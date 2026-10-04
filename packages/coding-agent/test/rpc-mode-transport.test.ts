@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
+import type { LiveState } from "../src/core/host/live-state.ts";
 import { openNewSession, openStoredSessionById } from "../src/core/host/session-intents.ts";
-import type { HostInteraction } from "../src/core/host-interaction.ts";
 import { isStdoutTakenOver, restoreStdout } from "../src/core/output-guard.ts";
+import { createIrohRemoteExplicitAccess, type IrohRemoteRpcCapability } from "../src/core/remote/iroh/access-grant.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { RpcGitContext } from "../src/core/rpc/types.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import { createLiveRecorder } from "./utilities/live-recorder.ts";
 
 // The modes' structural intents run through the host's session intents; these
 // tests stand in for them and move the fake host's client themselves.
@@ -410,7 +411,6 @@ describe("RPC mode caller-provided transports", () => {
 	test("bridges host-initiated action requests over RPC", async () => {
 		let lineHandler: ((line: string) => void) | undefined;
 		let closeHandler: RpcCloseHandler | undefined;
-		let hostInteraction: HostInteraction | undefined;
 		const detachInput = vi.fn();
 		const detachClose = vi.fn();
 		const detachSession = vi.fn();
@@ -439,11 +439,10 @@ describe("RPC mode caller-provided transports", () => {
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId: "session-1",
 			sessionFile: "/sessions/session-1.jsonl",
-			setHostInteraction: vi.fn((interaction: HostInteraction) => {
-				hostInteraction = interaction;
-			}),
 		};
 		const hosted = createHost(currentSession);
+		// Approvals wait in the conversation's live state.
+		const hostInteraction = hosted.conversation.liveState.hostInteraction;
 		let resolveReady: () => void = () => {};
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
@@ -459,7 +458,7 @@ describe("RPC mode caller-provided transports", () => {
 		await vi.waitFor(() => expect(hostInteraction).toBeDefined());
 
 		await expect(
-			hostInteraction!.requestAction({
+			hostInteraction.requestAction({
 				id: "no-caps",
 				action: "test.action",
 				title: "Unavailable action",
@@ -479,7 +478,7 @@ describe("RPC mode caller-provided transports", () => {
 			}),
 		);
 
-		const decisionPromise = hostInteraction!.requestAction({
+		const decisionPromise = hostInteraction.requestAction({
 			id: "host-1",
 			action: "test.action",
 			title: "Approve test action?",
@@ -496,7 +495,7 @@ describe("RPC mode caller-provided transports", () => {
 				blocking: true,
 			}),
 		);
-		hostInteraction!.updateAction?.({ id: "host-1", action: "test.action", status: "running" });
+		hostInteraction.updateAction?.({ id: "host-1", action: "test.action", status: "running" });
 		await vi.waitFor(() =>
 			expect(writes).toContainEqual({
 				type: "host_action_update",
@@ -531,7 +530,7 @@ describe("RPC mode caller-provided transports", () => {
 		lineHandler?.(JSON.stringify({ type: "host_action_response", id: "host-1", decision: "approved" }));
 		await expect(decisionPromise).resolves.toMatchObject({ decision: "approved" });
 
-		const cancelledPromise = hostInteraction!.requestAction({
+		const cancelledPromise = hostInteraction.requestAction({
 			id: "host-2",
 			action: "test.action",
 			title: "Cancelled action",
@@ -546,10 +545,11 @@ describe("RPC mode caller-provided transports", () => {
 				blocking: true,
 			}),
 		);
+		// The only client that took approvals stops taking them: nobody can answer it.
 		lineHandler?.(JSON.stringify({ id: "caps-2", type: "set_client_capabilities", features: [] }));
 		await expect(cancelledPromise).resolves.toMatchObject({
 			decision: "dismissed",
-			message: "Host action capability disabled",
+			message: "No client accepts host actions",
 		});
 
 		closeHandler?.();
@@ -557,7 +557,6 @@ describe("RPC mode caller-provided transports", () => {
 	});
 
 	test("preserves pending host action requests across retained runtime reconnects", async () => {
-		let hostInteraction: HostInteraction | undefined;
 		const detachSession = vi.fn();
 		const detachBackpressure = vi.fn();
 		const currentSession = {
@@ -567,11 +566,9 @@ describe("RPC mode caller-provided transports", () => {
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId: "session-1",
 			sessionFile: "/sessions/session-1.jsonl",
-			setHostInteraction: vi.fn((interaction: HostInteraction) => {
-				hostInteraction = interaction;
-			}),
 		};
 		const hosted = createHost(currentSession);
+		const hostInteraction = hosted.conversation.liveState.hostInteraction;
 		const startConnection = async () => {
 			let lineHandler: ((line: string) => void) | undefined;
 			let closeHandler: RpcCloseHandler | undefined;
@@ -632,9 +629,6 @@ describe("RPC mode caller-provided transports", () => {
 				success: true,
 			}),
 		);
-		if (!hostInteraction) {
-			throw new Error("Host interaction was not installed");
-		}
 		const retainedHostInteraction = hostInteraction;
 		const decisionPromise = retainedHostInteraction.requestAction({
 			id: "host-reconnect",
@@ -730,18 +724,15 @@ describe("RPC mode caller-provided transports", () => {
 	});
 
 	test("dismisses retained host action requests when a reconnect disables host action support", async () => {
-		let hostInteraction: HostInteraction | undefined;
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 			sessionId: "session-1",
-			setHostInteraction: vi.fn((interaction: HostInteraction) => {
-				hostInteraction = interaction;
-			}),
 		};
 		const hosted = createHost(currentSession);
+		const hostInteraction = hosted.conversation.liveState.hostInteraction;
 		const startConnection = async () => {
 			let lineHandler: ((line: string) => void) | undefined;
 			let closeHandler: RpcCloseHandler | undefined;
@@ -795,9 +786,6 @@ describe("RPC mode caller-provided transports", () => {
 		await vi.waitFor(() =>
 			expect(firstConnection.writes).toContainEqual(expect.objectContaining({ id: "caps-1", success: true })),
 		);
-		if (!hostInteraction) {
-			throw new Error("Host interaction was not installed");
-		}
 		const decisionPromise = hostInteraction.requestAction({
 			id: "host-disabled-reconnect",
 			action: "test.action",
@@ -815,7 +803,7 @@ describe("RPC mode caller-provided transports", () => {
 		secondConnection.send({ id: "caps-2", type: "set_client_capabilities", features: [] });
 		await expect(decisionPromise).resolves.toMatchObject({
 			decision: "dismissed",
-			message: "Host action capability disabled",
+			message: "No client accepts host actions",
 		});
 		secondConnection.send({ id: "pending-2", type: "get_pending_host_actions" });
 		await vi.waitFor(() =>
@@ -834,7 +822,6 @@ describe("RPC mode caller-provided transports", () => {
 
 	test("cancels pending host action requests when disposing the runtime", async () => {
 		let closeHandler: RpcCloseHandler | undefined;
-		let hostInteraction: HostInteraction | undefined;
 		let lineHandler: ((line: string) => void) | undefined;
 		const writes: object[] = [];
 		const transport: RpcTransport = {
@@ -859,10 +846,8 @@ describe("RPC mode caller-provided transports", () => {
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 			sessionId: "session-1",
-			setHostInteraction: vi.fn((interaction: HostInteraction) => {
-				hostInteraction = interaction;
-			}),
 		});
+		const hostInteraction = hosted.conversation.liveState.hostInteraction;
 		let resolveReady: () => void = () => {};
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
@@ -874,9 +859,6 @@ describe("RPC mode caller-provided transports", () => {
 			JSON.stringify({ id: "caps-1", type: "set_client_capabilities", features: ["host_action_requests.v1"] }),
 		);
 		await vi.waitFor(() => expect(writes).toContainEqual(expect.objectContaining({ id: "caps-1", success: true })));
-		if (!hostInteraction) {
-			throw new Error("Host interaction was not installed");
-		}
 		const decisionPromise = hostInteraction.requestAction({
 			id: "host-dispose",
 			action: "test.action",
@@ -886,10 +868,11 @@ describe("RPC mode caller-provided transports", () => {
 			expect(writes).toContainEqual(expect.objectContaining({ type: "host_action_request", id: "host-dispose" })),
 		);
 
+		// The anchor's conversation closes with the mode, and its approvals end.
 		closeHandler?.();
 		await expect(decisionPromise).resolves.toMatchObject({
 			decision: "dismissed",
-			message: "RPC mode is shutting down",
+			message: "The conversation closed",
 		});
 		await expect(modePromise).resolves.toBeUndefined();
 		expect(hosted.close).toHaveBeenCalledOnce();
@@ -1354,7 +1337,7 @@ describe("RPC mode caller-provided transports", () => {
 	});
 
 	test("startup cleanup treats extension shutdown UI requests as cancelled", async () => {
-		let uiContext: ExtensionUIContext | undefined;
+		let liveState: LiveState | undefined;
 		const detachInput = vi.fn();
 		const detachClose = vi.fn();
 		const startupError = new Error("bind failed");
@@ -1367,26 +1350,25 @@ describe("RPC mode caller-provided transports", () => {
 			flush: vi.fn(async () => {}),
 			close: transportClose,
 		};
+		// An extension asks from session_shutdown: the client that failed to start answers nothing.
 		const dispose = vi.fn(async () => {
-			if (!uiContext) {
-				throw new Error("missing extension UI context");
+			if (!liveState) {
+				throw new Error("missing live state");
 			}
-			const confirmed = await uiContext.confirm("Shutdown", "Continue?");
-			expect(confirmed).toBe(false);
+			const outcome = await liveState.request({ kind: "confirm", title: "Shutdown", message: "Continue?" });
+			expect(outcome).toEqual({ status: "cancelled", reason: "unavailable" });
 		});
 		const hosted = createHost(
 			{
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				attachExtensionClient: vi.fn((options: { ui: ExtensionUIContext }) => {
-					uiContext = options.ui;
-					return { ready: Promise.reject(startupError), detach: () => {} };
-				}),
+				attachExtensionClient: vi.fn(() => ({ ready: Promise.reject(startupError), detach: () => {} })),
 				subscribe: vi.fn(() => () => {}),
 				subscribeRuntimeEvents: vi.fn(() => () => {}),
 			},
 			{ onClose: dispose },
 		);
 
+		liveState = hosted.conversation.liveState;
 		await expect(runRpcMode(hosted.host, hosted.conversation, { transport })).rejects.toBe(startupError);
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(transport.write).not.toHaveBeenCalled();
@@ -1595,6 +1577,127 @@ describe("RPC mode caller-provided transports", () => {
 		await expect(modePromise).rejects.toThrow(flushError);
 		expect(transportFlush).toHaveBeenCalledOnce();
 		expect(transportClose).toHaveBeenCalledOnce();
+	});
+});
+
+describe("RPC mode host requests on the remote profile", () => {
+	/** A remote client on a conversation another client shares, with `capabilities` in its grant. */
+	async function startRemote(hosted: FakeHosted, capabilities: IrohRemoteRpcCapability[]) {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const writes: Array<Record<string, unknown>> = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value as Record<string, unknown>);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return vi.fn();
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return vi.fn();
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const ready = Promise.withResolvers<void>();
+		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+			anchor: false,
+			onReady: ready.resolve,
+			remoteGrant: createIrohRemoteExplicitAccess([], capabilities).rpcGrant,
+			transport,
+		});
+		await ready.promise;
+		return {
+			writes,
+			modePromise,
+			send: (message: object) => lineHandler?.(JSON.stringify(message)),
+			close: () => closeHandler?.(),
+		};
+	}
+
+	function createRemoteHost(): FakeHosted {
+		return createHost({
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
+			subscribe: vi.fn(() => () => {}),
+			subscribeRuntimeEvents: vi.fn(() => () => {}),
+			sessionId: "session-remote",
+		});
+	}
+
+	test("shows approvals only to a client whose grant holds host management", async () => {
+		const hosted = createRemoteHost();
+		const liveState = hosted.conversation.liveState;
+		const phone = await startRemote(hosted, ["conversation.observe.v1", "conversation.control.v1"]);
+		// Even a client that claims the capability takes no approval without host management.
+		phone.send({ id: "caps", type: "set_client_capabilities", features: ["host_action_requests.v1"] });
+		await vi.waitFor(() => expect(phone.writes).toContainEqual(expect.objectContaining({ id: "caps" })));
+		await expect(
+			liveState.hostInteraction.requestAction({ id: "approval-1", action: "test.action", title: "Approve?" }),
+		).resolves.toEqual({ decision: "unavailable" });
+
+		// An approval another client takes stays out of this client's reach.
+		const manager = createLiveRecorder(["approval"]);
+		liveState.attach("manager", manager);
+		const decision = liveState.hostInteraction.requestAction({
+			id: "approval-2",
+			action: "test.action",
+			title: "Approve?",
+		});
+		phone.send({ type: "host_action_response", id: "approval-2", decision: "approved" });
+		phone.send({ type: "extension_ui_response", id: "approval-2", confirmed: true });
+		phone.send({ id: "pending", type: "get_pending_host_actions" });
+		await vi.waitFor(() =>
+			expect(phone.writes).toContainEqual(expect.objectContaining({ id: "pending", data: { actions: [] } })),
+		);
+		expect(phone.writes.filter((write) => write.type === "host_action_request")).toEqual([]);
+		expect(liveState.answer("approval-2", { decision: "denied" }, "manager")).toBe("accepted");
+		await expect(decision).resolves.toEqual({ decision: "denied" });
+
+		// The client's dialogs are its to answer.
+		const asked = liveState.request({ kind: "confirm", title: "Sure?", message: "Really?" });
+		await vi.waitFor(() =>
+			expect(phone.writes).toContainEqual(
+				expect.objectContaining({ type: "extension_ui_request", method: "confirm" }),
+			),
+		);
+		const request = phone.writes.find((write) => write.method === "confirm");
+		phone.send({ type: "extension_ui_response", id: request?.id, confirmed: true });
+		await expect(asked).resolves.toMatchObject({ status: "answered", response: { confirmed: true } });
+
+		phone.close();
+		await expect(phone.modePromise).resolves.toBeUndefined();
+	});
+
+	test("shows no extension UI to a client that cannot answer its dialogs", async () => {
+		const hosted = createRemoteHost();
+		const liveState = hosted.conversation.liveState;
+		const observer = await startRemote(hosted, ["conversation.observe.v1", "host.manage.v1"]);
+		liveState.set("ext_status/build", { kind: "ext_status", text: "building" });
+		liveState.notice("info", "hello");
+		await expect(liveState.request({ kind: "confirm", title: "Sure?", message: "Really?" })).resolves.toEqual({
+			status: "cancelled",
+			reason: "unavailable",
+		});
+		expect(observer.writes.filter((write) => write.type === "extension_ui_request")).toEqual([]);
+
+		// Its grant holds host management, so it takes approvals once it asks for them.
+		observer.send({ id: "caps", type: "set_client_capabilities", features: ["host_action_requests.v1"] });
+		await vi.waitFor(() => expect(observer.writes).toContainEqual(expect.objectContaining({ id: "caps" })));
+		const decision = liveState.hostInteraction.requestAction({ id: "approval", action: "test.action", title: "Ok?" });
+		await vi.waitFor(() =>
+			expect(observer.writes).toContainEqual(
+				expect.objectContaining({ type: "host_action_request", id: "approval" }),
+			),
+		);
+		observer.send({ type: "host_action_response", id: "approval", decision: "approved" });
+		await expect(decision).resolves.toEqual({ decision: "approved" });
+
+		observer.close();
+		await expect(observer.modePromise).resolves.toBeUndefined();
 	});
 });
 

@@ -1,23 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
 import { PinnedConversationError } from "../../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { findSessionInfoById, SessionManager } from "../../src/core/session-manager.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions, moved } from "./host-harness.ts";
 
-/** A UI surface that records the statuses it shows. */
-function statusUi(statuses: Map<string, string>): ExtensionUIContext {
-	const ui: Pick<ExtensionUIContext, "setStatus" | "setWidget" | "setTitle" | "notify"> = {
-		setStatus: (key, text) => {
-			if (text === undefined) statuses.delete(key);
-			else statuses.set(key, text);
+/** A live view that keeps the extension statuses it is shown in `statuses`. */
+function statusLive(statuses: Map<string, string>): LiveClient {
+	return {
+		acceptsHostRequest: () => false,
+		apply: (update) => {
+			if (update.reset) statuses.clear();
+			for (const item of update.items) {
+				if (item.type === "set" && item.value.kind === "ext_status") {
+					statuses.set(item.key.slice("ext_status/".length), item.value.text);
+				} else if (item.type === "clear" && item.key.startsWith("ext_status/")) {
+					statuses.delete(item.key.slice("ext_status/".length));
+				}
+			}
 		},
-		setWidget: () => {},
-		setTitle: () => {},
-		notify: () => {},
 	};
-	return ui as ExtensionUIContext;
 }
 
 describe("ConversationHost", () => {
@@ -102,7 +105,7 @@ describe("ConversationHost", () => {
 		});
 		const source = await harness.openStartup();
 		const statuses = new Map<string, string>();
-		const client = harness.client("tui", { ui: statusUi(statuses) });
+		const client = harness.client("tui", { live: statusLive(statuses) });
 		await harness.host.attach(client, source);
 		expect(statuses.get("ext")).toBe(`ready:${source.id}`);
 		harness.events.length = 0;

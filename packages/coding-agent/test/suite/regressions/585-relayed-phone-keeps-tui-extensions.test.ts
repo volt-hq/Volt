@@ -15,6 +15,7 @@ import {
 	parseWrittenObjects,
 } from "../../iroh-stream-doubles.ts";
 import { connectTestClient } from "../../utilities/host-client.ts";
+import { createLiveRecorder } from "../../utilities/live-recorder.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 
 /**
@@ -81,21 +82,17 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		);
 		cleanups.push(() => fixture.dispose());
 
-		// The TUI attaches first; its host attaches its surface again on each conversation it moves to.
-		const notify = vi.fn();
-		const setStatus = vi.fn();
+		// The TUI attaches first; its host attaches its live view and surface again on each conversation it moves to.
+		const tuiLive = createLiveRecorder(["select", "confirm", "input", "editor", "approval"]);
 		const tuiErrors: ExtensionError[] = [];
 		const runtime = await connectTestClient(fixture.host, fixture.conversation, {
 			id: "tui",
-			surface: {
-				ui: { ...fixture.conversation.session.extensionRunner.getUIContext(), notify, setStatus },
-				onError: (error) => tuiErrors.push(error),
-			},
+			live: tuiLive,
+			surface: { onError: (error) => tuiErrors.push(error) },
 		});
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 
 		// Serve a phone stream the way the TUI serves a relay offer.
-		const setHostInteraction = vi.spyOn(runtime.session, "setHostInteraction");
 		const {
 			recv,
 			send,
@@ -112,11 +109,18 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		await ready;
 
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
-		// Approvals stay with the TUI.
-		expect(setHostInteraction).not.toHaveBeenCalled();
+		// Approvals stay with the TUI, which answers them.
+		const approval = runtime.conversation.liveState.hostInteraction.requestAction({
+			id: "relay-approval",
+			action: "test.action",
+			title: "Approve?",
+		});
+		expect(tuiLive.pending().map((pending) => pending.requestId)).toEqual(["relay-approval"]);
+		expect(runtime.conversation.liveState.answer("relay-approval", { decision: "approved" }, "tui")).toBe("accepted");
+		await expect(approval).resolves.toEqual({ decision: "approved" });
 		await runtime.session.prompt("/ask");
 		await runtime.session.prompt("/fail");
-		expect(notify).toHaveBeenCalledOnce();
+		expect(tuiLive.notices()).toEqual([["info", "asked"]]);
 		expect(seen).toEqual([
 			{ event: "session_start", mode: "tui", hasUI: true },
 			{ event: "ask", mode: "tui", hasUI: true },
@@ -146,13 +150,20 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			{ event: "session_start", mode: "tui", hasUI: true },
 			{ event: "ask", mode: "tui", hasUI: true },
 		]);
-		expect(notify).toHaveBeenCalledTimes(2);
-		expect(setStatus.mock.calls).toEqual([
+		expect(tuiLive.notices()).toEqual([
+			["info", "asked"],
+			["info", "asked"],
+		]);
+		expect(tuiLive.statuses()).toEqual([
 			["ext", "ready:startup"],
 			["ext", "ready:new"],
 		]);
 		expect(starts).toHaveLength(2);
-		expect(parseWrittenObjects(send).filter((frame) => frame.type === "extension_ui_request")).toEqual([]);
+		expect(
+			parseWrittenObjects(send).filter(
+				(frame) => frame.type === "extension_ui_request" || frame.type === "host_action_request",
+			),
+		).toEqual([]);
 	});
 
 	it("leaves extension UI with the clients that can answer it when a phone may only observe", async () => {
@@ -161,12 +172,9 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		});
 		cleanups.push(() => fixture.dispose());
 		const session = fixture.conversation.session;
-		const notify = vi.fn();
-		await session.attachExtensionClient({
-			id: "first-phone",
-			mode: "rpc",
-			ui: { ...session.extensionRunner.getUIContext(), notify },
-		}).ready;
+		const firstPhone = createLiveRecorder(["select", "confirm", "input", "editor"]);
+		fixture.conversation.liveState.attach("first-phone", firstPhone);
+		await session.attachExtensionClient({ id: "first-phone", mode: "rpc" }).ready;
 
 		const observer = servePhone(fixture.host, fixture.conversation, fixture.tempDir, {
 			rpcGrant: createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
@@ -179,7 +187,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		await observer.ready;
 
 		await session.prompt("/ask");
-		expect(notify).toHaveBeenCalledExactlyOnceWith("asked", "info");
+		expect(firstPhone.notices()).toEqual([["info", "asked"]]);
 		expect(parseWrittenObjects(observer.send).filter((frame) => frame.type === "extension_ui_request")).toEqual([]);
 	});
 });

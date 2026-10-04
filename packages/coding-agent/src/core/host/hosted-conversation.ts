@@ -1,8 +1,9 @@
 /**
  * One conversation a `ConversationHost` opened. It serves one log for its
  * whole life: its session, the cwd-bound services the session was created
- * with, its projection feed, its detached reviews, the one-shot recovery of
- * durable queued input, and its managed-worktree pin are fixed until it closes.
+ * with, its live state, its projection feed, its detached reviews, the
+ * one-shot recovery of durable queued input, and its managed-worktree pin are
+ * fixed until it closes.
  */
 
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
@@ -18,6 +19,7 @@ import type { CreateAgentSessionResult } from "../sdk.ts";
 import { type CommittedSessionEntry, isHostOnlySessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
+import type { LiveState } from "./live-state.ts";
 import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
 
 /**
@@ -191,6 +193,15 @@ export class HostedConversation {
 			void this._reviewWorkflows?.abortAll().catch(() => undefined);
 			this.lostSignal.resolve(error);
 		});
+	}
+
+	/**
+	 * The conversation's live state: extension status, widgets, and title,
+	 * dialogs, approvals, and MCP authorization flows. The host attaches each
+	 * client's `live` view when the client joins; it closes with the session.
+	 */
+	get liveState(): LiveState {
+		return this.session.liveState;
 	}
 
 	/** The conversation id: its log's session id. */

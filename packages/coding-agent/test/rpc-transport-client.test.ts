@@ -8,6 +8,7 @@ import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand, SessionIntentResult } from "../src/core/extensions/types.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
 import { openNewSession } from "../src/core/host/session-intents.ts";
 import type { PromptTemplate } from "../src/core/prompt-templates.ts";
 import {
@@ -856,12 +857,9 @@ describe("runRpcMode", () => {
 				}
 			});
 		});
-		const runtimeHost = createRuntimeHost(dispose, async (client) => {
-			const uiContext = client.ui;
-			if (!uiContext) {
-				throw new Error("UI context was not bound");
-			}
-			await uiContext.confirm("Startup", "Continue?");
+		// An extension asks while the extensions bind.
+		const runtimeHost = createRuntimeHost(dispose, async (_client, liveState) => {
+			await confirmThroughLiveState(liveState, "Startup", "Continue?");
 		});
 		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			transport: pair.server,
@@ -995,12 +993,9 @@ describe("runRpcMode", () => {
 				}
 			});
 		});
-		const runtimeHost = createRuntimeHost(dispose, async (client) => {
-			const uiContext = client.ui;
-			if (!uiContext) {
-				throw new Error("UI context was not bound");
-			}
-			await uiContext.confirm("Startup", "Continue?");
+		// An extension asks while the extensions bind.
+		const runtimeHost = createRuntimeHost(dispose, async (_client, liveState) => {
+			await confirmThroughLiveState(liveState, "Startup", "Continue?");
 		});
 		const transport = createIrohRemoteCloseDeferringRpcTransport({
 			transport: pair.server,
@@ -2267,21 +2262,10 @@ describe("createInProcessRpcClient", () => {
 	});
 
 	test("sends extension UI responses from in-process clients", async () => {
-		let uiContext: ExtensionClient["ui"];
-		const runtimeHost = createRuntimeHost(
-			vi.fn(async () => {}),
-			async (client) => {
-				uiContext = client.ui;
-			},
-		);
+		const runtimeHost = createRuntimeHost(vi.fn(async () => {}));
 		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
-			const boundUiContext = uiContext;
-			if (!boundUiContext) {
-				throw new Error("UI context was not bound");
-			}
-
 			let unsubscribe = () => {};
 			const requestPromise = new Promise<Extract<RpcExtensionUIRequest, { method: "confirm" }>>((resolve) => {
 				unsubscribe = client.onEvent((event) => {
@@ -2291,7 +2275,7 @@ describe("createInProcessRpcClient", () => {
 					}
 				});
 			});
-			const confirmPromise = boundUiContext.confirm("Approve", "Continue?");
+			const confirmPromise = confirmThroughLiveState(runtimeHost.conversation.liveState, "Approve", "Continue?");
 			const request = await requestPromise;
 
 			await client.sendExtensionUIResponse({
@@ -2309,12 +2293,8 @@ describe("createInProcessRpcClient", () => {
 	test("handles extension UI requests emitted while binding startup extensions", async () => {
 		const responsePromises: Promise<void>[] = [];
 		const dispose = vi.fn(async () => {});
-		const runtimeHost = createRuntimeHost(dispose, async (client) => {
-			const uiContext = client.ui;
-			if (!uiContext) {
-				throw new Error("UI context was not bound");
-			}
-			const confirmed = await uiContext.confirm("Startup", "Continue?", { timeout: 250 });
+		const runtimeHost = createRuntimeHost(dispose, async (_client, liveState) => {
+			const confirmed = await confirmThroughLiveState(liveState, "Startup", "Continue?", 250);
 			if (!confirmed) {
 				throw new Error("startup UI was not confirmed");
 			}
@@ -2450,9 +2430,25 @@ function parseCommandLine(line: string): { id: string; type: string } {
 	return { id: command.id, type: command.type };
 }
 
+/** Ask the conversation's clients to confirm, as an extension's `ctx.ui.confirm` does. */
+async function confirmThroughLiveState(
+	liveState: LiveState,
+	title: string,
+	message: string,
+	timeoutMs?: number,
+): Promise<boolean> {
+	const outcome = await liveState.request({
+		kind: "confirm",
+		title,
+		message,
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+	});
+	return outcome.status === "answered" && "confirmed" in outcome.response && outcome.response.confirmed;
+}
+
 function createRuntimeHost(
 	dispose: () => Promise<void>,
-	attachExtensions: (client: ExtensionClient) => Promise<void> = async () => {},
+	attachExtensions: (client: ExtensionClient, liveState: LiveState) => Promise<void> = async () => {},
 	resources: {
 		abort?: () => Promise<void>;
 		agentDir?: string;
@@ -2519,10 +2515,12 @@ function createRuntimeHost(
 	vi.mocked(openNewSession).mockImplementation(async (_host, _client, options) => {
 		return (await newSession(options)) as SessionIntentResult;
 	});
+	const liveState = new LiveState();
 	const session = {
+		liveState,
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		attachExtensionClient: vi.fn((client: ExtensionClient) => ({
-			ready: attachExtensions(client),
+			ready: attachExtensions(client, liveState),
 			detach: () => {},
 		})),
 		gitContextProvider: {

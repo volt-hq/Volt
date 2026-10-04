@@ -1,6 +1,4 @@
 import { describe, expect, test, vi } from "vitest";
-import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
-import type { HostInteraction } from "../src/core/host-interaction.ts";
 import { createLoopbackRpcTransportPair } from "../src/core/rpc/loopback-transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import {
@@ -255,27 +253,17 @@ describe("conversation mutation authority", () => {
 	});
 });
 
-describe("correlated conversation controls", () => {
-	test("retires extension and host-action replies across branch and session authority cuts", async () => {
+describe("host requests across conversation authority cuts", () => {
+	test("keeps dialogs and approvals pending across branch and authority cuts and with their conversation on a move", async () => {
 		const makeSession = (sessionId: string) => {
 			const generationListeners = new Set<() => void>();
-			let hostInteraction: HostInteraction | undefined;
 			const session = Object.assign(createTestSession(sessionId, null), {
-				setHostInteraction(interaction: HostInteraction) {
-					hostInteraction = interaction;
-				},
 				subscribeConversationGenerationChanges(listener: () => void) {
 					generationListeners.add(listener);
 					return () => generationListeners.delete(listener);
 				},
 			});
-			return {
-				session,
-				generationListeners,
-				get hostInteraction() {
-					return hostInteraction;
-				},
-			};
+			return { session, generationListeners };
 		};
 
 		const old = makeSession("control-old");
@@ -285,7 +273,6 @@ describe("correlated conversation controls", () => {
 		const replacementConversation = createFakeConversation(replacement.session).conversation;
 		const pair = createLoopbackRpcTransportPair();
 		const received: Array<Record<string, unknown>> = [];
-		const authorityChangeListeners = new Set<() => void>();
 		pair.client.onValue?.((value) => {
 			if (typeof value === "object" && value !== null && !Array.isArray(value)) {
 				received.push(value as Record<string, unknown>);
@@ -297,10 +284,6 @@ describe("correlated conversation controls", () => {
 			orderedConversation: {
 				subscriptionId: "control-subscription",
 				branchEpoch: "control-branch",
-				subscribeAuthorityChanges(listener) {
-					authorityChangeListeners.add(listener);
-					return () => authorityChangeListeners.delete(listener);
-				},
 				async enqueueControl(value) {
 					received.push(value as Record<string, unknown>);
 				},
@@ -325,16 +308,15 @@ describe("correlated conversation controls", () => {
 			expect(received).toContainEqual(expect.objectContaining({ id: "capabilities", success: true })),
 		);
 
+		/** An extension dialog and an approval in the old conversation, as the client sees them. */
 		const startControls = async (suffix: string) => {
-			const bindingCalls = (
-				old.session.attachExtensionClient as unknown as {
-					mock: { calls: Array<[{ ui: ExtensionUIContext }]> };
-				}
-			).mock.calls;
-			const binding = bindingCalls[bindingCalls.length - 1]?.[0] as { ui: ExtensionUIContext } | undefined;
-			if (!binding || !old.hostInteraction) throw new Error("RPC control bindings are unavailable");
-			const extensionResult = binding.ui.confirm(`Confirm ${suffix}`, "Proceed?");
-			const hostResult = old.hostInteraction.requestAction({
+			const liveState = oldConversation.liveState;
+			const extensionResult = liveState.request({
+				kind: "confirm",
+				title: `Confirm ${suffix}`,
+				message: "Proceed?",
+			});
+			const hostResult = liveState.hostInteraction.requestAction({
 				id: `host-${suffix}`,
 				action: "test.action",
 				title: `Host ${suffix}`,
@@ -355,52 +337,54 @@ describe("correlated conversation controls", () => {
 			return { extensionRequestId: extensionRequest.id, extensionResult, hostResult };
 		};
 
+		// A branch change commits entries; it never drops a pending dialog or approval (RFC §6.1).
 		const branchControls = await startControls("branch");
 		for (const listener of old.generationListeners) listener();
-		await expect(branchControls.extensionResult).resolves.toBe(false);
-		await expect(branchControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
 		pair.client.write({
 			type: "extension_ui_response",
 			id: branchControls.extensionRequestId,
 			confirmed: true,
 		});
 		pair.client.write({ type: "host_action_response", id: "host-branch", decision: "approved" });
-
-		const overflowControls = await startControls("overflow");
-		for (const listener of authorityChangeListeners) listener();
-		await expect(overflowControls.extensionResult).resolves.toBe(false);
-		await expect(overflowControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
-		pair.client.write({
-			type: "extension_ui_response",
-			id: overflowControls.extensionRequestId,
-			confirmed: true,
+		await expect(branchControls.extensionResult).resolves.toMatchObject({
+			status: "answered",
+			response: { confirmed: true },
 		});
-		pair.client.write({ type: "host_action_response", id: "host-overflow", decision: "approved" });
+		await expect(branchControls.hostResult).resolves.toEqual({ decision: "approved" });
 
-		// The client moves to another conversation, as one of its structural intents does.
+		// The client moves to another conversation, as one of its structural intents does. The
+		// requests stay with the conversation that asked them, which other clients keep open.
 		const rebindControls = await startControls("rebind");
 		const client = fake.clientOf(oldConversation);
 		if (!client) throw new Error("The RPC client is not attached");
 		await fake.move(client, replacementConversation);
 		expect(replacement.session.attachExtensionClient).toHaveBeenCalledOnce();
-		await expect(rebindControls.extensionResult).resolves.toBe(false);
-		await expect(rebindControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
+		// Its answers now go to the conversation it is on, which asked nothing.
 		pair.client.write({
 			type: "extension_ui_response",
 			id: rebindControls.extensionRequestId,
 			confirmed: true,
 		});
 		pair.client.write({ type: "host_action_response", id: "host-rebind", decision: "approved" });
-		pair.client.write({ id: "pending-after-cut", type: "get_pending_host_actions" });
+		pair.client.write({ id: "pending-after-move", type: "get_pending_host_actions" });
 		await vi.waitFor(() => {
 			expect(received).toContainEqual(
 				expect.objectContaining({
-					id: "pending-after-cut",
+					id: "pending-after-move",
 					success: true,
 					data: { actions: [] },
 				}),
 			);
 		});
+		expect(oldConversation.liveState.pendingRequests().map((pending) => pending.requestId)).toEqual([
+			rebindControls.extensionRequestId,
+			"host-rebind",
+		]);
+
+		// They end when their conversation closes.
+		await fake.close(oldConversation);
+		await expect(rebindControls.extensionResult).resolves.toEqual({ status: "cancelled", reason: "closed" });
+		await expect(rebindControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
 
 		pair.client.close();
 		await expect(modePromise).resolves.toBeUndefined();

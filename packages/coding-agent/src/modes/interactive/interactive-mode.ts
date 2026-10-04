@@ -19,6 +19,7 @@ import {
 	type OAuthSelectPrompt,
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
+import type { HostRequest, HostResponse, LiveValue } from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -76,7 +77,6 @@ import type {
 	ExtensionCommandContext,
 	ExtensionContext,
 	ExtensionRunner,
-	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	ProjectTrustContext,
@@ -91,7 +91,6 @@ import type { HostedConversation } from "../../core/host/hosted-conversation.ts"
 import { executePlan } from "../../core/host/plan-handoff.ts";
 import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
 import type { HostClient } from "../../core/host/targets.ts";
-import type { HostActionRequest, HostActionUpdate, HostInteraction } from "../../core/host-interaction.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -122,6 +121,7 @@ import {
 import { resolveReviewAccountingMessage } from "../../core/review-state.ts";
 import type { RpcRemoteTerminalEvent } from "../../core/rpc/types.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
+import type { ExtensionTerminalUI } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
 	findSessionInfoById,
@@ -231,6 +231,7 @@ import {
 	openDaemonWorktreeControl,
 	type RelayWorkspaceUnregisterRetirement,
 } from "./daemon-attach.ts";
+import { TuiLiveView } from "./live-view.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
 import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
 
@@ -324,6 +325,9 @@ interface InlineSessionRenderer {
 
 /** How an extension selector closed: an option picked, cancelled by the user, or dismissed by Volt or its signal. */
 type ExtensionSelectorOutcome = { kind: "selected"; option: string } | { kind: "cancelled" } | { kind: "dismissed" };
+
+/** A TUI dialog's options; a `live` dialog is closed by the live view, not by an extension UI reset. */
+type TuiDialogOptions = ExtensionUIDialogOptions & { live?: boolean };
 
 interface ActiveViewDescriptor {
 	regularComponents: readonly Component[];
@@ -513,6 +517,8 @@ export class InteractiveMode {
 	private conversation: HostedConversation;
 	/** The TUI as a client of its host: it anchors the conversation it shows and moves in place. */
 	private readonly client: HostClient;
+	/** The live state of the conversation the TUI shows: extension status, widgets, title, dialogs, and approvals. */
+	private readonly liveView: TuiLiveView;
 	private renderer: TuiMainScreen | TuiAltScreen;
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
@@ -682,7 +688,10 @@ export class InteractiveMode {
 	private extensionInputRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionEditorRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
-	/** Dismiss callbacks of pending extension dialogs, in opening order. Each settles its dialog once. */
+	/**
+	 * Dismiss callbacks of pending extension dialogs, in opening order. Each
+	 * settles its dialog once. The live view closes the dialogs it shows itself.
+	 */
 	private readonly pendingExtensionDialogs = new Set<() => void>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
@@ -728,10 +737,12 @@ export class InteractiveMode {
 	constructor(host: ConversationHost, conversation: HostedConversation, options: InteractiveModeOptions = {}) {
 		this.host = host;
 		this.conversation = conversation;
+		this.liveView = this.createLiveView();
 		this.client = {
 			id: randomUUID(),
 			anchor: true,
 			recoversInput: true,
+			live: this.liveView,
 			surface: this.createExtensionSurface(),
 			move: {
 				kind: "in_place",
@@ -882,7 +893,6 @@ export class InteractiveMode {
 		// Register themes from resource loader and initialize
 		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 		initTheme(this.settingsManager.getTheme(), true);
-		this.session.setHostInteraction(this.createHostInteraction());
 	}
 
 	private async detectThemeIfUnset(): Promise<void> {
@@ -1945,7 +1955,7 @@ export class InteractiveMode {
 	 */
 	private createExtensionSurface(): NonNullable<HostClient["surface"]> {
 		return {
-			ui: this.createExtensionUIContext(),
+			ui: this.createExtensionTerminalUI(),
 			abortHandler: () => {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
@@ -2535,7 +2545,6 @@ export class InteractiveMode {
 		this.clearPromptCacheAlertTimer();
 		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
-		session.setHostInteraction(this.createHostInteraction());
 	}
 
 	/** Present `session`, whose extensions are bound, as the TUI's session. */
@@ -2620,9 +2629,9 @@ export class InteractiveMode {
 		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
 		if (shortcuts.size === 0) return;
 
-		// Create a context for shortcut handlers
+		// Create a context for shortcut handlers. Its UI is the extensions' own: dialogs and status reach every client.
 		const createContext = (): ExtensionContext => ({
-			ui: this.createExtensionUIContext(),
+			ui: extensionRunner.getUIContext(),
 			mode: "tui",
 			hasUI: true,
 			cwd: this.sessionManager.getCwd(),
@@ -2914,18 +2923,23 @@ export class InteractiveMode {
 		this.renderWidgets();
 	}
 
-	private clearExtensionWidgets(): void {
-		for (const widget of this.extensionWidgetsAbove.values()) {
-			widget.dispose?.();
+	/** Remove the component widgets; the live view owns the string widgets. */
+	private clearComponentWidgets(): void {
+		for (const widgets of [this.extensionWidgetsAbove, this.extensionWidgetsBelow]) {
+			for (const [key, widget] of widgets) {
+				if (this.liveView.ownsWidget(key)) continue;
+				widget.dispose?.();
+				widgets.delete(key);
+			}
 		}
-		for (const widget of this.extensionWidgetsBelow.values()) {
-			widget.dispose?.();
-		}
-		this.extensionWidgetsAbove.clear();
-		this.extensionWidgetsBelow.clear();
 		this.renderWidgets();
 	}
 
+	/**
+	 * Reset the UI the extensions drive through the TUI's terminal. Status,
+	 * string widgets, title, and the dialogs of the live state stay with the
+	 * live view, which follows the live state of the conversation the TUI shows.
+	 */
 	private resetExtensionUI(): void {
 		this.dismissBackgroundJobsInspector?.();
 		this.dismissPendingExtensionDialogs();
@@ -2934,14 +2948,12 @@ export class InteractiveMode {
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
-		this.clearExtensionWidgets();
-		this.footerDataProvider.clearExtensionStatuses();
+		this.clearComponentWidgets();
 		this.footer.invalidate();
 		this.autocompleteProviderWrappers = [];
 		this.setCustomEditorComponent(undefined);
 		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
-		this.updateTerminalTitle();
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
@@ -3081,69 +3093,105 @@ export class InteractiveMode {
 		this.extensionTerminalInputSubscriptions.clear();
 	}
 
-	/**
-	 * Create the ExtensionUIContext for extensions.
-	 */
+	/** The trust prompts of a conversation the TUI opens, shown before its extensions bind. */
 	private createProjectTrustContext(cwd: string): ProjectTrustContext {
-		const ui = this.createExtensionUIContext();
 		return {
 			cwd,
 			mode: "tui",
 			hasUI: true,
 			ui: {
-				select: ui.select,
-				confirm: ui.confirm,
-				input: ui.input,
-				notify: ui.notify,
+				select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
+				confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
+				input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
+				notify: (message, type) => this.showExtensionNotify(message, type),
 			},
 		};
 	}
 
-	private createHostInteraction(): HostInteraction {
-		return {
-			requestAction: (request, options) => this.requestHostAction(request, options),
-			updateAction: (update) => this.updateHostAction(update),
-		};
-	}
-
-	private async requestHostAction(
-		request: HostActionRequest,
-		options?: { signal?: AbortSignal },
-	): Promise<{ decision: "approved" | "denied" | "dismissed" }> {
-		if (options?.signal?.aborted) {
-			return { decision: "dismissed" };
-		}
-		const details = [request.message, request.commandPreview ? `Command: ${request.commandPreview}` : undefined]
-			.filter((line): line is string => line !== undefined && line.length > 0)
-			.join("\n\n");
-		const outcome = await this.showExtensionSelectorOutcome(`${request.title}\n${details}`, ["Yes", "No"], {
-			signal: options?.signal,
-			timeout: request.timeoutMs,
-		});
-		if (outcome.kind === "dismissed") return { decision: "dismissed" };
-		return { decision: outcome.kind === "selected" && outcome.option === "Yes" ? "approved" : "denied" };
-	}
-
-	private updateHostAction(update: HostActionUpdate): void {
-		if (update.status === "running") {
-			this.showStatus(update.message ?? "Running host action...");
-		} else if (update.status === "completed") {
-			this.showStatus(update.message ?? "Host action completed");
-		} else if (update.status === "failed") {
-			this.showWarning(update.message ?? "Host action failed");
-		} else if (update.status === "cancelled") {
-			this.showStatus(update.message ?? "Host action cancelled");
-		}
-	}
-
-	private createExtensionUIContext(): ExtensionUIContext {
-		return {
-			select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
-			confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
-			input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
-			notify: (message, type) => this.showExtensionNotify(message, type),
-			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
+	private createLiveView(): TuiLiveView {
+		return new TuiLiveView({
+			showRequest: (request, signal) => this.showLiveRequest(request, signal),
+			answer: (requestId, response) => {
+				this.conversation.liveState.answer(requestId, response, this.client.id);
+			},
 			setStatus: (key, text) => this.setExtensionStatus(key, text),
+			setWidget: (key, lines, placement) =>
+				this.setExtensionWidget(key, lines === undefined ? undefined : [...lines], { placement }),
+			setTitle: (title) => {
+				if (title === undefined) this.updateTerminalTitle();
+				else this.ui.terminal.setTitle(title);
+			},
+			notify: (level, message) => this.showExtensionNotify(message, level),
+			setEditorText: (text) => this.editor.setText(text),
+			showHostAction: (progress) => this.showHostActionProgress(progress),
+		});
+	}
+
+	/**
+	 * Show a dialog or approval of the live state until the user answers it or
+	 * the live view closes it: the answer, or undefined when it closed without one.
+	 */
+	private async showLiveRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined> {
+		const options = { signal, live: true, ...("timeoutMs" in request ? { timeout: request.timeoutMs } : {}) };
+		switch (request.kind) {
+			case "select": {
+				const outcome = await this.showExtensionSelectorOutcome(request.title, request.options, options);
+				if (outcome.kind === "dismissed") return undefined;
+				return outcome.kind === "selected" ? { value: outcome.option } : { cancelled: true };
+			}
+			case "confirm": {
+				const outcome = await this.showExtensionSelectorOutcome(
+					`${request.title}\n${request.message}`,
+					["Yes", "No"],
+					options,
+				);
+				if (outcome.kind === "dismissed") return undefined;
+				return outcome.kind === "selected" ? { confirmed: outcome.option === "Yes" } : { cancelled: true };
+			}
+			case "input": {
+				const value = await this.showExtensionInput(request.title, request.placeholder, options);
+				if (signal.aborted) return undefined;
+				return value === undefined ? { cancelled: true } : { value };
+			}
+			case "editor": {
+				const value = await this.showExtensionEditor(request.title, request.prefill, options);
+				if (signal.aborted) return undefined;
+				return value === undefined ? { cancelled: true } : { value };
+			}
+			case "approval": {
+				const details = [request.message, request.commandPreview ? `Command: ${request.commandPreview}` : undefined]
+					.filter((line): line is string => line !== undefined && line.length > 0)
+					.join("\n\n");
+				const outcome = await this.showExtensionSelectorOutcome(
+					`${request.title}\n${details}`,
+					["Yes", "No"],
+					options,
+				);
+				if (outcome.kind === "dismissed") return undefined;
+				return { decision: outcome.kind === "selected" && outcome.option === "Yes" ? "approved" : "denied" };
+			}
+			default:
+				// Forms and MCP authorization are not shown in the TUI.
+				return undefined;
+		}
+	}
+
+	private showHostActionProgress(progress: Extract<LiveValue, { kind: "host_action" }>): void {
+		if (progress.status === "running") {
+			this.showStatus(progress.message ?? "Running host action...");
+		} else if (progress.status === "completed") {
+			this.showStatus(progress.message ?? "Host action completed");
+		} else if (progress.status === "failed") {
+			this.showWarning(progress.message ?? "Host action failed");
+		} else if (progress.status === "cancelled") {
+			this.showStatus(progress.message ?? "Host action cancelled");
+		}
+	}
+
+	/** The TUI's terminal for the extensions; dialogs, status, string widgets, and title come from the live view. */
+	private createExtensionTerminalUI(): ExtensionTerminalUI {
+		return {
+			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
 			setWorkingMessage: (message) => {
 				this.workingMessage = message;
 				if (this.loadingAnimation) {
@@ -3156,12 +3204,9 @@ export class InteractiveMode {
 			setWidget: (key, content, options) => this.setExtensionWidget(key, content, options),
 			setFooter: (factory) => this.setExtensionFooter(factory),
 			setHeader: (factory) => this.setExtensionHeader(factory),
-			setTitle: (title) => this.ui.terminal.setTitle(title),
 			custom: (factory, options) => this.showExtensionCustom(factory, options),
 			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
-			setEditorText: (text) => this.editor.setText(text),
 			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
-			editor: (title, prefill) => this.showExtensionEditor(title, prefill),
 			addAutocompleteProvider: (factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
@@ -3219,7 +3264,7 @@ export class InteractiveMode {
 	private showExtensionSelectorOutcome(
 		title: string,
 		options: string[],
-		opts?: ExtensionUIDialogOptions,
+		opts?: TuiDialogOptions,
 	): Promise<ExtensionSelectorOutcome> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -3238,7 +3283,7 @@ export class InteractiveMode {
 			};
 			const dismiss = () => settle({ kind: "dismissed" });
 			opts?.signal?.addEventListener("abort", dismiss, { once: true });
-			this.pendingExtensionDialogs.add(dismiss);
+			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
@@ -3306,7 +3351,7 @@ export class InteractiveMode {
 	private showExtensionInput(
 		title: string,
 		placeholder?: string,
-		opts?: ExtensionUIDialogOptions,
+		opts?: TuiDialogOptions,
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -3325,7 +3370,7 @@ export class InteractiveMode {
 			};
 			const dismiss = () => settle(undefined);
 			opts?.signal?.addEventListener("abort", dismiss, { once: true });
-			this.pendingExtensionDialogs.add(dismiss);
+			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
@@ -3358,18 +3403,25 @@ export class InteractiveMode {
 	/**
 	 * Show a multi-line editor for extensions (with Ctrl+G support).
 	 */
-	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
+	private showExtensionEditor(title: string, prefill?: string, opts?: TuiDialogOptions): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			if (opts?.signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+
 			let settled = false;
 			const settle = (value: string | undefined) => {
 				if (settled) return;
 				settled = true;
+				opts?.signal?.removeEventListener("abort", dismiss);
 				this.pendingExtensionDialogs.delete(dismiss);
 				this.hideExtensionEditor();
 				resolve(value);
 			};
 			const dismiss = () => settle(undefined);
-			this.pendingExtensionDialogs.add(dismiss);
+			opts?.signal?.addEventListener("abort", dismiss, { once: true });
+			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };

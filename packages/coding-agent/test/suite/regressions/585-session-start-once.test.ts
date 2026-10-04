@@ -111,7 +111,7 @@ describe("regression #585: a session's extensions are bound once", () => {
 		expect(starts).toHaveLength(2);
 	});
 
-	it("routes UI to the last attached client, replays status, and fans errors out to every client", async () => {
+	it("shows extension UI on every client, replays status on attach, and fans errors out to every client", async () => {
 		const { fixture, leaves } = await setup();
 		const first = await connect(fixture);
 		const second = await connect(fixture);
@@ -129,10 +129,11 @@ describe("regression #585: a session's extensions are bound once", () => {
 		]);
 
 		await first.client.prompt("/ping");
-		await vi.waitFor(() =>
-			expect(uiRequests(second.events, "notify")).toEqual([expect.objectContaining({ message: "pong" })]),
-		);
-		expect(uiRequests(first.events, "notify")).toEqual([]);
+		for (const events of [first.events, second.events]) {
+			await vi.waitFor(() =>
+				expect(uiRequests(events, "notify")).toEqual([expect.objectContaining({ message: "pong" })]),
+			);
+		}
 
 		await first.client.prompt("/fail");
 		for (const events of [first.events, second.events]) {
@@ -150,12 +151,54 @@ describe("regression #585: a session's extensions are bound once", () => {
 		await second.closed;
 		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
 
-		// The remaining client shows UI again and is brought up to date.
-		expect(uiRequests(first.events, "setStatus")).toHaveLength(2);
+		// The remaining client kept showing UI all along.
+		expect(uiRequests(first.events, "setStatus")).toHaveLength(1);
 		await first.client.prompt("/ping");
-		await vi.waitFor(() =>
-			expect(uiRequests(first.events, "notify")).toEqual([expect.objectContaining({ message: "pong" })]),
+		await vi.waitFor(() => expect(uiRequests(first.events, "notify")).toHaveLength(2));
+	});
+
+	it("asks every client that shows UI, takes the first answer, and shows a pending dialog to a client that attaches", async () => {
+		const answers: boolean[] = [];
+		const fixture = await createExtensionRuntime(
+			(volt) => {
+				volt.registerCommand("ask", {
+					handler: async (_args, ctx) => {
+						answers.push(await ctx.ui.confirm("Proceed?", "Continue with the change?"));
+					},
+				});
+			},
+			{ extensionMode: "rpc" },
 		);
+		cleanups.push(() => fixture.dispose());
+		const first = await connect(fixture);
+		const second = await connect(fixture);
+		cleanups.push(async () => {
+			await first.client.stop();
+			await second.client.stop();
+		});
+
+		const asking = first.client.prompt("/ask");
+		const confirmOf = (events: RpcClientEvent[]) =>
+			events.find((event) => event.type === "extension_ui_request" && event.method === "confirm");
+		await vi.waitFor(() => {
+			expect(confirmOf(first.events)).toMatchObject({ title: "Proceed?", message: "Continue with the change?" });
+			expect(confirmOf(second.events)).toEqual(confirmOf(first.events));
+		});
+		const requestId = (confirmOf(first.events) as { id: string }).id;
+
+		// A client that attaches while the dialog is pending is shown it too.
+		const third = await connect(fixture);
+		cleanups.push(async () => third.client.stop());
+		expect(confirmOf(third.events)).toEqual(confirmOf(first.events));
+
+		// The first answer wins; a later one finds the dialog gone.
+		await second.client.sendExtensionUIResponse({ type: "extension_ui_response", id: requestId, confirmed: true });
+		await vi.waitFor(() => expect(answers).toEqual([true]));
+		await first.client.sendExtensionUIResponse({ type: "extension_ui_response", id: requestId, confirmed: false });
+		await asking;
+		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
+		expect(answers).toEqual([true]);
+		expect(fixture.conversation.liveState.pendingRequests()).toEqual([]);
 	});
 
 	it("routes session actions to the invoking client and drops them once it leaves", async () => {

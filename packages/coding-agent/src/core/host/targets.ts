@@ -9,6 +9,7 @@ import type { ExtensionClient } from "../session/extension-binding.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { LogWriter } from "../session-writer.ts";
 import type { HostedConversation } from "./hosted-conversation.ts";
+import type { LiveClient } from "./live-state.ts";
 
 /** A new log. Without a source it is stored; with one it follows the source's storage. */
 export interface NewConversationTarget {
@@ -146,6 +147,14 @@ export interface HostClient {
 	 * the client joins one. The host binds the extensions in its own mode.
 	 */
 	readonly surface?: Omit<ExtensionClient, "id" | "mode">;
+	/**
+	 * The client's view of each conversation's live state (extension status,
+	 * widgets, and title, notices, dialogs, approvals, MCP authorization),
+	 * attached whenever the client joins one, before its surface binds the
+	 * extensions. The client answers the host requests it accepts through the
+	 * conversation's `liveState` under its id.
+	 */
+	readonly live?: LiveClient;
 	/**
 	 * Whether an in-place client replays the durable queued input of each
 	 * conversation it moves to, before anything it runs there afterwards.
