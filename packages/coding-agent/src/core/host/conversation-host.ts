@@ -9,8 +9,10 @@
  * conversation's `session_start` when the client's surface binds its
  * extensions, then the source's `session_shutdown` when it closes. A source
  * closes when its anchor leaves, or when its last client leaves and the host
- * closes unattached conversations. A client may not leave a busy source, and
- * no client may leave an owner-lifetime conversation such as a subagent's.
+ * closes unattached conversations. A client that moves in place may not leave
+ * a busy source; a client that follows moves by redirect may while other
+ * clients keep the source open, and the source is not fenced for its leave.
+ * No client may leave an owner-lifetime conversation such as a subagent's.
  * A client served for another host can instead be redirected: the target's
  * log is written here and the client reconnects to it through that host.
  */
@@ -251,10 +253,19 @@ export class ConversationHost {
 	 * bind when the first client with a surface attaches. A failed open closes
 	 * whatever it created and leaves `from` as it was.
 	 */
-	async open(target: ConversationTarget, options: OpenConversationOptions = {}): Promise<OpenConversationResult> {
+	open(target: ConversationTarget, options: OpenConversationOptions = {}): Promise<OpenConversationResult> {
+		return this.openTarget(target, options, false);
+	}
+
+	/** `open`; with `fromStaysOpen`, the opener leaves `from` open for other clients, so it may be busy. */
+	private async openTarget(
+		target: ConversationTarget,
+		options: OpenConversationOptions,
+		fromStaysOpen: boolean,
+	): Promise<OpenConversationResult> {
 		let accepted: boolean;
 		try {
-			accepted = await this.acceptOpen(target, options);
+			accepted = await this.acceptOpen(target, options, fromStaysOpen);
 		} catch (error) {
 			if (target.kind !== "adopt") throw error;
 			return await closeOwnedSessionManager(
@@ -310,12 +321,16 @@ export class ConversationHost {
 	 * Check that the opener may leave its source, let the source's extensions
 	 * cancel, and run the opener's preparation. Resolves false when cancelled.
 	 */
-	private async acceptOpen(target: ConversationTarget, options: OpenConversationOptions): Promise<boolean> {
+	private async acceptOpen(
+		target: ConversationTarget,
+		options: OpenConversationOptions,
+		fromStaysOpen: boolean,
+	): Promise<boolean> {
 		const from = options.from;
 		if (from) {
 			if (from.closed) throw new Error("The source conversation is closed");
 			if (from.lifetime === "owner") throw new PinnedConversationError();
-			from.assertCanLeave();
+			if (!fromStaysOpen) from.assertCanLeave();
 		}
 		if (target.kind === "import") {
 			const importPath = resolvePath(target.path);
@@ -323,7 +338,8 @@ export class ConversationHost {
 		}
 		if (from) {
 			if (await this.emitBeforeLeave(from, target)) return false;
-			from.assertCanLeave();
+			if (from.closed) throw new Error("The source conversation is closed");
+			if (!fromStaysOpen) from.assertCanLeave();
 		}
 		await options.onOpening?.();
 		return true;
@@ -534,11 +550,12 @@ export class ConversationHost {
 
 	/**
 	 * Move `client` to `to`. The source must be idle and is fenced against new
-	 * work meanwhile; the client's surface leaves the source before it joins
-	 * `to`, so the source's `session_shutdown` reaches none of the client's UI.
-	 * If the client cannot join `to`, it stays on the source. Once it joined,
-	 * the source closes per its anchor and the host's unattached rule, even if
-	 * the client's own move handler fails.
+	 * work meanwhile, unless the client follows moves by redirect and other
+	 * clients keep the source open; the client's surface leaves the source
+	 * before it joins `to`, so the source's `session_shutdown` reaches none of
+	 * the client's UI. If the client cannot join `to`, it stays on the source.
+	 * Once it joined, the source closes per its anchor and the host's unattached
+	 * rule, even if the client's own move handler fails.
 	 */
 	async move(client: HostClient, to: HostedConversation): Promise<void> {
 		const attachment = this.attachments.get(client.id);
@@ -546,7 +563,7 @@ export class ConversationHost {
 		if (from === to) return;
 		if (to.closed) throw new Error("Cannot move to a closed conversation");
 		if (from?.lifetime === "owner") throw new PinnedConversationError();
-		const releaseSource = from?.holdForLeave();
+		const releaseSource = from && !this.staysOpenWithout(client, from) ? from.holdForLeave() : undefined;
 		const anchorLeaving = client.anchor === true && from !== undefined && !this.anchorsLeaving.has(from);
 		if (anchorLeaving) this.anchorsLeaving.add(from);
 		if (attachment) this.leave(attachment);
@@ -590,7 +607,9 @@ export class ConversationHost {
 	 * opened, while the source is still open and fenced for the leave, so a
 	 * handoff writes its acknowledgement through the source's own writer; a
 	 * failure there discards the target and keeps the client on the source.
-	 * `withSession` runs against the new conversation after the move.
+	 * `withSession` runs against the new conversation after the move. A client
+	 * that follows moves by redirect, leaving a source its other clients keep
+	 * open, may leave it busy, and the source is not fenced for its leave.
 	 */
 	async openFor(
 		client: HostClient,
@@ -603,13 +622,18 @@ export class ConversationHost {
 		const { beforeMove, withSession, ...openOptions } = options;
 		const moved = await this.serialize(client.id, async () => {
 			const from = this.conversationOf(client);
-			const opened = await this.open(target, { ...openOptions, ...(from === undefined ? {} : { from }) });
+			const fromStaysOpen = from !== undefined && this.staysOpenWithout(client, from);
+			const opened = await this.openTarget(
+				target,
+				{ ...openOptions, ...(from === undefined ? {} : { from }) },
+				fromStaysOpen,
+			);
 			if (opened.cancelled) return undefined;
 			const to = opened.conversation;
 			let releaseSource: (() => void) | undefined;
 			try {
 				if (beforeMove) {
-					releaseSource = from?.holdForLeave();
+					releaseSource = fromStaysOpen ? undefined : from?.holdForLeave();
 					await beforeMove(from, to);
 				}
 				await this.move(client, to);
@@ -824,6 +848,12 @@ export class ConversationHost {
 			this.retention.set(conversation, timer);
 		}
 		return false;
+	}
+
+	/** Whether `from` stays open when `client`, which follows moves by redirect, leaves it for other clients. */
+	private staysOpenWithout(client: HostClient, from: HostedConversation): boolean {
+		if (client.move.kind !== "redirect" || this.anchorsLeaving.has(from)) return false;
+		return this.clientsOf(from).some((other) => other.id !== client.id);
 	}
 
 	private cancelRetention(conversation: HostedConversation): void {

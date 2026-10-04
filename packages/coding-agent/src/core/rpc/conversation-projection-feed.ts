@@ -55,8 +55,6 @@ export const DEFAULT_CONVERSATION_PROJECTION_MAX_CANONICAL_WORKFLOW_BYTES = 4 * 
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_CANONICAL_TRANSCRIPT_COMMIT_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_TRANSCRIPT_CURSORS = 1024;
 const CONVERSATION_PROJECTION_TRANSCRIPT_CURSOR_MAX_UTF8_BYTES = 2048;
-const CONVERSATION_PROJECTION_MAX_REBIND_CONTROLS = 128;
-const CONVERSATION_PROJECTION_MAX_REBIND_CONTROL_BYTES = 512 * 1024;
 
 const backgroundJobsChangedValidator = Compile(RpcBackgroundJobsChangedEventSchema);
 const providerErrorValidator = Compile(ProviderErrorSchema);
@@ -816,11 +814,12 @@ function activeAssistantFromFrame(frame: object): RpcConversationActiveAssistant
 }
 
 /**
- * Session-owned snapshot-and-tail feed. It retains only canonical raw assistant
- * source state; all wire projection and sanitization remains subscriber-local.
+ * Session-owned snapshot-and-tail feed over one conversation for its whole
+ * life. It retains only canonical raw assistant source state; all wire
+ * projection and sanitization remains subscriber-local.
  */
 export class ConversationProjectionFeed {
-	private source: ConversationProjectionSource;
+	private readonly source: ConversationProjectionSource;
 	private detachSourceEvents: () => void = () => {};
 	private detachGenerationChanges: () => void = () => {};
 	private releaseSourceObservation: (() => void) | undefined;
@@ -831,8 +830,6 @@ export class ConversationProjectionFeed {
 	private canonicalWorkflowBytes = 0;
 	private readonly transcriptCursors = new Set<string>();
 	private readonly transcriptCursorOrder: string[] = [];
-	private readonly pendingRebindControls: Array<{ value: object; bytes: number }> = [];
-	private pendingRebindControlBytes = 0;
 	private readonly createId: () => string;
 	private readonly defaultBounds: ConversationProjectionQueueBounds;
 	private readonly maxCheckpointRequests: number;
@@ -841,7 +838,6 @@ export class ConversationProjectionFeed {
 	private readonly now: () => number;
 	private disposed = false;
 	private poisonedError?: Error;
-	private sourceRebindPending = false;
 	private _branchEpoch: string;
 
 	constructor(source: ConversationProjectionSource, options: ConversationProjectionFeedOptions = {}) {
@@ -904,9 +900,6 @@ export class ConversationProjectionFeed {
 
 	attach(options: ConversationProjectionSubscriberOptions): ConversationProjectionSubscription {
 		this.assertActive();
-		if (this.sourceRebindPending) {
-			throw new Error("Conversation generation change is still awaiting host ownership rekey");
-		}
 		const subscriber: ConversationProjectionSubscriber = {
 			active: true,
 			fenced: false,
@@ -1132,9 +1125,6 @@ export class ConversationProjectionFeed {
 			this.poisonGeneration(projectionError);
 			throw projectionError;
 		}
-		if (this.sourceRebindPending) {
-			return;
-		}
 		for (const subscriber of [...this.subscribers]) {
 			if (!subscriber.active || subscriber.fenced) continue;
 			try {
@@ -1150,81 +1140,13 @@ export class ConversationProjectionFeed {
 		}
 	}
 
-	/**
-	 * Bind a replacement source without publishing its identity yet. Source state
-	 * continues to reduce while the host atomically rekeys its runtime/lease owner;
-	 * subscribers cannot attach or observe the new generation until commit.
-	 */
-	beginSourceRebind(source: ConversationProjectionSource): void {
-		this.assertNotDisposed();
-		if (this.sourceRebindPending) {
-			throw new Error("Conversation source rebind is already pending");
-		}
-		// Retire request/reply capabilities while the old authority tuple is still
-		// observable. Waiting until commit leaves a window where the source has
-		// already changed but an old correlated reply can still mutate host state.
-		this.notifyAllSubscriberAuthorityChanging();
-		this.stopSourceObservation();
-		this.detachSourceEvents();
-		this.detachGenerationChanges();
-		this.source = source;
-		this.activeAssistantSourceEvent = undefined;
-		this.workflowSnapshots.clear();
-		this.canonicalWorkflowBytes = 0;
-		this.resetTranscriptCursors();
-		this.clearPendingRebindControls();
-		this.poisonedError = undefined;
-		this._branchEpoch = this.mintId("branchEpoch");
-		this.sourceRebindPending = true;
-		this.bindSourceListeners();
-		if (this.subscribers.size > 0) this.startSourceObservation();
-	}
-
-	/** Publish a source previously installed by beginSourceRebind as cursor zero. */
-	commitSourceRebind(requestId?: string): void {
-		this.assertActive();
-		if (!this.sourceRebindPending) {
-			throw new Error("Conversation source rebind is not pending");
-		}
-		this.sourceRebindPending = false;
-		this.rotateAllSubscriptions("session_rebind", false, requestId);
-		this.flushPendingRebindControls();
-	}
-
-	/**
-	 * Fail closed if the host cannot rekey ownership. Existing subscribers are
-	 * detached. The rejecting ownership listener is responsible for releasing or
-	 * disposing its stale owner before it throws; after that cleanup the feed may
-	 * serve the installed source to a later, freshly authorized attach.
-	 */
-	failSourceRebind(error: Error): void {
-		if (!this.sourceRebindPending) return;
-		for (const subscriber of [...this.subscribers]) {
-			this.failSubscriber(subscriber, error);
-		}
-		this.clearPendingRebindControls();
-		this.sourceRebindPending = false;
-	}
-
-	/** Replace a source immediately when no external ownership transaction exists. */
-	rebindSource(source: ConversationProjectionSource): void {
-		this.beginSourceRebind(source);
-		this.commitSourceRebind();
-	}
-
 	/** Rotate after fork/navigation while retaining the same AgentSession source. */
 	rotateForBranchRebase(): void {
 		this.assertNotDisposed();
-		if (this.sourceRebindPending) {
-			// The unpublished generation's eventual bootstrap snapshots the current
-			// branch, so an intermediate branch notification needs no separate frame.
-			return;
-		}
 		this.activeAssistantSourceEvent = undefined;
 		this.workflowSnapshots.clear();
 		this.canonicalWorkflowBytes = 0;
 		this.resetTranscriptCursors();
-		this.clearPendingRebindControls();
 		this.poisonedError = undefined;
 		this._branchEpoch = this.mintId("branchEpoch");
 		this.rotateAllSubscriptions("branch_rebase");
@@ -1246,7 +1168,6 @@ export class ConversationProjectionFeed {
 		this.workflowSnapshots.clear();
 		this.canonicalWorkflowBytes = 0;
 		this.resetTranscriptCursors();
-		this.clearPendingRebindControls();
 	}
 
 	private bindSourceListeners(): void {
@@ -1272,14 +1193,6 @@ export class ConversationProjectionFeed {
 			return;
 		}
 		if (MCP_CONTROL_EVENT_TYPES.has(event.type)) {
-			if (this.sourceRebindPending) {
-				try {
-					this.bufferPendingRebindControl(event);
-				} catch (error: unknown) {
-					this.poisonGeneration(toError(error));
-				}
-				return;
-			}
 			for (const subscriber of [...this.subscribers]) {
 				if (!subscriber.active || subscriber.fenced) continue;
 				void this.enqueueControl(subscriber.subscriptionId, event, undefined, "source_control");
@@ -1318,9 +1231,6 @@ export class ConversationProjectionFeed {
 			// projected through each subscriber's assistant projector below.
 			this.activeAssistantSourceEvent = undefined;
 		}
-		if (this.sourceRebindPending) {
-			return;
-		}
 		for (const subscriber of [...this.subscribers]) {
 			if (!subscriber.active || subscriber.fenced) continue;
 			try {
@@ -1345,35 +1255,6 @@ export class ConversationProjectionFeed {
 		for (const subscriber of [...this.subscribers]) {
 			this.failSubscriber(subscriber, error);
 		}
-	}
-
-	private bufferPendingRebindControl(value: object): void {
-		if (this.pendingRebindControls.length >= CONVERSATION_PROJECTION_MAX_REBIND_CONTROLS) {
-			throw new Error("Conversation source rebind exceeded its buffered control count limit");
-		}
-		const remainingBytes = CONVERSATION_PROJECTION_MAX_REBIND_CONTROL_BYTES - this.pendingRebindControlBytes;
-		const owned = remainingBytes <= 0 ? null : ownJsonObjectWithin(value, remainingBytes);
-		if (owned === null) {
-			throw new Error("Conversation source rebind exceeded its buffered control byte limit");
-		}
-		this.pendingRebindControls.push({ value: owned.value, bytes: owned.bytes });
-		this.pendingRebindControlBytes += owned.bytes;
-	}
-
-	private flushPendingRebindControls(): void {
-		const controls = this.pendingRebindControls.splice(0);
-		this.pendingRebindControlBytes = 0;
-		for (const subscriber of [...this.subscribers]) {
-			if (!subscriber.active || subscriber.fenced) continue;
-			for (const control of controls) {
-				void this.enqueueControl(subscriber.subscriptionId, control.value, undefined, "source_control");
-			}
-		}
-	}
-
-	private clearPendingRebindControls(): void {
-		this.pendingRebindControls.splice(0);
-		this.pendingRebindControlBytes = 0;
 	}
 
 	private createProjector(options: ConversationProjectionSubscriberOptions): StreamProjector {
@@ -1802,17 +1683,11 @@ export class ConversationProjectionFeed {
 		this.flushAttachingTail(subscriber);
 	}
 
-	private rotateAllSubscriptions(
-		reason: Extract<RpcConversationBootstrapReason, "branch_rebase" | "session_rebind">,
-		notifyAuthorityChanging = true,
-		requestId?: string,
-	): void {
+	private rotateAllSubscriptions(reason: Extract<RpcConversationBootstrapReason, "branch_rebase">): void {
 		for (const subscriber of [...this.subscribers]) {
 			if (!subscriber.active || subscriber.fenced) continue;
 			try {
-				if (notifyAuthorityChanging) {
-					this.notifySubscriberAuthorityChanging(subscriber);
-				}
+				this.notifySubscriberAuthorityChanging(subscriber);
 				this.dropPendingConversationItems(subscriber, new Error("Superseded by conversation generation change"));
 				this.subscribersById.delete(subscriber.subscriptionId);
 				subscriber.subscriptionId = this.mintId("subscriptionId");
@@ -1826,7 +1701,7 @@ export class ConversationProjectionFeed {
 				subscriber.attaching = true;
 				const subscriptionId = subscriber.subscriptionId;
 				const branchEpoch = this._branchEpoch;
-				const bootstrap = this.createBootstrap(subscriber, reason, 0, requestId, true);
+				const bootstrap = this.createBootstrap(subscriber, reason, 0, undefined, true);
 				const item = this.createQueueItem(subscriber, bootstrap, "checkpoint");
 				this.assertSubscriberGeneration(subscriber, subscriptionId, branchEpoch);
 				this.assertAuthorityCapacity(subscriber, item, "Generation bootstrap exceeds its authority slot");
@@ -1996,13 +1871,6 @@ export class ConversationProjectionFeed {
 				// Authority rotation is irrevocably underway. A consumer's
 				// cleanup observer cannot roll it back or prevent the fresh bootstrap.
 			}
-		}
-	}
-
-	private notifyAllSubscriberAuthorityChanging(): void {
-		for (const subscriber of [...this.subscribers]) {
-			if (!subscriber.active || subscriber.fenced) continue;
-			this.notifySubscriberAuthorityChanging(subscriber);
 		}
 	}
 

@@ -1722,7 +1722,7 @@ Example streaming a text response:
 Reconstruction rules:
 
 - Assistant `message_start`, `message_update`, and `message_end` frames carry `{epoch, seq}` in `stream`. `message_start` is the base at sequence 0. Within one epoch, accept a delta only when its sequence is exactly the previous sequence plus one.
-- Adopt every `message_start`, snapshot-bearing `message_update`, and `message_end` unconditionally, even if its epoch is lower than a previously observed epoch. A server-side projector can be recreated during session rebinding. Epoch and sequence checks gate compact deltas only.
+- Adopt every `message_start`, snapshot-bearing `message_update`, and `message_end` unconditionally, even if its epoch is lower than a previously observed epoch. A server-side projector can be recreated, for example by a branch rebase or a recovery checkpoint. Epoch and sequence checks gate compact deltas only.
 - If no `message_start` was observed for the current message (for example, a mid-turn attach), the first `message_update` carries a full `message` snapshot. A snapshot can also arrive after a delivery discontinuity, a sequence gap, an authoritative non-append update, or remote redaction. Treat any update that includes `message` as an accumulator replacement and seed open tool argument text from its optional `toolState`.
 - `text_delta`/`thinking_delta` append `delta` to the block at `contentIndex`; `text_end`/`thinking_end` carry the authoritative block `content`.
 - `toolcall_start` includes best-effort `id` and `name`; `toolcall_delta.argsTextDelta` streams raw argument JSON text and may refine identity; `toolcall_end` carries the authoritative full `toolCall` object.

@@ -12,6 +12,7 @@
  * resolves after its entries commit, and the writer's view already holds them.
  */
 
+import { randomUUID } from "node:crypto";
 import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
 import { RpcGitContextSchema } from "@hansjm10/volt-protocol";
 import { Type } from "typebox";
@@ -28,9 +29,11 @@ import {
 import { type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
-import { parseSessionEntryForAdmission } from "./session-entry-codec.ts";
+import { digestClientInputPayload, parseSessionEntryForAdmission } from "./session-entry-codec.ts";
 import type {
 	BranchSummaryEntry,
+	ClientInputQueuedEntry,
+	ClientInputReceiptEntry,
 	CompactionEntry,
 	CustomEntry,
 	CustomMessageEntry,
@@ -408,6 +411,40 @@ export class LogWriter implements SessionWriter {
 	/** Move the leaf before the first entry: the next write appends a new root. */
 	async resetLeaf(): Promise<void> {
 		await this.lane.commit((write) => write.leaf(null));
+	}
+
+	/**
+	 * Queue host messages as one durable input with a host origin, as a live
+	 * session queues extension messages: the conversation that opens the log
+	 * delivers them in one turn once it recovers its durable input. Resolves
+	 * with the input's client message id.
+	 */
+	async queueHostMessages(delivery: "steer" | "follow_up", messages: readonly CustomMessage[]): Promise<string> {
+		const clientMessageId = randomUUID();
+		const input = { message: "", images: [] };
+		const receipt = admitEntry<ClientInputReceiptEntry>({
+			type: "client_input_receipt",
+			...pendingEnvelope(),
+			clientMessageId,
+			command: delivery,
+			semanticDigest: digestClientInputPayload(delivery, input),
+			input,
+			origin: "host",
+		});
+		const queuedInput = { delivery, message: "", images: [], messages: [...messages] };
+		return this.lane.commit((write) => {
+			const receiptId = write.place(receipt);
+			write.place(
+				admitEntry<ClientInputQueuedEntry>({
+					type: "client_input_queued",
+					...pendingEnvelope(),
+					receiptId,
+					clientMessageId,
+					queuedInput,
+				}),
+			);
+			return clientMessageId;
+		}, true);
 	}
 
 	/**

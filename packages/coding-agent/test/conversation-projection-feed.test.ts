@@ -1327,16 +1327,15 @@ describe("ConversationProjectionFeed", () => {
 		byteFeed.dispose();
 	});
 
-	it("deduplicates request ids and rejects stale subscriptions after rebind", async () => {
-		const firstSource = new TestSource();
-		const secondSource = new TestSource();
-		const feed = new ConversationProjectionFeed(firstSource, { createId: makeIds("generation") });
+	it("deduplicates request ids and rejects stale subscriptions after a branch rebase", async () => {
+		const source = new TestSource();
+		const feed = new ConversationProjectionFeed(source, { createId: makeIds("generation") });
 		const writes: object[] = [];
 		const subscription = feed.attach({
 			write: (value) => {
 				writes.push(value);
 			},
-			buildSnapshot: (context) => snapshotBuilder(context.source as TestSource)(context),
+			buildSnapshot: snapshotBuilder(source),
 		});
 		await subscription.ready;
 		const oldSubscriptionId = subscription.subscriptionId;
@@ -1360,194 +1359,21 @@ describe("ConversationProjectionFeed", () => {
 		await subscription.flush();
 		expect(writes.filter((value) => (value as { requestId?: string }).requestId === "same-request")).toHaveLength(1);
 
-		feed.rebindSource(secondSource);
+		source.rebase();
 		await subscription.flush();
 		expect(subscription.subscriptionId).not.toBe(oldSubscriptionId);
 		expect(writes.at(-1)).toMatchObject({
 			type: "conversation_bootstrap",
-			reason: "session_rebind",
+			reason: "branch_rebase",
 			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
 		});
 		expect(() => feed.requestCheckpoint({ subscriptionId: oldSubscriptionId, ...recoveryRequest("stale") })).toThrow(
 			/Unknown or stale/,
 		);
 
-		const count = writes.length;
-		firstSource.emit({ type: "agent_start" });
-		await subscription.flush();
-		expect(writes).toHaveLength(count);
-		secondSource.emit({ type: "agent_start" });
+		source.emit({ type: "agent_start" });
 		await subscription.flush();
 		expect(delivery(writes.at(-1)!)).toEqual({ subscriptionId: subscription.subscriptionId, cursor: 1 });
-		feed.dispose();
-	});
-
-	it("scopes a replacement request ID to its exact session rebind bootstrap", async () => {
-		const firstSource = new TestSource();
-		const secondSource = new TestSource();
-		const thirdSource = new TestSource();
-		const feed = new ConversationProjectionFeed(firstSource, { createId: makeIds("request-rebind") });
-		const writes: object[] = [];
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: (context) => snapshotBuilder(context.source as TestSource)(context),
-		});
-		await subscription.ready;
-
-		feed.beginSourceRebind(secondSource);
-		feed.commitSourceRebind("new-session-request");
-		await subscription.flush();
-		expect(writes.at(-1)).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-			requestId: "new-session-request",
-		});
-
-		feed.beginSourceRebind(thirdSource);
-		feed.commitSourceRebind();
-		await subscription.flush();
-		expect(writes.at(-1)).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-		});
-		expect(writes.at(-1)).not.toHaveProperty("requestId");
-		feed.dispose();
-	});
-
-	it("keeps a replacement generation unpublished until host ownership rekey commits", async () => {
-		const firstSource = new TestSource();
-		const secondSource = new TestSource();
-		const feed = new ConversationProjectionFeed(firstSource, { createId: makeIds("transaction") });
-		const writes: object[] = [];
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: (context) => snapshotBuilder(context.source as TestSource)(context),
-		});
-		await subscription.ready;
-		const originalSubscriptionId = subscription.subscriptionId;
-		const originalBranchEpoch = subscription.branchEpoch;
-		const authorityCuts: Array<{ subscriptionId: string; branchEpoch: string }> = [];
-		subscription.subscribeAuthorityChanges(() => {
-			authorityCuts.push({
-				subscriptionId: subscription.subscriptionId,
-				branchEpoch: subscription.branchEpoch,
-			});
-		});
-		const countBeforeRekey = writes.length;
-
-		feed.beginSourceRebind(secondSource);
-		expect(authorityCuts).toEqual([{ subscriptionId: originalSubscriptionId, branchEpoch: originalBranchEpoch }]);
-		secondSource.emit({ type: "agent_start" });
-		expect(writes).toHaveLength(countBeforeRekey);
-		expect(() =>
-			feed.attach({
-				write: () => {},
-				buildSnapshot: snapshotBuilder(secondSource),
-			}),
-		).toThrow(/awaiting host ownership rekey/);
-
-		feed.commitSourceRebind();
-		await subscription.flush();
-		expect(authorityCuts).toHaveLength(1);
-		expect(subscription.subscriptionId).not.toBe(originalSubscriptionId);
-		expect(writes.at(-1)).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
-			state: { revision: 1 },
-		});
-
-		const countAfterCommit = writes.length;
-		firstSource.emit({ type: "agent_start" });
-		await subscription.flush();
-		expect(writes).toHaveLength(countAfterCommit);
-		secondSource.emit({ type: "agent_start" });
-		await subscription.flush();
-		expect(delivery(writes.at(-1)!)).toEqual({ subscriptionId: subscription.subscriptionId, cursor: 1 });
-		feed.dispose();
-	});
-
-	it("reduces active assistant state and buffers controls while a source rebind is unpublished", async () => {
-		const firstSource = new TestSource();
-		const secondSource = new TestSource();
-		const writes: object[] = [];
-		const feed = new ConversationProjectionFeed(firstSource, { createId: makeIds("pending-rebind") });
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: (context) => snapshotBuilder(context.source as TestSource)(context),
-		});
-		await subscription.ready;
-
-		feed.beginSourceRebind(secondSource);
-		secondSource.emit({ type: "message_start", message: assistant("new generation") });
-		secondSource.emit({ type: "mcp_auth_request", serverId: "server-1", auth: { flow: "device" } });
-		expect(writes).toHaveLength(1);
-
-		feed.commitSourceRebind();
-		await subscription.flush();
-		expect(writes[1]).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-			activeAssistant: { message: { content: [{ text: "new generation" }] } },
-		});
-		expect(writes[2]).toEqual({
-			type: "mcp_auth_request",
-			serverId: "server-1",
-			auth: { flow: "device" },
-		});
-		expect(writes[2]).not.toHaveProperty("delivery");
-		feed.dispose();
-	});
-
-	it("keeps retained old controls before a rebind bootstrap and new-generation controls after it", async () => {
-		const firstSource = new TestSource();
-		const secondSource = new TestSource();
-		const blocked = deferredVoid();
-		const writes: object[] = [];
-		const feed = new ConversationProjectionFeed(firstSource, {
-			createId: makeIds("rebind-control-order"),
-			maxQueuedEnvelopes: 2,
-			maxQueuedBytes: 4_096,
-		});
-		let writeCount = 0;
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-				writeCount++;
-				return writeCount === 1 ? blocked.promise : Promise.resolve();
-			},
-			buildSnapshot: (context) => paddedSnapshotBuilder(context.source as TestSource, 2_500)(context),
-			prepare: prepareJsonl,
-		});
-		const beforeCutWrite = subscription.enqueueControl({
-			type: "control",
-			marker: "before-rebind",
-			padding: "c".repeat(3_000),
-		});
-		firstSource.emit({ type: "agent_start" });
-
-		feed.beginSourceRebind(secondSource);
-		secondSource.emit({ type: "mcp_servers_changed", marker: "after-rebind" });
-		feed.commitSourceRebind();
-
-		blocked.resolve();
-		await Promise.all([subscription.ready, beforeCutWrite]);
-		await subscription.flush();
-		expect(writes).toHaveLength(4);
-		expect(writes[0]).toMatchObject({ type: "conversation_bootstrap", reason: "bootstrap" });
-		expect(writes[1]).toMatchObject({ type: "control", marker: "before-rebind" });
-		expect(writes[2]).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "session_rebind",
-			delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
-		});
-		expect(writes[3]).toEqual({ type: "mcp_servers_changed", marker: "after-rebind" });
 		feed.dispose();
 	});
 

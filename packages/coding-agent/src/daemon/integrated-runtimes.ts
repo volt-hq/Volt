@@ -1,10 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
-import type {
-	AgentSessionReplacementTarget,
-	AgentSessionReplacementTransaction,
-	AgentSessionRuntime,
-} from "../core/agent-session-runtime.ts";
+import type { AgentSessionRuntime, HostedRedirect, RedirectTarget } from "../core/agent-session-runtime.ts";
 import type { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -64,17 +60,14 @@ export interface IntegratedRuntimeEntry {
 	readonly sessionId: string;
 	runtime: AgentSessionRuntime;
 	readonly lifecycle: "prepared" | "active" | "retiring" | "retired";
-	/** Monotonic ownership generation; rekey/retirement invalidates captured attaches. */
+	/** Monotonic ownership generation; retirement invalidates captured attaches. */
 	readonly generation: number;
 	/** Exactly-one terminal owner; concurrent cleanup paths join this promise. */
 	readonly retirementPromise?: Promise<void>;
 	/** Capability-scoped broker ownership for this exact runtime generation. */
 	readonly leaseOwner?: DaemonRuntimeOwnerCapability;
-	/** Attach claims fence rekey until stream/subscriber/feed ownership is published. */
+	/** Attaches whose stream/subscriber/feed ownership is still publishing. */
 	readonly attachClaims: ReadonlySet<IntegratedRuntimeAttachClaim>;
-	/** Last reconnect target persisted for each co-attached paired client. */
-	recordedSessionIdsByClient: Map<string, string>;
-	readonly previousSessionIds: ReadonlySet<string>;
 	readonly subscribers: ReadonlySet<IntegratedRuntimeSubscriber>;
 	readonly detachedAt: number | undefined;
 	readonly detachedRuntimeRetention: DetachedRuntimeRetentionHandle | undefined;
@@ -92,11 +85,6 @@ export interface IntegratedRuntimeEntry {
 	workingDirectory?: string;
 	/** Immutable tool policy used to create this shared runtime. */
 	toolPolicy: IrohRemoteRuntimeToolPolicy;
-}
-
-export interface IntegratedRuntimeStreamWriter {
-	sessionId: string;
-	write?(value: object): Promise<void> | void;
 }
 
 export interface IntegratedRuntimeRegistryOptions {
@@ -146,33 +134,25 @@ export interface IntegratedRuntimeRegistryOptions {
 	) => Promise<((writer: SessionWriter) => Promise<void>) | undefined>;
 	/** Persist the sessionId → worktree binding after a created worktree conversation. */
 	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
-	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
-	onRuntimeRekeyed?: (
-		owner: DaemonRuntimeOwnerCapability,
-		workspaceName: string,
-		previousSessionId: string,
-		sessionId: string,
-	) => void;
-	/** Reserve the lease target before the old daemon runtime is invalidated. */
-	prepareRuntimeRekey?: (
-		owner: DaemonRuntimeOwnerCapability,
-		workspaceName: string,
-		previousSessionId: string,
-		sessionId: string,
-	) => { commit(): void; rollback(): void };
 	/** Retire and await every stream/subscriber owner before low-level runtime disposal. */
 	beforeRuntimeStop?: (entry: IntegratedRuntimeEntry, reason: string) => Promise<void>;
-	/** Host-owned broker/shutdown admission for sibling creation without a phone attach. */
+	/**
+	 * Host-owned broker/shutdown admission for a sibling runtime the daemon
+	 * publishes without a phone attach: a review discussion, or the
+	 * conversation a phone's structural intent opened.
+	 */
 	beginReviewSiblingAdmission?: (parent: IntegratedRuntimeEntry, sessionId: string) => ReviewSiblingAdmission;
 	withReviewSourceWrite?: <T>(
 		parent: IntegratedRuntimeEntry,
 		source: SessionReference,
 		write: () => Promise<T>,
 	) => Promise<T>;
+	/** Whether a stream's authorization still matches persisted client and workspace authority. */
+	isAuthorizationCurrent?: (authorization: IrohRemoteClientAuthorizationSuccess) => Promise<boolean>;
 	/** Called exactly once after a newly-created runtime is published in the registry. */
 	onRuntimePublished?: (entry: IntegratedRuntimeEntry) => void;
-	/** Called after a published runtime's coordinator and registry key move atomically. */
-	onRuntimeSessionRekeyed?: (entry: IntegratedRuntimeEntry, previousSessionId: string, sessionId: string) => void;
+	/** Called once a conversation a phone's structural intent opened from `source` is published as `target`. */
+	onConversationMoved?: (source: IntegratedRuntimeEntry, target: IntegratedRuntimeEntry) => void;
 	onRuntimeDisposed?: (entry: IntegratedRuntimeEntry, reason: string) => void;
 }
 
@@ -222,15 +202,7 @@ export function getResolvedTargetSessionId(
 
 export function createConversationSessionSelectionFromEntry(
 	entry: IntegratedRuntimeEntry,
-	requestedSessionId: string = entry.sessionId,
 ): IntegratedConversationSessionSelection {
-	if (requestedSessionId !== entry.sessionId) {
-		return {
-			kind: "session_rekeyed",
-			requestedSessionId,
-			sessionId: entry.sessionId,
-		};
-	}
 	return {
 		kind: "resumed",
 		requestedSessionId: entry.sessionId,
@@ -349,8 +321,6 @@ export class IntegratedRuntimeRegistry {
 			rejectPublished(error: unknown): void;
 		}
 	>();
-	private readonly sessionRekeyReservationsBySource = new Map<string, IntegratedRuntimeEntry>();
-	private readonly sessionRekeyReservationsByTarget = new Map<string, IntegratedRuntimeEntry>();
 
 	constructor(options: IntegratedRuntimeRegistryOptions) {
 		this.options = options;
@@ -570,6 +540,255 @@ export class IntegratedRuntimeRegistry {
 		}
 	}
 
+	/**
+	 * The runtime one phone stream is served through: a view of `entry`'s
+	 * conversation that stays on it. A structural intent of the phone moves the
+	 * phone alone: the conversation a new session, fork, or import opens is
+	 * published as a detached runtime with this entry's tool policy and
+	 * placement (`hostRedirectTarget`), the phone's last session becomes the
+	 * one it moves to, and the stream then ends with `conversation_moved`.
+	 * Phones co-attached to the conversation stay on it.
+	 */
+	attachStreamView(
+		entry: IntegratedRuntimeEntry,
+		authorization: IrohRemoteClientAuthorizationSuccess,
+	): AgentSessionRuntime {
+		const view = entry.runtime.attachRedirectClient({
+			hostTarget: (target) => this.hostRedirectTarget(entry, authorization, target),
+		});
+		// Review discussions authorize through the entry's runtime, which the view serves.
+		view.reviewDiscussions = entry.runtime.reviewDiscussions;
+		return view;
+	}
+
+	/**
+	 * Host the conversation a phone on `source` is being redirected to. A
+	 * conversation that opened for it is prepared as a detached runtime here,
+	 * before the move writes anything through the source, and published on
+	 * commit, which also records it as the phone's last session in the
+	 * workspace, so `target:"last"` lands there. Abort releases what was
+	 * prepared; the phone stays on `source`.
+	 */
+	private async hostRedirectTarget(
+		source: IntegratedRuntimeEntry,
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		target: RedirectTarget,
+	): Promise<HostedRedirect> {
+		if (source.lifecycle !== "active" || this.entries.get(source.key) !== source) {
+			throw new Error("Conversation runtime ownership changed before the session change");
+		}
+		const prepared = target.runtime
+			? await this.prepareMovedConversation(source, authorization, target.runtime)
+			: undefined;
+		return {
+			commit: async () => {
+				await prepared?.publish();
+				try {
+					await this.options.setClientLastSessionId(
+						authorization.client.nodeId,
+						source.workspaceName,
+						target.sessionId,
+					);
+				} catch (error) {
+					// The phone reconnects to the target it is told; only `target:"last"` misses it.
+					await this.logAudit({
+						type: "session_changed",
+						clientNodeId: authorization.client.nodeId,
+						workspace: source.workspaceName,
+						success: false,
+						error: error instanceof Error ? error.message : String(error),
+						details: { reason: "conversation_moved", sessionId: target.sessionId, lastSessionUpdated: false },
+					});
+					return;
+				}
+				await this.logAudit({
+					type: "session_changed",
+					clientNodeId: authorization.client.nodeId,
+					workspace: source.workspaceName,
+					success: true,
+					details: {
+						reason: "conversation_moved",
+						previousSessionId: source.sessionId,
+						sessionId: target.sessionId,
+					},
+				});
+			},
+			abort: async () => {
+				await prepared?.abort();
+			},
+		};
+	}
+
+	/**
+	 * Prepare `runtime`, which a structural intent on `source` opened in its
+	 * host, as a detached runtime of its own: the source's tool policy, trust,
+	 * and worktree placement, with the session bound to that worktree, under a
+	 * daemon lease. Publishing it rechecks the phone's authorization; it then
+	 * follows retention until the redirected phone attaches. Exactly one of
+	 * `publish` and `abort` must run; a failed publish cleans up itself.
+	 */
+	private async prepareMovedConversation(
+		source: IntegratedRuntimeEntry,
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		runtime: AgentSessionRuntime,
+	): Promise<{ publish(): Promise<void>; abort(): Promise<void> }> {
+		const sessionId = runtime.session.sessionId;
+		const generation = source.generation;
+		let coordinator: ConversationCoordinator | undefined;
+		let admission: ReviewSiblingAdmission | undefined;
+		let preparation: WorktreeRuntimePreparation | undefined;
+		let entry: IntegratedRuntimeEntry | undefined;
+		let claim: IntegratedRuntimeAttachClaim | undefined;
+		let published = false;
+		const assertSource = () => {
+			admission?.assertCurrent();
+			if (
+				source.generation !== generation ||
+				source.lifecycle !== "active" ||
+				this.entries.get(source.key) !== source
+			) {
+				throw new Error("Conversation runtime ownership changed before the session change");
+			}
+		};
+		const release = () => {
+			claim?.release();
+			admission?.release();
+		};
+		const cleanUp = async (error: unknown): Promise<never> => {
+			try {
+				await preparation?.release();
+				if (entry && published) await this.stopEntry(entry, "conversation_move_publication_failed");
+				else if (entry && claim) await this.abortPreparedEntry(entry, undefined, claim);
+				else if (coordinator)
+					await coordinator.beginRuntimeRetirement("conversation_move_failed", () =>
+						cleanupUncommittedRuntime(runtime),
+					).settled;
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Conversation move publication and cleanup failed");
+			} finally {
+				admission?.rollback();
+				release();
+			}
+			throw error;
+		};
+		try {
+			assertSource();
+			if (this.findOwner(source.workspaceName, sessionId)) {
+				throw new Error(`Conversation runtime already active for ${source.workspaceName}/${sessionId}`);
+			}
+			// The new conversation stays inside the workspace or worktree its source was authorized for.
+			const directory = await resolveRuntimeWorkingDirectory(
+				source.worktreePath ?? authorization.workspace.path,
+				runtime.cwd,
+			);
+			const workingDirectory =
+				source.worktreeId === undefined
+					? directory.relativePath
+					: getRegisteredWorkingDirectoryForWorktree(
+							{ sourceRootRelativePath: source.worktreeSourceRootRelativePath },
+							directory.relativePath,
+						);
+			admission = this.options.beginReviewSiblingAdmission?.(source, sessionId);
+			if (source.coordinator.hasLeaseBroker && !admission) {
+				throw new Error("Conversation lease admission is unavailable");
+			}
+			coordinator = this.coordinators.reserveRuntime(source.workspaceName, sessionId);
+			claim = coordinator.createAttachClaim(authorization.client.nodeId);
+			admission?.commit(coordinator);
+			await admission?.validate();
+			assertSource();
+			if (source.worktreeId !== undefined && this.options.prepareWorktreeRuntime) {
+				preparation = await waitForAttachAdmission(
+					this.options.prepareWorktreeRuntime(source.workspaceName, source.worktreeId, sessionId),
+					admission?.signal,
+					(late) => late.release(),
+				);
+				assertSource();
+			}
+			if (source.worktreeId !== undefined && this.options.bindWorktreeSession) {
+				// A daemon restart resumes the session in its worktree checkout (#83).
+				await waitForAttachAdmission(
+					this.options.bindWorktreeSession(source.workspaceName, source.worktreeId, sessionId),
+					admission?.signal,
+				);
+				assertSource();
+			}
+			entry = this.createEntryRecord({
+				coordinator,
+				clientNodeId: authorization.client.nodeId,
+				workspaceName: source.workspaceName,
+				...(source.workspaceGeneration === undefined ? {} : { workspaceGeneration: source.workspaceGeneration }),
+				projectTrusted: source.projectTrusted,
+				sessionId,
+				runtime,
+				...(preparation === undefined ? {} : { worktreePreparation: preparation }),
+				...(source.worktreeId === undefined ? {} : { worktreeId: source.worktreeId }),
+				...(source.worktreePath === undefined ? {} : { worktreePath: source.worktreePath }),
+				...(source.worktreeSourceRootRelativePath === undefined
+					? {}
+					: { worktreeSourceRootRelativePath: source.worktreeSourceRootRelativePath }),
+				...(workingDirectory === undefined ? {} : { workingDirectory }),
+				toolPolicy: source.toolPolicy,
+			});
+			preparation = undefined;
+		} catch (error) {
+			return await cleanUp(error);
+		}
+		const candidate = entry;
+		let settled = false;
+		return {
+			publish: async () => {
+				if (settled) throw new Error("Conversation move was already settled");
+				settled = true;
+				try {
+					// A client revoked or narrowed during the move publishes nothing.
+					if (this.options.isAuthorizationCurrent && !(await this.options.isAuthorizationCurrent(authorization))) {
+						throw new Error("Client access changed during the session change; reconnect");
+					}
+					const publish = () => {
+						assertSource();
+						this.assertAttachClaimCurrent(candidate, claim!);
+						if (this.findOwner(candidate.workspaceName, candidate.sessionId)) {
+							throw new Error("Conversation runtime publication lost ownership");
+						}
+						candidate.coordinator.activateRuntime();
+						candidate.coordinator.markDetached();
+						this.entries.set(candidate.key, candidate);
+						published = true;
+						admission?.finalize();
+						this.options.onRuntimePublished?.(candidate);
+					};
+					if (candidate.worktreePreparation) await candidate.worktreePreparation.publish(publish);
+					else publish();
+					delete candidate.worktreePreparation;
+				} catch (error) {
+					return await cleanUp(error);
+				}
+				release();
+				await this.logAudit({
+					type: "runtime_started",
+					clientNodeId: authorization.client.nodeId,
+					workspace: candidate.workspaceName,
+					success: true,
+					details: this.getEntryDetails(candidate, { previousSessionId: source.sessionId }),
+				});
+				await this.logEntryAudit(candidate, "remote_runtime_started", {
+					reason: "conversation_moved",
+					previousSessionId: source.sessionId,
+				});
+				this.options.onConversationMoved?.(source, candidate);
+				this.scheduleRetention(candidate, "conversation_moved");
+			},
+			abort: async () => {
+				if (settled) return;
+				settled = true;
+				await cleanUp(new Error("Conversation move was abandoned")).catch((error: unknown) => {
+					if (error instanceof AggregateError) throw error;
+				});
+			},
+		};
+	}
+
 	/** Revoke pending review effects before waiting for affected stream lifecycles to drain. */
 	fenceReviewOperations(entries: Iterable<IntegratedRuntimeEntry>): void {
 		for (const entry of entries) this.revokedReviewAuthorities.add(entry.runtime);
@@ -589,20 +808,7 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	findOwner(workspaceName: string, sessionId: string): IntegratedRuntimeEntry | undefined {
-		const direct = this.entries.get(this.getRegistryKey(workspaceName, sessionId));
-		if (direct) {
-			return direct;
-		}
-		for (const entry of this.entries.values()) {
-			if (entry.workspaceName === workspaceName && entry.previousSessionIds.has(sessionId)) {
-				return entry;
-			}
-		}
-		return undefined;
-	}
-
-	private getSessionRekeyReservation(key: string): IntegratedRuntimeEntry | undefined {
-		return this.sessionRekeyReservationsBySource.get(key) ?? this.sessionRekeyReservationsByTarget.get(key);
+		return this.entries.get(this.getRegistryKey(workspaceName, sessionId));
 	}
 
 	private createAttachRetryError(entry: IntegratedRuntimeEntry, message: string): IrohRemoteHandshakeError {
@@ -633,11 +839,7 @@ export class IntegratedRuntimeRegistry {
 	/** Validate a claim immediately before attach side effects. */
 	assertEntryAttachable(entry: IntegratedRuntimeEntry, claim: IntegratedRuntimeAttachClaim): void {
 		this.assertAttachClaimCurrent(entry, claim);
-		if (
-			entry.lifecycle !== "active" ||
-			this.entries.get(entry.key) !== entry ||
-			this.getSessionRekeyReservation(entry.key) !== undefined
-		) {
+		if (entry.lifecycle !== "active" || this.entries.get(entry.key) !== entry) {
 			throw this.createAttachRetryError(entry, "conversation runtime ownership changed during attach");
 		}
 	}
@@ -677,10 +879,6 @@ export class IntegratedRuntimeRegistry {
 			if (siblingCreation) {
 				await waitForAttachAdmission(siblingCreation, options.signal);
 				return this.getOrCreateEntry(handshake, authorization, options);
-			}
-			const reservedEntry = this.getSessionRekeyReservation(targetKey);
-			if (reservedEntry) {
-				throw this.createAttachRetryError(reservedEntry, "conversation runtime replacement is still publishing");
 			}
 			// One runtime per conversation: any paired client attaches to an existing
 			// runtime for the target (conversation_in_use is retired; single-user model).
@@ -723,15 +921,11 @@ export class IntegratedRuntimeRegistry {
 					// lease/registry ownership). detachedAt stays set so attachSubscriber
 					// still logs the reattach and a pre-subscriber failure re-arms retention.
 					this.cancelRetention(existing);
-					const requestedSessionId =
-						handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
-							? targetSessionId
-							: existing.sessionId;
 					return {
 						entry: existing,
 						attachClaim: this.createAttachClaim(existing, authorization.client.nodeId),
 						created: false,
-						sessionSelection: createConversationSessionSelectionFromEntry(existing, requestedSessionId),
+						sessionSelection: createConversationSessionSelectionFromEntry(existing),
 					};
 				}
 				await waitForAttachAdmission(this.stopEntry(existing, "fresh_pairing_replaced_runtime"), options.signal);
@@ -918,26 +1112,6 @@ export class IntegratedRuntimeRegistry {
 					: remoteWorkingDirectory;
 			const sessionId = runtime.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
-			const reservedOwner = this.getSessionRekeyReservation(
-				this.getRegistryKey(authorization.workspace.name, sessionId),
-			);
-			if (reservedOwner) {
-				const retryError = this.createAttachRetryError(
-					reservedOwner,
-					"conversation runtime replacement is still publishing",
-				);
-				const runtimeToDispose = runtime;
-				runtime = undefined;
-				try {
-					await cleanupUncommittedRuntime(runtimeToDispose);
-				} catch (cleanupError) {
-					throw new AggregateError(
-						[retryError, cleanupError],
-						"Conversation attach retry cleanup did not complete",
-					);
-				}
-				throw retryError;
-			}
 			if (owner) {
 				const runtimeToDispose = runtime;
 				runtime = undefined;
@@ -961,9 +1135,9 @@ export class IntegratedRuntimeRegistry {
 				};
 			}
 			// Bind EVERY session actually created under the worktree root, not just
-			// the initial "new"-target one: a created_after_missing replacement for a
-			// bound-but-vanished resume target must stay resumable after a daemon
-			// restart too (#83). Resumed sessions were bound when they were created.
+			// the initial "new"-target one: a session created for a bound-but-vanished
+			// resume target must stay resumable after a daemon restart too (#83).
+			// Resumed sessions were bound when they were created.
 			if (worktree !== undefined && sessionSelection.kind !== "resumed") {
 				if (this.options.bindWorktreeSession) {
 					assertAttachAdmissionOpen(options.signal);
@@ -1084,10 +1258,6 @@ export class IntegratedRuntimeRegistry {
 			get attachClaims() {
 				return coordinator.attachClaims;
 			},
-			recordedSessionIdsByClient: new Map([[options.clientNodeId, options.sessionId]]),
-			get previousSessionIds() {
-				return coordinator.previousSessionIds;
-			},
 			get subscribers() {
 				return coordinator.subscribers;
 			},
@@ -1112,9 +1282,6 @@ export class IntegratedRuntimeRegistry {
 			},
 		};
 		entry.runtime.reviewDiscussions = this.reviewDiscussions.forRuntime(entry.runtime);
-		if (entry.parentSessionId === undefined) {
-			entry.runtime.setPrepareSessionReplacement?.((target) => this.prepareEntrySessionReplacement(entry, target));
-		}
 		return entry;
 	}
 
@@ -1127,10 +1294,7 @@ export class IntegratedRuntimeRegistry {
 		if (!parentEntry || parentEntry.lifecycle !== "active") {
 			throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 		}
-		if (
-			this.findOwner(workspaceName, event.sessionId) ||
-			this.getSessionRekeyReservation(this.getRegistryKey(workspaceName, event.sessionId)) !== undefined
-		) {
+		if (this.findOwner(workspaceName, event.sessionId)) {
 			throw new Error(`Subagent session ${event.sessionId} is already active`);
 		}
 		if (parentEntry.worktreeId !== undefined) {
@@ -1165,10 +1329,7 @@ export class IntegratedRuntimeRegistry {
 				if (this.findOwner(workspaceName, event.parentSessionId)?.lifecycle !== "active") {
 					throw new Error(`Parent runtime is not active for subagent session ${event.sessionId}`);
 				}
-				if (
-					this.findOwner(workspaceName, event.sessionId) ||
-					this.getSessionRekeyReservation(this.getRegistryKey(workspaceName, event.sessionId)) !== undefined
-				) {
+				if (this.findOwner(workspaceName, event.sessionId)) {
 					throw new Error(`Subagent session ${event.sessionId} is already active`);
 				}
 				state = "committed";
@@ -1217,8 +1378,7 @@ export class IntegratedRuntimeRegistry {
 			this.assertEntryAttachable(entry, attachClaim);
 		}
 		const owner = this.findOwner(authorization.workspace.name, entry.sessionId);
-		const reservedOwner = this.getSessionRekeyReservation(entry.key);
-		if ((owner && owner !== entry) || (reservedOwner && reservedOwner !== entry)) {
+		if (owner && owner !== entry) {
 			// Two attaches raced to create the same conversation runtime; the loser
 			// retries and attaches to the winner.
 			throw createConversationOpenError("duplicate_conversation_connection", "conversation runtime already active", {
@@ -1281,8 +1441,6 @@ export class IntegratedRuntimeRegistry {
 			}
 			if (entry.lifecycle === "active") {
 				this.assertEntryAttachable(entry, attachClaim);
-			} else if (this.getSessionRekeyReservation(entry.key) !== undefined) {
-				throw this.createAttachRetryError(entry, "conversation runtime ownership changed during commit");
 			}
 			entry.coordinator.activateRuntime();
 			if (inserted) this.options.onRuntimePublished?.(entry);
@@ -1432,11 +1590,17 @@ export class IntegratedRuntimeRegistry {
 		return entry.runtime.startRecoveredClientInputs();
 	}
 
+	/**
+	 * Detach a stream's subscriber. A runtime left without subscribers follows
+	 * retention: it stops once idle for `retainMs`, the configured detached TTL
+	 * by default.
+	 */
 	async detachSubscriber(
 		entry: IntegratedRuntimeEntry,
 		subscriber: IntegratedRuntimeSubscriber,
 		reason: string,
 		error?: unknown,
+		options: { readonly retainMs?: number } = {},
 	): Promise<void> {
 		if (!entry.coordinator.removeSubscriber(subscriber)) {
 			return;
@@ -1465,7 +1629,7 @@ export class IntegratedRuntimeRegistry {
 			{ detachedAt: entry.detachedAt, reason },
 			{ clientNodeId: subscriber.clientNodeId },
 		);
-		this.scheduleRetention(entry, reason);
+		this.scheduleRetention(entry, reason, options.retainMs);
 	}
 
 	async detachWithoutSubscriber(
@@ -1532,13 +1696,7 @@ export class IntegratedRuntimeRegistry {
 				`Cannot stop conversation runtime ${entry.workspaceName}/${entry.sessionId} with attached subscribers`,
 			);
 		}
-		const ownedConversationIds = new Set([entry.sessionId, ...entry.previousSessionIds]);
-		const activeStreamCount = Array.from(ownedConversationIds).reduce(
-			(count, sessionId) =>
-				count + this.options.activeStreams.entriesForConversationKey(entry.workspaceName, sessionId).length,
-			0,
-		);
-		if (activeStreamCount !== 0) {
+		if (this.options.activeStreams.entriesForConversationKey(entry.workspaceName, entry.sessionId).length !== 0) {
 			throw new Error(
 				`Cannot stop conversation runtime ${entry.workspaceName}/${entry.sessionId} with active streams`,
 			);
@@ -1558,12 +1716,6 @@ export class IntegratedRuntimeRegistry {
 		}
 		if (this.entries.get(entry.key) !== entry) {
 			return;
-		}
-		for (const [key, reservedEntry] of this.sessionRekeyReservationsBySource) {
-			if (reservedEntry === entry) this.sessionRekeyReservationsBySource.delete(key);
-		}
-		for (const [key, reservedEntry] of this.sessionRekeyReservationsByTarget) {
-			if (reservedEntry === entry) this.sessionRekeyReservationsByTarget.delete(key);
 		}
 		this.cancelRetention(entry);
 		this.entries.delete(entry.key);
@@ -1632,376 +1784,6 @@ export class IntegratedRuntimeRegistry {
 			stoppedCount++;
 		}
 		return stoppedCount;
-	}
-
-	private async prepareEntrySessionReplacement(
-		entry: IntegratedRuntimeEntry,
-		target: AgentSessionReplacementTarget,
-	): Promise<AgentSessionReplacementTransaction> {
-		if (entry.runtime.session.isReviewDiscussion) throw new Error("Review discussion identity is immutable");
-		if (entry.sessionId !== target.previousSessionId || this.entries.get(entry.key) !== entry) {
-			throw new Error("daemon runtime ownership changed before session replacement preflight");
-		}
-		if (entry.lifecycle !== "active" || entry.attachClaims.size !== 0) {
-			throw new Error("daemon runtime attach is still publishing");
-		}
-		const sourceKey = entry.key;
-		const targetKey = this.getRegistryKey(entry.workspaceName, target.sessionId);
-		const existing = this.findOwner(entry.workspaceName, target.sessionId);
-		if (existing && existing !== entry) {
-			throw new Error(`conversation runtime already active for ${entry.workspaceName}/${target.sessionId}`);
-		}
-		if (
-			this.sessionRekeyReservationsBySource.has(sourceKey) ||
-			this.sessionRekeyReservationsByTarget.has(sourceKey) ||
-			this.sessionRekeyReservationsBySource.has(targetKey) ||
-			this.sessionRekeyReservationsByTarget.has(targetKey)
-		) {
-			throw new Error("daemon runtime session replacement already in progress");
-		}
-
-		const lease = (() => {
-			if (entry.coordinator.hasLeaseBroker) {
-				return entry.coordinator.prepareDaemonRuntimeLeaseRekey(target.sessionId);
-			}
-			if (!this.options.prepareRuntimeRekey) {
-				return undefined;
-			}
-			if (!entry.leaseOwner) {
-				throw new Error("daemon runtime lease owner is unavailable for session replacement");
-			}
-			return this.options.prepareRuntimeRekey(
-				entry.leaseOwner,
-				entry.workspaceName,
-				target.previousSessionId,
-				target.sessionId,
-			);
-		})();
-		this.sessionRekeyReservationsBySource.set(sourceKey, entry);
-		if (sourceKey !== targetKey) {
-			this.sessionRekeyReservationsByTarget.set(targetKey, entry);
-		}
-		const attachedClientNodeIds = new Set(
-			this.options.activeStreams
-				.entriesForConversationKey(entry.workspaceName, target.previousSessionId)
-				.map((stream) => stream.clientNodeId),
-		);
-		attachedClientNodeIds.add(entry.clientNodeId);
-		const preparedGeneration = entry.generation;
-		let phase: "prepared" | "committed" | "finalized" | "rolled_back" | "disposed" = "prepared";
-		let targetSessionPersisted = false;
-		const clearReservation = () => {
-			if (this.sessionRekeyReservationsBySource.get(sourceKey) === entry) {
-				this.sessionRekeyReservationsBySource.delete(sourceKey);
-			}
-			if (this.sessionRekeyReservationsByTarget.get(targetKey) === entry) {
-				this.sessionRekeyReservationsByTarget.delete(targetKey);
-			}
-		};
-		const assertPreparedOwnershipCurrent = () => {
-			if (
-				entry.lifecycle !== "active" ||
-				entry.generation !== preparedGeneration ||
-				entry.attachClaims.size !== 0 ||
-				this.entries.get(sourceKey) !== entry ||
-				this.sessionRekeyReservationsBySource.get(sourceKey) !== entry ||
-				(sourceKey !== targetKey && this.sessionRekeyReservationsByTarget.get(targetKey) !== entry)
-			) {
-				throw new Error("daemon runtime ownership changed before session replacement commit");
-			}
-			const targetOwner = this.findOwner(entry.workspaceName, target.sessionId);
-			if (targetOwner && targetOwner !== entry) {
-				throw new Error(`conversation runtime already active for ${entry.workspaceName}/${target.sessionId}`);
-			}
-		};
-		const restorePreviousRecordedSession = async (): Promise<void> => {
-			if (!targetSessionPersisted || entry.parentSessionId !== undefined) return;
-			await this.options.stateManager.setClientsLastSessionId(
-				Array.from(attachedClientNodeIds),
-				entry.workspaceName,
-				target.previousSessionId,
-			);
-			targetSessionPersisted = false;
-		};
-
-		return {
-			commit: async () => {
-				if (phase !== "prepared") return;
-				try {
-					assertPreparedOwnershipCurrent();
-					if (entry.parentSessionId === undefined) {
-						await this.options.stateManager.setClientsLastSessionId(
-							Array.from(attachedClientNodeIds),
-							entry.workspaceName,
-							target.sessionId,
-						);
-						targetSessionPersisted = true;
-					}
-					if (entry.worktreeId !== undefined && this.options.bindWorktreeSession) {
-						// Keep the durable worktree binding covering the replacement id so a
-						// post-restart resume resolves the checkout again (#83). The append is
-						// additive and idempotent; rollback leaves a stale-but-inert extra id.
-						await this.options.bindWorktreeSession(entry.workspaceName, entry.worktreeId, target.sessionId);
-					}
-					// Persistence is an ownership await boundary. A stop can synchronously
-					// fence the entry while that write is pending; never publish its lease or
-					// registry rekey without revalidating the captured generation.
-					assertPreparedOwnershipCurrent();
-					lease?.commit();
-				} catch (error) {
-					try {
-						await restorePreviousRecordedSession();
-					} catch (compensationError) {
-						throw new AggregateError(
-							[error, compensationError],
-							"session replacement failed and its persisted client target could not be restored",
-						);
-					}
-					throw error;
-				}
-
-				if (this.entries.get(sourceKey) === entry) {
-					this.entries.delete(sourceKey);
-				}
-				this.coordinators.rekey(entry.coordinator, target.sessionId);
-				this.entries.set(targetKey, entry);
-				for (const stream of this.options.activeStreams.entriesForConversationKey(
-					entry.workspaceName,
-					target.previousSessionId,
-				)) {
-					stream.sessionId = target.sessionId;
-				}
-				for (const clientNodeId of attachedClientNodeIds) {
-					entry.recordedSessionIdsByClient.set(clientNodeId, target.sessionId);
-				}
-				phase = "committed";
-			},
-			finalize: async () => {
-				if (phase === "finalized") return;
-				if (phase !== "committed") {
-					throw new Error("daemon runtime session replacement was not committed before publication");
-				}
-				phase = "finalized";
-				clearReservation();
-				this.options.onRuntimeSessionRekeyed?.(entry, target.previousSessionId, target.sessionId);
-				await this.logEntryAudit(entry, "remote_runtime_session_changed", {
-					previousSessionId: target.previousSessionId,
-					sessionId: target.sessionId,
-				});
-				for (const clientNodeId of attachedClientNodeIds) {
-					await this.logAudit({
-						type: "session_changed",
-						clientNodeId,
-						workspace: entry.workspaceName,
-						success: true,
-						details: {
-							reason: "remote_rpc_session_change",
-							sessionId: target.sessionId,
-							lastSessionUpdated: entry.parentSessionId === undefined,
-						},
-					});
-				}
-			},
-			rollback: async () => {
-				if (phase !== "prepared") return;
-				phase = "rolled_back";
-				clearReservation();
-				lease?.rollback();
-				await restorePreviousRecordedSession();
-			},
-			dispose: () => {
-				if (phase === "disposed" || phase === "rolled_back") return Promise.resolve();
-				const existingRetirement = entry.coordinator.retirement;
-				const disposeTransaction = async (ownsRetirement: boolean): Promise<void> => {
-					if (phase === "prepared") {
-						lease?.rollback();
-					}
-					await restorePreviousRecordedSession().catch(() => undefined);
-					phase = "disposed";
-					clearReservation();
-					if (!ownsRetirement) {
-						// stopEntry already owns terminal disposal. Do not await it from the
-						// replacement command whose settlement may be needed to unblock stop.
-						return;
-					}
-					this.cancelRetention(entry);
-					if (this.entries.get(entry.key) === entry) {
-						this.entries.delete(entry.key);
-					}
-					this.options.onRuntimeDisposed?.(entry, "session_replacement_failed");
-				};
-				if (existingRetirement || entry.lifecycle === "retired") {
-					return disposeTransaction(false);
-				}
-				const retirement = entry.coordinator.beginRuntimeRetirement(
-					"session_replacement_failed",
-					() => disposeTransaction(true),
-					{ finalizationOrder: "concurrent" },
-				);
-				return retirement.finalization;
-			},
-		};
-	}
-
-	async handleSessionChanged(
-		entry: IntegratedRuntimeEntry,
-		activeStreamEntry: IntegratedRuntimeStreamWriter | undefined,
-		session: { sessionId: string },
-		authorization: IrohRemoteClientAuthorizationSuccess,
-	): Promise<void> {
-		const previousSessionId = entry.sessionId;
-		const attachedClientNodeIds = new Set(
-			this.options.activeStreams
-				.entriesForConversationKey(entry.workspaceName, previousSessionId)
-				.map((stream) => stream.clientNodeId),
-		);
-		attachedClientNodeIds.add(authorization.client.nodeId);
-		if (session.sessionId !== entry.sessionId) {
-			try {
-				await this.rekeyEntry(entry, activeStreamEntry, session.sessionId);
-			} catch (error: unknown) {
-				try {
-					await this.stopEntry(entry, "session_rekey_failed");
-				} catch (cleanupError) {
-					throw new AggregateError([error, cleanupError], error instanceof Error ? error.message : String(error));
-				}
-				throw error;
-			}
-		}
-		if (activeStreamEntry) {
-			activeStreamEntry.sessionId = session.sessionId;
-		}
-		for (const clientNodeId of attachedClientNodeIds) {
-			if (entry.recordedSessionIdsByClient.get(clientNodeId) === session.sessionId) continue;
-			try {
-				await this.recordSessionChange(entry, session.sessionId, clientNodeId);
-				entry.recordedSessionIdsByClient.set(clientNodeId, session.sessionId);
-			} catch (error: unknown) {
-				try {
-					await this.stopEntry(entry, "session_rekey_persistence_failed");
-				} catch (cleanupError) {
-					throw new AggregateError([error, cleanupError], error instanceof Error ? error.message : String(error));
-				}
-				throw error;
-			}
-		}
-	}
-
-	private async rekeyEntry(
-		entry: IntegratedRuntimeEntry,
-		activeStreamEntry: IntegratedRuntimeStreamWriter | undefined,
-		nextSessionId: string,
-	): Promise<void> {
-		if (entry.runtime.session.isReviewDiscussion) throw new Error("Review discussion identity is immutable");
-		const previousSessionId = entry.sessionId;
-		const previousKey = entry.key;
-		const nextKey = this.getRegistryKey(entry.workspaceName, nextSessionId);
-		if (entry.lifecycle !== "active" || entry.attachClaims.size !== 0) {
-			throw new Error("daemon runtime attach is still publishing");
-		}
-		const existing = this.findOwner(entry.workspaceName, nextSessionId);
-		if (existing && existing !== entry) {
-			throw new Error(`conversation runtime already active for ${entry.workspaceName}/${nextSessionId}`);
-		}
-		if (
-			this.sessionRekeyReservationsBySource.has(previousKey) ||
-			this.sessionRekeyReservationsByTarget.has(previousKey) ||
-			this.sessionRekeyReservationsBySource.has(nextKey) ||
-			this.sessionRekeyReservationsByTarget.has(nextKey)
-		) {
-			throw new Error("daemon runtime session replacement already in progress");
-		}
-		// Rekey the lease first. The callback is synchronous and may reject; in
-		// that case the registry and every active stream remain on the old identity
-		// and the runtime's projection barrier fails closed.
-		if (entry.coordinator.hasLeaseBroker) {
-			entry.coordinator.rekeyDaemonRuntimeLease(nextSessionId);
-		} else if (this.options.onRuntimeRekeyed) {
-			if (!entry.leaseOwner) {
-				throw new Error("daemon runtime lease owner is unavailable for session rekey");
-			}
-			this.options.onRuntimeRekeyed(entry.leaseOwner, entry.workspaceName, previousSessionId, nextSessionId);
-		}
-		if (this.entries.get(previousKey) === entry) {
-			this.entries.delete(previousKey);
-		}
-		this.coordinators.rekey(entry.coordinator, nextSessionId);
-		this.entries.set(nextKey, entry);
-		// Re-key EVERY stream bound to the old conversation id, not just the one
-		// that drove this session change. Workflow-event fan-out matches streams by
-		// the runtime's current sessionId, so a co-attached device left on the stale
-		// id would be silently dropped from all future events.
-		for (const stream of this.options.activeStreams.entriesForConversationKey(
-			entry.workspaceName,
-			previousSessionId,
-		)) {
-			stream.sessionId = nextSessionId;
-		}
-		if (activeStreamEntry) {
-			// Defensive: the driving stream is normally already in the registry, but
-			// keep it consistent even if this runs before it was registered.
-			activeStreamEntry.sessionId = nextSessionId;
-		}
-		// A rekeyed worktree conversation must stay resumable after a daemon
-		// restart: append the new id to the durable binding (additive, idempotent).
-		// Failure fails the rekey closed — handleSessionChanged stops the runtime
-		// rather than leaving a persisted resume target that cannot be resolved
-		// back to its checkout (#83). The registry has already moved to the new
-		// identity, so the fail-closed outcome is a stopped runtime, not the old
-		// identity retained.
-		if (entry.worktreeId !== undefined && this.options.bindWorktreeSession) {
-			await this.options.bindWorktreeSession(entry.workspaceName, entry.worktreeId, nextSessionId);
-		}
-		this.options.onRuntimeSessionRekeyed?.(entry, previousSessionId, nextSessionId);
-		await this.logEntryAudit(entry, "remote_runtime_session_changed", {
-			previousSessionId,
-			sessionId: nextSessionId,
-		});
-	}
-
-	private async recordSessionChange(
-		entry: IntegratedRuntimeEntry,
-		sessionId: string,
-		clientNodeId: string,
-	): Promise<void> {
-		if (entry.parentSessionId !== undefined) {
-			await this.logAudit({
-				type: "session_changed",
-				clientNodeId,
-				workspace: entry.workspaceName,
-				success: true,
-				details: {
-					reason: "remote_rpc_session_change",
-					sessionId,
-					parentSessionId: entry.parentSessionId,
-					...(entry.subagentId === undefined ? {} : { subagentId: entry.subagentId }),
-					lastSessionUpdated: false,
-				},
-			});
-			return;
-		}
-
-		try {
-			const client = await this.options.setClientLastSessionId(clientNodeId, entry.workspaceName, sessionId);
-			await this.logAudit({
-				type: "session_changed",
-				clientNodeId,
-				workspace: entry.workspaceName,
-				success: client !== undefined,
-				error: client ? undefined : "client not found",
-				details: { reason: "remote_rpc_session_change", sessionId },
-			});
-		} catch (error) {
-			await this.logAudit({
-				type: "session_changed",
-				clientNodeId,
-				workspace: entry.workspaceName,
-				success: false,
-				error: error instanceof Error ? error.message : String(error),
-				details: { reason: "remote_rpc_session_change", sessionId },
-			});
-			throw error;
-		}
 	}
 
 	// ==========================================================================
@@ -2147,15 +1929,6 @@ export class IntegratedRuntimeRegistry {
 				type: "session_created",
 				success: true,
 				details: { reason: "missing_on_resume", sessionId: selection.sessionId },
-			});
-			return;
-		}
-		if (selection.kind === "session_rekeyed") {
-			await this.logAudit({
-				...common,
-				type: "session_rekeyed",
-				success: true,
-				details: { requestedSessionId: selection.requestedSessionId, sessionId: selection.sessionId },
 			});
 			return;
 		}

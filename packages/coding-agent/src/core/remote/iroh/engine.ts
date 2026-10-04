@@ -127,7 +127,6 @@ export interface IrohRemoteHostReadHandshakeOptions extends IrohRemoteHandshakeL
 	conversationSession?: {
 		selection: IrohRemoteConversationSelection;
 		sessionId: string;
-		requestedSessionId?: string;
 	};
 }
 
@@ -154,7 +153,7 @@ export interface IrohRemoteClientReadHandshakeResponseOptions extends IrohRemote
 
 function createConversationHandshakeMetadata(
 	hello: IrohRemoteHello,
-	conversationSession: { selection: IrohRemoteConversationSelection; sessionId: string; requestedSessionId?: string },
+	conversationSession: { selection: IrohRemoteConversationSelection; sessionId: string },
 ): IrohRemoteConversationHandshakeMetadata {
 	if (hello.mode !== "conversation") {
 		throw new Error("conversation handshake metadata requires a conversation hello");
@@ -163,9 +162,6 @@ function createConversationHandshakeMetadata(
 		target: hello.conversation.target,
 		sessionId: conversationSession.sessionId,
 		selection: conversationSession.selection,
-		...(conversationSession.requestedSessionId === undefined
-			? {}
-			: { requestedSessionId: conversationSession.requestedSessionId }),
 	};
 }
 

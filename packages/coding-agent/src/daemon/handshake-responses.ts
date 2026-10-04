@@ -10,16 +10,11 @@ import { createIrohRemoteHostMetadata, type IrohRemoteHostMetadata } from "../co
 import type { IrohRemoteRelayMode } from "../core/remote/iroh/protocol.ts";
 import type { RpcSessionState } from "../core/rpc/types.ts";
 
-/**
- * Session selection outcomes as tracked by the conversation owner. Extends the
- * runtime-level selection kinds with "session_rekeyed" (an existing runtime is
- * serving a different session id than the one requested).
- */
+/** Session selection outcomes as tracked by the conversation owner. */
 export type IntegratedConversationSessionSelection =
 	| { kind: "created"; sessionId: string }
 	| { kind: "created_after_missing"; requestedSessionId: string; sessionId: string }
-	| { kind: "resumed"; requestedSessionId: string; sessionId: string }
-	| { kind: "session_rekeyed"; requestedSessionId: string; sessionId: string };
+	| { kind: "resumed"; requestedSessionId: string; sessionId: string };
 
 /** Host identity/context needed to build handshake responses and host-state decoration. */
 export interface RemoteHostResponseContext {
@@ -72,9 +67,6 @@ export function getHandshakeConversationSelection(
 	if (sessionSelection.kind === "created") {
 		return "created";
 	}
-	if (sessionSelection.kind === "session_rekeyed") {
-		return "session_rekeyed";
-	}
 	return "resumed";
 }
 
@@ -90,8 +82,6 @@ export function createIntegratedConversationHandshakeResponse(
 	if (handshake.hello.mode !== "conversation") {
 		throw new Error("integrated conversation handshake response requires a conversation hello");
 	}
-	const requestedSessionId =
-		sessionSelection.kind === "session_rekeyed" ? sessionSelection.requestedSessionId : undefined;
 	return createIrohRemoteHandshakeSuccess({
 		child: handshake.response.child,
 		clientNodeId: authorization.client.nodeId,
@@ -104,7 +94,6 @@ export function createIntegratedConversationHandshakeResponse(
 			target: handshake.hello.conversation.target,
 			sessionId,
 			selection: getHandshakeConversationSelection(sessionSelection),
-			...(requestedSessionId === undefined ? {} : { requestedSessionId }),
 			// Echoed only for worktree-bound conversations; old clients never see it.
 			...(worktreeId === undefined ? {} : { worktreeId }),
 			...(workingDirectory === undefined ? {} : { workingDirectory }),

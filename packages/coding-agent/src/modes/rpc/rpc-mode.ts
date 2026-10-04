@@ -1038,7 +1038,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		// Fire on a new session OBJECT, not just a new sessionId. A same-file
 		// drain/reacquire reload produces a fresh AgentSession with the identical
 		// sessionId; consumers (notably the iroh transcript-entry subscription)
-		// must rekey to the new object or they stay bound to the
+		// must move to the new object or they stay bound to the
 		// disposed one and silently stop delivering. Same-id consumers no-op safely.
 		if (options.onSessionChanged && session !== lastNotifiedSession) {
 			lastNotifiedSession = session;

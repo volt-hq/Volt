@@ -29,7 +29,7 @@ via `./check.sh <Module>`.
 |--------|------------------------|-------|
 | **`LeaseBroker`** | Who holds a conversation (daemon vs terminal) and how it hands off. | **Verified green** (40,804 states). `LeaseBroker.tla` / `.cfg` |
 | **`RelayViewer`** | The relay token + the "watch the turn finish" viewer feed during a hand-off. | **Verified green** (207,025 states). `RelayViewer.tla` / `.cfg` |
-| **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states). `SessionTarget.tla` / `.cfg` |
+| **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states) before its rekey overlay was removed; not re-run since (24 states by construction). `SessionTarget.tla` / `.cfg` |
 | **`ClientAuth`** | Pairing, revoking, and re-pairing a phone. | **Verified green** (9,678 states). `ClientAuth.tla` / `.cfg` |
 | **`ClientConn`** | The phone's own connect / reconnect / detach / abort behavior. | **Verified green** (176 states). `ClientConn.tla` / `.cfg` |
 

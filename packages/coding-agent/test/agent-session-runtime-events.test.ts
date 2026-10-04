@@ -22,6 +22,7 @@ import {
 	listReviewRuns,
 	type ReviewRunRecord,
 } from "../src/core/review-state.ts";
+import type { ConversationProjectionSnapshot } from "../src/core/rpc/conversation-projection-feed.ts";
 import { buildRpcSessionState } from "../src/core/rpc/session-state.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
@@ -268,13 +269,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const originalSession = runtimeHost.session;
 		const currentSessionRef = originalSession.sessionRef;
 		expect(currentSessionRef).toBeDefined();
-		const prepare = vi.fn(async () => undefined);
 		const rebind = vi.fn(async () => {});
 		const replaced = vi.fn();
-		runtimeHost.setPrepareSessionReplacement(prepare);
 		runtimeHost.setRebindSession(rebind);
 		const detach = runtimeHost.subscribeSessionReplaced(replaced);
-		const publish = vi.spyOn(runtimeHost.conversationProjectionFeed, "commitSourceRebind");
+		const feed = runtimeHost.conversationProjectionFeed;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(currentSessionRef!)).resolves.toEqual({
@@ -285,8 +284,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(prepare).not.toHaveBeenCalled();
-		expect(publish).not.toHaveBeenCalled();
+		expect(runtimeHost.conversationProjectionFeed).toBe(feed);
 		expect(rebind).not.toHaveBeenCalled();
 		expect(replaced).not.toHaveBeenCalled();
 		detach();
@@ -822,13 +820,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const collisionRef = collisionManager.getSessionRef();
 		expect(collisionRef).toBeDefined();
 		await collisionManager.closePersistence();
-		const prepare = vi.fn(async () => undefined);
 		const rebind = vi.fn(async () => {});
 		const replaced = vi.fn();
-		runtimeHost.setPrepareSessionReplacement(prepare);
 		runtimeHost.setRebindSession(rebind);
 		const detach = runtimeHost.subscribeSessionReplaced(replaced);
-		const publish = vi.spyOn(runtimeHost.conversationProjectionFeed, "commitSourceRebind");
+		const feed = runtimeHost.conversationProjectionFeed;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(collisionRef!)).rejects.toThrow(
@@ -837,63 +833,41 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(prepare).not.toHaveBeenCalled();
-		expect(publish).not.toHaveBeenCalled();
+		expect(runtimeHost.conversationProjectionFeed).toBe(feed);
 		expect(rebind).not.toHaveBeenCalled();
 		expect(replaced).not.toHaveBeenCalled();
 		detach();
 	});
 
-	it("commits replacement ownership and rebinds the new session before the old one shuts down", async () => {
+	it("replaces the projection feed and rebinds the new session before the old one shuts down", async () => {
 		const phases: string[] = [];
 		const { runtimeHost } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
 				phases.push("session_shutdown");
 			});
 		});
-		runtimeHost.setPrepareSessionReplacement(async () => {
-			phases.push("prepare");
-			return {
-				async commit() {
-					phases.push("commit");
-				},
-				async finalize() {
-					phases.push("finalize");
-				},
-				async rollback() {
-					phases.push("rollback");
-				},
-				async dispose() {
-					phases.push("dispose");
-				},
-			};
+		runtimeHost.subscribeSessionWillProject(() => {
+			phases.push("will_project");
 		});
 		runtimeHost.setRebindSession(async () => {
 			phases.push("rebind");
 		});
-		const commitSourceRebind = runtimeHost.conversationProjectionFeed.commitSourceRebind.bind(
-			runtimeHost.conversationProjectionFeed,
-		);
-		const publish = vi
-			.spyOn(runtimeHost.conversationProjectionFeed, "commitSourceRebind")
-			.mockImplementation((requestId) => {
-				phases.push("publish");
-				commitSourceRebind(requestId);
-			});
+		const sourceFeed = runtimeHost.conversationProjectionFeed;
 
-		await runtimeHost.newSession({ rebindRequestId: "new-session-request" });
-		expect(publish).toHaveBeenCalledWith("new-session-request");
-		expect(phases).toEqual(["prepare", "commit", "publish", "finalize", "rebind", "session_shutdown"]);
+		await runtimeHost.newSession();
+		expect(phases).toEqual(["will_project", "rebind", "session_shutdown"]);
+		// A stream never follows the move: the source's feed ended with it.
+		expect(runtimeHost.conversationProjectionFeed).not.toBe(sourceFeed);
+		expect(() =>
+			sourceFeed.attach({ write: () => {}, buildSnapshot: () => ({}) as ConversationProjectionSnapshot }),
+		).toThrow("disposed");
 	});
 
-	it("leaves the old runtime live and retains the candidate row when replacement ownership preflight rejects", async () => {
+	it("leaves the old runtime live and retains the candidate row when the move is refused before it starts", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
 		const originalSessionId = originalSession.sessionId;
 		let preparedRef: SessionReference | undefined;
-		runtimeHost.setPrepareSessionReplacement(async () => {
-			throw new Error("target lease occupied");
-		});
 
 		await expect(
 			runtimeHost.newSession({
@@ -901,8 +875,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 					await writer.appendPlanningState({ mode: "plan", plan: null });
 					preparedRef = writer.sessionManager.getSessionRef();
 				},
+				beforeMove: async () => {
+					throw new Error("source write refused");
+				},
 			}),
-		).rejects.toThrow("target lease occupied");
+		).rejects.toThrow("source write refused");
 		expect(preparedRef).toBeDefined();
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(runtimeHost.session.sessionId).toBe(originalSessionId);
@@ -935,23 +912,19 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			releasePreparation = resolve;
 		});
 		let preparationCount = 0;
-		runtimeHost.setPrepareSessionReplacement(async () => {
+		const setup = async () => {
 			preparationCount++;
 			markPreparationStarted();
 			await preparationGate;
-			return undefined;
-		});
+		};
 
-		const publish = vi.spyOn(runtimeHost.conversationProjectionFeed, "commitSourceRebind");
-		const first = runtimeHost.newSession({ rebindRequestId: "winning-request" });
+		const first = runtimeHost.newSession({ setup });
 		await preparationStarted;
-		const queuedFromOldSession = runtimeHost.newSession({ rebindRequestId: "stale-request" });
+		const queuedFromOldSession = runtimeHost.newSession({ setup });
 		releasePreparation();
 
 		await first;
 		await expect(queuedFromOldSession).rejects.toThrow("Stale agent session structural operation");
-		expect(publish).toHaveBeenCalledOnce();
-		expect(publish).toHaveBeenCalledWith("winning-request");
 		expect(preparationCount).toBe(1);
 		expect(shutdownReasons).toEqual(["new"]);
 	});
@@ -1219,9 +1192,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				reload: () => originalSession.reload(),
 			},
 		}).ready;
-		const prepare = vi.fn(async () => undefined);
 		const rebind = vi.fn(async () => {});
-		runtimeHost.setPrepareSessionReplacement(prepare);
 		runtimeHost.setRebindSession(rebind);
 
 		await expect(
@@ -1233,7 +1204,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(originalSession.sessionManager.getClientInput("extension-replacement-fence")?.state).toBe("completed");
-		expect(prepare).not.toHaveBeenCalled();
 		expect(rebind).not.toHaveBeenCalled();
 	});
 
@@ -1393,145 +1363,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		subscription.detach();
 	});
 
-	it("does not publish a replacement generation before host ownership rekeys", async () => {
+	it("ends the runtime and its projection feeds when a will-project listener fails", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
-		const phases: string[] = [];
-		const writes: object[] = [];
-		let releaseRekey!: () => void;
-		let markRekeyStarted!: () => void;
-		const rekeyStarted = new Promise<void>((resolve) => {
-			markRekeyStarted = resolve;
-		});
-		const rekeyGate = new Promise<void>((resolve) => {
-			releaseRekey = resolve;
-		});
-		const subscription = runtimeHost.conversationProjectionFeed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-				conversation: { workspaceName: "test", sessionId: runtimeHost.session.sessionId },
-				state: {
-					thinkingLevel: "off",
-					availableThinkingLevels: ["off"],
-					fastModeEnabled: false,
-					planning: { mode: "build", plan: null },
-					gitContext: null,
-					isStreaming: false,
-					isCompacting: false,
-					steeringMode: "one-at-a-time",
-					followUpMode: "one-at-a-time",
-					sessionId: runtimeHost.session.sessionId,
-					autoCompactionEnabled: true,
-					messageCount: runtimeHost.session.state.messages.length,
-					pendingMessageCount: 0,
-					steeringQueue: [],
-					followUpQueue: [],
-					backgroundJobs: [],
-				},
-				transcript: {
-					sessionId: runtimeHost.session.sessionId,
-					items: [],
-					hasMore: false,
-					nextBeforeEntryId: null,
-					projectionVersion: 3,
-					branchEpoch,
-					head: null,
-				},
-				activeAssistant,
-				activeWorkflows: [],
-			}),
-		});
-		await subscription.ready;
-		const originalSubscriptionId = subscription.subscriptionId;
-		// Old-generation Git observations may complete during replacement
-		// preparation. Exercise that ordering without relying on subprocess timing.
-		runtimeHost.setPrepareSessionReplacement(async () => {
-			execFileSync("git", ["init", "--initial-branch=main"], { cwd: runtimeHost.cwd, stdio: "ignore" });
-			await runtimeHost.session.gitContextProvider.refresh();
-			await subscription.flush();
-			return undefined;
-		});
-		const detachWillProject = runtimeHost.subscribeSessionWillProject(async () => {
-			phases.push("ownership-rekey-started");
-			markRekeyStarted();
-			await rekeyGate;
-			phases.push("ownership-rekeyed");
-		});
-		const detachReplaced = runtimeHost.subscribeSessionReplaced(() => {
-			phases.push("session-rebound");
-		});
-
-		const replacement = runtimeHost.newSession();
-		try {
-			await Promise.race([rekeyStarted, replacement]);
-			await subscription.flush();
-			expect(phases).toEqual(["ownership-rekey-started"]);
-			expect(writes).toContainEqual(expect.objectContaining({ type: "git_context_changed" }));
-			for (const write of writes) {
-				expect(write).toMatchObject({ delivery: { subscriptionId: originalSubscriptionId } });
-			}
-			const fencedWriteCount = writes.length;
-			execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/rekey-pending"], {
-				cwd: runtimeHost.cwd,
-				stdio: "ignore",
-			});
-			await runtimeHost.session.gitContextProvider.refresh();
-			await subscription.flush();
-			expect(writes).toHaveLength(fencedWriteCount);
-			expect(() =>
-				runtimeHost.conversationProjectionFeed.attach({
-					write: () => {},
-					buildSnapshot: () => {
-						throw new Error("must remain fenced");
-					},
-				}),
-			).toThrow(/awaiting host ownership rekey/);
-
-			releaseRekey();
-			await replacement;
-			await subscription.flush();
-			expect(phases).toEqual(["ownership-rekey-started", "ownership-rekeyed", "session-rebound"]);
-			expect(subscription.subscriptionId).not.toBe(originalSubscriptionId);
-			expect(writes.filter((write) => "type" in write && write.type === "conversation_bootstrap")).toMatchObject([
-				{ delivery: { subscriptionId: originalSubscriptionId, cursor: 0 } },
-				{
-					type: "conversation_bootstrap",
-					reason: "session_rebind",
-					conversation: { sessionId: runtimeHost.session.sessionId },
-					delivery: { subscriptionId: subscription.subscriptionId, cursor: 0 },
-				},
-			]);
-		} finally {
-			// An assertion must not strand runtime disposal behind the test's gate.
-			releaseRekey();
-			try {
-				await replacement;
-			} finally {
-				detachWillProject();
-				detachReplaced();
-				subscription.detach();
-			}
-		}
-	});
-
-	it("disposes replacement ownership exactly once when a pre-publication barrier fails", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		const ownershipPhases: string[] = [];
-		runtimeHost.setPrepareSessionReplacement(async () => ({
-			async commit() {
-				ownershipPhases.push("commit");
-			},
-			async finalize() {
-				ownershipPhases.push("finalize");
-			},
-			async rollback() {
-				ownershipPhases.push("rollback");
-			},
-			async dispose() {
-				ownershipPhases.push("dispose");
-			},
-		}));
 		const subscription = runtimeHost.conversationProjectionFeed.attach({
 			write: () => {},
 			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
@@ -1569,14 +1402,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 		await subscription.ready;
 		const detach = runtimeHost.subscribeSessionWillProject(() => {
-			// Real hosts release/dispose their old lease before rejecting this barrier.
-			throw new Error("target lease occupied");
+			throw new Error("mode rebind refused");
 		});
 
-		await expect(runtimeHost.newSession()).rejects.toThrow("target lease occupied");
+		await expect(runtimeHost.newSession()).rejects.toThrow("mode rebind refused");
 		await expect(subscription.flush()).rejects.toThrow(/closed/);
-		expect(ownershipPhases).toEqual(["commit", "dispose"]);
 		detach();
+		await expect(runtimeHost.newSession()).rejects.toThrow(/no longer accepting structural operations/);
 
 		expect(() =>
 			runtimeHost.conversationProjectionFeed.attach({
@@ -1588,24 +1420,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		).toThrow(/disposed/);
 	});
 
-	it("disposes committed replacement ownership when post-publication rebind fails", async () => {
+	it("ends the runtime and keeps the new log when the rebind after a committed move fails", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
-		const ownershipPhases: string[] = [];
 		let replacementRef: SessionReference | undefined;
-		runtimeHost.setPrepareSessionReplacement(async () => ({
-			async commit() {
-				ownershipPhases.push("commit");
-			},
-			async finalize() {
-				ownershipPhases.push("finalize");
-			},
-			async rollback() {
-				ownershipPhases.push("rollback");
-			},
-			async dispose() {
-				ownershipPhases.push("dispose");
-			},
-		}));
 		runtimeHost.setRebindSession(async () => {
 			throw new Error("rebind failed");
 		});
@@ -1619,7 +1436,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}),
 		).rejects.toThrow("rebind failed");
 		expect(replacementRef).toBeDefined();
-		expect(ownershipPhases).toEqual(["commit", "finalize", "dispose"]);
 		const reopened = await SessionManager.open(replacementRef!);
 		expect(reopened.getConversationState().planning).toEqual({ mode: "plan", plan: null });
 		expect(() =>

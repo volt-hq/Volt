@@ -136,72 +136,50 @@ describe("durable review General publication", () => {
 		expect(await getReviewGeneral(source, "run")).toEqual(final);
 	});
 
-	it.each(["setup", "ownership", "finalize", "rebind", "listener", "seed"])(
-		"does not publish when %s fails",
-		async (phase) => {
-			const { runtime, source, original, options, own } = await fixture();
-			const initial = await getReviewGeneral(source, "run");
-			const { writes, subscription } = await observe(runtime);
-			const fail = async () => {
-				throw new Error("injected failure");
-			};
-			let candidate: SessionManager | undefined;
-			if (phase === "ownership") runtime.subscribeSessionWillProject(fail);
-			if (phase === "finalize")
-				runtime.setPrepareSessionReplacement(async () => ({
-					commit: async () => {},
-					finalize: fail,
-					rollback: async () => {},
-					dispose: async () => {},
-				}));
-			if (phase === "rebind") runtime.setRebindSession(fail);
-			if (phase === "listener") runtime.subscribeSessionReplaced(fail);
-			await expect(
-				runtime.newSession({
-					...options,
-					setup: async (writer) => {
-						candidate = writer.sessionManager;
-						if (phase === "setup") await fail();
-					},
-					...(phase === "seed" ? { withSession: fail } : {}),
-				}),
-			).rejects.toThrow("injected failure");
-			expect(await getReviewGeneral(source, "run")).toEqual(initial);
-			await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
-			expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-			if (phase === "setup") {
-				await expect(subscription.flush()).resolves.toBeUndefined();
-				await expect(runtime.session.prompt("The original General is still usable")).resolves.toBeUndefined();
-			} else {
-				await expect(subscription.flush()).rejects.toThrow("closed");
-				const reopened = await own(await SessionManager.open(original));
-				await expect(reopened.session.prompt("The original General can resume")).resolves.toBeUndefined();
-				expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(initial);
-			}
-		},
-	);
+	it.each(["setup", "ownership", "rebind", "listener", "seed"])("does not publish when %s fails", async (phase) => {
+		const { runtime, source, original, options, own } = await fixture();
+		const initial = await getReviewGeneral(source, "run");
+		const { writes, subscription } = await observe(runtime);
+		const fail = async () => {
+			throw new Error("injected failure");
+		};
+		let candidate: SessionManager | undefined;
+		if (phase === "ownership") runtime.subscribeSessionWillProject(fail);
+		if (phase === "rebind") runtime.setRebindSession(fail);
+		if (phase === "listener") runtime.subscribeSessionReplaced(fail);
+		await expect(
+			runtime.newSession({
+				...options,
+				setup: async (writer) => {
+					candidate = writer.sessionManager;
+					if (phase === "setup") await fail();
+				},
+				...(phase === "seed" ? { withSession: fail } : {}),
+			}),
+		).rejects.toThrow("injected failure");
+		expect(await getReviewGeneral(source, "run")).toEqual(initial);
+		await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
+		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
+		if (phase === "setup") {
+			await expect(subscription.flush()).resolves.toBeUndefined();
+			await expect(runtime.session.prompt("The original General is still usable")).resolves.toBeUndefined();
+		} else {
+			await expect(subscription.flush()).rejects.toThrow("closed");
+			const reopened = await own(await SessionManager.open(original));
+			await expect(reopened.session.prompt("The original General can resume")).resolves.toBeUndefined();
+			expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(initial);
+		}
+	});
 
-	it("delivers frontend controls during preparation and snapshots the completed seed after General commits", async () => {
+	it("commits General only after the seed completed, ending the source's subscriptions", async () => {
 		const { runtime, source, options } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
 		const { writes, subscription } = await observe(runtime);
-		const control = {
-			type: "extension_ui_request",
-			id: "replacement-notice",
-			method: "notify",
-			message: "Preparing General",
-		};
-		runtime.setRebindSession(async () => {
-			// Frontend startup dialogs use this independent lane; waiting for physical
-			// control delivery must not require the candidate's conversation bootstrap.
-			await subscription.enqueueControl(control);
-			expect(writes.at(-1)).toEqual(control);
-			expect(await getReviewGeneral(source, "run")).toEqual(initial);
-		});
 		expect(
 			await runtime.newSession({
 				...options,
 				withSession: async (context) => {
+					expect(await getReviewGeneral(source, "run")).toEqual(initial);
 					await context.sendMessage({
 						customType: "general-seed",
 						content: "Preserved review context",
@@ -210,146 +188,64 @@ describe("durable review General publication", () => {
 				},
 			}),
 		).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: true });
-		await subscription.flush();
-		expect(writes).toHaveLength(3);
-		expect(writes.at(-1)).toMatchObject({
-			reason: "session_rebind",
+		// The source's stream never follows the move.
+		await expect(subscription.flush()).rejects.toThrow("closed");
+		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
+		expect(await getReviewGeneral(source, "run")).toMatchObject({
+			generalSessionId: runtime.session.sessionId,
+			generalRevision: 1,
+		});
+		const reattached = await observe(runtime);
+		await reattached.subscription.flush();
+		expect(reattached.writes[0]).toMatchObject({
+			reason: "bootstrap",
 			conversation: { sessionId: runtime.session.sessionId },
 			state: { messageCount: 1 },
 		});
-		expect(await getReviewGeneral(source, "run")).toMatchObject({
-			generalSessionId: runtime.session.sessionId,
-			generalRevision: 1,
-		});
 	});
 
-	it.each([false, true])(
-		"keeps General and its bootstrap unpublished through the durable commit (reject: %s)",
-		async (rejectCommit) => {
-			const { runtime, source, original, options, own } = await fixture();
-			const initial = await getReviewGeneral(source, "run");
-			const { writes, subscription } = await observe(runtime);
-			const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
-			let releaseCommit!: () => void;
-			let markCommitStarted!: () => void;
-			const commitStarted = new Promise<void>((resolve) => {
-				markCommitStarted = resolve;
-			});
-			const commitGate = new Promise<void>((resolve) => {
-				releaseCommit = resolve;
-			});
-			const replaceReviewGeneral = lease.client.replaceReviewGeneral.bind(lease.client);
-			const commit = vi.spyOn(lease.client, "replaceReviewGeneral").mockImplementation(async (request) => {
-				markCommitStarted();
-				await commitGate;
-				if (rejectCommit) throw new Error("General commit rejected");
-				return replaceReviewGeneral(request);
-			});
-			try {
-				const replacement = runtime.newSession({ ...options, rebindRequestId: "replace-general" });
-				const result = replacement.then(
-					() => undefined,
-					(error: unknown) => error,
-				);
-				await commitStarted;
-				expect(await getReviewGeneral(source, "run")).toEqual(initial);
-				expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-				expect(() =>
-					runtime.conversationProjectionFeed.attach({
-						write: () => {},
-						buildSnapshot: () => {
-							throw new Error("Uncommitted General cannot be observed");
-						},
-					}),
-				).toThrow("awaiting host ownership rekey");
-				releaseCommit();
-				if (rejectCommit) {
-					expect(await result).toMatchObject({ message: "General commit rejected" });
-					expect(await getReviewGeneral(source, "run")).toEqual(initial);
-					expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-					const reopened = await own(await SessionManager.open(original));
-					await expect(reopened.session.prompt("Resume after rejected General commit")).resolves.toBeUndefined();
-				} else {
-					expect(await result).toBeUndefined();
-					await subscription.flush();
-					expect(writes.filter((value) => "reason" in value && value.reason === "session_rebind")).toEqual([
-						expect.objectContaining({
-							conversation: { workspaceName: "test", sessionId: runtime.session.sessionId },
-							requestId: "replace-general",
-						}),
-					]);
-					expect(await getReviewGeneral(source, "run")).toMatchObject({
-						generalSessionId: runtime.session.sessionId,
-						generalRevision: 1,
-					});
-				}
-			} finally {
-				releaseCommit();
-				commit.mockRestore();
-				await lease.release();
-			}
-		},
-	);
-
-	it("keeps committed General live when a subscriber cannot build its replacement bootstrap", async () => {
-		const { runtime, source, options } = await fixture();
-		const { writes, subscription } = await observe(runtime);
-		runtime.setRebindSession(async (session) => {
-			vi.spyOn(session, "getAvailableThinkingLevels").mockImplementation(() => {
-				throw new Error("Subscriber snapshot failed");
-			});
-		});
-		await expect(runtime.newSession(options)).resolves.toEqual({
-			cancelled: false,
-			sessionId: expect.any(String),
-			seeded: false,
-		});
-		await expect(subscription.flush()).rejects.toThrow("closed");
-		expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-		expect(await getReviewGeneral(source, "run")).toMatchObject({
-			generalSessionId: runtime.session.sessionId,
-			generalRevision: 1,
-			generalAvailable: true,
-		});
-		vi.restoreAllMocks();
-		await expect(runtime.session.prompt("Continue in committed General")).resolves.toBeUndefined();
-		const reattached = await observe(runtime);
-		expect(reattached.writes[0]).toMatchObject({ conversation: { sessionId: runtime.session.sessionId } });
-	});
-
-	it("preserves a resumable committed General if projection fails after its durable CAS", async () => {
+	it.each([false, true])("keeps General unpublished through the durable commit (reject: %s)", async (rejectCommit) => {
 		const { runtime, source, original, options, own } = await fixture();
-		const { writes, subscription } = await observe(runtime);
+		const initial = await getReviewGeneral(source, "run");
 		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
+		let releaseCommit!: () => void;
+		let markCommitStarted!: () => void;
+		const commitStarted = new Promise<void>((resolve) => {
+			markCommitStarted = resolve;
+		});
+		const commitGate = new Promise<void>((resolve) => {
+			releaseCommit = resolve;
+		});
 		const replaceReviewGeneral = lease.client.replaceReviewGeneral.bind(lease.client);
 		const commit = vi.spyOn(lease.client, "replaceReviewGeneral").mockImplementation(async (request) => {
-			const result = await replaceReviewGeneral(request);
-			// Background source events may poison the unpublished generation while
-			// the durable CAS is awaiting its worker response.
-			expect(() => runtime.publishConversationProjectionEvent({ type: "invalid-source-event" })).toThrow(
-				"Unsupported conversation projection external event",
-			);
-			return result;
+			markCommitStarted();
+			await commitGate;
+			if (rejectCommit) throw new Error("General commit rejected");
+			return replaceReviewGeneral(request);
 		});
 		try {
-			await expect(runtime.newSession(options)).rejects.toThrow("projection generation is poisoned");
-			await expect(subscription.flush()).rejects.toThrow("closed");
-			expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-			const general = await getReviewGeneral(source, "run");
-			const target = runtime.session.sessionRef!;
-			expect(general).toMatchObject({
-				generalSessionId: target.sessionId,
-				generalSessionGeneration: target.sessionGeneration,
-				generalRevision: 1,
-				generalAvailable: true,
-			});
-			const reopened = await own(await SessionManager.open(target));
-			await expect(
-				reopened.session.prompt("Resume committed General after projection failure"),
-			).resolves.toBeUndefined();
-			expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(general);
-			expect(await resolveCanonicalReviewSource(reopened.session.sessionManager, "run")).toEqual(original);
+			const replacement = runtime.newSession(options);
+			const result = replacement.then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			await commitStarted;
+			expect(await getReviewGeneral(source, "run")).toEqual(initial);
+			releaseCommit();
+			if (rejectCommit) {
+				expect(await result).toMatchObject({ message: "General commit rejected" });
+				expect(await getReviewGeneral(source, "run")).toEqual(initial);
+				const reopened = await own(await SessionManager.open(original));
+				await expect(reopened.session.prompt("Resume after rejected General commit")).resolves.toBeUndefined();
+			} else {
+				expect(await result).toBeUndefined();
+				expect(await getReviewGeneral(source, "run")).toMatchObject({
+					generalSessionId: runtime.session.sessionId,
+					generalRevision: 1,
+				});
+			}
 		} finally {
+			releaseCommit();
 			commit.mockRestore();
 			await lease.release();
 		}

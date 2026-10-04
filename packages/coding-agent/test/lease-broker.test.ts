@@ -76,7 +76,7 @@ function attachDaemonRuntime(
 ): DaemonRuntimeOwnerCapability {
 	const begun = broker.beginDaemonAttach(workspaceName, sessionId);
 	if (begun.kind === "retry") {
-		throw new Error(`Cannot attach daemon runtime while a lease rekey reserves ${workspaceName}/${sessionId}`);
+		throw new Error(`Cannot attach daemon runtime while ${workspaceName}/${sessionId} is draining`);
 	}
 	if (begun.kind === "relay") {
 		throw new Error(`Cannot attach daemon runtime while ${workspaceName}/${sessionId} is TUI-owned`);
@@ -369,47 +369,6 @@ describe("LeaseBroker", () => {
 		expect(broker.rollbackDaemonRuntimeCommit(committed.token)).toBe(true);
 		expect(broker.lookup("ws", "s1")?.state).toBe("daemon-detached");
 		expect(broker.lookup("ws", "s1")?.streamCount).toBe(0);
-	});
-
-	it("fences a noncurrent commit cohort so it cannot revive after a session-key ABA", () => {
-		const { broker } = createHarness();
-		const owner = attachDaemonRuntime(broker, "ws", "old");
-		const begun = broker.beginDaemonAttach("ws", "old");
-		expect(begun.kind).toBe("proceed");
-		if (begun.kind !== "proceed") {
-			return;
-		}
-		const committed = broker.commitDaemonRuntime(begun.claim, "ws", "old", owner);
-		expect(committed.ok).toBe(true);
-		if (!committed.ok) {
-			return;
-		}
-
-		expect(broker.rekeyDaemonRuntime(owner, "ws", "old", "new")).toEqual({ ok: true });
-		rememberDaemonRuntimeOwner(broker, "ws", "new", owner);
-		const staleFinalization = broker.finalizeDaemonRuntimeCommit(committed.token);
-		expect(staleFinalization).toMatchObject({
-			kind: "fenced",
-			lease: { kind: "rekeyed", state: "daemon-active", sessionId: "new" },
-		});
-		if (staleFinalization.kind !== "fenced") return;
-		expect(staleFinalization.generation.expected).toBeTypeOf("number");
-		expect(staleFinalization.generation.current).toBe((staleFinalization.generation.expected ?? 0) + 1);
-		expect(broker.rekeyDaemonRuntime(owner, "ws", "new", "old")).toEqual({ ok: true });
-		rememberDaemonRuntimeOwner(broker, "ws", "old", owner);
-
-		const freshAttach = broker.beginDaemonAttach("ws", "old");
-		expect(freshAttach.kind).toBe("proceed");
-		if (freshAttach.kind !== "proceed") {
-			return;
-		}
-		const freshCommit = broker.commitDaemonRuntime(freshAttach.claim, "ws", "old", owner);
-		expect(freshCommit.ok).toBe(true);
-		if (!freshCommit.ok) {
-			return;
-		}
-		expect(broker.rollbackDaemonRuntimeCommit(freshCommit.token)).toBe(true);
-		expect(broker.lookup("ws", "old")?.state).toBe("daemon-active");
 	});
 
 	it("fences a disposed runtime cohort even when another attach claim pins its record", () => {
@@ -743,25 +702,6 @@ describe("LeaseBroker", () => {
 		expect(broker.lookup("ws", "s1")).toBeUndefined();
 	});
 
-	it("keeps the durable owner capability continuous through daemon rekey", () => {
-		const { broker } = createHarness();
-		const owner = attachDaemonRuntime(broker, "ws", "old");
-		expect(broker.onDaemonRuntimeStreamCountChanged(owner, "ws", "old", 1)).toBe(true);
-		const prepared = broker.prepareDaemonRekey(owner, "ws", "old", "new");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) {
-			return;
-		}
-		expect(broker.commitDaemonRekey(prepared.reservation.id)).toMatchObject({ ok: true });
-
-		expect(broker.isDaemonRuntimeOwnerCurrent(owner, "ws", "old")).toBe(false);
-		expect(broker.isDaemonRuntimeOwnerCurrent(owner, "ws", "new")).toBe(true);
-		expect(broker.onDaemonRuntimeStreamCountChanged(owner, "ws", "old", 0)).toBe(false);
-		expect(broker.onDaemonRuntimeDisposed(owner, "ws", "old", "stale_old_key")).toBe(false);
-		expect(broker.onDaemonRuntimeStreamCountChanged(owner, "ws", "new", 0)).toBe(true);
-		expect(broker.lookup("ws", "new")?.state).toBe("daemon-detached");
-	});
-
 	it("tracks daemon runtime attach/stream-count/dispose transitions", () => {
 		const { broker, effects } = createHarness();
 		attachDaemonRuntime(broker, "ws", "s1");
@@ -1084,55 +1024,6 @@ describe("LeaseBroker", () => {
 		expect(effects.disposed).toEqual([]);
 	});
 
-	it("rekeys daemon leases keeping state", () => {
-		const { broker } = createHarness();
-		attachDaemonRuntime(broker, "ws", "old");
-		updateDaemonRuntimeStreamCount(broker, "ws", "old", 1);
-		const owner = getDaemonRuntimeOwner(broker, "ws", "old");
-		expect(broker.rekeyDaemonRuntime(owner, "ws", "old", "new")).toEqual({ ok: true });
-		rememberDaemonRuntimeOwner(broker, "ws", "new", owner);
-		expect(broker.lookup("ws", "new")?.state).toBe("daemon-active");
-		expect(broker.lookup("ws", "new")?.streamCount).toBe(1);
-	});
-
-	it("reserves both daemon lease keys until a daemon rekey commits", async () => {
-		const { broker } = createHarness();
-		attachDaemonRuntime(broker, "ws", "old");
-		updateDaemonRuntimeStreamCount(broker, "ws", "old", 1);
-		const prepared = broker.prepareDaemonRekey(getDaemonRuntimeOwner(broker, "ws", "old"), "ws", "old", "new");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
-
-		expect(broker.beginDaemonAttach("ws", "old")).toMatchObject({ kind: "retry" });
-		expect(broker.beginDaemonAttach("ws", "new")).toMatchObject({ kind: "retry" });
-		expect(await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" })).toMatchObject({
-			kind: "denied",
-		});
-		expect(await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "new" })).toMatchObject({
-			kind: "denied",
-		});
-
-		expect(broker.commitDaemonRekey(prepared.reservation.id)).toMatchObject({ ok: true });
-		expect(broker.lookup("ws", "old")).toBeUndefined();
-		expect(broker.lookup("ws", "new")?.state).toBe("daemon-active");
-		expect(broker.lookup("ws", "new")?.streamCount).toBe(1);
-	});
-
-	it("rejects a daemon attach that began before the source rekey reservation", () => {
-		const { broker } = createHarness();
-		attachDaemonRuntime(broker, "ws", "old");
-		const begun = broker.beginDaemonAttach("ws", "old");
-		expect(begun.kind).toBe("proceed");
-		if (begun.kind !== "proceed") return;
-		const prepared = broker.prepareDaemonRekey(getDaemonRuntimeOwner(broker, "ws", "old"), "ws", "old", "new");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
-
-		expect(broker.commitDaemonRuntime(begun.claim, "ws", "old")).toEqual({ ok: false, reason: "draining" });
-		expect(broker.lookup("ws", "old")?.pendingDaemonAttaches).toBe(0);
-		expect(broker.rollbackDaemonRekey(prepared.reservation.id)).toMatchObject({ ok: true });
-	});
-
 	it("rejects a relay that reaches registration after its TUI lease was released", async () => {
 		const { broker } = createHarness();
 		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
@@ -1140,37 +1031,6 @@ describe("LeaseBroker", () => {
 
 		expect(broker.registerRelay("ws", "old", "late-relay")).toBe(false);
 		expect(broker.lookup("ws", "old")).toBeUndefined();
-	});
-
-	it("rolls back daemon target reservations without disturbing either owner", () => {
-		const { broker } = createHarness();
-		attachDaemonRuntime(broker, "ws", "old");
-		attachDaemonRuntime(broker, "ws", "occupied");
-		expect(broker.prepareDaemonRekey(getDaemonRuntimeOwner(broker, "ws", "old"), "ws", "old", "occupied")).toEqual({
-			ok: false,
-			code: "target_in_use",
-		});
-		const prepared = broker.prepareDaemonRekey(getDaemonRuntimeOwner(broker, "ws", "old"), "ws", "old", "new");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
-		expect(broker.rollbackDaemonRekey(prepared.reservation.id)).toMatchObject({ ok: true });
-		expect(broker.lookup("ws", "old")?.state).toBe("daemon-active");
-		expect(broker.lookup("ws", "occupied")?.state).toBe("daemon-active");
-		expect(() => attachDaemonRuntime(broker, "ws", "new")).not.toThrow();
-	});
-
-	it("settles an attach claim against the same record after that record is rekeyed", () => {
-		const { broker } = createHarness();
-		const owner = attachDaemonRuntime(broker, "ws", "old");
-		const begun = broker.beginDaemonAttach("ws", "old");
-		expect(begun.kind).toBe("proceed");
-		if (begun.kind !== "proceed") return;
-		expect(broker.lookup("ws", "old")?.pendingDaemonAttaches).toBe(1);
-
-		expect(broker.rekeyDaemonRuntime(owner, "ws", "old", "new")).toEqual({ ok: true });
-		broker.abortDaemonAttach(begun.claim);
-		expect(broker.lookup("ws", "new")?.pendingDaemonAttaches).toBe(0);
-		expect(broker.lookup("ws", "new")?.state).toBe("daemon-active");
 	});
 
 	it("routes a phone attach after TUI release through unowned (lazy resume)", async () => {

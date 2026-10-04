@@ -1411,7 +1411,7 @@ export class WorktreeManager {
 
 	/**
 	 * Binding-miss fallback (#83): worktrees[].sessionIds historically only
-	 * recorded ids bound at creation, so rekeyed descendants (fork/new),
+	 * recorded ids bound at creation, so descendants (fork/new) of older hosts,
 	 * subagent sessions, and pre-fix stranded sessions can live under a
 	 * checkout without a binding. Resolve those from the authoritative session
 	 * store's cwd in the parent-keyed session directory, then self-heal the

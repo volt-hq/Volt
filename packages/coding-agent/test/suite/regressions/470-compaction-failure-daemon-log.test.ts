@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "../../../src/core/agent-session.ts";
 import { observeCompactionFailures } from "../../../src/daemon/compaction-failure-log.ts";
 import { createDaemonLogger } from "../../../src/daemon/log.ts";
 import type { ExtensionFactory } from "../../../src/index.ts";
@@ -48,24 +47,6 @@ function createLogFile(): { logPath: string; readLines(): DaemonLogLine[]; clean
 	};
 }
 
-function createReplaceableRuntime(initial: AgentSession) {
-	const listeners = new Set<(session: AgentSession) => Promise<void> | void>();
-	const runtime = {
-		session: initial,
-		subscribeSessionReplaced(listener: (session: AgentSession) => Promise<void> | void): () => void {
-			listeners.add(listener);
-			return () => {
-				listeners.delete(listener);
-			};
-		},
-		replace(next: AgentSession): void {
-			runtime.session = next;
-			for (const listener of listeners) void listener(next);
-		},
-	};
-	return runtime;
-}
-
 function summaryProviderError(errorMessage: string) {
 	return fauxAssistantMessage("", {
 		stopReason: "error",
@@ -99,7 +80,7 @@ describe("#470 compaction failures are recorded in the daemon log", () => {
 		const logFile = createLogFile();
 		logFiles.push(logFile);
 		const stop = observeCompactionFailures(
-			createReplaceableRuntime(harness.session),
+			{ session: harness.session },
 			"volt-app",
 			createDaemonLogger({ logPath: logFile.logPath }).child("compaction"),
 		);
@@ -153,7 +134,7 @@ describe("#470 compaction failures are recorded in the daemon log", () => {
 		const logFile = createLogFile();
 		logFiles.push(logFile);
 		const stop = observeCompactionFailures(
-			createReplaceableRuntime(harness.session),
+			{ session: harness.session },
 			"volt-app",
 			createDaemonLogger({ logPath: logFile.logPath }).child("compaction"),
 		);
@@ -172,26 +153,24 @@ describe("#470 compaction failures are recorded in the daemon log", () => {
 		expect(logFile.readLines()).toEqual([]);
 	});
 
-	it("follows session replacement and stops logging after disposal", async () => {
-		const first = await createHarness();
-		const second = await createHarness();
-		harnesses.push(first, second);
+	it("observes only the runtime's session and stops logging after disposal", async () => {
+		const observed = await createHarness();
+		const other = await createHarness();
+		harnesses.push(observed, other);
 		const logFile = createLogFile();
 		logFiles.push(logFile);
-		const runtime = createReplaceableRuntime(first.session);
 		const stop = observeCompactionFailures(
-			runtime,
+			{ session: observed.session },
 			"volt-app",
 			createDaemonLogger({ logPath: logFile.logPath }).child("compaction"),
 		);
 
-		runtime.replace(second.session);
-		await expect(first.session.compact()).rejects.toThrow("Nothing to compact");
-		await expect(second.session.compact()).rejects.toThrow("Nothing to compact");
+		await expect(other.session.compact()).rejects.toThrow("Nothing to compact");
+		await expect(observed.session.compact()).rejects.toThrow("Nothing to compact");
 		stop();
-		await expect(second.session.compact()).rejects.toThrow("Nothing to compact");
+		await expect(observed.session.compact()).rejects.toThrow("Nothing to compact");
 
-		expect(logFile.readLines().map((line) => line.details.sessionId)).toEqual([second.session.sessionId]);
+		expect(logFile.readLines().map((line) => line.details.sessionId)).toEqual([observed.session.sessionId]);
 	});
 
 	it("truncates long error messages", async () => {
@@ -200,7 +179,7 @@ describe("#470 compaction failures are recorded in the daemon log", () => {
 		const logFile = createLogFile();
 		logFiles.push(logFile);
 		const stop = observeCompactionFailures(
-			createReplaceableRuntime(harness.session),
+			{ session: harness.session },
 			"volt-app",
 			createDaemonLogger({ logPath: logFile.logPath }).child("compaction"),
 		);

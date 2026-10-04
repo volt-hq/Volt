@@ -215,6 +215,36 @@ describe("ConversationHost", () => {
 		expect(result.conversation.closed).toBe(false);
 	});
 
+	it("lets a redirect client leave a busy source its other clients keep open, without fencing it", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const redirects: string[] = [];
+		const phone: HostClient = {
+			id: "phone",
+			move: { kind: "redirect", redirect: (sessionId) => void redirects.push(sessionId) },
+		};
+		await harness.host.attach(phone, source);
+		const assertCanLeave = vi.spyOn(source, "assertCanLeave").mockImplementation(() => {
+			throw new Error("Cannot change sessions while an agent run is active");
+		});
+		const holdForLeave = vi.spyOn(source, "holdForLeave");
+
+		// Alone on the source, the phone would close it: it may not leave it busy.
+		await expect(harness.host.openFor(phone, { kind: "new" })).rejects.toThrow("an agent run is active");
+		expect(harness.host.conversationOf(phone)).toBe(source);
+
+		await harness.host.attach(harness.client("tui", { anchor: true }), source);
+		const result = moved(
+			await harness.host.openFor(phone, { kind: "new", seed: async () => {} }, { beforeMove: async () => {} }),
+		);
+
+		expect(redirects).toEqual([result.sessionId]);
+		expect(source.closed).toBe(false);
+		expect(assertCanLeave).toHaveBeenCalledTimes(1);
+		expect(holdForLeave).not.toHaveBeenCalled();
+		expect(harness.host.list()).toEqual([source, result.conversation]);
+	});
+
 	it("writes a redirected client's new log and leaves its source open for the other clients", async () => {
 		const harness = await setup();
 		const source = await harness.openStartup();

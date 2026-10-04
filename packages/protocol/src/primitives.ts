@@ -77,14 +77,8 @@ export const RpcConversationDiscontinuityReasonSchema = stringEnum([
 	"reducer_divergence",
 ]);
 
-/** `branch_rebase` retains conversation identity; `session_rebind` replaces it. */
-export const RpcConversationBootstrapReasonSchema = stringEnum([
-	"bootstrap",
-	"branch_rebase",
-	"session_rebind",
-	"resync",
-	"overflow",
-]);
+/** `branch_rebase` retains conversation identity: a stream never changes conversations. */
+export const RpcConversationBootstrapReasonSchema = stringEnum(["bootstrap", "branch_rebase", "resync", "overflow"]);
 
 /** volt-ai's ImageContent annotated with the conversation-input byte limits. */
 export const RpcImageContentSchema = Type.Object(

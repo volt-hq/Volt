@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
-import type {
-	AgentSessionReplacementTarget,
-	AgentSessionReplacementTransaction,
-	AgentSessionRuntime,
-} from "../src/core/agent-session-runtime.ts";
+import type { AgentSessionRuntime, RedirectViewOptions } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -15,16 +11,13 @@ import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/ir
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import {
-	ConversationCoordinatorRegistry,
-	type ConversationCoordinatorRekeyReservation,
-} from "../src/daemon/conversation-coordinator.ts";
-import { type IntegratedRuntimeEntry, IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
+import { ConversationCoordinatorRegistry } from "../src/daemon/conversation-coordinator.ts";
+import { IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
 import {
 	collectClientAuthorityInvalidationRuntimes,
 	collectClientAuthorityInvalidationStreams,
 } from "../src/daemon/iroh-service.ts";
-import { type DaemonRuntimeOwnerCapability, LeaseBroker } from "../src/daemon/lease-broker.ts";
+import { LeaseBroker } from "../src/daemon/lease-broker.ts";
 import {
 	createTestSession,
 	parseWrittenObjects,
@@ -37,7 +30,6 @@ let workspacePath: string;
 let agentDir: string;
 
 function createConversationAuthorityEffects(coordinators: ConversationCoordinatorRegistry) {
-	const rekeys = new Map<string, ConversationCoordinatorRekeyReservation>();
 	return {
 		beginTuiLeaseHandoff: (workspaceName: string, sessionId: string, connectionId: string) => {
 			coordinators.getOrCreate(workspaceName, sessionId).beginTuiLeaseHandoff(connectionId);
@@ -52,31 +44,6 @@ function createConversationAuthorityEffects(coordinators: ConversationCoordinato
 		},
 		releaseTuiLease: (workspaceName: string, sessionId: string, connectionId: string) => {
 			coordinators.get(workspaceName, sessionId)?.releaseTuiLease(connectionId);
-		},
-		prepareTuiLeaseRekey: (
-			transactionId: string,
-			workspaceName: string,
-			oldSessionId: string,
-			newSessionId: string,
-			connectionId: string,
-		) => {
-			const coordinator = coordinators.get(workspaceName, oldSessionId);
-			if (!coordinator || coordinator.tuiLeaseConnectionId !== connectionId) {
-				throw new Error("missing test TUI lease authority");
-			}
-			rekeys.set(transactionId, coordinators.prepareRekey(coordinator, newSessionId));
-		},
-		commitTuiLeaseRekey: (transactionId: string) => {
-			const reservation = rekeys.get(transactionId);
-			if (!reservation) throw new Error("missing test coordinator rekey reservation");
-			coordinators.commitRekey(reservation);
-			rekeys.delete(transactionId);
-		},
-		rollbackTuiLeaseRekey: (transactionId: string) => {
-			const reservation = rekeys.get(transactionId);
-			if (!reservation) return;
-			coordinators.rollbackRekey(reservation);
-			rekeys.delete(transactionId);
 		},
 	};
 }
@@ -154,12 +121,6 @@ const HANDSHAKE_RESPONSE = {
 	child: "volt",
 	features: ["multi_streams.v1", "conversation_streams.v1"],
 } as unknown as IrohRemoteHandshakeSuccess;
-
-function installTestLeaseOwner(entry: IntegratedRuntimeEntry, id: string): DaemonRuntimeOwnerCapability {
-	const owner = { id };
-	entry.coordinator.installLeaseOwner(owner);
-	return owner;
-}
 
 describe("daemon co-attach (one runtime per conversation)", () => {
 	it("two phones with distinct clientNodeIds share one runtime, both stream, and abort keeps streams open", async () => {
@@ -678,33 +639,35 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await registry.stopAll("test_cleanup");
 	});
 
-	it("rekeys once and persists the reconnect target for every co-attached client", async () => {
-		const activeStreams = new IrohRemoteActiveStreamRegistry();
-		const setClientLastSessionId = vi.fn(async () => ({}) as never);
-		const onRuntimeRekeyed = vi.fn();
+	it("moves only the phone that changed sessions: its co-attached phone stays on the conversation", async () => {
+		const setClientLastSessionId = vi.fn(async () => undefined);
+		let hostTarget: RedirectViewOptions["hostTarget"];
 		const runtime = {
 			cwd: workspacePath,
-			session: createTestSession("shared-old", null),
+			session: createTestSession("shared-source", null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
+			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
+				hostTarget = options.hostTarget;
+				return runtime;
+			}),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
+		const auditEvents: IrohRemoteAuditEvent[] = [];
+		const onConversationMoved = vi.fn();
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
-			auditLogger: new IrohRemoteAuditLogger(),
+			auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
 			stateManager: new IrohRemoteHostStateManager(),
-			activeStreams,
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
 			detachedRuntimeTtlMs: () => 60_000,
 			getAllowTools: () => undefined,
 			getProjectTrustedForWorkspace: () => false,
 			setClientLastSessionId,
-			onRuntimeRekeyed,
-			onRuntimeDisposed: (entry) => {
-				entry.coordinator.clearLeaseOwner();
-			},
+			onConversationMoved,
 			createRuntime: async () => ({
 				runtime,
-				sessionSelection: { kind: "created", sessionId: "shared-old" },
+				sessionSelection: { kind: "created", sessionId: "shared-source" },
 			}),
 		});
 		const phoneA = createAuthorization("n-phone-a");
@@ -714,210 +677,148 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			phoneA,
 		);
 		await registry.commitEntry(created.entry, created.sessionSelection, phoneA, created.attachClaim);
-		installTestLeaseOwner(created.entry, "shared-owner");
+		const attached = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "session", sessionId: "shared-source" }), response: HANDSHAKE_RESPONSE },
+			phoneB,
+		);
+		await registry.commitEntry(attached.entry, attached.sessionSelection, phoneB, attached.attachClaim);
+		const subscriberA = await registry.attachSubscriber(created.entry, created.attachClaim);
+		const subscriberB = await registry.attachSubscriber(created.entry, attached.attachClaim);
+		created.attachClaim.release();
+		attached.attachClaim.release();
+		setClientLastSessionId.mockClear();
+
+		// Phone A starts a new session on its stream.
+		registry.attachStreamView(created.entry, phoneA);
+		const moved = {
+			cwd: workspacePath,
+			session: createTestSession("moved-to", null),
+			dispose: vi.fn(async () => {}),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		if (!hostTarget) throw new Error("No stream view was attached");
+		await (await hostTarget({ sessionId: "moved-to", runtime: moved })).commit();
+
+		const target = registry.findOwner("ws", "moved-to");
+		expect(target).toMatchObject({ lifecycle: "active", clientNodeId: "n-phone-a", runtime: moved });
+		expect(target?.toolPolicy).toEqual(created.entry.toolPolicy);
+		expect(target?.subscribers.size).toBe(0);
+		expect(onConversationMoved).toHaveBeenCalledExactlyOnceWith(created.entry, target);
+		// Only phone A's last session moves; phone B stays on the source.
+		expect(setClientLastSessionId).toHaveBeenCalledExactlyOnceWith("n-phone-a", "ws", "moved-to");
+		expect(registry.findOwner("ws", "shared-source")).toBe(created.entry);
+		expect(created.entry.subscribers.size).toBe(2);
+		expect(auditEvents).toContainEqual(
+			expect.objectContaining({
+				type: "session_changed",
+				clientNodeId: "n-phone-a",
+				details: { reason: "conversation_moved", previousSessionId: "shared-source", sessionId: "moved-to" },
+			}),
+		);
+
+		// Phone A's stream ends; phone B keeps the source open.
+		await registry.detachSubscriber(created.entry, subscriberA, "conversation_moved", undefined, { retainMs: 0 });
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(registry.findOwner("ws", "shared-source")).toBe(created.entry);
+		expect(runtime.dispose).not.toHaveBeenCalled();
+		await registry.detachSubscriber(created.entry, subscriberB, "transport_closed");
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("publishes nothing for a phone whose access changed during the move, and releases an abandoned target", async () => {
+		const setClientLastSessionId = vi.fn(async () => undefined);
+		let authorizationCurrent = true;
+		let hostTarget: RedirectViewOptions["hostTarget"];
+		const runtime = {
+			cwd: workspacePath,
+			session: createTestSession("revoked-source", null),
+			dispose: vi.fn(async () => {}),
+			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
+				hostTarget = options.hostTarget;
+				return runtime;
+			}),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId,
+			isAuthorizationCurrent: async () => authorizationCurrent,
+			createRuntime: async () => ({ runtime, sessionSelection: { kind: "created", sessionId: "revoked-source" } }),
+		});
+		const phone = createAuthorization("n-phone-a");
+		const created = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(created.entry, created.sessionSelection, phone, created.attachClaim);
 		created.attachClaim.release();
 		setClientLastSessionId.mockClear();
-		const streamA = {
-			clientNodeId: "n-phone-a",
-			workspaceName: "ws",
-			sessionId: "shared-old",
-			connectionId: "conn-a",
-			streamId: "stream-a",
-			close: vi.fn(),
-		};
-		const streamB = {
-			clientNodeId: "n-phone-b",
-			workspaceName: "ws",
-			sessionId: "shared-old",
-			connectionId: "conn-b",
-			streamId: "stream-b",
-			close: vi.fn(),
-		};
-		activeStreams.register(streamA);
-		activeStreams.register(streamB);
+		registry.attachStreamView(created.entry, phone);
+		if (!hostTarget) throw new Error("No stream view was attached");
+		const opened = (sessionId: string) =>
+			({
+				cwd: workspacePath,
+				session: createTestSession(sessionId, null),
+				dispose: vi.fn(async () => {}),
+				listSessions: vi.fn(async () => []),
+			}) as unknown as AgentSessionRuntime;
 
-		await registry.handleSessionChanged(created.entry, streamA, { sessionId: "shared-new" }, phoneA);
-		expect(onRuntimeRekeyed).toHaveBeenCalledOnce();
-		expect(streamA.sessionId).toBe("shared-new");
-		expect(streamB.sessionId).toBe("shared-new");
-		expect(setClientLastSessionId.mock.calls).toEqual(
-			expect.arrayContaining([
-				["n-phone-a", "ws", "shared-new"],
-				["n-phone-b", "ws", "shared-new"],
-			]),
-		);
-		expect(setClientLastSessionId).toHaveBeenCalledTimes(2);
+		// The client is revoked while the move writes through the source.
+		const revoked = opened("revoked-target");
+		const prepared = await hostTarget({ sessionId: "revoked-target", runtime: revoked });
+		authorizationCurrent = false;
+		await expect(prepared.commit()).rejects.toThrow("Client access changed");
+		expect(registry.findOwner("ws", "revoked-target")).toBeUndefined();
+		expect(revoked.dispose).toHaveBeenCalled();
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
-		await registry.handleSessionChanged(created.entry, streamB, { sessionId: "shared-new" }, phoneB);
-		expect(onRuntimeRekeyed).toHaveBeenCalledOnce();
-		expect(setClientLastSessionId).toHaveBeenCalledTimes(2);
-		activeStreams.unregister(streamA);
-		activeStreams.unregister(streamB);
+		// A target the move gave up on is released and never published.
+		authorizationCurrent = true;
+		const abandoned = opened("abandoned-target");
+		const abandonedTarget = await hostTarget({ sessionId: "abandoned-target", runtime: abandoned });
+		await abandonedTarget.abort();
+		expect(registry.findOwner("ws", "abandoned-target")).toBeUndefined();
+		expect(abandoned.dispose).toHaveBeenCalled();
+		await expect(abandonedTarget.commit()).rejects.toThrow("already settled");
+
+		// The source stays usable for the next move.
+		const next = opened("next-target");
+		await (await hostTarget({ sessionId: "next-target", runtime: next })).commit();
+		expect(registry.findOwner("ws", "next-target")).toMatchObject({ lifecycle: "active" });
 		await registry.stopAll("test_cleanup");
 	});
-	it("preflights daemon-owned rekeys and bulk-commits every attached client", async () => {
-		const activeStreams = new IrohRemoteActiveStreamRegistry();
-		const stateManager = new IrohRemoteHostStateManager();
-		const setClientsLastSessionId = vi.spyOn(stateManager, "setClientsLastSessionId").mockResolvedValue([]);
-		const leaseCommit = vi.fn();
-		const leaseRollback = vi.fn();
-		let prepareReplacement:
-			| ((target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>)
-			| undefined;
+
+	it("records a switch to a stored session as the phone's last session without opening it", async () => {
+		const setClientLastSessionId = vi.fn(async () => undefined);
+		let hostTarget: RedirectViewOptions["hostTarget"];
 		const runtime = {
 			cwd: workspacePath,
-			session: createTestSession("shared-old", null),
+			session: createTestSession("switch-source", null),
 			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn((prepare) => {
-				prepareReplacement = prepare;
+			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
+				hostTarget = options.hostTarget;
+				return runtime;
 			}),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
-			stateManager,
-			activeStreams,
-			detachedRuntimeTtlMs: () => 60_000,
-			getAllowTools: () => undefined,
-			getProjectTrustedForWorkspace: () => false,
-			setClientLastSessionId: vi.fn(async () => undefined),
-			prepareRuntimeRekey: () => ({ commit: leaseCommit, rollback: leaseRollback }),
-			onRuntimeDisposed: (entry) => {
-				entry.coordinator.clearLeaseOwner();
-			},
-			createRuntime: async () => ({
-				runtime,
-				sessionSelection: { kind: "created", sessionId: "shared-old" },
-			}),
-		});
-		const phoneA = createAuthorization("n-phone-a");
-		const created = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phoneA,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, phoneA, created.attachClaim);
-		installTestLeaseOwner(created.entry, "preflight-owner");
-		created.attachClaim.release();
-		const streamA = {
-			clientNodeId: "n-phone-a",
-			workspaceName: "ws",
-			sessionId: "shared-old",
-			connectionId: "conn-a",
-			streamId: "stream-a",
-			close: vi.fn(),
-		};
-		const streamB = {
-			clientNodeId: "n-phone-b",
-			workspaceName: "ws",
-			sessionId: "shared-old",
-			connectionId: "conn-b",
-			streamId: "stream-b",
-			close: vi.fn(),
-		};
-		activeStreams.register(streamA);
-		activeStreams.register(streamB);
-
-		const transaction = await prepareReplacement?.({ previousSessionId: "shared-old", sessionId: "shared-new" });
-		expect(transaction).toBeDefined();
-		expect(created.entry.sessionId).toBe("shared-old");
-		await transaction?.commit();
-
-		expect(leaseCommit).toHaveBeenCalledOnce();
-		expect(leaseRollback).not.toHaveBeenCalled();
-		expect(setClientsLastSessionId).toHaveBeenCalledOnce();
-		expect(setClientsLastSessionId).toHaveBeenCalledWith(
-			expect.arrayContaining(["n-phone-a", "n-phone-b"]),
-			"ws",
-			"shared-new",
-		);
-		expect(created.entry.sessionId).toBe("shared-new");
-		expect(streamA.sessionId).toBe("shared-new");
-		expect(streamB.sessionId).toBe("shared-new");
-		await expect(prepareReplacement?.({ previousSessionId: "shared-new", sessionId: "shared-next" })).rejects.toThrow(
-			"daemon runtime session replacement already in progress",
-		);
-
-		await transaction?.finalize?.();
-		const nextTransaction = await prepareReplacement?.({
-			previousSessionId: "shared-new",
-			sessionId: "shared-next",
-		});
-		expect(nextTransaction).toBeDefined();
-		await nextTransaction?.rollback();
-		expect(leaseRollback).toHaveBeenCalledOnce();
-		activeStreams.unregister(streamA);
-		activeStreams.unregister(streamB);
-		await registry.stopAll("test_cleanup");
-	});
-
-	it("compensates persisted session ownership when stop fences a replacement commit await", async () => {
-		let prepareReplacement:
-			| ((target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>)
-			| undefined;
-		let releasePersistence!: () => void;
-		let markPersistenceStarted!: () => void;
-		const persistenceStarted = new Promise<void>((resolve) => {
-			markPersistenceStarted = resolve;
-		});
-		const persistenceGate = new Promise<void>((resolve) => {
-			releasePersistence = resolve;
-		});
-		let releaseRetirement!: () => void;
-		let markRetirementStarted!: () => void;
-		const retirementStarted = new Promise<void>((resolve) => {
-			markRetirementStarted = resolve;
-		});
-		const retirementGate = new Promise<void>((resolve) => {
-			releaseRetirement = resolve;
-		});
-		const dispose = vi.fn(async () => {});
-		const runtime = {
-			cwd: workspacePath,
-			session: createTestSession("persist-race-old", null),
-			dispose,
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn((prepare) => {
-				prepareReplacement = prepare;
-			}),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const persistedSessionIds: string[] = [];
-		const stateManager = new IrohRemoteHostStateManager();
-		vi.spyOn(stateManager, "setClientsLastSessionId").mockImplementation(
-			async (_clientIds, _workspace, sessionId) => {
-				persistedSessionIds.push(sessionId);
-				if (sessionId === "persist-race-new") {
-					markPersistenceStarted();
-					await persistenceGate;
-				}
-				return [];
-			},
-		);
-		const leaseCommit = vi.fn();
-		const leaseRollback = vi.fn();
-		const onRuntimeDisposed = vi.fn((entry: IntegratedRuntimeEntry) => {
-			entry.coordinator.clearLeaseOwner();
-		});
-		const registry = new IntegratedRuntimeRegistry({
-			agentDir,
-			auditLogger: new IrohRemoteAuditLogger(),
-			stateManager,
+			stateManager: new IrohRemoteHostStateManager(),
 			activeStreams: new IrohRemoteActiveStreamRegistry(),
 			detachedRuntimeTtlMs: () => 60_000,
 			getAllowTools: () => undefined,
 			getProjectTrustedForWorkspace: () => false,
-			setClientLastSessionId: vi.fn(async () => undefined),
-			prepareRuntimeRekey: () => ({ commit: leaseCommit, rollback: leaseRollback }),
-			beforeRuntimeStop: async () => {
-				markRetirementStarted();
-				await retirementGate;
-			},
-			onRuntimeDisposed,
+			setClientLastSessionId,
 			createRuntime: async () => ({
 				runtime,
-				sessionSelection: { kind: "created", sessionId: "persist-race-old" },
+				sessionSelection: { kind: "created", sessionId: "switch-source" },
 			}),
 		});
 		const phone = createAuthorization("n-phone-a");
@@ -926,62 +827,34 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			phone,
 		);
 		await registry.commitEntry(created.entry, created.sessionSelection, phone, created.attachClaim);
-		installTestLeaseOwner(created.entry, "persist-race-owner");
 		created.attachClaim.release();
-		const transaction = await prepareReplacement?.({
-			previousSessionId: "persist-race-old",
-			sessionId: "persist-race-new",
-		});
-		expect(transaction).toBeDefined();
+		setClientLastSessionId.mockClear();
 
-		const committing = transaction!.commit();
-		await persistenceStarted;
-		const stopping = registry.stopEntry(created.entry, "host_shutdown");
-		await retirementStarted;
-		expect(created.entry.lifecycle).toBe("retiring");
-		releasePersistence();
-		await expect(committing).rejects.toThrow("ownership changed before session replacement commit");
-		expect(persistedSessionIds).toEqual(["persist-race-new", "persist-race-old"]);
-		expect(leaseCommit).not.toHaveBeenCalled();
-		expect(created.entry.sessionId).toBe("persist-race-old");
+		registry.attachStreamView(created.entry, phone);
+		if (!hostTarget) throw new Error("No stream view was attached");
+		await (await hostTarget({ sessionId: "stored-session" })).commit();
 
-		await transaction!.dispose();
-		expect(leaseRollback).toHaveBeenCalledOnce();
-		releaseRetirement();
-		await stopping;
-		expect(dispose).toHaveBeenCalledOnce();
-		expect(onRuntimeDisposed).toHaveBeenCalledOnce();
-		expect(onRuntimeDisposed).toHaveBeenCalledWith(created.entry, "host_shutdown");
-		expect(registry.findOwner("ws", "persist-race-old")).toBeUndefined();
-		expect(registry.findOwner("ws", "persist-race-new")).toBeUndefined();
+		expect(setClientLastSessionId).toHaveBeenCalledExactlyOnceWith("n-phone-a", "ws", "stored-session");
+		expect(registry.findOwner("ws", "stored-session")).toBeUndefined();
+		await registry.stopAll("test_cleanup");
 	});
 
-	it("rejects a daemon-owned rekey collision before invalidating either runtime", async () => {
-		let prepareSourceReplacement:
-			| ((target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>)
-			| undefined;
-		const sourceDispose = vi.fn(async () => {});
-		const targetDispose = vi.fn(async () => {});
-		const sourceRuntime = {
+	it("closes a conversation its last phone moved away from once it is idle", async () => {
+		let releaseTurn!: () => void;
+		const turn = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		const session = Object.assign(createTestSession("moved-away", null), {
+			isBusy: true,
+			waitForNotBusy: vi.fn(() => turn),
+		});
+		const dispose = vi.fn(async () => {});
+		const runtime = {
 			cwd: workspacePath,
-			session: createTestSession("source-session", null),
-			dispose: sourceDispose,
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn((prepare) => {
-				prepareSourceReplacement = prepare;
-			}),
+			session,
+			dispose,
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
-		const targetRuntime = {
-			cwd: workspacePath,
-			session: createTestSession("target-session", null),
-			dispose: targetDispose,
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const prepareRuntimeRekey = vi.fn(() => ({ commit: vi.fn(), rollback: vi.fn() }));
-		let createCount = 0;
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -991,189 +864,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			getAllowTools: () => undefined,
 			getProjectTrustedForWorkspace: () => false,
 			setClientLastSessionId: vi.fn(async () => undefined),
-			prepareRuntimeRekey,
-			createRuntime: async () => {
-				const runtime = createCount++ === 0 ? sourceRuntime : targetRuntime;
-				return {
-					runtime,
-					sessionSelection: { kind: "created", sessionId: runtime.session.sessionId },
-				};
-			},
-		});
-		const phone = createAuthorization("n-phone-a");
-		const source = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phone,
-		);
-		await registry.commitEntry(source.entry, source.sessionSelection, phone, source.attachClaim);
-		source.attachClaim.release();
-		const target = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phone,
-		);
-		await registry.commitEntry(target.entry, target.sessionSelection, phone, target.attachClaim);
-		target.attachClaim.release();
-
-		await expect(
-			prepareSourceReplacement?.({ previousSessionId: "source-session", sessionId: "target-session" }),
-		).rejects.toThrow("conversation runtime already active");
-		expect(prepareRuntimeRekey).not.toHaveBeenCalled();
-		expect(sourceDispose).not.toHaveBeenCalled();
-		expect(targetDispose).not.toHaveBeenCalled();
-		expect(registry.findOwner("ws", "source-session")).toBe(source.entry);
-		expect(registry.findOwner("ws", "target-session")).toBe(target.entry);
-		await registry.stopAll("test_cleanup");
-	});
-
-	it("releases a committed reservation when projection publication fails", async () => {
-		let prepareReplacement:
-			| ((target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>)
-			| undefined;
-		const sourceRuntime = {
-			cwd: workspacePath,
-			session: createTestSession("publication-old", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn((prepare) => {
-				prepareReplacement = prepare;
-			}),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const replacementRuntime = {
-			cwd: workspacePath,
-			session: createTestSession("publication-new", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const onRuntimeDisposed = vi.fn((entry: IntegratedRuntimeEntry) => {
-			entry.coordinator.clearLeaseOwner();
-		});
-		const retireTransport = vi.fn();
-		const stateManager = new IrohRemoteHostStateManager();
-		vi.spyOn(stateManager, "setClientsLastSessionId").mockResolvedValue([]);
-		let createCount = 0;
-		const registry = new IntegratedRuntimeRegistry({
-			agentDir,
-			auditLogger: new IrohRemoteAuditLogger(),
-			stateManager,
-			activeStreams: new IrohRemoteActiveStreamRegistry(),
-			detachedRuntimeTtlMs: () => 60_000,
-			getAllowTools: () => undefined,
-			getProjectTrustedForWorkspace: () => false,
-			setClientLastSessionId: vi.fn(async () => undefined),
-			prepareRuntimeRekey: () => ({ commit: vi.fn(), rollback: vi.fn() }),
-			onRuntimeDisposed,
-			createRuntime: async () => {
-				const runtime = createCount++ === 0 ? sourceRuntime : replacementRuntime;
-				return {
-					runtime,
-					sessionSelection: { kind: "created", sessionId: runtime.session.sessionId },
-				};
-			},
-		});
-		const phone = createAuthorization("n-phone-a");
-		const source = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phone,
-		);
-		await registry.commitEntry(source.entry, source.sessionSelection, phone, source.attachClaim);
-		installTestLeaseOwner(source.entry, "publication-owner");
-		source.entry.coordinator.registerTransport({
-			id: "publication-stream",
-			kind: "direct",
-			clientNodeId: phone.client.nodeId,
-			connectionId: "publication-connection",
-			close: retireTransport,
-		});
-		const sourceSubscriber = await registry.attachSubscriber(source.entry, source.attachClaim);
-		source.attachClaim.release();
-		const capturedAttach = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "session", sessionId: "publication-old" }), response: HANDSHAKE_RESPONSE },
-			createAuthorization("n-phone-b"),
-		);
-
-		await expect(
-			prepareReplacement?.({
-				previousSessionId: "publication-old",
-				sessionId: "publication-new",
-			}),
-		).rejects.toThrow("daemon runtime attach is still publishing");
-		capturedAttach.attachClaim.release();
-
-		const transaction = await prepareReplacement?.({
-			previousSessionId: "publication-old",
-			sessionId: "publication-new",
-		});
-		await transaction?.commit();
-		await transaction?.dispose();
-		expect(retireTransport).toHaveBeenCalledWith("session_replacement_failed");
-		expect(retireTransport.mock.invocationCallOrder[0]).toBeLessThan(onRuntimeDisposed.mock.invocationCallOrder[0]!);
-		expect(source.entry.subscribers.has(sourceSubscriber)).toBe(true);
-		expect(onRuntimeDisposed).toHaveBeenCalledWith(source.entry, "session_replacement_failed");
-		expect(registry.findOwner("ws", "publication-old")).toBeUndefined();
-		expect(registry.findOwner("ws", "publication-new")).toBeUndefined();
-		await expect(
-			registry.commitEntry(
-				capturedAttach.entry,
-				capturedAttach.sessionSelection,
-				createAuthorization("n-phone-b"),
-				capturedAttach.attachClaim,
-			),
-		).rejects.toMatchObject({ outcome: "duplicate_conversation_connection" });
-		await expect(registry.attachSubscriber(capturedAttach.entry, capturedAttach.attachClaim)).rejects.toMatchObject({
-			outcome: "duplicate_conversation_connection",
-		});
-		expect(registry.findOwner("ws", "publication-new")).toBeUndefined();
-
-		const replacement = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phone,
-		);
-		await registry.commitEntry(replacement.entry, replacement.sessionSelection, phone, replacement.attachClaim);
-		replacement.attachClaim.release();
-		expect(registry.findOwner("ws", "publication-new")).toBe(replacement.entry);
-		await registry.detachSubscriber(source.entry, sourceSubscriber, "retirement_settled");
-		await registry.stopAll("test_cleanup");
-	});
-
-	it("closes streams and removes the runtime when an ownership rekey is rejected", async () => {
-		const activeStreams = new IrohRemoteActiveStreamRegistry();
-		const dispose = vi.fn(async () => {});
-		const close = vi.fn(async () => {});
-		const runtime = {
-			cwd: workspacePath,
-			session: createTestSession("owned-old", null),
-			dispose,
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const registry = new IntegratedRuntimeRegistry({
-			agentDir,
-			auditLogger: new IrohRemoteAuditLogger(),
-			stateManager: new IrohRemoteHostStateManager(),
-			activeStreams,
-			detachedRuntimeTtlMs: () => 60_000,
-			getAllowTools: () => undefined,
-			getProjectTrustedForWorkspace: () => false,
-			setClientLastSessionId: vi.fn(async () => undefined),
-			onRuntimeRekeyed: () => {
-				throw new Error("target lease occupied");
-			},
-			onRuntimeDisposed: (entry) => {
-				entry.coordinator.clearLeaseOwner();
-			},
-			beforeRuntimeStop: async (entry, reason) => {
-				for (const stream of activeStreams.entriesForConversationKey(entry.workspaceName, entry.sessionId)) {
-					await stream.close(reason);
-					activeStreams.unregister(stream);
-				}
-			},
-			createRuntime: async () => ({
-				runtime,
-				sessionSelection: { kind: "created", sessionId: "owned-old" },
-			}),
+			createRuntime: async () => ({ runtime, sessionSelection: { kind: "created", sessionId: "moved-away" } }),
 		});
 		const phone = createAuthorization("n-phone-a");
 		const created = await registry.getOrCreateEntry(
@@ -1181,25 +872,20 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			phone,
 		);
 		await registry.commitEntry(created.entry, created.sessionSelection, phone, created.attachClaim);
-		installTestLeaseOwner(created.entry, "owned-rekey-owner");
+		const subscriber = await registry.attachSubscriber(created.entry, created.attachClaim);
 		created.attachClaim.release();
-		activeStreams.register({
-			clientNodeId: "n-phone-a",
-			workspaceName: "ws",
-			sessionId: "owned-old",
-			connectionId: "conn-a",
-			streamId: "stream-a",
-			close,
-		});
 
-		await expect(
-			registry.handleSessionChanged(created.entry, undefined, { sessionId: "occupied-new" }, phone),
-		).rejects.toThrow("target lease occupied");
-		expect(close).toHaveBeenCalledWith("session_rekey_failed");
+		await registry.detachSubscriber(created.entry, subscriber, "conversation_moved", undefined, { retainMs: 0 });
+		// The turn continues detached; the conversation closes once it ends, not after the configured TTL.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(registry.findOwner("ws", "moved-away")).toBe(created.entry);
+		expect(dispose).not.toHaveBeenCalled();
+		session.isBusy = false;
+		releaseTurn();
+		await vi.waitFor(() => expect(registry.findOwner("ws", "moved-away")).toBeUndefined());
 		expect(dispose).toHaveBeenCalledOnce();
-		expect(registry.findOwner("ws", "owned-old")).toBeUndefined();
-		expect(registry.findOwner("ws", "occupied-new")).toBeUndefined();
 	});
+
 	it("does not resurrect a runtime stopped while commit audit publication is paused", async () => {
 		let releaseAudit!: () => void;
 		let markAuditStarted!: () => void;
@@ -1673,9 +1359,6 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(child.entry).toMatchObject({ parentSessionId: "parent-session", subagentId: "sa-child" });
 		await registry.commitEntry(child.entry, child.sessionSelection, phone, child.attachClaim);
 		child.attachClaim.release();
-		expect(setClientLastSessionId).not.toHaveBeenCalled();
-
-		await registry.handleSessionChanged(child.entry, undefined, { sessionId: "child-session-rekeyed" }, phone);
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
 		await registry.stopAll("test_cleanup");

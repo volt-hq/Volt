@@ -1,6 +1,8 @@
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { ConversationLock } from "../../../src/core/conversation-log/conversation-lock.ts";
+import { PLAN_EXECUTION_CUSTOM_TYPE } from "../../../src/core/planning.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { findSessionInfoById, SessionManager } from "../../../src/core/session-manager.ts";
 import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
@@ -201,13 +203,41 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		expect(phone.send.finished).toBe(false);
 	});
 
-	it("refuses to execute a plan in a new session from a relayed phone", async () => {
+	it("executes a plan in a new session from a relayed phone: the new log queues the execution turn", async () => {
 		const { runtime } = await createTuiRuntime();
+		const sourceId = runtime.session.sessionId;
+		const sessionDir = runtime.session.sessionManager.getSessionDir();
+		await runtime.session.setAgentMode("plan");
+		const draft = await runtime.session.updatePlan({
+			title: "From the phone",
+			summary: "Execute in a fresh session.",
+			steps: [{ text: "Make the change" }],
+		});
+		const ready = await runtime.session.submitPlan({
+			planId: draft.id,
+			expectedRevision: draft.revision,
+			title: "From the phone",
+			summary: "Execute in a fresh session.",
+		});
 		const view = runtime.attachRedirectClient();
 		cleanups.push(() => view.dispose());
 
-		await expect(view.executePlan("plan", 1, "new_session")).rejects.toThrow(
-			"Executing a plan in a new session is unavailable while this session is open on the desktop",
-		);
+		const result = await view.executePlan(ready.id, ready.revision, "new_session");
+
+		expect(result.started).toBe(true);
+		expect(result.selectedSessionId).not.toBe(sourceId);
+		// The TUI stays on its session, whose plan is handed off.
+		expect(runtime.session.sessionId).toBe(sourceId);
+		expect(runtime.session.planningState.plan).toMatchObject({ id: ready.id, phase: "handed_off" });
+		await expectStoredAndUnlocked(sessionDir, result.selectedSessionId);
+		const info = await findSessionInfoById(sessionDir, result.selectedSessionId);
+		if (!info) throw new Error("the new session is not stored");
+		const written = await SessionManager.openReadOnly(info.ref);
+		expect(written.getConversationState().planning?.plan).toMatchObject({ id: ready.id, phase: "active" });
+		expect(clientInputRecovery(written.getConversationState())).toMatchObject({
+			kind: "replay",
+			records: [{ origin: "host", queuedInput: { messages: [{ customType: PLAN_EXECUTION_CUSTOM_TYPE }] } }],
+		});
+		await written.closePersistence();
 	});
 });

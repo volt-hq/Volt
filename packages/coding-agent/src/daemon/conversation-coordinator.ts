@@ -59,32 +59,15 @@ export interface ConversationRuntimeRetirement {
 	readonly settled: Promise<void>;
 }
 
-export interface BeginConversationRuntimeRetirementOptions {
-	/**
-	 * A replacement command can be executing inside one of the transports it is
-	 * retiring. In that case finalization must start concurrently so the command
-	 * can return and allow its own transport to settle. All other retirement uses
-	 * the stricter transports-before-runtime ordering.
-	 */
-	finalizationOrder?: "after_transports" | "concurrent";
-}
-
-export interface ConversationCoordinatorRekeyReservation {
-	readonly coordinator: ConversationCoordinator;
-	readonly previousSessionId: string;
-	readonly nextSessionId: string;
-}
-
 /**
- * Stable authority for one logical conversation. The object survives session
- * rekeys and daemon-runtime/TUI-relay ownership changes; registries only index
- * it. Every mutable lifetime fact that can fence an attach or keep the
+ * Stable authority for one conversation, keyed by its fixed session id. The
+ * object survives daemon-runtime/TUI-relay ownership changes; registries only
+ * index it. Every mutable lifetime fact that can fence an attach or keep the
  * conversation alive is owned here.
  */
 export class ConversationCoordinator {
 	readonly workspaceName: string;
-	private currentSessionId: string;
-	private readonly previousSessionIdSet = new Set<string>();
+	readonly sessionId: string;
 	private runtimeLifecycleValue: ConversationRuntimeLifecycle | undefined;
 	private generationValue = 0;
 	private runtimeRetirementValue: ConversationRuntimeRetirement | undefined;
@@ -105,16 +88,8 @@ export class ConversationCoordinator {
 		onVacant: (coordinator: ConversationCoordinator) => void = () => {},
 	) {
 		this.workspaceName = workspaceName;
-		this.currentSessionId = sessionId;
+		this.sessionId = sessionId;
 		this.onVacant = onVacant;
-	}
-
-	get sessionId(): string {
-		return this.currentSessionId;
-	}
-
-	get previousSessionIds(): ReadonlySet<string> {
-		return this.previousSessionIdSet;
 	}
 
 	get runtimeLifecycle(): ConversationRuntimeLifecycle | undefined {
@@ -375,39 +350,6 @@ export class ConversationCoordinator {
 		return true;
 	}
 
-	rekeyDaemonRuntimeLease(nextSessionId: string): void {
-		const owner = this.leaseOwnerValue;
-		if (!owner) throw new Error("daemon runtime lease owner is unavailable for session rekey");
-		const result = this.requireLeaseBroker().rekeyDaemonRuntime(
-			owner,
-			this.workspaceName,
-			this.sessionId,
-			nextSessionId,
-		);
-		if (!result.ok) throw new Error(`Unable to rekey conversation lease: ${result.code}`);
-	}
-
-	prepareDaemonRuntimeLeaseRekey(nextSessionId: string): { commit(): void; rollback(): void } {
-		const owner = this.leaseOwnerValue;
-		if (!owner) throw new Error("daemon runtime lease owner is unavailable for session replacement");
-		const prepared = this.requireLeaseBroker().prepareDaemonRekey(
-			owner,
-			this.workspaceName,
-			this.sessionId,
-			nextSessionId,
-		);
-		if (!prepared.ok) throw new Error(`Unable to reserve conversation lease rekey: ${prepared.code}`);
-		return {
-			commit: () => {
-				const result = this.requireLeaseBroker().commitDaemonRekey(prepared.reservation.id);
-				if (!result.ok) throw new Error(`Unable to commit conversation lease rekey: ${result.code}`);
-			},
-			rollback: () => {
-				this.requireLeaseBroker().rollbackDaemonRekey(prepared.reservation.id);
-			},
-		};
-	}
-
 	registerRelayLease(relayId: string): boolean {
 		return this.requireLeaseBroker().registerRelay(this.workspaceName, this.sessionId, relayId);
 	}
@@ -460,19 +402,6 @@ export class ConversationCoordinator {
 		if (!released) return false;
 		this.notifyIfVacant();
 		return true;
-	}
-
-	rekeySession(nextSessionId: string): void {
-		if (this.runtimeLifecycleValue !== "active" && this.tuiLeaseConnectionIdValue === undefined) {
-			throw new Error("cannot rekey a conversation without active lease authority");
-		}
-		if (this.attachClaimSet.size !== 0) {
-			throw new Error("cannot rekey a conversation while attach publication is in flight");
-		}
-		if (nextSessionId === this.currentSessionId) return;
-		this.previousSessionIdSet.add(this.currentSessionId);
-		this.currentSessionId = nextSessionId;
-		this.generationValue++;
 	}
 
 	registerTransport(owner: ConversationTransportOwner): () => void {
@@ -541,11 +470,7 @@ export class ConversationCoordinator {
 		return selected.length;
 	}
 
-	beginRuntimeRetirement(
-		reason: string,
-		finalizeRuntime: () => Promise<void> | void,
-		options: BeginConversationRuntimeRetirementOptions = {},
-	): ConversationRuntimeRetirement {
+	beginRuntimeRetirement(reason: string, finalizeRuntime: () => Promise<void> | void): ConversationRuntimeRetirement {
 		if (this.runtimeRetirementValue) {
 			return this.runtimeRetirementValue;
 		}
@@ -563,13 +488,10 @@ export class ConversationCoordinator {
 		this.invalidateAttachClaims();
 		this.cancelDetachedRuntimeRetention();
 		const transportsSettled = this.closeTransports(reason).then(() => undefined);
-		const finalization =
-			options.finalizationOrder === "concurrent"
-				? Promise.resolve().then(finalizeRuntime)
-				: (async () => {
-						await transportsSettled.catch(() => undefined);
-						await finalizeRuntime();
-					})();
+		const finalization = (async () => {
+			await transportsSettled.catch(() => undefined);
+			await finalizeRuntime();
+		})();
 
 		const settled = Promise.allSettled([transportsSettled, finalization]).then((results) => {
 			const errors = results.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
@@ -633,19 +555,13 @@ export class ConversationCoordinator {
 	}
 }
 
-/** Lookup index for stable conversation authorities, including rekey aliases. */
+/** Lookup index for stable conversation authorities, one per (workspace, session). */
 export class ConversationCoordinatorRegistry {
 	private readonly coordinatorsByKey = new Map<string, ConversationCoordinator>();
-	private readonly rekeyReservations = new Set<ConversationCoordinatorRekeyReservation>();
-	private readonly rekeyReservationsByCoordinator = new Map<
-		ConversationCoordinator,
-		ConversationCoordinatorRekeyReservation
-	>();
-	private readonly rekeyReservationsByTarget = new Map<string, ConversationCoordinatorRekeyReservation>();
 	private leaseBroker: LeaseBroker | undefined;
 
 	get size(): number {
-		return new Set(this.coordinatorsByKey.values()).size;
+		return this.coordinatorsByKey.size;
 	}
 
 	getRegistryKey(workspaceName: string, sessionId: string): string {
@@ -659,9 +575,6 @@ export class ConversationCoordinatorRegistry {
 	getOrCreate(workspaceName: string, sessionId: string): ConversationCoordinator {
 		const existing = this.get(workspaceName, sessionId);
 		if (existing) return existing;
-		if (this.rekeyReservationsByTarget.has(this.getRegistryKey(workspaceName, sessionId))) {
-			throw new Error(`conversation coordinator rekey target is reserved for ${workspaceName}/${sessionId}`);
-		}
 		const coordinator = new ConversationCoordinator(workspaceName, sessionId, (candidate) => {
 			this.releaseIfVacant(candidate);
 		});
@@ -686,103 +599,15 @@ export class ConversationCoordinatorRegistry {
 		return coordinator;
 	}
 
-	rekey(coordinator: ConversationCoordinator, nextSessionId: string): void {
-		const reservation = this.prepareRekey(coordinator, nextSessionId);
-		try {
-			this.commitRekey(reservation);
-		} catch (error) {
-			this.rollbackRekey(reservation);
-			throw error;
-		}
-	}
-
-	prepareRekey(coordinator: ConversationCoordinator, nextSessionId: string): ConversationCoordinatorRekeyReservation {
-		const existingReservation = this.rekeyReservationsByCoordinator.get(coordinator);
-		if (existingReservation) {
-			if (existingReservation.nextSessionId === nextSessionId) return existingReservation;
-			throw new Error(`conversation coordinator already has a pending session rekey`);
-		}
-		const targetKey = this.getRegistryKey(coordinator.workspaceName, nextSessionId);
-		const targetOwner = this.coordinatorsByKey.get(targetKey);
-		if (targetOwner && targetOwner !== coordinator) {
-			throw new Error(`conversation coordinator already active for ${coordinator.workspaceName}/${nextSessionId}`);
-		}
-		const targetReservation = this.rekeyReservationsByTarget.get(targetKey);
-		if (targetReservation && targetReservation.coordinator !== coordinator) {
-			throw new Error(
-				`conversation coordinator rekey target is reserved for ${coordinator.workspaceName}/${nextSessionId}`,
-			);
-		}
-		if (!this.values().includes(coordinator)) {
-			throw new Error("conversation coordinator is not registered");
-		}
-		const reservation: ConversationCoordinatorRekeyReservation = {
-			coordinator,
-			previousSessionId: coordinator.sessionId,
-			nextSessionId,
-		};
-		this.rekeyReservations.add(reservation);
-		this.rekeyReservationsByCoordinator.set(coordinator, reservation);
-		this.rekeyReservationsByTarget.set(targetKey, reservation);
-		return reservation;
-	}
-
-	commitRekey(reservation: ConversationCoordinatorRekeyReservation): void {
-		if (
-			!this.rekeyReservations.has(reservation) ||
-			this.rekeyReservationsByCoordinator.get(reservation.coordinator) !== reservation ||
-			reservation.coordinator.sessionId !== reservation.previousSessionId
-		) {
-			throw new Error("conversation coordinator rekey reservation is no longer current");
-		}
-		const targetKey = this.getRegistryKey(reservation.coordinator.workspaceName, reservation.nextSessionId);
-		if (this.rekeyReservationsByTarget.get(targetKey) !== reservation) {
-			throw new Error("conversation coordinator rekey target reservation is no longer current");
-		}
-		const targetOwner = this.coordinatorsByKey.get(targetKey);
-		if (targetOwner && targetOwner !== reservation.coordinator) {
-			throw new Error(
-				`conversation coordinator already active for ${reservation.coordinator.workspaceName}/${reservation.nextSessionId}`,
-			);
-		}
-		reservation.coordinator.rekeySession(reservation.nextSessionId);
-		this.clearRekeyReservation(reservation);
-		this.coordinatorsByKey.set(
-			this.getRegistryKey(reservation.coordinator.workspaceName, reservation.previousSessionId),
-			reservation.coordinator,
-		);
-		this.coordinatorsByKey.set(targetKey, reservation.coordinator);
-	}
-
-	rollbackRekey(reservation: ConversationCoordinatorRekeyReservation): boolean {
-		if (!this.rekeyReservations.has(reservation)) return false;
-		this.clearRekeyReservation(reservation);
-		return true;
-	}
-
-	private clearRekeyReservation(reservation: ConversationCoordinatorRekeyReservation): void {
-		this.rekeyReservations.delete(reservation);
-		if (this.rekeyReservationsByCoordinator.get(reservation.coordinator) === reservation) {
-			this.rekeyReservationsByCoordinator.delete(reservation.coordinator);
-		}
-		const targetKey = this.getRegistryKey(reservation.coordinator.workspaceName, reservation.nextSessionId);
-		if (this.rekeyReservationsByTarget.get(targetKey) === reservation) {
-			this.rekeyReservationsByTarget.delete(targetKey);
-		}
-	}
-
 	values(): ConversationCoordinator[] {
-		return Array.from(new Set(this.coordinatorsByKey.values()));
+		return Array.from(this.coordinatorsByKey.values());
 	}
 
 	releaseIfVacant(coordinator: ConversationCoordinator): boolean {
 		if (!coordinator.isVacant) return false;
-		let removed = false;
-		for (const [key, owner] of this.coordinatorsByKey) {
-			if (owner !== coordinator) continue;
-			this.coordinatorsByKey.delete(key);
-			removed = true;
-		}
-		return removed;
+		const key = this.getRegistryKey(coordinator.workspaceName, coordinator.sessionId);
+		if (this.coordinatorsByKey.get(key) !== coordinator) return false;
+		this.coordinatorsByKey.delete(key);
+		return true;
 	}
 }
