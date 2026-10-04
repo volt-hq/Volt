@@ -11,12 +11,11 @@ import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@ha
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { type SessionEntry, SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import {
 	acquireSharedSQLiteSessionStore,
@@ -33,6 +32,7 @@ import {
 	injectFaultyLog,
 	lose,
 } from "../../utilities/faulty-log.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import {
 	createHarness,
 	getAssistantTexts,
@@ -175,7 +175,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 	async function setupRuntime(
 		replacementHook: (event: SessionBeforeSwitchEvent | SessionShutdownEvent) => void = () => {},
 	): Promise<{
-		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
+		runtime: TestClient;
 		faux: FauxProvider;
 		log: FaultyConversationLog;
 	}> {
@@ -218,7 +218,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 				noThemes: true,
 			},
 		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({ ...runtimeOptions, cwd });
 			return {
 				...(await createAgentSessionFromServices({
@@ -234,22 +234,19 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const sessionManager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
 		// Faults are injected below the session, before it takes the manager's log.
 		const log = injectFaultyLog(sessionManager);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager,
 		});
-		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
+		const runtime = await connectTestClient(host, conversation, { surface: {} });
 		runtimeCleanups.push(async () => {
 			await runtime.dispose().catch(() => {});
 		});
 		return { runtime, faux, log };
 	}
 
-	async function loseRuntimeLog(
-		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>,
-		log: FaultyConversationLog,
-	): Promise<void> {
+	async function loseRuntimeLog(runtime: TestClient, log: FaultyConversationLog): Promise<void> {
 		await createReadyPlan(runtime.session);
 		log.failNext(planningFault("uncertain_committed"), isPlanningCommit);
 		await runtime.session.steer("end this runtime", undefined, "issue-217-runtime-replacement");
@@ -301,7 +298,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		await loseRuntimeLog(runtime, log);
 		await runtime.lost;
 		const previousSession = runtime.session;
-		const previousBranchEpoch = runtime.conversationProjectionFeed.branchEpoch;
+		const previousBranchEpoch = runtime.conversation.projectionFeed.branchEpoch;
 
 		await expect(runtime.switchSessionById(previousSession.sessionId)).resolves.toEqual({
 			cancelled: false,
@@ -310,7 +307,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		});
 
 		expect(runtime.session).toBe(previousSession);
-		expect(runtime.conversationProjectionFeed.branchEpoch).toBe(previousBranchEpoch);
+		expect(runtime.conversation.projectionFeed.branchEpoch).toBe(previousBranchEpoch);
 	});
 
 	it("rejects a stale manager at the ordinal fence without changing the committed winner", async () => {

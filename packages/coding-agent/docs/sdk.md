@@ -146,36 +146,41 @@ interface AgentSession {
 
 Always await `setAgentMode()` before reading `planningState`, `agentMode`, or active tools. In particular, a Plan-to-Build transition waits for unrestricted MCP startup and direct-tool restoration before the returned Build state is exposed. Mode and plan-execution transitions are serialized in invocation order; a queued toggle derives its target only after earlier transitions commit.
 
-Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
-Approving a ready plan also lives there:
+An `AgentSession` serves one log for its whole life. New-session, resume, fork, clone, and import open another conversation in a `ConversationHost` and move the client that asked there (see below). Approving a ready plan also goes through the host, since a `new_session` execution moves the client:
 
 ```typescript
-await runtime.executePlan(plan.id, plan.revision, "retain_context");
-await runtime.executePlan(plan.id, plan.revision, "new_session");
+import { executePlan } from "@hansjm10/volt-coding-agent";
+
+await executePlan(host, client, plan.id, plan.revision, "retain_context");
+await executePlan(host, client, plan.id, plan.revision, "new_session");
 ```
 
 All user plan actions are fenced by the exact plan ID and revision. Repeating an already-approved execution request is idempotent.
 
 Persisted review finding discussions use normal Build tools and Plan-mode research/authoring under the session's grants. Fix requests can be implemented in the discussion, including approved `retain_context` plan execution. Their source-linked identity cannot be replaced, forked/cloned or handed off with `new_session`; reset through the source review instead. Canonical finding outcomes also belong to the source review. These lifecycle boundaries do not restrict code fixes. Trusted host policy supersedes obsolete read-only guidance in resumed discussion context without rewriting history.
 
-### createAgentSessionRuntime() and AgentSessionRuntime
+### ConversationHost
 
-Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
-This is the same layer used by the built-in interactive, print, and RPC modes.
+A `ConversationHost` holds the conversations one process hosts and the clients attached to them. It is the layer the built-in interactive, print, JSON, and RPC modes, and subagents, are built on. A conversation (`HostedConversation`) serves one log for its whole life: its `session`, the cwd-bound `services` the session was created with, its `diagnostics`, its projection feed, and its detached reviews are fixed until it closes.
 
-`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. Passing the manager consumes it immediately. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result. A `CreateAgentSessionRuntimeFactory` callback borrows cleanup ownership from its enclosing runtime operation until it returns an `AgentSession`; construct and return the session as its final ownership-transferring step.
+The host opens every conversation through a `ConversationFactory`. The factory closes over process-global fixed inputs, creates cwd-bound services for the conversation's cwd, resolves session options against those services, and returns the session, the services, and their diagnostics. It borrows cleanup ownership of the session manager from the host until it returns an `AgentSession`; construct and return the session as its final ownership-transferring step.
 
 ```typescript
 import {
-  type CreateAgentSessionRuntimeFactory,
+  type ConversationFactory,
+  ConversationHost,
   createAgentSessionFromServices,
-  createAgentSessionRuntime,
   createAgentSessionServices,
   getAgentDir,
+  type HostClient,
+  openFork,
+  openImport,
+  openNewSession,
+  openStoredSession,
   SessionManager,
 } from "@hansjm10/volt-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
   return {
     ...(await createAgentSessionFromServices({
@@ -188,52 +193,71 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
   };
 };
 
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
+const host = new ConversationHost({ factory, agentDir: getAgentDir(), extensionMode: "print" });
+const opened = await host.open({
+  kind: "adopt",
   sessionManager: await SessionManager.create(process.cwd()),
+  cwd: process.cwd(),
 });
+if (opened.cancelled) throw new Error("cancelled");
+const conversation = opened.conversation;
+
+let unsubscribe = conversation.session.subscribe(() => {});
+const client: HostClient = {
+  id: "sdk",
+  anchor: true,
+  surface: { onError: (error) => console.error(error.error) },
+  move: {
+    kind: "in_place",
+    onMoved: (to) => {
+      unsubscribe();
+      unsubscribe = to.session.subscribe(() => {});
+    },
+  },
+};
+await host.attach(client, conversation);
+
+await openNewSession(host, client);
+const [previous] = await SessionManager.list(process.cwd());
+if (previous) await openStoredSession(host, client, previous.ref);
+await openFork(host, client, "entry-id"); // before a user message; returns its text as selectedText
+await openFork(host, client, "entry-id", { position: "at" }); // clone through this entry
+await openImport(host, client, "/path/to/session-snapshot.jsonl");
+
+await host.dispose();
 ```
 
-`AgentSessionRuntime` owns replacement of the active runtime across:
+`host.open(target, options)` opens a conversation without attaching a client. Targets are `{ kind: "new" }`, `{ kind: "session", ref }`, `{ kind: "fork", source, entryId, position }`, `{ kind: "import", path }`, and `{ kind: "adopt", sessionManager }` for a log the caller already opened, such as the one selected at startup; the host owns an adopted manager from the call.
 
-- `newSession()`
-- `switchSession()`
-- `fork()`
-- clone flows via `fork(entryId, { position: "at" })`
-- `importFromJsonl()`
+A client (`HostClient`) has:
 
-Important behavior:
+- `id`: the client scope its requests run in (`ClientScope.run(id, ...)`), so extension session actions reach the client whose command asked for them
+- `anchor`: the conversation closes when its anchor leaves it, whatever other clients remain; otherwise it closes when its last client leaves, or, with the host option `whenUnattached: "keep"` or `{ retainMs }`, stays open until the host closes it
+- `surface`: the client's UI, session actions (`commandContextActions`), and error listener on the extensions of each conversation it joins. The host attaches it on every join. The first join of a client with a surface binds the conversation's extensions in the host's `extensionMode` (`ctx.mode`) and fires `session_start` once; later clients only add their surface. UI calls go to the last attached client with a UI, errors go to every client.
+- `move`: how the client follows its structural intents. `{ kind: "in_place", prepare?, onMoved }` moves the client: `prepare(to, from)` runs once it left the source, before it joins `to` and `to`'s extensions start; `onMoved(to, from)` runs once it joined. `{ kind: "redirect", redirect(sessionId), hostTarget? }` keeps the client on its conversation and tells it where to reconnect; it never anchors.
+- `recoversInput`: an in-place client replays the durable queued input of each conversation it moves to before anything it runs there
 
-- `runtime.session` changes after those operations; `newSession()`, `switchSession()`, and `fork()` resolve with `{ cancelled: true }` or `{ cancelled: false, sessionId, seeded }`, where `sessionId` is the session the runtime is on now (`fork()` also returns `selectedText` for a fork before a user message)
-- event subscriptions are attached to a specific `AgentSession`, so re-subscribe after replacement
-- if you use extensions, attach your client to the new session with `await runtime.session.attachExtensionClient({ id, mode, ... }).ready`; the first client to attach a session binds its extensions and fires `session_start` once, and later clients only add their UI, error listener, and session actions; the returned `detach()` removes the client
-- creation returns diagnostics on `runtime.diagnostics`
-- the next session opens before the current one closes: if it fails to open, the method throws and `runtime.session` is still the current session; a failure after the switch committed ends the runtime
-- a switch refuses to leave a session that is running a turn, a bash command, a session mutation, or a detached review, or that holds queued durable input
-- inside a subagent's runtime, these methods reject
-- `runtime.whileOpen(operation)` runs `operation` against `runtime.session` and keeps that session open until it settles: `runtime.dispose()`, or a switch closing the session, waits for it
+The intents `openNewSession()`, `openStoredSession()`, `openStoredSessionById()`, `openFork()`, and `openImport()` open the target, move the client, then close the source per its anchor. Important behavior:
 
-`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` waits for pending writes, closes the session's log, and releases its lock and the SQLite store. `AgentSessionRuntime` does the same for its active session during `await runtime.dispose()`.
+- They resolve with `{ cancelled: true }` when a source extension cancels (`session_before_switch` or `session_before_fork`), else with `{ cancelled: false, sessionId, seeded }`, where `sessionId` is the conversation the client moved to and `seeded` says whether `withSession` ran (`openFork()` also returns `selectedText` for a fork before a user message).
+- The new conversation opens before the source closes: if it fails to open, the intent throws and the client stays on the source.
+- Lifecycle order: `session_before_switch` or `session_before_fork` on the source, then the new conversation's `session_start`, then the source's `session_shutdown` (reason `new`, `resume`, or `fork`, with `targetSessionRef`).
+- An in-place client may not leave a conversation that is running a turn, a bash command, a session mutation, or a detached review, or that holds queued durable input. The extension command that asks for the move is the exception: its own durable input is settled as completed before the check.
+- One client's intents run one at a time. An intent that waited while the client moved, or while its conversation's branch changed, fails as stale.
+- Inside a subagent's conversation (lifetime `owner`) and a review finding discussion, intents reject.
+- Event subscriptions belong to one `AgentSession`: re-subscribe in `onMoved`.
 
-```typescript
-let session = runtime.session;
-let unsubscribe = session.subscribe(() => {});
+`conversation.whileOpen(operation)` runs `operation` against the session and keeps the conversation open until it settles: closing it waits. `conversation.lost` resolves when its session loses its log (see below); close the conversation, which releases its lock.
 
-await runtime.newSession();
-
-unsubscribe();
-session = runtime.session;
-unsubscribe = session.subscribe(() => {});
-```
+`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` waits for pending writes, closes the session's log, and releases its lock and the SQLite store. `host.close(conversation)` emits `session_shutdown` and does the same for the conversation's session; `host.dispose()` closes every conversation.
 
 ### SubagentManager
 
-`SubagentManager` starts isolated child runtimes through the same runtime factory used by `AgentSessionRuntime`. Named starts use definitions from `ResourceLoader.getSubagents()`; project definitions are present only when project trust is active.
+`SubagentManager` starts isolated child conversations through a `ConversationFactory`, in a `ConversationHost` of its own. Each child conversation has an `owner` lifetime: no client can move away from it, and it closes when its in-process RPC client stops or, with `retainRuntimeOnDispose`, when the owner that retained it closes it. Named starts use definitions from `ResourceLoader.getSubagents()`; project definitions are present only when project trust is active.
 
 ```typescript
 import {
-  type CreateAgentSessionRuntimeFactory,
+  type ConversationFactory,
   createAgentSession,
   createAgentSessionFromServices,
   createAgentSessionServices,
@@ -247,7 +271,7 @@ const agentDir = getAgentDir();
 const parentServices = await createAgentSessionServices({ cwd, agentDir });
 const childAllowedTools = ["read", "grep", "find", "ls"];
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+const createRuntime: ConversationFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd, agentDir });
   return {
     ...(await createAgentSessionFromServices({
@@ -281,7 +305,7 @@ try {
 }
 ```
 
-During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner must retain and eventually dispose the runtime. Retaining a runtime alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
+During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner receives the child's `host` and `conversation` from `onRuntimeCreated` and must eventually close the conversation (`host.close(conversation)`). Retaining a conversation alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
 
 ```typescript
 interface SubagentResult {
@@ -320,7 +344,7 @@ Root sessions retain compatibility support for single `{ agent: string, task: st
 
 When the built-in `subagent` tool's manager implements the atomic spawn-confirmation methods — including `SubagentManager` — spawn modes are two-phase. The initial request internally lists the live registry and returns a one-time token without starting a child. Repeating the exact normalized request with `confirm: string` set to that token starts it. Reservations live in the shared session registry, so concurrent identical requests across different branches produce only one token; other callers observe the pending or claimed reservation. Tokens expire after five minutes, are request-bound and one-time. Custom `SubagentToolManager` implementations without the atomic methods retain immediate spawn behavior; direct `SubagentManager.startByName()` calls are unchanged.
 
-Custom runtime factories that support nested delegation must construct each child session's manager with the `subagentContext` passed to `CreateAgentSessionRuntimeFactory`. Explicit `tools` and `excludeTools` policies treat `subagent` and `subagent_registry` as separate names; omitting the registry name from an explicit child allowlist disables direct registry calls and its snapshot guidance, but not the spawn tool's internal registry preflight.
+Custom conversation factories that support nested delegation must construct each child session's manager with the `subagentContext` passed to the `ConversationFactory`. Explicit `tools` and `excludeTools` policies treat `subagent` and `subagent_registry` as separate names; omitting the registry name from an explicit child allowlist disables direct registry calls and its snapshot guidance, but not the spawn tool's internal registry preflight.
 
 Parallel mode accepts up to 8 tasks per call with max concurrency 4, rejects exact duplicate agent/task pairs before starting, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs up to 8 steps sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root delegation scope's cancellation signal and accounting. Structural spawn safeguards default to depth 5, 100 starts, and 16 active descendants; exhausting one rejects a new spawn without aborting admitted descendants. Each child runtime receives a wrap-up warning after 80 assistant turns and must return a tool-free final report after its turn 120. A child that tries to keep using tools in that report turn is aborted without affecting parallel siblings. Token, cost, and deadline budgets remain unlimited by default. A host can override the per-runtime thresholds through `SubagentManagerOptions.turnLimits` and tree-wide aggregate limits through `SubagentManagerOptions.delegationLimits`; every field accepts `Number.POSITIVE_INFINITY` explicitly, and setting per-runtime `maxTurns` to it without `warnAtTurns` disables both default turn stages. An unset `warnAtTurns` otherwise clamps to `min(80, maxTurns)` so a smaller explicit cap keeps a consistent warning stage, and an explicit `warnAtTurns` above a finite `maxTurns` is rejected instead of silently never firing. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel and list modes. Details payloads retain at most 100 task entries per snapshot with one shared aggregate output-text byte budget — omitted entries are counted in `summary.omittedTasks` and full output stays reachable through child sessions and the registry — so details stay well under remote frame limits regardless of future cap changes; tool details also store the final tree-budget snapshot.
 
@@ -358,7 +382,7 @@ Host policies registered with `session.registerTurnPolicy({ nextAction })` retur
 
 While `session.abort()` drains cleanup, a shared admission gate prevents new foreground turns, continuations, compaction/tree operations, and native Bash/subagent work. This includes custom messages with `triggerTurn: true` when they would start a turn. Pending reservations cannot restart after the gate reopens. Queue storage, non-triggering custom messages, and job inspection remain available. Admission reopens after cleanup settles, even when abort reports a cleanup error; disposal keeps it closed permanently.
 
-Jobs are runtime- and branch-scoped. Running work and retained output are not recovered after a restart or runtime replacement. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
+Jobs are conversation- and branch-scoped. Running work and retained output are not recovered after a restart or once their conversation closes. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
 
 RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conversationAuthority })`. Results include the owning `sessionId`; ordered responses also carry `branchEpoch`. `getState().backgroundJobs` and conversation bootstraps contain metadata-only snapshots, while `background_jobs_changed` invalidates the list and inspected output even after foreground settlement. RPC inspection does not acknowledge model collection. See [RPC background jobs](rpc.md#background-jobs) for remote grants, cancellation authority, and reconnect semantics.
 
@@ -934,15 +958,7 @@ interface SessionReference {
 Persisted factories and store queries are asynchronous. JSONL paths are explicit snapshot imports only.
 
 ```typescript
-import {
-  type CreateAgentSessionRuntimeFactory,
-  createAgentSession,
-  createAgentSessionFromServices,
-  createAgentSessionRuntime,
-  createAgentSessionServices,
-  getAgentDir,
-  SessionManager,
-} from "@hansjm10/volt-coding-agent";
+import { createAgentSession, SessionManager } from "@hansjm10/volt-coding-agent";
 
 // In-memory (no persistence)
 const { session } = await createAgentSession({
@@ -999,39 +1015,15 @@ try {
 } finally {
   await imported.closePersistence();
 }
-
-// Session replacement API for /clear, /resume, /fork, /clone, and import flows.
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({
-      services,
-      sessionManager,
-      sessionStartEvent,
-    })),
-    services,
-    diagnostics: services.diagnostics,
-  };
-};
-
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
-  sessionManager: await SessionManager.create(process.cwd()),
-});
-
-await runtime.newSession();
-if (selectedRef) await runtime.switchSession(selectedRef);
-await runtime.fork("entry-id");
-await runtime.fork("entry-id", { position: "at" }); // clone through this entry
-await runtime.importFromJsonl("/path/to/session-snapshot.jsonl");
 ```
+
+New-session, resume, fork, clone, and import of a live session go through a `ConversationHost` (see [ConversationHost](#conversationhost)).
 
 `AgentSession.sessionRef` is the current persisted reference, or `undefined` for an in-memory session. `AgentSession.sessionId` is always available.
 
-A persisted session can be open for writing in only one place at a time, across processes and within one process. `SessionManager.create`, `open`, `continueRecent`, `forkFrom` (for the new session), `importFromJsonl`, and `delete` take the session's lock, and closing the manager (`closePersistence()`, or disposing the session or runtime that owns it) releases it. While another host has the session open they throw `ConversationLockedError` (`code: "conversation_locked"`). `SessionManager.openReadOnly` takes no lock and rejects writes. Runtime replacement takes the target's lock before it releases the current session's.
+A persisted session can be open for writing in only one place at a time, across processes and within one process. `SessionManager.create`, `open`, `continueRecent`, `forkFrom` (for the new session), `importFromJsonl`, and `delete` take the session's lock, and closing the manager (`closePersistence()`, or disposing the session or closing the conversation that owns it) releases it. While another host has the session open they throw `ConversationLockedError` (`code: "conversation_locked"`). `SessionManager.openReadOnly` takes no lock and rejects writes. A client's move to another conversation takes the target's lock before the conversation it leaves releases its own.
 
-An OS lock gives no loss signal, so a writer that is no longer the session's only writer finds out when a commit cannot be confirmed: a fence conflict, a missing session, or an outcome that cannot be resolved. The session then ends instead of reloading. `SessionManager.lost`, `AgentSession.lost`, and `AgentSessionRuntime.lost` resolve with the error; the session cancels its work and rejects further writes. Dispose the runtime (which releases the lock), report the error, and reopen the session to continue from what was saved.
+An OS lock gives no loss signal, so a writer that is no longer the session's only writer finds out when a commit cannot be confirmed: a fence conflict, a missing session, or an outcome that cannot be resolved. The session then ends instead of reloading. `SessionManager.lost`, `AgentSession.lost`, and `HostedConversation.lost` resolve with the error; the session cancels its work and rejects further writes. Close the conversation (which releases the lock), report the error, and reopen the session to continue from what was saved.
 
 **SessionManager: catalog and read view**
 
@@ -1266,24 +1258,19 @@ await session.prompt("Get status and list files.");
 
 ## Run Modes
 
-The SDK exports run mode utilities for building custom interfaces on top of `createAgentSession()`:
-
-### InteractiveMode
-
-Full TUI interactive mode with editor, chat history, and all built-in commands:
+The SDK exports run mode utilities for building custom interfaces on top of a `ConversationHost`. Each mode attaches its own client to the conversation it is given and moves in place with that client's session changes. Create the host with the mode's extension mode (`"tui"`, `"print"`, `"json"`, or `"rpc"`). The examples below share this factory and startup conversation:
 
 ```typescript
 import {
-  type CreateAgentSessionRuntimeFactory,
+  type ConversationFactory,
+  ConversationHost,
   createAgentSessionFromServices,
-  createAgentSessionRuntime,
   createAgentSessionServices,
   getAgentDir,
-  InteractiveMode,
   SessionManager,
 } from "@hansjm10/volt-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
   const services = await createAgentSessionServices({ cwd });
   return {
     ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
@@ -1291,13 +1278,24 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
     diagnostics: services.diagnostics,
   };
 };
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
+const host = new ConversationHost({ factory, agentDir: getAgentDir(), extensionMode: "tui" });
+const opened = await host.open({
+  kind: "adopt",
   sessionManager: await SessionManager.create(process.cwd()),
+  cwd: process.cwd(),
 });
+if (opened.cancelled) throw new Error("cancelled");
+const conversation = opened.conversation;
+```
 
-const mode = new InteractiveMode(runtime, {
+### InteractiveMode
+
+Full TUI interactive mode with editor, chat history, and all built-in commands. It anchors the conversation it shows and closes the host's conversations when it quits:
+
+```typescript
+import { InteractiveMode } from "@hansjm10/volt-coding-agent";
+
+const mode = new InteractiveMode(host, conversation, {
   migratedProviders: [],
   modelFallbackMessage: undefined,
   initialMessage: "Hello",
@@ -1310,34 +1308,12 @@ await mode.run();
 
 ### runPrintMode
 
-Single-shot mode: send prompts, output result, exit:
+Single-shot mode: send prompts, output result, close the conversation it ends on, exit (host `extensionMode: "print"` or `"json"`):
 
 ```typescript
-import {
-  type CreateAgentSessionRuntimeFactory,
-  createAgentSessionFromServices,
-  createAgentSessionRuntime,
-  createAgentSessionServices,
-  getAgentDir,
-  runPrintMode,
-  SessionManager,
-} from "@hansjm10/volt-coding-agent";
+import { runPrintMode } from "@hansjm10/volt-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
-};
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
-  sessionManager: await SessionManager.create(process.cwd()),
-});
-
-await runPrintMode(runtime, {
+await runPrintMode(host, conversation, {
   mode: "text",
   initialMessage: "Hello",
   initialImages: [],
@@ -1347,66 +1323,22 @@ await runPrintMode(runtime, {
 
 ### runRpcMode
 
-JSON-RPC mode for subprocess or custom transport integration:
+JSON-RPC mode for subprocess or custom transport integration (host `extensionMode: "rpc"`). The RPC client anchors its conversation by default (`anchor: true`): the conversation closes when the mode ends, and the mode ends when its conversation loses its log. Pass `anchor: false` when the host keeps the conversation open for other clients.
 
 ```typescript
-import {
-  type CreateAgentSessionRuntimeFactory,
-  createAgentSessionFromServices,
-  createAgentSessionRuntime,
-  createAgentSessionServices,
-  getAgentDir,
-  runRpcMode,
-  SessionManager,
-} from "@hansjm10/volt-coding-agent";
+import { runRpcMode } from "@hansjm10/volt-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
-};
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
-  sessionManager: await SessionManager.create(process.cwd()),
-});
-
-await runRpcMode(runtime);
+await runRpcMode(host, conversation);
 ```
 
 For same-process RPC clients, use the in-memory transport adapter:
 
 ```typescript
-import {
-  createInProcessRpcClient,
-  type CreateAgentSessionRuntimeFactory,
-  createAgentSessionFromServices,
-  createAgentSessionRuntime,
-  createAgentSessionServices,
-  getAgentDir,
-  SessionManager,
-} from "@hansjm10/volt-coding-agent";
+import { createInProcessRpcClient } from "@hansjm10/volt-coding-agent";
 
-const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-  const services = await createAgentSessionServices({ cwd });
-  return {
-    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
-    services,
-    diagnostics: services.diagnostics,
-  };
-};
-const runtime = await createAgentSessionRuntime(createRuntime, {
-  cwd: process.cwd(),
-  agentDir: getAgentDir(),
-  sessionManager: await SessionManager.create(process.cwd()),
-});
-
-const client = await createInProcessRpcClient(runtime);
+const client = await createInProcessRpcClient(host, conversation);
 const state = await client.getState();
-await client.stop(); // also disposes the runtime through RPC mode shutdown
+await client.stop(); // also closes the conversation through RPC mode shutdown
 ```
 
 For custom transports, pass any `RpcTransport` to `RpcTransportClient`. This is the client-side adapter used by non-stdio transports such as Iroh streams.
@@ -1441,9 +1373,19 @@ The main entry point exports:
 ```typescript
 // Factory
 createAgentSession
-createAgentSessionRuntime
-AgentSessionRuntime
 SubagentManager
+
+// Conversation host
+ConversationHost
+HostedConversation
+type ConversationFactory
+type HostClient
+openNewSession
+openStoredSession
+openStoredSessionById
+openFork
+openImport
+executePlan
 
 // RPC clients and transports
 RpcClient

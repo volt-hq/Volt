@@ -204,7 +204,14 @@ export interface CreateAgentSessionResult {
 
 // Re-exports
 
-export * from "./agent-session-runtime.ts";
+export {
+	type AgentSessionDiagnostic,
+	type AgentSessionServices,
+	type CreateAgentSessionFromServicesOptions,
+	type CreateAgentSessionServicesOptions,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
+} from "./agent-session-services.ts";
 export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -214,6 +221,45 @@ export type {
 	SlashCommandSource,
 	ToolDefinition,
 } from "./extensions/index.ts";
+export { ClientScope } from "./host/client-scope.ts";
+export {
+	ConversationHost,
+	type ConversationHostOptions,
+	type OpenConversationOptions,
+	type OpenConversationResult,
+	type OpenForResult,
+	PinnedConversationError,
+	SessionImportFileNotFoundError,
+	type WhenUnattached,
+} from "./host/conversation-host.ts";
+export {
+	type ConversationFactory,
+	type ConversationFactoryResult,
+	type ConversationLifetime,
+	type ConversationTranscriptCommittedEvent,
+	HostedConversation,
+	isConversationTranscriptCommittedEvent,
+	type SubagentRuntimeContext,
+} from "./host/hosted-conversation.ts";
+export { executePlan } from "./host/plan-handoff.ts";
+export {
+	type ForkIntentResult,
+	type NewSessionIntentOptions,
+	openFork,
+	openImport,
+	openNewSession,
+	openStoredSession,
+	openStoredSessionById,
+	type SwitchSessionIntentOptions,
+} from "./host/session-intents.ts";
+export type { WorkspaceSessionSummary } from "./host/session-summaries.ts";
+export type {
+	ConversationTarget,
+	HostClient,
+	HostClientMove,
+	HostedRedirect,
+	RedirectTarget,
+} from "./host/targets.ts";
 export type { PromptTemplate } from "./prompt-templates.ts";
 export type { SessionReference } from "./session-manager.ts";
 export type { Skill } from "./skills.ts";
@@ -300,7 +346,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 }
 
-/** @internal The enclosing AgentSessionRuntime factory owns manager cleanup until this returns. */
+/** @internal The enclosing conversation factory's host owns manager cleanup until this returns. */
 export async function createAgentSessionForRuntime(
 	options: CreateAgentSessionOptions & { sessionManager: SessionManager },
 ): Promise<CreateAgentSessionResult> {

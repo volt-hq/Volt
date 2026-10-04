@@ -1,10 +1,10 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { expect, test, vi } from "vitest";
 import type { AgentSessionEventListener } from "../../../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import {
+	createTestConversation,
 	createTestIrohConversationOptions,
 	ManualIrohRecvStream,
 	ManualIrohSendStream,
@@ -49,19 +49,14 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 	});
 	const recv = new ManualIrohRecvStream();
 	const send = new BlockingFinishIrohSendStream();
-	const runtimeHost = {
+	// The conversation's projection feed subscribes to the session as it opens.
+	const { host, conversation } = createTestConversation(harness.session, {
 		cwd: harness.tempDir,
-		dispose: vi.fn(async () => {}),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		services: { agentDir: harness.tempDir },
-		session: harness.session,
-		setRebindSession: vi.fn(),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-	} as unknown as AgentSessionRuntime;
-	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
-		...createTestIrohConversationOptions(runtimeHost),
-		disposeRuntimeOnClose: false,
+		agentDir: harness.tempDir,
+	});
+	const modePromise = runIrohRemoteRpcMode(host, conversation, {
+		...createTestIrohConversationOptions(conversation),
+		anchor: false,
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 		stream: { recv, send },
 		workspacePath: harness.tempDir,

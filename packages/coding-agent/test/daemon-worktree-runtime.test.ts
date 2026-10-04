@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import type { AgentSessionRuntime, RedirectViewOptions } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -12,8 +11,12 @@ import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/re
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
-import { createConversationOpenError, IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
-import { createTestSession } from "./iroh-stream-doubles.ts";
+import {
+	createConversationOpenError,
+	type IntegratedRuntimeEntry,
+	IntegratedRuntimeRegistry,
+} from "../src/daemon/integrated-runtimes.ts";
+import { createTestDaemonRuntime, createTestSession } from "./iroh-stream-doubles.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 
 const realpathSync = nodeRealpathSync.native;
@@ -99,17 +102,10 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		bindWorktreeSession?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["bindWorktreeSession"];
 	}) {
 		const createRuntimeCalls: CreateRuntimeOptions[] = [];
-		let hostTarget: RedirectViewOptions["hostTarget"];
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			session: createTestSession(options.sessionId, null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			attachRedirectClient: vi.fn((viewOptions: RedirectViewOptions) => {
-				hostTarget = viewOptions.hostTarget;
-				return runtime;
-			}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const selectionKind = options.selectionKind ?? "created";
 		const setClientLastSessionId = vi.fn(async () => undefined);
 		const registry = new IntegratedRuntimeRegistry({
@@ -123,7 +119,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			setClientLastSessionId,
 			createRuntime: async (runtimeOptions) => {
 				createRuntimeCalls.push(runtimeOptions);
-				(runtime as AgentSessionRuntime & { cwd: string }).cwd = runtimeOptions.cwd;
+				(runtime.conversation as { cwd: string }).cwd = runtimeOptions.cwd;
 				return {
 					runtime,
 					sessionSelection:
@@ -146,17 +142,27 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			registry,
 			createRuntimeCalls,
 			setClientLastSessionId,
-			/** The runtime the phone's structural intent opened, as the view hands it to the daemon. */
-			moveTo: (sessionId: string, cwd: string) => {
-				const moved = {
-					session: createTestSession(sessionId, null),
-					cwd,
-					dispose: vi.fn(async () => {}),
-					listSessions: vi.fn(async () => []),
-				} as unknown as AgentSessionRuntime;
-				const host = hostTarget;
-				if (!host) throw new Error("No stream view was attached");
-				return { moved, hosted: host({ sessionId, runtime: moved }).then((hosted) => hosted.commit()) };
+			/**
+			 * The conversation a phone's structural intent on `source` opened in the
+			 * source's host, as the phone's stream hands it to the daemon, and its close.
+			 */
+			moveTo: (source: IntegratedRuntimeEntry, sessionId: string, cwd: string) => {
+				const close = vi.fn(async () => {});
+				const { conversation } = createTestDaemonRuntime(
+					{
+						session: createTestSession(sessionId, null),
+						cwd,
+						close,
+						listSessions: vi.fn(async () => []),
+					},
+					runtime.host,
+				);
+				const { hostTarget } = registry.streamRedirect(source, authorization);
+				if (!hostTarget) throw new Error("The phone's stream does not host its moves");
+				return {
+					moved: { conversation, close },
+					hosted: hostTarget({ sessionId, conversation }).then((hosted) => hosted.commit()),
+				};
 			},
 		};
 	}
@@ -168,7 +174,6 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		const created = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
 		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
 		created.attachClaim.release();
-		registry.attachStreamView(created.entry, authorization);
 		return created.entry;
 	}
 
@@ -432,7 +437,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		bindWorktreeSession.mockClear();
 		setClientLastSessionId.mockClear();
 
-		const { hosted } = moveTo("s-wt-new", worktreePath);
+		const { hosted } = moveTo(source, "s-wt-new", worktreePath);
 		await hosted;
 
 		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "s-wt-new");
@@ -465,13 +470,13 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		const source = await publishSource(registry, createConversationHello({ target: "new", worktreeId: "fix-login" }));
 		setClientLastSessionId.mockClear();
 
-		const { moved, hosted } = moveTo("s-wt-new", worktreePath);
+		const { moved, hosted } = moveTo(source, "s-wt-new", worktreePath);
 		await expect(hosted).rejects.toThrow("bind failed");
 
 		expect(registry.findOwner("ws", "s-wt-new")).toBeUndefined();
 		expect(registry.findOwner("ws", "s-wt")).toBe(source);
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
-		expect(moved.dispose).toHaveBeenCalled();
+		expect(moved.close).toHaveBeenCalled();
 		await registry.stopAll("test_cleanup");
 	});
 
@@ -502,9 +507,9 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			resolveWorktree: async () => undefined,
 			bindWorktreeSession,
 		});
-		await publishSource(registry, createConversationHello({ target: "new" }));
+		const plainSource = await publishSource(registry, createConversationHello({ target: "new" }));
 
-		await moveTo("s-plain-new", workspacePath).hosted;
+		await moveTo(plainSource, "s-plain-new", workspacePath).hosted;
 
 		expect(bindWorktreeSession).not.toHaveBeenCalled();
 		expect(registry.findOwner("ws", "s-plain-new")).toMatchObject({ lifecycle: "active" });
@@ -514,13 +519,13 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 
 	it("refuses a new session whose cwd leaves the source's workspace", async () => {
 		const { registry, moveTo } = createRegistry({ sessionId: "s-plain", resolveWorktree: async () => undefined });
-		await publishSource(registry, createConversationHello({ target: "new" }));
+		const escapingSource = await publishSource(registry, createConversationHello({ target: "new" }));
 
-		const { moved, hosted } = moveTo("s-escaped", worktreePath);
+		const { moved, hosted } = moveTo(escapingSource, "s-escaped", worktreePath);
 		await expect(hosted).rejects.toMatchObject({ outcome: "session_unavailable" });
 
 		expect(registry.findOwner("ws", "s-escaped")).toBeUndefined();
-		expect(moved.dispose).not.toHaveBeenCalled();
+		expect(moved.close).not.toHaveBeenCalled();
 		await registry.stopAll("test_cleanup");
 	});
 

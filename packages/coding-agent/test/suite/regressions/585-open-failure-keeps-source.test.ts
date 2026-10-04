@@ -1,10 +1,10 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
 import { MissingSessionCwdError } from "../../../src/core/session-cwd.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
+import { connectTestClient, openTestHost } from "../../utilities/host-client.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "../host-harness.ts";
 
 describe("regression #585: a failed open keeps the client on its source", () => {
@@ -103,24 +103,19 @@ describe("regression #585: a failed open keeps the client on its source", () => 
 		await reopened.closePersistence();
 	});
 
-	it("keeps the runtime on its session when a switch fails to open", async () => {
+	it("keeps an in-place client on its session when its switch intent fails to open", async () => {
 		const harness = await createHostHarness();
 		harnesses.push(harness);
-		const runtime = await createAgentSessionRuntime(harness.factory, {
+		const { host, conversation } = await openTestHost(harness.factory, {
 			cwd: harness.tempDir,
 			agentDir: harness.tempDir,
 			sessionManager: await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions")),
 		});
-		const rebind = vi.fn(async () => {
-			await runtime.session.attachExtensionClient({ id: "tui", mode: "print" }).ready;
-		});
-		runtime.setRebindSession(rebind);
-		await rebind();
-		rebind.mockClear();
+		const prepare = vi.fn();
+		const onMoved = vi.fn();
+		const runtime = await connectTestClient(host, conversation, { surface: {}, prepare, onMoved });
 		const source = runtime.session;
 		await source.prompt("before the failed switch");
-		const invalidated = vi.fn();
-		runtime.setBeforeSessionInvalidate(invalidated);
 		const holder = await storedSession(harness);
 		harness.events.length = 0;
 
@@ -133,8 +128,9 @@ describe("regression #585: a failed open keeps the client on its source", () => 
 		}
 
 		expect(runtime.session).toBe(source);
-		expect(invalidated).not.toHaveBeenCalled();
-		expect(rebind).not.toHaveBeenCalled();
+		expect(host.conversationOf(runtime.client)).toBe(conversation);
+		expect(prepare).not.toHaveBeenCalled();
+		expect(onMoved).not.toHaveBeenCalled();
 		expect(harness.events.map((event) => event.type)).toEqual(["session_before_switch"]);
 		await source.prompt("after the failed switch");
 		expect(source.messages.filter((message) => message.role === "user")).toHaveLength(2);

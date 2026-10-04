@@ -6,9 +6,9 @@ import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import type { ResolvedCommand } from "../src/core/extensions/types.ts";
+import type { ResolvedCommand, SessionIntentResult } from "../src/core/extensions/types.ts";
+import { openNewSession } from "../src/core/host/session-intents.ts";
 import {
 	AGENT_MODE_ACTION_ID,
 	CONTEXT_AUTO_COMPACTION_ACTION_ID,
@@ -56,6 +56,17 @@ import { RpcClientBase } from "../src/modes/rpc/rpc-client-base.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
 import { createTestModel } from "./iroh-stream-doubles.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+
+// The modes' structural intents run through the host's session intents; these
+// tests stand in for them with the fake runtime's `newSession`.
+vi.mock("../src/core/host/session-intents.ts", () => ({
+	openFork: vi.fn(async () => ({ cancelled: true })),
+	openImport: vi.fn(async () => ({ cancelled: true })),
+	openNewSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSessionById: vi.fn(async () => ({ cancelled: true })),
+}));
 
 describe("loopback RPC transport", () => {
 	test("buffers writes until a peer line handler attaches and preserves JSON string separators", () => {
@@ -853,7 +864,10 @@ describe("runRpcMode", () => {
 			}
 			await uiContext.confirm("Startup", "Continue?");
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport: pair.server, exitProcess: false });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport: pair.server,
+			exitProcess: false,
+		});
 		void modePromise.catch(() => {});
 
 		await startupRequest;
@@ -884,7 +898,7 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport, exitProcess: false });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
 		void modePromise.catch(() => {});
 		let modeSettled = false;
 		void modePromise.then(
@@ -937,7 +951,7 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport, exitProcess: false });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
 		void modePromise.catch(() => {});
 		let modeSettled = false;
 		void modePromise.then(
@@ -993,7 +1007,7 @@ describe("runRpcMode", () => {
 			transport: pair.server,
 			waitForPromptCompletion: () => Promise.resolve(),
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport, exitProcess: false });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
 		void modePromise.catch(() => {});
 
 		await startupRequest;
@@ -1044,7 +1058,10 @@ describe("runRpcMode", () => {
 			responses.push(JSON.parse(line) as Record<string, unknown>);
 		});
 		const runtimeHost = createRuntimeHost(dispose);
-		const modePromise = runRpcMode(runtimeHost, { transport: pair.server, exitProcess: false });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport: pair.server,
+			exitProcess: false,
+		});
 
 		pair.client.write({ id: 1, type: "get_state" });
 		await vi.waitFor(() => {
@@ -1166,7 +1183,7 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost, {
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			allowUiActionInvocation: true,
 			exitProcess: false,
 			requireRemoteSafeUiActions: true,
@@ -1398,7 +1415,7 @@ describe("createInProcessRpcClient", () => {
 	test("runs RPC mode against a runtime in the same process", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		await expect(client.getState()).resolves.toMatchObject({
 			thinkingLevel: "off",
@@ -1425,7 +1442,7 @@ describe("createInProcessRpcClient", () => {
 			setModel,
 			setThinkingLevel,
 		});
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1460,7 +1477,7 @@ describe("createInProcessRpcClient", () => {
 			activeAgentRun: { startedAt: 1_782_470_400_000 },
 			isStreaming: true,
 		});
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1479,7 +1496,7 @@ describe("createInProcessRpcClient", () => {
 			activeCompaction: { reason: "threshold", startedAt: 1_782_470_400_000 },
 			isCompacting: true,
 		});
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1505,7 +1522,7 @@ describe("createInProcessRpcClient", () => {
 			newSession,
 			setSessionName,
 		});
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getUiCapabilities()).resolves.toEqual({
@@ -1772,7 +1789,7 @@ describe("createInProcessRpcClient", () => {
 			model: createModel({ reasoning: true }),
 			thinkingLevel: "high",
 		});
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 		const fastStates: RpcUiActionStateChangedEvent["state"][] = [];
 		client.onEvent((event) => {
 			if (event.type === "ui_action_state_changed") fastStates.push(event.state);
@@ -1840,7 +1857,7 @@ describe("createInProcessRpcClient", () => {
 	test("routes review action invocation through RPC built-in actions", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, { cwd: tmpdir() });
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -1901,7 +1918,7 @@ describe("createInProcessRpcClient", () => {
 		];
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, { commands, prompts, skills });
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2031,7 +2048,7 @@ describe("createInProcessRpcClient", () => {
 		};
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, resources);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2104,7 +2121,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			{ cwd: repo },
 		);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2136,7 +2153,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			{ cwd: noRepoDir },
 		);
-		const noRepoClient = await createInProcessRpcClient(noRepoRuntimeHost);
+		const noRepoClient = await createInProcessRpcClient(noRepoRuntimeHost.host, noRepoRuntimeHost.conversation);
 		try {
 			await expect(noRepoClient.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "")).resolves.toEqual([]);
 		} finally {
@@ -2170,7 +2187,7 @@ describe("createInProcessRpcClient", () => {
 				prompt,
 			},
 		);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2216,7 +2233,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			resources,
 		);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2258,7 +2275,7 @@ describe("createInProcessRpcClient", () => {
 				uiContext = client.ui;
 			},
 		);
-		const client = await createInProcessRpcClient(runtimeHost);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const boundUiContext = uiContext;
@@ -2304,7 +2321,7 @@ describe("createInProcessRpcClient", () => {
 			}
 		});
 
-		const client = await createInProcessRpcClient(runtimeHost, {
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation, {
 			onEvent(event, pendingClient) {
 				if (event.type === "extension_ui_request" && event.method === "confirm") {
 					const responsePromise = pendingClient.sendExtensionUIResponse({
@@ -2334,7 +2351,7 @@ describe("createInProcessRpcClient", () => {
 			throw bindError;
 		});
 
-		await expect(createInProcessRpcClient(runtimeHost)).rejects.toBe(bindError);
+		await expect(createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation)).rejects.toBe(bindError);
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
@@ -2349,8 +2366,9 @@ describe("createInProcessRpcClient", () => {
 		});
 
 		try {
-			const thrown = await createInProcessRpcClient(createRuntimeHost(dispose), {
-				disposeRuntimeOnClose: true,
+			const owned = createRuntimeHost(dispose);
+			const thrown = await createInProcessRpcClient(owned.host, owned.conversation, {
+				anchor: true,
 				onEvent: () => undefined,
 			}).catch((error: unknown) => error);
 
@@ -2371,9 +2389,10 @@ describe("createInProcessRpcClient", () => {
 		});
 
 		try {
+			const retained = createRuntimeHost(dispose);
 			await expect(
-				createInProcessRpcClient(createRuntimeHost(dispose), {
-					disposeRuntimeOnClose: false,
+				createInProcessRpcClient(retained.host, retained.conversation, {
+					anchor: false,
 					onEvent: () => undefined,
 				}),
 			).rejects.toBe(constructionError);
@@ -2449,7 +2468,7 @@ function createRuntimeHost(
 		availableModels?: Model<Api>[];
 		availableThinkingLevels?: ThinkingLevel[];
 		setModel?: (model: Model<Api>, options?: { persistDefault?: boolean }) => Promise<void>;
-		newSession?: (options?: { parentSession?: string }) => Promise<{ cancelled: boolean }>;
+		newSession?: (options?: object) => Promise<{ cancelled: boolean }>;
 		prompt?: (message: string, options?: PromptOptions) => Promise<void>;
 		prompts?: PromptTemplate[];
 		thinkingLevel?: ThinkingLevel;
@@ -2459,7 +2478,7 @@ function createRuntimeHost(
 		setSessionName?: (name: string) => void;
 		skills?: Skill[];
 	} = {},
-): AgentSessionRuntime {
+) {
 	let fastModeEnabled = resources.fastModeEnabled ?? false;
 	let thinkingLevel = resources.thinkingLevel ?? "off";
 	let currentModel = resources.model;
@@ -2496,94 +2515,96 @@ function createRuntimeHost(
 			},
 		});
 	});
-	return {
+	// The session.new action reaches the host's new-session intent, which the fake runtime answers.
+	const newSession = resources.newSession ?? vi.fn(async () => ({ cancelled: true }));
+	vi.mocked(openNewSession).mockImplementation(async (_host, _client, options) => {
+		return (await newSession(options)) as SessionIntentResult;
+	});
+	const session = {
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+		attachExtensionClient: vi.fn((client: ExtensionClient) => ({
+			ready: attachExtensions(client),
+			detach: () => {},
+		})),
+		gitContextProvider: {
+			getSnapshot: () => null,
+			retainObservation: () => () => undefined,
+		},
+		subscribe: vi.fn((listener: (event: AgentSessionEvent) => void) => {
+			sessionListeners.add(listener);
+			return () => sessionListeners.delete(listener);
+		}),
+		activeToolExecutions: new Map(),
+		subscribeRuntimeEvents: vi.fn(() => () => {}),
+		get activeAgentRun() {
+			return resources.activeAgentRun;
+		},
+		get activeCompaction() {
+			return resources.activeCompaction;
+		},
+		get model() {
+			return currentModel;
+		},
+		get thinkingLevel() {
+			return thinkingLevel;
+		},
+		getAvailableThinkingLevels: vi.fn(() => resources.availableThinkingLevels ?? ["off"]),
+		setModel: vi.fn(async (model: Model<Api>, options?: { persistDefault?: boolean }) => {
+			currentModel = model;
+			await resources.setModel?.(model, options);
+		}),
+		get fastModeEnabled() {
+			return fastModeEnabled;
+		},
+		isStreaming: resources.isStreaming ?? false,
+		isBusy: resources.isStreaming ?? false,
+		isCompacting: resources.isCompacting ?? false,
+		steeringMode: "one-at-a-time",
+		followUpMode: "one-at-a-time",
+		sessionFile: undefined,
+		sessionId: "in-process-session",
+		sessionName: undefined,
+		autoCompactionEnabled: true,
+		messages: [],
+		pendingMessageCount: 0,
+		prompt:
+			resources.prompt ??
+			vi.fn(async (_message: string, options?: PromptOptions) => {
+				options?.preflightResult?.({ success: true, outcome: "admitted" });
+			}),
+		extensionRunner: {
+			getRegisteredCommands: vi.fn(() => resources.commands ?? []),
+			getCommand: vi.fn((name: string) =>
+				(resources.commands ?? []).find((command) => command.invocationName === name || command.name === name),
+			),
+		},
+		sessionManager: {
+			flush: vi.fn(async () => {}),
+			getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
+			getPrReviewBinding: vi.fn(() => undefined),
+			getSessionRef: vi.fn(() => undefined),
+			getStartingGitContext: vi.fn(() => undefined),
+		},
+		promptTemplates: resources.prompts ?? [],
+		modelRegistry,
+		settingsManager,
+		resourceLoader,
+		sendCustomMessage: vi.fn(async () => {}),
+		abort: resources.abort ?? vi.fn(async () => {}),
+		compact: resources.compact ?? vi.fn(async () => createCompactionResult()),
+		setThinkingLevel,
+		setFastModeEnabled,
+		setSessionName: resources.setSessionName ?? vi.fn(() => {}),
+	};
+	const fake = createFakeHost({ onClose: dispose });
+	const { conversation } = createFakeConversation(session, {
 		cwd: resources.cwd ?? tmpdir(),
 		services: {
 			agentDir: resources.agentDir ?? tmpdir(),
 		},
-		session: {
-			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			attachExtensionClient: vi.fn((client: ExtensionClient) => ({
-				ready: attachExtensions(client),
-				detach: () => {},
-			})),
-			gitContextProvider: {
-				getSnapshot: () => null,
-				retainObservation: () => () => undefined,
-			},
-			subscribe: vi.fn((listener: (event: AgentSessionEvent) => void) => {
-				sessionListeners.add(listener);
-				return () => sessionListeners.delete(listener);
-			}),
-			activeToolExecutions: new Map(),
-			subscribeRuntimeEvents: vi.fn(() => () => {}),
-			get activeAgentRun() {
-				return resources.activeAgentRun;
-			},
-			get activeCompaction() {
-				return resources.activeCompaction;
-			},
-			get model() {
-				return currentModel;
-			},
-			get thinkingLevel() {
-				return thinkingLevel;
-			},
-			getAvailableThinkingLevels: vi.fn(() => resources.availableThinkingLevels ?? ["off"]),
-			setModel: vi.fn(async (model: Model<Api>, options?: { persistDefault?: boolean }) => {
-				currentModel = model;
-				await resources.setModel?.(model, options);
-			}),
-			get fastModeEnabled() {
-				return fastModeEnabled;
-			},
-			isStreaming: resources.isStreaming ?? false,
-			isBusy: resources.isStreaming ?? false,
-			isCompacting: resources.isCompacting ?? false,
-			steeringMode: "one-at-a-time",
-			followUpMode: "one-at-a-time",
-			sessionFile: undefined,
-			sessionId: "in-process-session",
-			sessionName: undefined,
-			autoCompactionEnabled: true,
-			messages: [],
-			pendingMessageCount: 0,
-			prompt:
-				resources.prompt ??
-				vi.fn(async (_message: string, options?: PromptOptions) => {
-					options?.preflightResult?.({ success: true, outcome: "admitted" });
-				}),
-			extensionRunner: {
-				getRegisteredCommands: vi.fn(() => resources.commands ?? []),
-				getCommand: vi.fn((name: string) =>
-					(resources.commands ?? []).find((command) => command.invocationName === name || command.name === name),
-				),
-			},
-			sessionManager: {
-				flush: vi.fn(async () => {}),
-				getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
-				getPrReviewBinding: vi.fn(() => undefined),
-				getSessionRef: vi.fn(() => undefined),
-				getStartingGitContext: vi.fn(() => undefined),
-			},
-			promptTemplates: resources.prompts ?? [],
-			modelRegistry,
-			settingsManager,
-			resourceLoader,
-			sendCustomMessage: vi.fn(async () => {}),
-			abort: resources.abort ?? vi.fn(async () => {}),
-			compact: resources.compact ?? vi.fn(async () => createCompactionResult()),
-			setThinkingLevel,
-			setFastModeEnabled,
-			setSessionName: resources.setSessionName ?? vi.fn(() => {}),
-		},
-		newSession: resources.newSession ?? vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		startRecoveredClientInputs: vi.fn(async () => {}),
-		dispose,
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+	});
+	return { ...fake, session, conversation };
 }
 
 function gitInTestRepo(cwd: string, ...args: string[]): void {

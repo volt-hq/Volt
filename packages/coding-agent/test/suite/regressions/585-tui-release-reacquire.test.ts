@@ -1,7 +1,9 @@
 import { setKeybindings, type TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { ConversationLock } from "../../../src/core/conversation-log/conversation-lock.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import type { HostClient } from "../../../src/core/host/targets.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
@@ -13,6 +15,7 @@ import {
 	type DaemonLeaseWait,
 } from "../../../src/modes/interactive/daemon-attach.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { connectTestClient, type TestClient } from "../../utilities/host-client.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 
 type Outcomes = Map<string, () => AcquireOutcome>;
@@ -36,7 +39,9 @@ function fakeAttach(steps: string[], outcomes: Outcomes): DaemonAttach {
 }
 
 interface ModeDouble {
-	runtimeHost: AgentSessionRuntime;
+	host: ConversationHost;
+	client: HostClient;
+	readonly conversation: HostedConversation;
 	daemonLeaseTail: Promise<void>;
 	daemonRelayServers: Map<Promise<void>, string>;
 	showError: ReturnType<typeof vi.fn>;
@@ -54,28 +59,34 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	let steps: string[];
 	let outcomes: Outcomes;
 	let fixture: ExtensionRuntime;
+	/** The TUI's client of its host: its surface moves with it. */
+	let runtime: TestClient;
 	let mode: ModeDouble;
 
 	beforeEach(async () => {
 		steps = [];
 		outcomes = new Map();
-		fixture = await createExtensionRuntime((volt) => {
-			volt.on("session_start", (_event, ctx) => {
-				steps.push(`start:${ctx.sessionManager.getSessionId()}`);
-			});
-			volt.on("session_shutdown", (_event, ctx) => {
-				steps.push(`shutdown:${ctx.sessionManager.getSessionId()}`);
-			});
-		});
+		fixture = await createExtensionRuntime(
+			(volt) => {
+				volt.on("session_start", (_event, ctx) => {
+					steps.push(`start:${ctx.sessionManager.getSessionId()}`);
+				});
+				volt.on("session_shutdown", (_event, ctx) => {
+					steps.push(`shutdown:${ctx.sessionManager.getSessionId()}`);
+				});
+			},
+			{ extensionMode: "tui" },
+		);
 		cleanups.push(() => fixture.dispose());
-		const { runtime } = fixture;
-		// The TUI's extension surface moves with it, as its rebind hook does.
-		runtime.setRebindSession(async (session) => {
-			await session.attachExtensionClient({ id: "tui", mode: "tui" }).ready;
-		});
-		await runtime.session.attachExtensionClient({ id: "tui", mode: "tui" }).ready;
-		mode = Object.assign(Object.create(InteractiveMode.prototype) as object, {
-			runtimeHost: runtime,
+		const tui = await connectTestClient(fixture.host, fixture.conversation, { id: "tui", surface: {} });
+		runtime = tui;
+		const fields = {
+			host: fixture.host,
+			client: tui.client,
+			// The conversation the TUI shows follows its client's moves.
+			get conversation() {
+				return tui.conversation;
+			},
 			options: { daemonAttach: fakeAttach(steps, outcomes) },
 			daemonWorkObservation: { bind: vi.fn(), dispose: vi.fn() },
 			daemonRelayServers: new Map<Promise<void>, string>(),
@@ -90,7 +101,11 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 			updatePhoneFooterIndicator: vi.fn(),
 			createProjectTrustContext: (cwd: string) => ({ cwd, mode: "tui", hasUI: false }),
 			showDaemonLeaseWait: () => () => {},
-		}) as ModeDouble;
+		};
+		mode = Object.defineProperties(
+			Object.create(InteractiveMode.prototype),
+			Object.getOwnPropertyDescriptors(fields),
+		) as ModeDouble;
 		await call(mode, "initDaemonAttach");
 		steps.splice(0);
 	});
@@ -100,10 +115,7 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	async function storedSession(): Promise<SessionReference> {
-		const manager = await SessionManager.create(
-			fixture.tempDir,
-			fixture.runtime.session.sessionManager.getSessionDir(),
-		);
+		const manager = await SessionManager.create(fixture.tempDir, runtime.session.sessionManager.getSessionDir());
 		await manager.logWriter.appendSessionInfo("stored");
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("the session is not stored");
@@ -112,7 +124,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	}
 
 	it("on /new, releases the session it left once it closed and its relayed phones ended, then acquires the new one", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const relay = Promise.withResolvers<void>();
 		mode.daemonRelayServers.set(relay.promise, source);
@@ -135,7 +146,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	it("on /resume, acquires the target before opening it, then releases the session it left", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const target = await storedSession();
 
@@ -155,7 +165,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	it("shows an error and stays when the target is open for writing elsewhere, handing its lease back", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const target = await storedSession();
 		const elsewhere = ConversationLock.acquire(target.sessionDirectory, target.sessionId);
@@ -172,7 +181,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	it("points the daemon back at the session it shows when a resume took no lease and failed", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const target = await storedSession();
 		outcomes.set(target.sessionId, () => ({ kind: "noop" }));
@@ -185,7 +193,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	it("shows an error and opens nothing when another TUI holds the target's lease", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const target = await storedSession();
 		outcomes.set(target.sessionId, () => ({ kind: "denied", reason: "held_by_tui" }));
@@ -201,7 +208,6 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 	});
 
 	it("waits in the TUI for the daemon's turn: stopping it opens the session, cancelling keeps the current one", async () => {
-		const { runtime } = fixture;
 		const source = runtime.session.sessionId;
 		const cancelled = await storedSession();
 		outcomes.set(cancelled.sessionId, () => ({

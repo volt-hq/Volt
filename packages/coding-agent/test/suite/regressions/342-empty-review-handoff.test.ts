@@ -2,17 +2,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import {
 	registerDurableReviewAnchor,
 	registerReviewHandoffAliases,
 	resolveCanonicalReviewSource,
 } from "../../../src/core/review-anchors.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -25,14 +22,14 @@ async function fixture() {
 	const directory = join(root, "sessions");
 	const managers: SessionManager[] = [];
 	const harnesses: Harness[] = [];
-	let runtime: AgentSessionRuntime | undefined;
+	let client: TestClient | undefined;
 	cleanups.push(async () => {
-		await runtime?.dispose();
+		await client?.host.dispose();
 		for (const manager of managers) await manager.closePersistence();
 		for (const harness of harnesses) await harness.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const h = await createHarness({ sessionManager, settings: { lsp: { enabled: false } } });
 		harnesses.push(h);
 		return {
@@ -56,23 +53,24 @@ async function fixture() {
 	};
 	const source = await SessionManager.create(root, directory);
 	managers.push(source);
-	runtime = await createAgentSessionRuntime(factory, { sessionManager: source, cwd: root, agentDir: root });
-	return { root, directory, source, runtime, managers };
+	const opened = await openTestHost(factory, { sessionManager: source, cwd: root, agentDir: root });
+	client = await connectTestClient(opened.host, opened.conversation);
+	return { root, directory, source, client, managers };
 }
 
 describe("#342 empty review handoffs", () => {
 	it("creates a new session in another store without transferring review runs", async () => {
-		const { root, source, runtime } = await fixture();
+		const { root, source, client } = await fixture();
 		const original = source.getSessionRef()!;
 		const sessionDir = join(root, "other-store");
-		await expect(runtime.newSession({ sessionDir })).resolves.toEqual({
+		await expect(client.newSession({ sessionDir })).resolves.toEqual({
 			cancelled: false,
 			sessionId: expect.any(String),
 			seeded: false,
 		});
-		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
-		expect(runtime.session.sessionRef!.storeId).not.toBe(original.storeId);
-		expect(runtime.session.sessionId).not.toBe(original.sessionId);
+		expect(client.session.sessionManager.getSessionDir()).toBe(sessionDir);
+		expect(client.session.sessionRef!.storeId).not.toBe(original.storeId);
+		expect(client.session.sessionId).not.toBe(original.sessionId);
 	});
 
 	it("allows empty cross-store handoffs but rejects actual review linkage", async () => {

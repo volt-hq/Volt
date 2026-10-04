@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime, RedirectViewOptions } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -18,7 +17,10 @@ import {
 	collectClientAuthorityInvalidationStreams,
 } from "../src/daemon/iroh-service.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
+import type { IrohRemoteAgentRuntime } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
 import {
+	createTestConversation,
+	createTestDaemonRuntime,
 	createTestSession,
 	parseWrittenObjects,
 	startIrohRpcMode,
@@ -127,16 +129,8 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const fanout = createFanoutSession("s-co");
 		const dispose = vi.fn(async () => {});
 		const auditEvents: IrohRemoteAuditEvent[] = [];
-		const runtimeHost = {
-			cwd: workspacePath,
-			session: fanout.session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose,
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		// Both phones' streams are served from this one conversation.
+		const runtimeHost = createTestConversation(fanout.session, { cwd: workspacePath, close: dispose });
 
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
@@ -250,13 +244,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 	it("attributes a co-attaching client's pre-subscriber detach to that client", async () => {
 		const auditEvents: IrohRemoteAuditEvent[] = [];
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("s-pre-subscriber", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger({
@@ -326,15 +319,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			await sessionManager.closePersistence();
 			throw cleanupError;
 		});
-		const lateRuntime = {
+		const lateRuntime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("late-runtime", null),
-			dispose,
-			setRebindSession: vi.fn(),
+			close: dispose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		type RuntimeResult = {
-			runtime: AgentSessionRuntime;
+			runtime: IrohRemoteAgentRuntime;
 			sessionSelection: { kind: "created"; sessionId: string };
 		};
 		let resolveRuntime = (_result: RuntimeResult): void => {};
@@ -408,16 +400,14 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const sessionId = "recovery-race";
 		const starts = [vi.fn(async () => {}), vi.fn(async () => {})];
 		const disposes = [vi.fn(async () => {}), vi.fn(async () => {})];
-		const runtimes = starts.map(
-			(startRecoveredClientInputs, index) =>
-				({
-					cwd: workspacePath,
-					session: createTestSession(sessionId, null),
-					dispose: disposes[index],
-					startRecoveredClientInputs,
-					setRebindSession: vi.fn(),
-					listSessions: vi.fn(async () => []),
-				}) as unknown as AgentSessionRuntime,
+		const runtimes = starts.map((startRecoveredClientInputs, index) =>
+			createTestDaemonRuntime({
+				cwd: workspacePath,
+				session: createTestSession(sessionId, null),
+				close: disposes[index],
+				startRecoveredClientInputs,
+				listSessions: vi.fn(async () => []),
+			}),
 		);
 		let runtimeCalls = 0;
 		let releaseFactoryBarrier = (): void => {};
@@ -484,14 +474,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const startRecoveredClientInputs = vi.fn(async () => {});
 		const dispose = vi.fn(async () => {});
 		const sessionId = "recovery-cancelled";
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession(sessionId, null),
-			dispose,
+			close: dispose,
 			startRecoveredClientInputs,
-			setRebindSession: vi.fn(),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -535,13 +524,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			return undefined;
 		});
 		const dispose = vi.fn(async () => {});
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("cancelled-commit", null),
-			dispose,
-			setRebindSession: vi.fn(),
+			close: dispose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -590,13 +578,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 	});
 
 	it("rejects co-attach when an existing runtime exceeds the attaching client's grant", async () => {
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("s-policy", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -641,18 +628,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 	it("moves only the phone that changed sessions: its co-attached phone stays on the conversation", async () => {
 		const setClientLastSessionId = vi.fn(async () => undefined);
-		let hostTarget: RedirectViewOptions["hostTarget"];
-		const runtime = {
+		const sourceClose = vi.fn(async () => {});
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("shared-source", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
-				hostTarget = options.hostTarget;
-				return runtime;
-			}),
+			close: sourceClose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const auditEvents: IrohRemoteAuditEvent[] = [];
 		const onConversationMoved = vi.fn();
 		const registry = new IntegratedRuntimeRegistry({
@@ -688,19 +670,25 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		attached.attachClaim.release();
 		setClientLastSessionId.mockClear();
 
-		// Phone A starts a new session on its stream.
-		registry.attachStreamView(created.entry, phoneA);
-		const moved = {
-			cwd: workspacePath,
-			session: createTestSession("moved-to", null),
-			dispose: vi.fn(async () => {}),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		if (!hostTarget) throw new Error("No stream view was attached");
-		await (await hostTarget({ sessionId: "moved-to", runtime: moved })).commit();
+		// Phone A starts a new session on its stream: the conversation opens in the source's host.
+		const { hostTarget } = registry.streamRedirect(created.entry, phoneA);
+		const moved = createTestDaemonRuntime(
+			{
+				cwd: workspacePath,
+				session: createTestSession("moved-to", null),
+				listSessions: vi.fn(async () => []),
+			},
+			runtime.host,
+		);
+		if (!hostTarget) throw new Error("The phone's stream does not host its moves");
+		await (await hostTarget({ sessionId: "moved-to", conversation: moved.conversation })).commit();
 
 		const target = registry.findOwner("ws", "moved-to");
-		expect(target).toMatchObject({ lifecycle: "active", clientNodeId: "n-phone-a", runtime: moved });
+		expect(target).toMatchObject({
+			lifecycle: "active",
+			clientNodeId: "n-phone-a",
+			runtime: { host: runtime.host, conversation: moved.conversation },
+		});
 		expect(target?.toolPolicy).toEqual(created.entry.toolPolicy);
 		expect(target?.subscribers.size).toBe(0);
 		expect(onConversationMoved).toHaveBeenCalledExactlyOnceWith(created.entry, target);
@@ -720,7 +708,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await registry.detachSubscriber(created.entry, subscriberA, "conversation_moved", undefined, { retainMs: 0 });
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(registry.findOwner("ws", "shared-source")).toBe(created.entry);
-		expect(runtime.dispose).not.toHaveBeenCalled();
+		expect(sourceClose).not.toHaveBeenCalled();
 		await registry.detachSubscriber(created.entry, subscriberB, "transport_closed");
 		await registry.stopAll("test_cleanup");
 	});
@@ -728,17 +716,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 	it("publishes nothing for a phone whose access changed during the move, and releases an abandoned target", async () => {
 		const setClientLastSessionId = vi.fn(async () => undefined);
 		let authorizationCurrent = true;
-		let hostTarget: RedirectViewOptions["hostTarget"];
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("revoked-source", null),
-			dispose: vi.fn(async () => {}),
-			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
-				hostTarget = options.hostTarget;
-				return runtime;
-			}),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -759,54 +742,56 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		await registry.commitEntry(created.entry, created.sessionSelection, phone, created.attachClaim);
 		created.attachClaim.release();
 		setClientLastSessionId.mockClear();
-		registry.attachStreamView(created.entry, phone);
-		if (!hostTarget) throw new Error("No stream view was attached");
-		const opened = (sessionId: string) =>
-			({
-				cwd: workspacePath,
-				session: createTestSession(sessionId, null),
-				dispose: vi.fn(async () => {}),
-				listSessions: vi.fn(async () => []),
-			}) as unknown as AgentSessionRuntime;
+		const { hostTarget } = registry.streamRedirect(created.entry, phone);
+		if (!hostTarget) throw new Error("The phone's stream does not host its moves");
+		/** A conversation a move opened in the source's host, and its close. */
+		const opened = (sessionId: string) => {
+			const close = vi.fn(async () => {});
+			const { conversation } = createTestDaemonRuntime(
+				{
+					cwd: workspacePath,
+					session: createTestSession(sessionId, null),
+					close,
+					listSessions: vi.fn(async () => []),
+				},
+				runtime.host,
+			);
+			return { conversation, close };
+		};
 
 		// The client is revoked while the move writes through the source.
 		const revoked = opened("revoked-target");
-		const prepared = await hostTarget({ sessionId: "revoked-target", runtime: revoked });
+		const prepared = await hostTarget({ sessionId: "revoked-target", conversation: revoked.conversation });
 		authorizationCurrent = false;
 		await expect(prepared.commit()).rejects.toThrow("Client access changed");
 		expect(registry.findOwner("ws", "revoked-target")).toBeUndefined();
-		expect(revoked.dispose).toHaveBeenCalled();
+		expect(revoked.close).toHaveBeenCalled();
 		expect(setClientLastSessionId).not.toHaveBeenCalled();
 
 		// A target the move gave up on is released and never published.
 		authorizationCurrent = true;
 		const abandoned = opened("abandoned-target");
-		const abandonedTarget = await hostTarget({ sessionId: "abandoned-target", runtime: abandoned });
+		const abandonedTarget = await hostTarget({ sessionId: "abandoned-target", conversation: abandoned.conversation });
 		await abandonedTarget.abort();
 		expect(registry.findOwner("ws", "abandoned-target")).toBeUndefined();
-		expect(abandoned.dispose).toHaveBeenCalled();
+		expect(abandoned.close).toHaveBeenCalled();
 		await expect(abandonedTarget.commit()).rejects.toThrow("already settled");
 
 		// The source stays usable for the next move.
 		const next = opened("next-target");
-		await (await hostTarget({ sessionId: "next-target", runtime: next })).commit();
+		await (await hostTarget({ sessionId: "next-target", conversation: next.conversation })).commit();
 		expect(registry.findOwner("ws", "next-target")).toMatchObject({ lifecycle: "active" });
 		await registry.stopAll("test_cleanup");
 	});
 
 	it("records a switch to a stored session as the phone's last session without opening it", async () => {
 		const setClientLastSessionId = vi.fn(async () => undefined);
-		let hostTarget: RedirectViewOptions["hostTarget"];
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("switch-source", null),
-			dispose: vi.fn(async () => {}),
-			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
-				hostTarget = options.hostTarget;
-				return runtime;
-			}),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -830,8 +815,8 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		created.attachClaim.release();
 		setClientLastSessionId.mockClear();
 
-		registry.attachStreamView(created.entry, phone);
-		if (!hostTarget) throw new Error("No stream view was attached");
+		const { hostTarget } = registry.streamRedirect(created.entry, phone);
+		if (!hostTarget) throw new Error("The phone's stream does not host its moves");
 		await (await hostTarget({ sessionId: "stored-session" })).commit();
 
 		expect(setClientLastSessionId).toHaveBeenCalledExactlyOnceWith("n-phone-a", "ws", "stored-session");
@@ -849,12 +834,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			waitForNotBusy: vi.fn(() => turn),
 		});
 		const dispose = vi.fn(async () => {});
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session,
-			dispose,
+			close: dispose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -929,13 +914,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			},
 			onRuntimeDisposed,
 			createRuntime: async () => ({
-				runtime: {
+				runtime: createTestDaemonRuntime({
 					cwd: workspacePath,
 					session: createTestSession("commit-stop-race", null),
-					dispose,
-					setRebindSession: vi.fn(),
+					close: dispose,
 					listSessions: vi.fn(async () => []),
-				} as unknown as AgentSessionRuntime,
+				}),
 				sessionSelection: { kind: "created", sessionId: "commit-stop-race" },
 			}),
 		});
@@ -1014,13 +998,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 				return undefined;
 			}),
 			createRuntime: async () => ({
-				runtime: {
+				runtime: createTestDaemonRuntime({
 					cwd: workspacePath,
 					session: createTestSession("publication-handoff", null),
-					dispose: runtimeDispose,
-					setRebindSession: vi.fn(),
+					close: runtimeDispose,
 					listSessions: vi.fn(async () => []),
-				} as unknown as AgentSessionRuntime,
+				}),
 				sessionSelection: { kind: "created", sessionId: "publication-handoff" },
 			}),
 		});
@@ -1103,13 +1086,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 				throw new Error("session persistence failed");
 			}),
 			createRuntime: async () => ({
-				runtime: {
+				runtime: createTestDaemonRuntime({
 					cwd: workspacePath,
 					session: createTestSession("publication-failed", null),
-					dispose: runtimeDispose,
-					setRebindSession: vi.fn(),
+					close: runtimeDispose,
 					listSessions: vi.fn(async () => []),
-				} as unknown as AgentSessionRuntime,
+				}),
 				sessionSelection: { kind: "created", sessionId: "publication-failed" },
 			}),
 		});
@@ -1190,13 +1172,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 				await attachSettled;
 			},
 			createRuntime: async () => ({
-				runtime: {
+				runtime: createTestDaemonRuntime({
 					cwd: workspacePath,
 					session: createTestSession("attach-stop-race", null),
-					dispose,
-					setRebindSession: vi.fn(),
+					close: dispose,
 					listSessions: vi.fn(async () => []),
-				} as unknown as AgentSessionRuntime,
+				}),
 				sessionSelection: { kind: "created", sessionId: "attach-stop-race" },
 			}),
 		});
@@ -1241,13 +1222,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const retirementGate = new Promise<void>((resolve) => {
 			releaseRetirement = resolve;
 		});
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("retiring-session", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -1302,20 +1282,18 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 	});
 
 	it("does not let attachable subagent sessions overwrite the client's last top-level session", async () => {
-		const parentRuntime = {
+		const parentRuntime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("parent-session", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-		const childRuntime = {
+		});
+		const childRuntime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("child-session", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const setClientLastSessionId = vi.fn(async () => undefined);
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
@@ -1343,7 +1321,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 		setClientLastSessionId.mockClear();
 		const registration = await registry.registerSubagentRuntime(
-			{ id: "sa-child", parentSessionId: "parent-session", runtime: childRuntime, sessionId: "child-session" },
+			{
+				id: "sa-child",
+				parentSessionId: "parent-session",
+				host: childRuntime.host,
+				conversation: childRuntime.conversation,
+				sessionId: "child-session",
+			},
 			phone,
 		);
 		expect(registry.findOwner("ws", "child-session")).toBeUndefined();
@@ -1365,21 +1349,19 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 	});
 
 	it("disposes a prepared subagent runtime that is rolled back before prompt acceptance", async () => {
-		const parentRuntime = {
+		const parentRuntime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("parent-session", null),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
+			close: vi.fn(async () => {}),
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const childDispose = vi.fn(async () => {});
-		const childRuntime = {
+		const childRuntime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session: createTestSession("child-session", null),
-			dispose: childDispose,
-			setRebindSession: vi.fn(),
+			close: childDispose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -1403,7 +1385,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		parent.attachClaim.release();
 
 		const registration = await registry.registerSubagentRuntime(
-			{ id: "sa-child", parentSessionId: "parent-session", runtime: childRuntime, sessionId: "child-session" },
+			{
+				id: "sa-child",
+				parentSessionId: "parent-session",
+				host: childRuntime.host,
+				conversation: childRuntime.conversation,
+				sessionId: "child-session",
+			},
 			phone,
 		);
 
@@ -1463,13 +1451,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		const dispose = vi.fn(async () => {
 			await abort();
 		});
-		const runtime = {
+		const runtime = createTestDaemonRuntime({
 			cwd: workspacePath,
 			session,
-			dispose,
-			setRebindSession: vi.fn(),
+			close: dispose,
 			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		});
 		let registry!: IntegratedRuntimeRegistry;
 		registry = new IntegratedRuntimeRegistry({
 			agentDir,
@@ -1545,13 +1532,12 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 				waitForNotBusy: vi.fn(() => idle),
 			});
 			const dispose = vi.fn(async () => {});
-			const runtimeHost = {
+			const runtimeHost = createTestDaemonRuntime({
 				cwd: workspacePath,
 				session,
-				dispose,
-				setRebindSession: vi.fn(),
+				close: dispose,
 				listSessions: vi.fn(async () => []),
-			} as unknown as AgentSessionRuntime;
+			});
 			const registry = new IntegratedRuntimeRegistry({
 				agentDir,
 				auditLogger: new IrohRemoteAuditLogger(),
@@ -1595,14 +1581,13 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		// Regression guard: stopEntry used to delete by key alone, so a stale
 		// entry reference could evict a replacement runtime from the registry
 		// while leaving it running unmanaged.
-		const makeRuntimeHost = (sessionId: string, dispose: ReturnType<typeof vi.fn>) =>
-			({
+		const makeRuntimeHost = (sessionId: string, dispose: () => Promise<void>) =>
+			createTestDaemonRuntime({
 				cwd: workspacePath,
 				session: createTestSession(sessionId, null),
-				dispose,
-				setRebindSession: vi.fn(),
+				close: dispose,
 				listSessions: vi.fn(async () => []),
-			}) as unknown as AgentSessionRuntime;
+			});
 		const disposeA = vi.fn(async () => {});
 		const disposeB = vi.fn(async () => {});
 		let nextRuntime = makeRuntimeHost("s-stale", disposeA);

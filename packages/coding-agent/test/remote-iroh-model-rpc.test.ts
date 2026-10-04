@@ -1,10 +1,10 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model, SubscriptionUsageResult } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import {
+	createTestConversation,
 	createTestModel,
 	createTestSession,
 	parseWrittenObjects,
@@ -30,18 +30,14 @@ describe("Iroh remote model RPC", () => {
 				detach: () => {},
 			})),
 		};
-		const runtimeHost = {
-			session,
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
+		const target = createTestConversation(session);
 		const recoveredDispatch = vi.fn(() => {
 			expect(sessionStartInitialized).toBe(true);
 			expect(resourcesInitialized).toBe(true);
 			bindingOrder.push("recovered_dispatch");
 		});
 
-		const { modePromise, recv } = await startIrohRpcMode(runtimeHost, session, {
+		const { modePromise, recv } = await startIrohRpcMode(target, session, {
 			onReady: recoveredDispatch,
 		});
 		await vi.waitFor(() => expect(recoveredDispatch).toHaveBeenCalledOnce());
@@ -86,12 +82,8 @@ describe("Iroh remote model RPC", () => {
 			activeToolExecutions: new Map(),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 		};
-		const runtimeHost = {
-			session,
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 
 		recv.pushLine(JSON.stringify({ id: "models-1", type: "get_available_models" }));
 		recv.pushLine(
@@ -299,12 +291,8 @@ describe("Iroh remote model RPC", () => {
 			model: createTestModel("usage-model", { provider: providerId }),
 			modelRegistry,
 		};
-		const runtimeHost = {
-			session,
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 
 		try {
 			recv.pushLine(JSON.stringify({ id: "usage-1", type: "get_subscription_usage" }));

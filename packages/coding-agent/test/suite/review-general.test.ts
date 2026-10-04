@@ -4,11 +4,8 @@ import { join } from "node:path";
 import { RPC_COMMAND_SCHEMAS, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../src/core/agent-session-runtime.ts";
+import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
+import type { NewSessionIntentOptions } from "../../src/core/host/session-intents.ts";
 import {
 	createIrohRemoteRpcGrant,
 	getIrohRemoteRpcCommandCapabilities,
@@ -26,7 +23,27 @@ import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../src/modes/rpc/rpc-command-validation.ts";
+import { connectTestClient, openTestHost, type TestClient, type TestClientOptions } from "../utilities/host-client.ts";
 import { createHarness, type Harness } from "./harness.ts";
+
+/** Failures a test injects into how the main client follows a move. */
+interface MoveHooks {
+	prepare?: () => void;
+	onMoved?: () => Promise<void>;
+}
+
+/** An RPC dispatcher context for `client`'s current conversation. */
+function dispatcherContext(client: TestClient, extra: Record<string, unknown> = {}) {
+	return {
+		session: client.session,
+		conversation: client.conversation,
+		host: client.host,
+		client: client.client,
+		options: {},
+		assertConversationGenerationCurrent: () => {},
+		...extra,
+	} as unknown as RpcCommandDispatcherContext;
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -38,9 +55,9 @@ async function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "volt-general-"));
 	const directory = join(root, "sessions");
 	const harnesses: Harness[] = [];
-	const runtimes: AgentSessionRuntime[] = [];
+	const clients: TestClient[] = [];
 	const managers: SessionManager[] = [];
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const h = await createHarness({ sessionManager, settings: { lsp: { enabled: false } } });
 		harnesses.push(h);
 		return {
@@ -62,37 +79,48 @@ async function fixture() {
 			},
 		};
 	};
-	async function own(manager: SessionManager) {
-		const runtime = await createAgentSessionRuntime(factory, { sessionManager: manager, cwd: root, agentDir: root });
-		runtimes.push(runtime);
-		return runtime;
+	async function own(manager: SessionManager, clientOptions: TestClientOptions = {}) {
+		const { host, conversation } = await openTestHost(factory, {
+			sessionManager: manager,
+			cwd: root,
+			agentDir: root,
+		});
+		const client = await connectTestClient(host, conversation, clientOptions);
+		clients.push(client);
+		return client;
 	}
 	cleanups.push(async () => {
-		for (const runtime of runtimes) await runtime.dispose();
+		for (const client of clients) await client.host.dispose();
 		for (const manager of managers) await manager.closePersistence();
 		for (const h of harnesses) await h.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
-	const runtime = await own(await SessionManager.create(root, directory));
-	const source = runtime.session.sessionManager;
-	await runtime.session.sessionWriter.appendSessionInfo("Review source");
+	const hooks: MoveHooks = {};
+	const client = await own(await SessionManager.create(root, directory), {
+		prepare: () => hooks.prepare?.(),
+		onMoved: () => hooks.onMoved?.(),
+	});
+	const source = client.session.sessionManager;
+	await client.session.sessionWriter.appendSessionInfo("Review source");
 	await registerDurableReviewAnchor(source, "run");
 	const original = source.getSessionRef()!;
 	const options = { preserveReviewRunId: "run", replaceReviewGeneral: true };
-	return { runtime, root, directory, source, original, options, own, managers };
+	return { client, hooks, root, directory, source, original, options, own, managers };
 }
 
-async function observe(runtime: AgentSessionRuntime) {
+/** Subscribe to the projection feed of the conversation `client` is on now. */
+async function observe(client: TestClient) {
 	const writes: object[] = [];
-	const subscription = runtime.conversationProjectionFeed.attach({
+	const conversation = client.conversation;
+	const subscription = conversation.projectionFeed.attach({
 		write: (value) => {
 			writes.push(value);
 		},
 		buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-			conversation: { workspaceName: "test", sessionId: runtime.session.sessionId },
-			state: buildRpcSessionState(runtime.session),
+			conversation: { workspaceName: "test", sessionId: conversation.session.sessionId },
+			state: buildRpcSessionState(conversation.session),
 			transcript: {
-				sessionId: runtime.session.sessionId,
+				sessionId: conversation.session.sessionId,
 				items: [],
 				hasMore: false,
 				nextBeforeEntryId: null,
@@ -111,44 +139,52 @@ async function observe(runtime: AgentSessionRuntime) {
 
 describe("durable review General publication", () => {
 	it("replaces repeatedly, preserves canonical source and does not promote ordinary aliases or reopened history", async () => {
-		const { runtime, root, directory, source, original, options, managers } = await fixture();
+		const { client, root, directory, source, original, options, managers } = await fixture();
 		for (const revision of [1, 2]) {
-			const opened = await runtime.newSession(options);
-			expect(opened).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: false });
-			expect(await getReviewGeneral(runtime.session.sessionManager, "run")).toEqual({
+			const opened = await client.newSession(options);
+			expect(opened).toEqual({ cancelled: false, sessionId: client.session.sessionId, seeded: false });
+			expect(await getReviewGeneral(client.session.sessionManager, "run")).toEqual({
 				runId: "run",
 				sourceSessionId: original.sessionId,
-				generalSessionId: runtime.session.sessionId,
-				generalSessionGeneration: runtime.session.sessionRef!.sessionGeneration,
+				generalSessionId: client.session.sessionId,
+				generalSessionGeneration: client.session.sessionRef!.sessionGeneration,
 				generalRevision: revision,
 				generalAvailable: true,
 			});
-			expect(await resolveCanonicalReviewSource(runtime.session.sessionManager, "run")).toEqual(original);
+			expect(await resolveCanonicalReviewSource(client.session.sessionManager, "run")).toEqual(original);
 		}
-		const final = await getReviewGeneral(runtime.session.sessionManager, "run");
+		const final = await getReviewGeneral(client.session.sessionManager, "run");
 		const alias = await SessionManager.create(root, directory);
 		managers.push(alias);
-		await registerReviewHandoffAliases(runtime.session.sessionManager, alias, ["run"]);
+		await registerReviewHandoffAliases(client.session.sessionManager, alias, ["run"]);
 		expect(await getReviewGeneral(alias, "run")).toEqual(final);
-		await runtime.switchSession(original);
-		expect(await getReviewGeneral(runtime.session.sessionManager, "run")).toEqual(final);
-		await expect(runtime.newSession(options)).rejects.toThrow("exact current General");
+		await client.switchSession(original);
+		expect(await getReviewGeneral(client.session.sessionManager, "run")).toEqual(final);
+		await expect(client.newSession(options)).rejects.toThrow("exact current General");
 		expect(await getReviewGeneral(source, "run")).toEqual(final);
 	});
 
-	it.each(["setup", "ownership", "rebind", "listener", "seed"])("does not publish when %s fails", async (phase) => {
-		const { runtime, source, original, options, own } = await fixture();
+	// setup: the new log cannot be written; prepare: the client cannot point itself at the new
+	// conversation and returns to the source; moved: the client's move handler fails once it
+	// joined; seed: withSession fails after the move.
+	it.each(["setup", "prepare", "moved", "seed"])("does not publish when %s fails", async (phase) => {
+		const { client, hooks, source, original, options, own } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		const { writes, subscription } = await observe(runtime);
+		const { writes, subscription } = await observe(client);
 		const fail = async () => {
 			throw new Error("injected failure");
 		};
 		let candidate: SessionManager | undefined;
-		if (phase === "ownership") runtime.subscribeSessionWillProject(fail);
-		if (phase === "rebind") runtime.setRebindSession(fail);
-		if (phase === "listener") runtime.subscribeSessionReplaced(fail);
+		if (phase === "prepare") {
+			hooks.prepare = () => {
+				// Only the move away fails: returning to the source succeeds.
+				hooks.prepare = undefined;
+				throw new Error("injected failure");
+			};
+		}
+		if (phase === "moved") hooks.onMoved = fail;
 		await expect(
-			runtime.newSession({
+			client.newSession({
 				...options,
 				setup: async (writer) => {
 					candidate = writer.sessionManager;
@@ -160,23 +196,27 @@ describe("durable review General publication", () => {
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 		await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
 		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
-		if (phase === "setup") {
+		if (phase === "setup" || phase === "prepare") {
+			// The client stays on the source, which stays open.
+			expect(client.session.sessionManager).toBe(source);
 			await expect(subscription.flush()).resolves.toBeUndefined();
-			await expect(runtime.session.prompt("The original General is still usable")).resolves.toBeUndefined();
+			await expect(client.session.prompt("The original General is still usable")).resolves.toBeUndefined();
 		} else {
-			await expect(subscription.flush()).rejects.toThrow("closed");
+			// The source's stream never follows the move: it hears nothing of the new conversation.
+			await subscription.flush().catch(() => undefined);
+			expect(JSON.stringify(writes)).not.toContain(client.session.sessionId);
 			const reopened = await own(await SessionManager.open(original));
 			await expect(reopened.session.prompt("The original General can resume")).resolves.toBeUndefined();
 			expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(initial);
 		}
 	});
 
-	it("commits General only after the seed completed, ending the source's subscriptions", async () => {
-		const { runtime, source, options } = await fixture();
+	it("commits General only after the seed completed, leaving the source's subscriptions behind", async () => {
+		const { client, source, options } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		const { writes, subscription } = await observe(runtime);
+		const { writes, subscription } = await observe(client);
 		expect(
-			await runtime.newSession({
+			await client.newSession({
 				...options,
 				withSession: async (context) => {
 					expect(await getReviewGeneral(source, "run")).toEqual(initial);
@@ -187,25 +227,26 @@ describe("durable review General publication", () => {
 					});
 				},
 			}),
-		).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: true });
-		// The source's stream never follows the move.
-		await expect(subscription.flush()).rejects.toThrow("closed");
+		).toEqual({ cancelled: false, sessionId: client.session.sessionId, seeded: true });
+		// The source's stream never follows the move: it hears nothing of the new conversation.
+		await subscription.flush().catch(() => undefined);
+		expect(JSON.stringify(writes)).not.toContain(client.session.sessionId);
 		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
 		expect(await getReviewGeneral(source, "run")).toMatchObject({
-			generalSessionId: runtime.session.sessionId,
+			generalSessionId: client.session.sessionId,
 			generalRevision: 1,
 		});
-		const reattached = await observe(runtime);
+		const reattached = await observe(client);
 		await reattached.subscription.flush();
 		expect(reattached.writes[0]).toMatchObject({
 			reason: "bootstrap",
-			conversation: { sessionId: runtime.session.sessionId },
+			conversation: { sessionId: client.session.sessionId },
 			state: { messageCount: 1 },
 		});
 	});
 
 	it.each([false, true])("keeps General unpublished through the durable commit (reject: %s)", async (rejectCommit) => {
-		const { runtime, source, original, options, own } = await fixture();
+		const { client, source, original, options, own } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
 		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
 		let releaseCommit!: () => void;
@@ -224,7 +265,7 @@ describe("durable review General publication", () => {
 			return replaceReviewGeneral(request);
 		});
 		try {
-			const replacement = runtime.newSession(options);
+			const replacement = client.newSession(options);
 			const result = replacement.then(
 				() => undefined,
 				(error: unknown) => error,
@@ -240,7 +281,7 @@ describe("durable review General publication", () => {
 			} else {
 				expect(await result).toBeUndefined();
 				expect(await getReviewGeneral(source, "run")).toMatchObject({
-					generalSessionId: runtime.session.sessionId,
+					generalSessionId: client.session.sessionId,
 					generalRevision: 1,
 				});
 			}
@@ -252,15 +293,15 @@ describe("durable review General publication", () => {
 	});
 
 	it("does not promote cancelled or stale replacements and rejects same-source competitors", async () => {
-		const { runtime, source, options } = await fixture();
+		const { client, source, options } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		vi.spyOn(runtime.session.extensionRunner, "hasHandlers").mockReturnValueOnce(true);
-		vi.spyOn(runtime.session.extensionRunner, "emit").mockResolvedValueOnce({ cancel: true });
-		expect(await runtime.newSession(options)).toEqual({ cancelled: true });
+		vi.spyOn(client.session.extensionRunner, "hasHandlers").mockReturnValueOnce(true);
+		vi.spyOn(client.session.extensionRunner, "emit").mockResolvedValueOnce({ cancel: true });
+		expect(await client.newSession(options)).toEqual({ cancelled: true });
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 		let stale = false;
 		await expect(
-			runtime.newSession({
+			client.newSession({
 				...options,
 				setup: async () => {
 					stale = true;
@@ -271,9 +312,9 @@ describe("durable review General publication", () => {
 			}),
 		).rejects.toThrow("stale authority");
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
-		const results = await Promise.allSettled([runtime.newSession(options), runtime.newSession(options)]);
+		const results = await Promise.allSettled([client.newSession(options), client.newSession(options)]);
 		expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
-		expect(await getReviewGeneral(runtime.session.sessionManager, "run")).toMatchObject({ generalRevision: 1 });
+		expect(await getReviewGeneral(client.session.sessionManager, "run")).toMatchObject({ generalRevision: 1 });
 	});
 
 	it("authorizes RPC lookup from current and historical same-run children without canonical mutation authority", async () => {
@@ -316,13 +357,8 @@ describe("durable review General publication", () => {
 			});
 			await lease.client.registerReviewAnchor({ runId: "foreign", source: member, createdAt });
 			for (const identity of [discussion.current.child, reset.child.child]) {
-				const runtime = await own(await SessionManager.open({ ...original, ...identity }));
-				const context = {
-					session: runtime.session,
-					runtimeHost: runtime,
-					options: {},
-					assertConversationGenerationCurrent: () => {},
-				} as unknown as RpcCommandDispatcherContext;
+				const client = await own(await SessionManager.open({ ...original, ...identity }));
+				const context = dispatcherContext(client);
 				expect(await handleRpcCommand({ type: "get_review_general", runId: "run" }, context)).toMatchObject({
 					success: true,
 					data: await getReviewGeneral(source, "run"),
@@ -336,7 +372,7 @@ describe("durable review General publication", () => {
 						context,
 					),
 				).rejects.toThrow("source review");
-				expect(await resolveCanonicalReviewSource(runtime.session.sessionManager, "run")).toBeUndefined();
+				expect(await resolveCanonicalReviewSource(client.session.sessionManager, "run")).toBeUndefined();
 			}
 		} finally {
 			await lease.release();
@@ -344,11 +380,11 @@ describe("durable review General publication", () => {
 	});
 
 	it("returns explicit exact-generation unavailability after restart and rejects foreign stores", async () => {
-		const { runtime, source, options, directory, root, managers } = await fixture();
-		await runtime.newSession(options);
-		const final = await getReviewGeneral(runtime.session.sessionManager, "run");
-		const target = runtime.session.sessionRef!;
-		await runtime.dispose();
+		const { client, source, options, directory, root, managers } = await fixture();
+		await client.newSession(options);
+		const final = await getReviewGeneral(client.session.sessionManager, "run");
+		const target = client.session.sessionRef!;
+		await client.dispose();
 		const reader = await SessionManager.open(source.getSessionRef()!);
 		managers.push(reader);
 		expect(await getReviewGeneral(reader, "run")).toEqual(final);
@@ -363,8 +399,8 @@ describe("durable review General publication", () => {
 	});
 
 	it("serves the required RPC shape as a read, rejects malformed flags and forwards explicit General replacement", async () => {
-		const { runtime, original } = await fixture();
-		await appendReviewRunDurably(runtime.session.sessionWriter, {
+		const { client, original } = await fixture();
+		await appendReviewRunDurably(client.session.sessionWriter, {
 			schemaVersion: 1,
 			runId: "run",
 			workflowAction: "review.uncommitted",
@@ -380,13 +416,12 @@ describe("durable review General publication", () => {
 			options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
 		});
 		const context = () =>
-			({
-				session: runtime.session,
-				runtimeHost: runtime,
-				options: {},
-				assertConversationGenerationCurrent: () => {},
-				createHostActionContext: () => ({ session: runtime.session, newSession: runtime.newSession.bind(runtime) }),
-			}) as unknown as RpcCommandDispatcherContext;
+			dispatcherContext(client, {
+				createHostActionContext: () => ({
+					session: client.session,
+					newSession: (newSessionOptions?: NewSessionIntentOptions) => client.newSession(newSessionOptions),
+				}),
+			});
 		const command = { type: "get_review_general", runId: "run" } as const;
 		const response = await handleRpcCommand(command, context());
 		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_general).Errors(response)).toEqual([]);

@@ -12,7 +12,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake-reader.ts";
@@ -43,7 +42,12 @@ import {
 } from "../src/modes/interactive/daemon-attach.ts";
 import { adaptRelaySocketToIrohStream } from "../src/modes/interactive/relay-stream-adapter.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { createTestIrohConversationOptions, createTestSession } from "./iroh-stream-doubles.ts";
+import {
+	createTestConversation,
+	createTestIrohConversationOptions,
+	createTestSession,
+	type TestConversation,
+} from "./iroh-stream-doubles.ts";
 import { FakePhoneIrohStream } from "./relay-doubles.ts";
 import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
 
@@ -451,12 +455,12 @@ function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: str
 /**
  * TUI side of one relay offer, mirroring InteractiveMode.serveRelayConversation:
  * redeem the token, adapt the socket, write the handshake response, then serve
- * the stream from the shared in-process runtime via runIrohRemoteRpcMode.
+ * the stream as a redirect client of the TUI's conversation via runIrohRemoteRpcMode.
  */
 async function serveRelayFromTui(
 	client: DaemonClient,
 	relay: RelayLifecycleOwner,
-	runtimeHost: AgentSessionRuntime,
+	target: TestConversation,
 	tuiSessionId: string,
 ) {
 	const opened = await client.openRelay({ relayId: relay.relayId, relayToken: relay.relayToken });
@@ -485,12 +489,13 @@ async function serveRelayFromTui(
 		responseContext,
 	);
 	await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
-	const conversationOptions = createTestIrohConversationOptions(runtimeHost);
+	const conversationOptions = createTestIrohConversationOptions(target.conversation);
 
-	const done = runIrohRemoteRpcMode(runtimeHost, {
+	const done = runIrohRemoteRpcMode(target.host, target.conversation, {
 		...conversationOptions,
 		stream: relayedStream,
-		disposeRuntimeOnClose: false,
+		// The phone stays on the TUI's conversation; a session change redirects it alone.
+		redirect: {},
 		workspaceName: WORKSPACE.name,
 		workspacePath: WORKSPACE.path,
 		rpcGrant: authorizationSubset.rpcGrant,
@@ -505,7 +510,7 @@ async function serveRelayFromTui(
 					sessionListCursors: new Map(),
 					sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 				},
-				runtimeHost,
+				target.conversation,
 			),
 	}).finally(() => {
 		relayedStream.close();
@@ -517,7 +522,7 @@ async function serveOwnedRelayFromTui(
 	daemonAttach: DaemonAttach,
 	offer: DaemonRelayOffer,
 	openRelay: () => Promise<OpenedRelay>,
-	runtimeHost: AgentSessionRuntime,
+	target: TestConversation,
 ): Promise<void> {
 	const opened = await openRelay();
 	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
@@ -542,14 +547,14 @@ async function serveOwnedRelayFromTui(
 		responseContext,
 	);
 	await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
-	const conversationOptions = createTestIrohConversationOptions(runtimeHost);
+	const conversationOptions = createTestIrohConversationOptions(target.conversation);
 	const relayedSessionId = offer.sessionId;
 	const retirement = createRelayWorkspaceUnregisterRetirement(daemonAttach, () => relayedSessionId);
 	try {
-		await runIrohRemoteRpcMode(runtimeHost, {
+		await runIrohRemoteRpcMode(target.host, target.conversation, {
 			...conversationOptions,
 			stream: relayedStream,
-			disposeRuntimeOnClose: false,
+			redirect: {},
 			workspaceName: WORKSPACE.name,
 			workspacePath: authorizationSubset.workspacePath,
 			rpcGrant: authorizationSubset.rpcGrant,
@@ -584,7 +589,7 @@ async function serveOwnedRelayFromTui(
 						sessionListCursors: new Map(),
 						sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
 					},
-					runtimeHost,
+					target.conversation,
 				);
 			},
 		});
@@ -616,15 +621,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		const { socketPath, registry } = await startDaemonHarness();
 		const fanout = createFanoutSession(SESSION_ID);
 		const dispose = vi.fn(async () => {});
-		const runtimeHost = {
-			session: fanout.session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose,
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		const runtimeHost = createTestConversation(fanout.session, { cwd: WORKSPACE.path, close: dispose });
 
 		const client = createDaemonClient({
 			socketPath,
@@ -791,15 +788,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		const harness = await startOwnedRelayDaemonHarness();
 		const fanout = createFanoutSession(SESSION_ID);
 		const dispose = vi.fn(async () => {});
-		const runtimeHost = {
-			session: fanout.session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose,
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		const runtimeHost = createTestConversation(fanout.session, { cwd: WORKSPACE.path, close: dispose });
 		const relayServers: Promise<void>[] = [];
 		harness.attach.onRelayOffer((offer, openRelay) => {
 			relayServers.push(serveOwnedRelayFromTui(harness.attach, offer, openRelay, runtimeHost));

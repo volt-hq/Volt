@@ -13,7 +13,8 @@ type ShutdownThis = {
 	runtimeDisposePromise: Promise<void> | undefined;
 	disposeRuntimeHost: () => Promise<void>;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	host: { close: () => Promise<void>; dispose: () => Promise<void> };
+	conversation: object;
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	flushStdout: () => Promise<void>;
@@ -70,12 +71,14 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 			unregisterSignalHandlers: vi.fn(() => {
 				order.push("unregister");
 			}),
-			runtimeHost: {
-				dispose: vi.fn(() => {
+			host: {
+				close: vi.fn(() => {
 					order.push("dispose");
 					return dispose.promise;
 				}),
+				dispose: vi.fn(async () => {}),
 			},
+			conversation: {},
 			ui: {
 				terminal: {
 					drainInput: vi.fn(async () => {

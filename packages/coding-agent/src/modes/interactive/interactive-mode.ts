@@ -69,7 +69,6 @@ import {
 	VERSION,
 } from "../../config.ts";
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
-import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
 	AutocompleteProviderFactory,
@@ -87,7 +86,12 @@ import type {
 import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
+import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import { executePlan } from "../../core/host/plan-handoff.ts";
 import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
+import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
+import type { HostClient } from "../../core/host/targets.ts";
 import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	CONTEXT_COMPACT_SLASH_ALIAS,
@@ -525,7 +529,11 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 }
 
 export class InteractiveMode {
-	private runtimeHost: AgentSessionRuntime;
+	private readonly host: ConversationHost;
+	/** The conversation the TUI shows; a move points it at the next one before that one's extensions start. */
+	private conversation: HostedConversation;
+	/** The TUI as a client of its host: it anchors the conversation it shows and moves in place. */
+	private readonly client: HostClient;
 	private renderer: TuiMainScreen | TuiAltScreen;
 	private ui: TUI;
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
@@ -678,9 +686,7 @@ export class InteractiveMode {
 	 * served locally reads or writes host state.
 	 */
 	private readonly relayStateManager = new IrohRemoteHostStateManager();
-	/** This TUI's identity on each session's extensions: it attaches first, so it is their anchor. */
-	private readonly extensionClientId = randomUUID();
-	/** The runtime ended because its session lost its log, and the TUI is exiting. */
+	/** The conversation the TUI shows lost its log, and the TUI is exiting. */
 	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
@@ -731,7 +737,7 @@ export class InteractiveMode {
 
 	// Convenience accessors
 	private get session(): AgentSession {
-		return this.runtimeHost.session;
+		return this.conversation.session;
 	}
 	private get sessionManager() {
 		return this.session.sessionManager;
@@ -740,18 +746,28 @@ export class InteractiveMode {
 		return this.session.settingsManager;
 	}
 
-	constructor(runtimeHost: AgentSessionRuntime, options: InteractiveModeOptions = {}) {
-		this.runtimeHost = runtimeHost;
+	constructor(host: ConversationHost, conversation: HostedConversation, options: InteractiveModeOptions = {}) {
+		this.host = host;
+		this.conversation = conversation;
+		this.client = {
+			id: randomUUID(),
+			anchor: true,
+			recoversInput: true,
+			surface: this.createExtensionSurface(),
+			move: {
+				kind: "in_place",
+				prepare: (to) => {
+					this.conversation = to;
+					this.beginSessionReplacementUi();
+					this.enterSession(to.session);
+				},
+				onMoved: (to) => this.followMove(to),
+			},
+		};
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
-		this.runtimeHost.setBeforeSessionInvalidate(() => {
-			this.beginSessionReplacementUi();
-		});
-		this.runtimeHost.setRebindSession(async (session) => {
-			await this.rebindReplacementSession(session);
-		});
-		void this.runtimeHost.lost.then((error) => this.handleRuntimeLost(error));
+		this.observeLoss(conversation);
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
 			tuiMode,
@@ -1218,7 +1234,9 @@ export class InteractiveMode {
 		this.ui.requestRender();
 
 		// Initialize extensions first so resources are shown before messages
-		await this.rebindCurrentSession(this.session);
+		this.enterSession(this.session);
+		await this.host.attach(this.client, this.conversation);
+		await this.followSession(this.session);
 
 		// Render initial messages AFTER showing loaded resources
 		this.renderInitialMessages();
@@ -1942,13 +1960,12 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Attach this TUI to the session's extensions. It attaches before any relayed
-	 * phone, so it binds them in TUI mode and keeps their UI.
+	 * The TUI's surface on each conversation's extensions, which its host
+	 * attaches whenever the TUI joins a conversation. The TUI attaches before any
+	 * relayed phone and keeps the extensions' UI.
 	 */
-	private async attachSessionExtensions(session: AgentSession): Promise<void> {
-		await session.attachExtensionClient({
-			id: this.extensionClientId,
-			mode: "tui",
+	private createExtensionSurface(): NonNullable<HostClient["surface"]> {
+		return {
 			ui: this.createExtensionUIContext(),
 			abortHandler: () => {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
@@ -1965,7 +1982,7 @@ export class InteractiveMode {
 					this.statusContainer.clear();
 					const source = this.session;
 					try {
-						const result = await this.runtimeHost.newSession(options);
+						const result = await openNewSession(this.host, this.client, options);
 						if (!result.cancelled) {
 							this.renderCurrentSessionState();
 							this.ui.requestRender();
@@ -1979,7 +1996,7 @@ export class InteractiveMode {
 				fork: async (entryId, options) => {
 					const source = this.session;
 					try {
-						const result = await this.runtimeHost.fork(entryId, options);
+						const result = await openFork(this.host, this.client, entryId, options);
 						if (result.cancelled) return result;
 						this.renderCurrentSessionState();
 						this.editor.setText(result.selectedText ?? "");
@@ -2026,8 +2043,11 @@ export class InteractiveMode {
 			onError: (error) => {
 				this.showExtensionError(error.extensionPath, error.error, error.stack);
 			},
-		}).ready;
+		};
+	}
 
+	/** Show what the session's bound extensions provide: themes, autocomplete, shortcuts, and loaded resources. */
+	private showSessionExtensions(session: AgentSession): void {
 		setRegisteredThemes(session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
 
@@ -2073,13 +2093,13 @@ export class InteractiveMode {
 		const acquireOutcome = await this.acquireCurrentSessionLease();
 		this.bindDaemonWorkObservation(this.session);
 		// The TUI leaves a session by closing it; the lease follows once it closed.
-		this.runtimeHost.onConversationClosed((sessionId) => {
+		this.host.onClosed(({ id: sessionId }) => {
 			void this.queueDaemonLeaseWork(() => this.handOverDaemonLease(sessionId)).catch(() => undefined);
 		});
 		if (acquireOutcome.kind === "granted" || acquireOutcome.kind === "noop") {
 			// UI subscriptions and the daemon ownership decision are both complete.
 			// Drain any restored durable queue before startup input can overtake it.
-			await this.runtimeHost.startRecoveredClientInputs();
+			await this.conversation.startRecoveredClientInputs();
 		}
 	}
 
@@ -2104,7 +2124,7 @@ export class InteractiveMode {
 
 	private async handleReacquireOutcome(_sessionId: string, outcome: AcquireOutcome): Promise<void> {
 		if (outcome.kind === "granted") {
-			await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+			await this.conversation.startRecoveredClientInputs().catch(() => undefined);
 			void this.session.gitContextProvider.refresh();
 		}
 	}
@@ -2236,10 +2256,11 @@ export class InteractiveMode {
 	 * Serve a relayed phone conversation from this TUI's in-process runtime
 	 * (§5.6 step 7-9). The daemon has already authenticated the phone and
 	 * resolved the session target; the TUI writes the handshake response itself.
-	 * The phone is a client of the session the TUI shows, through a view of its
-	 * own that stays on it: a session change the phone asks for redirects the
-	 * phone alone (`conversation_moved`), and when the TUI leaves the session the
-	 * phone is told to reconnect (`lease_transferred`), to the daemon then.
+	 * The phone is a client of the conversation the TUI shows that follows its
+	 * structural intents by redirect: a session change the phone asks for
+	 * redirects the phone alone (`conversation_moved`), and when the TUI leaves
+	 * the conversation the phone is told to reconnect (`lease_transferred`), to
+	 * the daemon then.
 	 */
 	private async serveRelayConversation(offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>): Promise<void> {
 		// A resume holding its target's lease serves the target's phones once it switched.
@@ -2247,21 +2268,16 @@ export class InteractiveMode {
 		if (pendingSwitch?.sessionId === offer.sessionId) await pendingSwitch.settled;
 		// An offer for a session this TUI does not show expires; the daemon tells the phone to retry.
 		if (this.isShuttingDown || this.endingLostSession || offer.sessionId !== this.session.sessionId) return;
-		let relayRuntime: AgentSessionRuntime;
-		try {
-			relayRuntime = this.runtimeHost.attachRedirectClient();
-		} catch {
-			// The session is closing: the TUI is leaving it.
-			return;
-		}
+		const conversation = this.conversation;
+		// The conversation is closing: the TUI is leaving it.
+		if (conversation.closed) return;
 		let opened: OpenedRelay;
 		try {
 			opened = await openRelay();
 		} catch {
-			await relayRuntime.dispose().catch(() => undefined);
 			return;
 		}
-		const conversationSessionId = relayRuntime.session.sessionId;
+		const conversationSessionId = conversation.id;
 		const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
 		const preamble = opened.preamble;
 		const hostNodeId = preamble.hostNodeId;
@@ -2271,7 +2287,6 @@ export class InteractiveMode {
 		if (preamble.resolvedTarget.sessionId !== conversationSessionId || hostNodeId === undefined) {
 			relayedStream.close();
 			opened.finished();
-			await relayRuntime.dispose().catch(() => undefined);
 			return;
 		}
 		const handshake = preamble.handshake as {
@@ -2319,13 +2334,14 @@ export class InteractiveMode {
 					this.daemonAttach,
 					() => conversationSessionId,
 				);
-				await runIrohRemoteRpcMode(relayRuntime, {
+				await runIrohRemoteRpcMode(this.host, conversation, {
+					// The phone stays on this conversation; a session change redirects it alone.
+					redirect: {},
 					rpcGrant,
 					hostNodeId,
 					isRpcIngressOpen: workspaceUnregisterRetirement.isIngressOpen,
 					clientNodeId: authorizationSubset.clientNodeId,
 					stream: relayedStream,
-					disposeRuntimeOnClose: false,
 					workspaceName: authorization.workspace.name,
 					workspacePath: sanitizerOptions.workspacePath,
 					...(sanitizerOptions.remoteWorkspacePath === undefined
@@ -2356,16 +2372,10 @@ export class InteractiveMode {
 									hostNodeId,
 								},
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
-					buildConversationSnapshot: createRemoteConversationSnapshotBuilder({
-						authorization,
-						runtime: relayRuntime,
-					}),
-					projectConversationExternal: createRemoteConversationExternalProjector({
-						authorization,
-						runtime: relayRuntime,
-					}),
+					buildConversationSnapshot: createRemoteConversationSnapshotBuilder({ authorization, conversation }),
+					projectConversationExternal: createRemoteConversationExternalProjector({ authorization, conversation }),
 					onReady: () => {
-						void relayRuntime.startRecoveredClientInputs().catch(() => undefined);
+						void conversation.startRecoveredClientInputs().catch(() => undefined);
 					},
 					onResponseWritten: (response) => workspaceUnregisterRetirement?.onResponseWritten(response),
 					initialInput: handshake.initialInput,
@@ -2411,14 +2421,14 @@ export class InteractiveMode {
 								stateManager: this.relayStateManager,
 								sessionListCursors: this.relaySessionListCursors,
 								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-								getConversationBranchEpoch: () => relayRuntime.conversationProjectionFeed.branchEpoch,
+								getConversationBranchEpoch: () => conversation.projectionFeed.branchEpoch,
 								isConversationTranscriptCursorValid: (cursor) =>
-									relayRuntime.conversationProjectionFeed.isTranscriptCursorValid(cursor),
+									conversation.projectionFeed.isTranscriptCursorValid(cursor),
 								registerConversationTranscriptCursor: (cursor) =>
-									relayRuntime.conversationProjectionFeed.registerTranscriptCursor(cursor),
+									conversation.projectionFeed.registerTranscriptCursor(cursor),
 								listRuntimeStates: (workspaceName) => this.daemonAttach.listRuntimeStates(workspaceName),
 							},
-							relayRuntime,
+							conversation,
 						);
 					},
 				});
@@ -2428,7 +2438,6 @@ export class InteractiveMode {
 				await workspaceUnregisterRetirement?.finalize();
 				relayedStream.close();
 				opened.finished();
-				await relayRuntime.dispose().catch(() => undefined);
 			}
 		})();
 		this.daemonRelayServers.set(server, conversationSessionId);
@@ -2511,13 +2520,26 @@ export class InteractiveMode {
 		this.resetExtensionUI();
 	}
 
-	private async rebindReplacementSession(session: AgentSession): Promise<void> {
-		this.bindDaemonWorkObservation(session);
-		await this.rebindCurrentSession(session);
+	/**
+	 * The TUI moved to `to`, whose extensions its host just bound: show the
+	 * session and let it render again. The daemon lease follows once the
+	 * conversation the TUI left closed.
+	 */
+	private async followMove(to: HostedConversation): Promise<void> {
+		this.observeLoss(to);
+		this.bindDaemonWorkObservation(to.session);
+		await this.followSession(to.session);
 		this.ui.requestRender(true);
 		const suspension = this.sessionRenderSuspension;
 		this.sessionRenderSuspension = undefined;
 		suspension?.release();
+	}
+
+	/** End the TUI when the conversation it shows loses its log. */
+	private observeLoss(conversation: HostedConversation): void {
+		void conversation.lost.then((error) => {
+			if (conversation === this.conversation) void this.handleRuntimeLost(error);
+		});
 	}
 
 	private bindDaemonWorkObservation(session: AgentSession): void {
@@ -2525,12 +2547,10 @@ export class InteractiveMode {
 		this.daemonWorkObservation.bind(session.gitContextProvider);
 	}
 
-	private async rebindCurrentSession(session: AgentSession): Promise<void> {
+	/** Point the TUI's own state at `session`, before its extensions bind. */
+	private enterSession(session: AgentSession): void {
 		this.quitConfirmation = undefined;
 		this.lastSigintTime = 0;
-		if (this.session !== session) {
-			throw new Error("Agent session changed before interactive rebind");
-		}
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
 		this.dismissBackgroundJobsInspector?.();
@@ -2541,15 +2561,16 @@ export class InteractiveMode {
 		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
-		await this.attachSessionExtensions(session);
-		if (this.session !== session) {
-			throw new Error("Agent session changed during interactive rebind");
-		}
+	}
+
+	/** Present `session`, whose extensions are bound, as the TUI's session. */
+	private async followSession(session: AgentSession): Promise<void> {
+		this.showSessionExtensions(session);
 		this.subscribeToAgent(session);
 		this.subscribeToBackgroundJobs(session);
 		await this.updateAvailableProviderCount();
 		this.closePlanDetails();
-		// A rebound session is a fresh presentation, so a ready plan is offered again.
+		// A session the TUI moved to is a fresh presentation, so a ready plan is offered again.
 		this.readyPlanFocusKey = undefined;
 		this.refreshPlanningUi();
 		this.updateTerminalTitle();
@@ -3290,7 +3311,7 @@ export class InteractiveMode {
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
 		// A missing daemon-managed worktree checkout refuses takeover with a clear
 		// error instead of resurrecting the session in another directory (§5.2.3).
-		if (isPathUnderWorktreesRoot(this.runtimeHost.services.agentDir, error.issue.sessionCwd)) {
+		if (isPathUnderWorktreesRoot(this.conversation.services.agentDir, error.issue.sessionCwd)) {
 			this.showError(
 				`This session ran in a daemon-managed worktree whose checkout is missing: ${error.issue.sessionCwd}. ` +
 					"Recreate the worktree (volt remote worktree add) or remove the session; refusing to open it in another directory.",
@@ -3818,12 +3839,12 @@ export class InteractiveMode {
 			session: this.session,
 			abortRun: () => this.session.abort("host_action"),
 			compactContext: (customInstructions) => this.session.compact(customInstructions),
-			newSession: (newSessionOptions) => this.runtimeHost.newSession(newSessionOptions),
+			newSession: (newSessionOptions) => openNewSession(this.host, this.client, newSessionOptions),
 			renameSession: (name) => this.session.setSessionName(name),
 			setFastModeEnabled: (enabled) => this.session.setFastModeEnabled(enabled),
 			setAgentMode: (mode) => this.session.setAgentMode(mode),
 			executePlan: (planId, expectedRevision, strategy) =>
-				this.runtimeHost.executePlan(planId, expectedRevision, strategy),
+				executePlan(this.host, this.client, planId, expectedRevision, strategy),
 			changePlan: (planId, expectedRevision) => this.session.changePlan(planId, expectedRevision),
 			discardPlan: (planId, expectedRevision) => this.session.discardPlan(planId, expectedRevision),
 			runReviewAction: (target, reviewOptions) =>
@@ -5054,7 +5075,14 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	private disposeRuntimeHost(): Promise<void> {
-		this.runtimeDisposePromise ??= Promise.resolve().then(() => this.runtimeHost.dispose());
+		// The TUI's conversation closes with its UI still attached; extension UI is released before disposal.
+		this.runtimeDisposePromise ??= Promise.resolve().then(async () => {
+			await this.host.close(this.conversation, {
+				reason: "quit",
+				beforeDispose: () => this.beginSessionReplacementUi(),
+			});
+			await this.host.dispose();
+		});
 		return this.runtimeDisposePromise;
 	}
 
@@ -5633,7 +5661,7 @@ export class InteractiveMode {
 				return;
 			}
 			this.closePlanDetails();
-			const result = await this.runtimeHost.executePlan(plan.id, plan.revision, action);
+			const result = await executePlan(this.host, this.client, plan.id, plan.revision, action);
 			this.showStatus(
 				action === "new_session"
 					? `Executing plan in session ${result.selectedSessionId}`
@@ -6288,7 +6316,7 @@ export class InteractiveMode {
 			const center = new RemoteControlCenterComponent(createRemoteControlBackend(getAgentDir()), {
 				getTerminalRows: () => this.ui.terminal.rows,
 				getCurrentWorkspaceName: () => this.daemonAttach.workspaceName(),
-				getCurrentWorkspacePath: () => this.runtimeHost.services.cwd,
+				getCurrentWorkspacePath: () => this.conversation.services.cwd,
 				currentSessionId: this.session.sessionId,
 				requestRender: () => this.ui.requestRender(),
 				copyText: copyToClipboard,
@@ -6518,7 +6546,7 @@ export class InteractiveMode {
 	private getStorePackageManager(): DefaultPackageManager {
 		const packageManager = new DefaultPackageManager({
 			cwd: this.sessionManager.getCwd(),
-			agentDir: this.runtimeHost.services.agentDir,
+			agentDir: this.conversation.services.agentDir,
 			settingsManager: this.settingsManager,
 		});
 		packageManager.setProgressCallback((event) => {
@@ -6531,7 +6559,7 @@ export class InteractiveMode {
 
 	private async loadStoreCatalog(required: boolean): Promise<StoreCatalog | undefined> {
 		try {
-			const result = await loadDefaultStoreCatalog({ agentDir: this.runtimeHost.services.agentDir });
+			const result = await loadDefaultStoreCatalog({ agentDir: this.conversation.services.agentDir });
 			for (const warning of result.warnings) {
 				this.showWarning(warning);
 			}
@@ -7366,14 +7394,14 @@ export class InteractiveMode {
 			return false;
 		}
 		// Trust entries are never persisted for daemon-managed worktree paths.
-		if (isPathUnderWorktreesRoot(this.runtimeHost.services.agentDir, cwd)) {
+		if (isPathUnderWorktreesRoot(this.conversation.services.agentDir, cwd)) {
 			return false;
 		}
 		if (!this.settingsManager.isProjectTrusted() || !hasTrustRequiringProjectResources(cwd)) {
 			return false;
 		}
 
-		const trustStore = new ProjectTrustStore(this.runtimeHost.services.agentDir);
+		const trustStore = new ProjectTrustStore(this.conversation.services.agentDir);
 		try {
 			if (trustStore.get(cwd) !== null) {
 				this.autoTrustOnReloadCwd = undefined;
@@ -7414,7 +7442,7 @@ export class InteractiveMode {
 			requestedName = parts[1];
 		}
 
-		const agentDir = this.runtimeHost.services.agentDir;
+		const agentDir = this.conversation.services.agentDir;
 		this.showStatus("Contacting voltd…");
 		const opened = await openDaemonWorktreeControl({ cwd: this.sessionManager.getCwd(), agentDir });
 		if (!opened.ok) {
@@ -7460,7 +7488,7 @@ export class InteractiveMode {
 			}
 
 			const sessionDir = getDefaultSessionDir(control.workspacePath, agentDir);
-			const result = await this.runtimeHost.newSession({
+			const result = await openNewSession(this.host, this.client, {
 				cwd: target.path,
 				sessionDir,
 				workspaceName: control.workspaceName,
@@ -7485,7 +7513,7 @@ export class InteractiveMode {
 	}
 
 	private showTrustSelector(): void {
-		const agentDir = this.runtimeHost.services.agentDir;
+		const agentDir = this.conversation.services.agentDir;
 		const sessionCwd = this.sessionManager.getCwd();
 		// Worktree sessions pin trust to the PARENT checkout; entries are never
 		// prompted for or persisted on worktree paths (§5.2.1).
@@ -7497,7 +7525,7 @@ export class InteractiveMode {
 			return;
 		}
 		const cwd = worktreeParent ?? sessionCwd;
-		const trustStore = new ProjectTrustStore(this.runtimeHost.services.agentDir);
+		const trustStore = new ProjectTrustStore(this.conversation.services.agentDir);
 		const savedDecision = trustStore.getEntry(cwd);
 		this.showSelector((done) => {
 			const selector = new TrustSelectorComponent({
@@ -7645,7 +7673,7 @@ export class InteractiveMode {
 				async (entryId) => {
 					const source = this.session;
 					try {
-						const result = await this.runtimeHost.fork(entryId);
+						const result = await openFork(this.host, this.client, entryId);
 						if (result.cancelled) {
 							done();
 							this.ui.requestRender();
@@ -7680,7 +7708,7 @@ export class InteractiveMode {
 
 		const source = this.session;
 		try {
-			const result = await this.runtimeHost.fork(leafId, { position: "at" });
+			const result = await openFork(this.host, this.client, leafId, { position: "at" });
 			if (result.cancelled) {
 				this.ui.requestRender();
 				return;
@@ -7913,7 +7941,7 @@ export class InteractiveMode {
 			if (!settleLease) return { cancelled: true };
 			let switched = false;
 			try {
-				const result = await this.runtimeHost.switchSession(sessionRef, {
+				const result = await openStoredSession(this.host, this.client, sessionRef, {
 					...(cwdOverride === undefined ? {} : { cwdOverride }),
 					withSession: options?.withSession,
 					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
@@ -8516,7 +8544,7 @@ export class InteractiveMode {
 				this.loadingAnimation = undefined;
 			}
 			this.statusContainer.clear();
-			const result = await this.runtimeHost.importFromJsonl(inputPath);
+			const result = await openImport(this.host, this.client, inputPath);
 			if (result.cancelled) {
 				this.showStatus("Import cancelled");
 				return;
@@ -8530,7 +8558,7 @@ export class InteractiveMode {
 					this.showStatus("Import cancelled");
 					return;
 				}
-				const result = await this.runtimeHost.importFromJsonl(inputPath, selectedCwd);
+				const result = await openImport(this.host, this.client, inputPath, selectedCwd);
 				if (result.cancelled) {
 					this.showStatus("Import cancelled");
 					return;
@@ -9761,7 +9789,7 @@ export class InteractiveMode {
 			);
 			if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
 			const handoff = createReviewFixHandoff(record, requestedFindingIds);
-			const opened = await this.runtimeHost.newSession({
+			const opened = await openNewSession(this.host, this.client, {
 				setup: (writer) => handoff.setup(writer),
 				beforeMove: (source) => handoff.beforeMove(source),
 			});
@@ -9808,7 +9836,6 @@ export class InteractiveMode {
 					...(typeof args.note === "string" ? { note: args.note } : {}),
 				},
 				{
-					recordCanonicalOutcome: this.runtimeHost.reviewDiscussions?.recordOutcome,
 					assertCurrent,
 				},
 			);
@@ -9900,9 +9927,9 @@ export class InteractiveMode {
 				controls: options.controls,
 				...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
 				cwd: this.sessionManager.getCwd(),
-				agentDir: this.runtimeHost.services.agentDir,
+				agentDir: this.conversation.services.agentDir,
 				session: this.session,
-				newSession: (newSessionOptions) => this.runtimeHost.newSession(newSessionOptions),
+				newSession: (newSessionOptions) => openNewSession(this.host, this.client, newSessionOptions),
 				authStorage: this.session.modelRegistry.authStorage,
 				settingsManager: this.settingsManager,
 				tools: options.tools,
@@ -9915,7 +9942,7 @@ export class InteractiveMode {
 					diagnosticRetentionWarning = message;
 				},
 				createHooks: () => this.createReviewWorkflowHooks(),
-				workflowManager: this.runtimeHost.reviewWorkflows,
+				workflowManager: this.conversation.reviewWorkflows,
 			});
 
 			if (result.status !== "completed") {

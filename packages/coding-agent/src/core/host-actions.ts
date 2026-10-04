@@ -1,6 +1,8 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, type Model, supportsFastInference } from "@hansjm10/volt-ai";
-import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
+import type { AgentSession } from "./agent-session.ts";
+import type { SessionIntentResult } from "./extensions/index.ts";
+import type { NewSessionIntentOptions } from "./host/session-intents.ts";
 import type { AgentMode, PlanExecutionStrategy, PlanningState } from "./planning.ts";
 import type { ReviewRunControls, ReviewTarget, ReviewWorkflowResult } from "./review.ts";
 import {
@@ -17,12 +19,9 @@ import type {
 import { validateUiActionArgs } from "./rpc/ui-action-args.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
-type RuntimeNewSession = AgentSessionRuntime["newSession"];
-type RuntimeSession = AgentSessionRuntime["session"];
-
-export type HostActionNewSessionOptions = Parameters<RuntimeNewSession>[0];
-export type HostActionNewSessionResult = Awaited<ReturnType<RuntimeNewSession>>;
-export type HostActionCompactResult = Awaited<ReturnType<RuntimeSession["compact"]>>;
+export type HostActionNewSessionOptions = NewSessionIntentOptions;
+export type HostActionNewSessionResult = SessionIntentResult;
+export type HostActionCompactResult = Awaited<ReturnType<AgentSession["compact"]>>;
 
 export interface HostActionSessionState {
 	isReviewDiscussion?: boolean;
@@ -55,7 +54,6 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	abortRun(): Promise<void>;
 	compactContext(customInstructions?: string): Promise<HostActionCompactResult>;
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
-	afterSessionSwitch?: () => Promise<void>;
 	renameSession(name: string): Promise<void>;
 	setFastModeEnabled?(enabled: boolean): Promise<void>;
 	setAgentMode?(mode: AgentMode): Promise<PlanningState>;
@@ -334,11 +332,7 @@ export async function runSessionNewHostAction(
 	options?: HostActionNewSessionOptions,
 ): Promise<HostActionNewSessionResult> {
 	if (context.session.isReviewDiscussion) throw new Error(REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE);
-	const result = await context.newSession(options);
-	if (!result.cancelled) {
-		await context.afterSessionSwitch?.();
-	}
-	return result;
+	return context.newSession(options);
 }
 
 export async function runCancelHostAction(context: HostActionInvocationContext): Promise<void> {

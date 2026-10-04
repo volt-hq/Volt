@@ -7,11 +7,8 @@ import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import * as undici from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	AgentSessionRuntime,
-	type AgentSessionServices,
-	type CreateAgentSessionRuntimeFactory,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { createIrohRemoteHandshakeFailure } from "../../../src/core/remote/iroh/handshake.ts";
 import {
@@ -30,6 +27,7 @@ import * as themeRuntime from "../../../src/core/theme/runtime.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
 import { main } from "../../../src/main.ts";
 import { createDirectorySymlinkSync } from "../../symlink-utils.ts";
+import { adoptTestSession, connectTestClient, type TestClient } from "../../utilities/host-client.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -38,7 +36,7 @@ const repositoryRoot = resolve(packageRoot, "../..");
 const roots: string[] = [];
 const managers: SessionManager[] = [];
 const harnesses: Harness[] = [];
-const runtimes: AgentSessionRuntime[] = [];
+const runtimes: TestClient[] = [];
 const leases: SQLiteSessionStoreLease[] = [];
 const CLI_ENV_KEYS = [
 	"HOME",
@@ -99,7 +97,7 @@ async function ownHarness(harness: Promise<Harness>): Promise<Harness> {
 	return resolved;
 }
 
-function ownRuntime(runtime: AgentSessionRuntime): AgentSessionRuntime {
+function ownRuntime(runtime: TestClient): TestClient {
 	runtimes.push(runtime);
 	return runtime;
 }
@@ -280,7 +278,7 @@ afterEach(async () => {
 	restoreStdout();
 	for (const runtime of runtimes.splice(0).reverse()) {
 		try {
-			await runtime.dispose();
+			await runtime.host.dispose();
 		} catch (error) {
 			cleanupErrors.push(error);
 		}
@@ -512,7 +510,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
 		const initialHarness = await ownHarness(createHarness({ sessionManager: current }));
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd: nextCwd, agentDir, sessionManager }) => {
+		const createRuntime: ConversationFactory = async ({ cwd: nextCwd, agentDir, sessionManager }) => {
 			const replacementHarness = await ownHarness(createHarness({ sessionManager }));
 			const services = servicesForHarness(replacementHarness, nextCwd, agentDir);
 			return {
@@ -522,9 +520,12 @@ describe("PR #329 exact-ID discovery isolation", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = ownRuntime(
-			new AgentSessionRuntime(initialHarness.session, servicesForHarness(initialHarness, cwd), createRuntime),
+		const { host, conversation } = adoptTestSession(
+			initialHarness.session,
+			servicesForHarness(initialHarness, cwd),
+			createRuntime,
 		);
+		const runtime = ownRuntime(await connectTestClient(host, conversation));
 
 		await expect(runtime.switchSessionById(target.getSessionId())).resolves.toEqual({
 			cancelled: false,

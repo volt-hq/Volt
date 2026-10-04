@@ -1,8 +1,26 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import { executePlan } from "../../../src/core/host/plan-handoff.ts";
+import type { HostClient, RedirectTarget } from "../../../src/core/host/targets.ts";
 import { PLAN_EXECUTION_CUSTOM_TYPE, type PlanPhase } from "../../../src/core/planning.ts";
 import { findSessionInfoById, SessionManager } from "../../../src/core/session-manager.ts";
+import { connectTestClient } from "../../utilities/host-client.ts";
 import { createHostHarness } from "../host-harness.ts";
+
+/** A phone's client: it follows its structural intents by redirect, through `hostTarget` when given. */
+function redirectClient(
+	redirects: string[],
+	hostTarget?: (target: RedirectTarget) => Promise<{ commit(): Promise<void>; abort(): Promise<void> }>,
+): HostClient {
+	return {
+		id: "phone",
+		move: {
+			kind: "redirect",
+			redirect: (sessionId) => void redirects.push(sessionId),
+			...(hostTarget === undefined ? {} : { hostTarget }),
+		},
+	};
+}
 
 /** The plan phase of the last planning snapshot on a branch. */
 function lastPlanPhase(entries: ReadonlyArray<{ type: string }>): PlanPhase | undefined {
@@ -35,9 +53,10 @@ describe("regression #585: executing a plan in a new session hands it off throug
 			},
 		});
 		const source = await harness.openStartup();
-		const runtime = new AgentSessionRuntime(harness.host, source);
+		// The TUI's client: it anchors the source and moves in place.
+		const tui = await connectTestClient(harness.host, source);
 		cleanups.push(async () => {
-			await runtime.dispose();
+			await tui.dispose();
 			await harness.cleanup();
 		});
 		await source.session.setAgentMode("plan");
@@ -52,18 +71,18 @@ describe("regression #585: executing a plan in a new session hands it off throug
 			title: "Hand off",
 			summary: "Execute in a fresh session.",
 		});
-		return { harness, source, runtime, ready, shutdowns };
+		return { harness, source, tui, ready, shutdowns };
 	}
 
 	it("records handed_off in the source before it closes, without reopening it, and starts the plan in the new session", async () => {
-		const { source, runtime, ready, shutdowns } = await setup();
+		const { source, tui, ready, shutdowns } = await setup();
 		const sourceId = source.id;
 		const sourceRef = source.session.sessionRef!;
 		const reopen = vi.spyOn(SessionManager, "open");
 
-		const result = await runtime.executePlan(ready.id, ready.revision, "new_session");
+		const result = await tui.executePlan(ready.id, ready.revision, "new_session");
 
-		const target = runtime.session;
+		const target = tui.session;
 		expect(result.started).toBe(true);
 		expect(result.selectedSessionId).toBe(target.sessionId);
 		expect(target.sessionId).not.toBe(sourceId);
@@ -96,37 +115,35 @@ describe("regression #585: executing a plan in a new session hands it off throug
 	});
 
 	it("keeps the client on the source, with the plan still ready, when the handoff cannot be recorded there", async () => {
-		const { harness, source, runtime, ready, shutdowns } = await setup();
+		const { harness, source, tui, ready, shutdowns } = await setup();
 		vi.spyOn(source.session, "markPlanHandedOff").mockRejectedValueOnce(new Error("handoff refused"));
 
-		await expect(runtime.executePlan(ready.id, ready.revision, "new_session")).rejects.toThrow("handoff refused");
+		await expect(tui.executePlan(ready.id, ready.revision, "new_session")).rejects.toThrow("handoff refused");
 
-		expect(runtime.session).toBe(source.session);
+		expect(tui.session).toBe(source.session);
 		expect(harness.host.list()).toEqual([source]);
 		expect(shutdowns).toEqual([]);
 		expect(source.session.planningState.plan).toMatchObject({ id: ready.id, phase: "ready" });
 
 		// The plan can still be executed from the source.
-		const retried = await runtime.executePlan(ready.id, ready.revision, "new_session");
-		expect(retried).toMatchObject({ started: true, selectedSessionId: runtime.session.sessionId });
+		const retried = await tui.executePlan(ready.id, ready.revision, "new_session");
+		expect(retried).toMatchObject({ started: true, selectedSessionId: tui.session.sessionId });
 		expect(shutdowns).toEqual([{ sessionId: source.id, phase: "handed_off" }]);
 	});
 
 	it("queues the execution in the new log of a redirected client, and runs it once that conversation opens", async () => {
-		const { harness, source, runtime, ready, shutdowns } = await setup();
-		const view = runtime.attachRedirectClient();
-		cleanups.push(() => view.dispose());
+		const { harness, source, tui, ready, shutdowns } = await setup();
 		const redirects: string[] = [];
-		view.onClientDetached((detachment) => {
-			if (detachment.kind === "redirected") redirects.push(detachment.sessionId);
-		});
+		const phone = redirectClient(redirects);
+		await harness.host.attach(phone, source);
+		cleanups.push(() => harness.host.detach(phone));
 
-		const result = await view.executePlan(ready.id, ready.revision, "new_session");
+		const result = await executePlan(harness.host, phone, ready.id, ready.revision, "new_session");
 
 		expect(result.started).toBe(true);
 		expect(redirects).toEqual([result.selectedSessionId]);
 		// The source stays open for its other client, with the plan handed off.
-		expect(runtime.session).toBe(source.session);
+		expect(tui.session).toBe(source.session);
 		expect(source.session.planningState.plan).toMatchObject({
 			id: ready.id,
 			phase: "handed_off",
@@ -152,23 +169,22 @@ describe("regression #585: executing a plan in a new session hands it off throug
 	});
 
 	it("opens the new conversation in the host of a client whose host takes its redirect targets", async () => {
-		const { harness, source, runtime, ready } = await setup();
-		let hosted: AgentSessionRuntime | undefined;
-		const view = runtime.attachRedirectClient({
-			hostTarget: async (target) => ({
-				commit: async () => {
-					hosted = target.runtime;
-				},
-				abort: async () => {},
-			}),
-		});
-		cleanups.push(() => view.dispose());
+		const { harness, source, ready } = await setup();
+		let hosted: HostedConversation | undefined;
+		const phone = redirectClient([], async (target) => ({
+			commit: async () => {
+				hosted = target.conversation;
+			},
+			abort: async () => {},
+		}));
+		await harness.host.attach(phone, source);
+		cleanups.push(() => harness.host.detach(phone));
 
-		const result = await view.executePlan(ready.id, ready.revision, "new_session");
+		const result = await executePlan(harness.host, phone, ready.id, ready.revision, "new_session");
 
 		if (!hosted) throw new Error("the new conversation was not handed over");
 		const target = hosted;
-		cleanups.push(() => target.dispose());
+		cleanups.push(() => harness.host.close(target));
 		expect(target.session.sessionId).toBe(result.selectedSessionId);
 		expect(harness.host.list().map((conversation) => conversation.id)).toEqual([source.id, result.selectedSessionId]);
 		expect(source.session.planningState.plan).toMatchObject({ id: ready.id, phase: "handed_off" });
@@ -181,24 +197,25 @@ describe("regression #585: executing a plan in a new session hands it off throug
 	});
 
 	it("prepares the hosted target before writing through the source, and abandons it when that write fails", async () => {
-		const { harness, source, runtime, ready } = await setup();
+		const { harness, source, ready } = await setup();
 		const steps: string[] = [];
 		const handedOff = vi.spyOn(source.session, "markPlanHandedOff").mockImplementationOnce(async () => {
 			steps.push("source write");
 			throw new Error("handoff refused");
 		});
-		const view = runtime.attachRedirectClient({
-			hostTarget: async () => {
-				steps.push("prepare");
-				return {
-					commit: async () => void steps.push("commit"),
-					abort: async () => void steps.push("abort"),
-				};
-			},
+		const phone = redirectClient([], async () => {
+			steps.push("prepare");
+			return {
+				commit: async () => void steps.push("commit"),
+				abort: async () => void steps.push("abort"),
+			};
 		});
-		cleanups.push(() => view.dispose());
+		await harness.host.attach(phone, source);
+		cleanups.push(() => harness.host.detach(phone));
 
-		await expect(view.executePlan(ready.id, ready.revision, "new_session")).rejects.toThrow("handoff refused");
+		await expect(executePlan(harness.host, phone, ready.id, ready.revision, "new_session")).rejects.toThrow(
+			"handoff refused",
+		);
 
 		expect(handedOff).toHaveBeenCalledOnce();
 		expect(steps).toEqual(["prepare", "source write", "abort"]);

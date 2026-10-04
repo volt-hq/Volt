@@ -6,11 +6,8 @@ import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@h
 import { RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { BUILTIN_HOST_ACTION_REGISTRY, type HostActionInvocationContext } from "../../../src/core/host-actions.ts";
 import { getStaticIrohRemoteRpcFilterResult } from "../../../src/core/remote/iroh/rpc-command-filter.ts";
 import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
@@ -28,8 +25,26 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../../../src/core/session-store/client.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../../src/modes/rpc/rpc-command-validation.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+/** A test client of a hosted conversation, with the review discussion service a daemon would give it. */
+type Owned = TestClient & { reviewDiscussions?: ReviewDiscussionService };
+
+/** An RPC dispatcher context for the conversation `owned` is on. */
+function rpcContext(owned: Owned, extra: Record<string, unknown> = {}): RpcCommandDispatcherContext {
+	return {
+		session: owned.session,
+		conversation: owned.conversation,
+		host: owned.host,
+		client: owned.client,
+		...(owned.reviewDiscussions === undefined ? {} : { reviewDiscussions: owned.reviewDiscussions }),
+		options: {},
+		assertConversationGenerationCurrent: () => {},
+		...extra,
+	} as unknown as RpcCommandDispatcherContext;
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -93,15 +108,17 @@ async function fixture(models?: FauxModelDefinition[]) {
 		models,
 		settings: { lsp: { enabled: false }, compaction: { enabled: false } },
 	});
-	const runtimes: AgentSessionRuntime[] = [];
+	const runtimes: Owned[] = [];
+	const hosts: ConversationHost[] = [];
 	const gates: Array<() => void> = [];
 	cleanups.push(async () => {
 		for (const release of gates) release();
 		await Promise.all(runtimes.map((runtime) => runtime.dispose()));
+		await Promise.all(hosts.map((host) => host.dispose()));
 		await harness.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const created = await createAgentSession({
 			sessionManager,
 			cwd,
@@ -131,12 +148,31 @@ async function fixture(models?: FauxModelDefinition[]) {
 			diagnostics: [],
 		};
 	};
-	const source = await createAgentSessionRuntime(factory, {
-		sessionManager: await SessionManager.create(root, join(root, "sessions")),
-		cwd: root,
-		agentDir: root,
-	});
-	runtimes.push(source);
+	/** Open `manager`'s log in a host of its own, as the daemon does for a conversation a client attaches to. */
+	async function own(manager: SessionManager): Promise<Owned> {
+		const opened = await openTestHost(factory, { sessionManager: manager, cwd: root, agentDir: root });
+		hosts.push(opened.host);
+		const owned: Owned = await connectTestClient(opened.host, opened.conversation);
+		runtimes.push(owned);
+		return owned;
+	}
+	const siblings = {
+		/** Open a review discussion beside `parent`, in its host, without moving any client. */
+		async open(parent: HostedConversation, manager: SessionManager): Promise<Owned> {
+			const owner = runtimes.find((runtime) => runtime.conversation === parent);
+			if (!owner || !manager.getReviewDiscussion() || manager.getCwd() !== parent.cwd) {
+				await manager.closePersistence();
+				throw new Error("Review sibling requires an exact source cwd and a durable child binding");
+			}
+			const opened = await owner.host.open({ kind: "adopt", sessionManager: manager, cwd: parent.cwd });
+			if (opened.cancelled) throw new Error("Review sibling open was cancelled");
+			const child: Owned = await connectTestClient(owner.host, opened.conversation);
+			runtimes.push(child);
+			child.reviewDiscussions = service.forRuntime(child.conversation);
+			return child;
+		},
+	};
+	const source = await own(await SessionManager.create(root, join(root, "sessions")));
 	await source.session.setSessionName("Source");
 	await appendReviewRunDurably(source.session.sessionWriter, record());
 	const service = new HostReviewDiscussionService({
@@ -148,21 +184,19 @@ async function fixture(models?: FauxModelDefinition[]) {
 					current.sessionId === ref.sessionId &&
 					current.sessionGeneration === ref.sessionGeneration
 				);
-			}),
-		assertCurrent: (runtime) => {
-			if (!runtimes.includes(runtime)) throw new Error("retired");
+			})?.conversation,
+		assertCurrent: (conversation) => {
+			if (!runtimes.some((runtime) => runtime.conversation === conversation)) throw new Error("retired");
 		},
 		createSibling: async (parent, ref, assertCurrent) => {
 			const manager = await SessionManager.open(ref);
-			const child = await parent.createReviewDiscussionSibling(manager);
+			const child = await siblings.open(parent, manager);
 			assertCurrent();
-			runtimes.push(child);
-			child.reviewDiscussions = service.forRuntime(child);
-			return child;
+			return child.conversation;
 		},
 	});
-	source.reviewDiscussions = service.forRuntime(source);
-	return { root, source, service, api: source.reviewDiscussions, harness, runtimes, factory, gates };
+	source.reviewDiscussions = service.forRuntime(source.conversation);
+	return { root, source, service, api: source.reviewDiscussions, harness, runtimes, own, siblings, gates };
 }
 
 function holdResponses(harness: Harness, count: number, gates: Array<() => void>) {
@@ -224,12 +258,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 			expect(validateRpcCommandPayload(command)).toBeUndefined();
 			const remote = getStaticIrohRemoteRpcFilterResult(JSON.stringify(command));
 			expect(remote).toMatchObject({ allowed: true, command: JSON.parse(JSON.stringify(command)) });
-			const response = await handleRpcCommand(JSON.parse(JSON.stringify(command)), {
-				session: source.session,
-				runtimeHost: source,
-				options: {},
-				assertConversationGenerationCurrent: () => {},
-			} as RpcCommandDispatcherContext);
+			const response = await handleRpcCommand(JSON.parse(JSON.stringify(command)), rpcContext(source));
 			expect(response).toMatchObject({ success: true, data: { results: [{ outcome: "created" }] } });
 			await runtimes[1]!.session.waitForIdle();
 			expect(observed).toEqual({ model: expectedModel, thinking: expectedThinking });
@@ -267,12 +296,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 					requestId: "invalid",
 					discussionConfiguration,
 				},
-				{
-					session: source.session,
-					runtimeHost: source,
-					options: {},
-					assertConversationGenerationCurrent: () => {},
-				} as RpcCommandDispatcherContext,
+				rpcContext(source),
 			);
 			expect(response).toMatchObject({ success: false, error: expect.stringMatching(/unavailable|Unsupported/) });
 			expect((await api.list("review-341")).discussions).toEqual([]);
@@ -326,13 +350,10 @@ describe("Regression #341 host sibling lifecycle", () => {
 			changePlan: (id, revision) => child.session.changePlan(id, revision),
 			discardPlan: (id, revision) => child.session.discardPlan(id, revision),
 		};
-		const context = {
-			session: child.session,
-			runtimeHost: child,
+		const context = rpcContext(child, {
 			options: { allowUiActionInvocation: true },
-			assertConversationGenerationCurrent: () => {},
 			createHostActionContext: () => hostContext,
-		} as RpcCommandDispatcherContext;
+		});
 		expect(await handleRpcCommand({ type: "bash", command: "printf rpc-fixed > rpc.txt" }, context)).toMatchObject({
 			success: true,
 			data: { exitCode: 0 },
@@ -402,32 +423,31 @@ describe("Regression #341 host sibling lifecycle", () => {
 	it("dispatches co-client create/list and returns explicit unavailable without a sibling service", async () => {
 		const { source, harness, runtimes } = await fixture();
 		harness.setResponses([fauxAssistantMessage("answer")]);
-		const context = {
-			session: source.session,
-			runtimeHost: source,
-			options: {},
-			assertConversationGenerationCurrent: () => {},
-		} as RpcCommandDispatcherContext;
+		const context = () => rpcContext(source);
 		const first = await handleRpcCommand(
 			{ id: "one", type: "start_review_discussions", runId: "review-341", findingIds: ["f1"], requestId: "stable" },
-			context,
+			context(),
 		);
 		expect(first).toMatchObject({ id: "one", success: true, data: { results: [{ outcome: "created" }] } });
 		await runtimes[1]!.session.waitForIdle();
 		const second = await handleRpcCommand(
 			{ id: "two", type: "start_review_discussions", runId: "review-341", findingIds: ["f1"], requestId: "stable" },
-			{ ...context },
+			{ ...context() },
 		);
 		expect(second).toMatchObject({ id: "two", success: true, data: { results: [{ outcome: "existing" }] } });
-		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context)).toMatchObject({
-			success: true,
-			data: { discussions: [{ status: "completed" }] },
-		});
+		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context())).toMatchObject(
+			{
+				success: true,
+				data: { discussions: [{ status: "completed" }] },
+			},
+		);
 		source.reviewDiscussions = undefined;
-		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context)).toMatchObject({
-			success: false,
-			errorCode: "review_discussions_unavailable",
-		});
+		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context())).toMatchObject(
+			{
+				success: false,
+				errorCode: "review_discussions_unavailable",
+			},
+		);
 	});
 	it("starts four overlapping turns, co-client deduplicates and lists, and keeps one-child cancellation isolated", async () => {
 		const { api, harness, runtimes, source, service, gates, root } = await fixture();
@@ -441,7 +461,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 				.slice(1)
 				.every((runtime) => runtime.session.isBusy && runtime.cwd === root && runtime.session.isReviewDiscussion),
 		).toBe(true);
-		const second = service.forRuntime(source);
+		const second = service.forRuntime(source.conversation);
 		expect(
 			(await second.start("review-341", ["f1", "f2", "f3", "f4"], "retry")).results.every(
 				(row) => row.outcome === "existing",
@@ -477,10 +497,10 @@ describe("Regression #341 host sibling lifecycle", () => {
 	});
 
 	it("contains partial failures, retries only definitively unsubmitted launches, and never repeats completed kickoff", async () => {
-		const { api, harness, source, runtimes } = await fixture();
+		const { api, harness, runtimes, siblings } = await fixture();
 		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("retry")]);
-		const create = vi.spyOn(source, "createReviewDiscussionSibling");
-		create.mockImplementationOnce(async (manager) => {
+		const create = vi.spyOn(siblings, "open");
+		create.mockImplementationOnce(async (_parent, manager) => {
 			await manager.closePersistence();
 			throw new Error("injected");
 		});
@@ -522,7 +542,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 	it.each([false, true])(
 		"shows interrupted later input after reconnect (reset: %s) until an explicit retry answers",
 		async (reset) => {
-			const { api, harness, runtimes, source, service } = await fixture();
+			const { api, harness, runtimes, source, siblings } = await fixture();
 			harness.setResponses([fauxAssistantMessage("Initial answer")]);
 			const [first] = successful(await api.start("review-341", ["f1"], "start"));
 			await runtimes[1]!.session.waitForIdle();
@@ -542,9 +562,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 				),
 			);
 			expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
-			const reopened = await source.createReviewDiscussionSibling(manager);
-			runtimes.push(reopened);
-			reopened.reviewDiscussions = service.forRuntime(reopened);
+			const reopened = await siblings.open(source.conversation, manager);
 			await reopened.startRecoveredClientInputs();
 			expect(reopened.session.sessionManager.getClientInput("interrupted-follow-up")).toMatchObject({
 				state: "failed",
@@ -559,7 +577,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 	);
 
 	it("keeps an older undelivered follow-up visible after a newer input answers and recovery fails it", async () => {
-		const { api, harness, runtimes, source, service } = await fixture();
+		const { api, harness, runtimes, source, siblings } = await fixture();
 		harness.setResponses([fauxAssistantMessage("Initial answer")]);
 		await api.start("review-341", ["f1"], "start");
 		const child = runtimes[1]!;
@@ -582,9 +600,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		);
 		expect(clientInputRecovery(manager.getConversationState()).kind).toBe("replay");
 		expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
-		const reopened = await source.createReviewDiscussionSibling(manager);
-		runtimes.push(reopened);
-		reopened.reviewDiscussions = service.forRuntime(reopened);
+		const reopened = await siblings.open(source.conversation, manager);
 		await reopened.startRecoveredClientInputs();
 		expect(reopened.session.sessionManager.getClientInput("older-follow-up")?.state).toBe("failed");
 		expect((await api.list("review-341")).discussions[0]!.status).toBe("failed");
@@ -621,26 +637,27 @@ describe("Regression #341 host sibling lifecycle", () => {
 	});
 
 	it("source handoff aliases converge and copied/forked metadata cannot grant authority", async () => {
-		const { api, harness, source, service, runtimes, factory, root } = await fixture();
+		const { api, harness, source, service, runtimes, own, root } = await fixture();
 		harness.setResponses([fauxAssistantMessage("answer")]);
 		const first = successful(await api.start("review-341", ["f1"], "start"))[0]!;
 		await runtimes[1]!.session.waitForIdle();
 		const target = await SessionManager.create(root, join(root, "sessions"));
 		await appendReviewRun(target.logWriter, record());
-		const alias = await createAgentSessionRuntime(factory, { sessionManager: target, cwd: root, agentDir: root });
-		runtimes.push(alias);
-		await expect(service.forRuntime(alias).list("review-341")).rejects.toThrow("not owned");
+		const alias = await own(target);
+		await expect(service.forRuntime(alias.conversation).list("review-341")).rejects.toThrow("not owned");
 		await registerReviewHandoffAliases(source.session.sessionManager, target, ["review-341"]);
-		expect(successful(await service.forRuntime(alias).start("review-341", ["f1"], "alias"))[0]!.discussionId).toBe(
-			first.discussionId,
-		);
-		await service.forRuntime(alias).recordOutcome({ runId: "review-341", findingId: "f1", status: "fixed" });
+		expect(
+			successful(await service.forRuntime(alias.conversation).start("review-341", ["f1"], "alias"))[0]!.discussionId,
+		).toBe(first.discussionId);
+		await service
+			.forRuntime(alias.conversation)
+			.recordOutcome({ runId: "review-341", findingId: "f1", status: "fixed" });
 		expect(getReviewRun(source.session.sessionManager, "review-341")?.result?.findings[0]?.status).toBe("fixed");
 		expect(getReviewRun(alias.session.sessionManager, "review-341")?.result?.findings[0]?.status).toBe("open");
 	});
 
-	it("survives an actual source rebind and a child runtime reconnect without another initial turn", async () => {
-		const { api, harness, source, runtimes } = await fixture();
+	it("survives a source session change and a child reconnect without another initial turn", async () => {
+		const { api, harness, source, service, runtimes } = await fixture();
 		harness.setResponses([fauxAssistantMessage("answer")]);
 		const sourceId = source.session.sessionId;
 		const [first] = successful(await api.start("review-341", ["f1"], "first"));
@@ -653,7 +670,9 @@ describe("Regression #341 host sibling lifecycle", () => {
 			},
 		});
 		expect(source.session.sessionId).not.toBe(sourceId);
-		const [existing] = successful(await api.start("review-341", ["f1"], "after-rebind"));
+		// The service serves the conversation the source client moved to, an alias of the review's source.
+		const moved = service.forRuntime(source.conversation);
+		const [existing] = successful(await moved.start("review-341", ["f1"], "after-rebind"));
 		expect(existing).toMatchObject({
 			discussionId: first!.discussionId,
 			sourceSessionId: sourceId,

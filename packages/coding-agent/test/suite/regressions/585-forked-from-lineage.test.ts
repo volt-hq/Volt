@@ -5,12 +5,10 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import {
 	type CommittedSessionEntry,
 	importSessionFromJsonlInMemory,
@@ -18,11 +16,12 @@ import {
 	SessionManager,
 } from "../../../src/core/session-manager.ts";
 import { replaySessionEntries } from "../../../src/core/session-store/projection.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const harnesses: Harness[] = [];
 const managers: SessionManager[] = [];
-const runtimes: AgentSessionRuntime[] = [];
+const runtimes: TestClient[] = [];
 
 afterEach(async () => {
 	for (const runtime of runtimes.splice(0).reverse()) await runtime.dispose();
@@ -243,7 +242,7 @@ describe("#585 forked_from lineage", () => {
 		});
 	});
 
-	it("writes lineage when the runtime forks before the first message or clones", async () => {
+	it("writes lineage when a client forks before the first message or clones", async () => {
 		const harness = await persistedHarness();
 		const cwd = join(harness.tempDir, "workspace");
 		mkdirSync(cwd, { recursive: true });
@@ -253,7 +252,7 @@ describe("#585 forked_from lineage", () => {
 		const replyId = await initial.logWriter.appendMessage(fauxAssistantMessage("hi"));
 		const branchIds = initial.getBranch(replyId).map((entry) => entry.id);
 		const sourceRef = initial.getSessionRef()!;
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+		const createRuntime: ConversationFactory = async ({
 			cwd: runtimeCwd,
 			agentDir,
 			sessionManager,
@@ -280,13 +279,13 @@ describe("#585 forked_from lineage", () => {
 			});
 			return { ...created, services, diagnostics: services.diagnostics };
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd,
 			agentDir: harness.tempDir,
 			sessionManager: initial,
 		});
+		const runtime = await connectTestClient(host, conversation, { surface: {} });
 		runtimes.push(runtime);
-		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		await expect(runtime.fork(replyId, { position: "at" })).resolves.toMatchObject({ cancelled: false });
 		const clone = runtime.session.sessionManager;

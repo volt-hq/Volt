@@ -7,7 +7,8 @@
  * Moving a client fires, in order: `session_before_switch` or
  * `session_before_fork` on the source (which may cancel), the new
  * conversation's `session_start` when the client's surface binds its
- * extensions, then the source's `session_shutdown` when it closes. A source
+ * extensions (in the host's extension mode), then the source's
+ * `session_shutdown` when it closes. A source
  * closes when its anchor leaves, or when its last client leaves and the host
  * closes unattached conversations. A client that moves in place may not leave
  * a busy source; a client that follows moves by redirect may while other
@@ -25,7 +26,12 @@ import {
 	retainLocalSessionWorktree,
 } from "../../daemon/session-worktree.ts";
 import { resolvePath } from "../../utils/paths.ts";
-import type { ProjectTrustContext, ReplacedSessionContext, SessionStartEvent } from "../extensions/index.ts";
+import type {
+	ExtensionMode,
+	ProjectTrustContext,
+	ReplacedSessionContext,
+	SessionStartEvent,
+} from "../extensions/index.ts";
 import { assertSessionCwdExists, MissingSessionCwdError } from "../session-cwd.ts";
 import {
 	assertCurrentSessionSnapshot,
@@ -34,10 +40,11 @@ import {
 	type NewSessionOptions,
 	SessionManager,
 } from "../session-manager.ts";
+import { ClientScope } from "./client-scope.ts";
 import {
+	type ConversationFactory,
+	type ConversationFactoryResult,
 	type ConversationLifetime,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
 	HostedConversation,
 	type HostedConversationSession,
 	type SubagentRuntimeContext,
@@ -60,8 +67,10 @@ export class SessionImportFileNotFoundError extends Error {
 export type WhenUnattached = "close" | "keep" | { readonly retainMs: number };
 
 export interface ConversationHostOptions {
-	readonly factory: CreateAgentSessionRuntimeFactory;
+	readonly factory: ConversationFactory;
 	readonly agentDir: string;
+	/** The mode every conversation's extensions bind in (`ctx.mode`), once its first client with a surface joins. */
+	readonly extensionMode: ExtensionMode;
 	/** Default: "close". */
 	readonly whenUnattached?: WhenUnattached;
 }
@@ -157,7 +166,7 @@ async function closeOwnedSessionManager(manager: SessionManager, error: unknown,
 }
 
 /** Dispose a created session no conversation took over. */
-async function disposeUnownedSession(created: CreateAgentSessionRuntimeResult, error: unknown): Promise<never> {
+async function disposeUnownedSession(created: ConversationFactoryResult, error: unknown): Promise<never> {
 	const cleanupErrors: unknown[] = [];
 	try {
 		await created.session.disposeSubagentToolManager();
@@ -190,8 +199,9 @@ function shutdownReasonFor(conversation: HostedConversation): "new" | "resume" |
 }
 
 export class ConversationHost {
-	private readonly factory: CreateAgentSessionRuntimeFactory;
+	private readonly factory: ConversationFactory;
 	private readonly agentDir: string;
+	private readonly extensionMode: ExtensionMode;
 	private readonly whenUnattached: WhenUnattached;
 	private readonly conversations = new Set<HostedConversation>();
 	private readonly closing = new Map<HostedConversation, Promise<void>>();
@@ -206,6 +216,7 @@ export class ConversationHost {
 	constructor(options: ConversationHostOptions) {
 		this.factory = options.factory;
 		this.agentDir = options.agentDir;
+		this.extensionMode = options.extensionMode;
 		this.whenUnattached = options.whenUnattached ?? "close";
 	}
 
@@ -330,7 +341,11 @@ export class ConversationHost {
 		if (from) {
 			if (from.closed) throw new Error("The source conversation is closed");
 			if (from.lifetime === "owner") throw new PinnedConversationError();
-			if (!fromStaysOpen) from.assertCanLeave();
+			if (!fromStaysOpen) {
+				// An extension command that moves its client is done with its own input.
+				await from.session.settleInvokingCommandInput();
+				from.assertCanLeave();
+			}
 		}
 		if (target.kind === "import") {
 			const importPath = resolvePath(target.path);
@@ -462,7 +477,7 @@ export class ConversationHost {
 						previousSessionRef: from?.session.sessionRef,
 					};
 		const subagentContext = options.subagentContext;
-		let created: CreateAgentSessionRuntimeResult;
+		let created: ConversationFactoryResult;
 		let cwd: string;
 		try {
 			if (from) retainLocalSessionWorktree(from.session.sessionManager, sessionManager);
@@ -540,10 +555,19 @@ export class ConversationHost {
 		await this.join(client, conversation);
 	}
 
-	/** Detach `client` from its conversation, which closes if it was the anchor or the last client and the host closes unattached conversations. */
+	/**
+	 * Detach `client` from its conversation, which closes if it was the anchor
+	 * or the last client and the host closes unattached conversations. An
+	 * anchor's conversation closes with the anchor still attached, so its
+	 * `session_shutdown` reaches the anchor's surface.
+	 */
 	async detach(client: HostClient): Promise<void> {
 		const attachment = this.attachments.get(client.id);
 		if (!attachment) return;
+		if (client.anchor && !attachment.conversation.closed) {
+			await this.close(attachment.conversation);
+			return;
+		}
 		this.leave(attachment);
 		await this.afterLeave(attachment.conversation, client, { reason: "quit" });
 	}
@@ -553,9 +577,11 @@ export class ConversationHost {
 	 * work meanwhile, unless the client follows moves by redirect and other
 	 * clients keep the source open; the client's surface leaves the source
 	 * before it joins `to`, so the source's `session_shutdown` reaches none of
-	 * the client's UI. If the client cannot join `to`, it stays on the source.
-	 * Once it joined, the source closes per its anchor and the host's unattached
-	 * rule, even if the client's own move handler fails.
+	 * the client's UI. An in-place client prepares for `to` before joining it
+	 * and hears `onMoved` once it joined. If the client cannot join `to`, it
+	 * returns to the source. Once it joined, the source closes per its anchor
+	 * and the host's unattached rule, even if the client's own move handler
+	 * fails.
 	 */
 	async move(client: HostClient, to: HostedConversation): Promise<void> {
 		const attachment = this.attachments.get(client.id);
@@ -567,20 +593,22 @@ export class ConversationHost {
 		const anchorLeaving = client.anchor === true && from !== undefined && !this.anchorsLeaving.has(from);
 		if (anchorLeaving) this.anchorsLeaving.add(from);
 		if (attachment) this.leave(attachment);
-		if (client.move.kind === "in_place") {
+		const move = client.move;
+		if (move.kind === "in_place") {
 			try {
+				move.prepare?.(to, from);
 				await this.join(client, to);
 			} catch (error) {
 				if (anchorLeaving) this.anchorsLeaving.delete(from);
-				if (from && !from.closed) await this.join(client, from).catch(() => undefined);
+				if (from && !from.closed) await this.returnTo(client, from, to);
 				releaseSource?.();
 				throw error;
 			}
 		}
 		const errors: unknown[] = [];
 		try {
-			if (client.move.kind === "in_place") await client.move.onMoved(to, from);
-			else await client.move.redirect(to.id);
+			if (move.kind === "in_place") await move.onMoved(to, from);
+			else await move.redirect(to.id);
 		} catch (error) {
 			errors.push(error);
 		}
@@ -600,32 +628,62 @@ export class ConversationHost {
 		if (errors.length > 1) throw new AggregateError(errors, "Conversation move did not complete");
 	}
 
+	/** An in-place client that could not join `left` returns to `from`, the conversation it left. */
+	private async returnTo(client: HostClient, from: HostedConversation, left: HostedConversation): Promise<void> {
+		const move = client.move;
+		if (move.kind !== "in_place") return;
+		// The failed move is what the caller reports; the client gets back to the source regardless.
+		try {
+			move.prepare?.(from, left);
+		} catch {}
+		try {
+			await this.join(client, from);
+			await move.onMoved(from, left);
+		} catch {}
+	}
+
 	/**
 	 * Open `target` for `client` and move the client there, then close the
 	 * source per its anchor and the host's unattached rule. One client's
-	 * structural intents run one at a time. `beforeMove` runs once the target
-	 * opened, while the source is still open and fenced for the leave, so a
-	 * handoff writes its acknowledgement through the source's own writer; a
-	 * failure there discards the target and keeps the client on the source.
-	 * `withSession` runs against the new conversation after the move. A client
-	 * that follows moves by redirect, leaving a source its other clients keep
-	 * open, may leave it busy, and the source is not fenced for its leave.
+	 * structural intents run one at a time; `assertCurrent` runs before the
+	 * intent opens anything, once the source accepted the change, and right
+	 * before the move, and fails the intent while nothing moved. `beforeMove`
+	 * runs once the target opened, while the source is still open and fenced
+	 * for the leave, so a handoff writes its acknowledgement through the
+	 * source's own writer; a failure there discards the target and keeps the
+	 * client on the source. After the move, an in-place client that recovers
+	 * input replays the target's durable queued input; `withSession` then runs
+	 * against the new conversation unless that recovery failed, and `publish`
+	 * makes the last durable write, whose failure closes the new conversation.
+	 * A client that follows moves by redirect, leaving a source its other
+	 * clients keep open, may leave it busy, and the source is not fenced for
+	 * its leave.
 	 */
 	async openFor(
 		client: HostClient,
 		target: ConversationTarget,
 		options: Omit<OpenConversationOptions, "from"> & {
+			assertCurrent?: () => void;
 			beforeMove?: (from: HostedConversation | undefined, to: HostedConversation) => Promise<void>;
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			publish?: (to: HostedConversation) => Promise<void>;
 		} = {},
 	): Promise<OpenForResult> {
-		const { beforeMove, withSession, ...openOptions } = options;
+		const { assertCurrent, beforeMove, withSession, publish, onOpening, ...openOptions } = options;
 		const moved = await this.serialize(client.id, async () => {
+			assertCurrent?.();
 			const from = this.conversationOf(client);
 			const fromStaysOpen = from !== undefined && this.staysOpenWithout(client, from);
 			const opened = await this.openTarget(
 				target,
-				{ ...openOptions, ...(from === undefined ? {} : { from }) },
+				{
+					...openOptions,
+					...(from === undefined ? {} : { from }),
+					onOpening: async () => {
+						assertCurrent?.();
+						await onOpening?.();
+					},
+				},
 				fromStaysOpen,
 			);
 			if (opened.cancelled) return undefined;
@@ -636,6 +694,7 @@ export class ConversationHost {
 					releaseSource = fromStaysOpen ? undefined : from?.holdForLeave();
 					await beforeMove(from, to);
 				}
+				assertCurrent?.();
 				await this.move(client, to);
 			} catch (error) {
 				releaseSource?.();
@@ -650,15 +709,33 @@ export class ConversationHost {
 		});
 		if (!moved) return { cancelled: true };
 		const to = moved.conversation;
-		const sessionId = to.id;
+		let seedable = true;
+		if (client.move.kind === "in_place" && client.recoversInput) {
+			// Older durable input runs before anything the client does here. A failed
+			// recovery is diagnosed and leaves its queue visible; nothing is seeded.
+			try {
+				// Recovered turns belong to no client, whoever asked for the move.
+				await ClientScope.exit(() => to.startRecoveredClientInputs());
+			} catch {
+				seedable = false;
+			}
+		}
 		let seeded = false;
-		if (withSession) {
+		if (withSession && seedable) {
 			await withSession(to.session.createReplacedSessionContext());
 			seeded = true;
 		}
+		if (publish) {
+			try {
+				await publish(to);
+			} catch (error) {
+				await this.close(to).catch(() => undefined);
+				throw error;
+			}
+		}
 		return {
 			cancelled: false,
-			sessionId,
+			sessionId: to.id,
 			seeded,
 			conversation: to,
 			...(moved.selectedText === undefined ? {} : { selectedText: moved.selectedText }),
@@ -806,7 +883,11 @@ export class ConversationHost {
 		const attachment: Attachment = { client, conversation };
 		this.attachments.set(client.id, attachment);
 		if (!client.surface) return;
-		const extensions = conversation.session.attachExtensionClient({ ...client.surface, id: client.id });
+		const extensions = conversation.session.attachExtensionClient({
+			...client.surface,
+			id: client.id,
+			mode: this.extensionMode,
+		});
 		attachment.detachSurface = extensions.detach;
 		try {
 			await extensions.ready;

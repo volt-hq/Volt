@@ -1,5 +1,4 @@
 import { describe, expect, it, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import {
@@ -8,6 +7,7 @@ import {
 	sanitizeHostThemeTokens,
 } from "../src/daemon/theme-push.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 describe("host theme token push (§9.5)", () => {
 	it("keeps only plain hex colors and drops anything path-like or unresolved", () => {
@@ -61,17 +61,8 @@ describe("host theme token push (§9.5)", () => {
 				subscribeCompactionSettings: vi.fn(() => () => {}),
 			},
 		};
-		const runtimeHost = {
-			get session() {
-				return session;
-			},
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			switchSessionById: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => undefined),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
+		const { host } = createFakeHost();
+		const { conversation } = createFakeConversation(session);
 
 		let lineHandler: ((line: string) => void) | undefined;
 		const transport: RpcTransport = {
@@ -90,7 +81,7 @@ describe("host theme token push (§9.5)", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		void runRpcMode(runtimeHost, {
+		void runRpcMode(host, conversation, {
 			transport,
 			onReady: resolveReady,
 			onClientCapabilitiesChanged: (features) => capabilityUpdates.push(features),

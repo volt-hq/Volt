@@ -1,6 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
@@ -17,6 +16,7 @@ import {
 	createIrohRemoteHostCommandRpcTransport,
 } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createTestConversation } from "./iroh-stream-doubles.ts";
 
 class ManualRpcTransport implements RpcTransport {
 	readonly writes: object[] = [];
@@ -103,52 +103,48 @@ function createPromptRuntime(
 	let sessionEventHandler: ((event: object) => void) | undefined;
 	const detachSession = vi.fn();
 	const detachBackpressure = vi.fn();
-	const runtimeHost = {
-		session: {
-			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
-			subscribe: vi.fn((handler: (event: object) => void) => {
-				sessionEventHandler = handler;
-				return detachSession;
-			}),
-			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
-			sessionId: sessionManager.getSessionId(),
-			sessionManager,
-			prompt: vi.fn(
-				async (
-					_message: string,
-					promptOptions?: { preflightResult?: (result: PromptPreflightResult) => void },
-				): Promise<void> => {
-					promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
-					await promptRelease.promise;
-					await sessionManager.logWriter.appendMessage({
-						role: "assistant",
-						content: [{ type: "text", text: completionText }],
-						api: "anthropic-messages",
-						provider: "anthropic",
-						model: "claude-test",
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: options.stopReason ?? "stop",
-						timestamp: Date.now(),
-					});
-					promptCompleted.resolve();
-				},
-			),
-			abort,
-		},
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose,
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+	const session = {
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
+		subscribe: vi.fn((handler: (event: object) => void) => {
+			sessionEventHandler = handler;
+			return detachSession;
+		}),
+		subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+		sessionId: sessionManager.getSessionId(),
+		sessionManager,
+		prompt: vi.fn(
+			async (
+				_message: string,
+				promptOptions?: { preflightResult?: (result: PromptPreflightResult) => void },
+			): Promise<void> => {
+				promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
+				await promptRelease.promise;
+				await sessionManager.logWriter.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: completionText }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-test",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: options.stopReason ?? "stop",
+					timestamp: Date.now(),
+				});
+				promptCompleted.resolve();
+			},
+		),
+		abort,
+		lost: new Promise<Error>(() => {}),
+	};
+	// Closing the conversation would abort the prompt, as disposing its session does.
+	const target = createTestConversation(session, { close: dispose });
 
 	return {
 		abort,
@@ -161,7 +157,7 @@ function createPromptRuntime(
 		},
 		promptCompleted: promptCompleted.promise,
 		promptRelease,
-		runtimeHost,
+		target,
 	};
 }
 
@@ -345,8 +341,8 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.runtimeHost, {
-			disposeRuntimeOnClose: false,
+		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+			anchor: false,
 			onReady: resolveReady,
 			transport,
 		});
@@ -408,8 +404,8 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.runtimeHost, {
-			disposeRuntimeOnClose: false,
+		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+			anchor: false,
 			onReady: resolveReady,
 			transport,
 		});
@@ -473,8 +469,8 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.runtimeHost, {
-			disposeRuntimeOnClose: false,
+		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+			anchor: false,
 			onReady: resolveReady,
 			transport,
 		});

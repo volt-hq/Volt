@@ -837,6 +837,8 @@ export class ConversationProjectionFeed {
 	private readonly checkpointWindowMs: number;
 	private readonly now: () => number;
 	private disposed = false;
+	/** Set once the source closed: no subscriber attaches, and the feed disposes once the last one detached. */
+	private closing = false;
 	private poisonedError?: Error;
 	private _branchEpoch: string;
 
@@ -900,6 +902,7 @@ export class ConversationProjectionFeed {
 
 	attach(options: ConversationProjectionSubscriberOptions): ConversationProjectionSubscription {
 		this.assertActive();
+		if (this.closing) throw new Error("Conversation projection feed is closed");
 		const subscriber: ConversationProjectionSubscriber = {
 			active: true,
 			fenced: false,
@@ -1154,6 +1157,16 @@ export class ConversationProjectionFeed {
 
 	async flush(): Promise<void> {
 		await Promise.all([...this.subscribers].map((subscriber) => this.flushSubscriber(subscriber)));
+	}
+
+	/**
+	 * Close the feed with its source. No subscriber attaches any more; the feed
+	 * disposes once its current subscribers detached, so a stream still
+	 * delivers what it enqueues meanwhile, such as its final frame.
+	 */
+	close(): void {
+		this.closing = true;
+		if (this.subscribers.size === 0) this.dispose();
 	}
 
 	dispose(): void {
@@ -1831,6 +1844,7 @@ export class ConversationProjectionFeed {
 		this.subscribers.delete(subscriber);
 		this.subscribersById.delete(subscriber.subscriptionId);
 		if (this.subscribers.size === 0) this.stopSourceObservation();
+		if (this.closing && this.subscribers.size === 0) this.dispose();
 		subscriber.authorityChangeListeners.clear();
 		const closeError = error ?? new Error("Conversation projection subscription detached");
 		for (const item of subscriber.pending.splice(0)) item.deferred?.reject(closeError);

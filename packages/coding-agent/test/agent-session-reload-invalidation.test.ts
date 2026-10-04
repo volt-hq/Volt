@@ -18,15 +18,12 @@ import {
 	fauxAssistantMessage,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../src/index.ts";
+import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
 
 describe("AgentSession reload invalidates the previous extension generation", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -76,7 +73,7 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 		// reload); capture every volt instance in order.
 		const voltGenerations: ExtensionAPI[] = [];
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir,
@@ -120,11 +117,12 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 			};
 		};
 
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir,
 			sessionManager: await SessionManager.create(tempDir),
 		});
+		const runtime = await connectTestClient(host, conversation);
 
 		cleanups.push(async () => {
 			await runtime.dispose();

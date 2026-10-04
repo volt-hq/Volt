@@ -2,7 +2,6 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import { RpcUiActionStateChangedEventSchema, UiActionDescriptorSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import {
 	CONTEXT_AUTO_COMPACTION_ACTION_ID as autoAction,
@@ -20,6 +19,7 @@ import type { UiActionDescriptor } from "../src/core/rpc/types.ts";
 import { getUiActionDescriptors } from "../src/core/rpc/ui-actions.ts";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 const model: Model<Api> = {
 	id: "test-model",
@@ -396,10 +396,8 @@ it("invokes compaction actions through RPC with durable replies and shared state
 		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
 		sessionManager: { flush: async () => {}, getCwd: () => "/repo" },
 	};
-	const runtime = {
-		session: rpcSession,
-		setRebindSession: () => {},
-	} as unknown as AgentSessionRuntime;
+	const { host } = createFakeHost();
+	const { conversation } = createFakeConversation(rpcSession);
 	let onLine: ((line: string) => void) | undefined;
 	let onClose: RpcCloseHandler | undefined;
 	const writes: object[] = [];
@@ -421,10 +419,10 @@ it("invokes compaction actions through RPC with durable replies and shared state
 	const started = new Promise<void>((resolve) => {
 		ready = resolve;
 	});
-	const running = runRpcMode(runtime, {
+	const running = runRpcMode(host, conversation, {
 		transport,
 		onReady: ready,
-		disposeRuntimeOnClose: false,
+		anchor: false,
 		requireRemoteSafeUiActions: true,
 	});
 	try {

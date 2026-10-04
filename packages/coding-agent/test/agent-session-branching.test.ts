@@ -13,20 +13,16 @@ import { join } from "node:path";
 import { getModel } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { connectTestClient, openTestHost, type TestClient } from "./utilities/host-client.ts";
 import { API_KEY } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {
 	let session: AgentSession;
-	let runtimeHost: AgentSessionRuntime;
+	let runtimeHost: TestClient;
 	let tempDir: string;
 	let sessionManager: SessionManager;
 
@@ -60,7 +56,7 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 				noThemes: true,
 			},
 		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				...servicesOptions,
 				cwd,
@@ -77,11 +73,12 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		runtimeHost = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager,
 		});
+		runtimeHost = await connectTestClient(host, conversation);
 		session = runtimeHost.session;
 		session.subscribe(() => {});
 		return session;

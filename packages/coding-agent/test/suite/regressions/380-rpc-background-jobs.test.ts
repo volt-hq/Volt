@@ -1,6 +1,5 @@
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import {
 	createIrohRemoteExplicitAccess,
@@ -17,6 +16,7 @@ import * as nativeTools from "../../../src/core/tools/index.ts";
 import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
 import { type RpcModeOptions, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
+import { adoptTestSession, connectTestClient, type TestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 function deferred() {
@@ -28,7 +28,7 @@ function deferred() {
 }
 
 const harnesses: Harness[] = [];
-const runtimes: AgentSessionRuntime[] = [];
+const hosts: TestHost[] = [];
 const workers: Array<ReturnType<typeof deferred>> = [];
 const connections: Array<() => Promise<void>> = [];
 
@@ -76,7 +76,7 @@ async function setup() {
 	const harness = await createHarness(options);
 	harnesses.push(harness);
 	await harness.session.setSessionName("RPC Jobs test");
-	const runtime = new AgentSessionRuntime(harness.session, services(harness), async ({ sessionManager }) => {
+	const target = adoptTestSession(harness.session, services(harness), async ({ sessionManager }) => {
 		const next = await createHarness({ ...options, sessionManager });
 		harnesses.push(next);
 		return {
@@ -86,11 +86,14 @@ async function setup() {
 			extensionsResult: next.session.resourceLoader.getExtensions(),
 		};
 	});
-	runtimes.push(runtime);
-	return { harness, runtime, executions };
+	hosts.push(target);
+	// The conversation stays open while RPC clients reconnect to it.
+	await connectTestClient(target.host, target.conversation);
+	return { harness, target, executions };
 }
 
-async function connect(runtime: AgentSessionRuntime, ordered = false, observeOnly = false) {
+async function connect(target: TestHost, ordered = false, observeOnly = false) {
+	const conversation = target.conversation;
 	const pair = createLoopbackRpcTransportPair();
 	const frames: object[] = [];
 	const detachValues = pair.client.onValue!((value) => {
@@ -98,17 +101,17 @@ async function connect(runtime: AgentSessionRuntime, ordered = false, observeOnl
 	});
 	const outbound = createIrohRemoteOutboundFilteredRpcTransport({
 		transport: pair.server,
-		workspacePath: runtime.cwd,
+		workspacePath: conversation.cwd,
 	});
 	let subscription: ConversationProjectionSubscription | undefined;
 	if (ordered) {
-		subscription = runtime.conversationProjectionFeed.attach({
+		subscription = conversation.projectionFeed.attach({
 			write: (value) => outbound.write(value),
 			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-				conversation: { workspaceName: "workspace", sessionId: runtime.session.sessionId },
-				state: buildRpcSessionState(runtime.session),
+				conversation: { workspaceName: "workspace", sessionId: conversation.session.sessionId },
+				state: buildRpcSessionState(conversation.session),
 				transcript: {
-					sessionId: runtime.session.sessionId,
+					sessionId: conversation.session.sessionId,
 					items: [],
 					hasMore: false,
 					nextBeforeEntryId: null,
@@ -149,14 +152,14 @@ async function connect(runtime: AgentSessionRuntime, ordered = false, observeOnl
 						reason: command.reason,
 						assistantPosition: command.assistantPosition,
 					}),
-				publishExternal: (event) => runtime.conversationProjectionFeed.publishExternal(event),
+				publishExternal: (event) => conversation.projectionFeed.publishExternal(event),
 			}
 		: undefined;
 	const ready = deferred();
-	const mode = runRpcMode(runtime, {
+	const mode = runRpcMode(target.host, conversation, {
 		transport,
 		onReady: ready.resolve,
-		disposeRuntimeOnClose: false,
+		anchor: false,
 		orderedConversation: binding,
 		requireConversationAuthority: ordered,
 	});
@@ -183,7 +186,7 @@ async function connect(runtime: AgentSessionRuntime, ordered = false, observeOnl
 		subscription,
 		authority(): RpcConversationAuthority {
 			return {
-				sessionId: runtime.session.sessionId,
+				sessionId: conversation.session.sessionId,
 				subscriptionId: subscription!.subscriptionId,
 				branchEpoch: subscription!.branchEpoch,
 			};
@@ -203,15 +206,15 @@ async function startJob(harness: Harness, command = "first") {
 afterEach(async () => {
 	for (const worker of workers.splice(0)) worker.resolve();
 	for (const close of connections.splice(0)) await close();
-	for (const runtime of runtimes.splice(0)) await runtime.dispose();
+	for (const target of hosts.splice(0)) await target.host.dispose();
 	for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 	vi.restoreAllMocks();
 });
 
 describe("RPC background jobs", () => {
 	it("lists and reads live output after foreground settlement without consuming results or running inference", async () => {
-		const { harness, runtime, executions } = await setup();
-		const rpc = await connect(runtime);
+		const { harness, target, executions } = await setup();
+		const rpc = await connect(target);
 		const job = await startJob(harness);
 		const state = await rpc.client.getState();
 		expect(state).toMatchObject({
@@ -236,8 +239,8 @@ describe("RPC background jobs", () => {
 	});
 
 	it("cancels only one job and reports cancelling until cleanup finishes", async () => {
-		const { harness, runtime, executions } = await setup();
-		const rpc = await connect(runtime);
+		const { harness, target, executions } = await setup();
+		const rpc = await connect(target);
 		const first = await startJob(harness);
 		const second = await startJob(harness, "second");
 		expect((await rpc.client.cancelJob(first.id)).job.status).toBe("cancelling");
@@ -251,8 +254,8 @@ describe("RPC background jobs", () => {
 	});
 
 	it("keeps the native cancel action enabled while only jobs remain", async () => {
-		const { harness, runtime, executions } = await setup();
-		const rpc = await connect(runtime);
+		const { harness, target, executions } = await setup();
+		const rpc = await connect(target);
 		await startJob(harness);
 		expect((await rpc.client.getUiActions()).find((action) => action.id === "run.cancel")?.enabled).toBe(true);
 		const cancel = rpc.client.invokeUiAction("run.cancel");
@@ -263,8 +266,8 @@ describe("RPC background jobs", () => {
 	});
 
 	it.each(["jobs", "bash"])("hides and rejects jobs when the %s tool grant is removed", async (removed) => {
-		const { harness, runtime, executions } = await setup();
-		const rpc = await connect(runtime);
+		const { harness, target, executions } = await setup();
+		const rpc = await connect(target);
 		const job = await startJob(harness);
 		harness.session.setActiveToolsByName(["bash", "jobs"].filter((name) => name !== removed));
 		expect((await rpc.client.listJobs()).jobs).toEqual([]);
@@ -275,10 +278,10 @@ describe("RPC background jobs", () => {
 	});
 
 	it("reconnects to retained jobs and publishes metadata to both ordered subscribers", async () => {
-		const { harness, runtime, executions } = await setup();
+		const { harness, target, executions } = await setup();
 		const job = await startJob(harness);
-		const first = await connect(runtime, true);
-		const second = await connect(runtime, true, true);
+		const first = await connect(target, true);
+		const second = await connect(target, true, true);
 		for (const rpc of [first, second]) {
 			expect(rpc.frames[0]).toMatchObject({
 				type: "conversation_bootstrap",
@@ -286,7 +289,7 @@ describe("RPC background jobs", () => {
 			});
 			expect((await rpc.client.readJob(job.id)).job.status).toBe("running");
 		}
-		const denied = await connect(runtime, true, true);
+		const denied = await connect(target, true, true);
 		await expect(denied.client.cancelJob(job.id, { conversationAuthority: denied.authority() })).rejects.toThrow();
 		await denied.close();
 		expect(executions.get("first")!.signal?.aborted).toBe(false);
@@ -305,21 +308,21 @@ describe("RPC background jobs", () => {
 		const update = second.events.find((event) => event.type === "background_jobs_changed");
 		expect(update).toHaveProperty("delivery");
 		if (update?.type === "background_jobs_changed") expect(update.jobs[0]).not.toHaveProperty("output");
-		const third = await connect(runtime, true);
+		const third = await connect(target, true);
 		expect(third.frames[0]).toMatchObject({ state: { backgroundJobs: [{ id: job.id, status: "completed" }] } });
 	});
 
 	it("requires the current ordered subscription authority before cancelling a job", async () => {
-		const { harness, runtime, executions } = await setup();
+		const { harness, target, executions } = await setup();
 		const job = await startJob(harness);
-		const first = await connect(runtime, true);
-		const second = await connect(runtime, true);
+		const first = await connect(target, true);
+		const second = await connect(target, true);
 		await expect(first.client.cancelJob(job.id)).rejects.toThrow("authority is stale");
 		await expect(first.client.cancelJob(job.id, { conversationAuthority: second.authority() })).rejects.toThrow(
 			"authority is stale",
 		);
 		const stale = first.authority();
-		runtime.conversationProjectionFeed.rotateForBranchRebase();
+		target.conversation.projectionFeed.rotateForBranchRebase();
 		await first.subscription!.flush();
 		await expect(first.client.cancelJob(job.id, { conversationAuthority: stale })).rejects.toThrow(
 			"authority is stale",
@@ -334,9 +337,9 @@ describe("RPC background jobs", () => {
 	});
 
 	it("bounds multibyte output reads without putting the output into state", async () => {
-		const { harness, runtime, executions } = await setup();
+		const { harness, target, executions } = await setup();
 		const job = await startJob(harness);
-		const rpc = await connect(runtime, true);
+		const rpc = await connect(target, true);
 		executions.get("first")!.output("界".repeat(25_000));
 		// Native Bash coalesces progress before it reaches the job manager.
 		await vi.waitFor(() => expect(harness.session.backgroundJobs.get(job.id).outputTruncated).toBe(true));
@@ -347,9 +350,9 @@ describe("RPC background jobs", () => {
 		expect((await rpc.client.getState()).backgroundJobs[0]).not.toHaveProperty("output");
 	});
 
-	it("clears job handles on runtime replacement rather than reconstructing them from history", async () => {
-		const { harness, runtime, executions } = await setup();
-		const rpc = await connect(runtime);
+	it("clears job handles when the client moves to a new session rather than reconstructing them from history", async () => {
+		const { harness, target, executions } = await setup();
+		const rpc = await connect(target);
 		const job = await startJob(harness);
 		executions.get("first")!.finish();
 		await harness.session.waitForBackgroundJobs();

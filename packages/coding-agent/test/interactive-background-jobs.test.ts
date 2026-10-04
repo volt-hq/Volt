@@ -5,13 +5,13 @@ import { type Container, Text } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
 	BACKGROUND_JOB_MAX_RETAINED,
 	BACKGROUND_JOB_NOTIFICATION_TYPE,
 	BackgroundJobManager,
 	type BackgroundJobSource,
 } from "../src/core/background-jobs.ts";
+import type { HostClient } from "../src/core/host/targets.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
@@ -30,6 +30,7 @@ import { ToolExecutionComponent } from "../src/modes/interactive/components/tool
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type InteractiveTestAccess = {
@@ -61,8 +62,8 @@ type InteractiveTestAccess = {
 	subscribeToBackgroundJobs(session: AgentSession): void;
 	handleEvent(event: AgentSessionEvent): Promise<void>;
 	handleFollowUp(): Promise<void>;
+	client: HostClient;
 	beginSessionReplacementUi(): void;
-	rebindReplacementSession(session: AgentSession): Promise<void>;
 	renderCurrentSessionState(): void;
 	reloadRuntimeResources(): Promise<boolean>;
 };
@@ -132,13 +133,9 @@ async function createFixture(
 			},
 		});
 	}
-	const runtime = {
-		session: harness.session,
-		setBeforeSessionInvalidate: vi.fn(),
-		setRebindSession: vi.fn(),
-		lost: new Promise<Error>(() => {}),
-	};
-	const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, { tuiMode });
+	const host = createFakeHost({ extensionMode: "tui" });
+	const { conversation } = createFakeConversation(harness.session);
+	const mode = new InteractiveMode(host.host, conversation, { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;
 	const terminal = new VirtualTerminal(columns, 24);
 	access.renderer = createInteractiveTui({
@@ -175,7 +172,7 @@ async function createFixture(
 	await Promise.resolve();
 	access.backgroundJobsRenderCoalescer?.flush();
 	await terminal.waitForRender();
-	return { ...fixture, harness, access, runtime, terminal, source, listeners, job, update, scope };
+	return { ...fixture, harness, access, host, terminal, source, listeners, job, update, scope };
 }
 
 async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixture>>) {
@@ -901,10 +898,10 @@ describe("interactive background jobs", () => {
 	);
 
 	it.each([false, true])(
-		"closes old subscriptions and releases launch cards before replacing a session (settled: %s)",
+		"closes old subscriptions and releases launch cards before moving to another session (settled: %s)",
 		async (settled) => {
 			const fixture = await createFixture("regular");
-			const { harnesses, access, runtime, terminal, listeners, update, finish, jobs, job } = fixture;
+			const { harnesses, access, host, terminal, listeners, update, finish, jobs, job } = fixture;
 			const card = await acknowledgeLaunch(fixture);
 			if (settled) {
 				finish();
@@ -923,8 +920,8 @@ describe("interactive background jobs", () => {
 				settings: { lsp: { enabled: false }, theme: "dark", quietStartup: true },
 			});
 			harnesses.push(replacement);
-			runtime.session = replacement.session;
-			await access.rebindReplacementSession(replacement.session);
+			// The TUI moves to the replacement's conversation as one of its structural intents moves it.
+			await host.move(access.client, createFakeConversation(replacement.session).conversation);
 			access.renderCurrentSessionState();
 			update({ content: [{ type: "text", text: "stale runtime output" }] });
 			await terminal.waitForRender();

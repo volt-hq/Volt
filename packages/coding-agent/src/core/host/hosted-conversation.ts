@@ -1,32 +1,32 @@
 /**
  * One conversation a `ConversationHost` opened. It serves one log for its
  * whole life: its session, the cwd-bound services the session was created
- * with, its detached reviews, the one-shot recovery of durable queued input,
- * and its managed-worktree pin are fixed until it closes.
+ * with, its projection feed, its detached reviews, the one-shot recovery of
+ * durable queued input, and its managed-worktree pin are fixed until it closes.
  */
 
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { releaseLocalSessionWorktree } from "../../daemon/session-worktree.ts";
 import type { AgentSession } from "../agent-session.ts";
-import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "../agent-session-services.ts";
+import type { AgentSessionDiagnostic, AgentSessionServices } from "../agent-session-services.ts";
 import type { ProjectTrustContext, SessionShutdownEvent, SessionStartEvent } from "../extensions/index.ts";
 import { emitSessionShutdownEvent } from "../extensions/runner.ts";
 import { ReviewWorkflowManager } from "../review-workflows.ts";
 import { subscribeRpcSessionEvents } from "../rpc/background-jobs.ts";
-import type { ConversationProjectionSource } from "../rpc/conversation-projection-feed.ts";
+import { ConversationProjectionFeed, type ConversationProjectionSource } from "../rpc/conversation-projection-feed.ts";
 import type { CreateAgentSessionResult } from "../sdk.ts";
 import { type CommittedSessionEntry, isHostOnlySessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
-import { summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
+import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
 
 /**
  * Result returned by the conversation factory: the created session, its
  * cwd-bound services, and all diagnostics collected during setup.
  */
-export interface CreateAgentSessionRuntimeResult extends CreateAgentSessionResult {
+export interface ConversationFactoryResult extends CreateAgentSessionResult {
 	services: AgentSessionServices;
-	diagnostics: AgentSessionRuntimeDiagnostic[];
+	diagnostics: AgentSessionDiagnostic[];
 }
 
 export interface SubagentRuntimeContext {
@@ -54,7 +54,7 @@ export interface SubagentRuntimeContext {
  * should use createAgentSessionFromServices, which borrows that ownership
  * rather than closing the manager independently.
  */
-export type CreateAgentSessionRuntimeFactory = (options: {
+export type ConversationFactory = (options: {
 	cwd: string;
 	agentDir: string;
 	sessionManager: SessionManager;
@@ -64,7 +64,7 @@ export type CreateAgentSessionRuntimeFactory = (options: {
 	subagentContext?: SubagentRuntimeContext;
 	workspaceName?: string;
 	baseRef?: string;
-}) => Promise<CreateAgentSessionRuntimeResult>;
+}) => Promise<ConversationFactoryResult>;
 
 /** Canonical persistence commit, published after its store transaction, positioned by `entry.ordinal`. */
 export interface ConversationTranscriptCommittedEvent {
@@ -130,7 +130,7 @@ async function finalizeConversationSession(
 
 /** What a conversation is built from: a created session and the services it was created with. */
 export type HostedConversationSession = Pick<
-	CreateAgentSessionRuntimeResult,
+	ConversationFactoryResult,
 	"session" | "services" | "diagnostics" | "modelFallbackMessage"
 >;
 
@@ -143,7 +143,7 @@ export interface HostedConversationOptions {
 export class HostedConversation {
 	readonly session: AgentSession;
 	readonly services: AgentSessionServices;
-	readonly diagnostics: AgentSessionRuntimeDiagnostic[];
+	readonly diagnostics: AgentSessionDiagnostic[];
 	readonly modelFallbackMessage: string | undefined;
 	readonly subagentContext: SubagentRuntimeContext | undefined;
 	readonly lifetime: ConversationLifetime;
@@ -151,6 +151,13 @@ export class HostedConversation {
 	readonly openedAs: ConversationOpenReason;
 	/** The session's events, Git observation, and branch changes, as a projection feed consumes them. */
 	readonly projectionSource: ConversationProjectionSource;
+	/**
+	 * The ordered projection of the conversation for remote subscribers: its
+	 * session's events, canonical transcript commits, and detached review
+	 * workflow events. Closing the conversation closes the feed: it takes no new
+	 * subscriber and disposes once its subscribers detached.
+	 */
+	readonly projectionFeed: ConversationProjectionFeed;
 	private readonly lostSignal = Promise.withResolvers<Error>();
 	/**
 	 * Resolves once, when the conversation's session loses its log while the
@@ -159,7 +166,6 @@ export class HostedConversation {
 	 * host closes the conversation, which releases the lock. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
-	private readonly projectionListeners = new Set<(event: object) => void>();
 	private detachTranscriptCommits: () => void;
 	private _reviewWorkflows?: ReviewWorkflowManager;
 	private recovery?: RecoveredClientInputsTask;
@@ -176,6 +182,7 @@ export class HostedConversation {
 		this.lifetime = options.lifetime;
 		this.openedAs = options.openedAs;
 		this.projectionSource = this.createProjectionSource();
+		this.projectionFeed = new ConversationProjectionFeed(this.projectionSource);
 		this.detachTranscriptCommits = this.subscribeTranscriptCommits();
 		const session = this.session;
 		void session.lost.then((error) => {
@@ -202,27 +209,14 @@ export class HostedConversation {
 
 	/**
 	 * Detached review workflows of this conversation. Their events reach the
-	 * projection listeners, so they survive client detach and reattach; closing
-	 * the conversation aborts every active review.
+	 * projection feed, so they survive client detach and reattach; closing the
+	 * conversation aborts every active review.
 	 */
 	get reviewWorkflows(): ReviewWorkflowManager {
-		this._reviewWorkflows ??= new ReviewWorkflowManager({ publishEvent: (event) => this.publishProjection(event) });
+		this._reviewWorkflows ??= new ReviewWorkflowManager({
+			publishEvent: (event) => this.projectionFeed.publishExternal(event),
+		});
 		return this._reviewWorkflows;
-	}
-
-	/**
-	 * Observe the conversation's projection events beyond its session's own:
-	 * canonical transcript commits and detached review workflow events.
-	 */
-	subscribeProjectionEvents(listener: (event: object) => void): () => void {
-		this.projectionListeners.add(listener);
-		return () => {
-			this.projectionListeners.delete(listener);
-		};
-	}
-
-	private publishProjection(event: object): void {
-		for (const listener of [...this.projectionListeners]) listener(event);
 	}
 
 	private createProjectionSource(): ConversationProjectionSource {
@@ -256,7 +250,7 @@ export class HostedConversation {
 			// rows. Clients receive them through planning_state_changed and every
 			// bootstrap/checkpoint instead.
 			if (entry.type === "planning_state_change") return;
-			this.publishProjection({
+			this.projectionFeed.publishExternal({
 				type: "conversation_transcript_committed",
 				entry,
 			} satisfies ConversationTranscriptCommittedEvent);
@@ -288,6 +282,11 @@ export class HostedConversation {
 	/** The conversation's summary, read from its open log. */
 	summary(): WorkspaceSessionSummary {
 		return summarizeOpenSession(this.session, this.cwd);
+	}
+
+	/** The stored sessions of the conversation's workspace, with this conversation's live summary. */
+	listSessions(): Promise<WorkspaceSessionSummary[]> {
+		return listWorkspaceSessions(this.session, this.cwd);
 	}
 
 	/**
@@ -421,14 +420,13 @@ export class HostedConversation {
 			shutdownErrors.push(error);
 		}
 		const session = this.session;
+		this.projectionFeed.close();
 		await finalizeConversationSession(
 			session,
-			moved
-				? () => session.disposeForSessionReplacement()
-				: async () => {
-						session.dispose("disposal");
-						await session.waitForClosed();
-					},
+			async () => {
+				session.dispose(moved ? "session_replacement" : "disposal", { leavePromptWork: moved });
+				await session.waitForClosed();
+			},
 			"Conversation cleanup did not complete",
 			shutdownErrors,
 		);
@@ -440,6 +438,7 @@ export class HostedConversation {
 			await this.waitForHolds();
 			this.detachTranscriptCommits();
 			this.detachTranscriptCommits = () => {};
+			this.projectionFeed.close();
 			const session = this.session;
 			await finalizeConversationSession(
 				session,

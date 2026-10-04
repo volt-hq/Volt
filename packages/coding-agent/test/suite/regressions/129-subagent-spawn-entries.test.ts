@@ -4,10 +4,10 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../../../src/core/resource-loader.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
@@ -49,7 +49,7 @@ async function createTestContext(options: {
 		...createTestResourceLoader(),
 		getSubagents: () => ({ definitions: [definition], diagnostics: [] }),
 	};
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager }) => {
+	const createRuntime: ConversationFactory = async ({ cwd, sessionManager }) => {
 		const child = await createHarness({ withConfiguredAuth: options.withConfiguredAuth });
 		children.push(child);
 		child.setResponses([fauxAssistantMessage("researched the task"), fauxAssistantMessage("second turn")]);

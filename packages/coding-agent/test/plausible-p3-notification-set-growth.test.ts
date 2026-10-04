@@ -1,7 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import {
+	createTestConversation,
 	createTestSession,
 	parseWrittenObjects,
 	startIrohRpcMode,
@@ -48,16 +48,7 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 			},
 		);
 
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const { modePromise, recv, send } = await startIrohRpcMode(createTestConversation(session), session);
 
 		// Far exceeds any plausible per-stream dedupe cap (e.g. 128/256/512), while
 		// staying fast enough to run deterministically. The inbound transport queue

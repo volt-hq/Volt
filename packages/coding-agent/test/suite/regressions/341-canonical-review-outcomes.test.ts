@@ -6,14 +6,12 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { RPC_RESPONSE_SCHEMAS, RPC_STABLE_ERROR_CODES, RpcErrorResponseSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../../../src/core/code-host/index.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
-import { HostReviewDiscussionService } from "../../../src/core/review-discussions.ts";
+import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
 import { publishReviewRun } from "../../../src/core/review-publish.ts";
 import type { ReviewSnapshot } from "../../../src/core/review-snapshot.ts";
 import {
@@ -39,7 +37,17 @@ import {
 } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { RpcCommand, RpcResponse } from "../../../src/modes/rpc/rpc-types.ts";
+import { openTestHost } from "../../utilities/host-client.ts";
 import { createHarness } from "../harness.ts";
+
+/** A conversation this test hosts, with the review discussion service a daemon would give it. */
+interface Owned {
+	readonly host: ConversationHost;
+	readonly conversation: HostedConversation;
+	readonly session: AgentSession;
+	reviewDiscussions?: ReviewDiscussionService;
+	dispose(): Promise<void>;
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -116,7 +124,7 @@ async function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "volt-341-outcomes-"));
 	const directory = join(root, "sessions");
 	const harness = await createHarness({ settings: { lsp: { enabled: false }, compaction: { enabled: false } } });
-	const runtimes: AgentSessionRuntime[] = [];
+	const runtimes: Owned[] = [];
 	const managers: SessionManager[] = [];
 	cleanups.push(async () => {
 		for (const runtime of runtimes) await runtime.dispose();
@@ -124,7 +132,7 @@ async function fixture() {
 		await harness.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const created = await createAgentSession({
 			sessionManager,
 			cwd,
@@ -163,9 +171,9 @@ async function fixture() {
 					current.sessionId === ref.sessionId &&
 					current.sessionGeneration === ref.sessionGeneration
 				);
-			}),
-		assertCurrent: (runtime) => {
-			if (!runtimes.includes(runtime)) throw new Error("retired");
+			})?.conversation,
+		assertCurrent: (conversation) => {
+			if (!runtimes.some((runtime) => runtime.conversation === conversation)) throw new Error("retired");
 		},
 		// These isolated stores have no competing runtime. Broker exclusion is
 		// exercised separately by 341-review-sibling-admission.test.ts.
@@ -174,29 +182,41 @@ async function fixture() {
 			throw new Error("This test never launches a provider turn");
 		},
 	});
-	async function own(manager: SessionManager) {
-		const runtime = await createAgentSessionRuntime(factory, { sessionManager: manager, cwd: root, agentDir: root });
+	async function own(manager: SessionManager): Promise<Owned> {
+		const { host, conversation } = await openTestHost(factory, {
+			sessionManager: manager,
+			cwd: root,
+			agentDir: root,
+		});
+		const runtime: Owned = {
+			host,
+			conversation,
+			session: conversation.session,
+			reviewDiscussions: service.forRuntime(conversation),
+			dispose: () => host.dispose(),
+		};
 		runtimes.push(runtime);
-		runtime.reviewDiscussions = service.forRuntime(runtime);
 		return runtime;
 	}
 	const source = await own(await SessionManager.create(root, directory));
 	await appendReviewRunDurably(source.session.sessionWriter, review());
-	const aliases: AgentSessionRuntime[] = [];
+	const aliases: Owned[] = [];
 	for (let index = 0; index < 2; index++) {
 		const manager = await SessionManager.create(root, directory);
 		await appendReviewRun(manager.logWriter, review());
 		await registerReviewHandoffAliases(source.session.sessionManager, manager, ["review:341"]);
 		aliases.push(await own(manager));
 	}
-	async function dispatch(runtime: AgentSessionRuntime, command: RpcCommand): Promise<RpcResponse | undefined> {
+	async function dispatch(runtime: Owned, command: RpcCommand): Promise<RpcResponse | undefined> {
 		try {
 			return await handleRpcCommand(command, {
 				session: runtime.session,
-				runtimeHost: runtime,
+				conversation: runtime.conversation,
+				host: runtime.host,
+				...(runtime.reviewDiscussions === undefined ? {} : { reviewDiscussions: runtime.reviewDiscussions }),
 				options: {},
 				assertConversationGenerationCurrent: () => {},
-			} as RpcCommandDispatcherContext);
+			} as unknown as RpcCommandDispatcherContext);
 		} catch (error) {
 			return createRpcErrorResponse(
 				command.id,
@@ -517,9 +537,11 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			ready = resolve;
 		});
 		const writes: object[] = [];
-		const mode = runRpcMode(aliases[0]!, {
+		const alias = aliases[0]!;
+		const mode = runRpcMode(alias.host, alias.conversation, {
 			exitProcess: false,
-			disposeRuntimeOnClose: false,
+			anchor: false,
+			...(alias.reviewDiscussions === undefined ? {} : { reviewDiscussions: alias.reviewDiscussions }),
 			onReady: ready,
 			transport: {
 				write: (value) => {

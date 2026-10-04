@@ -16,7 +16,6 @@ import * as crypto from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { AgentSessionRuntime, RuntimeClientDetachment } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -24,7 +23,12 @@ import type {
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import { executePlan } from "../../core/host/plan-handoff.ts";
 import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
+import { openFork, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
+import type { HostClient, HostedRedirect, RedirectTarget } from "../../core/host/targets.ts";
 import {
 	type HostActionInvocationContext,
 	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
@@ -56,6 +60,7 @@ import {
 	type ReviewWorkflowToolEvent,
 	reviewTargetForRerun,
 } from "../../core/review.ts";
+import type { ReviewDiscussionService } from "../../core/review-discussions.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
 	appendReviewPublication,
@@ -166,6 +171,21 @@ export interface RpcSessionChange {
 	sessionId: string;
 }
 
+/**
+ * How a client that follows its structural intents by redirect left its
+ * conversation: redirected to another conversation by one of its intents, or
+ * its conversation closed.
+ */
+export type RpcClientDetachment =
+	| { readonly kind: "redirected"; readonly sessionId: string }
+	| { readonly kind: "closed" };
+
+/** A client that follows its structural intents by redirect (a phone): see `HostClientMove`. */
+export interface RpcRedirectOptions {
+	/** Host the conversations the client's intents lead it to before it is redirected there. */
+	readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
+}
+
 export interface RpcOrderedConversationBinding {
 	readonly subscriptionId: string;
 	readonly branchEpoch: string;
@@ -181,8 +201,21 @@ export interface RpcOrderedConversationBinding {
 
 export interface RpcModeOptions {
 	transport?: RpcTransport;
-	/** Defaults to true. Remote hosts can detach a transport without disposing the owned runtime. */
-	disposeRuntimeOnClose?: boolean;
+	/**
+	 * Defaults to true. The client anchors its conversation: the conversation
+	 * closes when the mode ends, and the mode ends when its conversation loses
+	 * its log. A host that shares the conversation (the daemon, a relaying TUI)
+	 * keeps it open after the transport detaches.
+	 */
+	anchor?: boolean;
+	/**
+	 * The client follows its structural intents by redirect: it stays on its
+	 * conversation, and after the intent's response the stream ends with
+	 * `detachedTerminal`. Other clients move to the new conversation in place.
+	 */
+	redirect?: RpcRedirectOptions;
+	/** Installed only by a daemon with sibling runtime ownership. */
+	reviewDiscussions?: ReviewDiscussionService;
 	/** Defaults to true for stdio RPC mode and false for caller-provided transports. */
 	exitProcess?: boolean;
 	/** Called after the active session is rebound, including initial startup. */
@@ -205,11 +238,13 @@ export interface RpcModeOptions {
 	 */
 	hostActions?: boolean;
 	/**
-	 * The final frame for a redirect view's client that left its conversation
-	 * (see `AgentSessionRuntime.onClientDetached`): after the response of the
-	 * command that redirected it, the stream ends with this frame.
+	 * The final frame for a redirect client that left its conversation: after
+	 * the response of the command that redirected it, the stream ends with this
+	 * frame.
 	 */
-	detachedTerminal?: (detachment: RuntimeClientDetachment) => object | undefined;
+	detachedTerminal?: (detachment: RpcClientDetachment) => object | undefined;
+	/** Observes a redirect client leaving its conversation, before its stream ends. */
+	onClientDetached?: (detachment: RpcClientDetachment) => void;
 	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
 	requireRemoteSafeUiActions?: boolean;
 	/** Remote host callback for registering platform push notification targets. */
@@ -408,13 +443,14 @@ class RpcHostActionBridge {
 	}
 }
 
-const rpcHostActionBridges = new WeakMap<AgentSessionRuntime, RpcHostActionBridge>();
+/** One bridge per conversation, so a client reconnecting to it finds the requests still pending. */
+const rpcHostActionBridges = new WeakMap<HostedConversation, RpcHostActionBridge>();
 
-function getRpcHostActionBridge(runtimeHost: AgentSessionRuntime): RpcHostActionBridge {
-	let bridge = rpcHostActionBridges.get(runtimeHost);
+function getRpcHostActionBridge(conversation: HostedConversation): RpcHostActionBridge {
+	let bridge = rpcHostActionBridges.get(conversation);
 	if (!bridge) {
 		bridge = new RpcHostActionBridge();
-		rpcHostActionBridges.set(runtimeHost, bridge);
+		rpcHostActionBridges.set(conversation, bridge);
 	}
 	return bridge;
 }
@@ -593,17 +629,23 @@ class RpcSubagentLifecycle implements RpcSubagentLifecycleController {
  * Run in RPC mode.
  * Listens for JSON commands from the transport, outputs events and responses to it.
  */
-export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcModeOptions = {}): Promise<void> {
+export async function runRpcMode(
+	host: ConversationHost,
+	conversation: HostedConversation,
+	options: RpcModeOptions = {},
+): Promise<void> {
 	if (!options.transport) {
 		takeOverStdout();
 	}
 	const shouldExitProcess = options.exitProcess ?? !options.transport;
-	const shouldDisposeRuntimeOnClose = options.disposeRuntimeOnClose ?? true;
+	const redirect = options.redirect;
+	/** Whether this client anchors its conversation; a client that follows moves by redirect never does. */
+	const anchorsConversation = redirect === undefined && (options.anchor ?? true);
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
 	const requireRemoteSafeUiActions = options.requireRemoteSafeUiActions ?? false;
 	const showsExtensionUi = options.extensionUi ?? true;
 	const takesHostActions = options.hostActions ?? true;
-	/** Set once a redirect view's client left its conversation: the stream only writes its final frame. */
+	/** Set once a redirect client left its conversation: the stream only writes its final frame. */
 	let clientDetached = false;
 	/** This client's identity on the session's extensions; its commands run in its client scope. */
 	const extensionClientId = crypto.randomUUID();
@@ -668,18 +710,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		}
 		await transport.waitForBackpressure?.();
 	};
-	let session = runtimeHost.session;
+	/** The conversation the client is on; a move points it at the next one before that one's extensions start. */
+	let current = conversation;
+	let session = conversation.session;
 	let lastNotifiedSession: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let sessionProjector: StreamProjector | undefined;
 	let stopModelCatalogWatcher: () => void = () => {};
-	let detachExtensionClient: (() => void) | undefined;
-	const detachExtensions = (): void => {
-		detachExtensionClient?.();
-		detachExtensionClient = undefined;
-	};
-	/** Settles when shutdown starts, so a rebind stops waiting on another client's pending bind. */
+	/** Settles when shutdown starts, so startup stops waiting on another client's pending bind. */
 	const shutdownStarted = Promise.withResolvers<void>();
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -730,12 +769,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	};
 
 	let clientCapabilities = new Set<RpcClientCapabilityFeature>();
-	const hostActionBridge = getRpcHostActionBridge(runtimeHost);
-	const detachHostActionBridge = hostActionBridge.attach({
+	const hostActionAttachment: RpcHostActionBridgeAttachment = {
 		canSend: () => !shuttingDown && clientCapabilities.has(HOST_ACTION_REQUESTS_CAPABILITY),
 		isShuttingDown: () => shuttingDown,
 		output: (message) => output(message),
-	});
+	};
+	let hostActionBridge = getRpcHostActionBridge(conversation);
+	let detachHostActionBridgeAttachment = hostActionBridge.attach(hostActionAttachment);
+	const detachHostActionBridge = (): void => detachHostActionBridgeAttachment();
 
 	const cancelPendingHostActionRequests = (message = "RPC mode is shutting down"): void => {
 		hostActionBridge.cancelAll(message);
@@ -748,7 +789,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		retireConversationControlCapabilities();
 	});
 	let unsubscribeConversationGenerationChanges: (() => void) | undefined;
-	let hasBoundConversationSession = false;
 
 	const setSessionHostInteraction = (targetSession: AgentSession): void => {
 		if (!takesHostActions) return;
@@ -1005,41 +1045,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 	});
 
-	// A runtime shared with another host survives this mode
-	// (shouldDisposeRuntimeOnClose === false). Capture the host's own rebind
-	// handler so it can be restored on exit; otherwise the host's session changes
-	// would keep running this RPC-mode handler after the client disconnects.
-	const previousRebindSession = runtimeHost.getRebindSession?.();
-	const detachSessionWillProject = runtimeHost.subscribeSessionWillProject?.(() => {
-		retireConversationControlCapabilities();
-	});
-	const detachSessionReplacement = runtimeHost.subscribeSessionReplaced?.(async () => {
-		await rebindSession();
-	});
-	if (!detachSessionReplacement) {
-		runtimeHost.setRebindSession(async () => {
-			await rebindSession();
-		});
-	}
-	let stopObservingClientDetachment = (): void => {};
-	const restoreRebindSession = (): void => {
-		stopObservingClientDetachment();
-		detachSessionReplacement?.();
-		detachSessionWillProject?.();
-		detachOrderedAuthorityChanges?.();
-		unsubscribeConversationGenerationChanges?.();
-		unsubscribeConversationGenerationChanges = undefined;
-		if (!detachSessionReplacement && !shouldDisposeRuntimeOnClose) {
-			runtimeHost.setRebindSession(previousRebindSession);
-		}
-	};
-
 	const notifySessionChanged = async (): Promise<void> => {
-		// Fire on a new session OBJECT, not just a new sessionId. A same-file
-		// drain/reacquire reload produces a fresh AgentSession with the identical
-		// sessionId; consumers (notably the iroh transcript-entry subscription)
-		// must move to the new object or they stay bound to the
-		// disposed one and silently stop delivering. Same-id consumers no-op safely.
+		// Fire on a new session object, not just a new sessionId: consumers (notably
+		// the iroh transcript-entry subscription) must move to the new object.
 		if (options.onSessionChanged && session !== lastNotifiedSession) {
 			lastNotifiedSession = session;
 			const sessionRef = session.sessionManager.getSessionRef();
@@ -1050,22 +1058,15 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		}
 	};
 
-	const rebindSession = async (): Promise<void> => {
-		// A client redirected elsewhere stays bound to its conversation until its stream ends.
-		if (clientDetached) return;
-		unsubscribe?.();
-		unsubscribe = undefined;
-		// Correlated control replies are capabilities over the conversation state
-		// that minted them. Retire them before attaching to a replacement's
-		// extensions, and bind the same synchronous cut to every in-session branch
-		// generation.
-		if (hasBoundConversationSession) {
-			retireConversationControlCapabilities();
-		}
+	/**
+	 * Point the client at `target` before its extensions bind or the client
+	 * attaches to them: host actions, registered themes, and the branch cut
+	 * that retires correlated control replies.
+	 */
+	const enterConversation = (target: HostedConversation): void => {
+		current = target;
+		session = target.session;
 		unsubscribeConversationGenerationChanges?.();
-		unsubscribeConversationGenerationChanges = undefined;
-		await rpcSubagents.disposeAll();
-		session = runtimeHost.session;
 		const sessionWithConversationGeneration = session as AgentSession & {
 			subscribeConversationGenerationChanges?: (listener: () => void) => () => void;
 		};
@@ -1073,11 +1074,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			sessionWithConversationGeneration.subscribeConversationGenerationChanges?.(() => {
 				retireConversationControlCapabilities();
 			});
-		hasBoundConversationSession = true;
-		if (shuttingDown) {
-			await notifySessionChanged();
-			return;
-		}
 		setSessionHostInteraction(session);
 		// Extension-provided themes resolve by name in rpc mode too (getAllThemes /
 		// getTheme / setTheme), mirroring the TUI's registration at bind time.
@@ -1085,37 +1081,91 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		if (resourceThemes) {
 			setRegisteredThemes(resourceThemes);
 		}
-		// The extensions are bound once per session; this client attaches its
-		// surface. Attaching again under the same id replaces it in place.
-		const detachPreviousExtensionClient = detachExtensionClient;
-		const extensionAttachment = session.attachExtensionClient({
-			id: extensionClientId,
-			mode: "rpc",
-			...(showsExtensionUi ? { ui: createExtensionUIContext() } : {}),
+	};
+
+	/** Stream the session's events to the client, unless an ordered conversation feed serves it. */
+	const subscribeSessionEvents = (): void => {
+		unsubscribe?.();
+		unsubscribe = undefined;
+		unsubscribeBackpressure?.();
+		unsubscribeBackpressure = undefined;
+		endSessionProjector();
+		if (options.orderedConversation) return;
+		sessionProjector = createStreamProjector();
+		unsubscribe = subscribeRpcSessionEvents(session, (event) => {
+			const batch = sessionProjector?.push(event);
+			if (!batch) {
+				return;
+			}
+			reportProjectionDiagnostics("rpc-session", batch.diagnostics);
+			for (const frame of batch.frames) {
+				output(frame);
+			}
+		});
+		unsubscribeBackpressure = session.subscribeRuntimeEvents(async () => {
+			try {
+				await waitForTransportBackpressure();
+			} catch (transportError: unknown) {
+				requestTransportFailureShutdown(transportError);
+			}
+		});
+	};
+
+	/** An anchoring client's mode ends when the conversation it is on loses its log. */
+	const observeLoss = (target: HostedConversation): void => {
+		if (!anchorsConversation) return;
+		void target.lost.then((error) => {
+			if (shuttingDown || target !== current) return;
+			console.error(
+				`Volt stopped session ${target.id} because its saved state could not be confirmed: ${error.message}`,
+			);
+			void shutdown(1, undefined, shouldExitProcess ? undefined : { error }).catch(() => {});
+		});
+	};
+
+	/** A redirect client left its conversation: after the response of the command that moved it, the stream ends. */
+	const leaveConversation = (detachment: RpcClientDetachment): void => {
+		if (shuttingDown || clientDetached) return;
+		clientDetached = true;
+		options.onClientDetached?.(detachment);
+		const terminal = options.detachedTerminal?.(detachment);
+		const queued = enqueueInputTask(async () => {
+			if (terminal && !shuttingDown) {
+				output(terminal);
+				await waitForTransportBackpressure();
+			}
+			await shutdown();
+		});
+		if (!queued) void shutdown().catch(() => {});
+	};
+
+	const extensionUi = showsExtensionUi ? createExtensionUIContext() : undefined;
+	const client: HostClient = {
+		id: extensionClientId,
+		...(anchorsConversation ? { anchor: true } : {}),
+		recoversInput: true,
+		surface: {
+			...(extensionUi === undefined ? {} : { ui: extensionUi }),
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
-				newSession: async (options) => runtimeHost.newSession(options),
+				newSession: (newSessionOptions) => openNewSession(host, client, newSessionOptions),
 				fork: async (entryId, forkOptions) => {
-					const result = await runtimeHost.fork(entryId, forkOptions);
+					const result = await openFork(host, client, entryId, forkOptions);
 					return result.cancelled
 						? result
 						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
 				},
-				navigateTree: async (targetId, options) => {
+				navigateTree: async (targetId, navigateOptions) => {
 					const result = await session.navigateTree(targetId, {
-						summarize: options?.summarize,
-						customInstructions: options?.customInstructions,
-						replaceInstructions: options?.replaceInstructions,
-						label: options?.label,
+						summarize: navigateOptions?.summarize,
+						customInstructions: navigateOptions?.customInstructions,
+						replaceInstructions: navigateOptions?.replaceInstructions,
+						label: navigateOptions?.label,
 					});
 					return { cancelled: result.cancelled };
 				},
-				switchSession: async (sessionPath, options) => {
-					return runtimeHost.switchSession(sessionPath, options);
-				},
-				reload: async () => {
-					await session.reload();
-				},
+				switchSession: (sessionRef, switchOptions) => openStoredSession(host, client, sessionRef, switchOptions),
+				reload: () => session.reload(),
 			},
 			shutdownHandler: () => {
 				shutdownRequested = true;
@@ -1123,48 +1173,85 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			onError: (err) => {
 				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
 			},
-		});
-		// Shutdown can detach the client while the extensions are still binding.
-		detachExtensionClient = extensionAttachment.detach;
-		detachPreviousExtensionClient?.();
-		await Promise.race([extensionAttachment.ready, shutdownStarted.promise]);
-		if (shuttingDown) {
-			detachExtensions();
+		},
+		move:
+			redirect === undefined
+				? {
+						kind: "in_place",
+						prepare: (to) => {
+							// Correlated control replies are capabilities over the conversation
+							// state that minted them; retire them before the client joins `to`.
+							retireConversationControlCapabilities();
+							unsubscribe?.();
+							unsubscribe = undefined;
+							detachHostActionBridgeAttachment();
+							hostActionBridge = getRpcHostActionBridge(to);
+							detachHostActionBridgeAttachment = hostActionBridge.attach(hostActionAttachment);
+							enterConversation(to);
+						},
+						onMoved: async (to) => {
+							await rpcSubagents.disposeAll();
+							observeLoss(to);
+							await notifySessionChanged();
+							if (shuttingDown) return;
+							subscribeSessionEvents();
+						},
+					}
+				: {
+						kind: "redirect",
+						redirect: (sessionId) => leaveConversation({ kind: "redirected", sessionId }),
+						...(redirect.hostTarget === undefined ? {} : { hostTarget: redirect.hostTarget }),
+					},
+	};
+	// A redirect client also leaves when its conversation closes, such as a relaying TUI leaving it.
+	const stopObservingClose = redirect
+		? host.onClosed((closed) => {
+				if (closed === conversation) leaveConversation({ kind: "closed" });
+			})
+		: () => {};
+
+	/** Attach the client to its conversation, whose extensions bind if no client attached before. */
+	const attachClient = async (): Promise<void> => {
+		// A redirect client whose conversation closed before it attached is told so, as if it had attached.
+		if (redirect && conversation.closed) {
+			leaveConversation({ kind: "closed" });
 			return;
 		}
+		enterConversation(conversation);
+		await Promise.race([host.attach(client, conversation), shutdownStarted.promise]);
+		if (shuttingDown) return;
 		await notifySessionChanged();
+		subscribeSessionEvents();
+	};
 
-		unsubscribeBackpressure?.();
-		unsubscribeBackpressure = undefined;
-		endSessionProjector();
-		if (!options.orderedConversation) {
-			sessionProjector = createStreamProjector();
-			unsubscribe = subscribeRpcSessionEvents(session, (event) => {
-				const batch = sessionProjector?.push(event);
-				if (!batch) {
-					return;
-				}
-				reportProjectionDiagnostics("rpc-session", batch.diagnostics);
-				for (const frame of batch.frames) {
-					output(frame);
-				}
-			});
-			unsubscribeBackpressure = session.subscribeRuntimeEvents(async () => {
-				try {
-					await waitForTransportBackpressure();
-				} catch (transportError: unknown) {
-					requestTransportFailureShutdown(transportError);
-				}
-			});
-		}
+	/** Stop following the conversation's authority changes and closing. */
+	const stopObservingConversation = (): void => {
+		stopObservingClose();
+		detachOrderedAuthorityChanges?.();
+		unsubscribeConversationGenerationChanges?.();
+		unsubscribeConversationGenerationChanges = undefined;
+	};
+
+	/** Leave the conversation once: an anchor closes it, even when the client never attached. */
+	let clientLeft: Promise<void> | undefined;
+	const leaveHost = (): Promise<void> => {
+		clientLeft ??= (async () => {
+			stopObservingClose();
+			if (host.conversationOf(client) !== undefined) {
+				await host.detach(client);
+			} else if (anchorsConversation) {
+				await host.close(current);
+			}
+		})();
+		return clientLeft;
 	};
 
 	// Detached review workflow events reach ordered-conversation clients through
-	// the runtime conversation projection feed (published by the manager itself,
+	// the conversation's projection feed (published by the manager itself,
 	// which outlives this mode instance). This per-mode sink only serves the
 	// direct stdio output path and the host's onWorkflowEvent observer.
 	const detachReviewWorkflowSink =
-		runtimeHost.reviewWorkflows?.attachSink((event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
+		conversation.reviewWorkflows?.attachSink((event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
 			try {
 				const result = options.onWorkflowEvent?.(event);
 				if (result) {
@@ -1178,10 +1265,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 		}) ?? (() => {});
 	// Per-mode review sinks outlive shutdown while workflows this client may be
-	// waiting on are still running; the runtime-scoped manager keeps executing
-	// them after the transport detaches (disposal aborts them instead).
+	// waiting on are still running; the conversation's manager keeps executing
+	// them after the transport detaches (closing the conversation aborts them).
 	const retireReviewWorkflowSink = (): void => {
-		const reviewWorkflows = runtimeHost.reviewWorkflows;
+		const reviewWorkflows = conversation.reviewWorkflows;
 		if (!reviewWorkflows?.hasActiveWorkflows) {
 			detachReviewWorkflowSink();
 			return;
@@ -1195,8 +1282,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const pendingReviewWorkflows = new Map<string, { launch: () => void; cancel: () => void }>();
 
 	const createHostActionContext = (
-		commandSession: AgentSession = session,
+		commandConversation: HostedConversation,
 		assertConversationGenerationCurrent?: () => void,
+		commandSession: AgentSession = commandConversation.session,
 	): HostActionInvocationContext => ({
 		session: commandSession,
 		assertCurrent: assertConversationGenerationCurrent,
@@ -1206,8 +1294,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		compactContext: (customInstructions) =>
 			commandSession.compact(customInstructions, assertConversationGenerationCurrent),
 		newSession: (newSessionOptions) =>
-			runtimeHost.newSession({ ...newSessionOptions, assertConversationGenerationCurrent }),
-		afterSessionSwitch: rebindSession,
+			openNewSession(host, client, { ...newSessionOptions, assertConversationGenerationCurrent }),
 		renameSession: (name) => commandSession.setSessionName(name),
 		setFastModeEnabled: (enabled) => commandSession.setFastModeEnabled(enabled),
 		setAgentMode: (mode) => {
@@ -1215,7 +1302,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			return commandSession.setAgentMode(mode);
 		},
 		executePlan: (planId, expectedRevision, strategy) =>
-			runtimeHost.executePlan(planId, expectedRevision, strategy, assertConversationGenerationCurrent),
+			executePlan(host, client, planId, expectedRevision, strategy, assertConversationGenerationCurrent),
 		changePlan: (planId, expectedRevision) => {
 			assertConversationGenerationCurrent?.();
 			return commandSession.changePlan(planId, expectedRevision);
@@ -1234,7 +1321,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				target,
 				controls: reviewOptions.controls,
 				...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
-				cwd: runtimeHost.cwd,
+				cwd: commandConversation.cwd,
 				settingsManager: commandSession.settingsManager,
 				modelRegistry: commandSession.modelRegistry,
 				currentModel: commandSession.model,
@@ -1247,17 +1334,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			const authStorage = commandSession.modelRegistry.authStorage;
 			const modelRegistry = commandSession.modelRegistry;
 			const settingsManager = commandSession.settingsManager;
-			let started: ReturnType<typeof runtimeHost.reviewWorkflows.start>;
+			let started: ReturnType<typeof commandConversation.reviewWorkflows.start>;
 			try {
-				started = runtimeHost.reviewWorkflows.start({
+				started = commandConversation.reviewWorkflows.start({
 					prepared,
 					fastModeEnabled,
 					execute: async (hooks) => {
 						try {
 							const result = await executeReviewWorkflow({
 								prepared,
-								cwd: runtimeHost.cwd,
-								agentDir: runtimeHost.services.agentDir,
+								cwd: commandConversation.cwd,
+								agentDir: commandConversation.services.agentDir,
 								authStorage,
 								modelRegistry,
 								settingsManager,
@@ -1311,7 +1398,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 							}),
 						).catch(() => {});
 					}
-					runtimeHost.reviewWorkflows.cancel(descriptor.workflowId);
+					commandConversation.reviewWorkflows.cancel(descriptor.workflowId);
 				},
 			});
 			return {
@@ -1342,7 +1429,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				);
 				if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
 				const handoff = createReviewFixHandoff(record, requestedFindingIds);
-				const opened = await runtimeHost.newSession({
+				const opened = await openNewSession(host, client, {
 					assertConversationGenerationCurrent,
 					setup: (writer) => handoff.setup(writer),
 					beforeMove: (source) => handoff.beforeMove(source),
@@ -1389,7 +1476,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						...(typeof args.note === "string" ? { note: args.note } : {}),
 					},
 					{
-						recordCanonicalOutcome: runtimeHost.reviewDiscussions?.recordOutcome,
+						recordCanonicalOutcome: options.reviewDiscussions?.recordOutcome,
 						assertCurrent: assertConversationGenerationCurrent,
 					},
 				);
@@ -1405,7 +1492,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				if (!record) throw new Error(`Unknown durable review run: ${runId}`);
 				const target = reviewTargetForRerun(record);
 				const rerun = await createHostActionContext(
-					commandSession,
+					commandConversation,
 					assertConversationGenerationCurrent,
 				).runReviewAction?.(target, {
 					remote: true,
@@ -1449,19 +1536,23 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 	});
 
-	const createRpcCommandContext = (command: RpcCommand, commandSession: AgentSession = session) => {
+	const createRpcCommandContext = (command: RpcCommand, commandConversation: HostedConversation) => {
+		const commandSession = commandConversation.session;
 		const assertConversationGenerationCurrent = () => assertConversationAuthority(command, commandSession);
 		return {
 			session: commandSession,
-			runtimeHost,
+			conversation: commandConversation,
+			host,
+			client,
+			...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
 			options: {
 				allowUiActionInvocation,
 				requireRemoteSafeUiActions,
 				registerPushTarget: options.registerPushTarget,
 			},
 			output,
-			rebindSession,
-			createHostActionContext: () => createHostActionContext(commandSession, assertConversationGenerationCurrent),
+			createHostActionContext: () =>
+				createHostActionContext(commandConversation, assertConversationGenerationCurrent),
 			setClientCapabilities(features: RpcClientCapabilityFeature[]): void {
 				clientCapabilities = new Set(
 					features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
@@ -1559,15 +1650,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 		};
 
-		await captureCleanupError(restoreRebindSession);
-		await captureCleanupError(detachExtensions);
+		await captureCleanupError(stopObservingConversation);
 		await captureCleanupError(stopModelCatalogWatcher);
 		await captureCleanupError(cancelPendingExtensionRequests);
 		await captureCleanupError(detachHostActionBridge);
 		await captureCleanupError(detachReviewWorkflowSink);
 		await captureCleanupError(() => rpcSubagents.disposeAll());
 		pendingReviewWorkflows.clear();
-		if (shouldDisposeRuntimeOnClose) {
+		if (anchorsConversation) {
 			await captureCleanupError(cancelPendingHostActionRequests);
 		}
 		for (const cleanup of signalCleanupHandlers) {
@@ -1576,9 +1666,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		await captureCleanupError(() => unsubscribe?.());
 		await captureCleanupError(endSessionProjector);
 		await captureCleanupError(() => unsubscribeBackpressure?.());
-		if (shouldDisposeRuntimeOnClose) {
-			await captureCleanupError(() => runtimeHost.dispose());
-		}
+		await captureCleanupError(leaveHost);
 		await captureCleanupError(detachInput);
 		await captureCleanupError(detachClose);
 		await captureCleanupError(() => transport.close());
@@ -1611,13 +1699,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 		}
 		stopModelCatalogWatcher();
-		// Extension UI, errors, and session actions go to the remaining clients from here on.
-		detachExtensions();
+		// Extension UI, errors, and session actions go to the remaining clients from
+		// here on; an anchor stays until its conversation closes with the mode.
+		if (!anchorsConversation) void leaveHost().catch(() => {});
 		shutdownStarted.resolve();
 		cancelPendingExtensionRequests();
 		detachHostActionBridge();
 		retireReviewWorkflowSink();
-		if (shouldDisposeRuntimeOnClose) {
+		if (anchorsConversation) {
 			cancelPendingHostActionRequests();
 		}
 		if (shuttingDown) {
@@ -1635,7 +1724,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					detachInput();
 					detachClose();
 					await commandQueue;
-					restoreRebindSession();
+					stopObservingConversation();
 					for (const cleanup of signalCleanupHandlers) {
 						cleanup();
 					}
@@ -1643,9 +1732,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					endSessionProjector();
 					unsubscribeBackpressure?.();
 					await rpcSubagents.disposeAll();
-					if (shouldDisposeRuntimeOnClose) {
-						await runtimeHost.dispose();
-					}
+					await leaveHost();
 					if (signal !== "SIGTERM" && !hasShutdownError) {
 						await waitForTransportBackpressure();
 						await transport.flush?.();
@@ -1745,9 +1832,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		try {
 			// Extension actions the command reaches go to this client. The command acts on the current session.
 			response = await ClientScope.run(extensionClientId, () => {
-				const currentSession = runtimeHost.session;
-				assertConversationAuthority(command, currentSession);
-				return handleRpcCommand(command, createRpcCommandContext(command, currentSession));
+				const commandConversation = current;
+				assertConversationAuthority(command, commandConversation.session);
+				return handleRpcCommand(command, createRpcCommandContext(command, commandConversation));
 			});
 		} catch (commandError: unknown) {
 			const target = getRpcErrorResponseTarget(command);
@@ -1849,40 +1936,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			void shutdown().catch(() => {});
 		}) ?? (() => {});
 
-	// A redirect view's client left its conversation, redirected by a command or
-	// because the conversation closed. The command's response goes first; the
-	// stream then ends with the host's final frame.
-	stopObservingClientDetachment =
-		runtimeHost.onClientDetached?.((detachment) => {
-			if (shuttingDown || clientDetached) return;
-			clientDetached = true;
-			const terminal = options.detachedTerminal?.(detachment);
-			const queued = enqueueInputTask(async () => {
-				if (terminal && !shuttingDown) {
-					output(terminal);
-					await waitForTransportBackpressure();
-				}
-				await shutdown();
-			});
-			if (!queued) void shutdown().catch(() => {});
-		}) ?? (() => {});
-
-	// A runtime this RPC host owns ends when its session loses its log; a host
-	// that shares the runtime (the daemon, a relaying TUI) ends it instead. The
-	// process reports the error and exits non-zero; an embedded host rejects its
-	// close promise with the error.
-	if (shouldDisposeRuntimeOnClose) {
-		void runtimeHost.lost?.then((error) => {
-			if (shuttingDown) return;
-			console.error(
-				`Volt stopped session ${runtimeHost.session.sessionId} because its saved state could not be confirmed: ${error.message}`,
-			);
-			void shutdown(1, undefined, shouldExitProcess ? undefined : { error }).catch(() => {});
-		});
-	}
+	// An anchoring client's conversation ends with its log; a host that shares
+	// the conversation (the daemon, a relaying TUI) ends it instead. The process
+	// reports the error and exits non-zero; an embedded host rejects its close
+	// promise with the error.
+	observeLoss(conversation);
 
 	try {
-		await rebindSession();
+		await attachClient();
 	} catch (startupError: unknown) {
 		if (shuttingDown) {
 			try {
@@ -1910,7 +1971,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	// Notify connected clients when logins or API keys saved by other volt
 	// processes change the selectable model catalog on disk.
 	stopModelCatalogWatcher = startModelCatalogWatcher({
-		agentDir: runtimeHost.services?.agentDir,
+		agentDir: current.services.agentDir,
 		getModelRegistry: () => session.modelRegistry,
 		onCatalogChanged: () => output({ type: "models_changed" }),
 	});

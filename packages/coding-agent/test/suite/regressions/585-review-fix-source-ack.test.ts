@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ParsedReview } from "../../../src/core/review-report.ts";
 import {
 	appendReviewRun,
@@ -100,24 +99,27 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 		});
 		const source = await harness.openStartup();
 		await appendReviewRun(source.session.sessionWriter, reviewRecord());
-		const runtime = new AgentSessionRuntime(harness.host, source);
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		await client.start();
 		const ready = Promise.withResolvers<void>();
-		const closed = runRpcMode(runtime, {
+		const closed = runRpcMode(harness.host, source, {
 			transport: pair.server,
-			disposeRuntimeOnClose: false,
 			onReady: ready.resolve,
 		});
 		await Promise.race([ready.promise, closed]);
 		cleanups.push(async () => {
 			await client.stop();
 			await closed.catch(() => undefined);
-			await runtime.dispose();
 			await harness.cleanup();
 		});
-		return { harness, source, runtime, client, shutdowns };
+		/** The session of the one conversation open: the RPC client's, as the host closes each it leaves. */
+		const currentSession = () => {
+			const [conversation, ...others] = harness.host.list();
+			if (!conversation || others.length > 0) throw new Error("Expected one open conversation");
+			return conversation.session;
+		};
+		return { harness, source, currentSession, client, shutdowns };
 	}
 
 	/** The run as the source's stored log holds it, read once nothing holds the log open. */
@@ -131,14 +133,14 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 	}
 
 	it("writes the source's acknowledgement before the source closes and never reopens the source", async () => {
-		const { source, runtime, client, shutdowns } = await setup();
+		const { source, currentSession, client, shutdowns } = await setup();
 		const sourceId = source.id;
 		const sourceRef = source.session.sessionRef!;
 		const reopen = vi.spyOn(SessionManager, "open");
 
 		const result = await client.openReviewSession(RUN_ID);
 
-		const target = runtime.session;
+		const target = currentSession();
 		expect(result).toEqual({ cancelled: false, sessionId: target.sessionId });
 		expect(target.sessionId).not.toBe(sourceId);
 		expect(reopen).not.toHaveBeenCalled();
@@ -156,19 +158,19 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 	});
 
 	it("acknowledges only the new session for a fix of selected findings", async () => {
-		const { source, runtime, client, shutdowns } = await setup();
+		const { source, currentSession, client, shutdowns } = await setup();
 		const sourceRef = source.session.sessionRef!;
 
 		const result = await client.openReviewSession(RUN_ID, ["finding-2"]);
 
-		expect(result).toEqual({ cancelled: false, sessionId: runtime.session.sessionId });
+		expect(result).toEqual({ cancelled: false, sessionId: currentSession().sessionId });
 		expect(shutdowns).toEqual([{ sessionId: source.id, acknowledged: false }]);
-		expect(getReviewRun(runtime.session.sessionManager, RUN_ID)?.acknowledgedAt).toEqual(expect.any(Number));
+		expect(getReviewRun(currentSession().sessionManager, RUN_ID)?.acknowledgedAt).toEqual(expect.any(Number));
 		expect((await storedSourceRun(sourceRef))?.acknowledgedAt).toBeUndefined();
 	});
 
 	it("keeps the client on the source and discards the new session when the source write fails", async () => {
-		const { harness, source, runtime, client, shutdowns } = await setup();
+		const { harness, source, currentSession, client, shutdowns } = await setup();
 		const writer = source.session.sessionWriter;
 		const appendCustomEntry = writer.appendCustomEntry.bind(writer);
 		vi.spyOn(writer, "appendCustomEntry").mockImplementation(async (customType, data) => {
@@ -178,7 +180,7 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 
 		await expect(client.openReviewSession(RUN_ID)).rejects.toThrow("source write failed");
 
-		expect(runtime.session).toBe(source.session);
+		expect(currentSession()).toBe(source.session);
 		await expect(client.getState()).resolves.toMatchObject({ sessionId: source.id });
 		expect(harness.host.list()).toEqual([source]);
 		expect(shutdowns).toEqual([]);

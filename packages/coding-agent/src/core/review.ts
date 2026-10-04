@@ -7,7 +7,6 @@ import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { minimatch } from "minimatch";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
-import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import {
 	type CodeHostProvider,
@@ -15,8 +14,9 @@ import {
 	githubCliCodeHostProvider,
 } from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
-import type { ToolDefinition } from "./extensions/types.ts";
+import type { SessionIntentResult, ToolDefinition } from "./extensions/types.ts";
 import { createReviewPromotion } from "./host/review-handoff.ts";
+import type { NewSessionIntentOptions } from "./host/session-intents.ts";
 import type { CustomMessageInput } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findExactModelReferenceMatch } from "./model-resolver.ts";
@@ -855,7 +855,7 @@ export interface ReviewWorkflowOptions {
 	cwd: string;
 	agentDir: string;
 	session: ReviewWorkflowSession;
-	newSession: AgentSessionRuntime["newSession"];
+	newSession: (options?: NewSessionIntentOptions) => Promise<SessionIntentResult>;
 	authStorage: AuthStorage;
 	settingsManager: SettingsManager;
 	tools?: readonly string[];

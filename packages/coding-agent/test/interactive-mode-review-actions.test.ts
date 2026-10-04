@@ -1,11 +1,18 @@
 import { describe, expect, test, vi } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type * as SessionIntents from "../src/core/host/session-intents.ts";
 import { REVIEW_FIX_ACTION_ID, REVIEW_RERUN_ACTION_ID } from "../src/core/host-actions.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import { acknowledgeReviewRun, appendReviewRun, getReviewRun, type ReviewRunRecord } from "../src/core/review-state.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { SessionWriter } from "../src/core/session-writer.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+
+const openNewSession = vi.hoisted(() => vi.fn());
+vi.mock("../src/core/host/session-intents.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof SessionIntents>()),
+	openNewSession,
+}));
 
 function durableRecord(): ReviewRunRecord {
 	const firstFinding: ParsedReview["findings"][number] = {
@@ -115,23 +122,27 @@ describe("InteractiveMode durable review actions", () => {
 		const replacementManager = SessionManager.inMemory("/workspace");
 		const fakeThis = {
 			session: { sessionManager: manager, sessionWriter: manager.logWriter as SessionWriter },
-			runtimeHost: {
-				newSession: vi.fn(
-					async (options: {
-						setup(writer: SessionWriter): Promise<void>;
-						beforeMove(source: HostedConversation): Promise<void>;
-					}) => {
-						await options.setup(replacementManager.logWriter);
-						const target = { sessionManager: replacementManager, sessionWriter: replacementManager.logWriter };
-						// The source is still the current session, and open, when `beforeMove` runs.
-						await options.beforeMove({ session: fakeThis.session } as unknown as HostedConversation);
-						fakeThis.session = target;
-						return { cancelled: false, sessionId: replacementManager.getSessionId(), seeded: false };
-					},
-				),
-			},
+			host: {},
+			client: {},
 			renderCurrentSessionState: vi.fn(),
 		};
+		openNewSession.mockImplementationOnce(
+			async (
+				_host: unknown,
+				_client: unknown,
+				options: {
+					setup(writer: SessionWriter): Promise<void>;
+					beforeMove(source: HostedConversation): Promise<void>;
+				},
+			) => {
+				await options.setup(replacementManager.logWriter);
+				const target = { sessionManager: replacementManager, sessionWriter: replacementManager.logWriter };
+				// The source is still the current session, and open, when `beforeMove` runs.
+				await options.beforeMove({ session: fakeThis.session } as unknown as HostedConversation);
+				fakeThis.session = target;
+				return { cancelled: false, sessionId: replacementManager.getSessionId(), seeded: false };
+			},
+		);
 		const runInteractiveReviewLifecycleAction = Reflect.get(
 			InteractiveMode.prototype,
 			"runInteractiveReviewLifecycleAction",

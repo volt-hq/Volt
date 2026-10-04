@@ -19,14 +19,7 @@ export {
 	type SessionStats,
 } from "./agent-session.ts";
 export {
-	AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	type CreateAgentSessionRuntimeResult,
-	createAgentSessionRuntime,
-	type SubagentRuntimeContext,
-} from "./agent-session-runtime.ts";
-export {
-	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionDiagnostic,
 	type AgentSessionServices,
 	type CreateAgentSessionFromServicesOptions,
 	type CreateAgentSessionServicesOptions,
@@ -83,6 +76,25 @@ export {
 	type TurnStartEvent,
 	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
+export {
+	ConversationHost,
+	type ConversationHostOptions,
+	SessionImportFileNotFoundError,
+} from "./host/conversation-host.ts";
+export {
+	type ConversationFactory,
+	type ConversationFactoryResult,
+	HostedConversation,
+	type SubagentRuntimeContext,
+} from "./host/hosted-conversation.ts";
+export {
+	openFork,
+	openImport,
+	openNewSession,
+	openStoredSession,
+	openStoredSessionById,
+} from "./host/session-intents.ts";
+export type { ConversationTarget, HostClient } from "./host/targets.ts";
 export type {
 	HostActionDecision,
 	HostActionDecisionKind,

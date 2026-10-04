@@ -10,13 +10,9 @@ import {
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-	type SubagentRuntimeContext,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory, SubagentRuntimeContext } from "../src/core/host/hosted-conversation.ts";
 import type { ResourceDiagnostic, ResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
@@ -165,7 +161,7 @@ describe("SubagentManager", () => {
 		}
 		let disposedSessionCount = 0;
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+		const createRuntime: ConversationFactory = async ({
 			cwd,
 			agentDir,
 			sessionManager,
@@ -319,8 +315,8 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			parentSessionManager,
 			onRuntimeCreated: (event) => {
-				childSessionRef = event.runtime.session.sessionManager.getSessionRef();
-				childCwd = event.runtime.session.sessionManager.getCwd();
+				childSessionRef = event.conversation.session.sessionManager.getSessionRef();
+				childCwd = event.conversation.session.sessionManager.getCwd();
 				throw startupError;
 			},
 		});
@@ -407,7 +403,8 @@ describe("SubagentManager", () => {
 		await handle.dispose();
 		expect(getDisposedSessionCount()).toBe(0);
 
-		await events[0]?.runtime.dispose();
+		const created = events[0];
+		await created?.host.close(created.conversation);
 		expect(getDisposedSessionCount()).toBe(1);
 	});
 
@@ -674,8 +671,8 @@ describe("SubagentManager", () => {
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("overflow child");
-				childSessionManager = event.runtime.session.sessionManager;
+				await event.conversation.session.setSessionName("overflow child");
+				childSessionManager = event.conversation.session.sessionManager;
 			},
 		});
 		cleanups.push(() => finishCompaction.resolve());
@@ -743,7 +740,7 @@ describe("SubagentManager", () => {
 			simpleResponses: [fauxAssistantMessage("compacted context")],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("settlement child");
+				await event.conversation.session.setSessionName("settlement child");
 			},
 		});
 		const handle = await manager.start();
@@ -770,9 +767,9 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			responseText: "extension command result",
 			onRuntimeCreated: (event) => {
-				const runner = event.runtime.session.extensionRunner;
+				const runner = event.conversation.session.extensionRunner;
 				const session = (
-					event.runtime.session as unknown as {
+					event.conversation.session as unknown as {
 						_prompting: {
 							sendCustomMessage(
 								message: { customType: string; content: string; display: boolean },
@@ -816,7 +813,7 @@ describe("SubagentManager", () => {
 	it("rejects completion when the delegated prompt settles without an agent result", async () => {
 		const { manager } = await createTestManager({
 			onRuntimeCreated: (event) => {
-				const runner = event.runtime.session.extensionRunner;
+				const runner = event.conversation.session.extensionRunner;
 				const hasHandlers = runner.hasHandlers.bind(runner);
 				runner.hasHandlers = (eventType) => eventType === "input" || hasHandlers(eventType);
 				runner.emitInput = async () => ({ action: "handled" });
@@ -858,7 +855,7 @@ describe("SubagentManager", () => {
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("resumed child");
+				await event.conversation.session.setSessionName("resumed child");
 			},
 		});
 		cleanups.push(() => finishTaskResponse.resolve());
@@ -914,8 +911,8 @@ describe("SubagentManager", () => {
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("failing compaction child");
-				childSessionManager = event.runtime.session.sessionManager;
+				await event.conversation.session.setSessionName("failing compaction child");
+				childSessionManager = event.conversation.session.sessionManager;
 			},
 		});
 		const handle = await manager.start();
@@ -967,7 +964,7 @@ describe("SubagentManager", () => {
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
 			},
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("retry child");
+				await event.conversation.session.setSessionName("retry child");
 			},
 		});
 		cleanups.push(() => finishRetryResponse.resolve());
@@ -1020,7 +1017,7 @@ describe("SubagentManager", () => {
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
 			},
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("aborted retry child");
+				await event.conversation.session.setSessionName("aborted retry child");
 			},
 		});
 		const handle = await manager.start();
@@ -1077,7 +1074,7 @@ describe("SubagentManager", () => {
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
 			},
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("scope-aborted retry child");
+				await event.conversation.session.setSessionName("scope-aborted retry child");
 			},
 		});
 		const handle = await manager.start({ delegationScope: scope });
@@ -1242,7 +1239,7 @@ describe("SubagentManager", () => {
 			noTools: false,
 			onCreateRuntime: (context) => observedContexts.push(context),
 			onRuntimeCreated: (event) => {
-				observedTools = event.runtime.session.getActiveToolNames();
+				observedTools = event.conversation.session.getActiveToolNames();
 			},
 		});
 
@@ -1291,7 +1288,7 @@ describe("SubagentManager", () => {
 			resourceLoader,
 			noTools: false,
 			onRuntimeCreated: (event) => {
-				observedTools = event.runtime.session.getActiveToolNames();
+				observedTools = event.conversation.session.getActiveToolNames();
 			},
 		});
 
@@ -1619,7 +1616,7 @@ describe("SubagentManager", () => {
 			turnLimits: { maxTurns: 1 },
 			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
 			onRuntimeCreated: (event) => {
-				event.runtime.session.subscribe((event) => {
+				event.conversation.session.subscribe((event) => {
 					if (event.type === "turn_start" || event.type === "compaction_start") timeline.push(event.type);
 				});
 			},
@@ -1673,7 +1670,7 @@ describe("SubagentManager", () => {
 	});
 
 	it("uses terminal plan finalization as the budget report turn without queuing a redundant report", async () => {
-		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
+		let childSession: SubagentRuntimeCreatedEvent["conversation"]["session"] | undefined;
 		let activePlan: { id: string; revision: number; steps: Array<{ id: string; status: string }> } | undefined;
 		let finalRequestTools: string[] | undefined;
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
@@ -1682,7 +1679,7 @@ describe("SubagentManager", () => {
 			noTools: false,
 			turnLimits: { maxTurns: 1 },
 			onRuntimeCreated: async (event) => {
-				childSession = event.runtime.session;
+				childSession = event.conversation.session;
 				await childSession.setAgentMode("plan");
 				const draft = await childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
 				const ready = await childSession.submitPlan({
@@ -1760,7 +1757,7 @@ describe("SubagentManager", () => {
 	});
 
 	it("counts plan-finalization responses below the limit against later prompts", async () => {
-		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
+		let childSession: SubagentRuntimeCreatedEvent["conversation"]["session"] | undefined;
 		let activePlan: { id: string; revision: number; steps: Array<{ id: string; status: string }> } | undefined;
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
@@ -1768,7 +1765,7 @@ describe("SubagentManager", () => {
 			noTools: false,
 			turnLimits: { maxTurns: 2 },
 			onRuntimeCreated: async (event) => {
-				childSession = event.runtime.session;
+				childSession = event.conversation.session;
 				await childSession.setAgentMode("plan");
 				const draft = await childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
 				const ready = await childSession.submitPlan({
@@ -1910,14 +1907,14 @@ describe("SubagentManager", () => {
 	});
 
 	it("keeps a re-prompted child in report-only mode after it finishes at its turn limit", async () => {
-		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
+		let childSession: SubagentRuntimeCreatedEvent["conversation"]["session"] | undefined;
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
 			noTools: false,
 			turnLimits: { warnAtTurns: 1, maxTurns: 2 },
 			onRuntimeCreated: (event) => {
-				childSession = event.runtime.session;
+				childSession = event.conversation.session;
 			},
 			responses: [
 				fauxAssistantMessage(fauxToolCall("subagent_registry", { list: true }), { stopReason: "toolUse" }),
@@ -1977,7 +1974,7 @@ describe("SubagentManager", () => {
 		let unregisterExternalPolicy: (() => void) | undefined;
 		const { manager } = await createTestManager({
 			onRuntimeCreated: (event) => {
-				unregisterExternalPolicy = event.runtime.session.registerTurnPolicy({
+				unregisterExternalPolicy = event.conversation.session.registerTurnPolicy({
 					nextAction: () => {
 						externalNextActionCalls++;
 						return undefined;
@@ -2547,7 +2544,7 @@ describe("SubagentManager", () => {
 	it("records accepted retained runs disposed before completion with disposal provenance", async () => {
 		const responseStarted = createDeferred();
 		const finishResponse = createDeferred();
-		let childRuntime: SubagentRuntimeCreatedEvent["runtime"] | undefined;
+		let childRuntime: SubagentRuntimeCreatedEvent | undefined;
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
@@ -2560,12 +2557,12 @@ describe("SubagentManager", () => {
 				},
 			],
 			onRuntimeCreated: (event) => {
-				childRuntime = event.runtime;
+				childRuntime = event;
 			},
 		});
 		cleanups.push(async () => {
 			finishResponse.resolve();
-			await childRuntime?.dispose();
+			await childRuntime?.host.close(childRuntime.conversation);
 		});
 
 		const handle = await manager.startByName("researcher");
@@ -2575,12 +2572,12 @@ describe("SubagentManager", () => {
 		finishResponse.resolve();
 		await disposal;
 		if (!childRuntime) throw new Error("expected retained child runtime");
-		await childRuntime.session.waitForIdle();
+		await childRuntime.conversation.session.waitForIdle();
 
 		expect(manager.listDelegations()).toEqual([
 			expect.objectContaining({ agent: { name: "researcher", source: "user" }, status: "aborted" }),
 		]);
-		expect(childRuntime.session.messages.at(-1)).toMatchObject({
+		expect(childRuntime.conversation.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "aborted",
 			diagnostics: [expect.objectContaining({ type: "runtime_abort", details: { source: "disposal" } })],
@@ -2590,7 +2587,7 @@ describe("SubagentManager", () => {
 	it("preserves an explicit abort source when a retained child is subsequently disposed", async () => {
 		const responseStarted = createDeferred();
 		const finishResponse = createDeferred();
-		let childRuntime: SubagentRuntimeCreatedEvent["runtime"] | undefined;
+		let childRuntime: SubagentRuntimeCreatedEvent | undefined;
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
@@ -2603,12 +2600,12 @@ describe("SubagentManager", () => {
 				},
 			],
 			onRuntimeCreated: (event) => {
-				childRuntime = event.runtime;
+				childRuntime = event;
 			},
 		});
 		cleanups.push(async () => {
 			finishResponse.resolve();
-			await childRuntime?.dispose();
+			await childRuntime?.host.close(childRuntime.conversation);
 		});
 
 		const handle = await manager.startByName("researcher");
@@ -2619,9 +2616,9 @@ describe("SubagentManager", () => {
 		await abort;
 		await handle.dispose();
 		if (!childRuntime) throw new Error("expected retained child runtime");
-		await childRuntime.session.waitForIdle();
+		await childRuntime.conversation.session.waitForIdle();
 
-		expect(childRuntime.session.messages.at(-1)).toMatchObject({
+		expect(childRuntime.conversation.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "aborted",
 			diagnostics: [expect.objectContaining({ type: "runtime_abort", details: { source: "remote_request" } })],
@@ -2872,7 +2869,7 @@ describe("SubagentManager", () => {
 	it("propagates abort provenance through the handle into the child transcript", async () => {
 		const responseStarted = createDeferred();
 		const finishResponse = createDeferred();
-		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
+		let childSession: SubagentRuntimeCreatedEvent["conversation"]["session"] | undefined;
 		const { manager } = await createTestManager({
 			responses: [
 				async () => {
@@ -2882,7 +2879,7 @@ describe("SubagentManager", () => {
 				},
 			],
 			onRuntimeCreated: (event) => {
-				childSession = event.runtime.session;
+				childSession = event.conversation.session;
 			},
 		});
 		cleanups.push(() => finishResponse.resolve());
@@ -2917,8 +2914,8 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			retainRuntimeOnDispose: true,
 			onRuntimeCreated: (event) => {
-				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
-				event.runtime.session.abort = async () => {
+				const abortRuntime = event.conversation.session.abort.bind(event.conversation.session);
+				event.conversation.session.abort = async () => {
 					abortCalls += 1;
 					await abortRuntime();
 				};
@@ -2937,8 +2934,8 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			retainRuntimeOnDispose: true,
 			onRuntimeCreated: (event) => {
-				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
-				event.runtime.session.abort = async () => {
+				const abortRuntime = event.conversation.session.abort.bind(event.conversation.session);
+				event.conversation.session.abort = async () => {
 					abortCalls += 1;
 					await abortRuntime();
 				};
@@ -2959,8 +2956,8 @@ describe("SubagentManager", () => {
 		const { manager } = await createTestManager({
 			retainRuntimeOnDispose: true,
 			onRuntimeCreated: (event) => {
-				const abortRuntime = event.runtime.session.abort.bind(event.runtime.session);
-				event.runtime.session.abort = async () => {
+				const abortRuntime = event.conversation.session.abort.bind(event.conversation.session);
+				event.conversation.session.abort = async () => {
 					abortCalls += 1;
 					await abortRuntime();
 				};
@@ -2980,7 +2977,7 @@ describe("SubagentManager", () => {
 		const finishRetryResponse = createDeferred();
 		const runtimeStopStarted = createDeferred();
 		const finishRuntimeStop = createDeferred();
-		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
+		let childSession: SubagentRuntimeCreatedEvent["conversation"]["session"] | undefined;
 		const { manager, getDisposedSessionCount } = await createTestManager({
 			responses: [
 				fauxAssistantMessage("", {
@@ -2998,13 +2995,17 @@ describe("SubagentManager", () => {
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
 			},
 			onRuntimeCreated: async (event) => {
-				await event.runtime.session.setSessionName("disposed retry child");
-				childSession = event.runtime.session;
-				const disposeRuntime = event.runtime.dispose.bind(event.runtime);
-				event.runtime.dispose = async () => {
-					runtimeStopStarted.resolve();
-					await finishRuntimeStop.promise;
-					await disposeRuntime();
+				await event.conversation.session.setSessionName("disposed retry child");
+				childSession = event.conversation.session;
+				// The in-process client closes the child's conversation when it stops.
+				const host = event.host;
+				const close = host.close.bind(host);
+				host.close = async (conversation, closeEvent) => {
+					if (conversation === event.conversation) {
+						runtimeStopStarted.resolve();
+						await finishRuntimeStop.promise;
+					}
+					await close(conversation, closeEvent);
 				};
 			},
 		});

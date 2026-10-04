@@ -1,8 +1,10 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type { HostClient } from "../src/core/host/targets.ts";
 import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
@@ -173,34 +175,61 @@ function createSession(options: {
 	};
 }
 
-function createRuntimeHost(options: {
-	definitions: SubagentDefinition[];
-	manager: SubagentToolManager;
-	onNewSession?: () => void;
-}): AgentSessionRuntime {
-	let session = createSession({ definitions: options.definitions, manager: options.manager });
-	return {
-		get session() {
-			return session;
-		},
-		newSession: vi.fn(async () => {
-			options.onNewSession?.();
-			session = createSession({
-				definitions: options.definitions,
-				manager: options.manager,
-				sessionId: "new-parent-session",
-			});
-			return { cancelled: false };
-		}),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		switchSessionById: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => undefined),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+interface FakeHost {
+	host: ConversationHost;
+	conversation: HostedConversation;
 }
 
-async function startHarness(runtimeHost: AgentSessionRuntime): Promise<RpcHarness> {
+/**
+ * A host over fake conversations. A new session opens and the client moves
+ * there, as `ConversationHost.openFor` moves an in-place client.
+ */
+function createHost(options: { definitions: SubagentDefinition[]; manager: SubagentToolManager }): FakeHost {
+	const conversationFor = (sessionId?: string): HostedConversation => {
+		const session = createSession({
+			definitions: options.definitions,
+			manager: options.manager,
+			...(sessionId === undefined ? {} : { sessionId }),
+		});
+		return {
+			id: session.sessionId,
+			session,
+			cwd: tmpdir(),
+			lifetime: "clients",
+			closed: false,
+			assertNotBusy: () => {},
+			lost: new Promise<Error>(() => {}),
+			services: { agentDir: undefined },
+		} as unknown as HostedConversation;
+	};
+	const conversation = conversationFor();
+	let current = conversation;
+	let attached: HostClient | undefined;
+	const host = {
+		attach: vi.fn(async (client: HostClient) => {
+			attached = client;
+		}),
+		conversationOf: (client: HostClient) => (attached?.id === client.id ? current : undefined),
+		onClosed: () => () => {},
+		detach: vi.fn(async () => {
+			attached = undefined;
+		}),
+		close: vi.fn(async () => undefined),
+		openFor: vi.fn(async (client: HostClient) => {
+			const move = client.move;
+			if (move.kind !== "in_place") throw new Error("Expected an in-place client");
+			const from = current;
+			const to = conversationFor("new-parent-session");
+			move.prepare?.(to, from);
+			current = to;
+			await move.onMoved(to, from);
+			return { cancelled: false, sessionId: to.id, seeded: false, conversation: to };
+		}),
+	} as unknown as ConversationHost;
+	return { host, conversation };
+}
+
+async function startHarness({ host, conversation }: FakeHost): Promise<RpcHarness> {
 	let lineHandler: ((line: string) => void) | undefined;
 	let closeHandler: RpcCloseHandler | undefined;
 	const writes: object[] = [];
@@ -224,7 +253,7 @@ async function startHarness(runtimeHost: AgentSessionRuntime): Promise<RpcHarnes
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(runtimeHost, { transport, onReady: resolveReady });
+	const modePromise = runRpcMode(host, conversation, { transport, onReady: resolveReady });
 	await ready;
 	await vi.waitFor(() => expect(lineHandler).toBeDefined());
 	return {
@@ -255,7 +284,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			maxSubagentDepth: 2,
 			maxChildAgents: 3,
 		});
-		const rpc = await startHarness(createRuntimeHost({ definitions: [definition], manager }));
+		const rpc = await startHarness(createHost({ definitions: [definition], manager }));
 		try {
 			rpc.send({ id: "list-1", type: "list_subagents" });
 			await vi.waitFor(() =>
@@ -299,7 +328,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const rpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect auth" });
 			await vi.waitFor(() =>
@@ -344,7 +373,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const rpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "slow" });
 			await vi.waitFor(() => expect(child.prompt).toHaveBeenCalledWith("slow"));
@@ -383,7 +412,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: (agent: string) => createDefinition(agent, `/tmp/${agent}.md`),
 			startByName: vi.fn(async (agent: string) => (agent === "first" ? first.handle : second.handle)),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const rpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			rpc.send({ id: "start-first", type: "subagent_start", agent: "first", prompt: "one" });
 			rpc.send({ id: "start-second", type: "subagent_start", agent: "second", prompt: "two" });
@@ -428,7 +457,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const rpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "work" });
 			await vi.waitFor(() => expect(child.prompt).toHaveBeenCalledWith("work"));
@@ -467,7 +496,7 @@ describe("local RPC subagent lifecycle commands", () => {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => nextHandle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const rpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			rpc.send({ id: "start-shutdown", type: "subagent_start", agent: "scout", prompt: "keep alive" });
 			await vi.waitFor(() => expect(first.prompt).toHaveBeenCalledWith("keep alive"));
@@ -479,7 +508,7 @@ describe("local RPC subagent lifecycle commands", () => {
 		}
 
 		nextHandle = second.handle;
-		const replacementRpc = await startHarness(createRuntimeHost({ definitions: [], manager }));
+		const replacementRpc = await startHarness(createHost({ definitions: [], manager }));
 		try {
 			replacementRpc.send({ id: "start-replace", type: "subagent_start", agent: "scout", prompt: "replace me" });
 			await vi.waitFor(() => expect(second.prompt).toHaveBeenCalledWith("replace me"));
@@ -490,7 +519,7 @@ describe("local RPC subagent lifecycle commands", () => {
 					type: "response",
 					command: "new_session",
 					success: true,
-					data: { cancelled: false },
+					data: { cancelled: false, sessionId: "new-parent-session" },
 				}),
 			);
 			expect(second.dispose).toHaveBeenCalledOnce();

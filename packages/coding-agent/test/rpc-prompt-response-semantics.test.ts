@@ -10,13 +10,14 @@ import {
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { getClientMessageId } from "../src/core/messages.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 import {
 	createTestAgentSessionRuntimeConfig,
 	createTestResourceLoader,
@@ -106,6 +107,8 @@ function getPromptResponses(outputLines: string[], id: string): ParsedOutputLine
 	);
 }
 
+type FakeRuntimeHost = ReturnType<typeof createFakeHost> & { conversation: HostedConversation };
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -117,7 +120,7 @@ async function createRuntimeHost(options: {
 	configureSession?: (session: AgentSession) => void;
 	sessionManager?: SessionManager;
 }): Promise<{
-	runtimeHost: AgentSessionRuntime;
+	runtimeHost: FakeRuntimeHost;
 	sessionManager: SessionManager;
 	getStreamCallCount: () => number;
 	cleanup: () => Promise<void>;
@@ -165,14 +168,7 @@ async function createRuntimeHost(options: {
 
 	options.configureSession?.(session);
 
-	const runtimeHost = {
-		session,
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => {}),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+	const runtimeHost = { ...createFakeHost(), conversation: createFakeConversation(session).conversation };
 
 	return {
 		runtimeHost,
@@ -212,7 +208,7 @@ async function startRpcMode(options: {
 	rpcIo.outputObserver = undefined;
 
 	const { runtimeHost, sessionManager, getStreamCallCount, cleanup } = await createRuntimeHost(options);
-	void runRpcMode(runtimeHost);
+	void runRpcMode(runtimeHost.host, runtimeHost.conversation);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
 	return { lineHandler: rpcIo.lineHandler!, sessionManager, getStreamCallCount, cleanup };

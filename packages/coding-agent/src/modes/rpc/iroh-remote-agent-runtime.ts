@@ -1,14 +1,11 @@
 import { join } from "node:path";
 import { ENV_AGENT_DIR, getAgentDir } from "../../config.ts";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../core/agent-session-runtime.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
 import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
+import { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import {
@@ -101,14 +98,24 @@ export type IrohRemoteAgentRuntimeSessionSelection =
 			sessionId: string;
 	  };
 
+/**
+ * A conversation the daemon hosts, in the host it opened in. The host keeps
+ * its conversations open until the daemon closes them; conversations a phone's
+ * structural intents open come from the same host.
+ */
+export interface IrohRemoteAgentRuntime {
+	readonly host: ConversationHost;
+	readonly conversation: HostedConversation;
+}
+
 export interface IrohRemoteAgentRuntimeResult {
-	runtime: AgentSessionRuntime;
+	runtime: IrohRemoteAgentRuntime;
 	sessionSelection: IrohRemoteAgentRuntimeSessionSelection;
 }
 
 export async function createIrohRemoteAgentRuntime(
 	options: IrohRemoteAgentRuntimeOptions,
-): Promise<AgentSessionRuntime> {
+): Promise<IrohRemoteAgentRuntime> {
 	return (await createIrohRemoteAgentRuntimeWithSessionSelection(options)).runtime;
 }
 
@@ -145,7 +152,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	// per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
 	const gitContextProviderPool = new GitContextProviderPool();
-	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+	const createRuntime: ConversationFactory = async (runtimeOptions) => {
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
 		const settingsManager = SettingsManager.create(projectCwd, runtimeOptions.agentDir, {
 			profile,
@@ -227,23 +234,30 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	} catch (error) {
 		return cleanupFailedIrohRemoteAgentRuntime(error, undefined, suppliedSessionManager);
 	}
-	let runtime: AgentSessionRuntime | undefined;
+	let runtime: IrohRemoteAgentRuntime | undefined;
 	let managerTransferred = false;
 	try {
 		const runtimeCwd = sessionTarget.sessionManager.getCwd();
 		await options.validateCwd?.(runtimeCwd);
 		managerTransferred = true;
-		runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: runtimeCwd,
+		// Phones attach as clients; the daemon closes each conversation itself.
+		const host = new ConversationHost({
+			factory: createRuntime,
 			agentDir,
-			sessionManager: sessionTarget.sessionManager,
-			profile: options.profile,
+			extensionMode: "rpc",
+			whenUnattached: "keep",
 		});
-		const errors = runtime.diagnostics.filter((diagnostic) => diagnostic.type === "error");
+		const opened = await host.open(
+			{ kind: "adopt", sessionManager: sessionTarget.sessionManager, cwd: runtimeCwd },
+			{ profile: options.profile },
+		);
+		if (opened.cancelled) throw new Error("Remote conversation open was cancelled");
+		runtime = { host, conversation: opened.conversation };
+		const errors = opened.conversation.diagnostics.filter((diagnostic) => diagnostic.type === "error");
 		if (errors.length > 0) {
 			throw new Error(errors.map((diagnostic) => diagnostic.message).join("\n"));
 		}
-		if (!runtime.session.model) {
+		if (!opened.conversation.session.model) {
 			throw new Error(formatNoModelsAvailableMessage());
 		}
 		return { runtime, sessionSelection: sessionTarget.selection };
@@ -258,13 +272,13 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 
 async function cleanupFailedIrohRemoteAgentRuntime(
 	error: unknown,
-	runtime: AgentSessionRuntime | undefined,
+	runtime: IrohRemoteAgentRuntime | undefined,
 	ownedSessionManager: SessionManager | undefined,
 ): Promise<never> {
 	const cleanupErrors: unknown[] = [];
 	if (runtime) {
 		try {
-			await runtime.dispose();
+			await runtime.host.close(runtime.conversation);
 		} catch (cleanupError) {
 			cleanupErrors.push(cleanupError);
 		}

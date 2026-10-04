@@ -1,7 +1,6 @@
 import { RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { createLoopbackRpcTransportPair, type RpcTransport } from "../../../src/core/rpc/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
@@ -38,22 +37,19 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 		});
 		const source = await harness.openStartup();
 		await source.session.prompt("first prompt");
-		const runtime = new AgentSessionRuntime(harness.host, source);
 		const frames: Array<Record<string, unknown>> = [];
 		const pair = createLoopbackRpcTransportPair();
 		const client = new RpcTransportClient({ transport: pair.client });
 		await client.start();
 		const ready = Promise.withResolvers<void>();
-		const closed = runRpcMode(runtime, {
+		const closed = runRpcMode(harness.host, source, {
 			transport: recording(pair.server, frames),
-			disposeRuntimeOnClose: false,
 			onReady: ready.resolve,
 		});
 		await Promise.race([ready.promise, closed]);
 		cleanups.push(async () => {
 			await client.stop();
 			await closed.catch(() => undefined);
-			await runtime.dispose();
 			await harness.cleanup();
 		});
 		/** Every structural response frame so far, checked against its contract schema. */
@@ -62,8 +58,14 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 			for (const frame of matching) expect(Compile(RPC_RESPONSE_SCHEMAS[command]).Errors(frame)).toEqual([]);
 			return matching.map((frame) => frame.data);
 		};
+		/** The session of the one conversation the RPC client is on: the host closes each it leaves. */
+		const currentSessionId = () => {
+			const [conversation, ...others] = harness.host.list();
+			if (!conversation || others.length > 0) throw new Error("Expected one open conversation");
+			return conversation.id;
+		};
 		return {
-			runtime,
+			currentSessionId,
 			client,
 			responses,
 			cancelNext: (value: boolean) => {
@@ -73,11 +75,11 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 	}
 
 	it("responds to each structural command with the session the client is on now", async () => {
-		const { runtime, client, responses } = await setup();
-		const first = runtime.session.sessionId;
+		const { currentSessionId, client, responses } = await setup();
+		const first = currentSessionId();
 
 		const created = await client.newSession();
-		const second = runtime.session.sessionId;
+		const second = currentSessionId();
 		expect(second).not.toBe(first);
 		expect(created).toEqual({ cancelled: false, sessionId: second });
 		await expect(client.getState()).resolves.toMatchObject({ sessionId: second });
@@ -86,18 +88,19 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 		await expect(client.switchSessionById(second)).resolves.toEqual({ cancelled: false, sessionId: second });
 		// A switch to the session the client is on moves nothing and names it.
 		await expect(client.switchSessionById(second)).resolves.toEqual({ cancelled: false, sessionId: second });
-		expect(runtime.session.sessionId).toBe(second);
+		expect(currentSessionId()).toBe(second);
 
 		await client.switchSessionById(first);
 		const [forkFrom] = await client.getForkMessages();
 		const forked = await client.fork(forkFrom!.entryId);
-		const third = runtime.session.sessionId;
+		const third = currentSessionId();
 		expect(forked).toEqual({ cancelled: false, sessionId: third, text: "first prompt" });
 		expect(new Set([first, second, third]).size).toBe(3);
 
-		await runtime.session.prompt("fork prompt");
+		await client.prompt("fork prompt");
+		await client.waitForIdle();
 		const cloned = await client.clone();
-		const fourth = runtime.session.sessionId;
+		const fourth = currentSessionId();
 		expect(cloned).toEqual({ cancelled: false, sessionId: fourth });
 		expect(fourth).not.toBe(third);
 		await expect(client.getState()).resolves.toMatchObject({ sessionId: fourth });
@@ -114,8 +117,8 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 	});
 
 	it("responds with only cancelled: true when an extension cancels, and keeps the client on its session", async () => {
-		const { runtime, client, responses, cancelNext } = await setup();
-		const first = runtime.session.sessionId;
+		const { currentSessionId, client, responses, cancelNext } = await setup();
+		const first = currentSessionId();
 		const created = await client.newSession();
 		if (created.cancelled) throw new Error("Expected the new session");
 		await client.switchSessionById(first);
@@ -128,7 +131,7 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 		await expect(client.fork(forkFrom!.entryId)).resolves.toEqual({ cancelled: true });
 		await expect(client.clone()).resolves.toEqual({ cancelled: true });
 
-		expect(runtime.session.sessionId).toBe(first);
+		expect(currentSessionId()).toBe(first);
 		await expect(client.getState()).resolves.toMatchObject({ sessionId: first });
 		expect(responses("new_session").at(-1)).toEqual({ cancelled: true });
 		expect(responses("switch_session")).toEqual([{ cancelled: true }]);

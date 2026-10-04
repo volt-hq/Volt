@@ -595,7 +595,7 @@ describe("#409 initial review accounting", () => {
 		await appendReviewRun(h.session.sessionWriter, { ...historical, runId: "historical" });
 		const context = {
 			session: h.session,
-			runtimeHost: { reviewWorkflows: new ReviewWorkflowManager() },
+			conversation: { reviewWorkflows: new ReviewWorkflowManager() },
 		} as unknown as RpcCommandDispatcherContext;
 		const response = await handleRpcCommand({ type: "get_review_result", runId: record.runId }, context);
 		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_result).Errors(response)).toEqual([]);

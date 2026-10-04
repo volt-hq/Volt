@@ -1233,20 +1233,17 @@ export class AgentSession {
 
 	/**
 	 * Remove all listeners and disconnect from agent.
-	 * Call this when completely done with the session.
+	 * Call this when completely done with the session. With `leavePromptWork`,
+	 * disposal does not wait for admitted prompt work: a session its clients
+	 * moved away from may be disposed by the extension command that moved them.
 	 */
-	dispose(source: AgentAbortSource = "disposal"): void {
-		void this._lifecycle.dispose(source, false);
+	dispose(source: AgentAbortSource = "disposal", options: { leavePromptWork?: boolean } = {}): void {
+		void this._lifecycle.dispose(source, options.leavePromptWork === true);
 	}
 
 	/** Join asynchronous teardown after dispose() has installed its synchronous fence. */
 	waitForClosed(): Promise<void> {
 		return this._lifecycle.waitForClosed();
-	}
-
-	/** Dispose an outgoing generation without joining admitted prompt work, which may be what replaces it. */
-	disposeForSessionReplacement(): Promise<void> {
-		return this._lifecycle.dispose("session_replacement", true);
 	}
 
 	/** The session's teardown, over the runtime state it fences and the participants it stops. */
@@ -2044,12 +2041,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Detach every client from the session's extensions: UI, errors, and
-	 * session actions stop reaching them. Clients that moved to another
-	 * conversation leave this one before its `session_shutdown`.
+	 * Settle the client input whose extension command the current call runs
+	 * in, as completed: the command is moving its client to another
+	 * conversation, which it may do only once the conversation it leaves has
+	 * no input with an unknown outcome.
 	 */
-	detachExtensionClients(): void {
-		this._extensions.releaseClients();
+	settleInvokingCommandInput(): Promise<void> {
+		return this._prompting.settleInvokingCommandInput();
 	}
 
 	reload(): Promise<void> {

@@ -1,6 +1,7 @@
 import type { RenderSuspensionLease } from "@hansjm10/volt-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type SessionReplacementContext = {
@@ -12,18 +13,19 @@ type SessionReplacementContext = {
 	dismissSubagentInspector?: () => void;
 	resetExtensionUI(): void;
 	bindDaemonWorkObservation(session: AgentSession): void;
-	rebindCurrentSession(session: AgentSession): Promise<void>;
+	observeLoss(conversation: HostedConversation): void;
+	followSession(session: AgentSession): Promise<void>;
 };
 
 type InteractiveModeSessionReplacementPrototype = {
 	beginSessionReplacementUi(this: SessionReplacementContext): void;
-	rebindReplacementSession(this: SessionReplacementContext, session: AgentSession): Promise<void>;
+	followMove(this: SessionReplacementContext, to: HostedConversation): Promise<void>;
 };
 
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModeSessionReplacementPrototype;
 
 describe("InteractiveMode session replacement rendering", () => {
-	it("suspends before teardown and releases after the replacement session is rebound", async () => {
+	it("suspends before the client leaves and releases once it follows the conversation it moved to", async () => {
 		const order: string[] = [];
 		const suspension: RenderSuspensionLease = {
 			release: vi.fn(() => order.push("release")),
@@ -44,30 +46,33 @@ describe("InteractiveMode session replacement rendering", () => {
 			dismissSubagentInspector: vi.fn(() => order.push("dismiss")),
 			resetExtensionUI: vi.fn(() => order.push("reset")),
 			bindDaemonWorkObservation: vi.fn(() => order.push("bind-work")),
-			rebindCurrentSession: vi.fn(async () => {
+			observeLoss: vi.fn(),
+			followSession: vi.fn(async () => {
 				order.push("rebind");
 				await rebindPending;
 			}),
 		};
 		const replacementSession = {} as AgentSession;
+		const replacement = { session: replacementSession } as HostedConversation;
 
 		interactiveModePrototype.beginSessionReplacementUi.call(context);
 		expect(order).toEqual(["suspend", "dismiss", "reset"]);
 
-		const replacement = interactiveModePrototype.rebindReplacementSession.call(context, replacementSession);
+		const moved = interactiveModePrototype.followMove.call(context, replacement);
 		await Promise.resolve();
 		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-work", "rebind"]);
 
 		finishRebind();
-		await replacement;
+		await moved;
 
+		expect(context.observeLoss).toHaveBeenCalledWith(replacement);
 		expect(context.bindDaemonWorkObservation).toHaveBeenCalledWith(replacementSession);
-		expect(context.rebindCurrentSession).toHaveBeenCalledWith(replacementSession);
+		expect(context.followSession).toHaveBeenCalledWith(replacementSession);
 		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-work", "rebind", "render:true", "release"]);
 		expect(context.sessionRenderSuspension).toBeUndefined();
 	});
 
-	it("retains the suspension when replacement rebind fails", async () => {
+	it("retains the suspension when following the moved-to session fails", async () => {
 		const rebindError = new Error("rebind failed");
 		const suspension: RenderSuspensionLease = { release: vi.fn() };
 		const context: SessionReplacementContext = {
@@ -78,14 +83,15 @@ describe("InteractiveMode session replacement rendering", () => {
 			sessionRenderSuspension: suspension,
 			resetExtensionUI: vi.fn(),
 			bindDaemonWorkObservation: vi.fn(),
-			rebindCurrentSession: vi.fn(async () => {
+			observeLoss: vi.fn(),
+			followSession: vi.fn(async () => {
 				throw rebindError;
 			}),
 		};
 
-		await expect(interactiveModePrototype.rebindReplacementSession.call(context, {} as AgentSession)).rejects.toBe(
-			rebindError,
-		);
+		await expect(
+			interactiveModePrototype.followMove.call(context, { session: {} as AgentSession } as HostedConversation),
+		).rejects.toBe(rebindError);
 
 		expect(context.bindDaemonWorkObservation).toHaveBeenCalledOnce();
 		expect(context.ui.requestRender).not.toHaveBeenCalled();

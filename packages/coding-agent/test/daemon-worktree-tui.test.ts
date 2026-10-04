@@ -12,9 +12,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
-import { AgentSessionRuntime, type CreateAgentSessionRuntimeResult } from "../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { ConversationFactoryResult } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
@@ -49,6 +49,7 @@ import {
 } from "../src/modes/interactive/daemon-attach.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import {
+	createTestConversation,
 	createTestIrohConversationOptions,
 	createTestSession,
 	ManualIrohRecvStream,
@@ -56,6 +57,7 @@ import {
 	parseWrittenObjects,
 } from "./iroh-stream-doubles.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { adoptTestSession, connectTestClient } from "./utilities/host-client.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const tempDirs: string[] = [];
@@ -565,14 +567,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 				subscribers.delete(handler);
 			};
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as Parameters<typeof runIrohRemoteRpcMode>[0];
+		const target = createTestConversation(session);
 
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
@@ -580,10 +575,11 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 			{ ...authorizationBase, worktreeId: "fix-login", worktreePath },
 			agentDir,
 		);
-		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
-			...createTestIrohConversationOptions(runtimeHost),
+		const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
+			...createTestIrohConversationOptions(target.conversation),
 			stream: { recv, send },
-			disposeRuntimeOnClose: false,
+			// A relayed phone stays on the TUI's conversation.
+			redirect: {},
 			rpcGrant: authorizationBase.rpcGrant,
 			workspaceName: "repo",
 			workspacePath: sanitizerOptions.workspacePath,
@@ -712,11 +708,10 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 				extensionRunner: { hasHandlers: () => false },
 				disposeSubagentToolManager: vi.fn(),
-				disposeForSessionReplacement: vi.fn(),
 				dispose: vi.fn(),
 				waitForClosed: vi.fn(async () => {}),
 				suspendAdmission: vi.fn(() => () => {}),
-				detachExtensionClients: vi.fn(),
+				settleInvokingCommandInput: vi.fn(async () => {}),
 				subscribe: vi.fn(() => () => {}),
 				lost: new Promise<Error>(() => {}),
 				get sessionRef() {
@@ -738,7 +733,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				sessionManager: SessionManager;
 				workspaceName?: string;
 				baseRef?: string;
-			}): Promise<CreateAgentSessionRuntimeResult> => {
+			}): Promise<ConversationFactoryResult> => {
 				createdSessions.push({
 					cwd: options.cwd,
 					sessionDir: options.sessionManager.getSessionDir(),
@@ -750,16 +745,18 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 					session: makeSessionDouble(options.sessionManager),
 					services: makeServices(options.cwd),
 					diagnostics: [],
-				} as unknown as CreateAgentSessionRuntimeResult;
+				} as unknown as ConversationFactoryResult;
 			},
 		);
 		const parentSessionDir = getDefaultSessionDir(parentCwd, agentDir);
 		const initialManager = await SessionManager.create(parentCwd, parentSessionDir);
-		const runtime = new AgentSessionRuntime(
+		const { host, conversation } = adoptTestSession(
 			makeSessionDouble(initialManager),
 			makeServices(parentCwd),
 			createRuntime as never,
 		);
+		// The TUI's client of its host: its new sessions open there and it moves to them.
+		const runtime = await connectTestClient(host, conversation);
 		return { runtime, createRuntime, createdSessions, parentSessionDir };
 	}
 

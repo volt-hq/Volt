@@ -3,13 +3,11 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { createEventBus } from "../../../src/core/event-bus.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type {
 	ExtensionAPI,
@@ -20,6 +18,7 @@ import type {
 	ExtensionUIContext,
 } from "../../../src/index.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createHarness } from "../harness.ts";
 
 describe("regression #527: extension cleanup when a session ends", () => {
@@ -41,7 +40,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		const resources: AbortController[] = [];
 		const errors: ExtensionError[] = [];
 		let instances = 0;
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir: harness.tempDir,
@@ -84,48 +83,54 @@ describe("regression #527: extension cleanup when a session ends", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: harness.tempDir,
 			agentDir: harness.tempDir,
 			sessionManager: await SessionManager.create(harness.tempDir),
 		});
-		cleanups.push(() => runtime.dispose().catch(() => undefined));
+		cleanups.push(() => host.dispose().catch(() => undefined));
 		const shutdown = vi.fn();
-		runtime.setRebindSession(async (session) => {
-			await session.attachExtensionClient({
-				id: "test",
-				mode: "print",
-				...(uiOverrides ? { ui: { ...session.extensionRunner.getUIContext(), ...uiOverrides } } : {}),
+		// The extensions are not bound yet: their UI context is the inert default the overrides replace.
+		const ui = uiOverrides ? { ...conversation.session.extensionRunner.getUIContext(), ...uiOverrides } : undefined;
+		// The host attaches the client's surface on every conversation it joins.
+		const runtime: TestClient = await connectTestClient(host, conversation, {
+			surface: {
+				...(ui ? { ui } : {}),
 				shutdownHandler: shutdown,
 				onError: (error) => errors.push(error),
 				commandContextActions: {
-					waitForIdle: () => session.waitForIdle(),
+					waitForIdle: () => runtime.session.waitForIdle(),
 					newSession: (options) => runtime.newSession(options),
-					fork: (entryId, options) => runtime.fork(entryId, options),
+					fork: async (entryId, options) => {
+						const result = await runtime.fork(entryId, options);
+						return result.cancelled
+							? result
+							: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+					},
 					switchSession: (ref, options) => runtime.switchSession(ref, options),
-					navigateTree: (targetId, options) => session.navigateTree(targetId, options),
-					reload: () => session.reload(),
+					navigateTree: (targetId, options) => runtime.session.navigateTree(targetId, options),
+					reload: () => runtime.session.reload(),
 				},
-			}).ready;
+			},
 		});
-		await runtime.getRebindSession()?.(runtime.session);
 		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };
 	}
 
-	/** The session's lock is lost and its next commit finds out: the runtime ends. */
-	async function loseRuntimeLog(runtime: AgentSessionRuntime): Promise<Error> {
+	/** The session's lock is lost and its next commit finds out: the conversation ends. */
+	async function loseRuntimeLog(runtime: TestClient): Promise<Error> {
 		const lost = await loseLog(runtime.session.sessionWriter);
 		await expect(runtime.lost).resolves.toBe(lost);
 		return lost;
 	}
 
-	it("cleans up once when the host disposes a runtime whose session lost its log", async () => {
+	it("cleans up once when the host closes a conversation whose session lost its log", async () => {
 		const { runtime, lifecycle, resources, errors, shutdown } = await createRuntimeForTest();
 		const lostSession = runtime.session;
+		const lostConversation = runtime.conversation;
 		await loseRuntimeLog(runtime);
 
-		const disposal = runtime.dispose();
-		expect(runtime.dispose()).toBe(disposal);
+		const disposal = runtime.host.close(lostConversation);
+		expect(runtime.host.close(lostConversation)).toBe(disposal);
 		// The loss was reported through `lost`; disposal does not report it again.
 		await expect(disposal).resolves.toBeUndefined();
 		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:quit"]);
@@ -135,7 +140,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		expect(shutdown).not.toHaveBeenCalled();
 	});
 
-	it("aborts command signals with the loss and rejects session writes until the runtime is disposed", async () => {
+	it("aborts command signals with the loss and rejects session writes until the conversation closes", async () => {
 		let oldVolt: ExtensionAPI | undefined;
 		let oldCommand: ExtensionCommandContext | undefined;
 		const { runtime, harness, errors } = await createRuntimeForTest((volt, instance) => {
@@ -202,7 +207,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		},
 	);
 
-	it("does not end the runtime when the outgoing session loses its log during a replacement", async () => {
+	it("does not end the client's conversation when the outgoing session loses its log during a move", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
 		const { runtime, lifecycle, resources, errors } = await createRuntimeForTest((volt, instance) => {

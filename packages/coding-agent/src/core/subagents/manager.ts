@@ -4,14 +4,10 @@ import type { AssistantMessage, Message, TextContent } from "@hansjm10/volt-ai";
 import { createInProcessRpcClient, type InProcessRpcClient } from "../../modes/rpc/in-process-rpc-client.ts";
 import type { RpcClientEvent } from "../../modes/rpc/rpc-client-base.ts";
 import type { SessionStats } from "../agent-session.ts";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-	type SubagentRuntimeContext,
-} from "../agent-session-runtime.ts";
 import { ConversationLockedError } from "../conversation-log/conversation-lock.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
+import { ConversationHost } from "../host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation, SubagentRuntimeContext } from "../host/hosted-conversation.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
@@ -108,7 +104,9 @@ export interface SubagentHandle {
 export interface SubagentRuntimeCreatedEvent {
 	id: string;
 	sessionId: string;
-	runtime: AgentSessionRuntime;
+	/** The child's conversation, in the manager's host for its children. */
+	host: ConversationHost;
+	conversation: HostedConversation;
 	definition?: SubagentDefinition;
 	parentSessionId?: string;
 	parentSessionRef?: SessionReference;
@@ -121,7 +119,7 @@ export interface SubagentRuntimeRegistration {
 }
 
 export interface SubagentManagerOptions {
-	createRuntime: CreateAgentSessionRuntimeFactory;
+	createRuntime: ConversationFactory;
 	cwd: string;
 	agentDir: string;
 	workspaceName?: string;
@@ -142,7 +140,7 @@ export interface SubagentManagerOptions {
 	/** Per-child turn safeguards; every parallel, chained, or nested runtime receives its own budget. */
 	turnLimits?: SubagentTurnLimits;
 	requestTimeoutMs?: number;
-	/** Keep child runtimes alive after the hidden loopback client detaches. Another owner must retain/dispose them. */
+	/** Keep child conversations open after the hidden loopback client detaches. Another owner must close them. */
 	retainRuntimeOnDispose?: boolean;
 	/** Called after a child runtime is ready so hosts can prepare it for live attachment. */
 	onRuntimeCreated?: (
@@ -271,7 +269,7 @@ interface MutableSubagentActivity {
 	transcript: AgentMessage[];
 	sessionStats: SessionStats | undefined;
 	error: string | undefined;
-	runtime: AgentSessionRuntime | undefined;
+	conversation: HostedConversation | undefined;
 	nextSequence: number;
 }
 
@@ -831,7 +829,9 @@ class LocalSubagentHandle implements SubagentHandle {
 }
 
 export class SubagentManager {
-	private readonly createRuntime: CreateAgentSessionRuntimeFactory;
+	private readonly createRuntime: ConversationFactory;
+	/** The hosts of this manager's child conversations, one per agent dir. */
+	private readonly childHosts = new Map<string, ConversationHost>();
 	private readonly cwd: string;
 	private readonly agentDir: string;
 	private readonly workspaceName?: string;
@@ -1486,7 +1486,8 @@ export class SubagentManager {
 		let managerTransferred = false;
 		let id: string;
 		let subagentContext: SubagentRuntimeContext;
-		let runtime: AgentSessionRuntime;
+		const childHost = this.childHost(agentDir);
+		let runtime: HostedConversation;
 		try {
 			id = options.resumeSubagentId ?? `sa_${randomUUID()}`;
 			subagentContext = this.createChildSubagentContext(
@@ -1496,7 +1497,7 @@ export class SubagentManager {
 			);
 			sessionManager ??= await this.createDefaultChildSessionManager(cwd);
 			managerTransferred = true;
-			runtime = await this.createChildRuntime({ cwd, agentDir, sessionManager, subagentContext });
+			runtime = await this.openChild(childHost, { cwd, sessionManager, subagentContext });
 		} catch (error) {
 			if (sessionManager && !managerTransferred) {
 				return await closeConsumedSessionManager(
@@ -1668,8 +1669,8 @@ export class SubagentManager {
 
 			let handle: LocalSubagentHandle | undefined;
 			const disposeRuntimeOnClose = !this.retainRuntimeOnDispose;
-			const pendingClient = createInProcessRpcClient(runtime, {
-				disposeRuntimeOnClose,
+			const pendingClient = createInProcessRpcClient(childHost, runtime, {
+				anchor: disposeRuntimeOnClose,
 				requestTimeoutMs: options.requestTimeoutMs ?? this.requestTimeoutMs,
 				onEvent: (event) => {
 					this.recordActivityEvent(id, event);
@@ -1682,7 +1683,8 @@ export class SubagentManager {
 			client = await pendingClient;
 			runtimeRegistration = await this.notifyRuntimeCreated({
 				id,
-				runtime,
+				host: childHost,
+				conversation: runtime,
 				definition: definitionOptions?.definition,
 			});
 			const publish = (message: string): void => {
@@ -1793,7 +1795,7 @@ export class SubagentManager {
 			}
 			if (!runtimeFinalizerTransferredToRpc) {
 				try {
-					await runtime.dispose();
+					await childHost.close(runtime);
 				} catch (cleanupError) {
 					cleanupErrors.push(cleanupError);
 				}
@@ -1807,14 +1809,14 @@ export class SubagentManager {
 
 	private registerActivity(
 		id: string,
-		runtime: AgentSessionRuntime,
+		conversation: HostedConversation,
 		definition: SubagentDefinition | undefined,
 		task: string,
 	): void {
 		const now = Date.now();
 		const activity: MutableSubagentActivity = {
 			id,
-			sessionId: runtime.session.sessionId,
+			sessionId: conversation.session.sessionId,
 			agent: {
 				name: definition?.name ?? "subagent",
 				source: definition?.source,
@@ -1830,7 +1832,7 @@ export class SubagentManager {
 			transcript: [],
 			sessionStats: undefined,
 			error: undefined,
-			runtime,
+			conversation,
 			nextSequence: 0,
 		};
 		this.activities.set(id, activity);
@@ -1874,13 +1876,13 @@ export class SubagentManager {
 	private finishActivity(id: string, status: Exclude<SubagentActivityStatus, "running">, error?: string): void {
 		const activity = this.activities.get(id);
 		if (!activity || activity.status !== "running") return;
-		const runtime = activity.runtime;
-		if (runtime) {
-			activity.transcript = [...runtime.session.messages];
-			activity.sessionStats = runtime.session.getSessionStats();
+		const conversation = activity.conversation;
+		if (conversation) {
+			activity.transcript = [...conversation.session.messages];
+			activity.sessionStats = conversation.session.getSessionStats();
 		}
 		const now = Date.now();
-		activity.runtime = undefined;
+		activity.conversation = undefined;
 		activity.status = status;
 		activity.finishedAt = now;
 		activity.updatedAt = now;
@@ -1890,9 +1892,9 @@ export class SubagentManager {
 	}
 
 	private snapshotActivity(activity: MutableSubagentActivity): SubagentActivity {
-		const runtime = activity.runtime;
-		const transcript = runtime ? [...runtime.session.messages] : [...activity.transcript];
-		const sessionStats = runtime ? runtime.session.getSessionStats() : activity.sessionStats;
+		const conversation = activity.conversation;
+		const transcript = conversation ? [...conversation.session.messages] : [...activity.transcript];
+		const sessionStats = conversation ? conversation.session.getSessionStats() : activity.sessionStats;
 		return {
 			id: activity.id,
 			sessionId: activity.sessionId,
@@ -1953,10 +1955,10 @@ export class SubagentManager {
 		spawnRecord: SubagentSpawnRecordContext | undefined,
 		id: string,
 		definition: SubagentDefinition | undefined,
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 	): void {
 		if (!spawnRecord?.writer.sessionManager.isPersisted()) return;
-		// Both identity fields come from the runtime's own session manager: a
+		// Both identity fields come from the child's own session manager: a
 		// factory that swaps managers must not produce an edge whose id and
 		// reference disagree.
 		const childSessionManager = runtime.session.sessionManager;
@@ -2113,7 +2115,8 @@ export class SubagentManager {
 
 	private async notifyRuntimeCreated(options: {
 		id: string;
-		runtime: AgentSessionRuntime;
+		host: ConversationHost;
+		conversation: HostedConversation;
 		definition?: SubagentDefinition;
 	}): Promise<SubagentRuntimeRegistration | undefined> {
 		if (!this.onRuntimeCreated) {
@@ -2123,8 +2126,9 @@ export class SubagentManager {
 		return (
 			(await this.onRuntimeCreated({
 				id: options.id,
-				sessionId: options.runtime.session.sessionId,
-				runtime: options.runtime,
+				sessionId: options.conversation.session.sessionId,
+				host: options.host,
+				conversation: options.conversation,
 				...(options.definition ? { definition: options.definition } : {}),
 				...(this.parentSessionManager ? { parentSessionId: this.parentSessionManager.getSessionId() } : {}),
 				...(parentSessionRef ? { parentSessionRef } : {}),
@@ -2154,7 +2158,7 @@ export class SubagentManager {
 	}
 
 	private async applyDefinitionToRuntime(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		definition: SubagentDefinition,
 		allowedTools: string[] | undefined,
 		subagentContext: SubagentRuntimeContext | undefined,
@@ -2224,19 +2228,40 @@ export class SubagentManager {
 		return definition.thinking;
 	}
 
-	private async createChildRuntime(options: {
-		cwd: string;
-		agentDir: string;
-		sessionManager: SessionManager;
-		subagentContext?: SubagentRuntimeContext;
-	}): Promise<AgentSessionRuntime> {
-		return createAgentSessionRuntime(this.createRuntime, {
-			cwd: options.cwd,
-			agentDir: options.agentDir,
-			sessionManager: options.sessionManager,
-			workspaceName: this.workspaceName,
-			baseRef: this.baseRef,
-			...(options.subagentContext ? { subagentContext: options.subagentContext } : {}),
-		});
+	/**
+	 * The host of this manager's child conversations under `agentDir`. A child
+	 * stays open until its in-process client, or the owner that retains it,
+	 * closes it.
+	 */
+	private childHost(agentDir: string): ConversationHost {
+		let host = this.childHosts.get(agentDir);
+		if (!host) {
+			host = new ConversationHost({
+				factory: this.createRuntime,
+				agentDir,
+				extensionMode: "rpc",
+				whenUnattached: "keep",
+			});
+			this.childHosts.set(agentDir, host);
+		}
+		return host;
+	}
+
+	/** Open a child conversation over `sessionManager`, owned by this manager: no client can move away from it. */
+	private async openChild(
+		host: ConversationHost,
+		options: { cwd: string; sessionManager: SessionManager; subagentContext: SubagentRuntimeContext },
+	): Promise<HostedConversation> {
+		const opened = await host.open(
+			{ kind: "adopt", sessionManager: options.sessionManager, cwd: options.cwd },
+			{
+				subagentContext: options.subagentContext,
+				lifetime: "owner",
+				...(this.workspaceName === undefined ? {} : { workspaceName: this.workspaceName }),
+				...(this.baseRef === undefined ? {} : { baseRef: this.baseRef }),
+			},
+		);
+		if (opened.cancelled) throw new Error("Subagent conversation open was cancelled");
+		return opened.conversation;
 	}
 }

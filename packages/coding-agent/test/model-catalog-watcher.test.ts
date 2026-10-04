@@ -2,13 +2,13 @@ import { existsSync, type FSWatcher, mkdtempSync, renameSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { isModelCatalogSourceWatchEvent, startModelCatalogWatcher } from "../src/core/model-catalog-watcher.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 describe("model catalog watcher", () => {
 	let agentDir: string;
@@ -235,12 +235,8 @@ describe("model catalog watcher", () => {
 			modelRegistry: registry,
 			sessionId: "session-1",
 		};
-		const runtimeHost = {
-			session,
-			services: { agentDir },
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
+		const { host } = createFakeHost();
+		const { conversation } = createFakeConversation(session, { services: { agentDir } });
 
 		let closeHandler: RpcCloseHandler | undefined;
 		const writes: Record<string, unknown>[] = [];
@@ -262,7 +258,7 @@ describe("model catalog watcher", () => {
 		const readyPromise = new Promise<void>((resolve) => {
 			ready = resolve;
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport, onReady: ready });
+		const modePromise = runRpcMode(host, conversation, { transport, onReady: ready });
 		await readyPromise;
 
 		try {

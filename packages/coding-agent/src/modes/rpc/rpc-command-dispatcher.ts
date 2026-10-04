@@ -1,9 +1,13 @@
 import { stripVTControlCharacters } from "node:util";
 import { RPC_STABLE_ERROR_CODES } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { SessionIntentResult } from "../../core/extensions/index.ts";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import { executePlan } from "../../core/host/plan-handoff.ts";
 import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
+import { openFork, openStoredSessionById } from "../../core/host/session-intents.ts";
+import type { HostClient } from "../../core/host/targets.ts";
 import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	type HostActionInvocationContext,
@@ -17,7 +21,7 @@ import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts"
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../core/remote/iroh/agent-options.ts";
 import { assertReviewDiscussionRpcAllowed } from "../../core/review-discussion-policy.ts";
-import { ReviewDiscussionConfigurationError } from "../../core/review-discussions.ts";
+import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../core/review-discussions.ts";
 import { getReviewGeneral } from "../../core/review-general.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
@@ -95,11 +99,16 @@ export interface RpcSubagentLifecycleController {
 }
 
 export interface RpcCommandDispatcherContext {
+	/** The session of `conversation`, the conversation the client was on when the command was dispatched. */
 	session: AgentSession;
-	runtimeHost: AgentSessionRuntime;
+	conversation: HostedConversation;
+	/** The client's host and the client itself, whose structural intents move it. */
+	host: ConversationHost;
+	client: HostClient;
+	/** Installed only by a daemon with sibling runtime ownership. */
+	reviewDiscussions?: ReviewDiscussionService;
 	options: RpcCommandDispatcherOptions;
 	output(response: RpcResponse): void;
-	rebindSession(): Promise<void>;
 	createHostActionContext(): HostActionInvocationContext;
 	setClientCapabilities(features: RpcClientCapabilityFeature[]): void;
 	reportStreamDiscontinuity(
@@ -322,7 +331,7 @@ export async function handleRpcCommand(
 	command: RpcCommand,
 	context: RpcCommandDispatcherContext,
 ): Promise<RpcResponse | undefined> {
-	const { options, runtimeHost, session } = context;
+	const { options, host, client, conversation, session } = context;
 	const id = typeof command.id === "string" ? command.id : undefined;
 	assertReviewDiscussionRpcAllowed(session, command);
 
@@ -430,15 +439,7 @@ export async function handleRpcCommand(
 						}
 					: {}),
 			};
-			// General publication is the final durable runtime step. The runtime's
-			// replacement listeners already rebind RPC; do not run a second fallible
-			// afterSessionSwitch callback after that irreversible commit.
-			const result = command.replaceReviewGeneral
-				? await runtimeHost.newSession({
-						...newSessionOptions,
-						assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
-					})
-				: await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
+			const result = await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
 			return createRpcSuccessResponse(id, "new_session", projectSessionIntent(result));
 		}
 
@@ -449,7 +450,9 @@ export async function handleRpcCommand(
 		}
 
 		case "plan_execute": {
-			const result = await runtimeHost.executePlan(
+			const result = await executePlan(
+				host,
+				client,
 				command.planId,
 				command.expectedRevision,
 				command.strategy,
@@ -592,7 +595,7 @@ export async function handleRpcCommand(
 		case "list_review_discussions":
 		case "reset_review_discussion":
 		case "get_review_discussion_source": {
-			const service = runtimeHost.reviewDiscussions;
+			const service = context.reviewDiscussions;
 			if (!service)
 				return createRpcErrorResponse(id, command.type, "This backend has no daemon sibling service", {
 					code: "review_discussions_unavailable",
@@ -626,7 +629,7 @@ export async function handleRpcCommand(
 		}
 
 		case "cancel_workflow": {
-			runtimeHost.reviewWorkflows.cancel(command.workflowId);
+			conversation.reviewWorkflows.cancel(command.workflowId);
 			return createRpcSuccessResponse(id, "cancel_workflow");
 		}
 
@@ -637,7 +640,7 @@ export async function handleRpcCommand(
 			});
 			return createRpcSuccessResponse(id, "list_review_workflows", {
 				runs: page.runs.map((run) => projectReviewRun(run, false)),
-				activeWorkflows: runtimeHost.reviewWorkflows.list().filter((workflow) => workflow.status === "running"),
+				activeWorkflows: conversation.reviewWorkflows.list().filter((workflow) => workflow.status === "running"),
 				...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
 			});
 		}
@@ -711,7 +714,7 @@ export async function handleRpcCommand(
 				...(command.note ? { note: command.note } : {}),
 			};
 			const transition = await recordReviewFindingOutcome(session.sessionWriter, outcome, {
-				recordCanonicalOutcome: runtimeHost.reviewDiscussions?.recordOutcome,
+				recordCanonicalOutcome: context.reviewDiscussions?.recordOutcome,
 				assertCurrent: context.assertConversationGenerationCurrent,
 			});
 			const { schemaVersion: _schemaVersion, ...data } = transition;
@@ -1212,7 +1215,7 @@ export async function handleRpcCommand(
 		}
 
 		case "list_sessions": {
-			const sessions: RpcSessionListItem[] = await runtimeHost.listSessions();
+			const sessions: RpcSessionListItem[] = await conversation.listSessions();
 			return createRpcSuccessResponse(id, "list_sessions", { sessions });
 		}
 
@@ -1222,29 +1225,22 @@ export async function handleRpcCommand(
 		}
 
 		case "switch_session": {
-			const result = await runtimeHost.switchSessionById(command.sessionId, {
+			const result = await openStoredSessionById(host, client, command.sessionId, {
 				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
 			});
-			if (!result.cancelled) {
-				await context.rebindSession();
-			}
 			return createRpcSuccessResponse(id, "switch_session", projectSessionIntent(result));
 		}
 
 		case "switch_session_by_id": {
-			const result = await runtimeHost.switchSessionById(command.sessionId, {
+			const result = await openStoredSessionById(host, client, command.sessionId, {
 				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
 			});
-			if (!result.cancelled) {
-				await context.rebindSession();
-			}
 			return createRpcSuccessResponse(id, "switch_session_by_id", projectSessionIntent(result));
 		}
 
 		case "fork": {
-			const result = await runtimeHost.fork(command.entryId);
+			const result = await openFork(host, client, command.entryId);
 			if (result.cancelled) return createRpcSuccessResponse(id, "fork", { cancelled: true });
-			await context.rebindSession();
 			return createRpcSuccessResponse(id, "fork", {
 				cancelled: false,
 				sessionId: result.sessionId,
@@ -1257,10 +1253,7 @@ export async function handleRpcCommand(
 			if (!leafId) {
 				return createRpcErrorResponse(id, "clone", "Cannot clone session: no current entry selected");
 			}
-			const result = await runtimeHost.fork(leafId, { position: "at" });
-			if (!result.cancelled) {
-				await context.rebindSession();
-			}
+			const result = await openFork(host, client, leafId, { position: "at" });
 			return createRpcSuccessResponse(id, "clone", projectSessionIntent(result));
 		}
 

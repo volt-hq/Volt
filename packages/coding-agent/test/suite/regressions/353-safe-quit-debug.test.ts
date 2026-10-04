@@ -6,12 +6,12 @@ import { setKeybindings, Text, type TUI, type TuiAltScreen, TuiMainScreen } from
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 interface ModeControl {
@@ -81,13 +81,8 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 			],
 		});
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		const runtimeHost = {
-			session: harness.session,
-			setBeforeSessionInvalidate: () => undefined,
-			setRebindSession: () => undefined,
-			lost: new Promise<Error>(() => {}),
-		} as unknown as AgentSessionRuntime;
-		mode = new InteractiveMode(runtimeHost);
+		const { host } = createFakeHost({ extensionMode: "tui" });
+		mode = new InteractiveMode(host, createFakeConversation(harness.session).conversation);
 		control = mode as unknown as ModeControl;
 		terminal = new VirtualTerminal(120, 36);
 		control.renderer = new TuiMainScreen(terminal, false, harness.tempDir);

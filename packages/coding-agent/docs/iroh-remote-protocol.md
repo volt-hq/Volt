@@ -308,7 +308,7 @@ All other command types receive a JSONL `response` with `success:false` and are 
 
 `get_state.backgroundJobs` and `conversation_bootstrap.state.backgroundJobs` always contain accessible job summaries, without output. Ordered `background_jobs_changed` events replace those summaries and invalidate cached output; clients read only the selected job. Read/cancel responses contain `data.job`, list responses contain `data.jobs`, and all carry `data.sessionId` plus the ordered `data.branchEpoch`. Discard responses from obsolete session/branch identities.
 
-`read_job` returns a non-consuming retained tail, at most 50 KiB UTF-8 or 2000 lines before remote path sanitization, never arbitrary logfile contents. The normal workspace/worktree path handling applies. RPC reads do not mark results collected by the model. Foreground `agent_settled`/`isBusy` do not imply job completion. Detach keeps retained jobs alive; runtime replacement/restart invalidates their handles. See [RPC background jobs](rpc.md#background-jobs) for the complete contract.
+`read_job` returns a non-consuming retained tail, at most 50 KiB UTF-8 or 2000 lines before remote path sanitization, never arbitrary logfile contents. The normal workspace/worktree path handling applies. RPC reads do not mark results collected by the model. Foreground `agent_settled`/`isBusy` do not imply job completion. Detach keeps retained jobs alive; closing the conversation or a restart invalidates their handles. See [RPC background jobs](rpc.md#background-jobs) for the complete contract.
 
 ### Subagent delegation trees on conversation streams
 

@@ -6,12 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
 import { githubCliCodeHostProvider } from "../../../src/core/code-host/index.ts";
 import type { ReviewCodeHostContextCaptureResult } from "../../../src/core/code-host/types.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import {
 	PR_CHECKOUT_CHANGED,
 	PR_CHECKOUT_UNAVAILABLE,
@@ -27,6 +24,7 @@ import {
 	validatePersistedSessionEntrySequence,
 } from "../../../src/core/session-entry-codec.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
+import { connectTestClient, openTestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -222,10 +220,10 @@ async function fixture() {
 	};
 }
 
-async function runtimeFixture() {
+async function hostedFixture() {
 	const f = await fixture();
 	const replacements: Harness[] = [];
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const h =
 			sessionManager === f.manager
 				? f.harness
@@ -253,16 +251,19 @@ async function runtimeFixture() {
 			},
 		};
 	};
-	const runtime = await createAgentSessionRuntime(factory, {
+	const { host, conversation } = await openTestHost(factory, {
 		sessionManager: f.manager,
 		cwd: f.cwd,
 		agentDir: f.root,
 	});
+	/** Observes each conversation the client moves to, once it joined it. */
+	const moves: { onMoved?: (to: HostedConversation) => Promise<void> } = {};
+	const client = await connectTestClient(host, conversation, { onMoved: async (to) => moves.onMoved?.(to) });
 	cleanups.push(async () => {
-		await runtime.dispose();
+		await host.dispose();
 		for (const h of replacements) await h.cleanupAsync();
 	});
-	return { ...f, runtime };
+	return { ...f, client, moves };
 }
 
 describe("#414 host-owned PR review bindings", () => {
@@ -466,8 +467,8 @@ describe("#414 host-owned PR review bindings", () => {
 	it.each(["dirty", "head", "execution-dirty", "execution-remote-head"])(
 		"preserves bound checkout enforcement after handoff, repeated reruns and reopen: %s",
 		async (mutation) => {
-			const f = await runtimeFixture();
-			const { manager, writer, placement, runtime, cwd, base, harness, capture } = f;
+			const f = await hostedFixture();
+			const { manager, writer, placement, client, moves, cwd, base, harness, capture } = f;
 			await writer.recordPrReviewBinding(placement);
 			let record: ReviewRunRecord = {
 				...f.record,
@@ -492,18 +493,21 @@ describe("#414 host-owned PR review bindings", () => {
 			};
 			await appendReviewRunDurably(writer, record);
 			const original = manager.getSessionRef()!;
-			// The binding must already be durable when the replacement becomes observable.
-			const unsubscribe = runtime.subscribeSessionWillProject(async (session) => {
-				const reader = await SessionManager.openReadOnly(session.sessionRef!);
+			// The binding must already be durable when the new session becomes observable.
+			let observed = false;
+			moves.onMoved = async (to) => {
+				const reader = await SessionManager.openReadOnly(to.session.sessionRef!);
 				try {
 					expect(reader.getPrReviewBinding()).toEqual(placement);
+					observed = true;
 				} finally {
 					await reader.closePersistence();
 				}
-			});
-			await runtime.newSession({ setup: async (target) => appendReviewRun(target, record) });
-			unsubscribe();
-			const target = runtime.session.sessionManager;
+			};
+			await client.newSession({ setup: async (target) => appendReviewRun(target, record) });
+			moves.onMoved = undefined;
+			expect(observed).toBe(true);
+			const target = client.session.sessionManager;
 			expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(original);
 			const prepareRerun = (sessionManager = target) =>
 				prepareReviewWorkflow({
@@ -523,11 +527,11 @@ describe("#414 host-owned PR review bindings", () => {
 					previousRun: { runId: record.runId },
 				});
 				record = { ...record, runId: prepared.workflowId, parentRunId: record.runId, endedAt: 2 + index };
-				await appendReviewRunDurably(runtime.session.sessionWriter, record);
+				await appendReviewRunDurably(client.session.sessionWriter, record);
 				await prepared.resolution.dispose();
 				expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(target.getSessionRef());
 			}
-			await runtime.dispose();
+			await client.dispose();
 			const reopened = await SessionManager.open(target.getSessionRef()!);
 			f.managers.push(reopened);
 			expect(await readPrReviewBinding(reopened, record.runId)).toEqual(placement);
@@ -560,32 +564,32 @@ describe("#414 host-owned PR review bindings", () => {
 	);
 
 	it("persists the binding through repeated General replacements without changing the canonical source", async () => {
-		const { manager, writer, placement, runtime, record } = await runtimeFixture();
+		const { manager, writer, placement, client, record } = await hostedFixture();
 		await writer.recordPrReviewBinding(placement);
 		await appendReviewRunDurably(writer, record);
 		const original = manager.getSessionRef();
 		for (const _ of [1, 2]) {
-			await runtime.newSession({
+			await client.newSession({
 				preserveReviewRunId: record.runId,
 				replaceReviewGeneral: true,
 				setup: async (target) => appendReviewRun(target, record),
 			});
-			expect(runtime.session.sessionManager.getPrReviewBinding()).toEqual(placement);
-			expect(await resolveCanonicalReviewSource(runtime.session.sessionManager, record.runId)).toEqual(original);
+			expect(client.session.sessionManager.getPrReviewBinding()).toEqual(placement);
+			expect(await resolveCanonicalReviewSource(client.session.sessionManager, record.runId)).toEqual(original);
 		}
 	});
 
 	it.each(["empty", "copied", "unbound"])("leaves %s session handoffs unbound", async (kind) => {
-		const { writer, placement, runtime, record } = await runtimeFixture();
+		const { writer, placement, client, record } = await hostedFixture();
 		if (kind !== "unbound") await writer.recordPrReviewBinding(placement);
 		if (kind === "unbound") await appendReviewRunDurably(writer, record);
-		await runtime.newSession({
+		await client.newSession({
 			setup: async (target) => {
 				if (kind !== "empty") await appendReviewRun(target, record);
 			},
 		});
-		expect(runtime.session.sessionManager.getPrReviewBinding()).toBeUndefined();
-		expect(await readPrReviewBinding(runtime.session.sessionManager, record.runId)).toBeUndefined();
+		expect(client.session.sessionManager.getPrReviewBinding()).toBeUndefined();
+		expect(await readPrReviewBinding(client.session.sessionManager, record.runId)).toBeUndefined();
 	});
 
 	it("ignores injected Git environment and does not restrict ordinary discussion writes", async () => {

@@ -98,7 +98,7 @@ The descriptor is a safe projection:
 - The action id is opaque and session-local, under `skill.*`.
 - The slash alias remains display/compatibility metadata; native clients should invoke the action id instead of constructing raw `/skill:name` text.
 - The skill body, skill file path, and skill base directory are not included in descriptors.
-- Invocation still runs through the host's skill expansion path. The host loads the skill content, appends any arguments as `User: <args>`, applies streaming policy, and rejects stale ids after reloads or session replacement.
+- Invocation still runs through the host's skill expansion path. The host loads the skill content, appends any arguments as `User: <args>`, applies streaming policy, and rejects stale ids after reloads or a session change.
 
 Over Iroh, skill actions are allowed only through the native action allowlist and sanitized descriptors. Raw `get_commands` remains blocked remotely because it may include local source metadata.
 

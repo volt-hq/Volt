@@ -5,8 +5,8 @@ import { pathToFileURL } from "node:url";
 import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
-import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { GitContextProvider } from "../src/core/git-context-provider.ts";
+import { ConversationHost } from "../src/core/host/conversation-host.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/index.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../src/core/session-manager.ts";
 import { LogWriter } from "../src/core/session-writer.ts";
@@ -208,14 +208,14 @@ export default function (volt) {
 			expect(existsSync(join(agentDir, "prompts", "remote.md"))).toBe(true);
 			expect(existsSync(join(agentDir, "commands"))).toBe(false);
 			expect(readdirSync(join(agentDir, "sessions"))).toHaveLength(1);
-			expect(runtime.session.getActiveToolNames()).toEqual(
+			expect(runtime.conversation.session.getActiveToolNames()).toEqual(
 				DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter(
 					(name) => name !== "subagent_registry" && name !== "image_gen",
 				),
 			);
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -226,7 +226,7 @@ export default function (volt) {
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
 			runtime = await createIrohRemoteAgentRuntime({ agentDir, cwd });
-			const manager = runtime.session.getSubagentToolManager();
+			const manager = runtime.conversation.session.getSubagentToolManager();
 			expect(manager).toBeInstanceOf(SubagentManager);
 			if (!(manager instanceof SubagentManager)) {
 				throw new Error("expected the Iroh runtime to create a SubagentManager");
@@ -235,7 +235,7 @@ export default function (volt) {
 			expectDefaultPerRuntimeTurnStagesAndUnlimitedAggregateBudgets(manager);
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -249,8 +249,8 @@ export default function (volt) {
 		try {
 			runtime = await createIrohRemoteAgentRuntime({ agentDir, cwd });
 
-			expect(runtime.session.getAllTools().map((tool) => tool.name)).toContain("remote_extension_tool");
-			expect(runtime.session.getActiveToolNames()).toEqual(
+			expect(runtime.conversation.session.getAllTools().map((tool) => tool.name)).toContain("remote_extension_tool");
+			expect(runtime.conversation.session.getActiveToolNames()).toEqual(
 				expect.arrayContaining([
 					...DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter(
 						(name) => name !== "subagent_registry" && name !== "image_gen",
@@ -259,14 +259,18 @@ export default function (volt) {
 				]),
 			);
 
-			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
+			await runtime.conversation.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
-			expect(runtime.session.getAllTools().map((tool) => tool.name)).toContain("remote_dynamic_tool");
-			expect(runtime.session.getActiveToolNames()).toEqual(expect.arrayContaining(["remote_dynamic_tool"]));
-			expect(runtime.session.systemPrompt).toContain("- remote_dynamic_tool: Run remote dynamic test behavior");
+			expect(runtime.conversation.session.getAllTools().map((tool) => tool.name)).toContain("remote_dynamic_tool");
+			expect(runtime.conversation.session.getActiveToolNames()).toEqual(
+				expect.arrayContaining(["remote_dynamic_tool"]),
+			);
+			expect(runtime.conversation.session.systemPrompt).toContain(
+				"- remote_dynamic_tool: Run remote dynamic test behavior",
+			);
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -329,20 +333,22 @@ export default function (volt) {
 				},
 			});
 
-			await runtime.session.prompt("delegate to scout");
+			await runtime.conversation.session.prompt("delegate to scout");
 
 			expect(subagentEvents).toHaveLength(1);
 			const child = subagentEvents[0];
-			expect(child).toMatchObject({ parentSessionId: runtime.session.sessionId });
-			expect(child.parentSessionRef).toEqual(runtime.session.sessionRef);
-			expect(child.sessionId).toBe(child.runtime.session.sessionId);
-			expect(child.runtime.session.sessionRef).toBeDefined();
-			expect(child.runtime.session.getActiveToolNames()).toContain("subagent_registry");
-			expect(child.runtime.session.getActiveToolNames()).not.toContain("subagent");
-			expect(child.runtime.session.sessionManager.getHeader()?.parentSession).toEqual(runtime.session.sessionRef);
+			expect(child).toMatchObject({ parentSessionId: runtime.conversation.session.sessionId });
+			expect(child.parentSessionRef).toEqual(runtime.conversation.session.sessionRef);
+			expect(child.sessionId).toBe(child.conversation.session.sessionId);
+			expect(child.conversation.session.sessionRef).toBeDefined();
+			expect(child.conversation.session.getActiveToolNames()).toContain("subagent_registry");
+			expect(child.conversation.session.getActiveToolNames()).not.toContain("subagent");
+			expect(child.conversation.session.sessionManager.getHeader()?.parentSession).toEqual(
+				runtime.conversation.session.sessionRef,
+			);
 			// The first subagent tool result is the registry preflight; the confirmed
 			// spawn's result is the last one.
-			const parentToolResult = runtime.session.sessionManager
+			const parentToolResult = runtime.conversation.session.sessionManager
 				.getBranch()
 				.filter((entry) => {
 					return (
@@ -364,8 +370,9 @@ export default function (volt) {
 			});
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
-			await subagentEvents[0]?.runtime.dispose().catch(() => undefined);
+			await runtime?.host.close(runtime.conversation);
+			const createdChild = subagentEvents[0];
+			await createdChild?.host.close(createdChild.conversation).catch(() => undefined);
 			registrySpy.mockRestore();
 		}
 	});
@@ -378,20 +385,20 @@ export default function (volt) {
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
 			runtime = await createIrohRemoteAgentRuntime({ agentDir, allowTools: "read", cwd });
-			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
+			await runtime.conversation.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(
-				runtime.session
+				runtime.conversation.session
 					.getAllTools()
 					.map((tool) => tool.name)
 					.sort(),
 			).toEqual(["read"]);
-			expect(runtime.session.getActiveToolNames()).toEqual(["read"]);
-			expect(runtime.session.systemPrompt).not.toContain("remote_extension_tool");
-			expect(runtime.session.systemPrompt).not.toContain("remote_dynamic_tool");
+			expect(runtime.conversation.session.getActiveToolNames()).toEqual(["read"]);
+			expect(runtime.conversation.session.systemPrompt).not.toContain("remote_extension_tool");
+			expect(runtime.conversation.session.systemPrompt).not.toContain("remote_dynamic_tool");
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -407,15 +414,15 @@ export default function (volt) {
 				cwd,
 				toolPolicy: { tools: [], allowUnlistedExtensionTools: false },
 			});
-			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
+			await runtime.conversation.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
-			expect(runtime.session.getAllTools()).toEqual([]);
-			expect(runtime.session.getActiveToolNames()).toEqual([]);
-			expect(runtime.session.systemPrompt).not.toContain("remote_extension_tool");
-			expect(runtime.session.systemPrompt).not.toContain("remote_dynamic_tool");
+			expect(runtime.conversation.session.getAllTools()).toEqual([]);
+			expect(runtime.conversation.session.getActiveToolNames()).toEqual([]);
+			expect(runtime.conversation.session.systemPrompt).not.toContain("remote_extension_tool");
+			expect(runtime.conversation.session.systemPrompt).not.toContain("remote_dynamic_tool");
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -616,12 +623,13 @@ export default function (volt) {
 		writeBrokenProviderExtension();
 		const sessionDir = join(agentDir, "sessions", "remote-workspace");
 		mkdirSync(sessionDir, { recursive: true });
-		const disposeError = new Error("injected runtime disposal failure");
-		const dispose = AgentSessionRuntime.prototype.dispose;
-		const disposeSpy = vi.spyOn(AgentSessionRuntime.prototype, "dispose").mockImplementationOnce(async function (
-			this: AgentSessionRuntime,
+		const disposeError = new Error("injected conversation close failure");
+		const close = ConversationHost.prototype.close;
+		const disposeSpy = vi.spyOn(ConversationHost.prototype, "close").mockImplementationOnce(async function (
+			this: ConversationHost,
+			...args: Parameters<ConversationHost["close"]>
 		): Promise<void> {
-			await dispose.call(this);
+			await close.apply(this, args);
 			throw disposeError;
 		});
 
@@ -719,14 +727,14 @@ export default function (volt) {
 				requestedSessionId: "remote-session",
 				sessionId: "remote-session",
 			});
-			expect(result.sessionSelection.sessionRef).toEqual(runtime.session.sessionRef);
-			expect(runtime.session.sessionId).toBe("remote-session");
-			expect(runtime.session.sessionRef).toBeDefined();
+			expect(result.sessionSelection.sessionRef).toEqual(runtime.conversation.session.sessionRef);
+			expect(runtime.conversation.session.sessionId).toBe("remote-session");
+			expect(runtime.conversation.session.sessionRef).toBeDefined();
 			expect(resumeRecoveredInputs).not.toHaveBeenCalled();
 		} finally {
 			resumeRecoveredInputs.mockRestore();
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -751,12 +759,12 @@ export default function (volt) {
 				throw new Error("expected missing-session fallback");
 			}
 			expect(result.sessionSelection.requestedSessionId).toBe("missing-session");
-			expect(result.sessionSelection.sessionId).toBe(runtime.session.sessionId);
+			expect(result.sessionSelection.sessionId).toBe(runtime.conversation.session.sessionId);
 			expect(result.sessionSelection.sessionId).not.toBe("missing-session");
-			expect(result.sessionSelection.sessionRef).toEqual(runtime.session.sessionRef);
+			expect(result.sessionSelection.sessionRef).toEqual(runtime.conversation.session.sessionRef);
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 
@@ -791,12 +799,12 @@ export default function (volt) {
 				throw new Error("expected malformed remembered session fallback");
 			}
 			expect(result.sessionSelection.requestedSessionId).toBe("BAD-SESSION");
-			expect(result.sessionSelection.sessionId).toBe(runtime.session.sessionId);
+			expect(result.sessionSelection.sessionId).toBe(runtime.conversation.session.sessionId);
 			expect(result.sessionSelection.sessionId).not.toBe("BAD-SESSION");
-			expect(runtime.session.sessionId).not.toBe("BAD-SESSION");
+			expect(runtime.conversation.session.sessionId).not.toBe("BAD-SESSION");
 		} finally {
 			errorSpy.mockRestore();
-			await runtime?.dispose();
+			await runtime?.host.close(runtime.conversation);
 		}
 	});
 

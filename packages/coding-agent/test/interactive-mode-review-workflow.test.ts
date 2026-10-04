@@ -1,5 +1,6 @@
 import { type Component, Container, setKeybindings, Text, type TUI } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as SessionIntents from "../src/core/host/session-intents.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { ReviewWorkflowHooks, ReviewWorkflowOptions, ReviewWorkflowResult } from "../src/core/review.ts";
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
@@ -15,16 +16,26 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 	return { ...actual, runReviewWorkflow: reviewMocks.runReviewWorkflow };
 });
 
+// The TUI opens the review session through its host's session intents.
+const openNewSession = vi.hoisted(() => vi.fn());
+vi.mock("../src/core/host/session-intents.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof SessionIntents>()),
+	openNewSession,
+}));
+
 import { BorderedLoader } from "../src/modes/interactive/components/bordered-loader.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 interface ReviewContext {
-	runtimeHost: {
+	conversation: {
 		session: Record<string, unknown>;
 		services: { agentDir: string };
-		newSession: ReturnType<typeof vi.fn>;
 		reviewWorkflows: ReviewWorkflowManager;
 	};
+	host: object;
+	client: object;
+	/** The TUI's `openNewSession` intent. */
+	newSession: ReturnType<typeof vi.fn>;
 	ui: TUI;
 	editorContainer: Container;
 	chatContainer: Container;
@@ -73,12 +84,14 @@ function createContext(): ReviewContext {
 	const chatContainer = new Container();
 	const view = { regularComponents: [editorContainer], fullscreenRoot: editorContainer };
 	return Object.assign(Object.create(InteractiveMode.prototype), {
-		runtimeHost: {
+		conversation: {
 			session,
 			services: { agentDir: "/workspace/.volt" },
-			newSession: vi.fn(),
 			reviewWorkflows: new ReviewWorkflowManager(),
 		},
+		host: {},
+		client: {},
+		newSession: openNewSession,
 		ui,
 		editorContainer,
 		chatContainer,
@@ -138,6 +151,7 @@ const DIAGNOSTIC_RETENTION_WARNING = "Could not retain optional private review d
 
 afterEach(() => {
 	reviewMocks.runReviewWorkflow.mockReset();
+	openNewSession.mockReset();
 	vi.restoreAllMocks();
 });
 
@@ -154,7 +168,7 @@ describe("InteractiveMode review workflow", () => {
 				completionStatus: "complete",
 				sessionSwitchCancelled: outcome === "cancelled handoff",
 			};
-			context.runtimeHost.newSession.mockImplementationOnce(async () => {
+			context.newSession.mockImplementationOnce(async () => {
 				context.chatContainer.clear();
 				context.chatContainer.addChild(new Text("Replacement session before render"));
 				return { cancelled: false, sessionId: "review-session", seeded: true };
@@ -180,7 +194,7 @@ describe("InteractiveMode review workflow", () => {
 			const rendered = context.chatContainer.render(120).lines.map(stripAnsi).join("\n");
 			expect(rendered.match(/Warning: Could not retain optional private review diagnostics\./g)).toHaveLength(1);
 			if (outcome === "handoff") {
-				expect(context.runtimeHost.newSession).toHaveBeenCalledOnce();
+				expect(context.newSession).toHaveBeenCalledOnce();
 				expect(context.renderInitialMessages).toHaveBeenCalledOnce();
 				expect(rendered).toContain("Seeded review findings");
 				expect(rendered).not.toContain("Original session");
@@ -367,7 +381,7 @@ describe("InteractiveMode review workflow", () => {
 	it("registers a TUI-started review with the runtime workflow manager", async () => {
 		const context = createContext();
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			expect(options.workflowManager).toBe(context.runtimeHost.reviewWorkflows);
+			expect(options.workflowManager).toBe(context.conversation.reviewWorkflows);
 			return { status: "cancelled" };
 		});
 

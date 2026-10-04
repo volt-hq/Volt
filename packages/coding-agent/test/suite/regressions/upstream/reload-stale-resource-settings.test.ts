@@ -6,20 +6,20 @@ import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../../src/core/agent-session-runtime.ts";
+} from "../../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../../../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../../../../src/core/session-manager.ts";
+import { openTestHost } from "../../../utilities/host-client.ts";
 
 describe("issue #2753 reload stale resource settings", () => {
-	const cleanups: Array<() => void> = [];
+	const cleanups: Array<() => Promise<void> | void> = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		while (cleanups.length > 0) {
-			cleanups.pop()?.();
+			await cleanups.pop()?.();
 		}
 	});
 
@@ -36,7 +36,7 @@ describe("issue #2753 reload stale resource settings", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir,
@@ -77,14 +77,14 @@ describe("issue #2753 reload stale resource settings", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation: runtime } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir,
 			sessionManager: await SessionManager.create(tempDir),
 		});
 
-		cleanups.push(() => {
-			runtime.session.dispose();
+		cleanups.push(async () => {
+			await host.dispose();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

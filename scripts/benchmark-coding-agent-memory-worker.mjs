@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import {
 	AuthStorage,
+	ConversationHost,
 	DefaultMcpClientFactory,
 	IrohRemoteActiveStreamRegistry,
 	IrohRemoteAuditLogger,
@@ -18,7 +19,6 @@ import {
 	SessionManager,
 	SettingsManager,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
 	createIrohRemotePresetAccess,
 } from "@hansjm10/volt-coding-agent";
@@ -157,14 +157,21 @@ async function createBenchmarkRuntime(options) {
 	const sessionManager =
 		options.sessionManager ??
 		SessionManager.create(options.workspace, options.sessionDir, { id: options.sessionId ?? randomUUID() });
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: options.workspace,
+	const host = new ConversationHost({
+		factory: createRuntime,
 		agentDir: options.agentDir,
-		sessionManager,
+		extensionMode: "rpc",
+		whenUnattached: "keep",
 	});
-	await runtime.session.bindExtensions({ mode: "rpc" });
-	assert.equal(runtime.session.sessionId, sessionManager.getSessionId());
-	assert.equal(runtime.session.isBusy, false);
+	const opened = await host.open({ kind: "adopt", sessionManager, cwd: options.workspace });
+	assert.equal(opened.cancelled, false);
+	const runtime = { host, conversation: opened.conversation };
+	// A client with a surface binds the conversation's extensions, as an RPC client does.
+	const client = { id: randomUUID(), surface: {}, move: { kind: "redirect", redirect: () => {} } };
+	await host.attach(client, runtime.conversation);
+	await host.detach(client);
+	assert.equal(runtime.conversation.session.sessionId, sessionManager.getSessionId());
+	assert.equal(runtime.conversation.session.isBusy, false);
 	return { runtime, registered, settingsManager };
 }
 
@@ -177,12 +184,12 @@ function payload(label, turn) {
 async function runRuntimeIdle(context) {
 	const created = await createBenchmarkRuntime(context);
 	try {
-		assert.equal(created.runtime.session.messages.length, 0);
-		await context.channel.checkpoint("baseline", { sessionId: created.runtime.session.sessionId, messages: 0 });
-		await created.runtime.dispose();
+		assert.equal(created.runtime.conversation.session.messages.length, 0);
+		await context.channel.checkpoint("baseline", { sessionId: created.runtime.conversation.session.sessionId, messages: 0 });
+		await created.runtime.host.dispose();
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 	}
 }
 
@@ -194,25 +201,25 @@ async function runConversation(context) {
 	const created = await createBenchmarkRuntime({ ...context, registered });
 	try {
 		await context.channel.checkpoint("baseline", {
-			sessionId: created.runtime.session.sessionId,
-			messages: created.runtime.session.messages.length,
+			sessionId: created.runtime.conversation.session.sessionId,
+			messages: created.runtime.conversation.session.messages.length,
 		});
 		for (let turn = 0; turn < CONVERSATION_TURNS; turn++) {
-			await created.runtime.session.prompt(payload("user", turn));
+			await created.runtime.conversation.session.prompt(payload("user", turn));
 		}
-		assert.equal(created.runtime.session.messages.length, CONVERSATION_TURNS * 2);
+		assert.equal(created.runtime.conversation.session.messages.length, CONVERSATION_TURNS * 2);
 		assert.equal(registered.faux.state.callCount, CONVERSATION_TURNS);
 		assert.equal(registered.faux.getPendingResponseCount(), 0);
 		await context.channel.checkpoint("populated", {
-			sessionId: created.runtime.session.sessionId,
-			messages: created.runtime.session.messages.length,
+			sessionId: created.runtime.conversation.session.sessionId,
+			messages: created.runtime.conversation.session.messages.length,
 			turns: CONVERSATION_TURNS,
 			payloadBytes: PAYLOAD_BYTES,
 		});
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 	}
 }
 
@@ -338,7 +345,7 @@ async function runReconnectRetention(context) {
 		});
 	} finally {
 		await registry.stopAll("benchmark_cleanup");
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 	}
 }
 
@@ -363,22 +370,22 @@ async function runExtension(context) {
 		tools: ["benchmark_extension"],
 	});
 	try {
-		const extensionRunner = created.runtime.session.extensionRunner;
+		const extensionRunner = created.runtime.conversation.session.extensionRunner;
 		assert.deepEqual(extensionRunner.getExtensionPaths(), [fixture.extensionPath]);
 		assert(extensionRunner.getAllRegisteredTools().some((tool) => tool.definition.name === "benchmark_extension"));
 		assert.equal(extensionRunner.hasHandlers("session_start"), true);
 		assert.equal((await readFile(fixture.markerPath, "utf8")).trim(), "started");
-		assert(created.runtime.session.getActiveToolNames().includes("benchmark_extension"));
-		const tool = created.runtime.session.state.tools.find((candidate) => candidate.name === "benchmark_extension");
+		assert(created.runtime.conversation.session.getActiveToolNames().includes("benchmark_extension"));
+		const tool = created.runtime.conversation.session.state.tools.find((candidate) => candidate.name === "benchmark_extension");
 		assert(tool);
 		const result = await tool.execute("benchmark-extension-call", { value: "ok" });
 		assert.equal(result.content[0]?.type, "text");
 		assert.equal(result.content[0]?.text, "extension:ok");
 		await context.channel.checkpoint("active", { tool: "benchmark_extension", listener: "session_start" });
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 	}
 }
 
@@ -468,8 +475,8 @@ async function runLsp(context) {
 		},
 	});
 	try {
-		assert(created.runtime.session.getActiveToolNames().includes("lsp"));
-		const tool = created.runtime.session.state.tools.find((candidate) => candidate.name === "lsp");
+		assert(created.runtime.conversation.session.getActiveToolNames().includes("lsp"));
+		const tool = created.runtime.conversation.session.state.tools.find((candidate) => candidate.name === "lsp");
 		assert(tool);
 		const result = await tool.execute("benchmark-lsp-call", {
 			action: "hover",
@@ -479,15 +486,15 @@ async function runLsp(context) {
 		});
 		assert.equal(result.content[0]?.type, "text");
 		assert.match(result.content[0]?.text ?? "", /benchmark hover/);
-		const status = created.runtime.session.getLspStatus();
+		const status = created.runtime.conversation.session.getLspStatus();
 		assert.equal(status.enabled, true);
 		assert(status.servers.some((server) => server.name === "benchmark" && server.alive));
 		await context.channel.checkpoint("active", { server: "benchmark", tool: "lsp" });
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 		await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
-		await created.runtime.dispose();
+		await created.runtime.host.dispose();
 	}
 }
 

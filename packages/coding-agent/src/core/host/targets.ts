@@ -78,17 +78,61 @@ export type ConversationTarget =
 	| ImportConversationTarget
 	| AdoptConversationTarget;
 
+/**
+ * The conversation a redirect client's structural intent leads it to, opened
+ * in the client's host: see `HostClientMove` `hostTarget`.
+ */
+export interface RedirectTarget {
+	readonly sessionId: string;
+	/**
+	 * The conversation the intent opened in the client's host, which the callee
+	 * takes over; absent for a switch to a stored conversation, which opens
+	 * wherever the client reconnects.
+	 */
+	readonly conversation?: HostedConversation;
+}
+
+/**
+ * A redirect target a host took: prepared before the move writes anything
+ * through the source, committed once those writes are done, or aborted.
+ */
+export interface HostedRedirect {
+	/** Make the target the client's to reconnect to. A failure keeps the client where it was. */
+	commit(): Promise<void>;
+	/** Release what was prepared for a target that will not be used. */
+	abort(): Promise<void>;
+}
+
 /** How a client follows a move to another conversation. */
 export type HostClientMove =
 	| {
 			/** The same client continues on the new conversation. */
 			readonly kind: "in_place";
+			/**
+			 * Runs once the client left `from`, before it joins `to` and `to`'s
+			 * extensions start: the client points its own state at `to`. When the
+			 * client cannot join `to`, it runs again with the conversations
+			 * swapped as the client returns to `from`, followed by `onMoved`.
+			 */
+			prepare?(to: HostedConversation, from: HostedConversation | undefined): void;
+			/** Runs once the client joined `to`, before `from` closes. */
 			onMoved(to: HostedConversation, from: HostedConversation | undefined): Promise<void> | void;
 	  }
 	| {
 			/** The client is told to reconnect to the new conversation and leaves this host's registry. */
 			readonly kind: "redirect";
 			redirect(sessionId: string): Promise<void> | void;
+			/**
+			 * Host the conversations the client's structural intents lead it to,
+			 * before the client is redirected there. A new, forked, or imported
+			 * conversation opens in this host, which need not fence the source
+			 * while other clients keep it open; a switch opens nothing. The
+			 * callee prepares the target before the move writes through the
+			 * source (a handoff) and commits it after; a failure keeps the client
+			 * where it was and discards what opened. Without it, the target's log
+			 * is written and closed for the host the client reconnects through.
+			 */
+			readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
 	  };
 
 /** A client of hosted conversations: a TUI view, an RPC connection, a phone stream, a print run. */
@@ -97,7 +141,15 @@ export interface HostClient {
 	readonly id: string;
 	/** A conversation closes when its anchor leaves, whatever other clients remain. */
 	readonly anchor?: boolean;
-	/** The client's surface on each conversation's extensions, attached whenever the client joins one. */
-	readonly surface?: Omit<ExtensionClient, "id">;
+	/**
+	 * The client's surface on each conversation's extensions, attached whenever
+	 * the client joins one. The host binds the extensions in its own mode.
+	 */
+	readonly surface?: Omit<ExtensionClient, "id" | "mode">;
+	/**
+	 * Whether an in-place client replays the durable queued input of each
+	 * conversation it moves to, before anything it runs there afterwards.
+	 */
+	readonly recoversInput?: boolean;
 	readonly move: HostClientMove;
 }

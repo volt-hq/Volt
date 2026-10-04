@@ -4,12 +4,9 @@ import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "../../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type { BackgroundJobSnapshot } from "../../src/core/background-jobs.ts";
+import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { parsePersistedSessionEntry } from "../../src/core/session-entry-codec.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -40,7 +37,7 @@ async function setup(withConfiguredAuth = true) {
 		...createTestResourceLoader(),
 		getSubagents: () => ({ definitions: createBuiltInSubagentDefinitions(), diagnostics: [] }),
 	};
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager }) => {
+	const createRuntime: ConversationFactory = async ({ cwd, sessionManager }) => {
 		const child = await createHarness({ withConfiguredAuth });
 		children.push(child);
 		child.setResponses([

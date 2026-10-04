@@ -202,7 +202,7 @@ describe("ConversationHost", () => {
 		const redirects: string[] = [];
 		const phone: HostClient = {
 			id: "phone",
-			surface: { mode: "rpc" },
+			surface: {},
 			move: { kind: "redirect", redirect: (sessionId) => void redirects.push(sessionId) },
 		};
 		await harness.host.attach(phone, source);
@@ -286,7 +286,7 @@ describe("ConversationHost", () => {
 		const anchor: HostClient = {
 			id: "tui",
 			anchor: true,
-			surface: { mode: "print" },
+			surface: {},
 			move: {
 				kind: "in_place",
 				// The phone disconnects while the anchor's move is under way.

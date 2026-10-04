@@ -354,7 +354,7 @@ exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
 
 #### project_trust
 
-Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when session replacement (for example `/resume`) enters a cwd whose trust has not been resolved in the current process. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
+Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when a session change (for example `/resume`) enters a cwd whose trust has not been resolved in the current process. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
 
 ```typescript
 volt.on("project_trust", async (event, ctx) => {
@@ -507,14 +507,14 @@ volt.on("session_tree", async (event, ctx) => {
 
 #### session_shutdown
 
-Fired before a started session runtime is torn down. Use this to clean up resources opened from `session_start` or other session-scoped hooks. When a client moves to another session (`reason` `"new"`, `"resume"`, or `"fork"`), the new session has already started and the client has left this one: UI calls from this handler reach no client, so they cannot disturb the new session's UI.
+Fired before a started session closes. Use this to clean up resources opened from `session_start` or other session-scoped hooks. When a client moves to another session (`reason` `"new"`, `"resume"`, or `"fork"`), the new session's `session_start` has already run and the client has left this one: UI calls from this handler reach no client that moved, so they cannot disturb the new session's UI. See [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) commit like any other: the session is disposed only after the handlers finish. They throw once the session has lost its log because a write could not be confirmed as saved; nothing can be saved after that. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
 
 ```typescript
 volt.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
-  // event.targetSessionRef - destination reference for session replacement flows
+  // event.targetSessionRef - the session the client moved to, for "new" | "resume" | "fork"
   // Clean up resources; session writes here throw if the session lost its log (see above)
 });
 ```
@@ -786,7 +786,7 @@ policy.invalidate();
 // policy.update(nextHandler) replaces this registration; policy() removes it.
 ```
 
-Every registration, update, removal, and explicit invalidation advances host-owned authorization revisions. Replacing a callback and restoring the original still revokes older managed authorization. Closure changes cannot be detected automatically: always invalidate when captured state changes policy behavior. Removed handles cannot update or invalidate, and old runtime handles cannot be used after reload/replacement.
+Every registration, update, removal, and explicit invalidation advances host-owned authorization revisions. Replacing a callback and restoring the original still revokes older managed authorization. Closure changes cannot be detected automatically: always invalidate when captured state changes policy behavior. Removed handles cannot update or invalidate, and old runtime handles cannot be used after a reload or session change.
 
 These revisions protect managed reads and optional context, not arbitrary Node access by trusted extensions. Loaded handler lists are host-owned; use registration handles rather than modifying `Extension.handlers`.
 
@@ -942,7 +942,7 @@ UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
 
 ### ctx.mode
 
-Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the client that opened the session and does not change while other clients attach, so a phone relayed through the desktop TUI leaves it `"tui"`. Use `ctx.mode === "tui"` to guard terminal-only features such as `custom()`, component factories, terminal input, and direct TUI rendering.
+Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"tui"` in the desktop TUI (also for phones relayed through it), `"rpc"` for stdio RPC, daemon-hosted conversations, and subagents, and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Use `ctx.mode === "tui"` to guard terminal-only features such as `custom()`, component factories, terminal input, and direct TUI rendering.
 
 ### ctx.hasUI
 
@@ -1099,7 +1099,7 @@ volt.registerCommand("deploy", {
 });
 ```
 
-After `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()`, use the signal of the `ctx` passed to `withSession`, which belongs to the replacement session.
+After `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()`, use the signal of the `ctx` passed to `withSession`, which belongs to the new session.
 
 ### ctx.getSystemPromptOptions()
 
@@ -1129,11 +1129,11 @@ volt.registerCommand("my-cmd", {
 
 ### ctx.newSession(options?)
 
-Create a new session and move the client whose command called it there. The result carries the new session's id:
+Create a new session and move the client whose command called it there (see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns)). The result carries the new session's id:
 
 ```typescript
 const parentSessionRef = ctx.sessionManager.getSessionRef();
-const kickoff = "Continue in the replacement session";
+const kickoff = "Continue in the new session";
 
 const result = await ctx.newSession({
   ...(parentSessionRef ? { parentSessionRef } : {}),
@@ -1145,7 +1145,7 @@ const result = await ctx.newSession({
     });
   },
   withSession: async (ctx) => {
-    // Use only the replacement-session ctx here.
+    // Use only the new session's ctx here.
     await ctx.sendUserMessage(kickoff);
   },
 });
@@ -1164,7 +1164,7 @@ if (result.cancelled) {
 Options:
 - `parentSessionRef`: persisted parent identity to record for the new session
 - `setup`: write the new session before it opens, through its async `SessionWriter` (`writer.sessionManager` reads it), before `withSession` runs
-- `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
+- `withSession`: run post-switch work against a fresh context of the new session. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
 - `{ cancelled: true }`: the session did not change, because an extension cancelled it or no client handles session changes. No `withSession` callback ran.
@@ -1179,7 +1179,7 @@ Fork from a specific entry, creating a new persisted session:
 ```typescript
 const result = await ctx.fork("entry-id-123", {
   withSession: async (ctx) => {
-    // Use only the replacement-session ctx here.
+    // Use only the forked session's ctx here.
     ctx.ui.notify("Now in the forked session", "info");
   },
 });
@@ -1198,7 +1198,7 @@ if (cloneResult.cancelled) {
 Options:
 - `position`: `"before"` (default) forks before the selected user message, restoring that prompt into the editor
 - `position`: `"at"` duplicates the active path through the selected entry without restoring editor text
-- `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
+- `withSession`: run post-switch work against a fresh context of the forked session. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 ### ctx.navigateTree(targetId, options?)
 
@@ -1227,7 +1227,7 @@ Switch to a persisted session by `SessionReference`:
 // Obtain sessionRef from SessionManager.list(), search(), or getSessionRef().
 const result = await ctx.switchSession(sessionRef, {
   withSession: async (ctx) => {
-    await ctx.sendUserMessage("Resume work in the replacement session");
+    await ctx.sendUserMessage("Resume work in this session");
   },
 });
 if (result.cancelled) {
@@ -1236,7 +1236,7 @@ if (result.cancelled) {
 ```
 
 Options:
-- `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
+- `withSession`: run post-switch work against a fresh context of the session switched to. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
 
 `SessionManager.list()` and `listAll()` read materialized SQLite summaries; `search()` scans extracted searchable text one session at a time. All return `SessionInfo` objects whose `ref` field can be passed directly to `ctx.switchSession()`:
 
@@ -1265,24 +1265,36 @@ volt.registerCommand("switch", {
 });
 ```
 
-### Session replacement lifecycle and footguns
+### Session changes: lifecycle and footguns
 
-`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
+A session serves one log for its whole life. `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` open another session, with its own extension instance, and move the client whose command called them there; the session the command ran in is never replaced in place. A command can change sessions from any client's request, including a stdio RPC `prompt`: the command's own prompt input completes as it leaves the session.
+
+The order of events:
+
+1. `session_before_switch` or `session_before_fork` in the current session's extensions, which may cancel. Nothing has changed yet.
+2. The new session opens. If it cannot (another process holds it, its cwd is missing, its extensions fail to start), the call throws and the client stays where it was.
+3. `session_start` (`reason` `"new"`, `"resume"`, or `"fork"`, with `previousSessionRef`) and `resources_discover` in the new session's extensions, with the client attached.
+4. `session_shutdown` (same `reason`, with `targetSessionRef`) in the old session's extensions, which no longer reach the client that moved. The old session then closes and releases its lock.
+5. `withSession`, against the new session.
+
+A session refuses to be left while it runs a turn, a bash command, a session mutation, or a detached review, or holds queued durable input; wait for it (`ctx.waitForIdle()`) before changing sessions.
+
+`withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the new session.
 
 Lifecycle and footguns:
 - `withSession` runs only after the new extension instance has received `session_start` and the old session has emitted `session_shutdown` and closed.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
-- Captured old `volt` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
-- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before replacement, `sm` is still the old `SessionManager` object. Do not reuse it after replacement.
+- Captured old `volt` / old command `ctx` session-bound objects are stale once the session changed and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
+- Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` is still the old `SessionManager` object. Do not reuse it afterwards.
 - Code in `withSession` should assume any state invalidated by your `session_shutdown` handler is already gone. Only capture plain data that survives shutdown cleanly, such as strings, ids, and serialized config.
-- `withSession` is not guaranteed to run even when the operation is not cancelled: if recovered durable client input fails to replay into the replacement session, the callback is skipped and the result reports `seeded: false`. Check `seeded` whenever your callback delivers state the rest of your flow depends on.
+- `withSession` is not guaranteed to run even when the operation is not cancelled: if recovered durable client input fails to replay into the new session, the callback is skipped and the result reports `seeded: false`. Check `seeded` whenever your callback delivers state the rest of your flow depends on.
 
 Safe pattern:
 
 ```typescript
 volt.registerCommand("handoff", {
   handler: async (_args, ctx) => {
-    const kickoff = "Continue from the replacement session";
+    const kickoff = "Continue from the new session";
     await ctx.newSession({
       withSession: async (ctx) => {
         await ctx.sendUserMessage(kickoff);
@@ -1822,7 +1834,7 @@ Extensions can prepare optional repository context without running another agent
 
 `ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, `revision` (the log ordinal the request builds on), cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
 
-Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and when the session ends because a write could not be confirmed as saved. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
+Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload, a session change, and when the session ends because a write could not be confirmed as saved. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
 
 ```typescript
 // Illustrative API use, not a built-in extension or default behavior.
@@ -2394,7 +2406,7 @@ Extensions can interact with users via `ctx.ui` methods and customize how messag
 
 ### Clients
 
-A session's extensions are bound once, by the first client to attach: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. That client's mode becomes `ctx.mode` and `session_start` fires. Later clients attach their own surface:
+A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
 - **UI** (`ctx.ui`) goes to the most recently attached client that shows UI. When a client starts showing UI (it attaches, or a later client leaves), it receives the latest `setStatus`, `setWidget`, and `setTitle` values. A phone relayed through the desktop TUI, or a phone whose access cannot answer dialogs, shows no extension UI: dialogs and status stay with the other clients.
 - **Errors** reach every attached client.

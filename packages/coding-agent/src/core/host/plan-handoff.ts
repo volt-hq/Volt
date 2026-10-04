@@ -18,11 +18,17 @@ import {
 	createPlanExecutionPrompt,
 	PLAN_EXECUTION_CUSTOM_TYPE,
 	type PlanExecution,
+	type PlanExecutionStrategy,
+	type PlanningState,
 	type PlanState,
+	StalePlanRevisionError,
 } from "../planning.ts";
 import { captureReviewStateForHandoff, restoreReviewStateFromHandoff } from "../review-state.ts";
 import type { LogWriter } from "../session-writer.ts";
+import type { ConversationHost } from "./conversation-host.ts";
 import type { HostedConversation } from "./hosted-conversation.ts";
+import { openNewSession } from "./session-intents.ts";
+import type { HostClient } from "./targets.ts";
 
 export interface PlanHandoff {
 	/** Writes the new conversation's log before it opens. */
@@ -94,5 +100,109 @@ export function createPlanHandoff(source: AgentSession, plan: PlanState, expecte
 				)
 				.catch(() => undefined);
 		},
+	};
+}
+
+/**
+ * Approve and start one exact ready-plan revision of the conversation
+ * `client` is on. The execution snapshot is durable before provider work
+ * begins, so retries observe the same execution identity instead of starting
+ * a second run. A `new_session` execution moves the client to a new
+ * conversation (see `createPlanHandoff`).
+ */
+export async function executePlan(
+	host: ConversationHost,
+	client: HostClient,
+	planId: string,
+	expectedRevision: number,
+	strategy: PlanExecutionStrategy,
+	assertConversationGenerationCurrent?: () => void,
+): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }> {
+	const source = host.conversationOf(client);
+	if (!source) throw new Error("The client is not attached to a conversation");
+	const sourceSession = source.session;
+	if (sourceSession.isReviewDiscussion && strategy === "new_session") {
+		throw new Error("Finding discussions execute plans in the current context; reset through the source review");
+	}
+	const sourcePlanning = sourceSession.planningState;
+	const sourcePlan = sourcePlanning.plan;
+	if (
+		sourcePlan?.id === planId &&
+		sourcePlan.execution?.approvedRevision === expectedRevision &&
+		sourcePlan.execution.strategy === strategy
+	) {
+		return {
+			planning: sourcePlanning,
+			selectedSessionId: sourcePlan.execution.targetSessionId,
+			started: false,
+		};
+	}
+	if (!sourcePlan || sourcePlan.id !== planId || sourcePlan.revision !== expectedRevision) {
+		throw new StalePlanRevisionError();
+	}
+	if (sourcePlan.phase !== "ready") {
+		throw new Error("Only a ready plan can be executed");
+	}
+	assertConversationGenerationCurrent?.();
+
+	if (strategy === "retain_context") {
+		const execution: PlanExecution = {
+			id: randomUUID(),
+			approvedRevision: expectedRevision,
+			strategy,
+			sourceSessionId: sourceSession.sessionId,
+			targetSessionId: sourceSession.sessionId,
+		};
+		const result = await sourceSession.activatePlan(planId, expectedRevision, execution);
+		if (result.activated) {
+			void sourceSession
+				.sendCustomMessage(
+					{
+						customType: PLAN_EXECUTION_CUSTOM_TYPE,
+						content: createPlanExecutionPrompt(result.planning.plan!),
+						display: true,
+					},
+					{ triggerTurn: true },
+				)
+				.catch(() => undefined);
+		}
+		return {
+			planning: result.planning,
+			selectedSessionId: sourceSession.sessionId,
+			started: result.activated,
+		};
+	}
+
+	// The new session is written before it opens; the source records the handoff while still open.
+	const handoff = createPlanHandoff(sourceSession, sourcePlan, expectedRevision);
+	const sourceSessionRef = sourceSession.sessionRef;
+	// A redirected client's new conversation opens for it elsewhere or later:
+	// its log queues the execution turn, which starts when it recovers its durable input.
+	const redirected = client.move.kind === "redirect";
+	const opened = await openNewSession(host, client, {
+		...(sourceSessionRef ? { parentSessionRef: sourceSessionRef } : {}),
+		setup: async (writer) => {
+			await handoff.setup(writer);
+			if (redirected) await handoff.queueStart(writer);
+		},
+		beforeMove: (from) => handoff.beforeMove(from),
+		...(redirected
+			? {}
+			: {
+					withSession: async (context: ReplacedSessionContext) => {
+						const target = host.conversationOf(client);
+						if (!target) throw new Error("Plan execution session was not created");
+						await handoff.start(target.session, context);
+					},
+				}),
+		...(assertConversationGenerationCurrent ? { assertConversationGenerationCurrent } : {}),
+	});
+	if (opened.cancelled || (!redirected && !opened.seeded)) {
+		throw new Error("Plan execution session was not created");
+	}
+	return {
+		planning: (host.conversationOf(client) ?? source).session.planningState,
+		selectedSessionId: opened.sessionId,
+		started: true,
 	};
 }

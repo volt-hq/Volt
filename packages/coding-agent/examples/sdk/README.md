@@ -1,8 +1,8 @@
 # SDK Examples
 
-Programmatic usage of volt-coding-agent via `createAgentSession()` and `createAgentSessionRuntime()`.
+Programmatic usage of volt-coding-agent via `createAgentSession()` and `ConversationHost`.
 
-The runtime example shows how to build a recreate function that closes over process-global fixed inputs and recreates cwd-bound services and sessions as the active session cwd changes.
+The conversation host example shows how to build a factory that closes over process-global fixed inputs and creates cwd-bound services and a session for each conversation the host opens.
 
 ## Examples
 
@@ -20,7 +20,7 @@ The runtime example shows how to build a recreate function that closes over proc
 | `10-settings.ts` | Override compaction, retry, terminal settings |
 | `11-sessions.ts` | In-memory, persistent, continue, list sessions |
 | `12-full-control.ts` | Replace everything, no discovery |
-| `13-session-runtime.ts` | Manage runtime-backed session replacement |
+| `13-conversation-host.ts` | Open new, resumed, and forked conversations in a host |
 
 ## Running
 

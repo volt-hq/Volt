@@ -3,15 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+import { createAgentSessionServices } from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../../../src/core/review.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
+import { openTestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -19,11 +16,11 @@ afterEach(async () => {
 	while (cleanups.length) await cleanups.pop()?.();
 });
 
-async function createRuntime() {
+async function openConversation(): Promise<HostedConversation> {
 	const directory = mkdtempSync(join(tmpdir(), "volt-537-"));
 	cleanups.push(() => rmSync(directory, { recursive: true, force: true }));
 	const harnesses: Harness[] = [];
-	const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager }) => {
+	const factory: ConversationFactory = async ({ cwd, sessionManager }) => {
 		const harness = await createHarness({
 			sessionManager,
 			agentDir: directory,
@@ -46,24 +43,24 @@ async function createRuntime() {
 		};
 	};
 	const manager = await SessionManager.create(directory);
-	const runtime = await createAgentSessionRuntime(factory, {
+	const { host, conversation } = await openTestHost(factory, {
 		cwd: directory,
 		agentDir: directory,
 		sessionManager: manager,
 	});
 	cleanups.push(async () => {
-		await runtime.dispose().catch(() => {});
+		await host.dispose().catch(() => {});
 		for (const harness of harnesses) await harness.cleanupAsync().catch(() => {});
 	});
-	await runtime.session.prompt("initial prompt");
-	return runtime;
+	await conversation.session.prompt("initial prompt");
+	return conversation;
 }
 
-function startReview(runtime: AgentSessionRuntime, workflowId: string, launched = true) {
+function startReview(conversation: HostedConversation, workflowId: string, launched = true) {
 	const finished = Promise.withResolvers<void>();
 	const cleanupFinished = Promise.withResolvers<void>();
 	const started = Promise.withResolvers<void>();
-	const workflow = runtime.reviewWorkflows.start({
+	const workflow = conversation.reviewWorkflows.start({
 		prepared: {
 			workflowId,
 			action: "review.custom",
@@ -86,31 +83,31 @@ function startReview(runtime: AgentSessionRuntime, workflowId: string, launched 
 	return { workflow, started: started.promise, finish: finished.resolve, releaseCleanup: cleanupFinished.resolve };
 }
 
-describe("regression #537: a runtime that loses its log cancels only its own reviews", () => {
-	it("cancels a running review and joins its cleanup, leaving other runtimes' reviews running", async () => {
-		const runtime = await createRuntime();
-		const otherRuntime = await createRuntime();
-		const unrelated = startReview(otherRuntime, "unrelated");
+describe("regression #537: a conversation that loses its log cancels only its own reviews", () => {
+	it("cancels a running review and joins its cleanup, leaving other conversations' reviews running", async () => {
+		const conversation = await openConversation();
+		const other = await openConversation();
+		const unrelated = startReview(other, "unrelated");
 		const events: Array<ReviewWorkflowEvent | ReviewWorkflowToolEvent> = [];
-		runtime.reviewWorkflows.attachSink((event) => events.push(event));
-		const review = startReview(runtime, "review");
+		conversation.reviewWorkflows.attachSink((event) => events.push(event));
+		const review = startReview(conversation, "review");
 		await review.started;
 
-		const lost = await loseLog(runtime.session.sessionWriter);
-		await expect(runtime.lost).resolves.toBe(lost);
+		const lost = await loseLog(conversation.session.sessionWriter);
+		await expect(conversation.lost).resolves.toBe(lost);
 
 		await vi.waitFor(() => expect(review.workflow.signal.aborted).toBe(true));
 		expect(unrelated.workflow.signal.aborted).toBe(false);
 		review.releaseCleanup();
 		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
-		expect(runtime.reviewWorkflows.get("review")?.status).toBe("cancelled");
+		expect(conversation.reviewWorkflows.get("review")?.status).toBe("cancelled");
 		expect(events.filter((event) => event.type === "workflow_end" && event.workflowId === "review")).toHaveLength(1);
 	});
 
 	it("cancels a review registered before launch without starting its executor", async () => {
-		const runtime = await createRuntime();
-		const review = startReview(runtime, "not-launched", false);
-		await loseLog(runtime.session.sessionWriter);
+		const conversation = await openConversation();
+		const review = startReview(conversation, "not-launched", false);
+		await loseLog(conversation.session.sessionWriter);
 		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
 		expect(review.workflow.signal.aborted).toBe(true);
 	});

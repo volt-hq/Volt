@@ -9,19 +9,19 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
+import type { HostClient } from "../../../src/core/host/targets.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { ExtensionAPI, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
+import { openTestHost, type TestHost } from "../../utilities/host-client.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -36,7 +36,8 @@ type InteractiveAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	attachSessionExtensions(session: AgentSession): Promise<void>;
+	client: HostClient;
+	showSessionExtensions(session: AgentSession): void;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
@@ -55,10 +56,8 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		}
 	});
 
-	async function createRuntimeForTest(
-		responses: string[],
-		options: { extensionFactory?: ExtensionFactory; interactive?: boolean } = {},
-	) {
+	/** Open a conversation over the faux provider in a host of its own, with no client attached yet. */
+	async function openConversationForTest(responses: string[], options: { extensionFactory?: ExtensionFactory } = {}) {
 		const tempDir = join(tmpdir(), `volt-536-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -67,7 +66,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir: tempDir,
@@ -114,30 +113,23 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		};
 
 		const sessionManager = await SessionManager.create(tempDir);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: sessionManager.getCwd(),
 			agentDir: tempDir,
 			sessionManager,
 		});
-		if (!options.interactive) {
-			// Bind replacements the way interactive mode does.
-			runtime.setRebindSession(async (session) => {
-				await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-			});
-			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-		}
 
 		cleanups.push(async () => {
-			await runtime.dispose().catch(() => {});
+			await host.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
-		return { runtime, faux, tempDir };
+		return { host, conversation, faux, tempDir };
 	}
 
-	function requireSessionRef(runtime: AgentSessionRuntime): SessionReference {
-		const sessionRef = runtime.session.sessionRef;
+	function requireSessionRef(session: AgentSession): SessionReference {
+		const sessionRef = session.sessionRef;
 		if (!sessionRef) throw new Error("expected a persisted session");
 		return sessionRef;
 	}
@@ -163,9 +155,10 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		return terminal.getViewport().join("\n");
 	}
 
-	/** Drive InteractiveMode on a real runtime and VirtualTerminal, without the main input loop. */
-	async function startInteractiveMode(runtime: AgentSessionRuntime, tempDir: string) {
-		const mode = new InteractiveMode(runtime, { tuiMode: "regular" });
+	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
+	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
+		const { host, conversation, tempDir } = opened;
+		const mode = new InteractiveMode(host, conversation, { tuiMode: "regular" });
 		cleanups.push(() => mode.stop());
 		const access = mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});
@@ -186,8 +179,9 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		access.activateView(access.conversationView, access.editor, false);
 		access.isInitialized = true;
 		access.ui.start();
-		await access.attachSessionExtensions(runtime.session);
-		access.subscribeToAgent(runtime.session);
+		await host.attach(access.client, conversation);
+		access.showSessionExtensions(conversation.session);
+		access.subscribeToAgent(conversation.session);
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}
 
@@ -218,13 +212,13 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 					},
 				});
 			};
-			const { runtime, faux, tempDir } = await createRuntimeForTest([], { extensionFactory, interactive: true });
+			const opened = await openConversationForTest([], { extensionFactory });
 			// Also releases the tool on a failed assertion so test teardown cannot hang.
 			cleanups.push(() => result.resolve({ content: [{ type: "text", text: "cleanup" }] }));
-			const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
-			faux.setResponses([fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" })]);
-			const staleSession = runtime.session;
-			const sessionRef = requireSessionRef(runtime);
+			const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
+			opened.faux.setResponses([fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" })]);
+			const staleSession = opened.conversation.session;
+			const sessionRef = requireSessionRef(staleSession);
 			const prompt = Promise.allSettled([staleSession.prompt("start")]);
 			const signal = await started.promise;
 			const abort = cancelFirst ? staleSession.abort("keyboard_interrupt") : Promise.resolve();

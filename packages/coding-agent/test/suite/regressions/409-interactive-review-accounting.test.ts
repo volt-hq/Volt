@@ -65,12 +65,13 @@ describe("#409 interactive terminal review accounting", () => {
 				const editorContainer = new Container();
 				editorContainer.addChild(editor);
 				const footer = { setTransientUsage: vi.fn(), invalidate: vi.fn() };
+				// A review that opens no session reaches nothing on the TUI's host.
 				const newSession = vi.fn();
 				const context = Object.assign(Object.create(InteractiveMode.prototype), {
-					runtimeHost: {
+					host: { conversationOf: newSession, openFor: newSession },
+					conversation: {
 						session: h.session,
 						services: { agentDir: h.tempDir },
-						newSession,
 						reviewWorkflows: new ReviewWorkflowManager(),
 					},
 					ui: {

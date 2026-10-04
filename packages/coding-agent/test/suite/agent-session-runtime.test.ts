@@ -3,13 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import {
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
@@ -26,6 +22,23 @@ import type {
 	SessionStartEvent,
 } from "../../src/index.ts";
 import { createDirectorySymlinkSync } from "../symlink-utils.ts";
+import {
+	connectTestClient,
+	type OpenTestHostOptions,
+	openTestHost,
+	type TestClient,
+	type TestClientOptions,
+} from "../utilities/host-client.ts";
+
+/** Open a conversation in a host of its own and attach an in-place anchor client to it. */
+async function openRuntime(
+	factory: ConversationFactory,
+	options: OpenTestHostOptions,
+	clientOptions?: TestClientOptions,
+): Promise<TestClient> {
+	const { host, conversation } = await openTestHost(factory, options);
+	return connectTestClient(host, conversation, clientOptions);
+}
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -33,7 +46,7 @@ type RecordedSessionEvent =
 	| SessionShutdownEvent
 	| SessionStartEvent;
 
-describe("AgentSessionRuntime characterization", () => {
+describe("conversation host client characterization", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	afterEach(async () => {
@@ -49,6 +62,7 @@ describe("AgentSessionRuntime characterization", () => {
 			bootstrapModel?: boolean;
 			bootstrapThinkingLevel?: boolean;
 			beforeCreateRuntime?: (sessionManager: SessionManager) => Promise<void> | void;
+			onMoved?: TestClientOptions["onMoved"];
 		},
 	) {
 		const tempDir =
@@ -98,7 +112,7 @@ describe("AgentSessionRuntime characterization", () => {
 				noThemes: true,
 			},
 		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			await options?.beforeCreateRuntime?.(sessionManager);
 			const services = await createAgentSessionServices({
 				...runtimeOptions,
@@ -116,11 +130,11 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: await SessionManager.create(tempDir),
-		});
+		const runtime = await openRuntime(
+			createRuntime,
+			{ cwd: tempDir, agentDir: tempDir, sessionManager: await SessionManager.create(tempDir) },
+			options?.onMoved === undefined ? {} : { onMoved: options.onMoved },
+		);
 		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		cleanups.push(async () => {
@@ -425,7 +439,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const stored = (await SessionManager.list(runtime.cwd, manager.getSessionDir())).find(
 			(session) => session.id === runtime.session.sessionId,
 		);
-		const live = runtime.getCurrentSessionSummary();
+		const live = runtime.conversation.summary();
 
 		expect(stored).toBeDefined();
 		expect(live.modifiedAt).toBe(new Date(messageTime).toISOString());
@@ -467,7 +481,7 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 		try {
 			expect(manager.getSessionEntrySummary()).toEqual(expected);
-			expect(runtime.getCurrentSessionSummary()).toMatchObject({
+			expect(runtime.conversation.summary()).toMatchObject({
 				messageCount: 3,
 				firstMessage: "first user",
 				modifiedAt: new Date(lastMessageTime).toISOString(),
@@ -496,7 +510,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const stored = (await SessionManager.list(runtime.cwd, manager.getSessionDir())).find(
 			(session) => session.id === runtime.session.sessionId,
 		);
-		const live = runtime.getCurrentSessionSummary();
+		const live = runtime.conversation.summary();
 
 		expect(stored).toBeDefined();
 		expect(stored?.messageCount).toBe(0);
@@ -525,7 +539,7 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 		await foreignSession.logWriter.appendMessage({ role: "user", content: "foreign prompt", timestamp: Date.now() });
 
-		const sessions = await runtime.listSessions();
+		const sessions = await runtime.conversation.listSessions();
 		expect(sessions).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
@@ -569,7 +583,9 @@ describe("AgentSessionRuntime characterization", () => {
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
 		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-		expect((await runtime.listSessions()).some((session) => session.sessionId === fastSessionId)).toBe(false);
+		expect((await runtime.conversation.listSessions()).some((session) => session.sessionId === fastSessionId)).toBe(
+			false,
+		);
 
 		const switchResult = await runtime.switchSessionById(fastSessionId);
 		expect(switchResult.cancelled).toBe(false);
@@ -592,7 +608,9 @@ describe("AgentSessionRuntime characterization", () => {
 			await target.closePersistence();
 		}
 
-		expect((await runtime.listSessions()).some((session) => session.sessionId === target.getSessionId())).toBe(true);
+		expect(
+			(await runtime.conversation.listSessions()).some((session) => session.sessionId === target.getSessionId()),
+		).toBe(true);
 		await expect(runtime.switchSessionById(target.getSessionId())).resolves.toEqual({
 			cancelled: false,
 			sessionId: target.getSessionId(),
@@ -772,31 +790,31 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(sessions.find((session) => session.id === preparedRef?.sessionId)?.ref).toEqual(preparedRef);
 	});
 
-	it("preserves a persisted import when replacement fails after installation", async () => {
-		const { runtime, tempDir } = await createRuntimeForTest(() => {});
+	it("preserves a persisted import when the client's move handler fails after the move", async () => {
 		const importedId = "failed-postinstall-import";
+		const { runtime, tempDir } = await createRuntimeForTest(() => {}, {
+			onMoved: (to) => {
+				if (to.session.sessionManager.getForkedFrom()?.sessionId === importedId) {
+					throw new Error("injected installed import projection failure");
+				}
+			},
+		});
 		const snapshotPath = join(tempDir, `${importedId}.jsonl`);
 		const sessionDir = runtime.session.sessionManager.getSessionDir();
 		const currentSessionRef = runtime.session.sessionRef;
 		writeSessionSnapshot(snapshotPath, tempDir, importedId);
-		const unsubscribe = runtime.subscribeSessionWillProject((session) => {
-			if (session.sessionManager.getForkedFrom()?.sessionId === importedId) {
-				throw new Error("injected installed import projection failure");
-			}
-		});
 
-		try {
-			await expect(runtime.importFromJsonl(snapshotPath)).rejects.toThrow(
-				"injected installed import projection failure",
-			);
-		} finally {
-			unsubscribe();
-		}
+		await expect(runtime.importFromJsonl(snapshotPath)).rejects.toThrow(
+			"injected installed import projection failure",
+		);
 
+		// The client joined the import before its handler failed; the source closed with the move.
 		expect(runtime.session.sessionManager.getForkedFrom()?.sessionId).toBe(importedId);
 		expect(runtime.session.sessionRef).not.toEqual(currentSessionRef);
 		const importedRef = runtime.session.sessionRef;
 		if (!importedRef) throw new Error("Expected the installed import reference");
+		// The import stays open until its client leaves it.
+		await runtime.dispose();
 		const sessions = await SessionManager.list(tempDir, sessionDir, undefined, {
 			includeMessageFreeDurable: true,
 		});
@@ -948,7 +966,7 @@ describe("AgentSessionRuntime characterization", () => {
 				noThemes: true,
 			},
 		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				...runtimeOptions,
 				cwd,
@@ -964,7 +982,7 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await openRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
@@ -1057,11 +1075,7 @@ describe("AgentSessionRuntime characterization", () => {
 				noThemes: true,
 			},
 		};
-		const createOtherRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd,
-			sessionManager,
-			sessionStartEvent,
-		}) => {
+		const createOtherRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				...otherRuntimeOptions,
 				cwd,
@@ -1076,7 +1090,7 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const otherRuntime = await createAgentSessionRuntime(createOtherRuntime, {
+		const otherRuntime = await openRuntime(createOtherRuntime, {
 			cwd: secondDir,
 			agentDir: tempDir,
 			sessionManager: await SessionManager.create(secondDir),
@@ -1133,11 +1147,7 @@ describe("AgentSessionRuntime characterization", () => {
 				noThemes: true,
 			},
 		};
-		const createOtherRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd,
-			sessionManager,
-			sessionStartEvent,
-		}) => {
+		const createOtherRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				...otherRuntimeOptions,
 				cwd,
@@ -1152,7 +1162,7 @@ describe("AgentSessionRuntime characterization", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const otherRuntime = await createAgentSessionRuntime(createOtherRuntime, {
+		const otherRuntime = await openRuntime(createOtherRuntime, {
 			cwd: otherDir,
 			agentDir: tempDir,
 			sessionManager: await SessionManager.create(otherDir),

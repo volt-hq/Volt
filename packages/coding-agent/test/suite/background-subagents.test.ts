@@ -1,13 +1,9 @@
 import { setImmediate } from "node:timers/promises";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "../../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import type { BackgroundJobSnapshot } from "../../src/core/background-jobs.ts";
+import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import {
@@ -16,6 +12,7 @@ import {
 	SubagentManager,
 	type SubagentManagerOptions,
 	SubagentRegistry,
+	type SubagentRuntimeCreatedEvent,
 } from "../../src/core/subagents/index.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
@@ -44,7 +41,8 @@ async function setup(
 ) {
 	const parentFixture = await createHarness({ settings: { lsp: { enabled: false }, retry: { enabled: false } } });
 	const children: Harness[] = [];
-	const runtimes: AgentSessionRuntime[] = [];
+	/** The children's conversations, in the hosts they opened in. */
+	const runtimes: SubagentRuntimeCreatedEvent[] = [];
 	const scopes: SubagentDelegationScope[] = [];
 	const finish = deferred();
 	const childInputs: string[] = [];
@@ -55,7 +53,7 @@ async function setup(
 		getSubagents: () => ({ definitions, diagnostics: [] }),
 	};
 	const parentManager = SessionManager.inMemory(parentFixture.tempDir);
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, subagentContext }) => {
+	const createRuntime: ConversationFactory = async ({ cwd, sessionManager, subagentContext }) => {
 		if (subagentContext) scopes.push(subagentContext.delegationScope);
 		await options.beforeRuntimeCreate?.();
 		const child = await createHarness({ settings: { lsp: { enabled: false }, retry: { enabled: false } } });
@@ -120,7 +118,7 @@ async function setup(
 		retainRuntimeOnDispose: options.retainRuntimeOnDispose,
 		subagentContext: options.subagentContext,
 		onRuntimeCreated: (event) => {
-			runtimes.push(event.runtime);
+			runtimes.push(event);
 			return options.onRuntimeCreated?.(event);
 		},
 	});
@@ -154,11 +152,29 @@ async function setup(
 			await session.waitForClosed();
 			await manager.dispose();
 			if (options.retainRuntimeOnDispose) {
-				for (const runtime of runtimes) await runtime.dispose();
+				for (const runtime of runtimes) await runtime.host.close(runtime.conversation);
 			}
 			for (const child of children) await child.cleanupAsync();
 			await parentFixture.cleanupAsync();
 		},
+	};
+}
+
+/**
+ * Run `before` ahead of closing `event`'s child conversation, which its
+ * in-process client closes when it stops. Every close of it joins one.
+ */
+function beforeChildClose(event: SubagentRuntimeCreatedEvent, before: () => Promise<void>): void {
+	const host = event.host;
+	const close = host.close.bind(host);
+	let closing: Promise<void> | undefined;
+	host.close = (conversation, closeEvent) => {
+		if (conversation !== event.conversation) return close(conversation, closeEvent);
+		closing ??= (async () => {
+			await before();
+			await close(conversation, closeEvent);
+		})();
+		return closing;
 	};
 }
 
@@ -214,7 +230,7 @@ describe("native background subagents", () => {
 				const params = { agent: "general", task: "own the child background work", background: true };
 				const parentJob = jobSnapshot(await startSubagent(context, params));
 				await started.promise;
-				const child = context.runtimes[0]!.session;
+				const child = context.runtimes[0]!.conversation.session;
 				await child.waitForIdle();
 				await setImmediate();
 				expect(child.getLastAssistantText()).toBe("Child final report.");
@@ -324,10 +340,10 @@ describe("native background subagents", () => {
 					}),
 					fauxAssistantMessage("Child final report."),
 				],
-				onRuntimeCreated: async ({ runtime }) => {
+				onRuntimeCreated: async ({ conversation }) => {
 					if (phase !== "late-start") return;
-					// A host can use the runtime before its factory returns the handle.
-					await runtime.session.prompt("Prepare child background work");
+					// A host can use the child's conversation before its factory returns the handle.
+					await conversation.session.prompt("Prepare child background work");
 					await releaseStart.promise;
 				},
 			});
@@ -341,7 +357,7 @@ describe("native background subagents", () => {
 					await startSubagent(context, { agent: "general", task: "own background work", background: true }),
 				);
 				await started.promise;
-				const child = context.runtimes[0]!.session;
+				const child = context.runtimes[0]!.conversation.session;
 				await child.waitForIdle();
 				expect(child.hasBackgroundJobs).toBe(true);
 				expect(context.manager.isSubagentRuntime()).toBe(true);
@@ -482,11 +498,9 @@ describe("native background subagents", () => {
 			const disposing = vi.fn(() => releaseDisposal.promise);
 			const context = await setup({
 				beforeRuntimeCreate: creating,
-				onRuntimeCreated: ({ runtime }) => {
-					const dispose = runtime.dispose.bind(runtime);
-					vi.spyOn(runtime, "dispose").mockImplementation(async () => {
+				onRuntimeCreated: (event) => {
+					beforeChildClose(event, async () => {
 						await disposing();
-						await dispose();
 					});
 				},
 			});
@@ -553,12 +567,10 @@ describe("native background subagents", () => {
 			const disposalStarted = deferred();
 			const releaseDisposal = deferred();
 			const context = await setup({
-				onRuntimeCreated: ({ runtime }) => {
-					const dispose = runtime.dispose.bind(runtime);
-					vi.spyOn(runtime, "dispose").mockImplementation(async () => {
+				onRuntimeCreated: (event) => {
+					beforeChildClose(event, async () => {
 						disposalStarted.resolve();
 						await releaseDisposal.promise;
-						await dispose();
 					});
 				},
 			});
@@ -675,13 +687,11 @@ describe("native background subagents", () => {
 								await release.promise;
 							}
 						: undefined,
-				onRuntimeCreated: ({ runtime }) => {
+				onRuntimeCreated: (event) => {
 					if (phase !== "disposal") return;
-					const dispose = runtime.dispose.bind(runtime);
-					vi.spyOn(runtime, "dispose").mockImplementation(async () => {
+					beforeChildClose(event, async () => {
 						blocked.resolve();
 						await release.promise;
-						await dispose();
 					});
 				},
 			});
