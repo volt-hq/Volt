@@ -66,7 +66,7 @@ describe("LiveState keyed values", () => {
 		expect(live.entries()).toEqual([]);
 	});
 
-	it("keeps a failing client from reaching the host or the other clients", () => {
+	it("keeps a failing client from reaching the host or the other clients", async () => {
 		const live = new LiveState();
 		const failing: LiveClient = {
 			acceptsHostRequest: () => true,
@@ -74,11 +74,25 @@ describe("LiveState keyed values", () => {
 				throw new Error("render failed");
 			},
 		};
-		const other = createLiveRecorder();
+		const throwing: LiveClient = {
+			acceptsHostRequest: () => {
+				throw new Error("check failed");
+			},
+			apply: () => {},
+		};
+		const other = createLiveRecorder(["confirm"]);
 		live.attach("failing", failing);
+		live.attach("throwing", throwing);
 		live.attach("other", other);
 		expect(() => live.notice("info", "hello")).not.toThrow();
 		expect(other.notices()).toEqual([["info", "hello"]]);
+
+		// A client whose check throws accepts nothing; the request and its requester carry on.
+		const asked = live.request(confirm, { id: "dialog" });
+		expect(live.answer("dialog", { confirmed: true }, "throwing")).toBe("not_allowed");
+		expect(live.answer("dialog", { confirmed: true }, "failing")).toBe("accepted");
+		await expect(asked).resolves.toMatchObject({ status: "answered", clientId: "failing" });
+		expect(other.pending()).toEqual([]);
 	});
 });
 
@@ -186,16 +200,16 @@ describe("LiveState host requests", () => {
 		await vi.advanceTimersByTimeAsync(1000);
 		await expect(timed).resolves.toEqual({ status: "cancelled", reason: "timeout" });
 
-		const first = live.request(confirm, { id: "same" });
-		const second = live.request({ kind: "input", title: "Name" }, { id: "same" });
-		await expect(first).resolves.toEqual({ status: "cancelled", reason: "replaced" });
+		// An answer to a pending request must never answer another: its id cannot be reused while it is pending.
+		const pending = live.request({ kind: "input", title: "Name" }, { id: "same" });
+		await expect(live.request(confirm, { id: "same" })).rejects.toThrow(/already pending/);
 		expect(live.pendingRequest("same")?.request).toEqual({ kind: "input", title: "Name" });
 
 		accepting = false;
 		live.cancelUnanswerable("confirm");
 		expect(live.pendingRequest("same")).toBeDefined();
 		live.cancelUnanswerable();
-		await expect(second).resolves.toEqual({ status: "cancelled", reason: "declined" });
+		await expect(pending).resolves.toEqual({ status: "cancelled", reason: "declined" });
 
 		accepting = true;
 		const closing = live.request(confirm);

@@ -935,7 +935,7 @@ A pending request belongs to the conversation, not to the client that saw it: ev
 {"type": "get_pending_host_actions"}
 ```
 
-Clients approve only the advertised host-owned action; they cannot alter the command. If no attached client advertises `host_action_requests.v1`, Volt falls back without blocking (for example, an LSP missing-server message with install instructions); when the last such client withdraws the feature, pending requests end as `dismissed`. A paired device needs `host.manage.v1` to see or answer host action requests. Current LSP install requests are limited to trusted built-in install recipes; custom LSP commands and manual-install-only servers still produce instructions only.
+Clients approve only the advertised host-owned action; they cannot alter the command. If no attached client advertises `host_action_requests.v1`, Volt falls back without blocking (for example, an LSP missing-server message with install instructions); when a client that may answer host action requests sends `set_client_capabilities` without the feature, pending requests no other attached client takes end as `dismissed`. A paired device needs `host.manage.v1` to see or answer host action requests. Current LSP install requests are limited to trusted built-in install recipes; custom LSP commands and manual-install-only servers still produce instructions only.
 
 ### Model
 

@@ -883,10 +883,10 @@ export class ConversationHost {
 		this.cancelRetention(conversation);
 		const attachment: Attachment = { client, conversation };
 		this.attachments.set(client.id, attachment);
-		// The live view first: a dialog an extension asks from session_start reaches the client.
-		if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
-		if (!client.surface) return;
 		try {
+			// The live view first: a dialog an extension asks from session_start reaches the client.
+			if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
+			if (!client.surface) return;
 			const extensions = conversation.session.attachExtensionClient({
 				...client.surface,
 				id: client.id,

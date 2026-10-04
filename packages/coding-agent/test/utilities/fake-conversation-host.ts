@@ -84,12 +84,12 @@ export function createFakeHost(
 		if (conversation.closed) throw new Error("Cannot attach to a closed conversation");
 		const attachment: Attachment = { client, conversation };
 		attachments.set(client.id, attachment);
-		if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
-		if (!client.surface) return;
-		const session = conversation.session as unknown as FakeSessionLike;
-		const extensions = session.attachExtensionClient?.({ ...client.surface, id: client.id, mode });
-		attachment.detachSurface = extensions?.detach;
 		try {
+			if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
+			if (!client.surface) return;
+			const session = conversation.session as unknown as FakeSessionLike;
+			const extensions = session.attachExtensionClient?.({ ...client.surface, id: client.id, mode });
+			attachment.detachSurface = extensions?.detach;
 			await extensions?.ready;
 		} catch (error) {
 			if (attachments.get(client.id) === attachment) attachments.delete(client.id);

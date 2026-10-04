@@ -91,7 +91,6 @@ export interface RpcCommandDispatcherContext {
 		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
 	): Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
-	cancelPendingHostActionRequests(message?: string): void;
 	/** Captured at dispatch for generation-scoped Jobs responses on ordered transports. */
 	conversationBranchEpoch?: string;
 	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
@@ -326,9 +325,6 @@ async function dispatchRpcCommand(
 
 		case "set_client_capabilities": {
 			context.setClientCapabilities(command.features);
-			if (!command.features.includes(HOST_ACTION_REQUESTS_CAPABILITY)) {
-				context.cancelPendingHostActionRequests("Host action capability disabled");
-			}
 			return createRpcSuccessResponse(id, "set_client_capabilities");
 		}
 

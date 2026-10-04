@@ -1082,6 +1082,12 @@ export async function runRpcMode(
 					features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
 				);
 				options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
+				// A client that may answer approvals declines them: those nobody else can answer end as
+				// dismissed, as a reconnecting client without support expects. A client that may not
+				// answer them (observe-only, relayed) cannot end them.
+				if (mayTakeApprovals() && !liveView.acceptsHostRequest("approval")) {
+					commandConversation.liveState.cancelUnanswerable("approval");
+				}
 			},
 			async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
 				const orderedConversation = options.orderedConversation;
@@ -1099,7 +1105,6 @@ export async function runRpcMode(
 			// A client that may take approvals finds them after a reconnect, before it accepts them again.
 			getPendingHostActionRequests: () =>
 				mayTakeApprovals() ? pendingHostActionRequests(commandConversation.liveState) : [],
-			cancelPendingHostActionRequests: () => commandConversation.liveState.cancelUnanswerable("approval"),
 			assertConversationGenerationCurrent,
 			conversationBranchEpoch: options.orderedConversation?.branchEpoch,
 			takePendingReviewWorkflow: (workflowId: string) => {

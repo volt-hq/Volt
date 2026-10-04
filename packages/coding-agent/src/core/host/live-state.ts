@@ -59,8 +59,6 @@ export type HostRequestCancelReason =
 	/** Its requester aborted it. */
 	| "aborted"
 	| "timeout"
-	/** A request with the same id replaced it. */
-	| "replaced"
 	/** The conversation closed. */
 	| "closed";
 
@@ -73,7 +71,10 @@ export type HostRequestOutcome =
 export type HostAnswerResult = "accepted" | "unknown" | "not_allowed" | "invalid";
 
 export interface HostRequestOptions {
-	/** The request id; minted when omitted. A pending request with the same id ends as replaced. */
+	/**
+	 * The request id; minted when omitted. Asking with the id of a pending
+	 * request rejects: an answer to that one must never answer another.
+	 */
 	readonly id?: string;
 	readonly signal?: AbortSignal;
 	/**
@@ -157,6 +158,15 @@ function keyFits(key: string, value: LiveValue): boolean {
 	return isKeyId(key.slice(value.kind.length + 1));
 }
 
+/** Whether `client` accepts `kind`; a client whose check throws accepts nothing. */
+function acceptsKind(client: LiveClient, kind: HostRequestKind): boolean {
+	try {
+		return client.acceptsHostRequest(kind) === true;
+	} catch {
+		return false;
+	}
+}
+
 function isGatedKey(key: string): boolean {
 	return key.startsWith("host_request/") || key.startsWith("host_action/");
 }
@@ -233,7 +243,6 @@ const HOST_ACTION_CANCEL_MESSAGES: Record<Exclude<HostRequestCancelReason, "unav
 	declined: "No client accepts host actions",
 	aborted: "Host action cancelled",
 	timeout: "Host action timed out",
-	replaced: "Host action replaced",
 	closed: "The conversation closed",
 };
 
@@ -279,7 +288,7 @@ export class LiveState {
 		for (const [key, value] of this.values) {
 			const gate = gateOf(key, value);
 			if (gate !== undefined) {
-				if (!client.acceptsHostRequest(gate)) continue;
+				if (!acceptsKind(client, gate)) continue;
 				attached.shown.add(key);
 			}
 			items.push({ type: "set", key, value });
@@ -295,7 +304,7 @@ export class LiveState {
 	/** Whether an attached client accepts host requests of `kind`. */
 	accepts(kind: HostRequestKind): boolean {
 		for (const attached of this.clients.values()) {
-			if (attached.client.acceptsHostRequest(kind)) return true;
+			if (acceptsKind(attached.client, kind)) return true;
 		}
 		return false;
 	}
@@ -342,7 +351,8 @@ export class LiveState {
 
 	/**
 	 * Ask the attached clients that accept `request`'s kind. Resolves with the
-	 * first valid answer, or cancelled. Rejects for a malformed request.
+	 * first valid answer, or cancelled. Rejects for a malformed request or the
+	 * id of a pending one.
 	 */
 	request(request: HostRequest, options: HostRequestOptions = {}): Promise<HostRequestOutcome> {
 		const requestId = options.id ?? randomUUID();
@@ -357,8 +367,9 @@ export class LiveState {
 		if (options.unattended !== true && !this.accepts(request.kind)) {
 			return Promise.resolve({ status: "cancelled", reason: "unavailable" });
 		}
-		const replaced = this.pending.get(requestId);
-		if (replaced) this.settle(replaced, { status: "cancelled", reason: "replaced" });
+		if (this.pending.has(requestId)) {
+			return Promise.reject(new Error(`Host request ${JSON.stringify(requestId)} is already pending`));
+		}
 		return new Promise((resolve) => {
 			const entry: PendingEntry = {
 				requestId,
@@ -401,7 +412,7 @@ export class LiveState {
 		if (!attached) return "not_allowed";
 		const entry = this.pending.get(requestId);
 		if (!entry) return "unknown";
-		if (!attached.client.acceptsHostRequest(entry.request.kind)) return "not_allowed";
+		if (!acceptsKind(attached.client, entry.request.kind)) return "not_allowed";
 		if (!answers(entry.request, response)) return "invalid";
 		this.settle(entry, { status: "answered", response, clientId });
 		return "accepted";
@@ -496,11 +507,15 @@ export class LiveState {
 		entry.settled = true;
 		if (entry.timer !== undefined) clearTimeout(entry.timer);
 		entry.signal?.removeEventListener("abort", entry.onAbort);
-		if (this.pending.get(entry.requestId) === entry) {
-			this.pending.delete(entry.requestId);
-			this.publish([{ type: "clear", key: liveKey("host_request", entry.requestId) }]);
+		try {
+			if (this.pending.get(entry.requestId) === entry) {
+				this.pending.delete(entry.requestId);
+				this.publish([{ type: "clear", key: liveKey("host_request", entry.requestId) }]);
+			}
+		} finally {
+			// The requester learns the outcome whatever happens to its delivery.
+			entry.resolve(outcome);
 		}
-		entry.resolve(outcome);
 	}
 
 	/**
@@ -537,7 +552,7 @@ export class LiveState {
 				const gate = gateOf(item.key, item.value);
 				if (gate === undefined) {
 					visible.push(item);
-				} else if (attached.client.acceptsHostRequest(gate)) {
+				} else if (acceptsKind(attached.client, gate)) {
 					attached.shown.add(item.key);
 					visible.push(item);
 				} else if (attached.shown.delete(item.key)) {

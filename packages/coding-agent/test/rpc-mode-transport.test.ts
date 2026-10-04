@@ -1641,12 +1641,18 @@ describe("RPC mode host requests on the remote profile", () => {
 
 		// An approval another client takes stays out of this client's reach.
 		const manager = createLiveRecorder(["approval"]);
-		liveState.attach("manager", manager);
+		const detachManager = liveState.attach("manager", manager);
 		const decision = liveState.hostInteraction.requestAction({
 			id: "approval-2",
 			action: "test.action",
 			title: "Approve?",
 		});
+		// While the manager reconnects, a client that may not answer approvals cannot end them by declining.
+		detachManager();
+		phone.send({ id: "withdraw", type: "set_client_capabilities", features: [] });
+		await vi.waitFor(() => expect(phone.writes).toContainEqual(expect.objectContaining({ id: "withdraw" })));
+		expect(liveState.pendingRequest("approval-2")).toBeDefined();
+		liveState.attach("manager", manager);
 		phone.send({ type: "host_action_response", id: "approval-2", decision: "approved" });
 		phone.send({ type: "extension_ui_response", id: "approval-2", confirmed: true });
 		phone.send({ id: "pending", type: "get_pending_host_actions" });
