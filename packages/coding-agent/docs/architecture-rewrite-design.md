@@ -1,6 +1,6 @@
 # RFC: Volt Architecture Rewrite
 
-- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps).
+- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps). §7.1 and §7.3 amended 2026-10-04 (explicit resume, retention on running work).
 - Date: 2026-10-02
 - Scope: all four packages (`packages/ai`, `packages/agent`, `packages/tui`, `packages/coding-agent`) plus a new `packages/protocol`. `volt-hq/volt-app` adapts through filed issues.
 - Release: ships in the next release (0.3.0), together with the removal of Pi extension compatibility (#573). There is no intermediate release.
@@ -260,6 +260,7 @@ Deleted outright:
   - `work_finished{workId, outcome, result}`.
 - **Live progress.** Fine-grained progress uses the live lane.
 - **One state machine.** `running → cancelling → completed | failed | cancelled`. On open, the fold finds work with no live executor and the kernel appends `interrupted`, unless the kind declares resume (subagents do).
+  - **Resume (amended).** A resumable item that is open without an executor is suspended until a client resumes or cancels it; opening a conversation never resumes work on its own. Resumable children of an in-log parent that is closed or being interrupted are interrupted with it.
 - **Delivery policy per kind.** `none`, `message` (a result entry the model sees), or `wake` (the result entry plus an idle turn).
 
 ### 7.2 Kinds
@@ -281,7 +282,7 @@ Not work items:
 ### 7.3 Rendering and deletions
 
 - **Generic rendering.** Clients render title, status, progress (text, determinate, or steps), result summary, and actions (cancel, open the child conversation). Kind-specific detail is declared UI data (§8.3), not client code.
-- **One retention check.** Daemon retention becomes a single check: is any work open.
+- **One retention check.** Daemon retention becomes a single check: is any work running (open with a live executor), a turn busy, or an operation holding the conversation open. Suspended work does not keep a conversation alive (amended).
 - **Deleted:**
   - `background_jobs_changed` and the `backgroundJobs` state field;
   - the job commands;
