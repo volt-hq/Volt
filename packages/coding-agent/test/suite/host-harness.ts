@@ -14,7 +14,6 @@ import type {
 	ExtensionAPI,
 	ExtensionFactory,
 	ExtensionMode,
-	ExtensionUIContext,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
 	SessionShutdownEvent,
@@ -22,6 +21,7 @@ import type {
 } from "../../src/core/extensions/index.ts";
 import { ConversationHost, type OpenForResult, type WhenUnattached } from "../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
@@ -60,7 +60,7 @@ export interface HostHarness {
 	/** Open a new conversation stored in `<tempDir>/sessions`, as startup does. */
 	openStartup(): Promise<HostedConversation>;
 	/** An in-place client with a surface; `moves` records the conversations it moved to. */
-	client(id: string, options?: { anchor?: boolean; ui?: ExtensionUIContext }): HostClient & { moves: string[] };
+	client(id: string, options?: { anchor?: boolean; live?: LiveClient }): HostClient & { moves: string[] };
 	cleanup(): Promise<void>;
 }
 
@@ -147,7 +147,8 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 			return {
 				id,
 				...(clientOptions.anchor === undefined ? {} : { anchor: clientOptions.anchor }),
-				surface: clientOptions.ui === undefined ? {} : { ui: clientOptions.ui },
+				surface: {},
+				...(clientOptions.live === undefined ? {} : { live: clientOptions.live }),
 				move: {
 					kind: "in_place",
 					onMoved: (to) => {

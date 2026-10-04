@@ -1,6 +1,7 @@
 import { describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
 	createIrohRemotePresetAccess,
@@ -104,6 +105,7 @@ function createPromptRuntime(
 	const detachSession = vi.fn();
 	const detachBackpressure = vi.fn();
 	const session = {
+		liveState: new LiveState(),
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		subscribe: vi.fn((handler: (event: object) => void) => {

@@ -88,6 +88,16 @@ export {
 	type SubagentRuntimeContext,
 } from "./host/hosted-conversation.ts";
 export {
+	type HostAnswerResult,
+	type HostRequestCancelReason,
+	type HostRequestOptions,
+	type HostRequestOutcome,
+	type LiveClient,
+	LiveState,
+	type LiveUpdate,
+	type PendingHostRequest,
+} from "./host/live-state.ts";
+export {
 	openFork,
 	openImport,
 	openNewSession,

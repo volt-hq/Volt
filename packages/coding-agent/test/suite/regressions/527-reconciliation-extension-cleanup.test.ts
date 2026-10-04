@@ -8,6 +8,8 @@ import {
 } from "../../../src/core/agent-session-services.ts";
 import { createEventBus } from "../../../src/core/event-bus.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
+import type { LiveClient } from "../../../src/core/host/live-state.ts";
+import type { ExtensionTerminalUI } from "../../../src/core/session/extension-binding.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type {
 	ExtensionAPI,
@@ -31,7 +33,8 @@ describe("regression #527: extension cleanup when a session ends", () => {
 	async function createRuntimeForTest(
 		extend?: (volt: ExtensionAPI, instance: number) => void,
 		otherExtensions: ExtensionFactory[] = [],
-		uiOverrides?: Partial<ExtensionUIContext>,
+		uiOverrides?: Partial<ExtensionTerminalUI>,
+		live?: LiveClient,
 	) {
 		const harness = await createHarness();
 		const eventBus = createEventBus();
@@ -94,6 +97,8 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		const ui = uiOverrides ? { ...conversation.session.extensionRunner.getUIContext(), ...uiOverrides } : undefined;
 		// The host attaches the client's surface on every conversation it joins.
 		const runtime: TestClient = await connectTestClient(host, conversation, {
+			id: "client",
+			...(live === undefined ? {} : { live }),
 			surface: {
 				...(ui ? { ui } : {}),
 				shutdownHandler: shutdown,
@@ -304,8 +309,26 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		const contexts: ExtensionUIContext[] = [];
 		let capturedNotify: ExtensionUIContext["notify"];
 		let capturedInput: ExtensionUIContext["input"];
-		const input = vi.fn(async () => "answer");
-		const { runtime } = await createRuntimeForTest(
+		const input = vi.fn(async (_title: string) => "answer");
+		let runtime: TestClient | undefined;
+		// The client's live view: editor text, notifications, and the dialogs it answers.
+		const live: LiveClient = {
+			acceptsHostRequest: (kind) => kind === "input",
+			apply: (update) => {
+				for (const item of update.items) {
+					if (item.type === "directive") draft = item.text;
+					else if (item.type === "notice") notify(item.message);
+					else if (item.type === "set" && item.value.kind === "host_request") {
+						const { requestId, request } = item.value;
+						if (request.kind !== "input") continue;
+						void input(request.title).then((value) =>
+							runtime?.conversation.liveState.answer(requestId, { value }, "client"),
+						);
+					}
+				}
+			},
+		};
+		({ runtime } = await createRuntimeForTest(
 			(volt, instance) => {
 				let removeListener: () => void;
 				volt.on("session_start", (_event, ctx) => {
@@ -321,21 +344,17 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			},
 			[],
 			{
-				setEditorText(text) {
-					draft = text;
-				},
 				getEditorText: () => draft,
-				notify,
-				input,
 				onTerminalInput: () => unsubscribe,
 			},
-		);
+			live,
+		));
 		contexts[0].setEditorText("unsent draft");
 		expect(contexts[0].getEditorText()).toBe("unsent draft");
 		expect(contexts[0].notify).toBe(capturedNotify!);
 		capturedNotify!("active notification");
 		await expect(capturedInput!("active dialog")).resolves.toBe("answer");
-		await runtime.newSession();
+		await runtime?.newSession();
 		expect(unsubscribe).toHaveBeenCalledOnce();
 		expect(() => contexts[0].setEditorText("late callback overwrote draft")).toThrow(/stale/);
 		expect(() => capturedNotify!("late notification")).toThrow(/stale/);

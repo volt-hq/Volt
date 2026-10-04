@@ -45,6 +45,7 @@ import type { PolicyRegistration } from "./extensions/policy-registration.ts";
 import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { ClientScope } from "./host/client-scope.ts";
+import { LiveState } from "./host/live-state.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import type { LspServerStatus } from "./lsp/manager.ts";
 import type { LspServerPool } from "./lsp/server-pool.ts";
@@ -278,7 +279,7 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Optional host interaction bridge for blocking host-initiated actions. */
+	/** Answers host-initiated actions (approvals). Default: they wait in the session's live state for an attached client. */
 	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
@@ -379,6 +380,12 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	readonly gitContextProvider: GitContextProvider;
+	/**
+	 * The conversation's live state: extension status, widgets, and title,
+	 * dialogs, approvals, and MCP authorization flows, which every attached
+	 * client sees. Disposing the session closes it.
+	 */
+	readonly liveState: LiveState = new LiveState();
 	private readonly _releaseGitContextProvider: () => void;
 
 	/** The conversation kernel this session runs on, over its session manager's log. */
@@ -601,6 +608,7 @@ export class AgentSession {
 				agentDir: this._agentDir,
 				lostSignal: this._lostAbort.signal,
 				planningController: this,
+				liveState: this.liveState,
 				conversation: () => this._conversation,
 				extensions: () => this._extensions,
 				extensionWork: () => this._extensionWork,
@@ -622,7 +630,8 @@ export class AgentSession {
 				allowUnlistedExtensionTools: config.allowUnlistedExtensionTools,
 				excludedToolNames: config.excludedToolNames,
 				baseToolsOverride: config.baseToolsOverride,
-				hostInteraction: config.hostInteraction,
+				// Approvals wait in the live state unless the session's creator answers them itself.
+				hostInteraction: config.hostInteraction ?? this.liveState.hostInteraction,
 				lspServerPool: config.lspServerPool,
 				subagentToolManager: config.subagentToolManager,
 				mcpManager: config.mcpManager,
@@ -639,6 +648,7 @@ export class AgentSession {
 				resourceLoader: this._resourceLoader,
 				cwd: this._cwd,
 				lifetimeSignal: this._lifetimeAbort.signal,
+				liveState: this.liveState,
 				conversation: () => this._conversation,
 				tools: () => this._tools,
 				extensionWork: () => this._extensionWork,
@@ -1046,6 +1056,7 @@ export class AgentSession {
 		return this._admissionGate.suspend();
 	}
 
+	/** Replace what answers host-initiated actions; `liveState.hostInteraction` is the default. */
 	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
 		this._assertActive();
 		this._tools.setHostInteraction(hostInteraction);
@@ -1278,7 +1289,11 @@ export class AgentSession {
 				this._events.clearStreamingState();
 				this._clientInputs.handBackQueue();
 			},
-			releaseExtensionClients: () => this._extensions.releaseClients(),
+			releaseExtensionClients: () => {
+				this._extensions.releaseClients();
+				// Pending dialogs and approvals end; nothing more reaches the clients.
+				this.liveState.close();
+			},
 			closeBackgroundJobs: () => this._backgroundJobs.close(),
 			settleLiveClientInputs: () => this._clientInputs.settleOnDisposal(),
 			stopToolServers: () => this._tools.stopServers(),

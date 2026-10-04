@@ -435,7 +435,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	});
 });
 
-describe("InteractiveMode.createExtensionUIContext setTheme", () => {
+describe("InteractiveMode.createExtensionTerminalUI setTheme", () => {
 	test("persists theme changes to settings manager", () => {
 		initTheme("dark");
 
@@ -452,7 +452,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			ui: { requestRender: vi.fn() },
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (InteractiveMode as any).prototype.createExtensionTerminalUI.call(fakeThis);
 		const result = uiContext.setTheme("light");
 
 		expect(result.success).toBe(true);
@@ -474,7 +474,7 @@ describe("InteractiveMode.createExtensionUIContext setTheme", () => {
 			ui: { requestRender: vi.fn() },
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (InteractiveMode as any).prototype.createExtensionTerminalUI.call(fakeThis);
 		const result = uiContext.setTheme("__missing_theme__");
 
 		expect(result.success).toBe(false);
@@ -567,7 +567,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 	});
 });
 
-describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () => {
+describe("InteractiveMode.createExtensionTerminalUI addAutocompleteProvider", () => {
 	test("stores wrapper factories and rebuilds autocomplete immediately", () => {
 		const wrapper: AutocompleteProviderFactory = (current) => current;
 		const fakeThis = {
@@ -575,7 +575,7 @@ describe("InteractiveMode.createExtensionUIContext addAutocompleteProvider", () 
 			setupAutocompleteProvider: vi.fn(),
 		};
 
-		const uiContext = (InteractiveMode as any).prototype.createExtensionUIContext.call(fakeThis);
+		const uiContext = (InteractiveMode as any).prototype.createExtensionTerminalUI.call(fakeThis);
 		uiContext.addAutocompleteProvider(wrapper);
 
 		expect(fakeThis.autocompleteProviderWrappers).toEqual([wrapper]);

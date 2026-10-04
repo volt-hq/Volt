@@ -11,11 +11,11 @@ import {
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import type { ExtensionUIContext } from "../../../src/core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../../src/core/host/targets.ts";
-import type { HostActionDecision, HostActionRequest } from "../../../src/core/host-interaction.ts";
+import type { HostActionRequest } from "../../../src/core/host-interaction.ts";
+import type { ExtensionTerminalUI } from "../../../src/core/session/extension-binding.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { type ExtensionAPI, type ExtensionFactory, ExtensionUIDismissedError } from "../../../src/index.ts";
@@ -25,6 +25,7 @@ import { createInteractiveTui, InteractiveMode } from "../../../src/modes/intera
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestHost } from "../../utilities/host-client.ts";
+import { createLiveRecorder } from "../../utilities/live-recorder.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -36,8 +37,11 @@ type InteractiveAccess = {
 	activeView: View;
 	extensionSelector?: { handleInput(data: string): void };
 	isInitialized: boolean;
-	createExtensionUIContext(): ExtensionUIContext;
-	requestHostAction(request: HostActionRequest, options?: { signal?: AbortSignal }): Promise<HostActionDecision>;
+	createExtensionTerminalUI(): ExtensionTerminalUI;
+	showExtensionSelector(title: string, options: string[]): Promise<string | undefined>;
+	showExtensionConfirm(title: string, message: string): Promise<boolean>;
+	showExtensionInput(title: string): Promise<string | undefined>;
+	showExtensionEditor(title: string, prefill?: string): Promise<string | undefined>;
 	resetExtensionUI(): void;
 	setupKeyHandlers(): void;
 	setupPlanPaneInputRouting(): void;
@@ -346,9 +350,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(exit).not.toHaveBeenCalled();
 	});
 
-	it("settles every pending extension dialog when extension UI is reset", async () => {
+	it("settles every pending TUI dialog and component when extension UI is reset", async () => {
 		const { access, terminal } = await startInteractiveMode(await openConversationForTest([]));
-		const ui = access.createExtensionUIContext();
+		const ui = access.createExtensionTerminalUI();
 		const settled = <T>(promise: Promise<T>) =>
 			promise.then(
 				(value) => ({ status: "fulfilled" as const, value }),
@@ -362,9 +366,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 		access.editor.setText("draft");
 
 		// One dialog of each kind, stacked in opening order.
-		const select = ui.select("Select dialog", ["a", "b"]);
-		const input = ui.input("Input dialog");
-		const editor = ui.editor("Editor dialog", "prefill");
+		const select = access.showExtensionSelector("Select dialog", ["a", "b"]);
+		const input = access.showExtensionInput("Input dialog");
+		const editor = access.showExtensionEditor("Editor dialog", "prefill");
 		const inline = customComponent("inline custom");
 		const inlineResult = settled(ui.custom<string>(() => inline));
 		const overlay = customComponent("overlay custom");
@@ -400,31 +404,61 @@ describe("regression #525: ending a session whose saved state could not be confi
 			expect(screen).not.toContain(label);
 		}
 
-		// Confirm and host actions share the selector; open them one at a time.
-		const confirm = ui.confirm("Confirm dialog", "Proceed?");
+		const confirm = access.showExtensionConfirm("Confirm dialog", "Proceed?");
 		access.resetExtensionUI();
 		await expect(confirm).resolves.toBe(false);
-
-		const request: HostActionRequest = { id: "host-action", action: "test.action", title: "Host action" };
-		const dismissed = access.requestHostAction(request);
-		access.resetExtensionUI();
-		await expect(dismissed).resolves.toEqual({ decision: "dismissed" });
-
-		const controller = new AbortController();
-		const aborted = access.requestHostAction(request, { signal: controller.signal });
-		controller.abort();
-		await expect(aborted).resolves.toEqual({ decision: "dismissed" });
-
-		const approved = access.requestHostAction(request);
-		access.extensionSelector?.handleInput("\n");
-		await expect(approved).resolves.toEqual({ decision: "approved" });
-
-		const denied = access.requestHostAction(request);
-		access.extensionSelector?.handleInput("\x1b");
-		await expect(denied).resolves.toEqual({ decision: "denied" });
 
 		// Nothing is left to dismiss.
 		access.resetExtensionUI();
 		expect(access.activeView).toBe(access.conversationView);
+	});
+
+	it("shows the live state's dialogs and approvals one at a time and answers them in process", async () => {
+		const opened = await openConversationForTest([]);
+		const { access, terminal } = await startInteractiveMode(opened);
+		const liveState = opened.conversation.liveState;
+		const interaction = liveState.hostInteraction;
+		const request: HostActionRequest = { id: "host-action", action: "test.action", title: "Host action" };
+
+		// An extension UI reset leaves the live state's approval showing: it is the conversation's.
+		const kept = interaction.requestAction({ ...request, commandPreview: "npm install" });
+		await terminal.waitForRender();
+		expect(viewport(terminal)).toContain("Command: npm install");
+		access.resetExtensionUI();
+		expect(access.extensionSelector).toBeDefined();
+		access.extensionSelector?.handleInput("\n");
+		await expect(kept).resolves.toEqual({ decision: "approved" });
+		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
+
+		// Escape denies; the requester's abort closes the dialog without an answer.
+		const denied = interaction.requestAction(request);
+		await vi.waitFor(() => expect(access.extensionSelector).toBeDefined());
+		access.extensionSelector?.handleInput("\x1b");
+		await expect(denied).resolves.toEqual({ decision: "denied" });
+		const controller = new AbortController();
+		const aborted = interaction.requestAction(request, { signal: controller.signal });
+		await vi.waitFor(() => expect(access.extensionSelector).toBeDefined());
+		controller.abort();
+		await expect(aborted).resolves.toEqual({ decision: "dismissed", message: "Host action cancelled" });
+		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
+
+		// Dialogs show oldest first; another client's answer closes the one that shows.
+		const phone = createLiveRecorder(["confirm", "select"]);
+		liveState.attach("phone", phone);
+		const first = liveState.request({ kind: "confirm", title: "First dialog", message: "One?" });
+		const second = liveState.request({ kind: "select", title: "Second dialog", options: ["x", "y"] });
+		await terminal.waitForRender();
+		expect(viewport(terminal)).toContain("First dialog");
+		expect(viewport(terminal)).not.toContain("Second dialog");
+		const firstId = phone.pending()[0]?.requestId ?? "";
+		expect(liveState.answer(firstId, { confirmed: false }, "phone")).toBe("accepted");
+		await expect(first).resolves.toMatchObject({ status: "answered", clientId: "phone" });
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Second dialog"));
+		expect(viewport(terminal)).not.toContain("First dialog");
+		access.extensionSelector?.handleInput("\n");
+		await expect(second).resolves.toMatchObject({ status: "answered", response: { value: "x" } });
+		expect(phone.pending()).toEqual([]);
+		await vi.waitFor(() => expect(access.activeView).toBe(access.conversationView));
+		expect(access.ui.getFocusedComponent()).toBe(access.editor);
 	});
 });

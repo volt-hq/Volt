@@ -218,6 +218,16 @@ export {
 	GitContextProviderPool,
 	type GitContextProviderPoolAcquireOptions,
 } from "./core/git-context-provider-pool.ts";
+export {
+	type HostAnswerResult,
+	type HostRequestCancelReason,
+	type HostRequestOptions,
+	type HostRequestOutcome,
+	type LiveClient,
+	LiveState,
+	type LiveUpdate,
+	type PendingHostRequest,
+} from "./core/host/live-state.ts";
 export type {
 	HostActionDecision,
 	HostActionDecisionKind,
@@ -690,7 +700,7 @@ export {
 	type WorkspaceSessionSummary,
 } from "./core/sdk.ts";
 export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
-export type { ExtensionClient } from "./core/session/extension-binding.ts";
+export type { ExtensionClient, ExtensionTerminalUI } from "./core/session/extension-binding.ts";
 export {
 	assertCurrentSessionSnapshot,
 	type BranchSummaryEntry,

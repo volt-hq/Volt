@@ -12,6 +12,7 @@ import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
 import type { BackgroundJobManager } from "../background-jobs.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
+import type { LiveState } from "../host/live-state.ts";
 import type { HostInteraction } from "../host-interaction.ts";
 import { resolveLspConfig } from "../lsp/config.ts";
 import { LspManager, type LspServerStatus } from "../lsp/manager.ts";
@@ -54,6 +55,7 @@ import { createToolDefinitionFromAgentTool } from "../tools/tool-definition-wrap
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
 import type { SessionExtensionWork } from "./extension-work.ts";
+import { McpAuthRequests } from "./mcp-auth-requests.ts";
 
 interface ToolDefinitionEntry {
 	definition: ToolDefinition<any, any>;
@@ -98,6 +100,8 @@ export interface SessionToolRuntimeHost {
 	readonly lostSignal: AbortSignal;
 	/** The session, which the planning tools drive. */
 	readonly planningController: PlanningToolController;
+	/** The conversation's live state, where MCP authorization flows wait for the user. */
+	readonly liveState: LiveState;
 	conversation(): Conversation<AgentTool>;
 	extensions(): SessionExtensionBinding;
 	extensionWork(): SessionExtensionWork;
@@ -154,6 +158,7 @@ export class SessionToolRuntime {
 	private subagentToolManager?: SubagentToolManager;
 	private mcpManager?: McpManager;
 	private unsubscribeMcpManager?: () => void;
+	private readonly mcpAuthRequests: McpAuthRequests;
 	private directMcpToolNames: Set<string> = new Set();
 	private requestedBuildToolNames: string[] = [];
 	private planningRuntimeInitialized = false;
@@ -187,6 +192,7 @@ export class SessionToolRuntime {
 		this.subagentToolManager = options.subagentToolManager;
 		this.mcpManager = options.mcpManager;
 		this.mcpManagerFactory = options.mcpManagerFactory;
+		this.mcpAuthRequests = new McpAuthRequests(host.liveState);
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -239,6 +245,7 @@ export class SessionToolRuntime {
 		this.lspManager?.dispose();
 		this.unsubscribeMcpManager?.();
 		this.unsubscribeMcpManager = undefined;
+		this.mcpAuthRequests.endAll();
 	}
 
 	/** Detach the language servers of a session whose open failed; the caller disposes them. */
@@ -971,10 +978,16 @@ export class SessionToolRuntime {
 		}
 	}
 
-	/** Forward MCP manager lifecycle events into the session event stream. */
+	/**
+	 * Forward MCP manager lifecycle events into the session event stream, and
+	 * its authorization flows into the live state. A replaced manager's flows end.
+	 */
 	attachMcpManagerEvents(): void {
 		this.unsubscribeMcpManager?.();
-		this.unsubscribeMcpManager = this.mcpManager?.subscribe((event) => {
+		this.mcpAuthRequests.endAll();
+		const manager = this.mcpManager;
+		this.unsubscribeMcpManager = manager?.subscribe((event) => {
+			this.mcpAuthRequests.observe(event, manager);
 			this.host.emit(event);
 		});
 	}

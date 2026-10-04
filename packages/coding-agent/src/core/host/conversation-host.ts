@@ -143,6 +143,7 @@ export class PinnedConversationError extends Error {
 interface Attachment {
 	readonly client: HostClient;
 	readonly conversation: HostedConversation;
+	detachLive?: () => void;
 	detachSurface?: () => void;
 }
 
@@ -882,17 +883,21 @@ export class ConversationHost {
 		this.cancelRetention(conversation);
 		const attachment: Attachment = { client, conversation };
 		this.attachments.set(client.id, attachment);
-		if (!client.surface) return;
-		const extensions = conversation.session.attachExtensionClient({
-			...client.surface,
-			id: client.id,
-			mode: this.extensionMode,
-		});
-		attachment.detachSurface = extensions.detach;
 		try {
+			// The live view first: a dialog an extension asks from session_start reaches the client.
+			if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
+			if (!client.surface) return;
+			const extensions = conversation.session.attachExtensionClient({
+				...client.surface,
+				id: client.id,
+				mode: this.extensionMode,
+			});
+			attachment.detachSurface = extensions.detach;
 			await extensions.ready;
 		} catch (error) {
 			if (this.attachments.get(client.id) === attachment) this.attachments.delete(client.id);
+			attachment.detachLive?.();
+			attachment.detachLive = undefined;
 			throw error;
 		}
 	}
@@ -901,6 +906,8 @@ export class ConversationHost {
 		if (this.attachments.get(attachment.client.id) === attachment) this.attachments.delete(attachment.client.id);
 		attachment.detachSurface?.();
 		attachment.detachSurface = undefined;
+		attachment.detachLive?.();
+		attachment.detachLive = undefined;
 	}
 
 	/** Apply the close rules to a conversation a client left; resolves whether it closes. */

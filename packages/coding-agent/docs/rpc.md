@@ -929,13 +929,13 @@ Volt may emit progress updates for approved actions:
 {"type": "host_action_update", "id": "ha_123", "action": "lsp.install_server", "status": "completed", "message": "typescript language server installed. Retrying diagnostics.", "exitCode": 0}
 ```
 
-Use `get_pending_host_actions` to recover currently pending requests after reconnect:
+A pending request belongs to the conversation, not to the client that saw it: every attached client that advertises `host_action_requests.v1` receives it, the first response wins, and later responses are ignored. It stays pending when a client disconnects, so a reconnecting client finds it again. Use `get_pending_host_actions` to recover currently pending requests after reconnect:
 
 ```json
 {"type": "get_pending_host_actions"}
 ```
 
-Clients approve only the advertised host-owned action; they cannot alter the command. If the client does not advertise `host_action_requests.v1`, Volt falls back without blocking (for example, an LSP missing-server message with install instructions). Current LSP install requests are limited to trusted built-in install recipes; custom LSP commands and manual-install-only servers still produce instructions only.
+Clients approve only the advertised host-owned action; they cannot alter the command. If no attached client advertises `host_action_requests.v1`, Volt falls back without blocking (for example, an LSP missing-server message with install instructions); when a client that may answer host action requests sends `set_client_capabilities` without the feature, pending requests no other attached client takes end as `dismissed`. A paired device needs `host.manage.v1` to see or answer host action requests. Current LSP install requests are limited to trusted built-in install recipes; custom LSP commands and manual-install-only servers still produce instructions only.
 
 ### Model
 
@@ -2020,7 +2020,7 @@ There are two categories of extension UI methods:
 - **Dialog methods** (`select`, `confirm`, `input`, `editor`): emit an `extension_ui_request` on stdout and block until the client sends back an `extension_ui_response` on stdin with the matching `id`.
 - **Fire-and-forget methods** (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`): emit an `extension_ui_request` on stdout but do not expect a response. The client can display the information or ignore it.
 
-If a dialog method includes a `timeout` field, the agent-side will auto-resolve with a default value when the timeout expires. The client does not need to track timeouts.
+If a dialog method includes a `timeout` field, the agent-side will auto-resolve with a default value when the timeout expires. The client does not need to track timeouts. A `select` response whose `value` is not one of the request's `options`, or a response whose shape does not fit the dialog, resolves it like a cancellation.
 
 Some `ExtensionUIContext` methods are not supported or degraded in RPC mode because they require direct TUI access:
 - `custom()` returns `undefined`
@@ -2031,7 +2031,7 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 
 The theme facade is fully functional in RPC mode: `getAllThemes()` returns the real theme list (builtin plus extension-registered), `getTheme()` resolves by name, and `setTheme()` applies the theme to the process and persists the choice. Under the background daemon, a successful `setTheme()` also broadcasts a `theme_snapshot` to connected desktop TUIs, which apply it unless the user explicitly picked a theme in that TUI session.
 
-Extensions are bound once per session, by the first client to attach. When several RPC clients share a session (phones on a daemon-hosted conversation), the others attach without another `session_start`; `extension_ui_request` frames go to the most recently attached client that shows UI, which receives the latest `setStatus`, `setWidget`, and `setTitle` values when it attaches or when a later client detaches; `extension_error` frames go to every client. A phone whose access does not include `conversation.control.v1` cannot send `extension_ui_response`, so it attaches without UI. Session control from an extension command (`ctx.newSession()` and the like) and `ctx.shutdown()` act for the client that invoked it.
+Extensions are bound once per session, by the first client to attach. When several RPC clients share a session (phones on a daemon-hosted conversation), the others attach without another `session_start`. Extension UI belongs to the conversation: `extension_ui_request` frames go to every attached client that shows UI, and a client that attaches receives the latest `setStatus`, `setWidget`, and `setTitle` values and every pending dialog. The first response to a dialog wins; later responses are ignored. A pending dialog stays pending when a client disconnects or the conversation's branch changes, and ends when it is answered, times out, or its conversation closes. `extension_error` frames go to every client. A phone whose access does not include `conversation.control.v1` cannot send `extension_ui_response`, so it attaches without UI. Session control from an extension command (`ctx.newSession()` and the like) and `ctx.shutdown()` act for the client that invoked it.
 
 For conversations owned by a desktop TUI and served to phones over the daemon's byte relay, the relayed stream attaches without extension UI: dialogs and status stay on the desktop where the extension's UI lives, phones receive no `extension_ui_request` frames, and `ctx.mode` stays `"tui"`. Phones still receive `extension_error` frames.
 

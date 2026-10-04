@@ -17,6 +17,7 @@ import type { AgentSessionServices } from "../src/core/agent-session-services.ts
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
@@ -132,6 +133,7 @@ export function withCurrentConversationAuthority<T extends object>(
 export function createTestSession(sessionId: string, leafId: string | null) {
 	const session = {
 		leafId,
+		liveState: new LiveState(),
 		autoCompactionEnabled: false,
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),

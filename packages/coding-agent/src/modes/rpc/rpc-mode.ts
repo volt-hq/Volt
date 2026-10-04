@@ -8,30 +8,21 @@
  * - Commands: JSON objects with `type` and a correlation `id` where required by the command schema
  * - Responses: JSON objects with `type: "response"`, `command`, `success`, and optional `data`/`error`
  * - Events: AgentSessionEvent objects streamed as they occur
- * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
+ * - Extension UI and approvals: the conversation's live state, written as the old
+ *   extension_ui_request and host_action_request events; the client answers with
+ *   extension_ui_response and host_action_response (see rpc-live-adapter.ts)
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
-import type { RemoteGrant } from "@hansjm10/volt-protocol";
+import type { RemoteCapability, RemoteGrant } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type {
-	ExtensionUIContext,
-	ExtensionUIDialogOptions,
-	ExtensionWidgetOptions,
-	WorkingIndicatorOptions,
-} from "../../core/extensions/index.ts";
+import type { WorkingIndicatorOptions } from "../../core/extensions/index.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
 import type { HostClient, HostedRedirect, RedirectTarget } from "../../core/host/targets.ts";
-import type {
-	HostActionDecision,
-	HostActionRequest,
-	HostActionUpdate,
-	HostInteraction,
-} from "../../core/host-interaction.ts";
 import { startModelCatalogWatcher } from "../../core/model-catalog-watcher.ts";
 import {
 	flushRawStdout,
@@ -56,6 +47,7 @@ import { createEmptyReviewUsage } from "../../core/review-usage.ts";
 import { subscribeRpcSessionEvents } from "../../core/rpc/background-jobs.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
+import type { ExtensionTerminalUI } from "../../core/session/extension-binding.ts";
 import type { SessionReference } from "../../core/session-manager.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../core/subagents/index.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
@@ -78,14 +70,16 @@ import {
 	type RpcSubagentLifecycleController,
 } from "./rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "./rpc-command-validation.ts";
+import {
+	answerExtensionUiResponse,
+	answerHostActionResponse,
+	createRpcLiveView,
+	pendingHostActionRequests,
+} from "./rpc-live-adapter.ts";
 import type {
 	RpcClientCapabilityFeature,
 	RpcCommand,
 	RpcExtensionUIRequest,
-	RpcExtensionUIResponse,
-	RpcHostActionRequest,
-	RpcHostActionResponse,
-	RpcHostActionUpdate,
 	RpcListSubagentsResponse,
 	RpcRegisterPushTargetArgs,
 	RpcRegisterPushTargetResponse,
@@ -145,10 +139,6 @@ export type {
 	UiActionStreamingBehavior,
 } from "./rpc-types.ts";
 
-function parseHostActionResponseDecision(value: unknown): RpcHostActionResponse["decision"] | undefined {
-	return value === "approved" || value === "denied" || value === "dismissed" ? value : undefined;
-}
-
 export interface RpcSessionChange {
 	sessionRef?: SessionReference;
 	sessionId: string;
@@ -172,7 +162,6 @@ export interface RpcRedirectOptions {
 export interface RpcOrderedConversationBinding {
 	readonly subscriptionId: string;
 	readonly branchEpoch: string;
-	subscribeAuthorityChanges(listener: () => void): () => void;
 	enqueueControl(value: object): Promise<void>;
 	requestCheckpoint(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>): {
 		subscriptionId: string;
@@ -317,137 +306,6 @@ function createStdioRpcTransport(): RpcTransport {
 			process.stdin.pause();
 		},
 	};
-}
-
-interface RpcHostActionBridgeAttachment {
-	canSend(): boolean;
-	isShuttingDown(): boolean;
-	output(message: RpcHostActionRequest | RpcHostActionUpdate): void;
-}
-
-interface PendingRpcHostActionRequest {
-	request: RpcHostActionRequest;
-	resolve(decision: HostActionDecision): void;
-	settled: boolean;
-	signal?: AbortSignal;
-	timeoutId?: ReturnType<typeof setTimeout>;
-	onAbort(): void;
-}
-
-class RpcHostActionBridge {
-	readonly interaction: HostInteraction = {
-		requestAction: (request, options) => this.requestAction(request, options),
-		updateAction: (update) => this.updateAction(update),
-	};
-
-	private activeAttachment: (RpcHostActionBridgeAttachment & { id: number }) | undefined;
-	private nextAttachmentId = 0;
-	private readonly pendingRequests = new Map<string, PendingRpcHostActionRequest>();
-
-	attach(attachment: RpcHostActionBridgeAttachment): () => void {
-		const activeAttachment = { ...attachment, id: ++this.nextAttachmentId };
-		this.activeAttachment = activeAttachment;
-		return () => {
-			if (this.activeAttachment?.id === activeAttachment.id) {
-				this.activeAttachment = undefined;
-			}
-		};
-	}
-
-	getPendingRequests(): RpcHostActionRequest[] {
-		return Array.from(this.pendingRequests.values()).map((entry) => entry.request);
-	}
-
-	cancelAll(message = "RPC mode is shutting down"): void {
-		const requests = Array.from(this.pendingRequests.values());
-		for (const request of requests) {
-			this.settle(request, { decision: "dismissed", message });
-		}
-	}
-
-	resolveResponse(response: RpcHostActionResponse & { decision: HostActionDecision["decision"] }): void {
-		const pending = this.pendingRequests.get(response.id);
-		if (pending) {
-			this.settle(pending, { decision: response.decision, message: response.message });
-		}
-	}
-
-	private requestAction(
-		request: HostActionRequest,
-		requestOptions?: { signal?: AbortSignal },
-	): Promise<HostActionDecision> {
-		const activeAttachment = this.activeAttachment;
-		if (activeAttachment?.isShuttingDown()) {
-			return Promise.resolve({ decision: "dismissed" });
-		}
-		if (!activeAttachment?.canSend()) {
-			return Promise.resolve({ decision: "unavailable" });
-		}
-		if (requestOptions?.signal?.aborted) {
-			return Promise.resolve({ decision: "dismissed" });
-		}
-
-		return new Promise((resolve) => {
-			const existing = this.pendingRequests.get(request.id);
-			if (existing) {
-				this.settle(existing, { decision: "dismissed", message: "Host action replaced" });
-			}
-
-			const rpcRequest: RpcHostActionRequest = { type: "host_action_request", ...request };
-			let entry: PendingRpcHostActionRequest;
-			const onAbort = (): void => {
-				this.settle(entry, { decision: "dismissed", message: "Host action cancelled" });
-			};
-			entry = {
-				request: rpcRequest,
-				resolve,
-				settled: false,
-				signal: requestOptions?.signal,
-				onAbort,
-			};
-			requestOptions?.signal?.addEventListener("abort", onAbort, { once: true });
-			if (request.timeoutMs !== undefined) {
-				entry.timeoutId = setTimeout(() => {
-					this.settle(entry, { decision: "dismissed", message: "Host action timed out" });
-				}, request.timeoutMs);
-				entry.timeoutId.unref?.();
-			}
-			this.pendingRequests.set(request.id, entry);
-			activeAttachment.output(rpcRequest);
-		});
-	}
-
-	private updateAction(update: HostActionUpdate): void {
-		const activeAttachment = this.activeAttachment;
-		if (activeAttachment?.canSend()) {
-			activeAttachment.output({ type: "host_action_update", ...update });
-		}
-	}
-
-	private settle(entry: PendingRpcHostActionRequest, decision: HostActionDecision): void {
-		if (entry.settled) {
-			return;
-		}
-		entry.settled = true;
-		if (entry.timeoutId) {
-			clearTimeout(entry.timeoutId);
-		}
-		entry.signal?.removeEventListener("abort", entry.onAbort);
-		this.pendingRequests.delete(entry.request.id);
-		entry.resolve(decision);
-	}
-}
-
-/** One bridge per conversation, so a client reconnecting to it finds the requests still pending. */
-const rpcHostActionBridges = new WeakMap<HostedConversation, RpcHostActionBridge>();
-
-function getRpcHostActionBridge(conversation: HostedConversation): RpcHostActionBridge {
-	let bridge = rpcHostActionBridges.get(conversation);
-	if (!bridge) {
-		bridge = new RpcHostActionBridge();
-		rpcHostActionBridges.set(conversation, bridge);
-	}
-	return bridge;
 }
 
 interface RpcSubagentEntry {
@@ -749,140 +607,28 @@ export async function runRpcMode(
 		sessionProjector = undefined;
 	};
 
-	// Pending extension UI requests waiting for response
-	const pendingExtensionRequests = new Map<
-		string,
-		{ resolve: (response: RpcExtensionUIResponse) => void; cancel: () => void }
-	>();
-
-	const cancelPendingExtensionRequests = (): void => {
-		const requests = Array.from(pendingExtensionRequests.values());
-		pendingExtensionRequests.clear();
-		for (const request of requests) {
-			request.cancel();
-		}
-	};
-
 	let clientCapabilities = new Set<RpcClientCapabilityFeature>();
-	const hostActionAttachment: RpcHostActionBridgeAttachment = {
-		canSend: () => !shuttingDown && clientCapabilities.has(HOST_ACTION_REQUESTS_CAPABILITY),
-		isShuttingDown: () => shuttingDown,
-		output: (message) => output(message),
-	};
-	let hostActionBridge = getRpcHostActionBridge(conversation);
-	let detachHostActionBridgeAttachment = hostActionBridge.attach(hostActionAttachment);
-	const detachHostActionBridge = (): void => detachHostActionBridgeAttachment();
-
-	const cancelPendingHostActionRequests = (message = "RPC mode is shutting down"): void => {
-		hostActionBridge.cancelAll(message);
-	};
-	const retireConversationControlCapabilities = (): void => {
-		cancelPendingExtensionRequests();
-		cancelPendingHostActionRequests("Conversation authority changed");
-	};
-	const detachOrderedAuthorityChanges = options.orderedConversation?.subscribeAuthorityChanges(() => {
-		retireConversationControlCapabilities();
+	/** A remote client's grant holds `capability`; a local client holds every capability. */
+	const grantAllows = (capability: RemoteCapability): boolean =>
+		remoteGrant === undefined || remoteGrant.capabilities.includes(capability);
+	/** Whether the client shows extension UI: a remote client must be able to answer its dialogs. */
+	const showsExtensionUiNow = (): boolean =>
+		!shuttingDown && showsExtensionUi && grantAllows("conversation.control.v1");
+	/** Whether the client sees and answers approvals; a remote client needs host management. */
+	const mayTakeApprovals = (): boolean => takesHostActions && grantAllows("host.manage.v1");
+	/** The client's live view: the conversation's live state as the old events. */
+	const liveView = createRpcLiveView({
+		output: (event) => output(event),
+		showsExtensionUi: showsExtensionUiNow,
+		takesApprovals: () =>
+			!shuttingDown && mayTakeApprovals() && clientCapabilities.has(HOST_ACTION_REQUESTS_CAPABILITY),
 	});
-	let unsubscribeConversationGenerationChanges: (() => void) | undefined;
 
-	const setSessionHostInteraction = (targetSession: AgentSession): void => {
-		if (!takesHostActions) return;
-		const sessionWithHostInteraction = targetSession as {
-			setHostInteraction?: (hostInteraction: HostInteraction) => void;
-		};
-		sessionWithHostInteraction.setHostInteraction?.(hostActionBridge.interaction);
-	};
-
-	/** Helper for dialog methods with signal/timeout support */
-	function createDialogPromise<T>(
-		opts: ExtensionUIDialogOptions | undefined,
-		defaultValue: T,
-		request: Record<string, unknown>,
-		parseResponse: (response: RpcExtensionUIResponse) => T,
-	): Promise<T> {
-		if (opts?.signal?.aborted || shuttingDown) return Promise.resolve(defaultValue);
-
-		const id = crypto.randomUUID();
-		return new Promise((resolve) => {
-			let timeoutId: ReturnType<typeof setTimeout> | undefined;
-
-			const cleanup = () => {
-				if (timeoutId) clearTimeout(timeoutId);
-				opts?.signal?.removeEventListener("abort", onAbort);
-				pendingExtensionRequests.delete(id);
-			};
-
-			const onAbort = () => {
-				cleanup();
-				resolve(defaultValue);
-			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
-
-			if (opts?.timeout) {
-				timeoutId = setTimeout(() => {
-					cleanup();
-					resolve(defaultValue);
-				}, opts.timeout);
-			}
-
-			pendingExtensionRequests.set(id, {
-				resolve: (response: RpcExtensionUIResponse) => {
-					cleanup();
-					resolve(parseResponse(response));
-				},
-				cancel: () => {
-					cleanup();
-					resolve(defaultValue);
-				},
-			});
-			output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
-		});
-	}
-
-	/**
-	 * Create an extension UI context that uses the RPC protocol.
-	 */
-	const createExtensionUIContext = (): ExtensionUIContext => ({
-		select: (title, options, opts) =>
-			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout }, (r) =>
-				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
-			),
-
-		confirm: (title, message, opts) =>
-			createDialogPromise(opts, false, { method: "confirm", title, message, timeout: opts?.timeout }, (r) =>
-				"cancelled" in r && r.cancelled ? false : "confirmed" in r ? r.confirmed : false,
-			),
-
-		input: (title, placeholder, opts) =>
-			createDialogPromise(opts, undefined, { method: "input", title, placeholder, timeout: opts?.timeout }, (r) =>
-				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
-			),
-
-		notify(message: string, type?: "info" | "warning" | "error"): void {
-			// Fire and forget - no response needed
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "notify",
-				message,
-				notifyType: type,
-			} as RpcExtensionUIRequest);
-		},
-
+	/** The terminal-only extension UI in RPC mode: theme control and editor paste; the rest needs a terminal. */
+	const createTerminalUI = (): ExtensionTerminalUI => ({
 		onTerminalInput(): () => void {
 			// Raw terminal input not supported in RPC mode
 			return () => {};
-		},
-
-		setStatus(key: string, text: string | undefined): void {
-			// Fire and forget - no response needed
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "setStatus",
-				statusKey: key,
-				statusText: text,
-			} as RpcExtensionUIRequest);
 		},
 
 		setWorkingMessage(_message?: string): void {
@@ -901,19 +647,8 @@ export async function runRpcMode(
 			// Hidden thinking label not supported in RPC mode - requires TUI message rendering access
 		},
 
-		setWidget(key: string, content: unknown, options?: ExtensionWidgetOptions): void {
-			// Only support string arrays in RPC mode - factory functions are ignored
-			if (content === undefined || Array.isArray(content)) {
-				output({
-					type: "extension_ui_request",
-					id: crypto.randomUUID(),
-					method: "setWidget",
-					widgetKey: key,
-					widgetLines: content as string[] | undefined,
-					widgetPlacement: options?.placement,
-				} as RpcExtensionUIRequest);
-			}
-			// Component factories are not supported in RPC mode - would need TUI access
+		setWidget(): void {
+			// Component widgets are not supported in RPC mode; string widgets reach the client through the live state
 		},
 
 		setFooter(_factory: unknown): void {
@@ -924,70 +659,26 @@ export async function runRpcMode(
 			// Custom header not supported in RPC mode - requires TUI access
 		},
 
-		setTitle(title: string): void {
-			// Fire and forget - host can implement terminal title control
-			output({
-				type: "extension_ui_request",
-				id: crypto.randomUUID(),
-				method: "setTitle",
-				title,
-			} as RpcExtensionUIRequest);
-		},
-
 		async custom() {
 			// Custom UI not supported in RPC mode
 			return undefined as never;
 		},
 
 		pasteToEditor(text: string): void {
-			// Paste handling not supported in RPC mode - falls back to setEditorText
-			this.setEditorText(text);
-		},
-
-		setEditorText(text: string): void {
-			// Fire and forget - host can implement editor control
-			output({
+			// Paste handling not supported in RPC mode - the client sets its editor text
+			const request: RpcExtensionUIRequest = {
 				type: "extension_ui_request",
 				id: crypto.randomUUID(),
 				method: "set_editor_text",
 				text,
-			} as RpcExtensionUIRequest);
+			};
+			output(request);
 		},
 
 		getEditorText(): string {
 			// Synchronous method can't wait for RPC response
 			// Host should track editor state locally if needed
 			return "";
-		},
-
-		async editor(title: string, prefill?: string): Promise<string | undefined> {
-			if (shuttingDown) {
-				return undefined;
-			}
-
-			const id = crypto.randomUUID();
-			return new Promise((resolve) => {
-				const cleanup = () => {
-					pendingExtensionRequests.delete(id);
-				};
-				pendingExtensionRequests.set(id, {
-					resolve: (response: RpcExtensionUIResponse) => {
-						cleanup();
-						if ("cancelled" in response && response.cancelled) {
-							resolve(undefined);
-						} else if ("value" in response) {
-							resolve(response.value);
-						} else {
-							resolve(undefined);
-						}
-					},
-					cancel: () => {
-						cleanup();
-						resolve(undefined);
-					},
-				});
-				output({ type: "extension_ui_request", id, method: "editor", title, prefill } as RpcExtensionUIRequest);
-			});
 		},
 
 		addAutocompleteProvider(): void {
@@ -1055,21 +746,11 @@ export async function runRpcMode(
 
 	/**
 	 * Point the client at `target` before its extensions bind or the client
-	 * attaches to them: host actions, registered themes, and the branch cut
-	 * that retires correlated control replies.
+	 * attaches to them: its commands and answers, and registered themes.
 	 */
 	const enterConversation = (target: HostedConversation): void => {
 		current = target;
 		session = target.session;
-		unsubscribeConversationGenerationChanges?.();
-		const sessionWithConversationGeneration = session as AgentSession & {
-			subscribeConversationGenerationChanges?: (listener: () => void) => () => void;
-		};
-		unsubscribeConversationGenerationChanges =
-			sessionWithConversationGeneration.subscribeConversationGenerationChanges?.(() => {
-				retireConversationControlCapabilities();
-			});
-		setSessionHostInteraction(session);
 		// Extension-provided themes resolve by name in rpc mode too (getAllThemes /
 		// getTheme / setTheme), mirroring the TUI's registration at bind time.
 		const resourceThemes = session.resourceLoader?.getThemes?.().themes;
@@ -1134,11 +815,12 @@ export async function runRpcMode(
 		if (!queued) void shutdown().catch(() => {});
 	};
 
-	const extensionUi = showsExtensionUi ? createExtensionUIContext() : undefined;
+	const extensionUi = showsExtensionUi ? createTerminalUI() : undefined;
 	const client: HostClient = {
 		id: extensionClientId,
 		...(anchorsConversation ? { anchor: true } : {}),
 		recoversInput: true,
+		live: liveView,
 		surface: {
 			...(extensionUi === undefined ? {} : { ui: extensionUi }),
 			commandContextActions: {
@@ -1174,14 +856,10 @@ export async function runRpcMode(
 				? {
 						kind: "in_place",
 						prepare: (to) => {
-							// Correlated control replies are capabilities over the conversation
-							// state that minted them; retire them before the client joins `to`.
-							retireConversationControlCapabilities();
+							// Host requests stay with the conversation that asked them; the host
+							// attaches the client's live view to `to` when it joins.
 							unsubscribe?.();
 							unsubscribe = undefined;
-							detachHostActionBridgeAttachment();
-							hostActionBridge = getRpcHostActionBridge(to);
-							detachHostActionBridgeAttachment = hostActionBridge.attach(hostActionAttachment);
 							enterConversation(to);
 						},
 						onMoved: async (to) => {
@@ -1219,12 +897,9 @@ export async function runRpcMode(
 		subscribeSessionEvents();
 	};
 
-	/** Stop following the conversation's authority changes and closing. */
+	/** Stop following the conversation's closing. */
 	const stopObservingConversation = (): void => {
 		stopObservingClose();
-		detachOrderedAuthorityChanges?.();
-		unsubscribeConversationGenerationChanges?.();
-		unsubscribeConversationGenerationChanges = undefined;
 	};
 
 	/** Leave the conversation once: an anchor closes it, even when the client never attached. */
@@ -1407,6 +1082,12 @@ export async function runRpcMode(
 					features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
 				);
 				options.onClientCapabilitiesChanged?.(Array.from(clientCapabilities));
+				// A client that may answer approvals declines them: those nobody else can answer end as
+				// dismissed, as a reconnecting client without support expects. A client that may not
+				// answer them (observe-only, relayed) cannot end them.
+				if (mayTakeApprovals() && !liveView.acceptsHostRequest("approval")) {
+					commandConversation.liveState.cancelUnanswerable("approval");
+				}
 			},
 			async reportStreamDiscontinuity(command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>) {
 				const orderedConversation = options.orderedConversation;
@@ -1421,8 +1102,9 @@ export async function runRpcMode(
 				}
 				return orderedConversation.requestCheckpoint(command);
 			},
-			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
-			cancelPendingHostActionRequests,
+			// A client that may take approvals finds them after a reconnect, before it accepts them again.
+			getPendingHostActionRequests: () =>
+				mayTakeApprovals() ? pendingHostActionRequests(commandConversation.liveState) : [],
 			assertConversationGenerationCurrent,
 			conversationBranchEpoch: options.orderedConversation?.branchEpoch,
 			takePendingReviewWorkflow: (workflowId: string) => {
@@ -1500,14 +1182,9 @@ export async function runRpcMode(
 
 		await captureCleanupError(stopObservingConversation);
 		await captureCleanupError(stopModelCatalogWatcher);
-		await captureCleanupError(cancelPendingExtensionRequests);
-		await captureCleanupError(detachHostActionBridge);
 		await captureCleanupError(detachReviewWorkflowSink);
 		await captureCleanupError(() => rpcSubagents.disposeAll());
 		pendingReviewWorkflows.clear();
-		if (anchorsConversation) {
-			await captureCleanupError(cancelPendingHostActionRequests);
-		}
 		for (const cleanup of signalCleanupHandlers) {
 			await captureCleanupError(cleanup);
 		}
@@ -1551,12 +1228,7 @@ export async function runRpcMode(
 		// here on; an anchor stays until its conversation closes with the mode.
 		if (!anchorsConversation) void leaveHost().catch(() => {});
 		shutdownStarted.resolve();
-		cancelPendingExtensionRequests();
-		detachHostActionBridge();
 		retireReviewWorkflowSink();
-		if (anchorsConversation) {
-			cancelPendingHostActionRequests();
-		}
 		if (shuttingDown) {
 			return invokedFromCommandTask ? Promise.resolve() : (shutdownPromise ?? modeClosed);
 		}
@@ -1634,21 +1306,13 @@ export async function runRpcMode(
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed) || !("type" in parsed)) {
 			return false;
 		}
+		// Answers go to the conversation the client is on, under the client's id.
 		if (parsed.type === "extension_ui_response") {
-			const response = parsed as RpcExtensionUIResponse;
-			const pending = pendingExtensionRequests.get(response.id);
-			if (pending) {
-				pendingExtensionRequests.delete(response.id);
-				pending.resolve(response);
-			}
+			answerExtensionUiResponse(current.liveState, extensionClientId, parsed as Record<string, unknown>);
 			return true;
 		}
 		if (parsed.type === "host_action_response") {
-			const response = parsed as RpcHostActionResponse;
-			const decision = parseHostActionResponseDecision(response.decision);
-			if (decision) {
-				hostActionBridge.resolveResponse({ ...response, decision });
-			}
+			answerHostActionResponse(current.liveState, extensionClientId, parsed as Record<string, unknown>);
 			return true;
 		}
 		return false;

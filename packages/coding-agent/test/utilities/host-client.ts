@@ -96,6 +96,8 @@ export interface TestClientOptions {
 	/** Default: true. */
 	anchor?: boolean;
 	surface?: HostClient["surface"];
+	/** The client's view of each conversation's live state. */
+	live?: HostClient["live"];
 	/** Observes each move once the client joined the new conversation. */
 	onMoved?: (to: HostedConversation, from: HostedConversation | undefined) => Promise<void> | void;
 	/** Runs once the client left a conversation, before it joins the next one. */
@@ -151,6 +153,7 @@ export async function connectTestClient(
 		id: options.id ?? randomUUID(),
 		...(options.anchor === false ? {} : { anchor: true }),
 		...(options.surface === undefined ? {} : { surface: options.surface }),
+		...(options.live === undefined ? {} : { live: options.live }),
 		get recoversInput() {
 			return recovers;
 		},

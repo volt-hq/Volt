@@ -143,7 +143,6 @@ async function connect(target: TestHost, ordered = false, observeOnly = false) {
 				get branchEpoch() {
 					return subscription!.branchEpoch;
 				},
-				subscribeAuthorityChanges: (listener) => subscription!.subscribeAuthorityChanges(listener),
 				enqueueControl: (value) => subscription!.enqueueControl(value),
 				requestCheckpoint: (command) =>
 					subscription!.requestCheckpoint({

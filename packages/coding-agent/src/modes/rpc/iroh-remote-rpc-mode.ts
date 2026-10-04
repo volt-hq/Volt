@@ -436,7 +436,6 @@ export function runIrohRemoteRpcMode(
 			get branchEpoch() {
 				return orderedSubscription.branchEpoch;
 			},
-			subscribeAuthorityChanges: (listener) => orderedSubscription.subscribeAuthorityChanges(listener),
 			enqueueControl: enqueueOrderedControl,
 			requestCheckpoint: (command) =>
 				orderedSubscription.requestCheckpoint({

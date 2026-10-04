@@ -169,7 +169,7 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Optional host interaction bridge for blocking host-initiated actions. */
+	/** Answers host-initiated actions (approvals). Default: they wait in the session's live state for an attached client. */
 	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;

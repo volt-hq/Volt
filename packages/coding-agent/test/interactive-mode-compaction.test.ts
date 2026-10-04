@@ -42,7 +42,7 @@ describe("InteractiveMode extension settlement", () => {
 			waitForIdle: sessionWaitForIdle,
 		};
 		const fakeThis = {
-			createExtensionUIContext: vi.fn(() => ({})),
+			createExtensionTerminalUI: vi.fn(() => ({})),
 			session,
 			shutdownRequested: false,
 			shutdown: vi.fn(async () => undefined),
