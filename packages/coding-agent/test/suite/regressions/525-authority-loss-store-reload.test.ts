@@ -7,15 +7,14 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { ExtensionUIContext } from "../../../src/core/extensions/index.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
+import type { HostClient } from "../../../src/core/host/targets.ts";
 import type { HostActionDecision, HostActionRequest } from "../../../src/core/host-interaction.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
@@ -25,6 +24,7 @@ import { FooterComponent } from "../../../src/modes/interactive/components/foote
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
+import { connectTestClient, openTestHost, type TestHost } from "../../utilities/host-client.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -43,7 +43,8 @@ type InteractiveAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	attachSessionExtensions(session: AgentSession): Promise<void>;
+	client: HostClient;
+	showSessionExtensions(session: AgentSession): void;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
@@ -62,10 +63,11 @@ describe("regression #525: ending a session whose saved state could not be confi
 		}
 	});
 
-	async function createRuntimeForTest(
+	/** Open a conversation over the faux provider in a host of its own, with no client attached yet. */
+	async function openConversationForTest(
 		responses: string[],
-		options: { extensionFactory?: ExtensionFactory; interactive?: boolean } = {},
-	) {
+		options: { extensionFactory?: ExtensionFactory } = {},
+	): Promise<TestHost & { tempDir: string }> {
 		const tempDir = join(tmpdir(), `volt-525-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -74,7 +76,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir: tempDir,
@@ -119,30 +121,23 @@ describe("regression #525: ending a session whose saved state could not be confi
 		};
 
 		const sessionManager = await SessionManager.create(tempDir);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: sessionManager.getCwd(),
 			agentDir: tempDir,
 			sessionManager,
 		});
-		if (!options.interactive) {
-			// Bind replacements the way interactive mode does.
-			runtime.setRebindSession(async (session) => {
-				await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-			});
-			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-		}
 
 		cleanups.push(async () => {
-			await runtime.dispose().catch(() => {});
+			await host.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
-		return { runtime, faux, tempDir };
+		return { host, conversation, tempDir };
 	}
 
-	function requireSessionRef(runtime: AgentSessionRuntime): SessionReference {
-		const sessionRef = runtime.session.sessionRef;
+	function requireSessionRef(session: AgentSession): SessionReference {
+		const sessionRef = session.sessionRef;
 		if (!sessionRef) throw new Error("expected a persisted session");
 		return sessionRef;
 	}
@@ -183,9 +178,10 @@ describe("regression #525: ending a session whose saved state could not be confi
 		};
 	}
 
-	/** Drive InteractiveMode on a real runtime and VirtualTerminal, without the main input loop. */
-	async function startInteractiveMode(runtime: AgentSessionRuntime, tempDir: string) {
-		const mode = new InteractiveMode(runtime, { tuiMode: "regular" });
+	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
+	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
+		const { host, conversation, tempDir } = opened;
+		const mode = new InteractiveMode(host, conversation, { tuiMode: "regular" });
 		cleanups.push(() => mode.stop());
 		const access = mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});
@@ -206,8 +202,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 		access.activateView(access.conversationView, access.editor, false);
 		access.isInitialized = true;
 		access.ui.start();
-		await access.attachSessionExtensions(runtime.session);
-		access.subscribeToAgent(runtime.session);
+		await host.attach(access.client, conversation);
+		access.showSessionExtensions(conversation.session);
+		access.subscribeToAgent(conversation.session);
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}
 
@@ -221,9 +218,11 @@ describe("regression #525: ending a session whose saved state could not be confi
 			process.off("unhandledRejection", onUnhandledRejection);
 		});
 
-		const { runtime } = await createRuntimeForTest(["tui reply", "never sent"]);
+		const opened = await openConversationForTest(["tui reply", "never sent"]);
+		// A client binds the extensions the way interactive mode does, on every conversation it joins.
+		const runtime = await connectTestClient(opened.host, opened.conversation, { surface: {} });
 		await runtime.session.prompt("tui prompt");
-		const sessionRef = requireSessionRef(runtime);
+		const sessionRef = requireSessionRef(runtime.session);
 		const staleSession = runtime.session;
 		const renderedFooter = new FooterComponent(staleSession, createFooterData());
 		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
@@ -260,17 +259,14 @@ describe("regression #525: ending a session whose saved state could not be confi
 				}));
 			});
 		};
-		const { runtime, tempDir } = await createRuntimeForTest(["tui reply"], {
-			extensionFactory: extensionFooter,
-			interactive: true,
-		});
-		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
+		const opened = await openConversationForTest(["tui reply"], { extensionFactory: extensionFooter });
+		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
 
-		await runtime.session.prompt("tui prompt");
+		await opened.conversation.session.prompt("tui prompt");
 		await terminal.waitForRender();
 		expect(extensionFooterEntries(terminal)).toBeGreaterThan(0);
 
-		const staleSession = runtime.session;
+		const staleSession = opened.conversation.session;
 		await loseConversationLock(staleSession.sessionManager);
 		access.editor.setText("unsent draft");
 
@@ -303,13 +299,10 @@ describe("regression #525: ending a session whose saved state could not be confi
 				},
 			});
 		};
-		const { runtime, tempDir } = await createRuntimeForTest(["tui reply"], {
-			extensionFactory: pickCommand,
-			interactive: true,
-		});
-		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
-		await runtime.session.prompt("tui prompt");
-		const staleSession = runtime.session;
+		const opened = await openConversationForTest(["tui reply"], { extensionFactory: pickCommand });
+		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
+		await opened.conversation.session.prompt("tui prompt");
+		const staleSession = opened.conversation.session;
 
 		const command = staleSession.prompt("/pick");
 		await selectorShown.promise;
@@ -338,12 +331,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 				},
 			});
 		};
-		const { runtime, tempDir } = await createRuntimeForTest([], {
-			extensionFactory: stuckCommand,
-			interactive: true,
-		});
-		const { handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
-		const staleSession = runtime.session;
+		const opened = await openConversationForTest([], { extensionFactory: stuckCommand });
+		const { handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
+		const staleSession = opened.conversation.session;
 
 		void staleSession.prompt("/stuck");
 		const commandSignal = await commandStarted.promise;
@@ -357,8 +347,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 	});
 
 	it("settles every pending extension dialog when extension UI is reset", async () => {
-		const { runtime, tempDir } = await createRuntimeForTest([], { interactive: true });
-		const { access, terminal } = await startInteractiveMode(runtime, tempDir);
+		const { access, terminal } = await startInteractiveMode(await openConversationForTest([]));
 		const ui = access.createExtensionUIContext();
 		const settled = <T>(promise: Promise<T>) =>
 			promise.then(

@@ -8,7 +8,11 @@
 
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage, ImageContent } from "@hansjm10/volt-ai";
-import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
+import type { AgentSession } from "../core/agent-session.ts";
+import type { ConversationHost } from "../core/host/conversation-host.ts";
+import type { HostedConversation } from "../core/host/hosted-conversation.ts";
+import { openFork, openNewSession, openStoredSession } from "../core/host/session-intents.ts";
+import type { HostClient } from "../core/host/targets.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../core/rpc/stream-projection.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
@@ -28,20 +32,92 @@ export interface PrintModeOptions {
 }
 
 /**
- * Run in print (single-shot) mode.
- * Sends prompts to the agent and outputs the result.
+ * Run in print (single-shot) mode: a client that anchors `conversation`,
+ * sends the prompts, outputs the result, and closes the conversation it ends
+ * on. Extension session changes move it in place.
  */
-export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
+export async function runPrintMode(
+	host: ConversationHost,
+	conversation: HostedConversation,
+	options: PrintModeOptions,
+): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
-	let session = runtimeHost.session;
+	let current = conversation;
 	let unsubscribe: (() => void) | undefined;
-	/** Set when the runtime ended because its session lost its log: a commit it could not confirm. */
+	/** Set when the session the run is on lost its log: a commit it could not confirm. */
 	let conversationLoss: string | undefined;
 	let streamProjector: StreamProjector | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
-	const extensionClientId = randomUUID();
+	const session = (): AgentSession => current.session;
+
+	const subscribe = (): void => {
+		unsubscribe?.();
+		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
+		const projector = new StreamProjector();
+		streamProjector = projector;
+		unsubscribe = session().subscribe(
+			(event) => {
+				if (mode === "json") {
+					const batch = projector.push(event);
+					reportProjectionDiagnostics("json-print", batch.diagnostics);
+					for (const frame of batch.frames) {
+						writeRawStdout(`${JSON.stringify(frame)}\n`);
+					}
+				}
+			},
+			{ monitorGitContext: false },
+		);
+	};
+
+	const observeLoss = (observed: HostedConversation): void => {
+		void observed.lost.then((error) => {
+			if (observed !== current) return;
+			conversationLoss ??= `Volt stopped session ${observed.id} because its saved state could not be confirmed: ${error.message}`;
+		});
+	};
+
+	const client: HostClient = {
+		id: randomUUID(),
+		anchor: true,
+		surface: {
+			commandContextActions: {
+				waitForIdle: () => session().waitForIdle(),
+				newSession: (newSessionOptions) => openNewSession(host, client, newSessionOptions),
+				fork: async (entryId, forkOptions) => {
+					const result = await openFork(host, client, entryId, forkOptions);
+					return result.cancelled
+						? result
+						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+				},
+				navigateTree: async (targetId, navigateOptions) => {
+					const result = await session().navigateTree(targetId, {
+						summarize: navigateOptions?.summarize,
+						customInstructions: navigateOptions?.customInstructions,
+						replaceInstructions: navigateOptions?.replaceInstructions,
+						label: navigateOptions?.label,
+					});
+					return { cancelled: result.cancelled };
+				},
+				switchSession: (sessionRef, switchOptions) => openStoredSession(host, client, sessionRef, switchOptions),
+				reload: () => session().reload(),
+			},
+			onError: (err) => {
+				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
+			},
+		},
+		move: {
+			kind: "in_place",
+			prepare: (to) => {
+				current = to;
+			},
+			onMoved: (to) => {
+				observeLoss(to);
+				subscribe();
+			},
+		},
+	};
 
 	const disposeRuntime = async (): Promise<void> => {
 		if (disposed) return;
@@ -49,7 +125,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		unsubscribe?.();
 		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
 		streamProjector = undefined;
-		await runtimeHost.dispose();
+		await (host.conversationOf(client) ? host.detach(client) : host.close(current));
 	};
 
 	const registerSignalHandlers = (): void => {
@@ -71,85 +147,26 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	};
 
 	registerSignalHandlers();
-
-	void runtimeHost.lost.then((error) => {
-		conversationLoss ??= `Volt stopped session ${runtimeHost.session.sessionId} because its saved state could not be confirmed: ${error.message}`;
-	});
-
-	runtimeHost.setRebindSession(async () => {
-		await rebindSession();
-	});
-
-	const rebindSession = async (): Promise<void> => {
-		session = runtimeHost.session;
-		await session.attachExtensionClient({
-			id: extensionClientId,
-			mode: mode === "json" ? "json" : "print",
-			commandContextActions: {
-				waitForIdle: () => session.waitForIdle(),
-				newSession: async (newSessionOptions) => runtimeHost.newSession(newSessionOptions),
-				fork: async (entryId, forkOptions) => {
-					const result = await runtimeHost.fork(entryId, forkOptions);
-					return result.cancelled
-						? result
-						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
-				},
-				navigateTree: async (targetId, navigateOptions) => {
-					const result = await session.navigateTree(targetId, {
-						summarize: navigateOptions?.summarize,
-						customInstructions: navigateOptions?.customInstructions,
-						replaceInstructions: navigateOptions?.replaceInstructions,
-						label: navigateOptions?.label,
-					});
-					return { cancelled: result.cancelled };
-				},
-				switchSession: async (sessionPath, switchOptions) => {
-					return runtimeHost.switchSession(sessionPath, switchOptions);
-				},
-				reload: async () => {
-					await session.reload();
-				},
-			},
-			onError: (err) => {
-				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
-			},
-		}).ready;
-
-		unsubscribe?.();
-		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
-		const projector = new StreamProjector();
-		streamProjector = projector;
-		unsubscribe = session.subscribe(
-			(event) => {
-				if (mode === "json") {
-					const batch = projector.push(event);
-					reportProjectionDiagnostics("json-print", batch.diagnostics);
-					for (const frame of batch.frames) {
-						writeRawStdout(`${JSON.stringify(frame)}\n`);
-					}
-				}
-			},
-			{ monitorGitContext: false },
-		);
-	};
+	observeLoss(conversation);
 
 	try {
 		if (mode === "json") {
-			const header = session.sessionManager.getHeader();
+			const header = session().sessionManager.getHeader();
 			if (header) {
 				writeRawStdout(`${JSON.stringify(header)}\n`);
 			}
 		}
 
-		await rebindSession();
+		await host.attach(client, conversation);
+		subscribe();
 
 		if (initialMessage) {
-			await session.prompt(initialMessage, { images: initialImages });
+			await session().prompt(initialMessage, { images: initialImages });
 		}
 
 		for (const message of messages) {
 			if (conversationLoss) break;
-			await session.prompt(message);
+			await session().prompt(message);
 		}
 
 		if (conversationLoss) {
@@ -158,7 +175,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		if (mode === "text") {
-			const state = session.state;
+			const state = session().state;
 			const lastMessage = state.messages[state.messages.length - 1];
 
 			if (lastMessage?.role === "assistant") {

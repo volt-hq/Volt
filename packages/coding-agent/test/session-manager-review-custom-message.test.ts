@@ -3,10 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { adoptTestSession } from "./utilities/host-client.ts";
 
 describe("review custom-message sessions", () => {
 	let tempDir: string;
@@ -56,7 +56,7 @@ describe("review custom-message sessions", () => {
 		]);
 	});
 
-	it("uses displayed review custom messages in the current runtime summary", async () => {
+	it("uses displayed review custom messages in the open conversation's summary", async () => {
 		const sessionManager = await SessionManager.create(cwd, sessionDir);
 		await sessionManager.logWriter.appendCustomMessageEntry(
 			"review",
@@ -64,7 +64,7 @@ describe("review custom-message sessions", () => {
 			true,
 		);
 
-		const runtimeHost = new AgentSessionRuntime(
+		const { conversation } = adoptTestSession(
 			{
 				sessionManager,
 				lost: new Promise<Error>(() => {}),
@@ -81,7 +81,7 @@ describe("review custom-message sessions", () => {
 			},
 		);
 
-		const summaries = await runtimeHost.listSessions();
+		const summaries = await conversation.listSessions();
 
 		expect(summaries[0]).toMatchObject({
 			sessionId: sessionManager.getSessionId(),

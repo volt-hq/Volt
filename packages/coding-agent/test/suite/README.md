@@ -1,6 +1,6 @@
 # Coding agent suite tests
 
-Use `test/suite/` for the new harness-based test suite around `AgentSession` and `AgentSessionRuntime`.
+Use `test/suite/` for the new harness-based test suite around `AgentSession` and `ConversationHost` (`test/suite/host-harness.ts`).
 
 Rules:
 - Use `test/suite/harness.ts`

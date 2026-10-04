@@ -6,12 +6,11 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import * as startupUi from "../../../src/cli/startup-ui.ts";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../../src/config.ts";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import type { SessionIntentResult } from "../../../src/core/extensions/index.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
@@ -34,6 +33,7 @@ import {
 import { main } from "../../../src/main.ts";
 import { createDisabledDaemonAttach } from "../../../src/modes/interactive/daemon-attach.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
@@ -112,7 +112,7 @@ async function fixture(archive = true) {
 		spawned: false,
 		socketPath: paths.socketPath,
 	});
-	const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir,
@@ -155,6 +155,15 @@ async function fixture(archive = true) {
 		ensureDaemon,
 		server,
 	};
+}
+
+/** Open a conversation over `options.sessionManager` and attach an in-place anchor client, as the CLI does. */
+async function createRuntime(
+	factory: ConversationFactory,
+	options: { cwd: string; agentDir: string; sessionManager: SessionManager },
+): Promise<TestClient> {
+	const { host, conversation } = await openTestHost(factory, options);
+	return connectTestClient(host, conversation);
 }
 
 describe("#442 local archived-worktree resume", () => {
@@ -260,7 +269,7 @@ describe("#442 local archived-worktree resume", () => {
 		await local.closePersistence();
 		expect(ref.sessionDirectory).not.toBe(f.sessionDir);
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
 			agentDir: f.agentDir,
 			sessionManager: await SessionManager.open(ref),
@@ -317,7 +326,7 @@ describe("#442 local archived-worktree resume", () => {
 
 	it.each(["startup", "switch"])("restores the original checkout before runtime %s", async (mode) => {
 		const f = await fixture();
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: mode === "startup" ? f.record.path : f.source,
 			agentDir: f.agentDir,
 			sessionManager: mode === "startup" ? await SessionManager.open(f.ref) : SessionManager.inMemory(f.source),
@@ -341,7 +350,7 @@ describe("#442 local archived-worktree resume", () => {
 		});
 		git(f.source, "worktree", "add", "--no-checkout", f.record.path, f.record.branch);
 		expect(existsSync(join(f.record.path, "value.txt"))).toBe(false);
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: mode === "startup" ? f.record.path : f.source,
 			agentDir: f.agentDir,
 			sessionManager: mode === "startup" ? await SessionManager.open(f.ref) : SessionManager.inMemory(f.source),
@@ -355,7 +364,7 @@ describe("#442 local archived-worktree resume", () => {
 
 	it("protects startup and same-checkout replacements until switching away", async () => {
 		const f = await fixture();
-		const runtime = await createAgentSessionRuntime(
+		const runtime = await createRuntime(
 			async (options) => {
 				if (options.cwd === f.record.path)
 					expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
@@ -384,7 +393,7 @@ describe("#442 local archived-worktree resume", () => {
 
 	it.each(["disconnect", "restart"])("protects active local work through daemon %s", async (failure) => {
 		const f = await fixture();
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
 			agentDir: f.agentDir,
 			sessionManager: await SessionManager.open(f.ref),
@@ -476,7 +485,7 @@ describe("#442 local archived-worktree resume", () => {
 		const factory = vi.fn(f.factory);
 		try {
 			await expect(
-				createAgentSessionRuntime(factory, {
+				createRuntime(factory, {
 					cwd: f.record.path,
 					agentDir: f.agentDir,
 					sessionManager: await SessionManager.open(f.ref),
@@ -492,7 +501,7 @@ describe("#442 local archived-worktree resume", () => {
 
 	it("protects an ephemeral managed-checkout session without a daemon connection", async () => {
 		const f = await fixture(false);
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
 			agentDir: f.agentDir,
 			sessionManager: SessionManager.inMemory(f.record.path),
@@ -510,7 +519,7 @@ describe("#442 local archived-worktree resume", () => {
 	it("releases protection when runtime creation fails", async () => {
 		const f = await fixture();
 		await expect(
-			createAgentSessionRuntime(
+			createRuntime(
 				async () => {
 					expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
 						removed: false,
@@ -579,7 +588,7 @@ describe("#442 local archived-worktree resume", () => {
 
 	it("retains protection until asynchronous runtime teardown finishes", async () => {
 		const f = await fixture();
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
 			agentDir: f.agentDir,
 			sessionManager: await SessionManager.open(f.ref),
@@ -621,7 +630,7 @@ describe("#442 local archived-worktree resume", () => {
 			socketPath: f.server.socketPath,
 			pid: process.pid,
 		});
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
 			agentDir: f.agentDir,
 			sessionManager: await SessionManager.open(f.ref),
@@ -661,7 +670,7 @@ describe("#442 local archived-worktree resume", () => {
 				spawned: false,
 				socketPath: "unused",
 			});
-		const runtime = await createAgentSessionRuntime(f.factory, {
+		const runtime = await createRuntime(f.factory, {
 			cwd: f.source,
 			agentDir: f.agentDir,
 			sessionManager: SessionManager.inMemory(f.source),
@@ -670,7 +679,9 @@ describe("#442 local archived-worktree resume", () => {
 		const previous = runtime.session;
 		const showError = vi.fn();
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
-			runtimeHost: runtime,
+			host: runtime.host,
+			conversation: runtime.conversation,
+			client: runtime.client,
 			daemonAttach: createDisabledDaemonAttach(),
 			statusContainer: { clear: vi.fn() },
 			showError,

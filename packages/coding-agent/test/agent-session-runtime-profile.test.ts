@@ -4,24 +4,21 @@ import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { createAgentSessionTestControl } from "./agent-session-test-control.ts";
+import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
 import {
 	createTestAgentSessionRuntimeConfig,
 	createTestExtensionsResult,
 	createTestResourceLoader,
 } from "./utilities.ts";
 
-function getRuntimeProfile(options: Parameters<CreateAgentSessionRuntimeFactory>[0]): string | undefined {
+function getRuntimeProfile(options: Parameters<ConversationFactory>[0]): string | undefined {
 	if (!("profile" in options)) {
 		return undefined;
 	}
@@ -29,7 +26,7 @@ function getRuntimeProfile(options: Parameters<CreateAgentSessionRuntimeFactory>
 	return typeof profile === "string" ? profile : undefined;
 }
 
-describe("AgentSessionRuntime profile propagation", () => {
+describe("conversation host profile propagation", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	afterEach(async () => {
@@ -57,7 +54,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		} satisfies Partial<Settings>;
 
 		let runtimeProfileDuringReplacement: string | undefined;
-		const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+		const createRuntime: ConversationFactory = async (runtimeOptions) => {
 			const runtimeProfile = getRuntimeProfile(runtimeOptions);
 			if (runtimeOptions.sessionStartEvent?.reason === "new") {
 				runtimeProfileDuringReplacement = runtimeProfile;
@@ -105,11 +102,12 @@ describe("AgentSessionRuntime profile propagation", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir,
 			sessionManager: await SessionManager.create(tempDir),
 		});
+		const runtime = await connectTestClient(host, conversation);
 
 		cleanups.push(async () => {
 			await runtime.dispose();

@@ -3,8 +3,10 @@ import { type Component, type Container, Text, type TUI, type TuiMode } from "@h
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type { HostClient } from "../src/core/host/targets.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import { createRequestUserInputToolDefinition } from "../src/core/tools/request-user-input.ts";
 import { BackgroundJobsInspector } from "../src/modes/interactive/components/background-jobs.ts";
@@ -13,6 +15,7 @@ import type { PlanInspectorComponent } from "../src/modes/interactive/components
 import { UserInputDialog } from "../src/modes/interactive/components/user-input-dialog.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type TestAccess = {
@@ -29,7 +32,10 @@ type TestAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	attachSessionExtensions(session: AgentSession): Promise<void>;
+	host: ConversationHost;
+	client: HostClient;
+	conversation: HostedConversation;
+	showSessionExtensions(session: AgentSession): void;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	showExtensionCustom: ExtensionUIContext["custom"];
@@ -83,13 +89,10 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 			summary: "Keep storage local and respect ignored files.",
 		});
 	}
-	const runtime = {
-		session: harness.session,
-		setBeforeSessionInvalidate: vi.fn(),
-		setRebindSession: vi.fn(),
-		lost: new Promise<Error>(() => {}),
-	};
-	const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, { tuiMode });
+	// The TUI's host binds the session's extensions in TUI mode when the TUI attaches.
+	const { host } = createFakeHost({ extensionMode: "tui" });
+	const { conversation } = createFakeConversation(harness.session);
+	const mode = new InteractiveMode(host, conversation, { tuiMode });
 	fixtures.push({ mode, harness });
 	const access = mode as unknown as TestAccess;
 	const terminal = new VirtualTerminal(columns, 24);
@@ -106,7 +109,8 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 	access.activateView(access.conversationView, access.editor, false);
 	access.isInitialized = true;
 	access.ui.start();
-	await access.attachSessionExtensions(harness.session);
+	await access.host.attach(access.client, access.conversation);
+	access.showSessionExtensions(harness.session);
 	access.subscribeToAgent(harness.session);
 	await terminal.waitForRender();
 	return { harness, access, terminal };

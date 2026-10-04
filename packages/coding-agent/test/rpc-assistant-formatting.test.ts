@@ -1,9 +1,9 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 interface RpcHarness {
 	close(): void;
@@ -71,16 +71,10 @@ async function startRpcModeForHarness(harness: Harness): Promise<RpcHarness> {
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const runtimeHost = {
-		session: harness.session,
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => {}),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
-	const modePromise = runRpcMode(runtimeHost, {
-		disposeRuntimeOnClose: false,
+	const { host } = createFakeHost();
+	const { conversation } = createFakeConversation(harness.session);
+	const modePromise = runRpcMode(host, conversation, {
+		anchor: false,
 		onReady: resolveReady,
 		transport,
 	});

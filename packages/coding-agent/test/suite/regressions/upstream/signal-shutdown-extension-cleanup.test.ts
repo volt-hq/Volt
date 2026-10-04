@@ -7,7 +7,7 @@ import type { SessionManager, SessionReference } from "../../../../src/core/sess
 import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
 
 // On SIGTERM/SIGHUP the graceful shutdown must emit `session_shutdown`
-// (runtimeHost.dispose) BEFORE touching the terminal. Extension teardown such
+// (the conversation's close) BEFORE touching the terminal. Extension teardown such
 // as removing a socket does not write to the tty, so it must not be skipped if
 // a later terminal-restore write fails on a dead or stalled terminal. The
 // interactive quit path (Ctrl+D, /quit) keeps the opposite order to preserve
@@ -19,7 +19,8 @@ type ShutdownThis = {
 	disposeRuntimeHost: () => Promise<void>;
 	flushStdout: () => Promise<void>;
 	unregisterSignalHandlers: () => void;
-	runtimeHost: { dispose: () => Promise<void> };
+	host: { close: () => Promise<void>; dispose: () => Promise<void> };
+	conversation: object;
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
@@ -76,11 +77,13 @@ function createContext(order: string[], sessionManager = createSessionManager())
 		disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
 		flushStdout: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).flushStdout,
 		unregisterSignalHandlers: vi.fn(),
-		runtimeHost: {
-			dispose: vi.fn(async () => {
+		host: {
+			close: vi.fn(async () => {
 				order.push("dispose");
 			}),
+			dispose: vi.fn(async () => {}),
 		},
+		conversation: {},
 		ui: {
 			terminal: {
 				drainInput: vi.fn(async () => {
@@ -266,6 +269,6 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 		await callShutdown(context, { fromSignal: true });
 
 		expect(order).toEqual([]);
-		expect(context.runtimeHost.dispose).not.toHaveBeenCalled();
+		expect(context.host.close).not.toHaveBeenCalled();
 	});
 });

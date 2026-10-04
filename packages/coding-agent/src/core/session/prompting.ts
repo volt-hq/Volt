@@ -6,6 +6,7 @@
  * and custom and extension user messages.
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import type {
 	AdmissionGate,
@@ -84,6 +85,8 @@ export class SessionPrompting {
 	/** Inputs extensions sent (`sendUserMessage`) that have not settled; they start no extension work. */
 	private readonly extensionInputIds = new Set<string>();
 	private activeExtensionCommandHandlers = 0;
+	/** The identified input whose extension command handler the current asynchronous chain runs in. */
+	private readonly commandInput = new AsyncLocalStorage<string>();
 	/** Each prompt turn's `before_agent_start` system prompt override, recorded when its prompt is admitted. */
 	private readonly turnSystemPromptOverrides = new Map<string, string | undefined>();
 
@@ -226,7 +229,8 @@ export class SessionPrompting {
 		// A handled command or input hook already ran its side effects. If its
 		// terminal write fails, `started` remains the truthful ambiguous outcome.
 		if (outcome === "handled") {
-			if (live && clientMessageId !== undefined) {
+			// A command that moved its client to another conversation settled its input before leaving.
+			if (live && clientMessageId !== undefined && this.inputState(clientMessageId) !== "completed") {
 				try {
 					this.host.assertActive();
 					await this.host.conversation().settleClientInput(clientMessageId, { state: "completed" });
@@ -287,7 +291,7 @@ export class SessionPrompting {
 			// Handle extension commands first (execute immediately, even during streaming)
 			// Extension commands manage their own LLM interaction via volt.sendMessage()
 			if (expandPromptTemplates && text.startsWith("/")) {
-				const handled = await this.tryExecuteExtensionCommand(text, async () => {
+				const handled = await this.tryExecuteExtensionCommand(text, identifiedClientMessageId, async () => {
 					releaseReservation();
 					await clientInputs.markStarted(identifiedClientMessageId, abortGeneration);
 					if (this.host.isDisposed() || abortGeneration !== this.host.abortGeneration()) {
@@ -541,7 +545,29 @@ export class SessionPrompting {
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
-	private async tryExecuteExtensionCommand(text: string, onWillExecute?: () => Promise<void>): Promise<boolean> {
+	/**
+	 * Settle, as completed, the identified input whose extension command the
+	 * current call runs in. The command is moving its client to another
+	 * conversation: its input is done, and the conversation it leaves must not
+	 * count it as an input whose outcome is still unknown.
+	 */
+	async settleInvokingCommandInput(): Promise<void> {
+		const clientMessageId = this.commandInput.getStore();
+		if (clientMessageId === undefined || this.inputState(clientMessageId) !== "started") return;
+		this.host.assertActive();
+		await this.host.conversation().settleClientInput(clientMessageId, { state: "completed" });
+		this.host.clientInputs().complete(clientMessageId, "completed");
+	}
+
+	private inputState(clientMessageId: string): string | undefined {
+		return this.host.conversation().state.clientInputs.inputs.get(clientMessageId)?.state;
+	}
+
+	private async tryExecuteExtensionCommand(
+		text: string,
+		clientMessageId: string | undefined,
+		onWillExecute?: () => Promise<void>,
+	): Promise<boolean> {
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
 		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
@@ -563,7 +589,11 @@ export class SessionPrompting {
 		const releaseActivity = this.host.conversation().beginActivity("extension_command");
 		this.activeExtensionCommandHandlers++;
 		try {
-			const handler = Promise.resolve(command.handler(args, ctx));
+			const handler = Promise.resolve(
+				clientMessageId === undefined
+					? command.handler(args, ctx)
+					: this.commandInput.run(clientMessageId, () => command.handler(args, ctx)),
+			);
 			// After the session lost its log nothing the handler does can be saved. Stop awaiting
 			// it (its ctx.signal is aborted) so a handler that never settles cannot keep the
 			// ending runtime alive.

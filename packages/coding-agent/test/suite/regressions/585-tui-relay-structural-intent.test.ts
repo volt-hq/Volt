@@ -1,7 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { ConversationLock } from "../../../src/core/conversation-log/conversation-lock.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import { executePlan } from "../../../src/core/host/plan-handoff.ts";
+import { openFork, openNewSession, openStoredSession } from "../../../src/core/host/session-intents.ts";
+import type { HostClient } from "../../../src/core/host/targets.ts";
 import { PLAN_EXECUTION_CUSTOM_TYPE } from "../../../src/core/planning.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { findSessionInfoById, SessionManager } from "../../../src/core/session-manager.ts";
@@ -13,24 +18,25 @@ import {
 	parseWrittenObjects,
 	withCurrentConversationAuthority,
 } from "../../iroh-stream-doubles.ts";
-import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
+import { connectTestClient, type TestClient } from "../../utilities/host-client.ts";
+import { createExtensionRuntime } from "../extension-runtime.ts";
 
 interface LifecycleEvent {
 	type: string;
 	sessionId: string;
 }
 
-/** A phone relayed through the TUI: served on a view of the TUI's session that stays on it. */
-function servePhone(view: AgentSessionRuntime, tempDir: string) {
+/** A phone relayed through the TUI: a client of the TUI's conversation that its moves redirect alone. */
+function servePhone(host: ConversationHost, conversation: HostedConversation, tempDir: string) {
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
 	const ready = Promise.withResolvers<void>();
-	const sessionId = view.session.sessionId;
-	const closed = runIrohRemoteRpcMode(view, {
-		...createTestIrohConversationOptions(view),
+	const sessionId = conversation.id;
+	const closed = runIrohRemoteRpcMode(host, conversation, {
+		...createTestIrohConversationOptions(conversation),
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 		stream: { recv, send },
-		disposeRuntimeOnClose: false,
+		redirect: {},
 		suppressExtensionUiRequests: true,
 		detachedTerminal: (detachment) => ({
 			type: "remote_terminal",
@@ -64,32 +70,47 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		cancelSwitch = false;
 	});
 
-	async function createTuiRuntime(): Promise<ExtensionRuntime> {
-		const fixture = await createExtensionRuntime((volt) => {
-			volt.on("session_start", (_event, ctx) => {
-				events.push({ type: "session_start", sessionId: ctx.sessionManager.getSessionId() });
-			});
-			volt.on("session_before_switch", (_event, ctx) => {
-				events.push({ type: "session_before_switch", sessionId: ctx.sessionManager.getSessionId() });
-				return cancelSwitch ? { cancel: true } : undefined;
-			});
-			volt.on("session_shutdown", (_event, ctx) => {
-				events.push({ type: "session_shutdown", sessionId: ctx.sessionManager.getSessionId() });
-			});
-		});
+	/** The TUI as its conversation's anchor client, in a host that binds extensions in TUI mode. */
+	async function createTuiRuntime(): Promise<{ runtime: TestClient; tempDir: string }> {
+		const fixture = await createExtensionRuntime(
+			(volt) => {
+				volt.on("session_start", (_event, ctx) => {
+					events.push({ type: "session_start", sessionId: ctx.sessionManager.getSessionId() });
+				});
+				volt.on("session_before_switch", (_event, ctx) => {
+					events.push({ type: "session_before_switch", sessionId: ctx.sessionManager.getSessionId() });
+					return cancelSwitch ? { cancel: true } : undefined;
+				});
+				volt.on("session_shutdown", (_event, ctx) => {
+					events.push({ type: "session_shutdown", sessionId: ctx.sessionManager.getSessionId() });
+				});
+			},
+			{ extensionMode: "tui" },
+		);
 		cleanups.push(() => fixture.dispose());
-		// The TUI is the session's anchor client.
-		await fixture.runtime.session.attachExtensionClient({ id: "tui", mode: "tui" }).ready;
-		return fixture;
+		const runtime = await connectTestClient(fixture.host, fixture.conversation, { id: "tui", surface: {} });
+		return { runtime, tempDir: fixture.tempDir };
+	}
+
+	/** A relayed phone attached to the TUI's conversation; `detachments` records where it was redirected. */
+	async function attachPhone(runtime: TestClient): Promise<{ phone: HostClient; detachments: unknown[] }> {
+		const detachments: unknown[] = [];
+		const phone: HostClient = {
+			id: randomUUID(),
+			move: {
+				kind: "redirect",
+				redirect: (sessionId) => void detachments.push({ kind: "redirected", sessionId }),
+			},
+		};
+		await runtime.host.attach(phone, runtime.conversation);
+		return { phone, detachments };
 	}
 
 	it("answers new_session, then redirects the phone to the new log while the TUI stays", async () => {
 		const { runtime, tempDir } = await createTuiRuntime();
 		const sourceId = runtime.session.sessionId;
 		const sessionDir = runtime.session.sessionManager.getSessionDir();
-		const view = runtime.attachRedirectClient();
-		cleanups.push(() => view.dispose());
-		const phone = servePhone(view, tempDir);
+		const phone = servePhone(runtime.host, runtime.conversation, tempDir);
 		cleanups.push(async () => {
 			phone.recv.end();
 			await phone.closed.catch(() => undefined);
@@ -135,12 +156,9 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 			.find((entry) => entry.type === "message" && entry.message.role === "user");
 		if (!userEntry) throw new Error("the user message is missing");
 
-		const newView = runtime.attachRedirectClient();
-		cleanups.push(() => newView.dispose());
-		const detachments: unknown[] = [];
-		newView.onClientDetached((detachment) => detachments.push(detachment));
+		const { phone: newPhone, detachments } = await attachPhone(runtime);
 		const withSession = vi.fn(async () => {});
-		const created = await newView.newSession({
+		const created = await openNewSession(runtime.host, newPhone, {
 			setup: (writer) => writer.appendSessionInfo("from the phone"),
 			withSession,
 		});
@@ -154,12 +172,12 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		const createdLog = await SessionManager.openReadOnly(createdInfo.ref);
 		expect(createdLog.getSessionName()).toBe("from the phone");
 		await createdLog.closePersistence();
-		// A redirected view takes no further session changes.
-		await expect(newView.newSession()).rejects.toThrow("no longer accepting structural operations");
+		// A redirected client left the host: it takes no further session changes.
+		expect(runtime.host.conversationOf(newPhone)).toBeUndefined();
+		await expect(openNewSession(runtime.host, newPhone)).rejects.toThrow("not attached");
 
-		const forkView = runtime.attachRedirectClient();
-		cleanups.push(() => forkView.dispose());
-		const forked = await forkView.fork(userEntry.id);
+		const { phone: forkPhone } = await attachPhone(runtime);
+		const forked = await openFork(runtime.host, forkPhone, userEntry.id);
 		if (forked.cancelled) throw new Error("the fork was cancelled");
 		expect(forked.selectedText).toBe("first question");
 		const forkedInfo = await findSessionInfoById(sessionDir, forked.sessionId);
@@ -168,9 +186,8 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		expect(forkedLog.getForkedFrom()).toEqual({ sessionId: sourceId, entryId: userEntry.parentId });
 		await forkedLog.closePersistence();
 
-		const switchView = runtime.attachRedirectClient();
-		cleanups.push(() => switchView.dispose());
-		const switched = await switchView.switchSession(createdInfo.ref);
+		const { phone: switchPhone } = await attachPhone(runtime);
+		const switched = await openStoredSession(runtime.host, switchPhone, createdInfo.ref);
 		expect(switched).toEqual({ cancelled: false, sessionId: created.sessionId, seeded: false });
 
 		expect(runtime.session.sessionId).toBe(sourceId);
@@ -181,9 +198,7 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 
 	it("keeps the phone on the session when the TUI's extensions cancel the switch", async () => {
 		const { runtime, tempDir } = await createTuiRuntime();
-		const view = runtime.attachRedirectClient();
-		cleanups.push(() => view.dispose());
-		const phone = servePhone(view, tempDir);
+		const phone = servePhone(runtime.host, runtime.conversation, tempDir);
 		cleanups.push(async () => {
 			phone.recv.end();
 			await phone.closed.catch(() => undefined);
@@ -219,10 +234,9 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 			title: "From the phone",
 			summary: "Execute in a fresh session.",
 		});
-		const view = runtime.attachRedirectClient();
-		cleanups.push(() => view.dispose());
+		const { phone } = await attachPhone(runtime);
 
-		const result = await view.executePlan(ready.id, ready.revision, "new_session");
+		const result = await executePlan(runtime.host, phone, ready.id, ready.revision, "new_session");
 
 		expect(result.started).toBe(true);
 		expect(result.selectedSessionId).not.toBe(sourceId);

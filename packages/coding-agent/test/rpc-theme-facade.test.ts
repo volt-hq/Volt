@@ -5,12 +5,12 @@
  */
 
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { Theme } from "../src/core/theme/runtime.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 function createSession() {
 	return {
@@ -42,18 +42,11 @@ function createSession() {
 	};
 }
 
-function createRuntimeHost(session: ReturnType<typeof createSession>): AgentSessionRuntime {
-	return {
-		get session() {
-			return session;
-		},
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		switchSessionById: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => undefined),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+/** A host whose rpc-mode conversation binds extensions in rpc mode. */
+function createRuntimeHost(session: ReturnType<typeof createSession>) {
+	const fake = createFakeHost({ extensionMode: "rpc" });
+	const { conversation } = createFakeConversation(session);
+	return { ...fake, conversation };
 }
 
 function createFakeTransport(): RpcTransport {
@@ -75,7 +68,10 @@ describe("rpc-mode extension theme facade", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtimeHost, { transport: createFakeTransport(), onReady: resolveReady });
+		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport: createFakeTransport(),
+			onReady: resolveReady,
+		});
 		await ready;
 		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalled());
 
@@ -106,9 +102,9 @@ describe("rpc-mode extension theme facade", () => {
 		expect(failed.success).toBe(false);
 		expect(session.settingsManager.setTheme).not.toHaveBeenCalled();
 
-		await runtimeHost.dispose();
-		// Shut the mode down by disposing; the transport never closes on its own
-		// in this harness, so just stop awaiting it.
+		await runtimeHost.close(runtimeHost.conversation);
+		// Shut the mode down by closing the conversation; the transport never
+		// closes on its own in this harness, so just stop awaiting it.
 		void modePromise;
 	});
 });

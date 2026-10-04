@@ -5,13 +5,14 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../../ai/src/providers/openai-responses-shared.ts";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import {
 	BACKGROUND_JOB_NOTIFICATION_TYPE,
 	BackgroundJobManager,
 	type BackgroundJobSnapshot,
 } from "../../src/core/background-jobs.ts";
 import type { ExtensionAPI, ToolResultEvent } from "../../src/core/extensions/index.ts";
+import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import { backgroundJobResult } from "../../src/core/tools/background.ts";
@@ -116,12 +117,14 @@ describe("AgentSession background jobs", () => {
 
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		const mode = new InteractiveMode({
-			session: harness.session,
-			setBeforeSessionInvalidate: () => undefined,
-			setRebindSession: () => undefined,
-			lost: new Promise<Error>(() => {}),
-		} as unknown as AgentSessionRuntime);
+		// The TUI shows the harness session; nothing here attaches it to a host.
+		const mode = new InteractiveMode(
+			{} as ConversationHost,
+			{
+				session: harness.session,
+				lost: new Promise<Error>(() => {}),
+			} as unknown as HostedConversation,
+		);
 		modes.push(mode);
 		const control = mode as unknown as {
 			renderer: TuiMainScreen;

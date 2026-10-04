@@ -1,10 +1,10 @@
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type AgentSessionRuntime,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
@@ -48,7 +48,7 @@ describe("#393 subagent policy stops fence background wakes", () => {
 		vi.spyOn(nativeTools, "createAllToolDefinitions").mockImplementation((cwd, options) =>
 			original(cwd, { ...options, bash: { ...options?.bash, operations: { exec } } }),
 		);
-		let runtime: AgentSessionRuntime | undefined;
+		let runtime: HostedConversation | undefined;
 		const manager = new SubagentManager({
 			cwd: fixture.tempDir,
 			agentDir: fixture.tempDir,
@@ -82,7 +82,7 @@ describe("#393 subagent policy stops fence background wakes", () => {
 				return { ...created, services, diagnostics: services.diagnostics };
 			},
 			onRuntimeCreated: (event) => {
-				runtime = event.runtime;
+				runtime = event.conversation;
 			},
 		});
 		try {

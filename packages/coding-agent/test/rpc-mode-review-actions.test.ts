@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { SessionIntentResult } from "../src/core/extensions/index.ts";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type * as SessionIntents from "../src/core/host/session-intents.ts";
+import type { HostClient } from "../src/core/host/targets.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
@@ -272,11 +275,15 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 	};
 });
 
-import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
+/** The session intents RPC mode runs; a test's fake host moves the client itself. */
+const intentMocks = vi.hoisted(() => ({ openNewSession: vi.fn() }));
 
-function runRpcMode(runtimeHost: AgentSessionRuntime, options: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
-	return runRpcModeImpl(runtimeHost, options);
-}
+vi.mock("../src/core/host/session-intents.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof SessionIntents>();
+	return { ...actual, openNewSession: intentMocks.openNewSession };
+});
+
+import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
 interface CollectingTransport {
 	transport: RpcTransport;
@@ -349,23 +356,54 @@ function makeSession(sessionId: string, sessionManager = SessionManager.inMemory
 	};
 }
 
-function makeRuntimeHost(
-	options: { manager?: SessionManager; seedMessages?: object[]; replacementManagers?: SessionManager[] } = {},
-) {
-	let currentSession = makeSession("initial-session", options.manager);
-	const runtimeHost = {
-		get session() {
-			return currentSession;
-		},
+interface FakeNewSessionOptions {
+	setup?: (writer: SessionWriter) => Promise<void>;
+	beforeMove?: (source: HostedConversation) => Promise<void>;
+	withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
+}
+
+function makeConversation(session: ReturnType<typeof makeSession>): HostedConversation {
+	return {
+		id: session.sessionId,
+		session,
 		cwd: "/workspace",
 		services: { agentDir: "/workspace/.volt" },
 		reviewWorkflows: new ReviewWorkflowManager(),
-		newSession: vi.fn(
-			async (newSessionOptions?: {
-				setup?: (writer: SessionWriter) => Promise<void>;
-				beforeMove?: (source: HostedConversation) => Promise<void>;
-				withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
-			}) => {
+		lost: new Promise<Error>(() => {}),
+	} as unknown as HostedConversation;
+}
+
+/**
+ * A host over fake conversations. Its `newSession` stands in for the session
+ * intent: it writes the new log, lets the handoff write through the source,
+ * and moves the attached client in place to the new conversation.
+ */
+function makeFakeHost(
+	options: { manager?: SessionManager; seedMessages?: object[]; replacementManagers?: SessionManager[] } = {},
+) {
+	const conversation = makeConversation(makeSession("initial-session", options.manager));
+	let current = conversation;
+	let attached: HostClient | undefined;
+	const host = {
+		attach: vi.fn(async (client: HostClient) => {
+			attached = client;
+		}),
+		detach: vi.fn(async () => {
+			attached = undefined;
+		}),
+		conversationOf: (client: HostClient) => (attached?.id === client.id ? current : undefined),
+		close: vi.fn(async () => {}),
+		onClosed: () => () => {},
+	} as unknown as ConversationHost;
+	const fake = {
+		host,
+		/** The conversation the client started on. */
+		conversation,
+		get reviewWorkflows() {
+			return conversation.reviewWorkflows;
+		},
+		newSession: vi.fn<(newSessionOptions?: FakeNewSessionOptions) => Promise<SessionIntentResult>>(
+			async (newSessionOptions) => {
 				const sessionManager = SessionManager.inMemory("/workspace");
 				await newSessionOptions?.setup?.(sessionManager.logWriter);
 				// The review message is written into the new session before it opens.
@@ -374,10 +412,14 @@ function makeRuntimeHost(
 					const { customType, content, display, details } = entry;
 					options.seedMessages?.push({ customType, content, display, details });
 				}
-				const target = makeSession("review-session", sessionManager);
-				await newSessionOptions?.beforeMove?.({ session: currentSession } as unknown as HostedConversation);
+				const target = makeConversation(makeSession("review-session", sessionManager));
+				await newSessionOptions?.beforeMove?.(current);
 				options.replacementManagers?.push(sessionManager);
-				currentSession = target;
+				const from = current;
+				const move = attached?.move;
+				if (move?.kind === "in_place") move.prepare?.(target, from);
+				current = target;
+				if (move?.kind === "in_place") await move.onMoved(target, from);
 				await newSessionOptions?.withSession?.({
 					sendMessage: async (message) => {
 						options.seedMessages?.push(message);
@@ -390,16 +432,16 @@ function makeRuntimeHost(
 				};
 			},
 		),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-		dispose: vi.fn(async () => {}),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
-	return runtimeHost;
+	};
+	intentMocks.openNewSession.mockImplementation(
+		(_host: ConversationHost, _client: HostClient, newSessionOptions?: FakeNewSessionOptions) =>
+			fake.newSession(newSessionOptions),
+	);
+	return fake;
 }
 
 async function startMode(
-	runtimeHost: AgentSessionRuntime,
+	fake: ReturnType<typeof makeFakeHost>,
 	transport: RpcTransport,
 	options: { requireRemoteSafeUiActions?: boolean } = {},
 ): Promise<{ modePromise: Promise<void> }> {
@@ -407,7 +449,7 @@ async function startMode(
 	const ready = new Promise<void>((resolve) => {
 		readyResolve = resolve;
 	});
-	const modePromise = runRpcMode(runtimeHost, {
+	const modePromise = runRpcMode(fake.host, fake.conversation, {
 		transport,
 		exitProcess: false,
 		onReady: readyResolve,
@@ -461,9 +503,9 @@ describe("RPC durable review actions", () => {
 				record,
 			};
 		});
-		const runtimeHost = makeRuntimeHost();
+		const fake = makeFakeHost();
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport, {
+		const modePromise = await startMode(fake, collecting.transport, {
 			requireRemoteSafeUiActions: true,
 		});
 		collecting.getLineHandler()(
@@ -487,7 +529,7 @@ describe("RPC durable review actions", () => {
 		);
 		expect(acceptedIndex).toBeLessThan(eventIndex);
 		release();
-		await vi.waitFor(() => expect(runtimeHost.reviewWorkflows.get("review:test")?.status).toBe("completed"));
+		await vi.waitFor(() => expect(fake.reviewWorkflows.get("review:test")?.status).toBe("completed"));
 		await closeMode(collecting, modePromise);
 	});
 
@@ -515,9 +557,9 @@ describe("RPC durable review actions", () => {
 			verificationInspectionComplete: true,
 		};
 		await appendReviewRun(manager.logWriter, newer);
-		const runtimeHost = makeRuntimeHost({ manager });
+		const fake = makeFakeHost({ manager });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 		line(JSON.stringify({ id: "list", type: "list_review_workflows", limit: 1 }));
 		line(JSON.stringify({ id: "get", type: "get_review_result", runId: "review:newer" }));
@@ -609,9 +651,9 @@ describe("RPC durable review actions", () => {
 		await appendReviewRun(manager.logWriter, record);
 		const seedMessages: object[] = [];
 		const replacementManagers: SessionManager[] = [];
-		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+		const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 		line(
 			JSON.stringify({
@@ -681,9 +723,9 @@ describe("RPC durable review actions", () => {
 		await appendReviewRun(manager.logWriter, durableRecord());
 		const seedMessages: object[] = [];
 		const replacementManagers: SessionManager[] = [];
-		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+		const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
 		const collecting = createCollectingTransport();
-		const started = await startMode(runtimeHost, collecting.transport);
+		const started = await startMode(fake, collecting.transport);
 		try {
 			collecting.getLineHandler()(
 				JSON.stringify({ id: "empty", type: "open_review_session", runId: "review:test", findingIds: [] }),
@@ -710,9 +752,9 @@ describe("RPC durable review actions", () => {
 			await appendReviewRun(manager.logWriter, durableRecord());
 			const seedMessages: object[] = [];
 			const replacementManagers: SessionManager[] = [];
-			const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+			const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
 			const collecting = createCollectingTransport();
-			const started = await startMode(runtimeHost, collecting.transport);
+			const started = await startMode(fake, collecting.transport);
 			const line = collecting.getLineHandler();
 			try {
 				line(
@@ -767,9 +809,9 @@ describe("RPC durable review actions", () => {
 		const manager = SessionManager.inMemory("/workspace");
 		await appendReviewRun(manager.logWriter, durableRecord());
 		const replacementManagers: SessionManager[] = [];
-		const runtimeHost = makeRuntimeHost({ manager, replacementManagers });
+		const fake = makeFakeHost({ manager, replacementManagers });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 
 		line(JSON.stringify({ id: "open-all", type: "open_review_session", runId: "review:test" }));
@@ -806,9 +848,9 @@ describe("RPC durable review actions", () => {
 	test("explicit acknowledgment is idempotent and unsuccessful opens preserve the source", async () => {
 		const manager = SessionManager.inMemory("/workspace");
 		await appendReviewRun(manager.logWriter, durableRecord());
-		const runtimeHost = makeRuntimeHost({ manager });
+		const fake = makeFakeHost({ manager });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 
 		line(JSON.stringify({ id: "ack-1", type: "acknowledge_review", runId: "review:test" }));
@@ -825,7 +867,7 @@ describe("RPC durable review actions", () => {
 
 		const unacknowledged = durableRecord("review:unacknowledged");
 		await appendReviewRun(manager.logWriter, unacknowledged);
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true });
+		vi.mocked(fake.newSession).mockResolvedValueOnce({ cancelled: true });
 		line(JSON.stringify({ id: "open-cancelled", type: "open_review_session", runId: unacknowledged.runId }));
 		await vi.waitFor(() => expect(response(collecting.writes, "open-cancelled")).toBeDefined());
 		expect(response(collecting.writes, "open-cancelled")).toMatchObject({
@@ -834,13 +876,13 @@ describe("RPC durable review actions", () => {
 		});
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
-		vi.mocked(runtimeHost.newSession).mockRejectedValueOnce(new Error("seed failed"));
+		vi.mocked(fake.newSession).mockRejectedValueOnce(new Error("seed failed"));
 		line(JSON.stringify({ id: "open-failed", type: "open_review_session", runId: unacknowledged.runId }));
 		await vi.waitFor(() => expect(response(collecting.writes, "open-failed")).toBeDefined());
 		expect(response(collecting.writes, "open-failed")).toMatchObject({ success: false, error: "seed failed" });
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true });
+		vi.mocked(fake.newSession).mockResolvedValueOnce({ cancelled: true });
 		line(
 			JSON.stringify({
 				id: "fix-cancelled",
@@ -856,7 +898,7 @@ describe("RPC durable review actions", () => {
 		});
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
-		vi.mocked(runtimeHost.newSession).mockRejectedValueOnce(new Error("fix seed failed"));
+		vi.mocked(fake.newSession).mockRejectedValueOnce(new Error("fix seed failed"));
 		line(
 			JSON.stringify({
 				id: "fix-failed",
@@ -876,9 +918,9 @@ describe("RPC durable review actions", () => {
 		await appendReviewRun(manager.logWriter, durableRecord());
 		const acknowledgedAt = (await acknowledgeReviewRun(manager.logWriter, "review:test")).acknowledgedAt;
 		const replacementManagers: SessionManager[] = [];
-		const runtimeHost = makeRuntimeHost({ manager, replacementManagers });
+		const fake = makeFakeHost({ manager, replacementManagers });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 
 		line(
@@ -894,9 +936,7 @@ describe("RPC durable review actions", () => {
 				data: { cancelled: false },
 			}),
 		);
-		expect(runtimeHost.newSession).toHaveBeenCalledWith(
-			expect.objectContaining({ preserveReviewRunId: "review:test" }),
-		);
+		expect(fake.newSession).toHaveBeenCalledWith(expect.objectContaining({ preserveReviewRunId: "review:test" }));
 		expect(getReviewRun(replacementManagers[0]!, "review:test")).toMatchObject({
 			runId: "review:test",
 			acknowledgedAt,
@@ -931,9 +971,9 @@ describe("RPC durable review actions", () => {
 	test("accepts an incremental durable branch rerun through its host-only locator", async () => {
 		const manager = SessionManager.inMemory("/workspace");
 		await appendReviewRun(manager.logWriter, durableBranchRecord());
-		const runtimeHost = makeRuntimeHost({ manager });
+		const fake = makeFakeHost({ manager });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 		line(JSON.stringify({ id: "list-branch", type: "list_review_workflows" }));
 		await vi.waitFor(() => expect(response(collecting.writes, "list-branch")).toBeDefined());
@@ -965,9 +1005,9 @@ describe("RPC durable review actions", () => {
 		const record = durableBranchRecord("review:missing-locator");
 		delete record.target.branchBase;
 		await appendReviewRun(manager.logWriter, record);
-		const runtimeHost = makeRuntimeHost({ manager });
+		const fake = makeFakeHost({ manager });
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		collecting.getLineHandler()(JSON.stringify({ id: "rerun-missing", type: "rerun_review", runId: record.runId }));
 		await vi.waitFor(() => expect(response(collecting.writes, "rerun-missing")).toBeDefined());
 		expect(response(collecting.writes, "rerun-missing")).toMatchObject({
@@ -985,15 +1025,15 @@ describe("RPC durable review actions", () => {
 			);
 			return { status: "cancelled" as const };
 		});
-		const runtimeHost = makeRuntimeHost();
+		const fake = makeFakeHost();
 		const collecting = createCollectingTransport();
-		const modePromise = await startMode(runtimeHost, collecting.transport);
+		const modePromise = await startMode(fake, collecting.transport);
 		const line = collecting.getLineHandler();
 		line(JSON.stringify({ id: "invoke", type: "invoke_ui_action", action: "review.uncommitted" }));
 		await vi.waitFor(() => expect(response(collecting.writes, "invoke")).toBeDefined());
 		line(JSON.stringify({ id: "cancel", type: "cancel_workflow", workflowId: "review:test" }));
 		await vi.waitFor(() => expect(response(collecting.writes, "cancel")).toMatchObject({ success: true }));
-		await vi.waitFor(() => expect(runtimeHost.reviewWorkflows.get("review:test")?.status).toBe("cancelled"));
+		await vi.waitFor(() => expect(fake.reviewWorkflows.get("review:test")?.status).toBe("cancelled"));
 		await closeMode(collecting, modePromise);
 	});
 });

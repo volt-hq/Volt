@@ -1,5 +1,7 @@
 import type { AssistantMessage, ImageContent } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
 
@@ -30,14 +32,14 @@ type FakeSession = {
 	reload: ReturnType<typeof vi.fn>;
 };
 
-type FakeRuntimeHost = {
+type FakeHostClient = Parameters<ConversationHost["attach"]>[0];
+
+/** A host over one fake conversation: attaching binds the client's surface, leaving closes the conversation. */
+type FakeHost = {
+	host: ConversationHost;
+	conversation: HostedConversation;
 	session: FakeSession;
-	newSession: ReturnType<typeof vi.fn>;
-	fork: ReturnType<typeof vi.fn>;
-	switchSession: ReturnType<typeof vi.fn>;
-	dispose: ReturnType<typeof vi.fn>;
-	setRebindSession: ReturnType<typeof vi.fn>;
-	lost: Promise<Error>;
+	close: ReturnType<typeof vi.fn>;
 	loseLog(error: Error): void;
 };
 
@@ -66,7 +68,7 @@ function createAssistantMessage(options?: {
 	};
 }
 
-function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost {
+function createHost(assistantMessage: AssistantMessage): FakeHost {
 	const extensionRunner: FakeExtensionRunner = {
 		hasHandlers: (eventType: string) => eventType === "session_shutdown",
 		emit: vi.fn(async () => {}),
@@ -91,19 +93,25 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 	};
-
-	return {
-		session,
-		newSession: vi.fn(async () => undefined),
-		fork: vi.fn(async () => ({ selectedText: "" })),
-		switchSession: vi.fn(async () => undefined),
-		dispose: vi.fn(async () => {
-			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+	const conversation = { id: session.sessionId, session, lost: lost.promise } as unknown as HostedConversation;
+	let attached: FakeHostClient | undefined;
+	const close = vi.fn(async () => {
+		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
+	});
+	const host = {
+		attach: vi.fn(async (client: FakeHostClient) => {
+			attached = client;
+			await session.attachExtensionClient({ ...client.surface, id: client.id } as AttachExtensionOptions).ready;
 		}),
-		setRebindSession: vi.fn(),
-		lost: lost.promise,
-		loseLog: (error) => lost.resolve(error),
-	};
+		conversationOf: (client: FakeHostClient) => (attached?.id === client.id ? conversation : undefined),
+		detach: vi.fn(async () => {
+			attached = undefined;
+			await close();
+		}),
+		close,
+	} as unknown as ConversationHost;
+
+	return { host, conversation, session, close, loseLog: (error) => lost.resolve(error) };
 }
 
 afterEach(() => {
@@ -112,11 +120,11 @@ afterEach(() => {
 
 describe("runPrintMode", () => {
 	it("emits session_shutdown in text mode", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
-		const { session } = runtimeHost;
+		const fixture = createHost(createAssistantMessage({ text: "done" }));
+		const { session } = fixture;
 		const images: ImageContent[] = [{ type: "image", mimeType: "image/png", data: "abc" }];
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+		const exitCode = await runPrintMode(fixture.host, fixture.conversation, {
 			mode: "text",
 			initialMessage: "Say done",
 			initialImages: images,
@@ -132,10 +140,10 @@ describe("runPrintMode", () => {
 	});
 
 	it("emits session_shutdown in json mode", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
-		const { session } = runtimeHost;
+		const fixture = createHost(createAssistantMessage({ text: "done" }));
+		const { session } = fixture;
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+		const exitCode = await runPrintMode(fixture.host, fixture.conversation, {
 			mode: "json",
 			messages: ["hello"],
 		});
@@ -147,16 +155,16 @@ describe("runPrintMode", () => {
 	});
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {
-		const runtimeHost = createRuntimeHost(
+		const fixture = createHost(
 			createAssistantMessage({
 				stopReason: "error",
 				error: { kind: "unknown", retryable: false, message: "provider failure" },
 			}),
 		);
-		const { session } = runtimeHost;
+		const { session } = fixture;
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+		const exitCode = await runPrintMode(fixture.host, fixture.conversation, {
 			mode: "text",
 		});
 
@@ -167,14 +175,14 @@ describe("runPrintMode", () => {
 	});
 
 	it("ends the run with an error when the runtime's session loses its log, skipping later prompts", async () => {
-		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
-		const { session } = runtimeHost;
+		const fixture = createHost(createAssistantMessage({ text: "done" }));
+		const { session } = fixture;
 		session.prompt.mockImplementationOnce(async () => {
-			runtimeHost.loseLog(new Error("Expected log ordinal 4, but the log head is 5"));
+			fixture.loseLog(new Error("Expected log ordinal 4, but the log head is 5"));
 		});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+		const exitCode = await runPrintMode(fixture.host, fixture.conversation, {
 			mode: "text",
 			initialMessage: "first",
 			messages: ["second"],
@@ -185,7 +193,7 @@ describe("runPrintMode", () => {
 		expect(errorSpy).toHaveBeenCalledWith(
 			"Volt stopped session print-session because its saved state could not be confirmed: Expected log ordinal 4, but the log head is 5",
 		);
-		// The runtime is disposed, which releases the session's lock.
-		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
+		// The conversation closes, which releases the session's lock.
+		expect(fixture.close).toHaveBeenCalledTimes(1);
 	});
 });

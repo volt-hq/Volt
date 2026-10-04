@@ -137,7 +137,7 @@ Comparison requires identical Node version, platform, architecture, selected sce
 | --- | --- | --- |
 | `daemon-idle` | `idle` | Shared source daemon launch, including `--optimize-for-size`, authenticated empty status, Iroh relay-disabled readiness, graceful shutdown |
 | `rpc-idle` | `idle` | Successful `get_state` while stdin and the benchmark snapshot channel remain open, then clean EOF shutdown |
-| `runtime-idle` | `baseline`, `post-disposal` | Persisted `AgentSessionRuntime` with the faux provider |
+| `runtime-idle` | `baseline`, `post-disposal` | Persisted conversation in a `ConversationHost` with the faux provider |
 | `conversation` | `baseline`, `populated`, `post-disposal` | Schema-v1 fixed conversation: 20 user/assistant turns, exactly 2 KiB of text per message |
 | `reconnect-retention` | `baseline`, `detached`, `post-cycle`, `post-disposal` | Real registry attach/detach, ten warm same-runtime reattaches, then detached retirement with a short TTL |
 | `extension` | `before-activation`, `active`, `post-disposal` | Generated on-disk TypeScript extension loaded through Jiti, with a registered tool and `session_start` listener |

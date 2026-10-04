@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as startupUi from "../../../src/cli/startup-ui.ts";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../../src/config.ts";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { GitContextProvider } from "../../../src/core/git-context-provider.ts";
+import { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { createEmptyMcpMergedConfig, finalizeMcpConfig } from "../../../src/core/mcp/config.ts";
 import { McpManager } from "../../../src/core/mcp/manager.ts";
 import { McpMetadataCache } from "../../../src/core/mcp/metadata-cache.ts";
@@ -286,29 +287,38 @@ describe("PR #329 manager ownership contract", () => {
 		}
 	});
 
-	it("disposes the transferred CLI runtime exactly once when interactive initialization rejects", async () => {
+	it("closes the transferred CLI conversation exactly once when interactive initialization rejects", async () => {
 		const initializationError = new Error("injected interactive initialization failure");
-		let cliRuntime: AgentSessionRuntime | undefined;
+		let cliHost: ConversationHost | undefined;
+		let cliConversation: HostedConversation | undefined;
 		let cliManager: SessionManager | undefined;
-		let runtimeDisposeCalls = 0;
+		let conversationCloseCalls = 0;
 		let managerCloseCalls = 0;
 		let managerClosed = false;
-		const disposeRuntime = AgentSessionRuntime.prototype.dispose;
-		const setBeforeSessionInvalidate = AgentSessionRuntime.prototype.setBeforeSessionInvalidate;
+		const openConversation = ConversationHost.prototype.open;
+		const closeConversation = ConversationHost.prototype.close;
 		const closePersistence = SessionManager.prototype.closePersistence;
-		vi.spyOn(AgentSessionRuntime.prototype, "setBeforeSessionInvalidate").mockImplementation(function (
-			this: AgentSessionRuntime,
-			callback,
-		): void {
-			cliRuntime = this;
-			cliManager = this.session.sessionManager;
-			setBeforeSessionInvalidate.call(this, callback);
+		// The CLI opens its startup conversation first.
+		vi.spyOn(ConversationHost.prototype, "open").mockImplementation(async function (
+			this: ConversationHost,
+			target,
+			options,
+		) {
+			const opened = await openConversation.call(this, target, options);
+			if (!opened.cancelled && cliConversation === undefined) {
+				cliHost = this;
+				cliConversation = opened.conversation;
+				cliManager = opened.conversation.session.sessionManager;
+			}
+			return opened;
 		});
-		vi.spyOn(AgentSessionRuntime.prototype, "dispose").mockImplementation(function (
-			this: AgentSessionRuntime,
+		vi.spyOn(ConversationHost.prototype, "close").mockImplementation(function (
+			this: ConversationHost,
+			conversation,
+			event,
 		): Promise<void> {
-			if (this === cliRuntime) runtimeDisposeCalls++;
-			return disposeRuntime.call(this);
+			if (conversation === cliConversation) conversationCloseCalls++;
+			return closeConversation.call(this, conversation, event);
 		});
 		vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(function (
 			this: SessionManager,
@@ -327,10 +337,12 @@ describe("PR #329 manager ownership contract", () => {
 
 		try {
 			expect(thrown).toBe(initializationError);
-			expect(cliRuntime).toBeDefined();
+			expect(cliConversation).toBeDefined();
 			expect(cliManager).toBeDefined();
-			expect.soft(runtimeDisposeCalls, "The transferred CLI runtime must be finalized exactly once").toBe(1);
-			expect.soft(managerCloseCalls, "The runtime-owned session manager must be finalized exactly once").toBe(1);
+			expect.soft(conversationCloseCalls, "The transferred CLI conversation must be closed exactly once").toBe(1);
+			expect
+				.soft(managerCloseCalls, "The conversation-owned session manager must be finalized exactly once")
+				.toBe(1);
 			if (cliManager) {
 				managerClosed = await isPersistenceClosed(cliManager);
 				expect.soft(managerClosed, "The transferred CLI session manager must be closed").toBe(true);
@@ -343,10 +355,8 @@ describe("PR #329 manager ownership contract", () => {
 				}
 			}
 		} finally {
-			if (cliRuntime && runtimeDisposeCalls === 0) {
-				cliRuntime.setBeforeSessionInvalidate(undefined);
-				cliRuntime.setRebindSession(undefined);
-				await disposeRuntime.call(cliRuntime);
+			if (cliHost && cliConversation && conversationCloseCalls === 0) {
+				await closeConversation.call(cliHost, cliConversation);
 			} else if (cliManager && !managerClosed) {
 				await closePersistence.call(cliManager);
 			}

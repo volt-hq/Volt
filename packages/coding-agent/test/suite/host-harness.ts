@@ -13,6 +13,7 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type {
 	ExtensionAPI,
 	ExtensionFactory,
+	ExtensionMode,
 	ExtensionUIContext,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
@@ -20,7 +21,7 @@ import type {
 	SessionStartEvent,
 } from "../../src/core/extensions/index.ts";
 import { ConversationHost, type OpenForResult, type WhenUnattached } from "../../src/core/host/conversation-host.ts";
-import type { CreateAgentSessionRuntimeFactory, HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import type { ConversationFactory, HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
@@ -42,6 +43,8 @@ export interface HostHarnessOptions {
 	/** Extra extension behavior, added to the recording extension. */
 	extension?: ExtensionFactory;
 	whenUnattached?: WhenUnattached;
+	/** The mode the host binds extensions in; "print" by default. */
+	extensionMode?: ExtensionMode;
 	/** Runs before the factory creates each session; throw to fail the open. */
 	beforeCreate?: (sessionManager: SessionManager) => Promise<void> | void;
 	responses?: string[];
@@ -49,14 +52,14 @@ export interface HostHarnessOptions {
 
 export interface HostHarness {
 	host: ConversationHost;
-	factory: CreateAgentSessionRuntimeFactory;
+	factory: ConversationFactory;
 	faux: FauxProvider;
 	tempDir: string;
 	/** Lifecycle events every extension instance saw, in order. */
 	events: RecordedLifecycleEvent[];
 	/** Open a new conversation stored in `<tempDir>/sessions`, as startup does. */
 	openStartup(): Promise<HostedConversation>;
-	/** An in-place client with a print-mode surface; `moves` records the conversations it moved to. */
+	/** An in-place client with a surface; `moves` records the conversations it moved to. */
 	client(id: string, options?: { anchor?: boolean; ui?: ExtensionUIContext }): HostClient & { moves: string[] };
 	cleanup(): Promise<void>;
 }
@@ -69,7 +72,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 	const events: RecordedLifecycleEvent[] = [];
 
-	const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 		await options.beforeCreate?.(sessionManager);
 		const services = await createAgentSessionServices({
 			cwd,
@@ -123,6 +126,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 	const host = new ConversationHost({
 		factory,
 		agentDir: tempDir,
+		extensionMode: options.extensionMode ?? "print",
 		...(options.whenUnattached === undefined ? {} : { whenUnattached: options.whenUnattached }),
 	});
 
@@ -143,7 +147,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 			return {
 				id,
 				...(clientOptions.anchor === undefined ? {} : { anchor: clientOptions.anchor }),
-				surface: { mode: "print", ...(clientOptions.ui === undefined ? {} : { ui: clientOptions.ui }) },
+				surface: clientOptions.ui === undefined ? {} : { ui: clientOptions.ui },
 				move: {
 					kind: "in_place",
 					onMoved: (to) => {

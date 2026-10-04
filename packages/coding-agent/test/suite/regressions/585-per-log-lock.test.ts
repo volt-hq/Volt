@@ -8,19 +8,18 @@ import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ConversationLock, ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
+import { connectTestClient, openTestHost, type TestClient, type TestHost } from "../../utilities/host-client.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -84,16 +83,17 @@ async function holdInAnotherProcess(sessionDir: string, sessionId: string): Prom
 	return child;
 }
 
-async function createRuntime(
+/** Open `sessionManager`'s conversation in a host of its own, as startup does. */
+async function openConversation(
 	cwd: string,
 	sessionManager: SessionManager,
 	responses: string[] = [],
-): Promise<AgentSessionRuntime> {
+): Promise<TestHost> {
 	const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 	faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-	const factory: CreateAgentSessionRuntimeFactory = async (options) => {
+	const factory: ConversationFactory = async (options) => {
 		const services = await createAgentSessionServices({
 			cwd: options.cwd,
 			agentDir: cwd,
@@ -135,10 +135,20 @@ async function createRuntime(
 			diagnostics: services.diagnostics,
 		};
 	};
-	const runtime = await createAgentSessionRuntime(factory, { cwd, agentDir: cwd, sessionManager });
-	// A runtime whose session lost its log cannot close its persistence cleanly.
-	cleanups.push(() => runtime.dispose().catch(() => {}));
-	return runtime;
+	const opened = await openTestHost(factory, { cwd, agentDir: cwd, sessionManager });
+	// A conversation whose session lost its log cannot close its persistence cleanly.
+	cleanups.push(() => opened.host.dispose().catch(() => {}));
+	return opened;
+}
+
+/** An in-place client anchoring a conversation opened over `sessionManager`. */
+async function createRuntime(
+	cwd: string,
+	sessionManager: SessionManager,
+	responses: string[] = [],
+): Promise<TestClient> {
+	const { host, conversation } = await openConversation(cwd, sessionManager, responses);
+	return connectTestClient(host, conversation);
 }
 
 function lockState(ref: SessionReference): "free" | "held" {
@@ -282,7 +292,7 @@ describe("regression #585: one writer per conversation log", () => {
 		const sessionDir = join(root, "sessions");
 		const sourceRef = await storedSession(sessionDir, root, "source");
 		const targetRef = await storedSession(sessionDir, root, "target");
-		const runtime = await createRuntime(root, await SessionManager.open(sourceRef));
+		const { host, conversation } = await openConversation(root, await SessionManager.open(sourceRef));
 		const elsewhere = ConversationLock.acquire(sessionDir, targetRef.sessionId);
 		cleanups.push(() => elsewhere.close());
 		let line!: RpcLineHandler;
@@ -292,9 +302,9 @@ describe("regression #585: one writer per conversation log", () => {
 			ready = resolve;
 		});
 		const writes: object[] = [];
-		const mode = runRpcMode(runtime, {
+		const mode = runRpcMode(host, conversation, {
 			exitProcess: false,
-			disposeRuntimeOnClose: false,
+			anchor: false,
 			onReady: ready,
 			transport: {
 				write: (value) => {
@@ -324,7 +334,8 @@ describe("regression #585: one writer per conversation log", () => {
 					}),
 				),
 			);
-			expect(runtime.session.sessionId).toBe(sourceRef.sessionId);
+			expect(host.list()).toEqual([conversation]);
+			expect(conversation.closed).toBe(false);
 		} finally {
 			close?.();
 			await mode;
@@ -337,14 +348,14 @@ describe("regression #585: one writer per conversation log", () => {
 	] as const)("ends when its session loses its log: %s", async (_label, exitProcess) => {
 		const root = temporaryDirectory();
 		const ref = await storedSession(join(root, "sessions"), root);
-		const runtime = await createRuntime(root, await SessionManager.open(ref));
+		const { host, conversation } = await openConversation(root, await SessionManager.open(ref));
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		let ready!: () => void;
 		const started = new Promise<void>((resolve) => {
 			ready = resolve;
 		});
-		const mode = runRpcMode(runtime, {
+		const mode = runRpcMode(host, conversation, {
 			exitProcess,
 			onReady: ready,
 			transport: {
@@ -357,7 +368,7 @@ describe("regression #585: one writer per conversation log", () => {
 		void mode.catch(() => {});
 		await started;
 
-		const lost = await loseLog(runtime.session.sessionWriter);
+		const lost = await loseLog(conversation.session.sessionWriter);
 
 		if (exitProcess) {
 			await expect(mode).resolves.toBeUndefined();
@@ -370,7 +381,7 @@ describe("regression #585: one writer per conversation log", () => {
 			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: ${lost.message}`,
 		);
 		expect(lost.message).toMatch(/^Expected log ordinal \d+, but the log head is \d+$/);
-		// The RPC host owned the runtime: disposal released the session's lock.
+		// The RPC client anchored the conversation: closing it released the session's lock.
 		expect(lockState(ref)).toBe("free");
 	});
 });

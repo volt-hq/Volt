@@ -46,6 +46,17 @@ Clients that intend to stop active agent work must send the `abort` command and 
 
 RPC mode is not durable job recovery. If the Volt process or embedding host process exits or crashes, in-memory work stops; clients can only reopen persisted session state that was written before exit.
 
+### Session Changes
+
+A session serves one log for its whole life. The structural commands `new_session`, `switch_session`, `switch_session_by_id`, `fork`, `clone`, `open_review_session`, and `plan_execute` with `strategy: "new_session"` open another session and move this client there; so do extension commands that call `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()`, including commands run through `prompt`. Each move:
+
+- opens the target before it leaves the current session. If the target cannot open (another process holds it, a missing cwd, a failing extension), the command fails and the client stays on the current session.
+- runs in this order: `session_before_switch` or `session_before_fork` in the current session's extensions (which may cancel), `session_start` in the new session's extensions, then `session_shutdown` in the session the client left, which closes and releases its lock.
+- is refused while the current session runs a turn, a bash command, a session mutation, or a detached review, or holds queued durable input. An extension command that asks for the move is not blocked by its own `prompt` input, which completes as the command leaves the session.
+- answers with the new session's ID (`{"cancelled": false, "sessionId": ...}`), or `{"cancelled": true}` when an extension cancelled. Every event after the response comes from the new session; resubscribe nothing. Correlated extension UI and host-action requests of the previous session are cancelled.
+
+One client's session changes run one at a time.
+
 ## Commands
 
 ### Prompting
@@ -152,7 +163,7 @@ Messages queued with `steer`, `follow_up`, or `prompt` with `streamingBehavior` 
 
 #### new_session
 
-Start a fresh session. Can be cancelled by a `session_before_switch` extension event handler.
+Move to a fresh session (see [Session Changes](#session-changes)). Can be cancelled by a `session_before_switch` extension event handler.
 
 ```json
 {"type": "new_session"}
@@ -172,7 +183,7 @@ Response, with the new session's ID:
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false, "sessionId": "new-session-id"}}
 ```
 
-If an extension cancelled (no `sessionId`; the current session stays active):
+If an extension cancelled (no `sessionId`; the client stays on its session):
 ```json
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
@@ -355,7 +366,7 @@ Over Iroh, list/read require `conversation.observe.v1` and cancellation requires
 
 This metadata-only event replaces the Jobs list and invalidates cached output. Re-read only the job being inspected; output may have changed even when the summary fields are unchanged. Updates are coalesced to at most ten per second and continue after foreground settlement. Ordered streams carry the normal `delivery` cursor; plain RPC does not. Reconnect/resync uses the authoritative bootstrap snapshot rather than reconstructing jobs from transcript acknowledgements.
 
-Jobs remain runtime- and branch-scoped. Detaching a retained remote runtime does not cancel them; runtime shutdown/replacement or process restart invalidates their handles. Historical tool details and completion notices remain snapshots, not live control authority. The native `run.cancel` action stays enabled while background work remains.
+Jobs remain conversation- and branch-scoped. Detaching from a retained remote conversation does not cancel them; closing the conversation (including when its last client moves to another session) or a process restart invalidates their handles. Historical tool details and completion notices remain snapshots, not live control authority. The native `run.cancel` action stays enabled while background work remains.
 
 Typed clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, {conversationAuthority})`, with `RpcListJobsResponse`, `RpcReadJobResponse`, and `RpcCancelJobResponse` return types.
 
@@ -472,7 +483,7 @@ Response:
 {"type": "response", "command": "subagent_dispose", "success": true}
 ```
 
-Active RPC-started subagents are scoped to the RPC connection/runtime and are disposed on RPC shutdown and session replacement.
+Active RPC-started subagents are scoped to the RPC connection and its session, and are disposed on RPC shutdown and when the client moves to another session.
 
 ### MCP management
 
@@ -811,7 +822,7 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 
 - Extension command actions invoke their registered slash command and return `handled` when the command handler completes. They do not require an `agent_end` event.
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
-- Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
+- Dynamic action ids are opaque and tied to the current action catalog. After a reload, a move to another session, or a catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
 - `thinking.fast_mode` uses a required boolean `enabled` argument. The independent boolean policy is durable on the active session branch and does not change the selected model, thinking level, model/thinking defaults, profiles, or project/global settings. Reconnects and tree navigation restore the branch's latest Fast state. The action is enabled only for supported models on the canonical OpenAI Responses and OpenAI Codex endpoints. Enabled maps normal conversation turns to `service_tier: "priority"`; disabled maps them to `service_tier: "default"`. Auxiliary calls such as compaction and session naming do not inherit the toggle.
 - Review actions start a detached host workflow: the host resolves git targets and review-model settings inline (target errors fail the invocation synchronously), then returns `accepted` with a `workflowId` while isolated review sessions run with the approved tool policy. All Git-backed review diffs disable textconv and external diff drivers; `review.commit` additionally resolves the bounded input ref to a canonical commit object id before invoking `git show`. `review.branch` captures local `HEAD` before refreshing a plain branch through its configured/matching upstream, or a short remote branch directly, into an isolated temporary Git source using host credentials and network. It never moves workspace refs or `FETCH_HEAD`, fails instead of silently using stale state, and treats explicit full refs as local cached targets. Durable branch reruns recapture the same resolved remote branch or explicit local/cached full ref instead of depending on disposed snapshot objects. `review.pr` validates the optional number before using the host's GitHub credentials and network. For PR targets, pull request metadata/diff plus authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments are submitted to discovery and independent verification. GitHub text is untrusted evidence and is bounded to 32 KiB per field, 20 linked issues, 200 total discussion entries, and 256 KiB of rendered context; links are not inferred from arbitrary text or followed recursively. Both analysis passes must inspect the same complete captured context. Capture limitations or incomplete inspection make the result incomplete and withhold its correctness verdict, while a final head-OID check rejects a PR that moved during capture. When they accept a new finding, the verifier model runs once more in a fresh context-blind presentation session that receives one-time host ids, validated code anchors/evidence, severity, and immutable code tools, but no GitHub context, target title/body, private model prose, extension tools, or auxiliary commands. It must inspect every accepted hunk and cannot change finding identity, anchor, severity, or status; no-new-finding and prior-only incremental runs skip this pass. The runtime keeps serving other RPC commands, and the client's session is never force-switched. Progress streams as sanitized `workflow_*` and `tool_execution_*` events; completion is reported by `workflow_end`. Findings are fetched with `get_review_result`, running or retained reviews are listed with `list_review_workflows`, a running review is aborted with `cancel_workflow`, and `open_review_session` seeds a fresh session with the findings when the client asks for one. Responses, events, durable records, opened review sessions, and publication payloads do not include raw diffs, review prompts, linked-issue/discussion text, free-form discovery/verifier prose, full model configuration, auth state, or raw tool output. Accounting details are a narrow exception: they expose bounded provider/model identifiers and numeric usage metadata, never model endpoints or credentials. Active and durable target descriptors may include bounded pull request display metadata; the pull request body appears only in a full `get_review_result` response. They may include bounded context status/count/limitation/fingerprint metadata plus explicitly declassified finding structure; finding prose is code-derived by the context-blind pass, and other PR summaries, diagnostics, limitation counts, and command-attempt counts are host-generated. Pull request workflow tool events omit all model-controlled string arguments; configured-model fallback warnings are suppressed remotely, and subprocess/provider failures use stable remote messages while detailed diagnostics remain host-local. Reviews use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`) without inheriting extension tools; descriptors advertise `requiresConfirmation`, and clients confirm before invoking (there is no host-side confirmation round trip). Hosts cap concurrent reviews and retain a bounded window of terminal results.
 - Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `context.auto_compaction`, `context.compaction_threshold`, `review.uncommitted`, `review.branch`, `review.pr`, `review.commit`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact` and `session.rename`, deferred `review.tools`, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
@@ -1380,13 +1391,13 @@ Response:
 
 #### switch_session
 
-Load another session from the active workspace store by stable ID. Can be cancelled by a `session_before_switch` extension event handler.
+Move to another session from the active workspace store by stable ID (see [Session Changes](#session-changes)). A switch to the session the client is on changes nothing and answers with its ID. Can be cancelled by a `session_before_switch` extension event handler.
 
 ```json
 {"type": "switch_session", "sessionId": "abc123"}
 ```
 
-Response, with the ID of the session now active:
+Response, with the ID of the session the client is on now:
 ```json
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": false, "sessionId": "abc123"}}
 ```
@@ -1396,7 +1407,7 @@ If an extension cancelled the switch:
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": true}}
 ```
 
-If another Volt process has the session open for writing, the switch fails and the current session stays active:
+If another Volt process has the session open for writing, the switch fails and the client stays on its session:
 ```json
 {"type": "response", "command": "switch_session", "success": false, "error": "Session abc123 is open in another Volt process. ...", "errorCode": "conversation_locked"}
 ```
@@ -1405,13 +1416,13 @@ The same `conversation_locked` error code applies to every command that opens an
 
 #### switch_session_by_id
 
-Load another session from the current workspace by stable ID. It has the same path-free request semantics as `switch_session`. Conversation-bound mobile streams reject direct retargeting; select the session when opening the stream instead.
+Move to another session from the current workspace by stable ID. It has the same path-free request semantics as `switch_session`. Conversation-bound mobile streams reject direct retargeting; select the session when opening the stream instead.
 
 ```json
 {"type": "switch_session_by_id", "sessionId": "abc123"}
 ```
 
-Response, with the ID of the session now active:
+Response, with the ID of the session the client is on now:
 ```json
 {"type": "response", "command": "switch_session_by_id", "success": true, "data": {"cancelled": false, "sessionId": "abc123"}}
 ```
@@ -1423,7 +1434,7 @@ If an extension cancelled the switch:
 
 #### fork
 
-Create a new fork from a previous user message on the active branch. Can be cancelled by a `session_before_fork` extension event handler. Returns the forked session's ID and the text of the message being forked from.
+Move to a new session forked before a previous user message on the active branch (see [Session Changes](#session-changes)). The fork's log starts with a `forked_from` entry and a copy of the branch up to that message. Can be cancelled by a `session_before_fork` extension event handler. Returns the forked session's ID and the text of the message being forked from.
 
 ```json
 {"type": "fork", "entryId": "abc123"}
@@ -1451,7 +1462,7 @@ If an extension cancelled the fork:
 
 #### clone
 
-Duplicate the current active branch into a new session at the current position. Can be cancelled by a `session_before_fork` extension event handler.
+Move to a new session that copies the current active branch through its leaf (see [Session Changes](#session-changes)). Can be cancelled by a `session_before_fork` extension event handler.
 
 ```json
 {"type": "clone"}

@@ -169,7 +169,7 @@ interface ConversationSessionSummary {
 	startingGitContext?: RpcGitContext | null;
 }
 
-/** Minimal runtime surface the conversation command handlers consume. */
+/** Minimal conversation surface the conversation command handlers consume. */
 export interface ConversationCommandRuntime {
 	session: {
 		sessionId: string;
@@ -177,7 +177,8 @@ export interface ConversationCommandRuntime {
 			Partial<Pick<SessionManager, "getEntries">>;
 	};
 	listSessions(): Promise<ConversationSessionSummary[]>;
-	getCurrentSessionSummary?(): ConversationSessionSummary;
+	/** The conversation's own summary, from its open log. */
+	summary?(): ConversationSessionSummary;
 }
 
 export interface ConversationCommandContext {
@@ -1766,9 +1767,7 @@ export async function listRemoteWorkspaceSessionSummaries(
 	}
 	if (runtime !== undefined) {
 		const liveSummaries =
-			context.agentDir !== undefined && runtime.getCurrentSessionSummary
-				? [runtime.getCurrentSessionSummary()]
-				: await runtime.listSessions();
+			context.agentDir !== undefined && runtime.summary ? [runtime.summary()] : await runtime.listSessions();
 		for (const liveSummary of liveSummaries) {
 			const summary = createRemoteSessionSummary(
 				{

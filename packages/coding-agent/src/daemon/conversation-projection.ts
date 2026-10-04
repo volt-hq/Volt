@@ -1,5 +1,5 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
-import { type AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../core/agent-session-runtime.ts";
+import { type HostedConversation, isConversationTranscriptCommittedEvent } from "../core/host/hosted-conversation.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import type {
 	ConversationProjectionRawWorkflowSnapshot,
@@ -50,7 +50,7 @@ const REMOTE_WORKFLOW_MAX_EVENT_FIELDS = 64;
 
 export interface RemoteConversationProjectionOptions {
 	authorization: IrohRemoteClientAuthorizationSuccess;
-	runtime: AgentSessionRuntime;
+	conversation: HostedConversation;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -431,7 +431,7 @@ export function createRemoteConversationSnapshotBuilder(
 	options: RemoteConversationProjectionOptions,
 ): ConversationProjectionSnapshotBuilder {
 	return (context) => {
-		const transcript = createRemoteConversationTranscriptPage(options.authorization, options.runtime, {
+		const transcript = createRemoteConversationTranscriptPage(options.authorization, options.conversation, {
 			branchEpoch: context.branchEpoch,
 		});
 		if (!transcript) {
@@ -440,7 +440,7 @@ export function createRemoteConversationSnapshotBuilder(
 		const activeAssistant = projectRemoteConversationActiveAssistant(context.activeAssistant);
 		const activeWorkflows = projectActiveWorkflows(context.activeWorkflows);
 		const state = addWorkflowProjectionToState(
-			buildRpcSessionState(options.runtime.session),
+			buildRpcSessionState(options.conversation.session),
 			activeWorkflows.projection,
 		);
 		const stateBytes = measureRpcJsonBytes(state);
@@ -452,7 +452,7 @@ export function createRemoteConversationSnapshotBuilder(
 		const snapshot: ConversationProjectionSnapshot = {
 			conversation: {
 				workspaceName: options.authorization.workspace.name,
-				sessionId: options.runtime.session.sessionId,
+				sessionId: options.conversation.session.sessionId,
 			},
 			state,
 			transcript,
@@ -478,14 +478,14 @@ export function createRemoteConversationSnapshotBuilder(
 
 /** Project canonical runtime commits using the same policy as the checkpoint. */
 export function createRemoteConversationExternalProjector(
-	options: Pick<RemoteConversationProjectionOptions, "authorization" | "runtime">,
+	options: Pick<RemoteConversationProjectionOptions, "authorization" | "conversation">,
 ): (event: object) => object | null {
 	return (event) => {
 		if (isConversationTranscriptCommittedEvent(event)) {
 			const transcriptEntry = createRemoteConversationTranscriptEntry(
 				event.entry,
 				options.authorization,
-				options.runtime,
+				options.conversation,
 			);
 			return transcriptEntry === undefined
 				? null

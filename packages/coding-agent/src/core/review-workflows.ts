@@ -3,23 +3,23 @@
  *
  * Reviews invoked over RPC run detached from the RPC command queue: the
  * invocation returns immediately with a workflowId and the review executes in
- * its own isolated in-memory session while the runtime keeps serving other
- * commands. This manager owns those detached executions for one
- * AgentSessionRuntime: it tracks active workflows, guarantees every workflow
+ * its own isolated in-memory session while the conversation keeps serving
+ * other commands. This manager owns those detached executions for one hosted
+ * conversation: it tracks active workflows, guarantees every workflow
  * reaches a terminal `workflow_end` event, retains a bounded window of
  * terminal results for later fetching (`get_review_result`,
  * `open_review_session`), and supports cancellation by workflowId.
  *
- * Event fan-out is runtime-scoped so it survives client detach/reattach:
- * every event is published through `publishEvent` (the runtime conversation
+ * Event fan-out is conversation-scoped so it survives client detach/reattach:
+ * every event is published through `publishEvent` (the conversation's
  * projection feed) and to per-mode sinks attached with `attachSink`.
  */
 
 import { Buffer } from "node:buffer";
 import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
-// Types only: a runtime import edge from this module (reached via
-// AgentSessionRuntime) into review.ts would also defeat test doubles that
-// replace review.ts for the RPC modes.
+// Types only: a runtime import edge from this module (reached via the hosted
+// conversation) into review.ts would also defeat test doubles that replace
+// review.ts for the RPC modes.
 import type {
 	ExecuteReviewWorkflowResult,
 	ParsedReview,

@@ -4,12 +4,11 @@ import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
@@ -27,6 +26,7 @@ import {
 	parseWrittenObjects,
 	withCurrentConversationAuthority,
 } from "../../iroh-stream-doubles.ts";
+import { openTestHost } from "../../utilities/host-client.ts";
 
 interface LifecycleEvent {
 	type: string;
@@ -58,7 +58,7 @@ function createDaemon() {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 	const events: LifecycleEvent[] = [];
-	const factory: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
 			cwd,
 			agentDir: workspacePath,
@@ -141,12 +141,15 @@ function createDaemon() {
 				sessionDir,
 				target?.target === "new" && target.sessionId !== undefined ? { id: target.sessionId } : {},
 			);
-			const runtime = await createAgentSessionRuntime(factory, {
+			// As the daemon does: a host of its own that keeps the conversation open between phones.
+			const runtime = await openTestHost(factory, {
 				cwd: workspacePath,
 				agentDir: workspacePath,
 				sessionManager,
+				extensionMode: "rpc",
+				whenUnattached: "keep",
 			});
-			return { runtime, sessionSelection: { kind: "created", sessionId: runtime.session.sessionId } };
+			return { runtime, sessionSelection: { kind: "created", sessionId: runtime.conversation.id } };
 		},
 	});
 
@@ -172,7 +175,7 @@ function createDaemon() {
 		};
 	}
 
-	/** Attach a phone stream the way the daemon serves one: on a view that redirects it alone. */
+	/** Attach a phone stream the way the daemon serves one: a client of the conversation that its moves redirect alone. */
 	async function connectPhone(nodeId: string, hello: IrohRemoteHello) {
 		const authorization = authorize(nodeId);
 		const attach = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
@@ -180,19 +183,20 @@ function createDaemon() {
 		const subscriber = await registry.attachSubscriber(attach.entry, attach.attachClaim);
 		attach.attachClaim.release();
 		const entry = attach.entry;
-		const view = registry.attachStreamView(entry, authorization);
+		const { host, conversation } = entry.runtime;
 		let movedTo: string | undefined;
-		view.onClientDetached((detachment) => {
-			if (detachment.kind === "redirected") movedTo = detachment.sessionId;
-		});
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
 		const ready = Promise.withResolvers<void>();
-		const closed = runIrohRemoteRpcMode(view, {
-			...createTestIrohConversationOptions(view),
+		const closed = runIrohRemoteRpcMode(host, conversation, {
+			...createTestIrohConversationOptions(conversation),
 			rpcGrant: authorization.client.rpcGrant,
 			stream: { recv, send },
-			disposeRuntimeOnClose: false,
+			redirect: registry.streamRedirect(entry, authorization),
+			...(entry.reviewDiscussions === undefined ? {} : { reviewDiscussions: entry.reviewDiscussions }),
+			onClientDetached: (detachment) => {
+				if (detachment.kind === "redirected") movedTo = detachment.sessionId;
+			},
 			workspaceName: "ws",
 			workspacePath,
 			detachedTerminal: (detachment) =>
@@ -207,7 +211,6 @@ function createDaemon() {
 					: undefined,
 			onReady: ready.resolve,
 		}).finally(async () => {
-			await view.dispose();
 			await registry.detachSubscriber(
 				entry,
 				subscriber,
@@ -217,7 +220,7 @@ function createDaemon() {
 			);
 		});
 		await Promise.race([ready.promise, closed]);
-		return { entry, view, recv, send, closed };
+		return { entry, recv, send, closed };
 	}
 
 	return {
@@ -257,9 +260,8 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		);
 		const source = phoneA.entry;
 		expect(phoneB.entry).toBe(source);
-		// Each stream's view authorizes review discussions through the conversation's runtime.
-		expect(phoneA.view.reviewDiscussions).toBeDefined();
-		expect(phoneA.view.reviewDiscussions).toBe(source.runtime.reviewDiscussions);
+		// Each phone's stream authorizes review discussions through the conversation's entry.
+		expect(source.reviewDiscussions).toBeDefined();
 		daemon.events.length = 0;
 
 		phoneA.recv.pushLine(newSessionRequest(phoneA.send));
@@ -305,9 +307,9 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 				expect.objectContaining({ id: "p1", command: "prompt", success: true }),
 			),
 		);
-		await source.runtime.session.waitForIdle();
-		expect(source.runtime.session.sessionId).toBe("s-source");
-		expect(source.runtime.session.messages.some((message) => message.role === "user")).toBe(true);
+		await source.runtime.conversation.session.waitForIdle();
+		expect(source.runtime.conversation.session.sessionId).toBe("s-source");
+		expect(source.runtime.conversation.session.messages.some((message) => message.role === "user")).toBe(true);
 
 		// Only phone A's last session moved: `target:"last"` lands it on the new conversation.
 		expect(daemon.lastSessionIds.get("n-phone-a")).toBe(targetId);

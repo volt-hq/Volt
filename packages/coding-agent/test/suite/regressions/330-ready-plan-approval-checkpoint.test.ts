@@ -2,7 +2,8 @@ import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { type Component, setKeybindings, TuiMainScreen } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
+import type * as PlanHandoff from "../../../src/core/host/plan-handoff.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import type { PlanState } from "../../../src/core/planning.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
@@ -10,7 +11,14 @@ import type { CustomEditor } from "../../../src/modes/interactive/components/cus
 import type { PlanInspectorComponent } from "../../../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsComponent } from "../../../src/modes/interactive/components/plan-status.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { adoptTestSession } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+const executePlan = vi.hoisted(() => vi.fn());
+vi.mock("../../../src/core/host/plan-handoff.ts", async (importOriginal) => ({
+	...(await importOriginal<typeof PlanHandoff>()),
+	executePlan,
+}));
 
 interface ModeControl {
 	renderer: TuiMainScreen;
@@ -71,15 +79,16 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 			summary: PLAN_SUMMARY,
 			steps: [{ text: "Apply the approved change" }],
 		});
-		const executePlan = vi.fn();
-		const runtimeHost = {
-			session: harness.session,
-			setBeforeSessionInvalidate: () => undefined,
-			setRebindSession: () => undefined,
-			executePlan,
-			lost: new Promise<Error>(() => {}),
-		} as unknown as AgentSessionRuntime;
-		const mode = new InteractiveMode(runtimeHost);
+		executePlan.mockReset();
+		const { host, conversation } = adoptTestSession(
+			harness.session,
+			{ cwd: harness.tempDir, agentDir: harness.tempDir } as unknown as AgentSessionServices,
+			async () => {
+				throw new Error("not used");
+			},
+			{ extensionMode: "tui" },
+		);
+		const mode = new InteractiveMode(host, conversation);
 		const control = mode as unknown as ModeControl;
 		const terminal = new VirtualTerminal(columns, rows);
 		control.renderer = new TuiMainScreen(terminal, false, harness.tempDir);

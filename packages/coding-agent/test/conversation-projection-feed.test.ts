@@ -601,6 +601,36 @@ describe("ConversationProjectionFeed", () => {
 		feed.dispose();
 	});
 
+	it("closes with its source: no new subscriber, and the current ones keep delivering until they detach", async () => {
+		const source = new TestSource();
+		const writes: object[] = [];
+		const feed = new ConversationProjectionFeed(source);
+		const subscription = feed.attach({
+			write: (value) => {
+				writes.push(value);
+			},
+			buildSnapshot: snapshotBuilder(source),
+		});
+		await subscription.ready;
+
+		feed.close();
+		expect(() => feed.attach({ write: () => {}, buildSnapshot: snapshotBuilder(source) })).toThrow(
+			"Conversation projection feed is closed",
+		);
+		// A stream's final frame still reaches it after its conversation closed.
+		await subscription.enqueueControl({ type: "remote_terminal", reason: "lease_transferred" });
+		expect(writes.at(-1)).toMatchObject({ type: "remote_terminal", reason: "lease_transferred" });
+		expect(source.observationCount).toBe(1);
+
+		subscription.detach();
+		expect(source.observationCount).toBe(0);
+		expect(() => feed.publishExternal({ type: "agent_settled" })).toThrow();
+
+		const empty = new ConversationProjectionFeed(new TestSource());
+		empty.close();
+		expect(() => empty.publishExternal({ type: "agent_settled" })).toThrow();
+	});
+
 	it("enqueues bootstrap first at cursor zero, then contiguous top-level delivery", async () => {
 		const source = new TestSource();
 		const writes: object[] = [];

@@ -5,13 +5,9 @@ import type { AgentMessage, AgentToolResult } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionStats } from "../src/core/agent-session.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-	type SubagentRuntimeContext,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory, SubagentRuntimeContext } from "../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -449,7 +445,7 @@ describe("subagent tool", () => {
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		const resourceLoader = createSubagentResourceLoader(options.definitions);
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, agentDir, sessionManager }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir,
@@ -1070,7 +1066,7 @@ describe("subagent tool", () => {
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
 			},
 			onRuntimeCreated: (event) => {
-				event.runtime.session.subscribe((sessionEvent) => {
+				event.conversation.session.subscribe((sessionEvent) => {
 					if (sessionEvent.type === "auto_retry_start") {
 						retryStarted.resolve(undefined);
 					}
@@ -1212,17 +1208,17 @@ describe("subagent tool", () => {
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			onRuntimeCreated: (event) => {
-				childSessionManager = event.runtime.session.sessionManager;
-				event.runtime.session.subscribe((sessionEvent) => {
+				childSessionManager = event.conversation.session.sessionManager;
+				event.conversation.session.subscribe((sessionEvent) => {
 					if (sessionEvent.type === "agent_end") {
 						childAgentEnds.push(sessionEvent);
 					}
 				});
-				const dispose = event.runtime.session.dispose.bind(event.runtime.session);
-				event.runtime.session.dispose = () => {
+				const dispose = event.conversation.session.dispose.bind(event.conversation.session);
+				event.conversation.session.dispose = (...args) => {
 					childDisposeCount += 1;
 					childEndCountAtDispose = childAgentEnds.length;
-					return dispose();
+					return dispose(...args);
 				};
 			},
 		});

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -7,6 +6,7 @@ import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/ir
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { IntegratedRuntimeRegistry } from "../src/daemon/integrated-runtimes.ts";
+import { createTestDaemonRuntime } from "./iroh-stream-doubles.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -34,7 +34,7 @@ describe("daemon background job retention", () => {
 				abort: vi.fn(async () => {}),
 			};
 			const dispose = vi.fn(async () => {});
-			const runtime = { cwd: process.cwd(), session, dispose } as unknown as AgentSessionRuntime;
+			const runtime = createTestDaemonRuntime({ cwd: process.cwd(), session, close: dispose });
 			const registry = new IntegratedRuntimeRegistry({
 				auditLogger: new IrohRemoteAuditLogger({ sink: { write: () => {} } }),
 				stateManager: new IrohRemoteHostStateManager(),

@@ -1,12 +1,10 @@
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
 import type { HostInteraction } from "../src/core/host-interaction.ts";
-import type { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import { createLoopbackRpcTransportPair } from "../src/core/rpc/loopback-transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import {
+	createTestConversation,
 	createTestModel,
 	createTestSession,
 	getCurrentConversationAuthority,
@@ -14,17 +12,16 @@ import {
 	startIrohRpcMode,
 	withCurrentConversationAuthority,
 } from "./iroh-stream-doubles.ts";
+import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
-function createRuntimeHost(session: ReturnType<typeof createTestSession>): AgentSessionRuntime {
-	return {
-		session,
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSessionById: vi.fn(async () => ({ cancelled: true })),
-		dispose: vi.fn(async () => {}),
-		setRebindSession: vi.fn(),
-		listSessions: vi.fn(async () => []),
-	} as unknown as AgentSessionRuntime;
-}
+// Structural intents are not under test here: they answer cancelled once a command passes its authority check.
+vi.mock("../src/core/host/session-intents.ts", () => ({
+	openFork: vi.fn(async () => ({ cancelled: true })),
+	openImport: vi.fn(async () => ({ cancelled: true })),
+	openNewSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSessionById: vi.fn(async () => ({ cancelled: true })),
+}));
 
 describe("conversation mutation authority", () => {
 	test("requires the exact current tuple for every remote conversation mutation", async () => {
@@ -45,8 +42,8 @@ describe("conversation mutation authority", () => {
 			setThinkingLevel,
 			steer,
 		});
-		const runtimeHost = createRuntimeHost(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 		const authority = getCurrentConversationAuthority(send);
 
 		recv.pushLine(
@@ -194,8 +191,8 @@ describe("conversation mutation authority", () => {
 			},
 			setModel,
 		});
-		const runtimeHost = createRuntimeHost(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 		recv.pushLine(
 			JSON.stringify(
 				withCurrentConversationAuthority(send, {
@@ -207,11 +204,7 @@ describe("conversation mutation authority", () => {
 			),
 		);
 		await modelsStarted;
-		(
-			runtimeHost as unknown as {
-				conversationProjectionFeed: ConversationProjectionFeed;
-			}
-		).conversationProjectionFeed.rotateForBranchRebase();
+		target.conversation.projectionFeed.rotateForBranchRebase();
 		releaseModels();
 
 		await vi.waitFor(() => {
@@ -231,7 +224,7 @@ describe("conversation mutation authority", () => {
 
 	test("keeps transport-neutral local RPC prompts compatible without authority", async () => {
 		const session = createTestSession("local-session", null);
-		const runtimeHost = createRuntimeHost(session);
+		const target = createTestConversation(session);
 		const pair = createLoopbackRpcTransportPair();
 		const received: Array<Record<string, unknown>> = [];
 		pair.client.onValue?.((value) => {
@@ -239,8 +232,8 @@ describe("conversation mutation authority", () => {
 				received.push(value as Record<string, unknown>);
 			}
 		});
-		const modePromise = runRpcMode(runtimeHost, {
-			disposeRuntimeOnClose: false,
+		const modePromise = runRpcMode(target.host, target.conversation, {
+			anchor: false,
 			exitProcess: false,
 			transport: pair.server,
 		});
@@ -287,25 +280,9 @@ describe("correlated conversation controls", () => {
 
 		const old = makeSession("control-old");
 		const replacement = makeSession("control-new");
-		let current = old.session;
-		const willProjectListeners = new Set<(session: AgentSession) => Promise<void> | void>();
-		const replacedListeners = new Set<(session: AgentSession) => Promise<void> | void>();
-		const runtimeHost = {
-			get session() {
-				return current;
-			},
-			subscribeSessionWillProject(listener: (session: AgentSession) => Promise<void> | void) {
-				willProjectListeners.add(listener);
-				return () => willProjectListeners.delete(listener);
-			},
-			subscribeSessionReplaced(listener: (session: AgentSession) => Promise<void> | void) {
-				replacedListeners.add(listener);
-				return () => replacedListeners.delete(listener);
-			},
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
+		const fake = createFakeHost();
+		const oldConversation = createFakeConversation(old.session).conversation;
+		const replacementConversation = createFakeConversation(replacement.session).conversation;
 		const pair = createLoopbackRpcTransportPair();
 		const received: Array<Record<string, unknown>> = [];
 		const authorityChangeListeners = new Set<() => void>();
@@ -314,8 +291,8 @@ describe("correlated conversation controls", () => {
 				received.push(value as Record<string, unknown>);
 			}
 		});
-		const modePromise = runRpcMode(runtimeHost, {
-			disposeRuntimeOnClose: false,
+		const modePromise = runRpcMode(fake.host, oldConversation, {
+			anchor: false,
 			exitProcess: false,
 			orderedConversation: {
 				subscriptionId: "control-subscription",
@@ -400,10 +377,12 @@ describe("correlated conversation controls", () => {
 		});
 		pair.client.write({ type: "host_action_response", id: "host-overflow", decision: "approved" });
 
+		// The client moves to another conversation, as one of its structural intents does.
 		const rebindControls = await startControls("rebind");
-		for (const listener of willProjectListeners) await listener(replacement.session as unknown as AgentSession);
-		current = replacement.session;
-		for (const listener of replacedListeners) await listener(replacement.session as unknown as AgentSession);
+		const client = fake.clientOf(oldConversation);
+		if (!client) throw new Error("The RPC client is not attached");
+		await fake.move(client, replacementConversation);
+		expect(replacement.session.attachExtensionClient).toHaveBeenCalledOnce();
 		await expect(rebindControls.extensionResult).resolves.toBe(false);
 		await expect(rebindControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
 		pair.client.write({

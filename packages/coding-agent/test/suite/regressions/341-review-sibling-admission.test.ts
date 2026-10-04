@@ -3,10 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
@@ -33,7 +30,16 @@ import {
 	beginReviewSiblingAdmission,
 	withReviewSourceWriteLease,
 } from "../../../src/daemon/review-sibling-admission.ts";
+import type { IrohRemoteAgentRuntime } from "../../../src/modes/rpc/iroh-remote-agent-runtime.ts";
+import { openTestHost } from "../../utilities/host-client.ts";
 import { createHarness } from "../harness.ts";
+
+/** Open a review discussion beside `source`, in its host, without moving any client. */
+async function openSibling(source: IrohRemoteAgentRuntime, manager: SessionManager): Promise<IrohRemoteAgentRuntime> {
+	const opened = await source.host.open({ kind: "adopt", sessionManager: manager, cwd: source.conversation.cwd });
+	if (opened.cancelled) throw new Error("Review sibling open was cancelled");
+	return { host: source.host, conversation: opened.conversation };
+}
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -49,9 +55,9 @@ async function fixture() {
 	const stateManager = new IrohRemoteHostStateManager();
 	let registry: IntegratedRuntimeRegistry;
 	const broker = new LeaseBroker({
-		isRuntimeStreaming: (ws, id) => registry.findOwner(ws, id)?.runtime.session.isBusy === true,
+		isRuntimeStreaming: (ws, id) => registry.findOwner(ws, id)?.runtime.conversation.session.isBusy === true,
 		waitForRuntimeIdle: async (ws, id) => {
-			await registry.findOwner(ws, id)?.runtime.session.waitForIdle();
+			await registry.findOwner(ws, id)?.runtime.conversation.session.waitForIdle();
 		},
 		disposeRuntime: async (ws, id, reason) => {
 			const entry = registry.findOwner(ws, id);
@@ -66,7 +72,7 @@ async function fixture() {
 		releaseTuiLease: (ws, id, connection) => coordinators.get(ws, id)?.releaseTuiLease(connection),
 	});
 	coordinators.bindLeaseBroker(broker);
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const created = await createAgentSession({
 			sessionManager,
 			cwd,
@@ -96,10 +102,13 @@ async function fixture() {
 			diagnostics: [],
 		};
 	};
-	const source = await createAgentSessionRuntime(factory, {
+	// The daemon's host for the source: phones attach as clients, and the daemon closes its conversations.
+	const source: IrohRemoteAgentRuntime = await openTestHost(factory, {
 		sessionManager: await SessionManager.create(root, join(root, "sessions")),
 		cwd: root,
 		agentDir: root,
+		extensionMode: "rpc",
+		whenUnattached: "keep",
 	});
 	const record: ReviewRunRecord = {
 		schemaVersion: 1,
@@ -148,15 +157,15 @@ async function fixture() {
 			},
 		},
 	};
-	await appendReviewRunDurably(source.session.sessionWriter, record);
+	await appendReviewRunDurably(source.conversation.session.sessionWriter, record);
 	const validate = vi.fn(async () => {});
 	const published = vi.fn((_entry: IntegratedRuntimeEntry) => {});
 	const createRuntime = vi.fn(async () => ({
 		runtime: source,
 		sessionSelection: {
 			kind: "resumed" as const,
-			requestedSessionId: source.session.sessionId,
-			sessionId: source.session.sessionId,
+			requestedSessionId: source.conversation.session.sessionId,
+			sessionId: source.conversation.session.sessionId,
 		},
 	}));
 	registry = new IntegratedRuntimeRegistry({
@@ -197,7 +206,7 @@ async function fixture() {
 	cleanups.push(async () => {
 		gate.close();
 		await registry.stopAll("test_cleanup");
-		await source.dispose();
+		await source.host.dispose();
 		await harness.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
@@ -235,11 +244,11 @@ async function fixture() {
 		} as IrohRemoteHello,
 		response: {} as IrohRemoteHandshakeSuccess,
 	});
-	const prepared = await registry.getOrCreateEntry(handshake(source.session.sessionId), authorization);
+	const prepared = await registry.getOrCreateEntry(handshake(source.conversation.session.sessionId), authorization);
 	const sourceLease = gate.tryAcquire()!;
 	const admission = beginReviewSiblingAdmission({
 		workspaceName: "ws",
-		sessionId: source.session.sessionId,
+		sessionId: source.conversation.session.sessionId,
 		broker,
 		lease: sourceLease,
 		validateWorkspace: async () => {},
@@ -254,6 +263,8 @@ async function fixture() {
 		root,
 		registry,
 		source,
+		/** The source's registry entry, whose review discussion service the tests drive. */
+		sourceEntry: prepared.entry,
 		gate,
 		broker,
 		validate,
@@ -270,24 +281,24 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 	it("publishes four independent broker-owned conversations without replacing the source", async () => {
 		const f = await fixture();
 		f.harness.setResponses([1, 2, 3, 4].map(() => fauxAssistantMessage("answer")));
-		const result = await f.source.reviewDiscussions!.start("run", ["f1", "f2", "f3", "f4"], "start");
+		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1", "f2", "f3", "f4"], "start");
 		expect(result.results.every((row) => row.outcome === "created")).toBe(true);
 		expect(f.registry.size).toBe(5);
 		for (const row of result.results) {
 			const entry = f.registry.findOwner("ws", row.discussion!.sessionId)!;
 			expect(entry.lifecycle).toBe("active");
-			expect(entry.runtime.session.sessionManager.getSessionName()).toBe(
+			expect(entry.runtime.conversation.session.sessionManager.getSessionName()).toBe(
 				`Review: Finding ${row.findingId.slice(1)}`,
 			);
-			await entry.runtime.session.waitForIdle();
-			expect(entry.runtime.session.getActiveToolNames()).toEqual(["read"]);
-			await entry.runtime.session.setAgentMode("plan");
-			await entry.runtime.session.setAgentMode("build");
-			expect(entry.runtime.session.getActiveToolNames()).toEqual(["read"]);
-			expect(entry.runtime.getCurrentSessionSummary().reviewDiscussion).not.toHaveProperty("readOnly");
+			await entry.runtime.conversation.session.waitForIdle();
+			expect(entry.runtime.conversation.session.getActiveToolNames()).toEqual(["read"]);
+			await entry.runtime.conversation.session.setAgentMode("plan");
+			await entry.runtime.conversation.session.setAgentMode("build");
+			expect(entry.runtime.conversation.session.getActiveToolNames()).toEqual(["read"]);
+			expect(entry.runtime.conversation.summary().reviewDiscussion).not.toHaveProperty("readOnly");
 			expect(entry.leaseOwner).toBeDefined();
 			expect(f.broker.isDaemonRuntimeOwnerCurrent(entry.leaseOwner!, "ws", entry.sessionId)).toBe(true);
-			await entry.runtime.session.waitForIdle();
+			await entry.runtime.conversation.session.waitForIdle();
 		}
 		expect(f.published).toHaveBeenCalledTimes(4);
 		expect(f.createRuntime).toHaveBeenCalledOnce();
@@ -300,12 +311,12 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 	])("does not borrow runtime state from another workspace authority: %j", async ({ workspace, generation }) => {
 		const f = await fixture();
 		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const first = (await f.source.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
+		const first = (await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
 		const local = f.registry.findOwner("ws", first.sessionId)!;
-		await local.runtime.session.waitForIdle();
-		const ref = local.runtime.session.sessionRef!;
+		await local.runtime.conversation.session.waitForIdle();
+		const ref = local.runtime.conversation.session.sessionRef!;
 		await f.registry.stopEntry(local, "test_detach");
-		const foreign = await f.source.createReviewDiscussionSibling(await SessionManager.open(ref));
+		const foreign = await openSibling(f.source, await SessionManager.open(ref));
 		f.createRuntime.mockResolvedValueOnce({
 			runtime: foreign,
 			sessionSelection: { kind: "resumed", requestedSessionId: ref.sessionId, sessionId: ref.sessionId },
@@ -332,9 +343,9 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		admission.finalize();
 		admission.release();
 		prepared.attachClaim.release();
-		const busy = vi.spyOn(foreign.session, "isBusy", "get").mockReturnValue(true);
+		const busy = vi.spyOn(foreign.conversation.session, "isBusy", "get").mockReturnValue(true);
 		try {
-			expect((await f.source.reviewDiscussions!.list("run")).discussions[0]!.status).toBe("completed");
+			expect((await f.sourceEntry.reviewDiscussions!.list("run")).discussions[0]!.status).toBe("completed");
 		} finally {
 			busy.mockRestore();
 		}
@@ -345,15 +356,15 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		f.published.mockImplementationOnce(() => {
 			throw new Error("publication failed");
 		});
-		const failed = await f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const failed = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		expect(failed.results[0]!.outcome).toBe("failed");
 		const id = failed.results[0]!.discussion!.sessionId;
 		expect(f.registry.findOwner("ws", id)).toBeUndefined();
 		expect(f.broker.lookup("ws", id)).toBeUndefined();
 		f.harness.setResponses([fauxAssistantMessage("retry")]);
-		const retried = await f.source.reviewDiscussions!.start("run", ["f1"], "retry");
+		const retried = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry");
 		expect(retried.results[0]).toMatchObject({ outcome: "existing", discussion: { sessionId: id } });
-		await f.registry.findOwner("ws", id)!.runtime.session.waitForIdle();
+		await f.registry.findOwner("ws", id)!.runtime.conversation.session.waitForIdle();
 		await f.gate.waitForDrain();
 	});
 
@@ -362,7 +373,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		f.validate.mockImplementationOnce(async () => {
 			f.gate.close();
 		});
-		const result = await f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		expect(result.results[0]!.outcome).toBe("failed");
 		const id = result.results[0]!.discussion!.sessionId;
 		expect(f.registry.findOwner("ws", id)).toBeUndefined();
@@ -376,22 +387,24 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		activate.mockImplementationOnce(() => {
 			throw new Error("activation failed");
 		});
-		const result = await f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		expect(result.results[0]!.outcome).toBe("failed");
 		const id = result.results[0]!.discussion!.sessionId;
 		expect(f.registry.findOwner("ws", id)).toBeUndefined();
 		expect(f.broker.lookup("ws", id)).toBeUndefined();
 		activate.mockRestore();
 		f.harness.setResponses([fauxAssistantMessage("retry")]);
-		expect((await f.source.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("existing");
-		await f.registry.findOwner("ws", id)!.runtime.session.waitForIdle();
+		expect((await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe(
+			"existing",
+		);
+		await f.registry.findOwner("ws", id)!.runtime.conversation.session.waitForIdle();
 		await f.gate.waitForDrain();
 	});
 
 	it("does not seed through another TUI's producer ownership", async () => {
 		const f = await fixture();
 		f.validate.mockRejectedValueOnce(new Error("defer initialization"));
-		const first = await f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const first = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		const id = first.results[0]!.discussion!.sessionId;
 		expect(await f.broker.acquireForTui({ connectionId: "tui", workspaceName: "ws", sessionId: id })).toMatchObject({
 			kind: "granted",
@@ -400,7 +413,9 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const tuiManager = await SessionManager.open(ref!);
 		try {
 			expect(tuiManager.getEntries()).toHaveLength(0);
-			expect((await f.source.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("failed");
+			expect((await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe(
+				"failed",
+			);
 			// If the losing service had seeded first, this owner's revision would be stale.
 			await tuiManager.logWriter.appendSessionInfo("TUI owns initialization");
 			expect(f.registry.findOwner("ws", id)).toBeUndefined();
@@ -420,10 +435,10 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 					release = resolve;
 				}),
 		);
-		const starting = f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		const rejected = expect(starting).rejects.toThrow("unavailable");
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const id = (await f.source.reviewDiscussions!.list("run")).discussions[0]!.sessionId;
+		const id = (await f.sourceEntry.reviewDiscussions!.list("run")).discussions[0]!.sessionId;
 		const captured = f.registry.values();
 		f.registry.fenceReviewOperations(captured);
 		// Revocation now waits for stream closure while the parent is still active.
@@ -439,7 +454,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 	it("revalidates workspace authority after the child factory returns", async () => {
 		const f = await fixture();
 		f.validate.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("workspace replaced"));
-		const result = await f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		expect(result.results[0]!.outcome).toBe("failed");
 		const id = result.results[0]!.discussion!.sessionId;
 		expect(f.registry.findOwner("ws", id)).toBeUndefined();
@@ -459,13 +474,13 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 				return fauxAssistantMessage("answer");
 			},
 		]);
-		const first = (await f.source.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
+		const first = (await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
 		await vi.waitFor(() => expect(finishTurn).toBeTypeOf("function"));
-		expect((await f.source.reviewDiscussions!.reset(first.discussionId, first.sessionId, "busy-reset")).status).toBe(
-			"busy",
-		);
+		expect(
+			(await f.sourceEntry.reviewDiscussions!.reset(first.discussionId, first.sessionId, "busy-reset")).status,
+		).toBe("busy");
 		finishTurn();
-		await f.registry.findOwner("ws", first.sessionId)!.runtime.session.waitForIdle();
+		await f.registry.findOwner("ws", first.sessionId)!.runtime.conversation.session.waitForIdle();
 		let release!: () => void;
 		f.validate.mockImplementationOnce(
 			() =>
@@ -473,16 +488,17 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 					release = resolve;
 				}),
 		);
-		const resetting = f.source.reviewDiscussions!.reset(first.discussionId, first.sessionId, "reset");
+		const resetting = f.sourceEntry.reviewDiscussions!.reset(first.discussionId, first.sessionId, "reset");
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
 		const oldChild = f.registry.findOwner("ws", first.sessionId)!;
 		const disposeRequested = Promise.withResolvers<void>();
-		const disposeOldChild = oldChild.runtime.dispose.bind(oldChild.runtime);
-		vi.spyOn(oldChild.runtime, "dispose").mockImplementation(() => {
-			disposeRequested.resolve();
-			return disposeOldChild();
+		const host = oldChild.runtime.host;
+		const close = host.close.bind(host);
+		vi.spyOn(host, "close").mockImplementation((conversation, event) => {
+			if (conversation === oldChild.runtime.conversation) disposeRequested.resolve();
+			return close(conversation, event);
 		});
-		const closeOldSession = vi.spyOn(oldChild.runtime.session, "dispose");
+		const closeOldSession = vi.spyOn(oldChild.runtime.conversation.session, "dispose");
 		let acquired = false;
 		const acquiring = f.broker
 			.acquireForTui({ connectionId: "tui-old", workspaceName: "ws", sessionId: first.sessionId })
@@ -502,8 +518,8 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		expect(await acquiring).toMatchObject({ kind: "granted" });
 		const child = f.registry.findOwner("ws", reset.discussion.currentSessionId)!;
 		expect(child.lifecycle).toBe("active");
-		expect(child.runtime.session.isBusy).toBe(false);
-		expect(child.runtime.session.messages.filter((message) => message.role === "user")).toHaveLength(0);
+		expect(child.runtime.conversation.session.isBusy).toBe(false);
+		expect(child.runtime.conversation.session.messages.filter((message) => message.role === "user")).toHaveLength(0);
 		expect(f.broker.lookup("ws", first.sessionId)?.state).toBe("tui-owned");
 	});
 
@@ -513,8 +529,8 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const originalId = canonical.getSessionId();
 		const coldRecord = { ...f.record, runId: "cold-run" };
 		await appendReviewRunDurably(canonical.logWriter, coldRecord);
-		await appendReviewRun(f.source.session.sessionWriter, coldRecord);
-		await registerReviewHandoffAliases(canonical, f.source.session.sessionManager, ["cold-run"]);
+		await appendReviewRun(f.source.conversation.session.sessionWriter, coldRecord);
+		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionManager, ["cold-run"]);
 		await canonical.closePersistence();
 		let release!: () => void;
 		f.validate.mockImplementationOnce(
@@ -523,7 +539,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 					release = resolve;
 				}),
 		);
-		const writing = f.source.reviewDiscussions!.recordOutcome({
+		const writing = f.sourceEntry.reviewDiscussions!.recordOutcome({
 			runId: "cold-run",
 			findingId: "f1",
 			status: "fixed",
@@ -542,10 +558,11 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		await writing;
 		expect(await acquiring).toMatchObject({ kind: "granted" });
 		expect(
-			(await getCanonicalReviewRun(f.source.session.sessionManager, "cold-run"))?.result?.findings[0]?.status,
+			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
+				?.status,
 		).toBe("fixed");
 		await expect(
-			f.source.reviewDiscussions!.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
+			f.sourceEntry.reviewDiscussions!.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
 		).rejects.toThrow("owned");
 		expect(f.broker.lookup("ws", originalId)?.state).toBe("tui-owned");
 		await f.gate.waitForDrain();
@@ -561,9 +578,9 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 				}),
 		);
 		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const starting = f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const parent = f.registry.findOwner("ws", f.source.session.sessionId)!;
+		const parent = f.registry.findOwner("ws", f.source.conversation.session.sessionId)!;
 		parent.coordinator.markDetached();
 		f.registry.scheduleRetention(parent, "phone_detached", 0);
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -572,7 +589,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const result = await starting;
 		expect(result.results[0]!.outcome).toBe("created");
 		const child = f.registry.findOwner("ws", result.results[0]!.discussion!.sessionId)!;
-		await child.runtime.session.waitForIdle();
+		await child.runtime.conversation.session.waitForIdle();
 		expect(child.lifecycle).toBe("active");
 	});
 
@@ -586,9 +603,9 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 				}),
 		);
 		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const starting = f.source.reviewDiscussions!.start("run", ["f1"], "start");
+		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const listing = await f.source.reviewDiscussions!.list("run");
+		const listing = await f.sourceEntry.reviewDiscussions!.list("run");
 		const id = listing.discussions[0]!.sessionId;
 		let attached = false;
 		const attaching = f.registry.getOrCreateEntry(f.handshake(id), f.authorization).then((value) => {
@@ -604,7 +621,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		expect(entry.created).toBe(false);
 		expect(entry.entry).toBe(f.registry.findOwner("ws", id));
 		entry.attachClaim.release();
-		await entry.entry.runtime.session.waitForIdle();
+		await entry.entry.runtime.conversation.session.waitForIdle();
 		expect(f.createRuntime).toHaveBeenCalledOnce();
 	});
 });

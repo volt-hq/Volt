@@ -6,13 +6,9 @@ import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory, HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import {
 	acknowledgeReviewRun,
 	appendReviewFindingTransition,
@@ -34,6 +30,7 @@ import type {
 	SessionStartEvent,
 } from "../src/index.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
 import { type SeedLogBuild, seedSession } from "./utilities/seed-log.ts";
 
 type RecordedSessionEvent =
@@ -42,7 +39,13 @@ type RecordedSessionEvent =
 	| SessionShutdownEvent
 	| SessionStartEvent;
 
-describe("AgentSessionRuntime session lifecycle events", () => {
+/** What the test client does when it moves; a test sets them as it needs. */
+interface MoveHooks {
+	prepare?: (to: HostedConversation, from: HostedConversation | undefined) => void;
+	onMoved?: (to: HostedConversation, from: HostedConversation | undefined) => Promise<void> | void;
+}
+
+describe("conversation host client session lifecycle events", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 	const tempDirs: string[] = [];
 	const managerOwner = createSessionManagerTestOwner();
@@ -55,7 +58,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		for (const tempDir of tempDirs.splice(0)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	/** A runtime over a new persisted session; `seed` commits entries before the session opens. */
+	/**
+	 * An in-place anchor client of a host over a new persisted session; `seed`
+	 * commits entries before the session opens. The extensions are bound on the
+	 * first session only; `hooks` observe the client's moves.
+	 */
 	async function createRuntimeHost(extensionFactory: ExtensionFactory, seed?: SeedLogBuild) {
 		const tempDir = join(tmpdir(), `volt-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
@@ -78,7 +85,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				noThemes: true,
 			},
 		};
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				...runtimeOptions,
 				cwd,
@@ -97,21 +104,27 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		};
 		const sessionManager = await SessionManager.create(tempDir);
 		if (seed) await seedSession(sessionManager, seed);
-		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager,
+		});
+		const hooks: MoveHooks = {};
+		const runtimeHost = await connectTestClient(host, conversation, {
+			prepare: (to, from) => hooks.prepare?.(to, from),
+			onMoved: (to, from) => hooks.onMoved?.(to, from),
 		});
 		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		cleanups.push(async () => {
 			await runtimeHost.dispose();
+			await host.dispose();
 		});
 
-		return { runtimeHost, faux };
+		return { runtimeHost, faux, hooks, host, factory: createRuntime };
 	}
 
-	it("uses only session disposal after runtime construction fails", async () => {
+	it("uses only session disposal after conversation construction fails", async () => {
 		const tempDir = join(tmpdir(), `volt-runtime-construction-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
@@ -120,7 +133,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
 		const closePersistence = vi.spyOn(sessionManager, "closePersistence");
 		const constructionError = new Error("injected runtime transcript subscription failure");
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager }) => {
 			const services = await createAgentSessionServices({ cwd, agentDir: tempDir });
 			const created = await createAgentSessionFromServices({
 				services,
@@ -133,9 +146,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			return { ...created, services, diagnostics: services.diagnostics };
 		};
 
-		await expect(
-			createAgentSessionRuntime(createRuntime, { cwd: tempDir, agentDir: tempDir, sessionManager }),
-		).rejects.toBe(constructionError);
+		await expect(openTestHost(createRuntime, { cwd: tempDir, agentDir: tempDir, sessionManager })).rejects.toBe(
+			constructionError,
+		);
 
 		expect(closePersistence).toHaveBeenCalledOnce();
 		await expect(sessionManager.logWriter.appendSessionInfo("late write")).rejects.toThrow(
@@ -258,7 +271,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	it("treats switching to the current session reference as a clean no-op", async () => {
 		const events: RecordedSessionEvent[] = [];
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.on("session_before_switch", (event) => {
 				events.push(event);
 			});
@@ -269,11 +282,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const originalSession = runtimeHost.session;
 		const currentSessionRef = originalSession.sessionRef;
 		expect(currentSessionRef).toBeDefined();
-		const rebind = vi.fn(async () => {});
-		const replaced = vi.fn();
-		runtimeHost.setRebindSession(rebind);
-		const detach = runtimeHost.subscribeSessionReplaced(replaced);
-		const feed = runtimeHost.conversationProjectionFeed;
+		const prepare = vi.fn();
+		const moved = vi.fn();
+		hooks.prepare = prepare;
+		hooks.onMoved = moved;
+		const feed = runtimeHost.conversation.projectionFeed;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(currentSessionRef!)).resolves.toEqual({
@@ -284,10 +297,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(runtimeHost.conversationProjectionFeed).toBe(feed);
-		expect(rebind).not.toHaveBeenCalled();
-		expect(replaced).not.toHaveBeenCalled();
-		detach();
+		expect(runtimeHost.conversation.projectionFeed).toBe(feed);
+		expect(prepare).not.toHaveBeenCalled();
+		expect(moved).not.toHaveBeenCalled();
 	});
 
 	it("rejects replacement until originating review persistence is released", async () => {
@@ -304,7 +316,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			(entry) => entry.type === "message" && entry.message.role === "assistant",
 		);
 		expect(forkEntry).toBeDefined();
-		const disposeForReplacement = vi.spyOn(originatingSession, "disposeForSessionReplacement");
+		const dispose = vi.spyOn(originatingSession, "dispose");
 		const record: ReviewRunRecord = {
 			schemaVersion: 1,
 			runId: "review:replacement-persistence",
@@ -342,7 +354,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const reviewGate = new Promise<void>((resolve) => {
 			releaseReview = resolve;
 		});
-		const workflow = runtimeHost.reviewWorkflows.start({
+		const workflow = runtimeHost.conversation.reviewWorkflows.start({
 			prepared: {
 				workflowId: record.runId,
 				action: record.workflowAction,
@@ -377,16 +389,17 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await expect(runtimeHost.fork(forkEntry!.id, { position: "at" })).rejects.toThrow(activeReviewError);
 		await expect(runtimeHost.newSession()).rejects.toThrow(activeReviewError);
 		expect(runtimeHost.session).toBe(originatingSession);
-		expect(disposeForReplacement).not.toHaveBeenCalled();
+		expect(dispose).not.toHaveBeenCalled();
 		expect(originatingManager.getEntries()).toEqual(originatingEntries);
 		expect(originatingManager.getLeafId()).toBe(originatingLeaf);
 		expect(readdirSync(originatingManager.getSessionDir()).sort()).toEqual(originatingSessionFiles);
 
 		releaseReview();
-		await runtimeHost.reviewWorkflows.waitForIdle();
+		await runtimeHost.conversation.reviewWorkflows.waitForIdle();
 		const opened = await runtimeHost.newSession();
 		expect(opened).toEqual({ cancelled: false, sessionId: runtimeHost.session.sessionId, seeded: false });
-		expect(disposeForReplacement).toHaveBeenCalledOnce();
+		// The conversation the client left closes without waiting for its own admitted prompt work.
+		expect(dispose).toHaveBeenCalledExactlyOnceWith("session_replacement", { leavePromptWork: true });
 		expect(getReviewRun(await SessionManager.open(originatingRef!), record.runId)).toEqual(record);
 	});
 
@@ -803,7 +816,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 	it("rejects a different session reference that collides on the current session ID", async () => {
 		const events: RecordedSessionEvent[] = [];
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", (event) => {
 				events.push(event);
 			});
@@ -820,11 +833,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const collisionRef = collisionManager.getSessionRef();
 		expect(collisionRef).toBeDefined();
 		await collisionManager.closePersistence();
-		const rebind = vi.fn(async () => {});
-		const replaced = vi.fn();
-		runtimeHost.setRebindSession(rebind);
-		const detach = runtimeHost.subscribeSessionReplaced(replaced);
-		const feed = runtimeHost.conversationProjectionFeed;
+		const prepare = vi.fn();
+		const moved = vi.fn();
+		hooks.prepare = prepare;
+		hooks.onMoved = moved;
+		const feed = runtimeHost.conversation.projectionFeed;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(collisionRef!)).rejects.toThrow(
@@ -833,31 +846,30 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(runtimeHost.conversationProjectionFeed).toBe(feed);
-		expect(rebind).not.toHaveBeenCalled();
-		expect(replaced).not.toHaveBeenCalled();
-		detach();
+		expect(runtimeHost.conversation.projectionFeed).toBe(feed);
+		expect(prepare).not.toHaveBeenCalled();
+		expect(moved).not.toHaveBeenCalled();
 	});
 
-	it("replaces the projection feed and rebinds the new session before the old one shuts down", async () => {
+	it("moves the client to the new conversation's feed and session before the old one shuts down", async () => {
 		const phases: string[] = [];
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
 				phases.push("session_shutdown");
 			});
 		});
-		runtimeHost.subscribeSessionWillProject(() => {
-			phases.push("will_project");
-		});
-		runtimeHost.setRebindSession(async () => {
-			phases.push("rebind");
-		});
-		const sourceFeed = runtimeHost.conversationProjectionFeed;
+		hooks.prepare = () => {
+			phases.push("prepare");
+		};
+		hooks.onMoved = async () => {
+			phases.push("moved");
+		};
+		const sourceFeed = runtimeHost.conversation.projectionFeed;
 
 		await runtimeHost.newSession();
-		expect(phases).toEqual(["will_project", "rebind", "session_shutdown"]);
+		expect(phases).toEqual(["prepare", "moved", "session_shutdown"]);
 		// A stream never follows the move: the source's feed ended with it.
-		expect(runtimeHost.conversationProjectionFeed).not.toBe(sourceFeed);
+		expect(runtimeHost.conversation.projectionFeed).not.toBe(sourceFeed);
 		expect(() =>
 			sourceFeed.attach({ write: () => {}, buildSnapshot: () => ({}) as ConversationProjectionSnapshot }),
 		).toThrow("disposed");
@@ -924,40 +936,42 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		releasePreparation();
 
 		await first;
-		await expect(queuedFromOldSession).rejects.toThrow("Stale agent session structural operation");
+		await expect(queuedFromOldSession).rejects.toThrow("Stale session change");
 		expect(preparationCount).toBe(1);
 		expect(shutdownReasons).toEqual(["new"]);
 	});
 
-	it("orders disposal after an admitted replacement", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		let releasePublication!: () => void;
-		let markPublicationStarted!: () => void;
-		const publicationStarted = new Promise<void>((resolve) => {
-			markPublicationStarted = resolve;
+	it("closes both conversations when its host is disposed during a client's move", async () => {
+		const { runtimeHost, hooks, host } = await createRuntimeHost(() => {});
+		const source = runtimeHost.conversation;
+		let releaseMove!: () => void;
+		let markMoveStarted!: () => void;
+		const moveStarted = new Promise<void>((resolve) => {
+			markMoveStarted = resolve;
 		});
-		const publicationGate = new Promise<void>((resolve) => {
-			releasePublication = resolve;
+		const moveGate = new Promise<void>((resolve) => {
+			releaseMove = resolve;
 		});
-		runtimeHost.subscribeSessionWillProject(async () => {
-			markPublicationStarted();
-			await publicationGate;
-		});
+		hooks.onMoved = async () => {
+			markMoveStarted();
+			await moveGate;
+		};
 
 		const replacement = runtimeHost.newSession();
-		await publicationStarted;
-		let disposeSettled = false;
-		const disposal = runtimeHost.dispose().then(() => {
-			disposeSettled = true;
-		});
-		await Promise.resolve();
-		expect(disposeSettled).toBe(false);
-		await expect(runtimeHost.newSession()).rejects.toThrow(/no longer accepting structural operations/);
+		await moveStarted;
+		const target = runtimeHost.conversation;
+		expect(target).not.toBe(source);
+		const disposal = host.dispose();
 
-		releasePublication();
+		releaseMove();
 		await replacement;
 		await disposal;
-		expect(disposeSettled).toBe(true);
+		expect(source.closed).toBe(true);
+		expect(target.closed).toBe(true);
+		expect(host.list()).toEqual([]);
+		// The client was detached with the conversations: it has no structural intents left.
+		expect(host.conversationOf(runtimeHost.client)).toBeUndefined();
+		await expect(runtimeHost.newSession()).rejects.toThrow("not attached");
 	});
 
 	it("handles recovered-input failure without retiring the runtime or leaking payloads", async () => {
@@ -972,7 +986,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const recovery = runtimeHost.startRecoveredClientInputs();
 		await expect(recovery).rejects.toThrow("secret queued message contents");
-		expect(runtimeHost.diagnostics).toContainEqual({ type: "warning", message: warning });
+		expect(runtimeHost.conversation.diagnostics).toContainEqual({ type: "warning", message: warning });
 		expect(warn).toHaveBeenCalledWith(warning);
 		expect(warn).not.toHaveBeenCalledWith(expect.stringContaining("secret queued message contents"));
 		expect(runtimeHost.session).toBeDefined();
@@ -1162,9 +1176,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await reopened.closePersistence();
 	});
 
-	it("blocks session replacement from an identified extension command after dispatch starts", async () => {
+	it("settles an identified extension command's input as it moves its client to a new session", async () => {
 		let replacementError: Error | undefined;
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.registerCommand("replace-current", {
 				handler: async (_args, ctx) => {
 					try {
@@ -1183,7 +1197,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			commandContextActions: {
 				waitForIdle: () => originalSession.waitForIdle(),
 				newSession: (options) => runtimeHost.newSession(options),
-				fork: (entryId, options) => runtimeHost.fork(entryId, options),
+				fork: async (entryId, options) => {
+					const result = await runtimeHost.fork(entryId, options);
+					return result.cancelled
+						? result
+						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+				},
 				navigateTree: async (targetId, options) => {
 					const result = await originalSession.navigateTree(targetId, options);
 					return { cancelled: result.cancelled };
@@ -1192,19 +1211,18 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				reload: () => originalSession.reload(),
 			},
 		}).ready;
-		const rebind = vi.fn(async () => {});
-		runtimeHost.setRebindSession(rebind);
+		const moved = vi.fn(async () => {});
+		hooks.onMoved = moved;
 
 		await expect(
 			originalSession.prompt("/replace-current", { clientMessageId: "extension-replacement-fence" }),
 		).resolves.toBeUndefined();
 
-		expect(replacementError?.message).toBe(
-			"Cannot replace the session while a durable client input outcome is ambiguous",
-		);
-		expect(runtimeHost.session).toBe(originalSession);
+		// The command that moves its client is done with its own input: the session it leaves has no ambiguous input.
+		expect(replacementError).toBeUndefined();
+		expect(runtimeHost.session).not.toBe(originalSession);
 		expect(originalSession.sessionManager.getClientInput("extension-replacement-fence")?.state).toBe("completed");
-		expect(rebind).not.toHaveBeenCalled();
+		expect(moved).toHaveBeenCalledOnce();
 	});
 
 	it("keeps the source and its projection feed when the new conversation cannot open", async () => {
@@ -1228,7 +1246,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(runtimeHost.session).toBe(originalSession);
 		// The feed is neither fenced nor disposed: an attach reaches its snapshot.
 		expect(() =>
-			runtimeHost.conversationProjectionFeed.attach({
+			runtimeHost.conversation.projectionFeed.attach({
 				write: () => {},
 				buildSnapshot: () => {
 					throw new Error("snapshot built");
@@ -1238,50 +1256,53 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await expect(originalSession.prompt("source still works")).resolves.toBeUndefined();
 	});
 
-	it("runs beforeSessionInvalidate and rebindSession before the old session shuts down", async () => {
+	it("prepares and moves the client before the old session shuts down", async () => {
 		const phases: string[] = [];
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
 				phases.push("session_shutdown");
 			});
 		});
 		const oldSession = runtimeHost.session;
-		runtimeHost.setBeforeSessionInvalidate(() => {
-			phases.push("beforeSessionInvalidate");
+		hooks.prepare = () => {
+			phases.push("prepare");
 			expect(oldSession.extensionRunner.createContext().cwd).toBe(oldSession.sessionManager.getCwd());
-		});
-		runtimeHost.setRebindSession(async () => {
-			phases.push("rebindSession");
-		});
+		};
+		hooks.onMoved = async () => {
+			phases.push("moved");
+		};
 
 		await runtimeHost.newSession();
 
-		expect(phases).toEqual(["beforeSessionInvalidate", "rebindSession", "session_shutdown"]);
+		expect(phases).toEqual(["prepare", "moved", "session_shutdown"]);
 		expect(() => oldSession.extensionRunner.createContext().cwd).toThrow(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured volt or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
-		runtimeHost.setBeforeSessionInvalidate(undefined);
-		runtimeHost.setRebindSession(undefined);
 	});
 
-	it("notifies independent co-attached replacement listeners", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		const first: string[] = [];
-		const second: string[] = [];
-		const detachFirst = runtimeHost.subscribeSessionReplaced((session) => {
-			first.push(session.sessionId);
-		});
-		runtimeHost.subscribeSessionReplaced((session) => {
-			second.push(session.sessionId);
+	it("moves only the client whose intent it is; a co-attached client stays and hears nothing", async () => {
+		const { runtimeHost, hooks, host } = await createRuntimeHost(() => {});
+		const source = runtimeHost.conversation;
+		const anchorMoves = vi.fn();
+		hooks.onMoved = anchorMoves;
+		const moves: string[] = [];
+		const other = await connectTestClient(host, source, {
+			anchor: false,
+			onMoved: (to) => {
+				moves.push(to.id);
+			},
 		});
 
-		await runtimeHost.newSession();
-		const replacementID = runtimeHost.session.sessionId;
-		detachFirst();
-		await runtimeHost.newSession();
+		await other.newSession();
+		const first = other.session.sessionId;
+		await other.newSession();
 
-		expect(first).toEqual([replacementID]);
-		expect(second).toEqual([replacementID, runtimeHost.session.sessionId]);
+		expect(moves).toEqual([first, other.session.sessionId]);
+		expect(new Set([source.id, ...moves]).size).toBe(3);
+		expect(anchorMoves).not.toHaveBeenCalled();
+		expect(runtimeHost.conversation).toBe(source);
+		expect(source.closed).toBe(false);
+		await other.dispose();
 	});
 
 	it("keeps an attached conversation projection healthy while host-only input WAL is committed", async () => {
@@ -1289,7 +1310,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			volt.registerCommand("private-wal", { handler: async () => {} });
 		});
 		const writes: object[] = [];
-		const subscription = runtimeHost.conversationProjectionFeed.attach({
+		const subscription = runtimeHost.conversation.projectionFeed.attach({
 			write: (value) => {
 				writes.push(value);
 			},
@@ -1363,9 +1384,10 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		subscription.detach();
 	});
 
-	it("ends the runtime and its projection feeds when a will-project listener fails", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		const subscription = runtimeHost.conversationProjectionFeed.attach({
+	it("leaves the client on the new conversation and closes the source when its move handler fails", async () => {
+		const { runtimeHost, hooks } = await createRuntimeHost(() => {});
+		const source = runtimeHost.conversation;
+		const subscription = source.projectionFeed.attach({
 			write: () => {},
 			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
 				conversation: { workspaceName: "test", sessionId: runtimeHost.session.sessionId },
@@ -1401,31 +1423,54 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}),
 		});
 		await subscription.ready;
-		const detach = runtimeHost.subscribeSessionWillProject(() => {
+		hooks.onMoved = () => {
 			throw new Error("mode rebind refused");
-		});
+		};
 
 		await expect(runtimeHost.newSession()).rejects.toThrow("mode rebind refused");
-		await expect(subscription.flush()).rejects.toThrow(/closed/);
-		detach();
-		await expect(runtimeHost.newSession()).rejects.toThrow(/no longer accepting structural operations/);
+		hooks.onMoved = undefined;
 
+		// The client joined the new conversation before its handler failed; the source closed with the move.
+		const target = runtimeHost.conversation;
+		expect(target).not.toBe(source);
+		expect(source.closed).toBe(true);
+		expect(target.closed).toBe(false);
+		// The closed source's feed admits no new stream; it ends once its last stream detaches.
 		expect(() =>
-			runtimeHost.conversationProjectionFeed.attach({
+			source.projectionFeed.attach({
 				write: () => {},
 				buildSnapshot: () => {
-					throw new Error("must not build from a disposed replacement");
+					throw new Error("must not build from a closed conversation");
+				},
+			}),
+		).toThrow(/closed/);
+		subscription.detach();
+		expect(() =>
+			source.projectionFeed.attach({
+				write: () => {},
+				buildSnapshot: () => {
+					throw new Error("must not build from a closed conversation");
 				},
 			}),
 		).toThrow(/disposed/);
+		// The new conversation serves the client.
+		expect(() =>
+			target.projectionFeed.attach({
+				write: () => {},
+				buildSnapshot: () => {
+					throw new Error("snapshot built");
+				},
+			}),
+		).toThrow("snapshot built");
+		await expect(runtimeHost.newSession()).resolves.toMatchObject({ cancelled: false });
 	});
 
-	it("ends the runtime and keeps the new log when the rebind after a committed move fails", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
+	it("keeps the new log when the client's move handler fails after the move", async () => {
+		const { runtimeHost, hooks } = await createRuntimeHost(() => {});
 		let replacementRef: SessionReference | undefined;
-		runtimeHost.setRebindSession(async () => {
+		hooks.onMoved = async () => {
 			throw new Error("rebind failed");
-		});
+		};
 
 		await expect(
 			runtimeHost.newSession({
@@ -1436,13 +1481,19 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}),
 		).rejects.toThrow("rebind failed");
 		expect(replacementRef).toBeDefined();
+		const replacement = runtimeHost.conversation;
+		expect(replacement.session.sessionRef).toEqual(replacementRef);
+
+		// The new conversation closes once its client leaves; its log stays in the store.
+		await runtimeHost.dispose();
 		const reopened = await SessionManager.open(replacementRef!);
 		expect(reopened.getConversationState().planning).toEqual({ mode: "plan", plan: null });
+		await reopened.closePersistence();
 		expect(() =>
-			runtimeHost.conversationProjectionFeed.attach({
+			replacement.projectionFeed.attach({
 				write: () => {},
 				buildSnapshot: () => {
-					throw new Error("must not build from a disposed replacement");
+					throw new Error("must not build from a closed conversation");
 				},
 			}),
 		).toThrow(/disposed/);

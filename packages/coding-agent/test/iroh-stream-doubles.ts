@@ -13,10 +13,11 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
@@ -195,47 +196,124 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		waitForIdle: vi.fn(async () => {}),
 		activeToolExecutions: new Map(),
 		subscribeRuntimeEvents: vi.fn((_handler: () => Promise<void> | void) => () => {}),
+		/** Never resolves: a test session keeps its log. */
+		lost: new Promise<Error>(() => {}),
 	};
 	return session;
 }
 
+/** A conversation hosted for a test, as the RPC modes take it. */
+export interface TestConversation {
+	host: ConversationHost;
+	conversation: HostedConversation;
+}
+
+/**
+ * Host a lightweight test session as a conversation of its own host, which
+ * opens nothing else and keeps the conversation open when its clients leave,
+ * as a daemon host does. The conversation's projection feed observes the
+ * session's events.
+ */
+export function createTestConversation(
+	session: Pick<ReturnType<typeof createTestSession>, "sessionId" | "lost">,
+	options: {
+		cwd?: string;
+		agentDir?: string;
+		/**
+		 * Replaces the host's close of the conversation, which a lightweight test
+		 * session cannot go through: it runs when the daemon or a test closes it.
+		 */
+		close?: () => Promise<void>;
+	} = {},
+): TestConversation {
+	const host = new ConversationHost({
+		factory: () => Promise.reject(new Error("A test host opens no other conversation")),
+		agentDir: "/volt-test-agent",
+		extensionMode: "rpc",
+		whenUnattached: "keep",
+	});
+	const conversation = host.adoptSession({
+		session: session as unknown as AgentSession,
+		// Without an agent dir, the RPC mode's model catalog watcher stays off.
+		services: { cwd: options.cwd ?? "/workspace", agentDir: options.agentDir } as unknown as AgentSessionServices,
+		diagnostics: [],
+	});
+	const close = options.close;
+	if (close) vi.spyOn(host, "close").mockImplementation(() => close());
+	return { host, conversation };
+}
+
+/** The parts of a lightweight daemon conversation double: a session, where it runs, and how it closes. */
+export interface TestDaemonRuntimeParts {
+	session: object;
+	cwd?: string;
+	/** Runs when the daemon closes the conversation; resolves by default. */
+	close?: () => Promise<void>;
+	/** An idle manager by default. */
+	reviewWorkflows?: object;
+	startRecoveredClientInputs?: () => Promise<void>;
+	listSessions?: () => Promise<object[]>;
+	/** Never resolves by default. */
+	lost?: Promise<Error>;
+}
+
+/** The close of each conversation a daemon host double hosts. */
+const testDaemonHostClosers = new WeakMap<ConversationHost, Map<HostedConversation, () => Promise<void>>>();
+
+/**
+ * A daemon conversation double for registry tests that never serve a stream
+ * from it: the conversation is a plain object, and the host only closes it.
+ * With `host`, the conversation joins that double's host instead, as a
+ * conversation a phone's structural intent opened in its source's host does.
+ */
+export function createTestDaemonRuntime(parts: TestDaemonRuntimeParts, host?: ConversationHost): TestConversation {
+	const conversation = {
+		get id() {
+			return (parts.session as { sessionId?: string }).sessionId;
+		},
+		session: parts.session,
+		cwd: parts.cwd ?? "/workspace",
+		closed: false,
+		lost: parts.lost ?? new Promise<Error>(() => {}),
+		reviewWorkflows: parts.reviewWorkflows ?? {
+			hasActiveWorkflows: false,
+			waitForIdle: async () => {},
+			list: () => [],
+			attachSink: () => () => {},
+		},
+		startRecoveredClientInputs: parts.startRecoveredClientInputs ?? (async () => {}),
+		listSessions: parts.listSessions ?? (async () => []),
+	} as unknown as HostedConversation;
+	const conversationHost = host ?? createTestDaemonHost();
+	const closers = testDaemonHostClosers.get(conversationHost);
+	if (!closers) throw new Error("Not a daemon host double");
+	closers.set(conversation, parts.close ?? (async () => {}));
+	return { host: conversationHost, conversation };
+}
+
+/** A daemon host double: it closes the conversation doubles that joined it. */
+function createTestDaemonHost(): ConversationHost {
+	const closers = new Map<HostedConversation, () => Promise<void>>();
+	const host = {
+		close: vi.fn(async (conversation: HostedConversation) => {
+			await closers.get(conversation)?.();
+		}),
+	} as unknown as ConversationHost;
+	testDaemonHostClosers.set(host, closers);
+	return host;
+}
+
 type TestIrohConversationOptions = Pick<
-	Parameters<typeof runIrohRemoteRpcMode>[1],
+	Parameters<typeof runIrohRemoteRpcMode>[2],
 	"buildConversationSnapshot" | "hostNodeId" | "projectConversationExternal"
 >;
 
-interface TestConversationRuntimeHost {
-	conversationProjectionFeed?: ConversationProjectionFeed;
-	publishConversationProjectionEvent?: (event: object) => void;
-	session: AgentSessionRuntime["session"];
-}
-
-/** Install the runtime-owned ordered feed surface omitted by lightweight test doubles. */
-export function createTestIrohConversationOptions(runtimeHost: AgentSessionRuntime): TestIrohConversationOptions {
-	const testHost = runtimeHost as unknown as TestConversationRuntimeHost;
-	let feed = testHost.conversationProjectionFeed;
-	if (!feed) {
-		feed = new ConversationProjectionFeed({
-			subscribe: (listener) => testHost.session.subscribe((event) => listener(event)),
-		});
-		Object.defineProperty(testHost, "conversationProjectionFeed", {
-			configurable: true,
-			value: feed,
-			writable: true,
-		});
-	}
-	if (!testHost.publishConversationProjectionEvent) {
-		Object.defineProperty(testHost, "publishConversationProjectionEvent", {
-			configurable: true,
-			value: (event: object) => feed.publishExternal(event),
-			writable: true,
-		});
-	}
-
+/** A checkpoint builder and external projector over a test conversation's session. */
+export function createTestIrohConversationOptions(conversation: HostedConversation): TestIrohConversationOptions {
 	return {
 		hostNodeId: "a".repeat(64),
 		buildConversationSnapshot: ({ activeAssistant, branchEpoch }) => {
-			const session = testHost.session;
+			const session = conversation.session;
 			return {
 				conversation: { workspaceName: "test", sessionId: session.sessionId },
 				state: {
@@ -276,24 +354,29 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 	};
 }
 
+/**
+ * Serve `target`'s conversation over a manual Iroh stream as a client that
+ * shares it with others, as a daemon phone stream does: the conversation stays
+ * open when the stream ends.
+ */
 export async function startIrohRpcMode(
-	runtimeHost: AgentSessionRuntime,
+	target: TestConversation,
 	startupSession:
 		| Pick<AgentSession, "attachExtensionClient">
 		| Pick<ReturnType<typeof createTestSession>, "attachExtensionClient">,
-	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[1]> = {},
+	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[2]> = {},
 ) {
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
-	const conversationOptions = createTestIrohConversationOptions(runtimeHost);
-	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+	const conversationOptions = createTestIrohConversationOptions(target.conversation);
+	const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
+		anchor: false,
 		...options,
 		buildConversationSnapshot: options.buildConversationSnapshot ?? conversationOptions.buildConversationSnapshot,
 		hostNodeId: options.hostNodeId ?? conversationOptions.hostNodeId,
 		projectConversationExternal:
 			options.projectConversationExternal ?? conversationOptions.projectConversationExternal,
 		rpcGrant: options.rpcGrant ?? createIrohRemotePresetAccess("full").rpcGrant,
-		disposeRuntimeOnClose: false,
 		stream: { recv, send },
 		workspacePath: "/workspace",
 	});
@@ -302,7 +385,7 @@ export async function startIrohRpcMode(
 	expect(bootstrap).toMatchObject({
 		type: "conversation_bootstrap",
 		delivery: { cursor: 0 },
-		conversation: { sessionId: runtimeHost.session.sessionId },
+		conversation: { sessionId: target.conversation.session.sessionId },
 		reason: "bootstrap",
 	});
 	return { modePromise, recv, send };

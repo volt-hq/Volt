@@ -1,11 +1,11 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ConversationProjectionSubscription } from "../../../src/core/rpc/conversation-projection-feed.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/loopback-transport.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
+import { adoptTestSession, connectTestClient, type TestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 function deferred() {
@@ -17,23 +17,24 @@ function deferred() {
 }
 
 const harnesses: Harness[] = [];
-const runtimes: AgentSessionRuntime[] = [];
+const hosts: TestHost[] = [];
 const connections: Array<() => Promise<void>> = [];
 const releases: Array<() => void> = [];
 
-async function connect(runtime: AgentSessionRuntime) {
+async function connect(target: TestHost) {
+	const conversation = target.conversation;
 	const pair = createLoopbackRpcTransportPair();
 	const frames: unknown[] = [];
 	const unsubscribe = pair.client.onValue!((value) => {
 		frames.push(value);
 	});
-	const subscription: ConversationProjectionSubscription = runtime.conversationProjectionFeed.attach({
+	const subscription: ConversationProjectionSubscription = conversation.projectionFeed.attach({
 		write: (value) => pair.server.write(value),
 		buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-			conversation: { workspaceName: "workspace", sessionId: runtime.session.sessionId },
-			state: buildRpcSessionState(runtime.session),
+			conversation: { workspaceName: "workspace", sessionId: conversation.session.sessionId },
+			state: buildRpcSessionState(conversation.session),
 			transcript: {
-				sessionId: runtime.session.sessionId,
+				sessionId: conversation.session.sessionId,
 				items: [],
 				hasMore: false,
 				nextBeforeEntryId: null,
@@ -47,10 +48,10 @@ async function connect(runtime: AgentSessionRuntime) {
 	});
 	await subscription.ready;
 	const ready = deferred();
-	const mode = runRpcMode(runtime, {
+	const mode = runRpcMode(target.host, conversation, {
 		transport: pair.server,
 		onReady: ready.resolve,
-		disposeRuntimeOnClose: false,
+		anchor: false,
 		orderedConversation: {
 			get subscriptionId() {
 				return subscription.subscriptionId;
@@ -67,7 +68,7 @@ async function connect(runtime: AgentSessionRuntime) {
 					reason: command.reason,
 					assistantPosition: command.assistantPosition,
 				}),
-			publishExternal: (event) => runtime.conversationProjectionFeed.publishExternal(event),
+			publishExternal: (event) => conversation.projectionFeed.publishExternal(event),
 		},
 		requireConversationAuthority: true,
 	});
@@ -91,7 +92,7 @@ afterEach(async () => {
 	for (const release of releases.splice(0)) release();
 	vi.useRealTimers();
 	for (const close of connections.splice(0)) await close();
-	for (const runtime of runtimes.splice(0)) await runtime.dispose();
+	for (const target of hosts.splice(0)) await target.host.dispose();
 	for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 	vi.restoreAllMocks();
 });
@@ -132,7 +133,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			});
 			harnesses.push(harness);
 			await harness.session.setSessionName("Reconnect timing regression");
-			const runtime = new AgentSessionRuntime(
+			const target = adoptTestSession(
 				harness.session,
 				{
 					cwd: harness.tempDir,
@@ -151,8 +152,10 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 					throw new Error("No replacement expected");
 				},
 			);
-			runtimes.push(runtime);
-			const initial = await connect(runtime);
+			hosts.push(target);
+			// The host keeps the conversation open between the reconnecting RPC clients.
+			await connectTestClient(target.host, target.conversation);
+			const initial = await connect(target);
 			harness.session.subscribe((event) => {
 				if (event.type === "auto_retry_start") recovery.resolve();
 			});
@@ -181,7 +184,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			expect(initial.frames).toContainEqual(expect.objectContaining({ type: "agent_start", startedAt }));
 			await initial.close();
 			now += 10_000;
-			const during = await connect(runtime);
+			const during = await connect(target);
 			expect(during.frames[0]).toMatchObject({
 				type: "conversation_bootstrap",
 				state: {
@@ -197,7 +200,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 				vi.useRealTimers();
 			} else releaseRecovery.resolve();
 			await continued.promise;
-			const after = await connect(runtime);
+			const after = await connect(target);
 			expect(after.frames[0]).toMatchObject({
 				type: "conversation_bootstrap",
 				state: {
@@ -214,7 +217,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			expect(after.frames).toContainEqual(expect.objectContaining({ type: "agent_settled" }));
 			expect((await after.client.getState()).activeAgentRun).toBeUndefined();
 			await after.close();
-			const settled = await connect(runtime);
+			const settled = await connect(target);
 			expect(settled.frames[0]).toMatchObject({ type: "conversation_bootstrap", state: { isStreaming: false } });
 			expect(settled.frames[0]).not.toHaveProperty("state.activeAgentRun");
 		},

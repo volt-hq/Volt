@@ -1,6 +1,6 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import { openNewSession } from "../../../src/core/host/session-intents.ts";
 import type { RpcCloseHandler, RpcTransport } from "../../../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../../../src/core/rpc/types.ts";
 import type { SubagentEvent, SubagentHandle, SubagentResult } from "../../../src/core/subagents/index.ts";
@@ -8,7 +8,17 @@ import type { SubagentToolManager } from "../../../src/core/tools/index.ts";
 import { createInProcessRpcClient } from "../../../src/modes/rpc/in-process-rpc-client.ts";
 import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+// Structural intents answer cancelled unless a test moves the client itself.
+vi.mock("../../../src/core/host/session-intents.ts", () => ({
+	openFork: vi.fn(async () => ({ cancelled: true })),
+	openImport: vi.fn(async () => ({ cancelled: true })),
+	openNewSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSession: vi.fn(async () => ({ cancelled: true })),
+	openStoredSessionById: vi.fn(async () => ({ cancelled: true })),
+}));
 
 interface RpcHarness {
 	close(): void;
@@ -42,18 +52,16 @@ function getAssistantMessageEvent(frame: Record<string, unknown>): Record<string
 	return event;
 }
 
-function createFakeRuntimeHost(harness: Harness): AgentSessionRuntime {
-	return {
-		session: harness.session,
-		newSession: vi.fn(async () => ({ cancelled: true })),
-		switchSession: vi.fn(async () => ({ cancelled: true })),
-		switchSessionById: vi.fn(async () => ({ cancelled: true })),
-		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+/** A fake host over the harness session's conversation. */
+function createFakeRuntimeHost(harness: Harness) {
+	const fake = createFakeHost();
+	const { conversation } = createFakeConversation(harness.session, {
 		startRecoveredClientInputs: vi.fn(async () => {}),
-		dispose: vi.fn(async () => {}),
-		setRebindSession: vi.fn(),
-	} as unknown as AgentSessionRuntime;
+	});
+	return { ...fake, conversation };
 }
+
+type FakeRuntimeHost = ReturnType<typeof createFakeRuntimeHost>;
 
 function createFakeSubagentScaffold(): {
 	emit: (event: SubagentEvent) => void;
@@ -99,7 +107,7 @@ function createFakeSubagentScaffold(): {
 
 async function startRpcModeForHarness(
 	harness: Harness,
-	runtimeHost: AgentSessionRuntime = createFakeRuntimeHost(harness),
+	runtimeHost: FakeRuntimeHost = createFakeRuntimeHost(harness),
 ): Promise<RpcHarness> {
 	let lineHandler: ((line: string) => void) | undefined;
 	let closeHandler: RpcCloseHandler | undefined;
@@ -127,8 +135,8 @@ async function startRpcModeForHarness(
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(runtimeHost, {
-		disposeRuntimeOnClose: false,
+	const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+		anchor: false,
 		onReady: resolveReady,
 		transport,
 	});
@@ -306,9 +314,13 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		const session = harness.session as unknown as { getSubagentToolManager?: () => SubagentToolManager };
 		session.getSubagentToolManager = () => manager;
 		const runtimeHost = createFakeRuntimeHost(harness);
-		(runtimeHost as { newSession: () => Promise<{ cancelled: boolean }> }).newSession = vi.fn(async () => ({
-			cancelled: false,
-		}));
+		const next = await createHarness();
+		activeHarnesses.push(next);
+		const nextConversation = createFakeConversation(next.session).conversation;
+		vi.mocked(openNewSession).mockImplementationOnce(async (_host, client) => {
+			await runtimeHost.move(client, nextConversation);
+			return { cancelled: false, sessionId: nextConversation.id, seeded: false };
+		});
 		const rpc = await startRpcModeForHarness(harness, runtimeHost);
 
 		rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect" });
@@ -334,8 +346,8 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 			},
 		});
 
-		// new_session rebinds the RPC session and disposes all active subagents
-		// host-side. No subagent_end fires on this path; the dedicated terminal
+		// new_session moves the RPC client to another session, which disposes all
+		// active subagents host-side. No subagent_end fires on this path; the dedicated terminal
 		// frame is the only signal that lets clients drop the accumulator.
 		rpc.send({ id: "new-1", type: "new_session" });
 		await vi.waitFor(() =>
@@ -364,8 +376,9 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 		harness.setResponses([fauxAssistantMessage(STREAMED_TEXT)]);
 
 		const events: RpcClientEvent[] = [];
-		const client = await createInProcessRpcClient(createFakeRuntimeHost(harness), {
-			disposeRuntimeOnClose: false,
+		const runtimeHost = createFakeRuntimeHost(harness);
+		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation, {
+			anchor: false,
 			onEvent: (event) => {
 				events.push(event);
 			},

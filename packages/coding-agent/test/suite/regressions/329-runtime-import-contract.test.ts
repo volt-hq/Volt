@@ -2,12 +2,10 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import {
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
@@ -20,13 +18,15 @@ import {
 	type SessionStoreApplyTransactionInput,
 	type SQLiteSessionStoreLease,
 } from "../../../src/core/session-store/index.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const HEADER_TIMESTAMP = "2025-01-01T00:00:00.000Z";
 const LEAF_TIMESTAMP = "2025-01-01T00:59:00.000Z";
 
 interface RuntimeFixture {
-	runtime: AgentSessionRuntime;
+	/** An in-place client of a host over the source session; an import moves it there. */
+	runtime: TestClient;
 	cwd: string;
 	sessionDir: string;
 	root: string;
@@ -35,14 +35,14 @@ interface RuntimeFixture {
 }
 
 const harnesses: Harness[] = [];
-const runtimes: AgentSessionRuntime[] = [];
+const runtimes: TestClient[] = [];
 const openedManagers: SessionManager[] = [];
 const storeLeases: SQLiteSessionStoreLease[] = [];
 
 afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const manager of openedManagers.splice(0).reverse()) await manager.closePersistence();
-	for (const runtime of runtimes.splice(0).reverse()) await runtime.dispose();
+	for (const runtime of runtimes.splice(0).reverse()) await runtime.host.dispose();
 	for (const lease of storeLeases.splice(0).reverse()) await lease.release();
 	for (const harness of harnesses.splice(0).reverse()) await harness.cleanupAsync();
 });
@@ -62,7 +62,7 @@ async function createRuntimeFixture(options: { persisted?: boolean } = {}): Prom
 	await initialManager.logWriter.appendModelChange(model.provider, model.id);
 	await initialManager.logWriter.appendThinkingLevelChange("off");
 
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+	const createRuntime: ConversationFactory = async ({
 		cwd: runtimeCwd,
 		agentDir,
 		sessionManager,
@@ -89,13 +89,13 @@ async function createRuntimeFixture(options: { persisted?: boolean } = {}): Prom
 		});
 		return { ...created, services, diagnostics: services.diagnostics };
 	};
-	const runtime = await createAgentSessionRuntime(createRuntime, {
+	const { host, conversation } = await openTestHost(createRuntime, {
 		cwd,
 		agentDir: root,
 		sessionManager: initialManager,
 	});
+	const runtime = await connectTestClient(host, conversation, { surface: {} });
 	runtimes.push(runtime);
-	await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 	return { runtime, cwd, sessionDir, root, modelProvider: model.provider, modelId: model.id };
 }
 
@@ -183,7 +183,7 @@ function transactionCustomTypes(input: SessionStoreApplyTransactionInput): strin
 	});
 }
 
-describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
+describe("PR #329 conversation host JSONL import contract", () => {
 	it("preserves canonical timestamps and derived behavior for in-memory runtime imports", async () => {
 		const { runtime, cwd, root, modelProvider, modelId } = await createRuntimeFixture({ persisted: false });
 		const snapshotPath = join(root, "in-memory-canonical-import.jsonl");

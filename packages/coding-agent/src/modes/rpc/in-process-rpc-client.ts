@@ -1,4 +1,5 @@
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { createLoopbackRpcTransportPair } from "../../core/rpc/index.ts";
 import type { RpcClientEvent } from "./rpc-client-base.ts";
 import { runRpcMode } from "./rpc-mode.ts";
@@ -10,24 +11,27 @@ export interface InProcessRpcClientOptions {
 	/** Milliseconds to wait for a command response. Defaults to 30 seconds. */
 	requestTimeoutMs?: number;
 	/**
-	 * Defaults to true. When enabled, createInProcessRpcClient consumes runtime
-	 * finalizer ownership at invocation and carries it through RPC shutdown. Set
-	 * false when another owner retains the runtime after this loopback client stops.
+	 * Defaults to true. The client anchors its conversation: stopping it closes
+	 * the conversation, and createInProcessRpcClient takes over closing it from
+	 * the call on. Set false when another owner keeps the conversation open after
+	 * this loopback client stops.
 	 */
-	disposeRuntimeOnClose?: boolean;
+	anchor?: boolean;
 	/** Initial event listener registered before startup completes. */
 	onEvent?: InProcessRpcClientEventListener;
 }
 
 interface InProcessRpcClientConstructorOptions extends InProcessRpcClientOptions {
-	runtimeHost: AgentSessionRuntime;
+	host: ConversationHost;
+	conversation: HostedConversation;
 }
 
 /**
- * RPC client backed by runRpcMode in the same Node.js process.
+ * RPC client backed by runRpcMode in the same Node.js process, attached to a
+ * hosted conversation.
  *
  * stop() closes the client transport and waits for RPC mode shutdown. By default
- * shutdown also disposes the supplied AgentSessionRuntime.
+ * the client anchors the conversation, and shutdown closes it.
  */
 export class InProcessRpcClient extends RpcTransportClient {
 	private readonly modeClosed: Promise<void>;
@@ -59,12 +63,12 @@ export class InProcessRpcClient extends RpcTransportClient {
 		});
 		void this.modeReady.catch(() => {});
 
-		this.modeClosed = runRpcMode(options.runtimeHost, {
+		this.modeClosed = runRpcMode(options.host, options.conversation, {
 			transport: pair.server,
-			disposeRuntimeOnClose: options.disposeRuntimeOnClose,
+			...(options.anchor === undefined ? {} : { anchor: options.anchor }),
 			exitProcess: false,
 			onReady: () => {
-				void options.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+				void options.conversation.startRecoveredClientInputs().catch(() => undefined);
 				resolveReady();
 			},
 		});
@@ -88,23 +92,24 @@ export class InProcessRpcClient extends RpcTransportClient {
 }
 
 export async function createInProcessRpcClient(
-	runtimeHost: AgentSessionRuntime,
+	host: ConversationHost,
+	conversation: HostedConversation,
 	options: InProcessRpcClientOptions = {},
 ): Promise<InProcessRpcClient> {
-	const disposeRuntimeOnClose = options.disposeRuntimeOnClose ?? true;
+	const anchor = options.anchor ?? true;
 	let client: InProcessRpcClient;
 	try {
-		client = new InProcessRpcClient({ runtimeHost, ...options, disposeRuntimeOnClose });
+		client = new InProcessRpcClient({ host, conversation, ...options, anchor });
 	} catch (constructionError) {
-		if (!disposeRuntimeOnClose) {
+		if (!anchor) {
 			throw constructionError;
 		}
 		try {
-			await runtimeHost.dispose();
+			await host.close(conversation);
 		} catch (cleanupError) {
 			throw new AggregateError(
 				[constructionError, cleanupError],
-				"In-process RPC construction failed and runtime cleanup did not complete",
+				"In-process RPC construction failed and conversation cleanup did not complete",
 			);
 		}
 		throw constructionError;

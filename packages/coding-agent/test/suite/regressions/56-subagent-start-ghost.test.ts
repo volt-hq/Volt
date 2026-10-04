@@ -3,10 +3,10 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
+} from "../../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../../../src/core/resource-loader.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
 import {
@@ -55,7 +55,7 @@ async function createTestContext(options: {
 		...createTestResourceLoader(),
 		getSubagents: () => ({ definitions: [definition], diagnostics: [] }),
 	};
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+	const createRuntime: ConversationFactory = async ({ cwd, agentDir, sessionManager }) => {
 		const child = await createHarness({ withConfiguredAuth: options.withConfiguredAuth });
 		children.push(child);
 		if (options.providerFailure) {

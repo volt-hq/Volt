@@ -4,10 +4,10 @@ import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { relative, resolve, sep } from "node:path";
-import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { createAgentSessionServices } from "../core/agent-session-services.ts";
 import { type GitContextObservation, GitContextObservationBinding } from "../core/git-context-provider.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
+import type { HostedConversation } from "../core/host/hosted-conversation.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
@@ -1132,14 +1132,18 @@ class IrohDaemonService {
 				if (!this.runtimeCompactionFailureObservers.has(entry)) {
 					this.runtimeCompactionFailureObservers.set(
 						entry,
-						observeCompactionFailures(entry.runtime, entry.workspaceName, services.logger.child("compaction")),
+						observeCompactionFailures(
+							entry.runtime.conversation,
+							entry.workspaceName,
+							services.logger.child("compaction"),
+						),
 					);
 				}
 				if (!this.runtimeConversationLossObservers.has(entry)) {
 					// A runtime that lost its log ends; a reconnecting phone reopens the session from the store.
 					this.runtimeConversationLossObservers.set(
 						entry,
-						observeConversationLoss(entry.runtime, () => {
+						observeConversationLoss(entry.runtime.conversation, () => {
 							void this.stopRuntimeEntryAfterStreams(entry, "daemon_runtime_owner_fenced").catch(() => {});
 						}),
 					);
@@ -1203,9 +1207,9 @@ class IrohDaemonService {
 		});
 		this.leaseBroker = new LeaseBroker({
 			isRuntimeStreaming: (workspaceName, sessionId) =>
-				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isBusy ?? false,
+				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.conversation.session.isBusy ?? false,
 			waitForRuntimeIdle: async (workspaceName, sessionId) => {
-				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForNotBusy();
+				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.conversation.session.waitForNotBusy();
 			},
 			disposeRuntime: async (workspaceName, sessionId, reason) => {
 				const owner = this.runtimes.findOwner(workspaceName, sessionId);
@@ -1248,7 +1252,7 @@ class IrohDaemonService {
 			onDrainStarted: (record, viewerFeedId) => {
 				const owner = this.runtimes.findOwner(record.workspaceName, record.sessionId);
 				if (owner && record.tuiConnectionId) {
-					this.viewerFeeds.start(viewerFeedId, record.tuiConnectionId, owner.runtime.session);
+					this.viewerFeeds.start(viewerFeedId, record.tuiConnectionId, owner.runtime.conversation.session);
 				}
 			},
 			onDrainEnded: (_record, viewerFeedId, reason) => {
@@ -1290,7 +1294,7 @@ class IrohDaemonService {
 				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
 				return;
 			}
-			const location = discoverGitWorktree(entry.runtime.cwd);
+			const location = discoverGitWorktree(entry.runtime.conversation.cwd);
 			if (!location) {
 				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
 				return;
@@ -1300,7 +1304,7 @@ class IrohDaemonService {
 					workspaceName: entry.workspaceName,
 					workspaceGeneration: entry.workspaceGeneration!,
 					sessionId: entry.sessionId,
-					cwd: entry.runtime.cwd,
+					cwd: entry.runtime.conversation.cwd,
 					commonGitDir: location.commonGitDir,
 					repositoryDisplayName: gitContext.repository,
 					branch: gitContext.head.name,
@@ -1313,7 +1317,7 @@ class IrohDaemonService {
 		binding = new GitContextObservationBinding(publish, { monitor: true });
 		this.runtimeWorkObservers.set(entry, binding);
 		// The runtime serves one conversation for its whole life.
-		binding.bind(entry.runtime.session.gitContextProvider);
+		binding.bind(entry.runtime.conversation.session.gitContextProvider);
 	}
 
 	private stopRuntimeWorkObservation(entry: IntegratedRuntimeEntry): void {
@@ -1621,7 +1625,7 @@ class IrohDaemonService {
 					);
 		if (parent.worktreeId !== undefined && !worktree) throw new Error("Review worktree unavailable");
 		const root = await realpath(worktree?.path ?? workspace.path);
-		const cwd = await realpath(parent.runtime.cwd);
+		const cwd = await realpath(parent.runtime.conversation.cwd);
 		if (!isPathInside(root, cwd)) throw new Error("Review source escaped its workspace");
 	}
 
@@ -1633,8 +1637,8 @@ class IrohDaemonService {
 		workspaceName: string;
 		workspacePath?: string;
 		entry: IntegratedRuntimeEntry;
-		/** The stream's view of the entry's conversation, whose projection feed serves the stream. */
-		runtime: AgentSessionRuntime;
+		/** The entry's conversation, whose projection feed serves the stream. */
+		conversation: HostedConversation;
 		streamEntry?: IrohRemoteActiveStreamEntry;
 		onWorkspaceUnregistered?: () => void;
 	}): ConversationCommandContext {
@@ -1648,11 +1652,11 @@ class IrohDaemonService {
 			...(conversation === undefined
 				? {}
 				: {
-						getConversationBranchEpoch: () => conversation.runtime.conversationProjectionFeed.branchEpoch,
+						getConversationBranchEpoch: () => conversation.conversation.projectionFeed.branchEpoch,
 						isConversationTranscriptCursorValid: (cursor: string) =>
-							conversation.runtime.conversationProjectionFeed.isTranscriptCursorValid(cursor),
+							conversation.conversation.projectionFeed.isTranscriptCursorValid(cursor),
 						registerConversationTranscriptCursor: (cursor: string | null) =>
-							conversation.runtime.conversationProjectionFeed.registerTranscriptCursor(cursor),
+							conversation.conversation.projectionFeed.registerTranscriptCursor(cursor),
 					}),
 			listRuntimeStates: (workspaceName) => {
 				const states = new Map<string, Exclude<LeaseState, "unowned">>();
@@ -3485,7 +3489,7 @@ class IrohDaemonService {
 			getLiveStartingGitContext: (sessionId) => {
 				const owner = this.runtimes.findOwner(authorization.workspace.name, sessionId);
 				return owner?.sessionId === sessionId
-					? owner.runtime.session.sessionManager.getStartingGitContext()
+					? owner.runtime.conversation.session.sessionManager.getStartingGitContext()
 					: undefined;
 			},
 			getWorkContext: (sessionId) =>
@@ -4509,8 +4513,6 @@ class IrohDaemonService {
 		let activeStream: { entry: IrohRemoteActiveStreamEntry; remove: () => void } | undefined;
 		let subscriber: IntegratedRuntimeSubscriber | undefined;
 		let subscriberError: unknown;
-		/** The stream's view of the conversation; its structural intents redirect this phone alone. */
-		let streamView: AgentSessionRuntime | undefined;
 		/** Set when the phone's own session change redirected it to another conversation. */
 		let movedToSessionId: string | undefined;
 		// Monotonic publication fact: once commitEntry succeeds, this runtime is
@@ -4776,19 +4778,20 @@ class IrohDaemonService {
 			if (hostNodeId === undefined) {
 				throw new Error("Iroh service host node ID is unavailable");
 			}
-			const view = this.runtimes.attachStreamView(entry, authorization);
-			streamView = view;
-			view.onClientDetached((detachment) => {
-				if (detachment.kind === "redirected") movedToSessionId = detachment.sessionId;
-			});
-			await runIrohRemoteRpcMode(view, {
+			const { host, conversation } = entry.runtime;
+			// The phone's structural intents redirect it alone; it stays on this conversation.
+			await runIrohRemoteRpcMode(host, conversation, {
+				redirect: this.runtimes.streamRedirect(entry, authorization),
+				...(entry.reviewDiscussions === undefined ? {} : { reviewDiscussions: entry.reviewDiscussions }),
+				onClientDetached: (detachment) => {
+					if (detachment.kind === "redirected") movedToSessionId = detachment.sessionId;
+				},
 				rpcGrant: authorization.client.rpcGrant,
 				hostNodeId,
 				clientNodeId: authorization.client.nodeId,
 				isRpcIngressOpen: () => !workspaceUnregistered,
 				isRpcGrantCurrent: () => this.isAuthorizationCurrent(authorization),
 				decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
-				disposeRuntimeOnClose: false,
 				notificationDelivery: pushDispatcher,
 				onClientCapabilitiesChanged: (features) => {
 					const streamEntry = activeStream?.entry;
@@ -4841,14 +4844,8 @@ class IrohDaemonService {
 								hostNodeId,
 							}
 						: undefined,
-				buildConversationSnapshot: createRemoteConversationSnapshotBuilder({
-					authorization,
-					runtime: view,
-				}),
-				projectConversationExternal: createRemoteConversationExternalProjector({
-					authorization,
-					runtime: view,
-				}),
+				buildConversationSnapshot: createRemoteConversationSnapshotBuilder({ authorization, conversation }),
+				projectConversationExternal: createRemoteConversationExternalProjector({ authorization, conversation }),
 				onConversationLifecycleReady: (lifecycle) => {
 					if (activeStream?.entry) {
 						activeStream.entry.write = lifecycle.write;
@@ -4875,14 +4872,14 @@ class IrohDaemonService {
 							workspaceName: authorization.workspace.name,
 							workspacePath: authorization.workspace.path,
 							entry,
-							runtime: view,
+							conversation,
 							streamEntry: activeStream?.entry,
 							onWorkspaceUnregistered: () => {
 								workspaceUnregistered = true;
 								activeStream?.remove();
 							},
 						}),
-						view,
+						conversation,
 					),
 				stream,
 				initialInput: handshake.initialInput,
@@ -4911,7 +4908,6 @@ class IrohDaemonService {
 			}
 		} finally {
 			try {
-				await streamView?.dispose().catch(() => undefined);
 				if (subscriber) {
 					// A conversation the phone moved away from closes once idle when no other client remains.
 					await this.runtimes.detachSubscriber(
@@ -6227,9 +6223,13 @@ class IrohDaemonService {
 		const drainResults = await Promise.allSettled(
 			this.runtimes
 				.values()
-				.filter((entry) => entry.runtime.session.isBusy)
+				.filter((entry) => entry.runtime.conversation.session.isBusy)
 				.map((entry) =>
-					withTimeout(entry.runtime.session.waitForNotBusy(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
+					withTimeout(
+						entry.runtime.conversation.session.waitForNotBusy(),
+						SHUTDOWN_RUNTIME_IDLE_CAP_MS,
+						"drain cap",
+					),
 				),
 		);
 		const cappedRuntimes = drainResults.filter((result) => result.status === "rejected").length;

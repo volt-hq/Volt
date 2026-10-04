@@ -1,7 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { AgentSession } from "../../core/agent-session.ts";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { extractVisibleTextContent } from "../../core/messages.ts";
 import type { AgentMode, PlanPhase } from "../../core/planning.ts";
 import {
@@ -53,7 +55,11 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	/** Recheck persisted authority at each command boundary when the host owns grant state. */
 	isRpcGrantCurrent?: () => boolean | Promise<boolean>;
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
-	disposeRuntimeOnClose?: boolean;
+	/** See `RpcModeOptions.anchor`; a phone never anchors its conversation. */
+	anchor?: boolean;
+	/** A phone follows its structural intents by redirect: see `RpcModeOptions.redirect`. */
+	redirect?: RpcModeOptions["redirect"];
+	reviewDiscussions?: RpcModeOptions["reviewDiscussions"];
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
 	onClientCapabilitiesChanged?: (features: string[]) => void;
 	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
@@ -67,8 +73,9 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	 * extension_ui_request frame.
 	 */
 	suppressExtensionUiRequests?: boolean;
-	/** The final frame for a redirect view's client that left its conversation. */
+	/** The final frame for a redirect client that left its conversation. */
 	detachedTerminal?: RpcModeOptions["detachedTerminal"];
+	onClientDetached?: RpcModeOptions["onClientDetached"];
 	workspaceName?: string;
 	workspacePath: string;
 	/** Extra roots (worktree parent checkout, worktrees root) redacted on every outbound frame. */
@@ -177,9 +184,13 @@ const MAX_PENDING_NOTIFICATION_EVENT_IDS = 512;
  */
 const IROH_REMOTE_TOOL_OUTPUT_MAX_SCALARS = 8_000;
 
-/** Run Volt RPC in-process over an authorized Iroh bidirectional stream. */
+/**
+ * Run Volt RPC in-process over an authorized Iroh bidirectional stream, as a
+ * client of `conversation`, whose projection feed serves the stream.
+ */
 export function runIrohRemoteRpcMode(
-	runtimeHost: AgentSessionRuntime,
+	host: ConversationHost,
+	conversation: HostedConversation,
 	options: IrohRemoteRpcModeOptions,
 ): Promise<void> {
 	let notificationDelivery: IrohRemoteNotificationDeliveryAttachment | undefined;
@@ -243,7 +254,7 @@ export function runIrohRemoteRpcMode(
 	const closeDeferringTransport = createIrohRemoteCloseDeferringRpcTransport({
 		transport: outboundTransport,
 		preparedTransport: preparedOutboundTransport,
-		getCompletionState: () => getIrohRemoteCompletionState(runtimeHost),
+		getCompletionState: () => getIrohRemoteCompletionState(conversation.session),
 		onCommandCompleted: async (completion) => {
 			const notification = createIrohRemoteCompletionNotification(
 				completion,
@@ -255,7 +266,7 @@ export function runIrohRemoteRpcMode(
 			}
 		},
 		onResponseWritten: options.onResponseWritten,
-		waitForPromptCompletion: () => runtimeHost.session.waitForIdle(),
+		waitForPromptCompletion: () => conversation.session.waitForIdle(),
 	});
 	let retireConversationStream: (error?: Error) => void = () => {};
 
@@ -349,7 +360,7 @@ export function runIrohRemoteRpcMode(
 		closeDeferringTransport.admitPrepared(value);
 	};
 
-	conversationSubscription = runtimeHost.conversationProjectionFeed.attach({
+	conversationSubscription = conversation.projectionFeed.attach({
 		write: (value) => closeDeferringTransport.writePrepared(value),
 		buildSnapshot: options.buildConversationSnapshot,
 		projectExternal: options.projectConversationExternal,
@@ -375,7 +386,7 @@ export function runIrohRemoteRpcMode(
 		settleDeliveryAfterRetirement(orderedSubscription.fenceAndEnqueueTerminal(value, admitPreparedResponse));
 	writeOrderedControl = enqueueOrderedControl;
 	writeOrderedTerminal = enqueueOrderedTerminal;
-	notificationDelivery = attachIrohRemoteNotificationDelivery(runtimeHost, {
+	notificationDelivery = attachIrohRemoteNotificationDelivery(conversation, {
 		clientNodeId: options.clientNodeId,
 		delivery: options.notificationDelivery,
 		hostNodeId: options.hostNodeId,
@@ -397,7 +408,7 @@ export function runIrohRemoteRpcMode(
 	// ready would couple reads to physical bootstrap delivery and deadlock peer
 	// EOF behind a blocked native writer. Feed errors still retire the lifecycle.
 	void orderedSubscription.ready.catch(() => {});
-	return runRpcMode(runtimeHost, {
+	return runRpcMode(host, conversation, {
 		allowUiActionInvocation: true,
 		// Only a client that may answer dialogs (extension_ui_response is a control command) shows extension UI.
 		extensionUi:
@@ -405,7 +416,10 @@ export function runIrohRemoteRpcMode(
 			hasIrohRemoteRpcCapability(options.rpcGrant, "conversation.control.v1"),
 		hostActions: options.suppressExtensionUiRequests !== true,
 		...(options.detachedTerminal === undefined ? {} : { detachedTerminal: options.detachedTerminal }),
-		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
+		...(options.onClientDetached === undefined ? {} : { onClientDetached: options.onClientDetached }),
+		...(options.anchor === undefined ? {} : { anchor: options.anchor }),
+		...(options.redirect === undefined ? {} : { redirect: options.redirect }),
+		...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
 		onReady: options.onReady,
 		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,
@@ -431,7 +445,7 @@ export function runIrohRemoteRpcMode(
 					...(command.assistantPosition === undefined ? {} : { assistantPosition: command.assistantPosition }),
 					reason: command.reason,
 				}),
-			publishExternal: (event) => runtimeHost.publishConversationProjectionEvent(event),
+			publishExternal: (event) => conversation.projectionFeed.publishExternal(event),
 		},
 	}).finally(() => {
 		notificationDelivery?.detach();
@@ -463,39 +477,38 @@ interface IrohRemoteActiveNotificationAttachment {
 }
 
 /**
- * Delivery history per session and client, so one client's streams to a session
- * share it whichever runtime view serves them (a relaying TUI serves each
- * stream through a view of its own).
+ * Delivery history per session and client, so one client's streams to a
+ * session share it whichever stream serves them.
  */
 const notificationReconcilersBySession = new WeakMap<
-	AgentSessionRuntime["session"],
+	AgentSession,
 	Map<IrohRemoteNotificationClientKey, IrohRemoteNotificationDeliveryReconciler>
 >();
 
 class IrohRemoteNotificationDeliveryReconciler {
 	private readonly deliveredEventIds = new Set<string>();
 	private readonly pendingNotifications = new Map<string, IrohRemoteNotificationRequest>();
-	private readonly runtimeHost: AgentSessionRuntime;
+	private readonly conversation: HostedConversation;
 	private readonly hostNodeId: string;
 	private currentAttachment: IrohRemoteActiveNotificationAttachment | undefined;
 	private deliveryQueue: Promise<void> = Promise.resolve();
 	private pushDelivery: IrohRemotePushNotificationDelivery | undefined;
 	private workspaceName: string | undefined;
 
-	constructor(runtimeHost: AgentSessionRuntime, hostNodeId: string) {
-		this.runtimeHost = runtimeHost;
+	constructor(conversation: HostedConversation, hostNodeId: string) {
+		this.conversation = conversation;
 		this.hostNodeId = hostNodeId;
-		runtimeHost.reviewWorkflows?.attachSink((event) => {
+		conversation.reviewWorkflows.attachSink((event) => {
 			if (event.type !== "workflow_end" || event.kind !== "review" || event.status !== "completed") {
 				return;
 			}
-			const record = runtimeHost.reviewWorkflows?.get(event.workflowId);
+			const record = conversation.reviewWorkflows.get(event.workflowId);
 			if (record?.status !== "completed") {
 				return;
 			}
 			const notification = createIrohRemoteReviewCompletionNotification(
 				record,
-				runtimeHost.session.sessionId,
+				conversation.session.sessionId,
 				this.hostNodeId,
 				this.workspaceName,
 			);
@@ -513,17 +526,17 @@ class IrohRemoteNotificationDeliveryReconciler {
 		this.currentAttachment = { token, writeJsonl: options.writeJsonl };
 		this.workspaceName = options.workspaceName;
 		this.pushDelivery = options.delivery;
-		for (const descriptor of this.runtimeHost.reviewWorkflows?.list() ?? []) {
+		for (const descriptor of this.conversation.reviewWorkflows.list()) {
 			if (descriptor.status !== "completed") {
 				continue;
 			}
-			const record = this.runtimeHost.reviewWorkflows?.get(descriptor.workflowId);
+			const record = this.conversation.reviewWorkflows.get(descriptor.workflowId);
 			if (record?.status !== "completed") {
 				continue;
 			}
 			const notification = createIrohRemoteReviewCompletionNotification(
 				record,
-				this.runtimeHost.session.sessionId,
+				this.conversation.session.sessionId,
 				this.hostNodeId,
 				this.workspaceName,
 			);
@@ -615,18 +628,18 @@ class IrohRemoteNotificationDeliveryReconciler {
 }
 
 function attachIrohRemoteNotificationDelivery(
-	runtimeHost: AgentSessionRuntime,
+	conversation: HostedConversation,
 	options: IrohRemoteNotificationDeliveryAttachmentOptions,
 ): IrohRemoteNotificationDeliveryAttachment {
-	let reconcilers = notificationReconcilersBySession.get(runtimeHost.session);
+	let reconcilers = notificationReconcilersBySession.get(conversation.session);
 	if (!reconcilers) {
 		reconcilers = new Map();
-		notificationReconcilersBySession.set(runtimeHost.session, reconcilers);
+		notificationReconcilersBySession.set(conversation.session, reconcilers);
 	}
 	const key = options.clientNodeId ?? anonymousNotificationClient;
 	let reconciler = reconcilers.get(key);
 	if (!reconciler) {
-		reconciler = new IrohRemoteNotificationDeliveryReconciler(runtimeHost, options.hostNodeId);
+		reconciler = new IrohRemoteNotificationDeliveryReconciler(conversation, options.hostNodeId);
 		reconcilers.set(key, reconciler);
 	}
 	return reconciler.attach(options);
@@ -1144,17 +1157,17 @@ export function createIrohRemoteCloseDeferringRpcTransport(
 	return transport;
 }
 
-function getIrohRemoteCompletionState(runtimeHost: AgentSessionRuntime): IrohRemoteCompletionState {
-	const planning = runtimeHost.session.getPlanningState?.() ?? { mode: "build" as const, plan: null };
+function getIrohRemoteCompletionState(session: AgentSession): IrohRemoteCompletionState {
+	const planning = session.getPlanningState?.() ?? { mode: "build" as const, plan: null };
 	const planId = sanitizeIrohRemoteNotificationMetadata(planning.plan?.id);
 	const planTitle =
 		planning.plan?.title === undefined
 			? undefined
 			: sanitizeIrohRemoteNotificationText(planning.plan.title, MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES);
 	return {
-		sessionId: runtimeHost.session.sessionId,
-		runId: runtimeHost.session.sessionManager.getLeafId() ?? undefined,
-		terminalOutcome: getRunTerminalOutcome(runtimeHost.session.messages),
+		sessionId: session.sessionId,
+		runId: session.sessionManager.getLeafId() ?? undefined,
+		terminalOutcome: getRunTerminalOutcome(session.messages),
 		planningMode: planning.mode,
 		...(planning.plan === null ? {} : { planPhase: planning.plan.phase }),
 		...(planId === undefined ? {} : { planId }),

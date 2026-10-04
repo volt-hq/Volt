@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import type { ExtensionError, ExtensionMode, SessionStartEvent } from "../../../src/core/extensions/types.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
 } from "../../../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteRpcGrant } from "../../../src/core/remote/iroh/index.ts";
-import type { ExtensionClient } from "../../../src/core/session/extension-binding.ts";
 import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import {
 	createTestIrohConversationOptions,
@@ -14,26 +14,28 @@ import {
 	ManualIrohSendStream,
 	parseWrittenObjects,
 } from "../../iroh-stream-doubles.ts";
+import { connectTestClient } from "../../utilities/host-client.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 
 /**
- * A phone stream on a runtime another client already holds, as the daemon
- * serves it, or relayed through a TUI on a view of the session that stays on it.
+ * A phone stream on a conversation another client already holds, as the daemon
+ * serves it or as a TUI relays it: a client whose moves redirect it alone.
  */
 function servePhone(
-	runtime: AgentSessionRuntime,
+	host: ConversationHost,
+	conversation: HostedConversation,
 	tempDir: string,
 	options: { rpcGrant: IrohRemoteRpcGrant; relayed: boolean },
 ): { recv: ManualIrohRecvStream; send: ManualIrohSendStream; closed: Promise<void>; ready: Promise<void> } {
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
 	const ready = Promise.withResolvers<void>();
-	const sessionId = runtime.session.sessionId;
-	const closed = runIrohRemoteRpcMode(runtime, {
-		...createTestIrohConversationOptions(runtime),
+	const sessionId = conversation.id;
+	const closed = runIrohRemoteRpcMode(host, conversation, {
+		...createTestIrohConversationOptions(conversation),
 		rpcGrant: options.rpcGrant,
 		stream: { recv, send },
-		disposeRuntimeOnClose: false,
+		redirect: {},
 		suppressExtensionUiRequests: options.relayed,
 		detachedTerminal: (detachment) => ({
 			type: "remote_terminal",
@@ -56,53 +58,50 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 	it("keeps session_start, ctx.mode, extension UI, and host actions with the TUI; the phone stays when the TUI moves", async () => {
 		const starts: SessionStartEvent[] = [];
 		const seen: Array<{ event: string; mode: ExtensionMode; hasUI: boolean }> = [];
-		const fixture: ExtensionRuntime = await createExtensionRuntime((volt) => {
-			volt.on("session_start", (event, ctx) => {
-				starts.push(event);
-				seen.push({ event: "session_start", mode: ctx.mode, hasUI: ctx.hasUI });
-				ctx.ui.setStatus("ext", `ready:${event.reason}`);
-			});
-			volt.registerCommand("ask", {
-				handler: async (_args, ctx) => {
-					seen.push({ event: "ask", mode: ctx.mode, hasUI: ctx.hasUI });
-					ctx.ui.notify("asked", "info");
-				},
-			});
-			volt.registerCommand("fail", {
-				handler: async () => {
-					throw new Error("command failed");
-				},
-			});
-		});
+		const fixture: ExtensionRuntime = await createExtensionRuntime(
+			(volt) => {
+				volt.on("session_start", (event, ctx) => {
+					starts.push(event);
+					seen.push({ event: "session_start", mode: ctx.mode, hasUI: ctx.hasUI });
+					ctx.ui.setStatus("ext", `ready:${event.reason}`);
+				});
+				volt.registerCommand("ask", {
+					handler: async (_args, ctx) => {
+						seen.push({ event: "ask", mode: ctx.mode, hasUI: ctx.hasUI });
+						ctx.ui.notify("asked", "info");
+					},
+				});
+				volt.registerCommand("fail", {
+					handler: async () => {
+						throw new Error("command failed");
+					},
+				});
+			},
+			{ extensionMode: "tui" },
+		);
 		cleanups.push(() => fixture.dispose());
-		const { runtime } = fixture;
 
-		// The TUI attaches first, on startup and again from its rebind hook after a replacement.
+		// The TUI attaches first; its host attaches its surface again on each conversation it moves to.
 		const notify = vi.fn();
 		const setStatus = vi.fn();
 		const tuiErrors: ExtensionError[] = [];
-		const tui: ExtensionClient = {
+		const runtime = await connectTestClient(fixture.host, fixture.conversation, {
 			id: "tui",
-			mode: "tui",
-			ui: { ...runtime.session.extensionRunner.getUIContext(), notify, setStatus },
-			onError: (error) => tuiErrors.push(error),
-		};
-		runtime.setRebindSession(async (session) => {
-			await session.attachExtensionClient(tui).ready;
+			surface: {
+				ui: { ...fixture.conversation.session.extensionRunner.getUIContext(), notify, setStatus },
+				onError: (error) => tuiErrors.push(error),
+			},
 		});
-		await runtime.session.attachExtensionClient(tui).ready;
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 
-		// Serve a phone stream the way the TUI serves a relay offer: on a view of the session.
+		// Serve a phone stream the way the TUI serves a relay offer.
 		const setHostInteraction = vi.spyOn(runtime.session, "setHostInteraction");
-		const phoneView = runtime.attachRedirectClient();
-		cleanups.push(() => phoneView.dispose());
 		const {
 			recv,
 			send,
 			closed: phone,
 			ready,
-		} = servePhone(phoneView, fixture.tempDir, {
+		} = servePhone(runtime.host, runtime.conversation, fixture.tempDir, {
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			relayed: true,
 		});
@@ -161,15 +160,15 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			volt.registerCommand("ask", { handler: async (_args, ctx) => ctx.ui.notify("asked", "info") });
 		});
 		cleanups.push(() => fixture.dispose());
-		const { runtime } = fixture;
+		const session = fixture.conversation.session;
 		const notify = vi.fn();
-		await runtime.session.attachExtensionClient({
+		await session.attachExtensionClient({
 			id: "first-phone",
 			mode: "rpc",
-			ui: { ...runtime.session.extensionRunner.getUIContext(), notify },
+			ui: { ...session.extensionRunner.getUIContext(), notify },
 		}).ready;
 
-		const observer = servePhone(runtime, fixture.tempDir, {
+		const observer = servePhone(fixture.host, fixture.conversation, fixture.tempDir, {
 			rpcGrant: createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
 			relayed: false,
 		});
@@ -179,7 +178,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		});
 		await observer.ready;
 
-		await runtime.session.prompt("/ask");
+		await session.prompt("/ask");
 		expect(notify).toHaveBeenCalledExactlyOnceWith("asked", "info");
 		expect(parseWrittenObjects(observer.send).filter((frame) => frame.type === "extension_ui_request")).toEqual([]);
 	});

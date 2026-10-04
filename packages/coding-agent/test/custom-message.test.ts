@@ -256,7 +256,7 @@ describe("CustomMessageComponent", () => {
 			ui.addChild(transcript);
 			if (isViewportTUI(ui)) ui.setLayoutRoot(new ScrollView(transcript, { follow: "end", primary: true }));
 			const mode = Object.assign(Object.create(InteractiveMode.prototype) as object, {
-				runtimeHost: {
+				conversation: {
 					session: {
 						sessionManager,
 						get messages() {

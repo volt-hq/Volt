@@ -114,7 +114,7 @@ async function fixture() {
 		render(expanded = false) {
 			const chatContainer = new Container();
 			const mode = Object.assign(Object.create(InteractiveMode.prototype), {
-				runtimeHost: { session: live().session, services: { agentDir: live().tempDir } },
+				conversation: { session: live().session, services: { agentDir: live().tempDir } },
 				ui: { terminal: { rows: 24, columns: 120 }, requestRender: vi.fn() },
 				chatContainer,
 				editor: new Text("editor"),

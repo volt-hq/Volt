@@ -29,12 +29,7 @@ import {
 	VERSION,
 } from "./config.ts";
 import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "./core/agent-session-runtime.ts";
-import {
-	type AgentSessionRuntimeDiagnostic,
+	type AgentSessionDiagnostic,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "./core/agent-session-services.ts";
@@ -42,8 +37,10 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { ConversationLockedError } from "./core/conversation-log/conversation-lock.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
-import type { ExtensionFactory } from "./core/extensions/types.ts";
+import type { ExtensionFactory, ExtensionMode } from "./core/extensions/types.ts";
 import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
+import { ConversationHost } from "./core/host/conversation-host.ts";
+import type { ConversationFactory } from "./core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { LspServerPool } from "./core/lsp/server-pool.ts";
@@ -116,17 +113,14 @@ async function readPipedStdin(): Promise<string | undefined> {
 	});
 }
 
-function collectSettingsDiagnostics(
-	settingsManager: SettingsManager,
-	context: string,
-): AgentSessionRuntimeDiagnostic[] {
+function collectSettingsDiagnostics(settingsManager: SettingsManager, context: string): AgentSessionDiagnostic[] {
 	return settingsManager.drainErrors().map(({ scope, error }) => ({
 		type: "warning",
 		message: `(${context}, ${scope} settings) ${error.message}`,
 	}));
 }
 
-function reportDiagnostics(diagnostics: readonly AgentSessionRuntimeDiagnostic[]): void {
+function reportDiagnostics(diagnostics: readonly AgentSessionDiagnostic[]): void {
 	for (const diagnostic of diagnostics) {
 		const color = diagnostic.type === "error" ? chalk.red : diagnostic.type === "warning" ? chalk.yellow : chalk.dim;
 		const prefix = diagnostic.type === "error" ? "Error: " : diagnostic.type === "warning" ? "Warning: " : "";
@@ -181,6 +175,11 @@ function resolveAppMode(parsed: Args, stdinIsTTY: boolean, stdoutIsTTY: boolean)
 
 function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
+}
+
+/** The mode the CLI's conversations bind their extensions in (`ctx.mode`). */
+function toExtensionMode(appMode: AppMode): ExtensionMode {
+	return appMode === "interactive" ? "tui" : appMode === "rpc" ? "rpc" : appMode === "json" ? "json" : "print";
 }
 
 function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
@@ -575,10 +574,10 @@ function buildSessionOptions(
 	settingsManager: SettingsManager,
 ): {
 	options: CreateAgentSessionOptions;
-	diagnostics: AgentSessionRuntimeDiagnostic[];
+	diagnostics: AgentSessionDiagnostic[];
 } {
 	const options: CreateAgentSessionOptions = {};
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	const diagnostics: AgentSessionDiagnostic[] = [];
 
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
@@ -742,8 +741,9 @@ class CliSessionManagerOwner {
 	}
 }
 
-async function runWithOwnedAgentSessionRuntime(
-	runtime: AgentSessionRuntime,
+/** Run `operation`, then close the host's conversations unless the operation handed them to a mode. */
+async function runWithOwnedConversationHost(
+	host: ConversationHost,
 	operation: (transferRuntime: () => void) => Promise<void>,
 ): Promise<void> {
 	let runtimeOwned = true;
@@ -762,7 +762,7 @@ async function runWithOwnedAgentSessionRuntime(
 	let cleanupFailed = false;
 	if (runtimeOwned) {
 		try {
-			await runtime.dispose();
+			await host.dispose();
 		} catch (error) {
 			cleanupFailed = true;
 			cleanupError = error;
@@ -939,9 +939,9 @@ export async function main(args: string[], options?: MainOptions) {
 		console.error(chalk.red(`Error: ${error.message}`));
 		process.exit(1);
 	}
-	// From this point until createAgentSessionRuntime() is invoked, this is the sole
+	// From this point until the host opens the startup conversation, this is the sole
 	// owner/finalizer for the acquired manager. Replacement closes the old manager
-	// before adopting the new one; transfer relinquishes it at the runtime-factory boundary.
+	// before adopting the new one; transfer relinquishes it to the host's open.
 	const sessionManagerOwner = new CliSessionManagerOwner(initialSessionManager);
 	let missingSessionCwdIssue: SessionCwdIssue | undefined;
 	try {
@@ -1024,11 +1024,11 @@ export async function main(args: string[], options?: MainOptions) {
 	// and, per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
 	const gitContextProviderPool = new GitContextProviderPool();
-	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
+	const createRuntime: ConversationFactory = async (runtimeOptions) => {
 		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext, subagentContext } = runtimeOptions;
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
 		const isInitialRuntime = sessionStartEvent === undefined;
-		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		const projectTrustDiagnostics: AgentSessionDiagnostic[] = [];
 		// Daemon-managed worktree checkouts pin trust to the PARENT checkout:
 		// prompts and trust.json entries always target the parent workspace path,
 		// never a path under ~/.volt/agent/worktrees (worktrees-design §5.2.1).
@@ -1107,7 +1107,7 @@ export async function main(args: string[], options?: MainOptions) {
 			if (parsed.lsp) {
 				settingsManager.applyOverrides({ lsp: { enabled: true } });
 			}
-			const diagnostics: AgentSessionRuntimeDiagnostic[] = [
+			const diagnostics: AgentSessionDiagnostic[] = [
 				...projectTrustDiagnostics,
 				...services.diagnostics,
 				...collectSettingsDiagnostics(settingsManager, "runtime creation"),
@@ -1197,14 +1197,13 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	};
 	time("createRuntime");
-	const runtime = await createAgentSessionRuntime(createRuntime, {
-		cwd: sessionCwd,
-		agentDir,
-		sessionManager: sessionManagerOwner.transfer(),
-	});
-	time("createAgentSessionRuntime");
-	await runWithOwnedAgentSessionRuntime(runtime, async (transferRuntime) => {
-		const { services, session, modelFallbackMessage } = runtime;
+	const host = new ConversationHost({ factory: createRuntime, agentDir, extensionMode: toExtensionMode(appMode) });
+	const opened = await host.open({ kind: "adopt", sessionManager: sessionManagerOwner.transfer(), cwd: sessionCwd });
+	if (opened.cancelled) throw new Error("Startup session open was cancelled");
+	const conversation = opened.conversation;
+	time("openStartupConversation");
+	await runWithOwnedConversationHost(host, async (transferRuntime) => {
+		const { services, session, modelFallbackMessage } = conversation;
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
@@ -1229,6 +1228,7 @@ export async function main(args: string[], options?: MainOptions) {
 			stdinContent = await readPipedStdin();
 			if (stdinContent !== undefined && appMode === "interactive") {
 				appMode = "print";
+				host.setExtensionMode(toExtensionMode(appMode));
 			}
 		}
 		time("readPipedStdin");
@@ -1248,8 +1248,8 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		time("resolveModelScope");
-		reportDiagnostics(runtime.diagnostics);
-		if (runtime.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
+		reportDiagnostics(conversation.diagnostics);
+		if (conversation.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
 			process.exitCode = 1;
 			return;
 		}
@@ -1275,13 +1275,13 @@ export async function main(args: string[], options?: MainOptions) {
 		if (appMode === "rpc") {
 			printTimings();
 			transferRuntime();
-			await runRpcMode(runtime, {
+			await runRpcMode(host, conversation, {
 				onReady: () => {
-					void runtime.startRecoveredClientInputs().catch(() => undefined);
+					void conversation.startRecoveredClientInputs().catch(() => undefined);
 				},
 			});
 		} else if (appMode === "interactive") {
-			const interactiveMode = new InteractiveMode(runtime, {
+			const interactiveMode = new InteractiveMode(host, conversation, {
 				migratedProviders,
 				modelFallbackMessage,
 				modelScopePatterns: parsed.models,
@@ -1314,7 +1314,7 @@ export async function main(args: string[], options?: MainOptions) {
 		} else {
 			printTimings();
 			transferRuntime();
-			const exitCode = await runPrintMode(runtime, {
+			const exitCode = await runPrintMode(host, conversation, {
 				mode: toPrintOutputMode(appMode),
 				messages: parsed.messages,
 				initialMessage,

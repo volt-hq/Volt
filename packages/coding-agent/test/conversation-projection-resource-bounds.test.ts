@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
-import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
@@ -68,7 +68,7 @@ function createAuthorization(): IrohRemoteClientAuthorizationSuccess {
 	};
 }
 
-function createRuntime(largePayload: string): AgentSessionRuntime {
+function createConversation(largePayload: string): HostedConversation {
 	const branch = Array.from({ length: 120 }, (_, index) => ({
 		type: "message",
 		id: `assistant-${index}`,
@@ -127,7 +127,7 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 			pendingMessageCount: 6,
 			sessionManager: createLinearSessionManager(branch as unknown as SessionEntry[]),
 		},
-	} as unknown as AgentSessionRuntime;
+	} as unknown as HostedConversation;
 }
 
 function createLinearSessionManager(
@@ -294,12 +294,12 @@ describe("conversation projection resource bounds", () => {
 
 	it("bounds adversarial multi-megabyte state and workflows below the full bootstrap envelope", () => {
 		const largePayload = "x".repeat(2 * 1024 * 1024);
-		const runtime = createRuntime(largePayload);
+		const conversation = createConversation(largePayload);
 		const activeWorkflows = createActiveWorkflows(largePayload);
 		const source = new TestSource();
 		const builder = createRemoteConversationSnapshotBuilder({
 			authorization: createAuthorization(),
-			runtime,
+			conversation,
 		});
 		const snapshot = builder({
 			source,
@@ -356,7 +356,7 @@ describe("conversation projection resource bounds", () => {
 
 		const liveProjector = createRemoteConversationExternalProjector({
 			authorization: createAuthorization(),
-			runtime,
+			conversation,
 		});
 		const liveWorkflow = liveProjector(activeWorkflows[0]!.workflowEvent)!;
 		expect(liveWorkflow).toMatchObject({ pullRequest: { provider: "github", number: 243 } });
@@ -395,7 +395,7 @@ describe("conversation projection resource bounds", () => {
 	});
 
 	it("bounds projection traversal before omitted queue, tool, and workflow tails", () => {
-		const runtime = createRuntime("small");
+		const conversation = createConversation("small");
 		const queue = Array.from({ length: 128 }, (_, index) => ({
 			clientMessageId: `queued-${index}`,
 			text: `queued-${index}`,
@@ -420,7 +420,7 @@ describe("conversation projection resource bounds", () => {
 		for (let index = 129; index < 10_000; index++) {
 			tools.set(`tool-${index}`, { toolCallId: `tool-${index}`, toolName: "read", args: {} });
 		}
-		const session = runtime.session as unknown as {
+		const session = conversation.session as unknown as {
 			activeToolExecutions: typeof tools;
 			getSteeringMessages: () => typeof queue;
 			getFollowUpMessages: () => typeof queue;
@@ -443,7 +443,7 @@ describe("conversation projection resource bounds", () => {
 		const source = new TestSource();
 		const snapshot = createRemoteConversationSnapshotBuilder({
 			authorization: createAuthorization(),
-			runtime,
+			conversation,
 		})({
 			source,
 			subscriptionId: "bounded-work",

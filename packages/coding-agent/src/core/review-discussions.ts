@@ -8,8 +8,8 @@ import type {
 	RpcReviewDiscussionLink,
 	RpcStartReviewDiscussions,
 } from "@hansjm10/volt-protocol";
-import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import type { HostedConversation } from "./host/hosted-conversation.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { appendReviewFindingTransition, getReviewRun, type ReviewFindingTransitionRecord } from "./review-state.ts";
 import type { RpcCommand } from "./rpc/types.ts";
@@ -111,35 +111,35 @@ export async function getReviewDiscussionLink(ref: SessionReference): Promise<Rp
 }
 
 export interface ReviewDiscussionHost {
-	findRuntime(ref: SessionReference, requester: AgentSessionRuntime): AgentSessionRuntime | undefined;
-	assertCurrent(runtime: AgentSessionRuntime): void;
-	withSourceWrite?<T>(requester: AgentSessionRuntime, source: SessionReference, write: () => Promise<T>): Promise<T>;
+	findRuntime(ref: SessionReference, requester: HostedConversation): HostedConversation | undefined;
+	assertCurrent(runtime: HostedConversation): void;
+	withSourceWrite?<T>(requester: HostedConversation, source: SessionReference, write: () => Promise<T>): Promise<T>;
 	createSibling(
-		source: AgentSessionRuntime,
+		source: HostedConversation,
 		ref: SessionReference,
 		assertCurrent: () => void,
-	): Promise<AgentSessionRuntime>;
+	): Promise<HostedConversation>;
 }
 
 /** One host instance shares these lanes across all source aliases and attached clients. */
 export class HostReviewDiscussionService {
 	private readonly host: ReviewDiscussionHost;
 	private readonly lanes = new Map<string, Promise<unknown>>();
-	private readonly pending = new Map<AgentSessionRuntime, Set<Promise<unknown>>>();
+	private readonly pending = new Map<HostedConversation, Set<Promise<unknown>>>();
 
 	constructor(host: ReviewDiscussionHost) {
 		this.host = host;
 	}
 
-	hasPendingWork(runtime: AgentSessionRuntime): boolean {
+	hasPendingWork(runtime: HostedConversation): boolean {
 		return (this.pending.get(runtime)?.size ?? 0) > 0;
 	}
 
-	async waitForIdle(runtime: AgentSessionRuntime): Promise<void> {
+	async waitForIdle(runtime: HostedConversation): Promise<void> {
 		while (this.hasPendingWork(runtime)) await Promise.allSettled([...this.pending.get(runtime)!]);
 	}
 
-	private track<T>(runtime: AgentSessionRuntime, operation: () => Promise<T>): Promise<T> {
+	private track<T>(runtime: HostedConversation, operation: () => Promise<T>): Promise<T> {
 		const promise = operation();
 		const pending = this.pending.get(runtime) ?? new Set<Promise<unknown>>();
 		this.pending.set(runtime, pending);
@@ -153,7 +153,7 @@ export class HostReviewDiscussionService {
 		return promise;
 	}
 
-	forRuntime(runtime: AgentSessionRuntime): ReviewDiscussionService {
+	forRuntime(runtime: HostedConversation): ReviewDiscussionService {
 		return {
 			recordOutcome: (transition) =>
 				this.withStore(runtime, async (store, ref, assertCurrent) => {
@@ -256,7 +256,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async withStore<T>(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		operation: (store: SQLiteSessionStoreClient, ref: SessionReference, assertCurrent: () => void) => Promise<T>,
 	): Promise<T> {
 		const session = runtime.session;
@@ -287,7 +287,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async requireSource(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		store: SQLiteSessionStoreClient,
 		ref: SessionReference,
 		runId: string,
@@ -306,7 +306,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async project(
-		requester: AgentSessionRuntime,
+		requester: HostedConversation,
 		store: SQLiteSessionStoreClient,
 		ref: SessionReference,
 		row: SessionStoreReviewDiscussion,
@@ -382,7 +382,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async start(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		store: SQLiteSessionStoreClient,
 		ref: SessionReference,
 		assertCurrent: () => void,
@@ -499,11 +499,11 @@ export class HostReviewDiscussionService {
 	}
 
 	private async prepareChild(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		ref: SessionReference,
 		row: SessionStoreReviewDiscussion,
 		assertCurrent: () => void,
-	): Promise<AgentSessionRuntime> {
+	): Promise<HostedConversation> {
 		const childRef = { ...ref, ...row.current.child };
 		const existing = this.host.findRuntime(childRef, runtime);
 		if (existing) return existing;
@@ -513,7 +513,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async ensureKickoff(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		store: SQLiteSessionStoreClient,
 		ref: SessionReference,
 		row: SessionStoreReviewDiscussion,
@@ -556,7 +556,7 @@ export class HostReviewDiscussionService {
 	}
 
 	private async reset(
-		runtime: AgentSessionRuntime,
+		runtime: HostedConversation,
 		store: SQLiteSessionStoreClient,
 		ref: SessionReference,
 		assertCurrent: () => void,

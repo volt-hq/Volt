@@ -1,15 +1,14 @@
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import {
-	AgentSessionRuntime,
-	type AgentSessionServices,
-	type CreateAgentSessionRuntimeFactory,
-} from "../../../src/core/agent-session-runtime.ts";
+import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
+import { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { adoptTestSession, connectTestClient } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 function createServices(harness: Harness, cwd = harness.tempDir, agentDir = harness.tempDir): AgentSessionServices {
@@ -29,11 +28,11 @@ function createServices(harness: Harness, cwd = harness.tempDir, agentDir = harn
 }
 
 function createHarnessRuntimeFactory(options: { onHarness?: (harness: Harness, index: number) => void } = {}): {
-	createRuntime: CreateAgentSessionRuntimeFactory;
+	createRuntime: ConversationFactory;
 	harnesses: Harness[];
 } {
 	const harnesses: Harness[] = [];
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+	const createRuntime: ConversationFactory = async ({ cwd, agentDir, sessionManager }) => {
 		const harness = await createHarness({ sessionManager });
 		const index = harnesses.push(harness) - 1;
 		options.onHarness?.(harness, index);
@@ -52,8 +51,17 @@ function cleanupHarnesses(harnesses: Harness[]): void {
 	for (const harness of harnesses.reverse()) harness.cleanup();
 }
 
+/** Make `host` fail closing `conversation` with `error`, once the conversation closed. */
+function failClose(host: ConversationHost, conversation: HostedConversation, error: Error): void {
+	const close = host.close.bind(host);
+	host.close = async (closing, event) => {
+		await close(closing, event);
+		if (closing === conversation) throw error;
+	};
+}
+
 describe("PR #329 finalizer error contract", () => {
-	it("uses one AgentSessionRuntime finalizer when local subagent RPC startup fails", async () => {
+	it("closes the child conversation once when local subagent RPC startup fails", async () => {
 		const owner = await createHarness();
 		const startupError = new Error("injected local RPC startup failure");
 		const fixture = createHarnessRuntimeFactory({
@@ -69,13 +77,15 @@ describe("PR #329 finalizer error contract", () => {
 			cwd: owner.tempDir,
 			agentDir: owner.tempDir,
 		});
-		const originalDispose = AgentSessionRuntime.prototype.dispose;
+		const originalClose = ConversationHost.prototype.close;
 		let logicalFinalizerCalls = 0;
-		const disposeSpy = vi.spyOn(AgentSessionRuntime.prototype, "dispose").mockImplementation(function (
-			this: AgentSessionRuntime,
+		const closeSpy = vi.spyOn(ConversationHost.prototype, "close").mockImplementation(function (
+			this: ConversationHost,
+			conversation,
+			event,
 		): Promise<void> {
-			if (fixture.harnesses.some((harness) => harness.session === this.session)) logicalFinalizerCalls += 1;
-			return originalDispose.call(this);
+			if (fixture.harnesses.some((harness) => harness.session === conversation.session)) logicalFinalizerCalls += 1;
+			return originalClose.call(this, conversation, event);
 		});
 
 		try {
@@ -83,7 +93,7 @@ describe("PR #329 finalizer error contract", () => {
 			expect(logicalFinalizerCalls).toBe(1);
 		} finally {
 			await manager.dispose().catch(() => undefined);
-			disposeSpy.mockRestore();
+			closeSpy.mockRestore();
 			cleanupHarnesses(fixture.harnesses);
 			owner.cleanup();
 		}
@@ -98,14 +108,11 @@ describe("PR #329 finalizer error contract", () => {
 			createRuntime: fixture.createRuntime,
 			cwd: owner.tempDir,
 			agentDir: owner.tempDir,
-			onRuntimeCreated: ({ runtime }) => {
+			onRuntimeCreated: ({ host, conversation }) => {
 				const disposalError = disposalErrors[runtimeIndex++];
 				if (!disposalError) throw new Error("unexpected extra child runtime");
-				const disposeRuntime = runtime.dispose.bind(runtime);
-				runtime.dispose = async () => {
-					await disposeRuntime();
-					throw disposalError;
-				};
+				// The child's in-process client closes its conversation when the handle is disposed.
+				failClose(host, conversation, disposalError);
 			},
 		});
 
@@ -135,7 +142,7 @@ describe("PR #329 finalizer error contract", () => {
 			ready: Promise.reject(startupError),
 			detach: () => {},
 		}));
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, agentDir }) => {
 			const services = createServices(harness, cwd, agentDir);
 			return {
 				session: harness.session,
@@ -144,16 +151,12 @@ describe("PR #329 finalizer error contract", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = new AgentSessionRuntime(harness.session, createServices(harness), createRuntime);
-		const disposeRuntime = runtime.dispose.bind(runtime);
-		vi.spyOn(runtime, "dispose").mockImplementation(async () => {
-			await disposeRuntime();
-			throw cleanupError;
-		});
+		const { host, conversation } = adoptTestSession(harness.session, createServices(harness), createRuntime);
+		failClose(host, conversation, cleanupError);
 		const pair = createLoopbackRpcTransportPair();
 
 		try {
-			const thrown = await runRpcMode(runtime, { transport: pair.server, exitProcess: false }).catch(
+			const thrown = await runRpcMode(host, conversation, { transport: pair.server, exitProcess: false }).catch(
 				(error: unknown) => error,
 			);
 
@@ -169,7 +172,7 @@ describe("PR #329 finalizer error contract", () => {
 		}
 	});
 
-	it("preserves subagent and persistence failures through runtime disposal", async () => {
+	it("preserves subagent and persistence failures through conversation close", async () => {
 		const owner = await createHarness();
 		const sessionManager = await SessionManager.create(owner.tempDir, join(owner.tempDir, "runtime-sessions"));
 		const subagentManager = new SubagentManager({
@@ -205,9 +208,10 @@ describe("PR #329 finalizer error contract", () => {
 			releaseGitContextProvider: () => {},
 			diagnostics: [],
 		};
-		const runtime = new AgentSessionRuntime(created.session, services, async () => {
+		const { host, conversation } = adoptTestSession(created.session, services, async () => {
 			throw new Error("replacement runtime creation is not expected");
 		});
+		const runtime = await connectTestClient(host, conversation);
 		const subagentError = new Error("injected subagent cleanup failure");
 		const persistenceError = new Error("injected persistence cleanup failure");
 		const disposeSubagents = subagentManager.dispose.bind(subagentManager);
@@ -235,9 +239,7 @@ describe("PR #329 finalizer error contract", () => {
 			expect(subagentDisposeCalls).toBe(1);
 			expect(managerCloseCalls).toBe(1);
 			await expect(created.session.prompt("must not run")).rejects.toThrow("Cannot prompt a disposed session");
-			await expect(runtime.newSession()).rejects.toThrow(
-				"Agent session runtime is no longer accepting structural operations",
-			);
+			await expect(runtime.newSession()).rejects.toThrow("The client is not attached to a conversation");
 		} finally {
 			subagentDisposeSpy.mockRestore();
 			managerCloseSpy.mockRestore();

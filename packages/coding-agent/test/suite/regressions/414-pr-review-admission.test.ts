@@ -4,11 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
+import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
+import { openNewSession } from "../../../src/core/host/session-intents.ts";
+import type { HostClient } from "../../../src/core/host/targets.ts";
 import { readPrReviewBinding } from "../../../src/core/pr-review-binding.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
@@ -29,11 +28,13 @@ import {
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { getDefaultSessionDir, SessionManager } from "../../../src/core/session-manager.ts";
 import { ConversationSessionWriter } from "../../../src/core/session-writer.ts";
+import type { IntegratedRuntimeEntry } from "../../../src/daemon/integrated-runtimes.ts";
 import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
+import { openTestHost } from "../../utilities/host-client.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -144,7 +145,7 @@ async function fixture(nested = false, workspaceName = "project") {
 		expectedPullRequest: { url: target.pullRequest.url, headRefOid: head },
 	};
 	const authority = { workspaceGeneration: 1, assertCurrent: () => {} };
-	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {
+	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const created = await createAgentSession({
 			sessionManager,
 			cwd,
@@ -202,10 +203,13 @@ async function fixture(nested = false, workspaceName = "project") {
 				}),
 			);
 			await options.validateCwd?.(resolved.sessionManager.getCwd());
-			const runtime = await createAgentSessionRuntime(factory, {
+			// As the daemon does: phones attach as clients, and the registry closes the conversation.
+			const runtime = await openTestHost(factory, {
 				sessionManager: resolved.sessionManager,
 				cwd: resolved.sessionManager.getCwd(),
 				agentDir,
+				extensionMode: "rpc",
+				whenUnattached: "keep",
 			});
 			return {
 				runtime,
@@ -420,8 +424,8 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 				let published = false;
 				try {
 					expect(opened.sessionSelection.kind).toBe("resumed");
-					expect(opened.entry.runtime.session.sessionRef).toEqual(ref);
-					expect(opened.entry.runtime.cwd).toBe(placement.cwd);
+					expect(opened.entry.runtime.conversation.session.sessionRef).toEqual(ref);
+					expect(opened.entry.runtime.conversation.cwd).toBe(placement.cwd);
 					expect(opened.entry.worktreeId).toBe(prepared.worktreeId);
 					// A separate store reader must see the binding before ownership publication.
 					const reader = await SessionManager.openReadOnly(ref);
@@ -455,7 +459,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 					prepareReviewWorkflow({
 						target: { kind: "pr", number: "415" },
 						cwd: placement.cwd,
-						sessionManager: opened.entry.runtime.session.sessionManager,
+						sessionManager: opened.entry.runtime.conversation.session.sessionManager,
 						settingsManager: f.harness.settingsManager,
 						modelRegistry: f.harness.session.modelRegistry,
 						currentModel: f.harness.getModel(),
@@ -508,7 +512,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		writeFileSync(join(placement.cwd, "value.txt"), "requested edit\n");
 		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
 		const resumed = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
-		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toEqual(placement);
+		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
 		expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("requested edit\n");
 	});
 
@@ -528,7 +532,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		expect(restarted.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
 		record.mockRestore();
 		const resumed = await restarted.attach({ target: "session", sessionId: prepared.sessionId });
-		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toEqual(placement);
+		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
 	});
 
 	it("leaves ordinary resumed sessions unbound", async () => {
@@ -537,7 +541,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		await manager.closePersistence();
 		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
 		const resumed = await f.host().attach({ target: "session", sessionId: "ordinary" });
-		expect(await readPrReviewBinding(resumed.entry.runtime.session.sessionManager)).toBeUndefined();
+		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toBeUndefined();
 		expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
 	});
 
@@ -552,9 +556,9 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		await host.state.upsertWorktree((await foreignHost.state.listWorktrees(foreign.workspace.name))[0]!);
 		const { ref, placement } = await interruptedLaunch(f);
 		const opened = await host.attach({ target: "session", sessionId: f.request.sessionId });
-		expect(opened.entry.runtime.session.sessionRef).toEqual(ref);
-		expect(opened.entry.runtime.cwd).toBe(placement.cwd);
-		expect(await readPrReviewBinding(opened.entry.runtime.session.sessionManager)).toEqual(placement);
+		expect(opened.entry.runtime.conversation.session.sessionRef).toEqual(ref);
+		expect(opened.entry.runtime.conversation.cwd).toBe(placement.cwd);
+		expect(await readPrReviewBinding(opened.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
 	});
 
 	it.each(["new", "session", "last"] as const)(
@@ -574,9 +578,9 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			f.authorization.client.lastSessionIdByWorkspace = { [f.workspace.name]: f.request.sessionId };
 			const opened = await host.attach(target === "last" ? { target } : { target, sessionId: f.request.sessionId });
 			expect(opened.sessionSelection.kind).toBe(target === "new" ? "created" : "resumed");
-			expect(opened.entry.runtime.session.sessionId).toBe(f.request.sessionId);
-			expect(opened.entry.runtime.cwd).toBe(f.source);
-			expect(await readPrReviewBinding(opened.entry.runtime.session.sessionManager)).toBeUndefined();
+			expect(opened.entry.runtime.conversation.session.sessionId).toBe(f.request.sessionId);
+			expect(opened.entry.runtime.conversation.cwd).toBe(f.source);
+			expect(await readPrReviewBinding(opened.entry.runtime.conversation.session.sessionManager)).toBeUndefined();
 			expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
 		},
 	);
@@ -616,7 +620,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 				workingDirectory: prepared.workingDirectory,
 			};
 			const opened = await first.attach(conversation);
-			const placement = opened.entry.runtime.session.sessionManager.getPrReviewBinding()!;
+			const placement = opened.entry.runtime.conversation.session.sessionManager.getPrReviewBinding()!;
 			expect(opened.sessionSelection).toMatchObject({ kind: "created", sessionId: prepared.sessionId });
 			expect(first.createRuntime).toHaveBeenCalledWith(
 				expect.objectContaining({ cwd: placement.cwd, projectCwd: placement.cwd, sessionDir: f.sessionDir }),
@@ -625,20 +629,20 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			expect(opened.entry.workingDirectory).toBe(prepared.workingDirectory);
 			expect(placement.cwd).not.toBe(f.source);
 			expect(git(placement.cwd, "rev-parse", "HEAD")).toBe(f.head);
-			const ref = opened.entry.runtime.session.sessionRef;
+			const ref = opened.entry.runtime.conversation.session.sessionRef;
 			await first.registry.stopAll("restart");
 			// Requested edits must survive retries/resumes; only first admission requires a pristine checkout.
 			writeFileSync(join(placement.cwd, "value.txt"), "requested edit\n");
 			const restarted = f.host();
 			const retry = await restarted.attach(conversation);
 			expect(retry.sessionSelection.kind).toBe("resumed");
-			expect(retry.entry.runtime.session.sessionRef).toEqual(ref);
-			expect(retry.entry.runtime.session.sessionManager.getPrReviewBinding()).toEqual(placement);
+			expect(retry.entry.runtime.conversation.session.sessionRef).toEqual(ref);
+			expect(retry.entry.runtime.conversation.session.sessionManager.getPrReviewBinding()).toEqual(placement);
 			await restarted.registry.stopAll("restart_again");
 			const resumed = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
-			expect(resumed.entry.runtime.cwd).toBe(placement.cwd);
-			expect(resumed.entry.runtime.session.sessionManager.getCwd()).toBe(placement.cwd);
-			expect(resumed.entry.runtime.session.sessionRef).toEqual(ref);
+			expect(resumed.entry.runtime.conversation.cwd).toBe(placement.cwd);
+			expect(resumed.entry.runtime.conversation.session.sessionManager.getCwd()).toBe(placement.cwd);
+			expect(resumed.entry.runtime.conversation.session.sessionRef).toEqual(ref);
 			expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("requested edit\n");
 			expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("parent\n");
 		},
@@ -684,59 +688,82 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			worktreeId: prepared.worktreeId,
 			workingDirectory: prepared.workingDirectory,
 		});
-		const runtime = entry.runtime;
-		const placement = runtime.session.sessionManager.getPrReviewBinding()!;
-		const sourceId = runtime.session.sessionId;
+		const source = entry.runtime.conversation;
+		const placement = source.session.sessionManager.getPrReviewBinding()!;
+		const sourceId = source.session.sessionId;
 		const record = reviewRecord(f.source, f.base, f.target);
-		await appendReviewRunDurably(runtime.session.sessionWriter, record);
-		await runtime.newSession({
+		await appendReviewRunDurably(source.session.sessionWriter, record);
+		// A phone's structural intents redirect it; the daemon hosts each conversation they open.
+		const phoneOn = async (from: IntegratedRuntimeEntry): Promise<HostClient> => {
+			const phone: HostClient = {
+				id: `phone-${from.sessionId}`,
+				move: {
+					kind: "redirect",
+					redirect: () => {},
+					...host.registry.streamRedirect(from, f.authorization),
+				},
+			};
+			await from.runtime.host.attach(phone, from.runtime.conversation);
+			return phone;
+		};
+		const opened = await openNewSession(entry.runtime.host, await phoneOn(entry), {
 			preserveReviewRunId: record.runId,
 			replaceReviewGeneral: true,
 			setup: async (manager) => {
 				await appendReviewRun(manager, record);
 			},
 		});
-		expect(await getReviewGeneral(runtime.session.sessionManager, record.runId)).toMatchObject({
+		if (opened.cancelled) throw new Error("The General session was not opened");
+		const generalEntry = host.registry.findOwner(f.workspace.name, opened.sessionId)!;
+		const general = generalEntry.runtime.conversation;
+		expect(await getReviewGeneral(general.session.sessionManager, record.runId)).toMatchObject({
 			sourceSessionId: sourceId,
-			generalSessionId: runtime.session.sessionId,
+			generalSessionId: general.session.sessionId,
 			generalRevision: 1,
 		});
-		expect(await readPrReviewBinding(runtime.session.sessionManager)).toEqual(placement);
-		const generalId = runtime.session.sessionId;
-		await runtime.newSession({
+		expect(await readPrReviewBinding(general.session.sessionManager)).toEqual(placement);
+		const generalId = general.session.sessionId;
+		const findings = await openNewSession(generalEntry.runtime.host, await phoneOn(generalEntry), {
 			setup: async (manager) => {
 				await appendReviewRun(manager, record);
-			},
-			withSession: async (context) => {
-				await context.sendMessage(createReviewSeedMessage(record, ["f1"]));
+				const message = createReviewSeedMessage(record, ["f1"]);
+				await manager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+				);
 			},
 		});
-		expect(runtime.session.sessionId).not.toBe(generalId);
-		expect(runtime.cwd).toBe(placement.cwd);
-		expect(await readPrReviewBinding(runtime.session.sessionManager)).toEqual(placement);
-		const api = runtime.reviewDiscussions!;
+		if (findings.cancelled) throw new Error("The findings session was not opened");
+		const findingsEntry = host.registry.findOwner(f.workspace.name, findings.sessionId)!;
+		const handoff = findingsEntry.runtime.conversation;
+		expect(handoff.session.sessionId).not.toBe(generalId);
+		expect(handoff.cwd).toBe(placement.cwd);
+		expect(await readPrReviewBinding(handoff.session.sessionManager)).toEqual(placement);
+		const api = findingsEntry.reviewDiscussions!;
 		f.harness.setResponses([fauxAssistantMessage("Finding discussion")]);
 		const started = await api.start(record.runId, ["f1"], "start-414");
 		expect(started.results).toMatchObject([{ outcome: "created" }]);
 		const discussion = started.results[0]!.discussion!;
 		const child = host.registry.findOwner(f.workspace.name, discussion.sessionId)!;
-		await child.runtime.session.waitForIdle();
-		expect(child.runtime.cwd).toBe(placement.cwd);
+		await child.runtime.conversation.session.waitForIdle();
+		expect(child.runtime.conversation.cwd).toBe(placement.cwd);
 		expect(child.worktreeId).toBe(prepared.worktreeId);
 		const reset = await api.reset(discussion.discussionId, discussion.sessionId, "reset-414");
 		expect(reset.status).toBe("reset");
 		const resetEntry = host.registry.findOwner(f.workspace.name, reset.discussion.currentSessionId)!;
-		expect(resetEntry.runtime.cwd).toBe(placement.cwd);
-		expect(resetEntry.runtime.session.sessionManager.getCwd()).toBe(placement.cwd);
+		expect(resetEntry.runtime.conversation.cwd).toBe(placement.cwd);
+		expect(resetEntry.runtime.conversation.session.sessionManager.getCwd()).toBe(placement.cwd);
 		expect(resetEntry.worktreeId).toBe(prepared.worktreeId);
-		expect(resetEntry.runtime.session.messages.some((message) => message.role === "user")).toBe(false);
+		expect(resetEntry.runtime.conversation.session.messages.some((message) => message.role === "user")).toBe(false);
 		f.harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("write", { path: "value.txt", content: "requested faux fix\n" }), {
 				stopReason: "toolUse",
 			}),
 			fauxAssistantMessage("Fixed the finding"),
 		]);
-		await resetEntry.runtime.session.prompt("Fix finding f1 by writing value.txt", {
+		await resetEntry.runtime.conversation.session.prompt("Fix finding f1 by writing value.txt", {
 			source: "rpc",
 			clientMessageId: "fix-414",
 		});
@@ -745,13 +772,15 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("parent\n");
 		expect(git(f.source, "rev-parse", "HEAD")).toBe(f.base);
 		expect(git(f.source, "status", "--porcelain")).toBe("");
-		expect(getReviewRun(runtime.session.sessionManager, record.runId)?.result?.findings[0]?.status).toBe("open");
+		expect(getReviewRun(handoff.session.sessionManager, record.runId)?.result?.findings[0]?.status).toBe("open");
 		const resetId = resetEntry.sessionId;
 		await host.registry.stopAll("restart_discussion");
 		const resumed = await f.host().attach({ target: "session", sessionId: resetId });
-		expect(resumed.entry.runtime.cwd).toBe(placement.cwd);
+		expect(resumed.entry.runtime.conversation.cwd).toBe(placement.cwd);
 		expect(resumed.entry.worktreeId).toBe(prepared.worktreeId);
-		expect(resumed.entry.runtime.session.isReviewDiscussion).toBe(true);
-		expect(resumed.entry.runtime.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(resumed.entry.runtime.conversation.session.isReviewDiscussion).toBe(true);
+		expect(
+			resumed.entry.runtime.conversation.session.messages.filter((message) => message.role === "user"),
+		).toHaveLength(1);
 	});
 });

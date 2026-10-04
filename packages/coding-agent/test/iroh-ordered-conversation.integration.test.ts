@@ -3,9 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
-import { AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../src/core/agent-session-runtime.ts";
-import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
+import { isConversationTranscriptCommittedEvent } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { ConversationProjectionSnapshotBuilder } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes } from "../src/core/rpc/iroh-transport.ts";
@@ -14,9 +12,11 @@ import { type SessionEntry, SessionManager } from "../src/core/session-manager.t
 import { type IrohRemoteConversationLifecycle, runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 import {
 	createTestSession as createIrohTestSession,
+	createTestConversation,
 	ManualIrohRecvStream,
 	ManualIrohSendStream,
 	parseWrittenObjects,
+	type TestConversation,
 } from "./iroh-stream-doubles.ts";
 import { loadPersistedSessionSnapshot } from "./utilities.ts";
 
@@ -24,7 +24,7 @@ interface OrderedConversationFixture {
 	readonly manager: SessionManager;
 	readonly modePromise: Promise<void>;
 	readonly recv: ManualIrohRecvStream;
-	readonly runtimeHost: AgentSessionRuntime;
+	readonly target: TestConversation;
 	readonly send: ManualIrohSendStream;
 	readonly session: Pick<ReturnType<typeof createIrohTestSession>, "attachExtensionClient">;
 	readonly sessionId: string;
@@ -215,13 +215,7 @@ async function createFixture(
 			return () => listeners.delete(listener);
 		}),
 	};
-	const runtimeHost = new AgentSessionRuntime(
-		session as unknown as AgentSession,
-		{ cwd: workspacePath, agentDir: undefined } as unknown as AgentSessionServices,
-		async () => {
-			throw new Error("session replacement is not used by this integration fixture");
-		},
-	);
+	const target = createTestConversation(session, { cwd: workspacePath });
 	const emit = (event: object): void => {
 		for (const listener of [...listeners]) {
 			listener(event);
@@ -231,10 +225,10 @@ async function createFixture(
 
 	const recv = options.recv ?? new ManualIrohRecvStream();
 	const send = options.send ?? new ManualIrohSendStream();
-	const modePromise = runIrohRemoteRpcMode(runtimeHost, {
+	const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 		hostNodeId: "a".repeat(64),
-		disposeRuntimeOnClose: false,
+		anchor: false,
 		stream: { recv, send },
 		workspacePath,
 		buildConversationSnapshot: createSnapshotBuilder(manager, sessionId),
@@ -269,7 +263,7 @@ async function createFixture(
 		manager,
 		modePromise,
 		recv,
-		runtimeHost,
+		target,
 		send,
 		session,
 		sessionId,
@@ -279,7 +273,7 @@ async function createFixture(
 			try {
 				await modePromise;
 			} finally {
-				runtimeHost.conversationProjectionFeed.dispose();
+				target.conversation.projectionFeed.dispose();
 				await manager.closePersistence();
 				rmSync(root, { recursive: true, force: true });
 			}
@@ -576,10 +570,10 @@ describe("Iroh ordered conversation integration", () => {
 
 		const replacementRecv = new ManualIrohRecvStream();
 		const replacementSend = new ManualIrohSendStream();
-		const replacementMode = runIrohRemoteRpcMode(fixture.runtimeHost, {
+		const replacementMode = runIrohRemoteRpcMode(fixture.target.host, fixture.target.conversation, {
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			hostNodeId: "a".repeat(64),
-			disposeRuntimeOnClose: false,
+			anchor: false,
 			stream: { recv: replacementRecv, send: replacementSend },
 			workspacePath: fixture.manager.getCwd(),
 			buildConversationSnapshot: createSnapshotBuilder(fixture.manager, fixture.sessionId),

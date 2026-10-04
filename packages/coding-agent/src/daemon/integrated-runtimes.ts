@@ -1,6 +1,8 @@
 import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
-import type { AgentSessionRuntime, HostedRedirect, RedirectTarget } from "../core/agent-session-runtime.ts";
+import type { HostedConversation } from "../core/host/hosted-conversation.ts";
+import { sameFilesystemLocation } from "../core/host/session-summaries.ts";
+import type { HostedRedirect, RedirectTarget } from "../core/host/targets.ts";
 import type { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -20,15 +22,17 @@ import {
 } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
-import { HostReviewDiscussionService } from "../core/review-discussions.ts";
+import { HostReviewDiscussionService, type ReviewDiscussionService } from "../core/review-discussions.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../core/session-manager.ts";
 import type { SessionWriter } from "../core/session-writer.ts";
 import type { SubagentRuntimeRegistration } from "../core/subagents/index.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
+	type IrohRemoteAgentRuntime,
 	type IrohRemoteAgentRuntimeConversationTarget,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "../modes/rpc/iroh-remote-agent-runtime.ts";
+import type { RpcRedirectOptions } from "../modes/rpc/rpc-mode.ts";
 import {
 	type DetachedRuntimeRetentionHandle,
 	scheduleDetachedRuntimeRetention,
@@ -58,7 +62,10 @@ export interface IntegratedRuntimeEntry {
 	readonly workspaceGeneration?: number;
 	readonly projectTrusted: boolean;
 	readonly sessionId: string;
-	runtime: AgentSessionRuntime;
+	/** The conversation, in the host it opened in. */
+	runtime: IrohRemoteAgentRuntime;
+	/** Review discussions authorize through this entry's conversation. */
+	reviewDiscussions?: ReviewDiscussionService;
 	readonly lifecycle: "prepared" | "active" | "retiring" | "retired";
 	/** Monotonic ownership generation; retirement invalidates captured attaches. */
 	readonly generation: number;
@@ -309,9 +316,9 @@ export class IntegratedRuntimeRegistry {
 	readonly coordinators: ConversationCoordinatorRegistry;
 	private readonly entries = new Map<string, IntegratedRuntimeEntry>();
 	private readonly reviewDiscussions: HostReviewDiscussionService;
-	private readonly reviewSiblingCreations = new Map<string, Promise<AgentSessionRuntime>>();
+	private readonly reviewSiblingCreations = new Map<string, Promise<HostedConversation>>();
 	private readonly reviewSourceWrites = new Map<string, Promise<unknown>>();
-	private readonly revokedReviewAuthorities = new WeakSet<AgentSessionRuntime>();
+	private readonly revokedReviewAuthorities = new WeakSet<HostedConversation>();
 	private readonly namedSessionCreations = new Map<
 		string,
 		{
@@ -325,16 +332,18 @@ export class IntegratedRuntimeRegistry {
 	constructor(options: IntegratedRuntimeRegistryOptions) {
 		this.options = options;
 		this.coordinators = options.coordinators ?? new ConversationCoordinatorRegistry();
-		const exactOwner = (runtime: AgentSessionRuntime) =>
-			this.revokedReviewAuthorities.has(runtime)
+		const exactOwner = (conversation: HostedConversation) =>
+			this.revokedReviewAuthorities.has(conversation)
 				? undefined
-				: this.values().find((entry) => entry.runtime === runtime && entry.lifecycle === "active");
+				: this.values().find(
+						(entry) => entry.runtime.conversation === conversation && entry.lifecycle === "active",
+					);
 		this.reviewDiscussions = new HostReviewDiscussionService({
 			findRuntime: (ref, requester) => {
 				const source = exactOwner(requester);
 				if (!source) throw new Error("Review requester runtime is unavailable");
 				return this.values().find((entry) => {
-					const current = entry.runtime.session.sessionRef;
+					const current = entry.runtime.conversation.session.sessionRef;
 					return (
 						entry.lifecycle === "active" &&
 						entry.workspaceName === source.workspaceName &&
@@ -343,12 +352,12 @@ export class IntegratedRuntimeRegistry {
 						current.sessionId === ref.sessionId &&
 						current.sessionGeneration === ref.sessionGeneration
 					);
-				})?.runtime;
+				})?.runtime.conversation;
 			},
 			assertCurrent: (runtime) => {
 				if (!exactOwner(runtime)) throw new Error("Review runtime ownership changed");
 			},
-			withSourceWrite: <T>(requester: AgentSessionRuntime, ref: SessionReference, write: () => Promise<T>) => {
+			withSourceWrite: <T>(requester: HostedConversation, ref: SessionReference, write: () => Promise<T>) => {
 				const parent = exactOwner(requester);
 				if (!parent || !this.options.withReviewSourceWrite)
 					return Promise.reject(new Error("Canonical source writer is unavailable"));
@@ -374,11 +383,13 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	private async createReviewSibling(
-		runtime: AgentSessionRuntime,
+		conversation: HostedConversation,
 		ref: SessionReference,
 		assertCurrent: () => void,
-	): Promise<AgentSessionRuntime> {
-		const parent = this.values().find((entry) => entry.runtime === runtime && entry.lifecycle === "active");
+	): Promise<HostedConversation> {
+		const parent = this.values().find(
+			(entry) => entry.runtime.conversation === conversation && entry.lifecycle === "active",
+		);
 		if (!parent) throw new Error("Review source runtime unavailable");
 		const key = this.getRegistryKey(parent.workspaceName, ref.sessionId);
 		const pending = this.reviewSiblingCreations.get(key);
@@ -401,13 +412,13 @@ export class IntegratedRuntimeRegistry {
 		parent: IntegratedRuntimeEntry,
 		ref: SessionReference,
 		assertCurrent: () => void,
-	): Promise<AgentSessionRuntime> {
+	): Promise<HostedConversation> {
 		const generation = parent.generation;
 		let manager: SessionManager | undefined;
 		let coordinator: ConversationCoordinator | undefined;
 		let admission: ReviewSiblingAdmission | undefined;
 		let preparation: WorktreeRuntimePreparation | undefined;
-		let child: AgentSessionRuntime | undefined;
+		let child: IrohRemoteAgentRuntime | undefined;
 		let entry: IntegratedRuntimeEntry | undefined;
 		let claim: IntegratedRuntimeAttachClaim | undefined;
 		let transferred = false;
@@ -427,7 +438,7 @@ export class IntegratedRuntimeRegistry {
 			assertParent();
 			const existing = this.findOwner(parent.workspaceName, ref.sessionId);
 			if (existing) {
-				const current = existing.runtime.session.sessionRef;
+				const current = existing.runtime.conversation.session.sessionRef;
 				if (
 					existing.lifecycle !== "active" ||
 					existing.workspaceGeneration !== parent.workspaceGeneration ||
@@ -437,7 +448,7 @@ export class IntegratedRuntimeRegistry {
 				) {
 					throw new Error("Review child runtime identity changed");
 				}
-				return existing.runtime;
+				return existing.runtime.conversation;
 			}
 			admission = this.options.beginReviewSiblingAdmission?.(parent, ref.sessionId);
 			if (parent.coordinator.hasLeaseBroker && !admission)
@@ -468,13 +479,13 @@ export class IntegratedRuntimeRegistry {
 			transferred = true;
 			// Keep the provisional lease until initialization settles, including on cancellation;
 			// releasing it early would let a new owner race late SDK persistence.
-			child = await parent.runtime.createReviewDiscussionSibling(manager);
+			child = await openReviewDiscussionSibling(parent.runtime, manager);
 			assertParent();
 			await admission?.validate();
 			assertParent();
-			if (this.findOwner(parent.workspaceName, child.session.sessionId))
+			if (this.findOwner(parent.workspaceName, child.conversation.session.sessionId))
 				throw new Error("Review child runtime already active");
-			const childRef = child.session.sessionRef;
+			const childRef = child.conversation.session.sessionRef;
 			if (
 				childRef?.storeId !== ref.storeId ||
 				childRef.sessionId !== ref.sessionId ||
@@ -487,7 +498,7 @@ export class IntegratedRuntimeRegistry {
 				workspaceName: parent.workspaceName,
 				workspaceGeneration: parent.workspaceGeneration,
 				projectTrusted: parent.projectTrusted,
-				sessionId: child.session.sessionId,
+				sessionId: child.conversation.session.sessionId,
 				runtime: child,
 				worktreePreparation: preparation,
 				worktreeId: parent.worktreeId,
@@ -515,7 +526,7 @@ export class IntegratedRuntimeRegistry {
 			delete entry.worktreePreparation;
 			assertParent();
 			this.scheduleRetention(entry, "review_discussion_created");
-			return child;
+			return child.conversation;
 		} catch (error) {
 			try {
 				await preparation?.release();
@@ -541,24 +552,20 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	/**
-	 * The runtime one phone stream is served through: a view of `entry`'s
-	 * conversation that stays on it. A structural intent of the phone moves the
-	 * phone alone: the conversation a new session, fork, or import opens is
-	 * published as a detached runtime with this entry's tool policy and
-	 * placement (`hostRedirectTarget`), the phone's last session becomes the
-	 * one it moves to, and the stream then ends with `conversation_moved`.
-	 * Phones co-attached to the conversation stay on it.
+	 * How one phone stream follows its structural intents as a client of
+	 * `entry`'s conversation: by redirect, staying on the conversation. A
+	 * structural intent of the phone moves the phone alone: the conversation a
+	 * new session, fork, or import opens is published as a detached runtime
+	 * with this entry's tool policy and placement (`hostRedirectTarget`), the
+	 * phone's last session becomes the one it moves to, and the stream then ends
+	 * with `conversation_moved`. Phones co-attached to the conversation stay on
+	 * it.
 	 */
-	attachStreamView(
+	streamRedirect(
 		entry: IntegratedRuntimeEntry,
 		authorization: IrohRemoteClientAuthorizationSuccess,
-	): AgentSessionRuntime {
-		const view = entry.runtime.attachRedirectClient({
-			hostTarget: (target) => this.hostRedirectTarget(entry, authorization, target),
-		});
-		// Review discussions authorize through the entry's runtime, which the view serves.
-		view.reviewDiscussions = entry.runtime.reviewDiscussions;
-		return view;
+	): RpcRedirectOptions {
+		return { hostTarget: (target) => this.hostRedirectTarget(entry, authorization, target) };
 	}
 
 	/**
@@ -577,8 +584,11 @@ export class IntegratedRuntimeRegistry {
 		if (source.lifecycle !== "active" || this.entries.get(source.key) !== source) {
 			throw new Error("Conversation runtime ownership changed before the session change");
 		}
-		const prepared = target.runtime
-			? await this.prepareMovedConversation(source, authorization, target.runtime)
+		const prepared = target.conversation
+			? await this.prepareMovedConversation(source, authorization, {
+					host: source.runtime.host,
+					conversation: target.conversation,
+				})
 			: undefined;
 		return {
 			commit: async () => {
@@ -620,8 +630,8 @@ export class IntegratedRuntimeRegistry {
 	}
 
 	/**
-	 * Prepare `runtime`, which a structural intent on `source` opened in its
-	 * host, as a detached runtime of its own: the source's tool policy, trust,
+	 * Prepare `runtime`, which a structural intent on `source` opened in the
+	 * source's host, as a detached runtime of its own: the source's tool policy, trust,
 	 * and worktree placement, with the session bound to that worktree, under a
 	 * daemon lease. Publishing it rechecks the phone's authorization; it then
 	 * follows retention until the redirected phone attaches. Exactly one of
@@ -630,9 +640,9 @@ export class IntegratedRuntimeRegistry {
 	private async prepareMovedConversation(
 		source: IntegratedRuntimeEntry,
 		authorization: IrohRemoteClientAuthorizationSuccess,
-		runtime: AgentSessionRuntime,
+		runtime: IrohRemoteAgentRuntime,
 	): Promise<{ publish(): Promise<void>; abort(): Promise<void> }> {
-		const sessionId = runtime.session.sessionId;
+		const sessionId = runtime.conversation.session.sessionId;
 		const generation = source.generation;
 		let coordinator: ConversationCoordinator | undefined;
 		let admission: ReviewSiblingAdmission | undefined;
@@ -679,7 +689,7 @@ export class IntegratedRuntimeRegistry {
 			// The new conversation stays inside the workspace or worktree its source was authorized for.
 			const directory = await resolveRuntimeWorkingDirectory(
 				source.worktreePath ?? authorization.workspace.path,
-				runtime.cwd,
+				runtime.conversation.cwd,
 			);
 			const workingDirectory =
 				source.worktreeId === undefined
@@ -791,7 +801,7 @@ export class IntegratedRuntimeRegistry {
 
 	/** Revoke pending review effects before waiting for affected stream lifecycles to drain. */
 	fenceReviewOperations(entries: Iterable<IntegratedRuntimeEntry>): void {
-		for (const entry of entries) this.revokedReviewAuthorities.add(entry.runtime);
+		for (const entry of entries) this.revokedReviewAuthorities.add(entry.runtime.conversation);
 	}
 
 	/** The conversation runtime key: one runtime per (workspaceName, sessionId). */
@@ -995,7 +1005,7 @@ export class IntegratedRuntimeRegistry {
 		created: boolean;
 		sessionSelection: IntegratedConversationSessionSelection;
 	}> {
-		let runtime: AgentSessionRuntime | undefined;
+		let runtime: IrohRemoteAgentRuntime | undefined;
 		let sessionSelection: IntegratedConversationSessionSelection | undefined;
 		let worktreePreparation: WorktreeRuntimePreparation | undefined;
 		try {
@@ -1082,10 +1092,10 @@ export class IntegratedRuntimeRegistry {
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
 			assertAttachAdmissionOpen(options.signal);
-			await bindPrReview?.(runtime.session.sessionWriter);
+			await bindPrReview?.(runtime.conversation.session.sessionWriter);
 			assertAttachAdmissionOpen(options.signal);
 			const runtimeDirectory = await waitForAttachAdmission(
-				resolveRuntimeWorkingDirectory(rootPath, runtime.cwd),
+				resolveRuntimeWorkingDirectory(rootPath, runtime.conversation.cwd),
 				options.signal,
 			);
 			const remoteWorkingDirectory =
@@ -1101,7 +1111,7 @@ export class IntegratedRuntimeRegistry {
 				throw createConversationOpenError(
 					"invalid_conversation_target",
 					"session id is already bound to a different working directory",
-					{ workspace: authorization.workspace.name, sessionId: runtime.session.sessionId },
+					{ workspace: authorization.workspace.name, sessionId: runtime.conversation.session.sessionId },
 				);
 			}
 			const echoedWorkingDirectory =
@@ -1110,7 +1120,7 @@ export class IntegratedRuntimeRegistry {
 				requestedWorkingDirectory === undefined
 					? undefined
 					: remoteWorkingDirectory;
-			const sessionId = runtime.session.sessionId;
+			const sessionId = runtime.conversation.session.sessionId;
 			const owner = this.findOwner(authorization.workspace.name, sessionId);
 			if (owner) {
 				const runtimeToDispose = runtime;
@@ -1210,7 +1220,7 @@ export class IntegratedRuntimeRegistry {
 		workspaceGeneration?: number;
 		projectTrusted: boolean;
 		sessionId: string;
-		runtime: AgentSessionRuntime;
+		runtime: IrohRemoteAgentRuntime;
 		parentSessionId?: string;
 		subagentId?: string;
 		worktreePreparation?: WorktreeRuntimePreparation;
@@ -1281,7 +1291,7 @@ export class IntegratedRuntimeRegistry {
 				allowUnlistedExtensionTools: options.toolPolicy.allowUnlistedExtensionTools,
 			},
 		};
-		entry.runtime.reviewDiscussions = this.reviewDiscussions.forRuntime(entry.runtime);
+		entry.reviewDiscussions = this.reviewDiscussions.forRuntime(entry.runtime.conversation);
 		return entry;
 	}
 
@@ -1311,7 +1321,7 @@ export class IntegratedRuntimeRegistry {
 				: { workspaceGeneration: parentEntry.workspaceGeneration }),
 			projectTrusted: parentEntry.projectTrusted,
 			sessionId: event.sessionId,
-			runtime: event.runtime,
+			runtime: { host: event.host, conversation: event.conversation },
 			parentSessionId: event.parentSessionId,
 			subagentId: event.id,
 			...(parentEntry.worktreeId === undefined ? {} : { worktreeId: parentEntry.worktreeId }),
@@ -1352,8 +1362,9 @@ export class IntegratedRuntimeRegistry {
 					return;
 				}
 				state = "rolled-back";
-				await entry.coordinator.beginRuntimeRetirement("subagent_start_rolled_back", () => event.runtime.dispose())
-					.settled;
+				await entry.coordinator.beginRuntimeRetirement("subagent_start_rolled_back", () =>
+					event.host.close(event.conversation),
+				).settled;
 			},
 		};
 	}
@@ -1587,7 +1598,7 @@ export class IntegratedRuntimeRegistry {
 		if (!entry.subscribers.has(subscriber) || subscriber.clientNodeId !== attachClaim.clientNodeId) {
 			throw this.createAttachRetryError(entry, "conversation subscriber is not owned by this attach");
 		}
-		return entry.runtime.startRecoveredClientInputs();
+		return entry.runtime.conversation.startRecoveredClientInputs();
 	}
 
 	/**
@@ -1701,15 +1712,14 @@ export class IntegratedRuntimeRegistry {
 				`Cannot stop conversation runtime ${entry.workspaceName}/${entry.sessionId} with active streams`,
 			);
 		}
-		const wasActive = entry.runtime.session.isBusy;
+		const wasActive = entry.runtime.conversation.session.isBusy;
 		let stopSuccess = true;
 		const stopErrors: string[] = [];
-		// dispose() closes structural admission synchronously, then waits for an
-		// admitted move and for operations holding the conversation open (a review
+		// Closing waits for operations holding the conversation open (a review
 		// reset or source write). Keep registry/lease reservations intact until
 		// they have settled.
 		try {
-			await entry.runtime.dispose();
+			await entry.runtime.host.close(entry.runtime.conversation);
 		} catch (error) {
 			stopSuccess = false;
 			stopErrors.push(`runtime disposal: ${error instanceof Error ? error.message : String(error)}`);
@@ -1815,17 +1825,18 @@ export class IntegratedRuntimeRegistry {
 		const ttlMs = ttlOverrideMs ?? this.options.detachedRuntimeTtlMs();
 		// Detached jobs and review workflows count as activity: their work must
 		// pin the runtime until it reaches a terminal state.
+		const conversation = entry.runtime.conversation;
 		const isEntryActive = () =>
-			entry.runtime.session.isBusy ||
-			entry.runtime.session.hasBackgroundJobs ||
-			entry.runtime.reviewWorkflows?.hasActiveWorkflows === true ||
-			this.reviewDiscussions.hasPendingWork(entry.runtime);
+			conversation.session.isBusy ||
+			conversation.session.hasBackgroundJobs ||
+			conversation.reviewWorkflows.hasActiveWorkflows ||
+			this.reviewDiscussions.hasPendingWork(conversation);
 		// Each wait must block while its own activity check above is true.
 		const waitForEntryIdle = async () => {
-			await entry.runtime.session.waitForNotBusy();
-			await entry.runtime.session.waitForBackgroundJobs();
-			await entry.runtime.reviewWorkflows?.waitForIdle();
-			await this.reviewDiscussions.waitForIdle(entry.runtime);
+			await conversation.session.waitForNotBusy();
+			await conversation.session.waitForBackgroundJobs();
+			await conversation.reviewWorkflows.waitForIdle();
+			await this.reviewDiscussions.waitForIdle(conversation);
 		};
 		const handle = scheduleDetachedRuntimeRetention({
 			ttlMs,
@@ -1878,7 +1889,7 @@ export class IntegratedRuntimeRegistry {
 			runtime: "integrated-volt",
 			sessionId: entry.sessionId,
 			subscriberCount: entry.subscribers.size,
-			active: entry.runtime.session.isBusy,
+			active: entry.runtime.conversation.session.isBusy,
 			...extraDetails,
 		};
 	}
@@ -1949,6 +1960,37 @@ export class IntegratedRuntimeRegistry {
 	}
 }
 
-async function cleanupUncommittedRuntime(runtime: AgentSessionRuntime): Promise<void> {
-	await runtime.dispose();
+async function cleanupUncommittedRuntime(runtime: IrohRemoteAgentRuntime): Promise<void> {
+	await runtime.host.close(runtime.conversation);
+}
+
+/**
+ * Open a review discussion beside `source`'s conversation, in its host,
+ * without moving any client. The discussion must share the source's exact cwd
+ * and carry a durable child binding; `manager` is owned from the call.
+ */
+async function openReviewDiscussionSibling(
+	source: IrohRemoteAgentRuntime,
+	manager: SessionManager,
+): Promise<IrohRemoteAgentRuntime> {
+	const conversation = source.conversation;
+	if (
+		conversation.session.isReviewDiscussion ||
+		!manager.getReviewDiscussion() ||
+		!sameFilesystemLocation(manager.getCwd(), conversation.cwd)
+	) {
+		await manager.closePersistence();
+		throw new Error("Review sibling requires an exact source cwd and a durable child binding");
+	}
+	const services = conversation.services;
+	const opened = await source.host.open(
+		{ kind: "adopt", sessionManager: manager, cwd: conversation.cwd },
+		{
+			profile: services.settingsManager.getRequestedProfile(),
+			...(services.workspaceName === undefined ? {} : { workspaceName: services.workspaceName }),
+			...(services.baseRef === undefined ? {} : { baseRef: services.baseRef }),
+		},
+	);
+	if (opened.cancelled) throw new Error("Review sibling open was cancelled");
+	return { host: source.host, conversation: opened.conversation };
 }

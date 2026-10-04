@@ -4,13 +4,9 @@ import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import type {
 	ConversationProjectionSnapshotBuilder,
 	ConversationProjectionSubscription,
@@ -19,6 +15,13 @@ import { buildRpcSessionState } from "../src/core/rpc/session-state.ts";
 import type { RpcConversationTranscriptItem } from "../src/core/rpc/types.ts";
 import { SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
 import { getCurrentConversationAuthority, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
+import { connectTestClient, type OpenTestHostOptions, openTestHost, type TestClient } from "./utilities/host-client.ts";
+
+/** Open a conversation in a host of its own and attach an in-place anchor client to it. */
+async function openRuntime(factory: ConversationFactory, options: OpenTestHostOptions): Promise<TestClient> {
+	const { host, conversation } = await openTestHost(factory, options);
+	return connectTestClient(host, conversation);
+}
 
 function messageText(message: AgentMessage): string {
 	if (message.role !== "user" && message.role !== "assistant") {
@@ -51,7 +54,7 @@ describe("AgentSession conversation generation commits", () => {
 		const faux = createFauxProvider();
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir,
 				authStorage,
@@ -74,7 +77,7 @@ describe("AgentSession conversation generation commits", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await openRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
@@ -140,7 +143,7 @@ describe("AgentSession conversation generation commits", () => {
 		};
 
 		const writes: object[] = [];
-		subscription = runtime.conversationProjectionFeed.attach({
+		subscription = runtime.conversation.projectionFeed.attach({
 			write: (value) => {
 				writes.push(value);
 			},
@@ -215,7 +218,7 @@ describe("AgentSession conversation generation commits", () => {
 		faux.setResponses([fauxAssistantMessage("streamed answer")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir,
 				authStorage,
@@ -238,8 +241,9 @@ describe("AgentSession conversation generation commits", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
-		const manager = SessionManager.inMemory(tempDir);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		// Stored beside the switch target, so a switch by id finds it before refusing the busy source.
+		const manager = await SessionManager.create(tempDir, tempDir);
+		const runtime = await openRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: manager,
@@ -336,7 +340,7 @@ describe("AgentSession conversation generation commits", () => {
 		faux.setResponses([fauxAssistantMessage("targeted assistant")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir,
 				authStorage,
@@ -360,7 +364,7 @@ describe("AgentSession conversation generation commits", () => {
 			};
 		};
 		const manager = SessionManager.inMemory(tempDir);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await openRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: manager,
@@ -439,7 +443,7 @@ describe("AgentSession conversation generation commits", () => {
 			faux.setResponses([fauxAssistantMessage("targeted assistant")]);
 			const authStorage = AuthStorage.inMemory();
 			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+			const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 				const services = await createAgentSessionServices({
 					agentDir: tempDir,
 					authStorage,
@@ -462,7 +466,7 @@ describe("AgentSession conversation generation commits", () => {
 					diagnostics: services.diagnostics,
 				};
 			};
-			const runtime = await createAgentSessionRuntime(createRuntime, {
+			const runtime = await openRuntime(createRuntime, {
 				cwd: tempDir,
 				agentDir: tempDir,
 				sessionManager: SessionManager.inMemory(tempDir),
@@ -512,7 +516,10 @@ describe("AgentSession conversation generation commits", () => {
 			}
 
 			vi.spyOn(runtime.session, "attachExtensionClient");
-			const mode = await startIrohRpcMode(runtime, runtime.session);
+			const mode = await startIrohRpcMode(
+				{ host: runtime.host, conversation: runtime.conversation },
+				runtime.session,
+			);
 			modePromise = mode.modePromise;
 			endMode = () => mode.recv.end();
 			const authority = getCurrentConversationAuthority(mode.send);
@@ -583,7 +590,7 @@ describe("AgentSession conversation generation commits", () => {
 		const faux = createFauxProvider();
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir,
 				authStorage,
@@ -607,7 +614,7 @@ describe("AgentSession conversation generation commits", () => {
 			};
 		};
 		const activeManager = await SessionManager.create(tempDir, tempDir);
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const runtime = await openRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: activeManager,
@@ -661,7 +668,7 @@ describe("AgentSession conversation generation commits", () => {
 		});
 
 		vi.spyOn(runtime.session, "attachExtensionClient");
-		const mode = await startIrohRpcMode(runtime, runtime.session);
+		const mode = await startIrohRpcMode({ host: runtime.host, conversation: runtime.conversation }, runtime.session);
 		modePromise = mode.modePromise;
 		endMode = () => mode.recv.end();
 		const id = `stale-structural-${name.replaceAll(" ", "-")}`;
@@ -723,7 +730,7 @@ describe("AgentSession conversation generation commits", () => {
 			const faux = createFauxProvider();
 			const authStorage = AuthStorage.inMemory();
 			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+			const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 				const services = await createAgentSessionServices({
 					agentDir: tempDir,
 					authStorage,
@@ -747,7 +754,7 @@ describe("AgentSession conversation generation commits", () => {
 				};
 			};
 			const manager = SessionManager.inMemory(tempDir);
-			const runtime = await createAgentSessionRuntime(createRuntime, {
+			const runtime = await openRuntime(createRuntime, {
 				cwd: tempDir,
 				agentDir: tempDir,
 				sessionManager: manager,
@@ -819,7 +826,10 @@ describe("AgentSession conversation generation commits", () => {
 			});
 
 			vi.spyOn(runtime.session, "attachExtensionClient");
-			const mode = await startIrohRpcMode(runtime, runtime.session);
+			const mode = await startIrohRpcMode(
+				{ host: runtime.host, conversation: runtime.conversation },
+				runtime.session,
+			);
 			modePromise = mode.modePromise;
 			endMode = () => mode.recv.end();
 			mode.recv.pushLine(

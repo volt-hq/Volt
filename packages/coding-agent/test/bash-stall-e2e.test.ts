@@ -19,15 +19,11 @@ import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import {
-	type AgentSessionRuntime,
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionRuntime,
-	createAgentSessionServices,
-} from "../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { connectTestClient, openTestHost, type TestClient } from "./utilities/host-client.ts";
 
 const isPosix = process.platform !== "win32";
 const hasPerl = (() => {
@@ -65,7 +61,7 @@ async function poll(predicate: () => boolean, timeoutMs: number): Promise<boolea
 }
 
 describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
-	let runtimeHost: AgentSessionRuntime | undefined;
+	let runtimeHost: TestClient | undefined;
 	let tempDir: string | undefined;
 
 	afterEach(async () => {
@@ -100,11 +96,7 @@ describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 		const sessionManager = SessionManager.inMemory(tempDir);
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({
-			cwd,
-			sessionManager: manager,
-			sessionStartEvent,
-		}) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager: manager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				agentDir: tempDir as string,
 				authStorage,
@@ -130,11 +122,12 @@ describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
 			};
 		};
 
-		runtimeHost = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager,
 		});
+		runtimeHost = await connectTestClient(host, conversation);
 		const session: AgentSession = runtimeHost.session;
 		session.subscribe(() => {});
 

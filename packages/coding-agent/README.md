@@ -509,7 +509,7 @@ await session.prompt("What files are in the current directory?");
 
 `session.state` is a readonly detached runtime projection. Use `AgentSession` mutation methods rather than assigning state properties or mutating its tool/message arrays and pending-tool collections.
 
-For advanced multi-session runtime replacement, use `createAgentSessionRuntime()` and `AgentSessionRuntime`.
+To open new, resumed, forked, or imported sessions and move clients between them, host them in a `ConversationHost`.
 
 See [docs/sdk.md](docs/sdk.md) and [examples/sdk/](examples/sdk/).
 

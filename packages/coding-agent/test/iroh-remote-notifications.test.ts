@@ -1,7 +1,10 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
-import { type AgentSessionRuntime, isConversationTranscriptCommittedEvent } from "../src/core/agent-session-runtime.ts";
+import {
+	type HostedConversation,
+	isConversationTranscriptCommittedEvent,
+} from "../src/core/host/hosted-conversation.ts";
 import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
 import type { PlanningState } from "../src/core/planning.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
@@ -18,10 +21,11 @@ import {
 	type IrohRemotePushTarget,
 } from "../src/core/remote/iroh/index.ts";
 import type { ExecuteReviewWorkflowResult } from "../src/core/review.ts";
-import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
+import type { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
 import {
+	createTestConversation,
 	createTestIrohConversationOptions,
 	createTestSession,
 	isRecord,
@@ -198,18 +202,18 @@ function createAssistantMessage(overrides: Partial<AssistantAgentMessage> = {}):
 	};
 }
 
-function createTestTranscriptExternalProjection(runtimeHost: AgentSessionRuntime): (event: object) => object | null {
+function createTestTranscriptExternalProjection(conversation: HostedConversation): (event: object) => object | null {
 	return (event) => {
 		if (!isConversationTranscriptCommittedEvent(event)) {
 			return event;
 		}
-		const entry = createRemoteConversationTranscriptEntry(event.entry, TEST_TRANSCRIPT_AUTHORIZATION, runtimeHost);
+		const entry = createRemoteConversationTranscriptEntry(event.entry, TEST_TRANSCRIPT_AUTHORIZATION, conversation);
 		return entry === undefined ? null : { type: "transcript_entry", entry, final: true };
 	};
 }
 
-function publishTestTranscriptCommit(runtimeHost: AgentSessionRuntime, entry: SessionEntry): void {
-	runtimeHost.publishConversationProjectionEvent({ type: "conversation_transcript_committed", entry });
+function publishTestTranscriptCommit(conversation: HostedConversation, entry: SessionEntry): void {
+	conversation.projectionFeed.publishExternal({ type: "conversation_transcript_committed", entry });
 }
 
 function startTestReview(
@@ -446,15 +450,8 @@ describe("Iroh remote notification requests", () => {
 			relayClient,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			registerPushTarget: (args) => dispatcher.registerPushTarget(args),
 		});
 
@@ -558,15 +555,8 @@ describe("Iroh remote notification requests", () => {
 			retryDelayMs: 0,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			notificationDelivery: dispatcher,
 			workspaceName: "volt-app",
 		});
@@ -632,15 +622,8 @@ describe("Iroh remote notification requests", () => {
 				};
 			},
 		);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			workspaceName: "volt-app",
 		});
 
@@ -732,15 +715,8 @@ describe("Iroh remote notification requests", () => {
 			retryDelayMs: 0,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			notificationDelivery: dispatcher,
 			workspaceName: "volt-app",
 		});
@@ -788,15 +764,8 @@ describe("Iroh remote notification requests", () => {
 				session.messages = [createAssistantMessage({ stopReason: "aborted" })];
 			},
 		);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 
 		recv.pushLine(
 			JSON.stringify(
@@ -840,19 +809,12 @@ describe("Iroh remote notification requests", () => {
 			retryDelayMs: 0,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
+		const target = createTestConversation(session);
 		const recv = new ManualIrohRecvStream();
 		const send = new ThrowingIrohSendStream();
-		const modePromise = runIrohRemoteRpcMode(runtimeHost, {
-			...createTestIrohConversationOptions(runtimeHost),
-			disposeRuntimeOnClose: false,
+		const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
+			...createTestIrohConversationOptions(target.conversation),
+			anchor: false,
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			notificationDelivery: dispatcher,
 			stream: { recv, send },
@@ -888,8 +850,7 @@ describe("Iroh remote notification requests", () => {
 		await expect(modePromise).rejects.toThrow("send closed");
 	});
 
-	test("streams displayed review custom messages as transcript entries after session rebind", async () => {
-		const initialSession = createTestSession("initial-session", "initial-entry");
+	test("streams displayed review custom messages as transcript entries", async () => {
 		const reviewSession = createTestSession("review-session", "review-entry");
 		const reviewContent = [{ type: "text" as const, text: "Review findings" }];
 		const reviewEntry = {
@@ -903,29 +864,12 @@ describe("Iroh remote notification requests", () => {
 			display: true,
 		} as unknown as SessionEntry;
 		reviewSession.sessionManager.getBranch.mockReturnValue([reviewEntry]);
-		let currentSession = initialSession;
-		const setRebindSession = vi.fn();
-		const runtimeHost = {
-			get session() {
-				return currentSession;
-			},
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession,
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, initialSession, {
-			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		const target = createTestConversation(reviewSession);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, reviewSession, {
+			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
 		});
-		const rebindSession = setRebindSession.mock.calls[0]?.[0] as (() => Promise<void>) | undefined;
-		if (!rebindSession) {
-			throw new Error("Expected runIrohRemoteRpcMode to register a session rebind callback");
-		}
 
-		currentSession = reviewSession;
-		await rebindSession();
-		publishTestTranscriptCommit(runtimeHost, reviewEntry);
+		publishTestTranscriptCommit(target.conversation, reviewEntry);
 
 		await vi.waitFor(() =>
 			expect(parseWrittenObjects(send)).toContainEqual(
@@ -965,18 +909,11 @@ describe("Iroh remote notification requests", () => {
 			message: assistantMessage,
 		} as unknown as SessionEntry;
 		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
 		});
-		publishTestTranscriptCommit(runtimeHost, assistantEntry);
+		publishTestTranscriptCommit(target.conversation, assistantEntry);
 
 		await vi.waitFor(() =>
 			expect(parseWrittenObjects(send)).toContainEqual(
@@ -1035,18 +972,11 @@ describe("Iroh remote notification requests", () => {
 			message: assistantMessage,
 		} as unknown as SessionEntry;
 		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
 		});
-		publishTestTranscriptCommit(runtimeHost, assistantEntry);
+		publishTestTranscriptCommit(target.conversation, assistantEntry);
 
 		await vi.waitFor(() =>
 			expect(parseWrittenObjects(send)).toContainEqual(
@@ -1215,22 +1145,15 @@ describe("Iroh remote notification requests", () => {
 			},
 		] as unknown as SessionEntry[];
 		session.sessionManager.getBranch.mockReturnValue(branch);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
 		});
 		for (let index = 1; index < branch.length; index++) {
 			const entry = branch[index]!;
 			session.leafId = entry.id;
 			session.sessionManager.getBranch.mockReturnValue(branch.slice(0, index + 1));
-			publishTestTranscriptCommit(runtimeHost, entry);
+			publishTestTranscriptCommit(target.conversation, entry);
 		}
 
 		await vi.waitFor(() => {
@@ -1355,18 +1278,11 @@ describe("Iroh remote notification requests", () => {
 			},
 		] as unknown as SessionEntry[];
 		session.sessionManager.getBranch.mockReturnValue(branch);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(runtimeHost),
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
+			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
 		});
-		publishTestTranscriptCommit(runtimeHost, branch[1]!);
+		publishTestTranscriptCommit(target.conversation, branch[1]!);
 
 		await vi.waitFor(() => {
 			const objects = parseWrittenObjects(send);
@@ -1410,15 +1326,8 @@ describe("Iroh remote notification requests", () => {
 			relayClient,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			notificationDelivery: dispatcher,
 			workspaceName: "volt-app",
 		});
@@ -1473,15 +1382,8 @@ describe("Iroh remote notification requests", () => {
 			retryDelayMs: 0,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			notificationDelivery: dispatcher,
 		});
 
@@ -1537,15 +1439,8 @@ describe("Iroh remote notification requests", () => {
 			retryDelayMs: 0,
 			stateManager,
 		});
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session, {
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
 			notificationDelivery: dispatcher,
 		});
 
@@ -1593,15 +1488,8 @@ describe("Iroh remote notification requests", () => {
 				session.leafId = "conversation-run";
 			},
 		);
-		const runtimeHost = {
-			session,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 
 		recv.pushLine(
 			JSON.stringify(
@@ -1634,17 +1522,9 @@ describe("Iroh remote notification requests", () => {
 
 	test("formats complete and incomplete review results from retained workflow records", async () => {
 		const session = createTestSession("session-one", "review-run");
-		const reviewWorkflows = new ReviewWorkflowManager();
-		const runtimeHost = {
-			session,
-			reviewWorkflows,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const reviewWorkflows = target.conversation.reviewWorkflows;
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 		const completions: Array<[string, ExecuteReviewWorkflowResult]> = [
 			["review:zero", completedReview(0)],
 			["review:one", completedReview(1)],
@@ -1675,17 +1555,9 @@ describe("Iroh remote notification requests", () => {
 
 	test("omits malicious review targets and cancelled reviews from lock-screen delivery", async () => {
 		const session = createTestSession("session-one", "review-run");
-		const reviewWorkflows = new ReviewWorkflowManager();
-		const runtimeHost = {
-			session,
-			reviewWorkflows,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
+		const target = createTestConversation(session);
+		const reviewWorkflows = target.conversation.reviewWorkflows;
+		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
 		const privateContextResult = completedReview(2);
 		if (privateContextResult.status !== "completed") throw new Error("Expected a completed review fixture");
 		privateContextResult.parsed.summary = "PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT";
@@ -1723,17 +1595,9 @@ describe("Iroh remote notification requests", () => {
 
 	test("retains detached review completion for reconnect and does not repeat an already delivered event", async () => {
 		const session = createTestSession("session-one", "review-run");
-		const reviewWorkflows = new ReviewWorkflowManager();
-		const runtimeHost = {
-			session,
-			reviewWorkflows,
-			newSession: vi.fn(async () => ({ cancelled: true })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const firstMode = await startIrohRpcMode(runtimeHost, session, { clientNodeId: "paired-client" });
+		const target = createTestConversation(session);
+		const reviewWorkflows = target.conversation.reviewWorkflows;
+		const firstMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
 		const review = startTestReview(reviewWorkflows, "review:reconnect", "PR #151");
 		firstMode.recv.end();
 		await expect(firstMode.modePromise).resolves.toBeUndefined();
@@ -1742,7 +1606,7 @@ describe("Iroh remote notification requests", () => {
 		expect(getNotifications(firstMode.send)).toEqual([]);
 
 		session.attachExtensionClient.mockClear();
-		const secondMode = await startIrohRpcMode(runtimeHost, session, { clientNodeId: "paired-client" });
+		const secondMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
 		await vi.waitFor(() =>
 			expect(getNotifications(secondMode.send)).toEqual([
 				{
@@ -1761,7 +1625,7 @@ describe("Iroh remote notification requests", () => {
 		await expect(secondMode.modePromise).resolves.toBeUndefined();
 
 		session.attachExtensionClient.mockClear();
-		const thirdMode = await startIrohRpcMode(runtimeHost, session, { clientNodeId: "paired-client" });
+		const thirdMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(getNotifications(thirdMode.send)).toEqual([]);
 		thirdMode.recv.end();
@@ -1769,22 +1633,9 @@ describe("Iroh remote notification requests", () => {
 	});
 
 	test("emits one review completion notification after a detached remote review completes", async () => {
-		const currentSession = createTestSession("initial-session", "initial-run");
-		const runtimeHost = {
-			get session() {
-				return currentSession;
-			},
-			cwd: "/workspace",
-			services: { agentDir: "/agent" },
-			reviewWorkflows: new ReviewWorkflowManager(),
-			newSession: vi.fn(async () => ({ cancelled: false })),
-			switchSession: vi.fn(async () => ({ cancelled: true })),
-			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-		} as unknown as AgentSessionRuntime;
-		const startupSession = currentSession;
-		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, startupSession);
+		const startupSession = createTestSession("initial-session", "initial-run");
+		const target = createTestConversation(startupSession, { agentDir: "/agent" });
+		const { modePromise, recv, send } = await startIrohRpcMode(target, startupSession);
 
 		recv.pushLine(
 			JSON.stringify(
@@ -1811,8 +1662,9 @@ describe("Iroh remote notification requests", () => {
 			]),
 		);
 		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledOnce();
-		// The detached review never force-switches the client's session.
-		expect(runtimeHost.newSession).not.toHaveBeenCalled();
+		// The detached review never moves the client to another conversation.
+		expect(target.host.list()).toEqual([target.conversation]);
+		expect(target.conversation.closed).toBe(false);
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();

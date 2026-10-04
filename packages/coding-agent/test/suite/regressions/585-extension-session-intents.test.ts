@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { AgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionIntentResult } from "../../../src/core/extensions/index.ts";
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
-import type { SessionReference } from "../../../src/core/session-manager.ts";
+import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
+import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
+import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
 describe("regression #585: extension session control returns the id of the session the client moved to", () => {
@@ -66,14 +68,10 @@ describe("regression #585: extension session control returns the id of the sessi
 		});
 		const source = await harness.openStartup();
 		await source.session.prompt("first prompt");
-		const runtime = new AgentSessionRuntime(harness.host, source);
-		cleanups.push(async () => {
-			await runtime.dispose();
-			await harness.cleanup();
-		});
+		cleanups.push(() => harness.cleanup());
 		return {
 			harness,
-			runtime,
+			source,
 			results,
 			seededIn,
 			starts,
@@ -84,12 +82,12 @@ describe("regression #585: extension session control returns the id of the sessi
 	}
 
 	it("returns the new, resumed, and forked session's id from ctx.newSession, ctx.switchSession, and ctx.fork", async () => {
-		const { runtime, results, seededIn, starts } = await setup();
-		const first = runtime.session.sessionId;
-		const forkFrom = runtime.session.getUserMessagesForForking()[0]!.entryId;
+		const { harness, source, results, seededIn, starts } = await setup();
+		const first = source.id;
+		const forkFrom = source.session.getUserMessagesForForking()[0]!.entryId;
 
 		// Print mode runs each command for its one client, which moves with each intent.
-		const exitCode = await runPrintMode(runtime, {
+		const exitCode = await runPrintMode(harness.host, source, {
 			mode: "text",
 			messages: ["/intent-new", `/intent-switch ${first}`, `/intent-switch ${first}`, `/intent-fork ${forkFrom}`],
 		});
@@ -113,12 +111,12 @@ describe("regression #585: extension session control returns the id of the sessi
 	});
 
 	it("returns only cancelled: true when an extension cancels, and the client stays on its session", async () => {
-		const { runtime, results, seededIn, starts, cancelNext } = await setup();
-		const first = runtime.session.sessionId;
-		const forkFrom = runtime.session.getUserMessagesForForking()[0]!.entryId;
+		const { harness, source, results, seededIn, starts, cancelNext } = await setup();
+		const first = source.id;
+		const forkFrom = source.session.getUserMessagesForForking()[0]!.entryId;
 		cancelNext(true);
 
-		await runPrintMode(runtime, {
+		await runPrintMode(harness.host, source, {
 			mode: "text",
 			messages: ["/intent-new", `/intent-fork ${forkFrom}`, `/intent-switch ${first}`],
 		});
@@ -133,9 +131,44 @@ describe("regression #585: extension session control returns the id of the sessi
 		expect(starts.map((start) => start.sessionId)).toEqual([first]);
 	});
 
+	it("lets an extension command that a stdio RPC prompt runs change sessions", async () => {
+		const { harness, source, results, seededIn, starts } = await setup();
+		const pair = createLoopbackRpcTransportPair();
+		const client = new RpcTransportClient({ transport: pair.client });
+		await client.start();
+		const ready = Promise.withResolvers<void>();
+		const closed = runRpcMode(harness.host, source, { transport: pair.server, onReady: ready.resolve });
+		await Promise.race([ready.promise, closed]);
+		cleanups.push(async () => {
+			await client.stop();
+			await closed.catch(() => undefined);
+		});
+		const sourceRef = source.session.sessionRef!;
+
+		// The prompt's durable input is the command's: it settles as the command leaves the session.
+		await client.prompt("/intent-new");
+		await vi.waitFor(() => expect(results).toHaveLength(1));
+
+		const [result] = results;
+		if (!result || result.cancelled) throw new Error("Expected the command to move the client");
+		expect(result.seeded).toBe(true);
+		expect(seededIn).toEqual([result.sessionId]);
+		expect(starts.map((start) => start.reason)).toEqual(["startup", "new"]);
+		await expect(client.getState()).resolves.toMatchObject({ sessionId: result.sessionId });
+		await vi.waitFor(() => expect(source.closed).toBe(true));
+		const stored = await SessionManager.openReadOnly(sourceRef);
+		try {
+			// Nothing the source recorded is left with an unknown outcome, the command's input included.
+			const inputs = [...stored.getConversationState().clientInputs.inputs.values()];
+			expect(inputs.map((input) => input.state)).toEqual(["completed", "completed"]);
+		} finally {
+			await stored.closePersistence();
+		}
+	});
+
 	it("reports cancelled when no attached client handles session changes", async () => {
-		const { runtime } = await setup();
-		const session = runtime.session;
+		const { harness, source } = await setup();
+		const session = source.session;
 		await session.attachExtensionClient({ id: "bare", mode: "print" }).ready;
 		const context = () => session.extensionRunner.createCommandContext();
 
@@ -144,6 +177,6 @@ describe("regression #585: extension session control returns the id of the sessi
 		await expect(context().switchSession(session.sessionRef!)).resolves.toEqual({ cancelled: true });
 		// A client that has left gets nothing either.
 		await expect(ClientScope.run("gone", () => context().newSession())).resolves.toEqual({ cancelled: true });
-		expect(runtime.session).toBe(session);
+		expect(harness.host.list()).toEqual([source]);
 	});
 });

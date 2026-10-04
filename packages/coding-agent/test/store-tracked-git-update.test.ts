@@ -76,7 +76,7 @@ interface FakeStorePackageManager {
 }
 
 interface InteractiveStoreMode {
-	runtimeHost: {
+	conversation: {
 		session: {
 			settingsManager: InteractiveSettingsManager;
 			sessionManager: { getCwd(): string };
@@ -138,7 +138,7 @@ function createInteractiveMode(packageManager: FakeStorePackageManager): Interac
 		getCwd: () => "/repo/project",
 	};
 	return Object.assign(Object.create(InteractiveMode.prototype) as InteractiveStoreMode, {
-		runtimeHost: {
+		conversation: {
 			session: {
 				settingsManager,
 				sessionManager,

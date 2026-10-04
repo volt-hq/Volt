@@ -3,11 +3,8 @@ import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall, type Prov
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantStreamNormalizer } from "../../../ai/src/stream/normalizer.ts";
-import {
-	type CreateAgentSessionRuntimeFactory,
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "../../src/core/agent-session-runtime.ts";
+import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
+import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import { SubagentManager } from "../../src/core/subagents/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
@@ -211,7 +208,7 @@ describe("tool response transport recovery", () => {
 					return exhausted ? interruptedResponse()(...args) : fauxAssistantMessage("review complete");
 				},
 			]);
-			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager }) => {
+			const createRuntime: ConversationFactory = async ({ cwd, agentDir, sessionManager }) => {
 				const services = await createAgentSessionServices({
 					cwd,
 					agentDir,

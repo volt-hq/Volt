@@ -130,7 +130,10 @@ export interface SessionExtensionBindingHost {
 export interface ExtensionClient {
 	/** Matches the client scope the client's requests run in. */
 	readonly id: string;
-	/** The client's run mode. The first client to attach fixes the session's `ctx.mode`. */
+	/**
+	 * The client's run mode. The first client to attach fixes the session's
+	 * `ctx.mode`; a `ConversationHost` attaches every client in its own mode.
+	 */
 	readonly mode: ExtensionMode;
 	/** Where dialogs, notifications, status, and widgets show. A client without one receives no UI calls. */
 	readonly ui?: ExtensionUIContext;

@@ -116,10 +116,11 @@ export class SessionLifecycle {
 	}
 
 	/**
-	 * Dispose the session; every caller joins one disposal. A replacement does
-	 * not wait for admitted prompt work, which may be what replaces it.
+	 * Dispose the session; every caller joins one disposal. With
+	 * `leavePromptWork` it does not wait for admitted prompt work, which may be
+	 * the extension command that moved the session's clients away.
 	 */
-	dispose(source: AgentAbortSource, replacement: boolean): Promise<void> {
+	dispose(source: AgentAbortSource, leavePromptWork: boolean): Promise<void> {
 		if (!this.disposePromise) {
 			// Fence observable runtime state before any asynchronous close barrier.
 			// Late conversation events are ignored by the disposed guard and cannot
@@ -138,7 +139,7 @@ export class SessionLifecycle {
 			this.disposePromise = disposal;
 			// Publish the join before cancellation invokes reentrant abort listeners.
 			const backgroundDrain = this.host.closeBackgroundJobs();
-			void this.performDispose(source, replacement, backgroundDrain).then(resolveDisposal, rejectDisposal);
+			void this.performDispose(source, leavePromptWork, backgroundDrain).then(resolveDisposal, rejectDisposal);
 		}
 		return this.disposePromise;
 	}
@@ -150,7 +151,7 @@ export class SessionLifecycle {
 
 	private async performDispose(
 		source: AgentAbortSource,
-		replacement: boolean,
+		leavePromptWork: boolean,
 		backgroundDrain: Promise<void>,
 	): Promise<void> {
 		const conversation = this.host.conversation();
@@ -165,7 +166,7 @@ export class SessionLifecycle {
 		} catch {
 			// Dispose must continue even if an abort hook throws.
 		}
-		await this.host.drainAdmittedWork(!replacement);
+		await this.host.drainAdmittedWork(!leavePromptWork);
 
 		let subagentDrain: Promise<void>;
 		let mcpDrain: Promise<void>;

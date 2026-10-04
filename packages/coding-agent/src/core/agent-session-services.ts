@@ -29,7 +29,7 @@ import type { SubagentToolManager } from "./tools/index.ts";
  * exiting. The app layer decides whether warnings should be shown and whether
  * errors should abort startup.
  */
-export interface AgentSessionRuntimeDiagnostic {
+export interface AgentSessionDiagnostic {
 	type: "info" | "warning" | "error";
 	message: string;
 }
@@ -110,18 +110,18 @@ export interface AgentSessionServices {
 	releaseGitContextProvider: () => void;
 	workspaceName?: string;
 	baseRef?: string;
-	diagnostics: AgentSessionRuntimeDiagnostic[];
+	diagnostics: AgentSessionDiagnostic[];
 }
 
 function applyExtensionFlagValues(
 	resourceLoader: ResourceLoader,
 	extensionFlagValues: Map<string, boolean | string> | undefined,
-): AgentSessionRuntimeDiagnostic[] {
+): AgentSessionDiagnostic[] {
 	if (!extensionFlagValues) {
 		return [];
 	}
 
-	const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+	const diagnostics: AgentSessionDiagnostic[] = [];
 	const extensionsResult = resourceLoader.getExtensions();
 	const registeredFlags = new Map<string, { type: "boolean" | "string" }>();
 	for (const extension of extensionsResult.extensions) {
@@ -201,7 +201,7 @@ export async function createAgentSessionServices(
 	void gitContextProvider.refresh();
 
 	try {
-		const diagnostics: AgentSessionRuntimeDiagnostic[] = [];
+		const diagnostics: AgentSessionDiagnostic[] = [];
 		const extensionsResult = resourceLoader.getExtensions();
 		for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
 			try {
@@ -248,9 +248,9 @@ export async function createAgentSessionServices(
 /**
  * Create an AgentSession from previously created services.
  *
- * This helper is intended for a CreateAgentSessionRuntimeFactory callback. The
- * enclosing runtime operation owns manager cleanup until this returns; this
- * function therefore does not close the manager on pre-session failure.
+ * This helper is intended for a `ConversationFactory` callback. The enclosing
+ * host owns manager cleanup until this returns; this function therefore does
+ * not close the manager on pre-session failure.
  *
  * This keeps session creation separate from service creation so callers can
  * resolve model, thinking, tools, and other session inputs against the target

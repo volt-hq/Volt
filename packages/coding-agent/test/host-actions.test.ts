@@ -82,7 +82,6 @@ describe("HostActionRegistry", () => {
 	});
 
 	test("registers the built-in new session action", async () => {
-		const afterSessionSwitch = vi.fn(async () => {});
 		const newSession = vi.fn(async () => ({ cancelled: false as const, sessionId: "new-session", seeded: false }));
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 		const context = {
@@ -90,7 +89,6 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession,
-			afterSessionSwitch,
 			renameSession: vi.fn(async () => {}),
 		};
 
@@ -116,8 +114,9 @@ describe("HostActionRegistry", () => {
 			stateChanged: true,
 			actionsChanged: true,
 		});
+		// The client that asked follows the move through its host; the action only asks for the new session.
+		expect(newSession).toHaveBeenCalledOnce();
 		expect(newSession).toHaveBeenCalledWith(undefined);
-		expect(afterSessionSwitch).toHaveBeenCalledOnce();
 	});
 
 	test("validates descriptor argument schema subset before invoking handlers", async () => {

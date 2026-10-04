@@ -39,43 +39,32 @@ describe("InteractiveMode extension settlement", () => {
 		const sessionWaitForIdle = vi.fn(async () => undefined);
 		const session = {
 			isBusy: true,
-			attachExtensionClient: vi.fn((_options: { commandContextActions: { waitForIdle(): Promise<void> } }) => ({
-				ready: Promise.resolve(),
-				detach: () => {},
-			})),
-			extensionRunner: {},
-			resourceLoader: { getThemes: () => ({ themes: [] }) },
 			waitForIdle: sessionWaitForIdle,
 		};
 		const fakeThis = {
 			createExtensionUIContext: vi.fn(() => ({})),
 			session,
-			setupAutocompleteProvider: vi.fn(),
-			setupExtensionShortcuts: vi.fn(),
-			showLoadedResources: vi.fn(),
-			showStartupNoticesIfNeeded: vi.fn(),
 			shutdownRequested: false,
 			shutdown: vi.fn(async () => undefined),
 		};
-		const attachSessionExtensions = Reflect.get(InteractiveMode.prototype, "attachSessionExtensions") as (
+		const createExtensionSurface = Reflect.get(InteractiveMode.prototype, "createExtensionSurface") as (
 			this: typeof fakeThis,
-			currentSession: typeof session,
-		) => Promise<void>;
-
-		await attachSessionExtensions.call(fakeThis, session);
-		const options = session.attachExtensionClient.mock.calls[0]?.[0] as {
+		) => {
 			commandContextActions: { waitForIdle(): Promise<void> };
 			shutdownHandler(): void;
 		};
-		await options.commandContextActions.waitForIdle();
+
+		// The host attaches this surface to every session the TUI joins.
+		const surface = createExtensionSurface.call(fakeThis);
+		await surface.commandContextActions.waitForIdle();
 
 		expect(sessionWaitForIdle).toHaveBeenCalledOnce();
 
-		options.shutdownHandler();
+		surface.shutdownHandler();
 		expect(fakeThis.shutdownRequested).toBe(true);
 		expect(fakeThis.shutdown).not.toHaveBeenCalled();
 		session.isBusy = false;
-		options.shutdownHandler();
+		surface.shutdownHandler();
 		expect(fakeThis.shutdown).toHaveBeenCalledOnce();
 	});
 });

@@ -7,14 +7,14 @@ import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
-	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
-	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../../src/core/agent-session-runtime.ts";
+} from "../../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import type { ConversationFactory } from "../../../../src/core/host/hosted-conversation.ts";
 import { SessionManager, type SessionReference } from "../../../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../../src/index.ts";
+import { connectTestClient, openTestHost, type TestClient } from "../../../utilities/host-client.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -49,7 +49,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 
-		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 			const services = await createAgentSessionServices({
 				cwd,
 				agentDir: tempDir,
@@ -93,23 +93,26 @@ describe("regression #2860: replaced session callbacks", () => {
 			};
 		};
 
-		const runtime = await createAgentSessionRuntime(createRuntime, {
+		const { host, conversation } = await openTestHost(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
 			sessionManager: await SessionManager.create(tempDir),
 		});
 
-		const rebindSession = async (): Promise<void> => {
-			const session = runtime.session;
-			await session.attachExtensionClient({
-				id: "test",
-				mode: "print",
+		// The host attaches the client's surface on every conversation it moves to.
+		const runtime: TestClient = await connectTestClient(host, conversation, {
+			surface: {
 				commandContextActions: {
-					waitForIdle: () => session.waitForIdle(),
+					waitForIdle: () => runtime.session.waitForIdle(),
 					newSession: async (options) => runtime.newSession(options),
-					fork: (entryId, options) => runtime.fork(entryId, options),
+					fork: async (entryId, options) => {
+						const result = await runtime.fork(entryId, options);
+						return result.cancelled
+							? result
+							: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+					},
 					navigateTree: async (targetId, options) => {
-						const result = await session.navigateTree(targetId, {
+						const result = await runtime.session.navigateTree(targetId, {
 							summarize: options?.summarize,
 							customInstructions: options?.customInstructions,
 							replaceInstructions: options?.replaceInstructions,
@@ -119,19 +122,14 @@ describe("regression #2860: replaced session callbacks", () => {
 					},
 					switchSession: async (sessionRef, options) => runtime.switchSession(sessionRef, options),
 					reload: async () => {
-						await session.reload();
+						await runtime.session.reload();
 					},
 				},
-			}).ready;
-		};
-
-		runtime.setRebindSession(async () => {
-			await rebindSession();
+			},
 		});
-		await rebindSession();
 
 		cleanups.push(async () => {
-			await runtime.dispose();
+			await host.dispose();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -140,7 +138,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		return { runtime, faux };
 	}
 
-	it("rebinds before withSession, targets the replacement session, and invalidates stale volt/ctx", async () => {
+	it("attaches the client before withSession, targets the new session, and invalidates stale volt/ctx", async () => {
 		const events: string[] = [];
 		let oldCtx: ExtensionCommandContext | undefined;
 		let oldVolt: ExtensionAPI | undefined;
