@@ -955,14 +955,14 @@ describe("ExtensionRunner", () => {
 		it("passes fork options through to the bound handler", async () => {
 			const runtime = createExtensionRuntime();
 			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
-			const fork = vi.fn(async () => ({ cancelled: false, seeded: false }));
+			const fork = vi.fn(async () => ({ cancelled: false as const, sessionId: "forked", seeded: false }));
 
 			runner.bindCommandContext({
 				waitForIdle: async () => {},
-				newSession: async () => ({ cancelled: false, seeded: false }),
+				newSession: async () => ({ cancelled: true }),
 				fork,
 				navigateTree: async () => ({ cancelled: false }),
-				switchSession: async () => ({ cancelled: false, seeded: false }),
+				switchSession: async () => ({ cancelled: true }),
 				reload: async () => {},
 			});
 

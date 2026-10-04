@@ -55,6 +55,7 @@ import type {
 	SessionBeforeForkResult,
 	SessionBeforeSwitchResult,
 	SessionBeforeTreeResult,
+	SessionIntentResult,
 	SessionShutdownEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -194,12 +195,12 @@ export type NewSessionHandler = (options?: {
 	parentSessionRef?: SessionReference;
 	setup?: (writer: SessionWriter) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-}) => Promise<{ cancelled: boolean; seeded: boolean }>;
+}) => Promise<SessionIntentResult>;
 
 export type ForkHandler = (
 	entryId: string,
 	options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-) => Promise<{ cancelled: boolean; seeded: boolean }>;
+) => Promise<SessionIntentResult>;
 
 export type NavigateTreeHandler = (
 	targetId: string,
@@ -209,7 +210,7 @@ export type NavigateTreeHandler = (
 export type SwitchSessionHandler = (
 	sessionRef: SessionReference,
 	options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-) => Promise<{ cancelled: boolean; seeded: boolean }>;
+) => Promise<SessionIntentResult>;
 
 export type ReloadHandler = () => Promise<void>;
 
@@ -317,10 +318,10 @@ export class ExtensionRunner {
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () => ({ cwd: this.cwd });
-	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false, seeded: false });
-	private forkHandler: ForkHandler = async () => ({ cancelled: false, seeded: false });
+	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: true });
+	private forkHandler: ForkHandler = async () => ({ cancelled: true });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
-	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false, seeded: false });
+	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: true });
 	private reloadHandler: ReloadHandler = async () => {};
 	private shutdownHandler: ShutdownHandler = () => {};
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
@@ -468,10 +469,10 @@ export class ExtensionRunner {
 		}
 
 		this.waitForIdleFn = async () => {};
-		this.newSessionHandler = async () => ({ cancelled: false, seeded: false });
-		this.forkHandler = async () => ({ cancelled: false, seeded: false });
+		this.newSessionHandler = async () => ({ cancelled: true });
+		this.forkHandler = async () => ({ cancelled: true });
 		this.navigateTreeHandler = async () => ({ cancelled: false });
-		this.switchSessionHandler = async () => ({ cancelled: false, seeded: false });
+		this.switchSessionHandler = async () => ({ cancelled: true });
 		this.reloadHandler = async () => {};
 	}
 

@@ -1129,7 +1129,7 @@ volt.registerCommand("my-cmd", {
 
 ### ctx.newSession(options?)
 
-Create a new session:
+Create a new session and move the client whose command called it there. The result carries the new session's id:
 
 ```typescript
 const parentSessionRef = ctx.sessionManager.getSessionRef();
@@ -1152,10 +1152,12 @@ const result = await ctx.newSession({
 
 if (result.cancelled) {
   // An extension cancelled the new session
-} else if (!result.seeded) {
-  // The replacement session was applied but your withSession callback was
-  // skipped (recovered durable client input failed to replay). Nothing you
-  // intended to seed reached the new session.
+} else {
+  console.log(`Now in session ${result.sessionId}`);
+  if (!result.seeded) {
+    // The new session was opened but your withSession callback was skipped
+    // (recovered durable client input failed to replay).
+  }
 }
 ```
 
@@ -1164,9 +1166,9 @@ Options:
 - `setup`: write the new session before it opens, through its async `SessionWriter` (`writer.sessionManager` reads it), before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-Result:
-- `cancelled`: an extension cancelled the operation; the current session is unchanged
-- `seeded`: `true` only when a requested `withSession` callback ran to completion. `cancelled: false` with `seeded: false` after passing `withSession` means the callback did not run: either the switch was a no-op targeting the current session (`switchSession` only), or the replacement was applied but the callback was skipped because recovered durable client input failed to replay. Check `seeded` before assuming your seed landed. `fork()` and `switchSession()` return the same shape.
+Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
+- `{ cancelled: true }`: the session did not change, because an extension cancelled it or no client handles session changes. No `withSession` callback ran.
+- `{ cancelled: false, sessionId, seeded }`: `sessionId` is the session the invoking client is on now; for `switchSession()` to the current session it is the current one. `seeded` is `true` only when a requested `withSession` callback ran to completion. `seeded: false` after passing `withSession` means the callback did not run: either the switch was a no-op targeting the current session (`switchSession` only), or the callback was skipped because recovered durable client input failed to replay. Check `seeded` before assuming your seed landed. Anything `setup` wrote is in the new session either way.
 
 `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` reject inside a subagent's conversation: a subagent stays in the conversation its parent opened for it.
 
@@ -1183,6 +1185,8 @@ const result = await ctx.fork("entry-id-123", {
 });
 if (result.cancelled) {
   // An extension cancelled the fork
+} else {
+  console.log(`Forked into session ${result.sessionId}`);
 }
 
 const cloneResult = await ctx.fork("entry-id-456", { position: "at" });

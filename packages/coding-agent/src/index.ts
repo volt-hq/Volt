@@ -155,6 +155,7 @@ export type {
 	SessionBeforeSwitchEvent,
 	SessionBeforeTreeEvent,
 	SessionCompactEvent,
+	SessionIntentResult,
 	SessionShutdownEvent,
 	SessionStartEvent,
 	SessionTreeEvent,
@@ -632,7 +633,6 @@ export {
 } from "./core/rpc/index.ts";
 // SDK for programmatic usage
 export {
-	type AgentSessionReplacementResult,
 	AgentSessionRuntime,
 	type AgentSessionRuntimeDiagnostic,
 	type AgentSessionServices,

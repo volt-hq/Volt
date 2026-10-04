@@ -389,25 +389,21 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	waitForIdle(): Promise<void>;
 
 	/**
-	 * Start a new session, optionally with initialization.
-	 *
-	 * `seeded` is `true` only when the requested `withSession` callback ran to
-	 * completion. A non-cancelled result with `seeded: false` means the
-	 * replacement session was applied but the callback was skipped because
-	 * recovered durable client input failed to replay.
+	 * Start a new session, optionally with initialization, and move the client
+	 * whose command called it there. Resolves with the new session's id.
 	 */
 	newSession(options?: {
 		parentSessionRef?: SessionReference;
 		/** Write the new session before it opens, such as entries to seed it with. */
 		setup?: (writer: SessionWriter) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}): Promise<{ cancelled: boolean; seeded: boolean }>;
+	}): Promise<SessionIntentResult>;
 
-	/** Fork from a specific entry, creating a new persisted session. See `newSession` for `seeded`. */
+	/** Fork from a specific entry into a new persisted session and move the invoking client there. */
 	fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; seeded: boolean }>;
+	): Promise<SessionIntentResult>;
 
 	/** Navigate to a different point in the session tree. */
 	navigateTree(
@@ -415,15 +411,36 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Switch to a different persisted session. See `newSession` for `seeded`. */
+	/** Switch to a different persisted session and move the invoking client there. */
 	switchSession(
 		sessionRef: SessionReference,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<{ cancelled: boolean; seeded: boolean }>;
+	): Promise<SessionIntentResult>;
 
 	/** Reload extensions, skills, prompts, and themes. */
 	reload(): Promise<void>;
 }
+
+/**
+ * The outcome of a session intent (`newSession`, `fork`, `switchSession`).
+ *
+ * - `cancelled: true`: the session did not change, because an extension
+ *   cancelled it or no client handles session changes; no `withSession`
+ *   callback ran.
+ * - `cancelled: false`: `sessionId` is the session the invoking client is on
+ *   now (the current one for a switch to itself). `seeded` is `true` only when
+ *   the requested `withSession` callback ran to completion; it is `false` when
+ *   none was requested, for a switch to the current session, and when the
+ *   callback was skipped because recovered durable client input failed to
+ *   replay into the new session.
+ */
+export type SessionIntentResult =
+	| { cancelled: true }
+	| {
+			cancelled: false;
+			sessionId: string;
+			seeded: boolean;
+	  };
 
 /**
  * Fresh command-capable context bound to the replacement session after a session switch.
@@ -1690,11 +1707,11 @@ export interface ExtensionCommandContextActions {
 		parentSessionRef?: SessionReference;
 		setup?: (writer: SessionWriter) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	}) => Promise<{ cancelled: boolean; seeded: boolean }>;
+	}) => Promise<SessionIntentResult>;
 	fork: (
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean; seeded: boolean }>;
+	) => Promise<SessionIntentResult>;
 	navigateTree: (
 		targetId: string,
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
@@ -1702,7 +1719,7 @@ export interface ExtensionCommandContextActions {
 	switchSession: (
 		sessionRef: SessionReference,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	) => Promise<{ cancelled: boolean; seeded: boolean }>;
+	) => Promise<SessionIntentResult>;
 	reload: () => Promise<void>;
 }
 

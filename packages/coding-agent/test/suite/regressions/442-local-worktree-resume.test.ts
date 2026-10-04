@@ -11,6 +11,7 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-runtime.ts";
+import type { SessionIntentResult } from "../../../src/core/extensions/index.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
@@ -675,11 +676,11 @@ describe("#442 local archived-worktree resume", () => {
 		const resume = Reflect.get(InteractiveMode.prototype, "handleResumeSession") as (
 			this: InteractiveMode,
 			ref: typeof f.ref,
-		) => Promise<{ cancelled: boolean; seeded: boolean }>;
+		) => Promise<SessionIntentResult>;
 		vi.spyOn(process, "exit").mockImplementation(() => {
 			throw new Error("Unexpected TUI exit");
 		});
-		await expect(resume.call(context, f.ref)).resolves.toEqual({ cancelled: true, seeded: false });
+		await expect(resume.call(context, f.ref)).resolves.toEqual({ cancelled: true });
 		expect(showError).toHaveBeenCalledWith(expect.stringContaining(message));
 		expect(process.exit).not.toHaveBeenCalled();
 		expect(runtime.session).toBe(previous);

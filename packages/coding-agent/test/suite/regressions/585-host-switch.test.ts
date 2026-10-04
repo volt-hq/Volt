@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import { createHostHarness, type HostHarness, type HostHarnessOptions } from "../host-harness.ts";
+import { createHostHarness, type HostHarness, type HostHarnessOptions, moved } from "../host-harness.ts";
 
 describe("regression #585: a client switches by opening another conversation", () => {
 	const harnesses: HostHarness[] = [];
@@ -35,10 +35,10 @@ describe("regression #585: a client switches by opening another conversation", (
 		const targetRef = await storedSession(harness, "stored prompt");
 		const sourceRef = source.session.sessionRef as SessionReference;
 
-		const result = await harness.host.openFor(client, { kind: "session", ref: targetRef });
+		const result = moved(await harness.host.openFor(client, { kind: "session", ref: targetRef }));
 		const target = result.conversation;
-		if (!target) throw new Error("Expected the resumed conversation");
 
+		expect(result.sessionId).toBe(targetRef.sessionId);
 		expect(target.id).toBe(targetRef.sessionId);
 		expect(harness.host.conversationOf(client)).toBe(target);
 		expect(target.session.messages.map((message) => message.role)).toEqual(["user"]);
@@ -60,15 +60,14 @@ describe("regression #585: a client switches by opening another conversation", (
 		const { harness, source, client } = await setup();
 		const sourceRef = source.session.sessionRef as SessionReference;
 
-		const opened = await harness.host.openFor(client, { kind: "new" });
-		const fresh = opened.conversation;
-		if (!fresh) throw new Error("Expected the new conversation");
+		const fresh = moved(await harness.host.openFor(client, { kind: "new" })).conversation;
 		expect(fresh.cwd).toBe(source.cwd);
 		expect(fresh.session.sessionManager.getSessionDir()).toBe(source.session.sessionManager.getSessionDir());
 		expect(fresh.session.messages).toEqual([]);
 
-		const back = await harness.host.openFor(client, { kind: "session", ref: sourceRef });
-		expect(back.conversation?.id).toBe(source.id);
+		const back = moved(await harness.host.openFor(client, { kind: "session", ref: sourceRef }));
+		expect(back.sessionId).toBe(source.id);
+		expect(back.conversation.id).toBe(source.id);
 		expect(back.conversation).not.toBe(source);
 		expect(fresh.closed).toBe(true);
 		expect(harness.events.map((event) => `${event.type}:${event.sessionId === source.id ? "A" : "B"}`)).toEqual([
@@ -79,7 +78,7 @@ describe("regression #585: a client switches by opening another conversation", (
 			"session_start:A",
 			"session_shutdown:B",
 		]);
-		expect(back.conversation?.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(back.conversation.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 	});
 
 	it("keeps the source and creates nothing when an extension cancels the switch", async () => {
@@ -91,7 +90,7 @@ describe("regression #585: a client switches by opening another conversation", (
 		const sessionDir = source.session.sessionManager.getSessionDir();
 		const before = await SessionManager.list(source.cwd, sessionDir, undefined, { includeMessageFreeDurable: true });
 
-		await expect(harness.host.openFor(client, { kind: "new" })).resolves.toEqual({ cancelled: true, seeded: false });
+		await expect(harness.host.openFor(client, { kind: "new" })).resolves.toEqual({ cancelled: true });
 
 		expect(harness.host.conversationOf(client)).toBe(source);
 		expect(source.closed).toBe(false);

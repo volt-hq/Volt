@@ -52,7 +52,7 @@ function setup(global: Settings = {}, project: Settings = {}, profile?: string, 
 		assertCurrent: vi.fn(),
 		abortRun: async () => {},
 		compactContext: async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 }),
-		newSession: async () => ({ cancelled: true, seeded: false }),
+		newSession: async () => ({ cancelled: true as const }),
 		renameSession: async () => {},
 	};
 	const descriptor = (action: string) => registry.getDescriptor(action, context)!;

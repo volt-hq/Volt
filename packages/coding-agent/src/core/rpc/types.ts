@@ -45,6 +45,7 @@ import type {
 	RpcExtensionErrorEventSchema,
 	RpcExtensionUIRequestSchema,
 	RpcExtensionUIResponseSchema,
+	RpcForkResponseSchema,
 	RpcGitContextChangedEventSchema,
 	RpcGitContextSchema,
 	RpcHostActionRequestSchema,
@@ -98,6 +99,7 @@ import type {
 	RpcReviewWorkflowLifecycleStatusSchema,
 	RpcReviewWorkflowListResponseSchema,
 	RpcReviewWorkflowResultResponseSchema,
+	RpcSessionIntentResponseSchema,
 	RpcSessionListItemSchema,
 	RpcSessionStateProjectionSchema,
 	RpcSessionStateSchema,
@@ -383,6 +385,12 @@ export type RpcKeepAwakeStatus = Static<typeof RpcKeepAwakeStatusSchema>;
 export type RpcWebSearchStatus = Static<typeof RpcWebSearchStatusSchema>;
 
 export type RpcPromptResponse = Static<typeof RpcPromptResponseSchema>;
+
+/** A structural intent's response data: cancelled, or the id of the session the client is on now. */
+export type RpcSessionIntentResponse = Static<typeof RpcSessionIntentResponseSchema>;
+
+/** A fork's response data: cancelled, or the forked session's id and the text of the message it forked before. */
+export type RpcForkResponse = Static<typeof RpcForkResponseSchema>;
 
 // ============================================================================
 // RPC Responses

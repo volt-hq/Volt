@@ -95,7 +95,8 @@ describe("regression #585: a session's extensions are bound once", () => {
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 		expect(modes).toEqual(["rpc"]);
 
-		await expect(first.client.newSession()).resolves.toEqual({ cancelled: false });
+		const opened = await first.client.newSession();
+		expect(opened).toEqual({ cancelled: false, sessionId: fixture.runtime.session.sessionId });
 		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 		expect(modes).toEqual(["rpc", "rpc"]);
 		// Both clients follow the replacement; neither binds it a second time.

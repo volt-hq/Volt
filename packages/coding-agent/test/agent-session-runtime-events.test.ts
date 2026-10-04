@@ -279,6 +279,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await expect(runtimeHost.switchSession(currentSessionRef!)).resolves.toEqual({
 			cancelled: false,
+			sessionId: currentSessionRef!.sessionId,
 			seeded: false,
 		});
 
@@ -370,6 +371,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await expect(runtimeHost.switchSession(originatingRef!)).resolves.toEqual({
 			cancelled: false,
+			sessionId: originatingRef!.sessionId,
 			seeded: false,
 		});
 		const activeReviewError =
@@ -384,7 +386,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		releaseReview();
 		await runtimeHost.reviewWorkflows.waitForIdle();
-		await expect(runtimeHost.newSession()).resolves.toEqual({ cancelled: false, seeded: false });
+		const opened = await runtimeHost.newSession();
+		expect(opened).toEqual({ cancelled: false, sessionId: runtimeHost.session.sessionId, seeded: false });
 		expect(disposeForReplacement).toHaveBeenCalledOnce();
 		expect(getReviewRun(await SessionManager.open(originatingRef!), record.runId)).toEqual(record);
 	});
@@ -1071,7 +1074,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				await ctx.sendUserMessage("fresh callback input");
 			},
 		});
-		expect(switchResult).toEqual({ cancelled: false, seeded: true });
+		expect(switchResult).toEqual({ cancelled: false, sessionId: targetRef!.sessionId, seeded: true });
 
 		const userTexts = runtimeHost.session.messages
 			.filter((message) => message.role === "user")
@@ -1107,7 +1110,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			const result = await runtimeHost.switchSession(targetManager.getSessionRef()!, { withSession });
 			// The replacement applied, but the skipped callback must be surfaced so
 			// callers cannot mistake the non-cancelled result for a completed seed.
-			expect(result).toEqual({ cancelled: false, seeded: false });
+			expect(result).toEqual({
+				cancelled: false,
+				sessionId: targetManager.getSessionRef()!.sessionId,
+				seeded: false,
+			});
 			expect(withSession).not.toHaveBeenCalled();
 			await expect(
 				runtimeHost.session.prompt("fresh", { clientMessageId: "fresh-after-failed-recovery" }),
@@ -1203,10 +1210,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			commandContextActions: {
 				waitForIdle: () => originalSession.waitForIdle(),
 				newSession: (options) => runtimeHost.newSession(options),
-				fork: async (entryId, options) => {
-					const result = await runtimeHost.fork(entryId, options);
-					return { cancelled: result.cancelled, seeded: result.seeded };
-				},
+				fork: (entryId, options) => runtimeHost.fork(entryId, options),
 				navigateTree: async (targetId, options) => {
 					const result = await originalSession.navigateTree(targetId, options);
 					return { cancelled: result.cancelled };
@@ -1685,8 +1689,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const previousSessionRef = runtimeHost.session.sessionRef;
 
 		const successResult = await runtimeHost.fork(userMessage.entryId);
-		expect(successResult.cancelled).toBe(false);
-		expect(successResult.selectedText).toBe("hello");
+		expect(successResult).toMatchObject({
+			cancelled: false,
+			sessionId: runtimeHost.session.sessionId,
+			selectedText: "hello",
+		});
 		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
@@ -1697,13 +1704,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelResult = await runtimeHost.fork(userMessage.entryId);
-		expect(cancelResult).toEqual({ cancelled: true, seeded: false });
+		expect(cancelResult).toEqual({ cancelled: true });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" }]);
 
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelAtResult = await runtimeHost.fork("missing-entry", { position: "at" });
-		expect(cancelAtResult).toEqual({ cancelled: true, seeded: false });
+		expect(cancelAtResult).toEqual({ cancelled: true });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
 });

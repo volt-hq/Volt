@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
@@ -362,18 +363,34 @@ function makeRuntimeHost(
 		newSession: vi.fn(
 			async (newSessionOptions?: {
 				setup?: (writer: SessionWriter) => Promise<void>;
+				beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
 				withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
 			}) => {
 				const sessionManager = SessionManager.inMemory("/workspace");
 				await newSessionOptions?.setup?.(sessionManager.logWriter);
+				// The review message is written into the new session before it opens.
+				for (const entry of sessionManager.getBranch()) {
+					if (entry.type !== "custom_message") continue;
+					const { customType, content, display, details } = entry;
+					options.seedMessages?.push({ customType, content, display, details });
+				}
+				const target = makeSession("review-session", sessionManager);
+				await newSessionOptions?.beforeMove?.(
+					{ session: currentSession } as unknown as HostedConversation,
+					{ session: target } as unknown as HostedConversation,
+				);
 				options.replacementManagers?.push(sessionManager);
-				currentSession = makeSession("review-session", sessionManager);
+				currentSession = target;
 				await newSessionOptions?.withSession?.({
 					sendMessage: async (message) => {
 						options.seedMessages?.push(message);
 					},
 				});
-				return { cancelled: false, seeded: newSessionOptions?.withSession !== undefined };
+				return {
+					cancelled: false,
+					sessionId: sessionManager.getSessionId(),
+					seeded: newSessionOptions?.withSession !== undefined,
+				};
 			},
 		),
 		switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -811,21 +828,12 @@ describe("RPC durable review actions", () => {
 
 		const unacknowledged = durableRecord("review:unacknowledged");
 		await appendReviewRun(manager.logWriter, unacknowledged);
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true, seeded: false });
+		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true });
 		line(JSON.stringify({ id: "open-cancelled", type: "open_review_session", runId: unacknowledged.runId }));
 		await vi.waitFor(() => expect(response(collecting.writes, "open-cancelled")).toBeDefined());
 		expect(response(collecting.writes, "open-cancelled")).toMatchObject({
 			success: true,
 			data: { cancelled: true },
-		});
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
-
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: false, seeded: false });
-		line(JSON.stringify({ id: "open-skipped", type: "open_review_session", runId: unacknowledged.runId }));
-		await vi.waitFor(() => expect(response(collecting.writes, "open-skipped")).toBeDefined());
-		expect(response(collecting.writes, "open-skipped")).toMatchObject({
-			success: false,
-			error: expect.stringContaining("remains available"),
 		});
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
@@ -835,7 +843,7 @@ describe("RPC durable review actions", () => {
 		expect(response(collecting.writes, "open-failed")).toMatchObject({ success: false, error: "seed failed" });
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true, seeded: false });
+		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true });
 		line(
 			JSON.stringify({
 				id: "fix-cancelled",
@@ -848,22 +856,6 @@ describe("RPC durable review actions", () => {
 		expect(response(collecting.writes, "fix-cancelled")).toMatchObject({
 			success: true,
 			data: { status: "cancelled" },
-		});
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
-
-		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: false, seeded: false });
-		line(
-			JSON.stringify({
-				id: "fix-skipped",
-				type: "invoke_ui_action",
-				action: "review.fix",
-				args: { runId: unacknowledged.runId, findingIds: "" },
-			}),
-		);
-		await vi.waitFor(() => expect(response(collecting.writes, "fix-skipped")).toBeDefined());
-		expect(response(collecting.writes, "fix-skipped")).toMatchObject({
-			success: false,
-			error: expect.stringContaining("opened without the selected findings"),
 		});
 		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 

@@ -43,7 +43,7 @@ describe("Fast mode host action", () => {
 			session,
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
@@ -82,7 +82,7 @@ describe("Fast mode host action", () => {
 			session,
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
@@ -124,7 +124,7 @@ describe("Fast mode host action", () => {
 			session,
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled: vi.fn(),
 		};

@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
-import type { ProjectTrustContext, ReplacedSessionContext, SessionStartEvent } from "./extensions/index.ts";
+import type {
+	ProjectTrustContext,
+	ReplacedSessionContext,
+	SessionIntentResult,
+	SessionStartEvent,
+} from "./extensions/index.ts";
 import { ClientScope } from "./host/client-scope.ts";
 import { ConversationHost, type OpenConversationResult, PinnedConversationError } from "./host/conversation-host.ts";
 import type {
@@ -10,6 +15,7 @@ import type {
 	HostedConversation,
 	SubagentRuntimeContext,
 } from "./host/hosted-conversation.ts";
+import { createPlanHandoff } from "./host/plan-handoff.ts";
 import {
 	listWorkspaceSessions,
 	sameFilesystemLocation,
@@ -17,7 +23,6 @@ import {
 } from "./host/session-summaries.ts";
 import type { ConversationTarget, HostClient } from "./host/targets.ts";
 import {
-	clonePlanState,
 	createPlanExecutionPrompt,
 	PLAN_EXECUTION_CUSTOM_TYPE,
 	type PlanExecution,
@@ -29,14 +34,14 @@ import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "./pr-review-binding.ts
 import { registerReviewHandoffAliases } from "./review-anchors.ts";
 import type { ReviewDiscussionService } from "./review-discussions.ts";
 import { prepareReviewGeneralReplacement } from "./review-general.ts";
-import { captureReviewStateForHandoff, listReviewRuns, restoreReviewStateFromHandoff } from "./review-state.ts";
+import { listReviewRuns } from "./review-state.ts";
 import type { ReviewWorkflowManager } from "./review-workflows.ts";
 import { ConversationProjectionFeed } from "./rpc/conversation-projection-feed.ts";
 import {
 	assertValidSessionId,
 	findSessionInfoById,
 	getDefaultSessionDir,
-	SessionManager,
+	type SessionManager,
 	type SessionReference,
 } from "./session-manager.ts";
 import type { SessionWriter } from "./session-writer.ts";
@@ -73,26 +78,6 @@ export interface AgentSessionReplacementTarget {
 	cwd?: string;
 }
 
-/**
- * Result of a structural session operation (`newSession`, `fork`,
- * `switchSession`, `switchSessionById`).
- *
- * - `cancelled: true` — an extension cancelled the operation; the current
- *   session is unchanged and no `withSession` callback ran.
- * - `seeded` — the requested `withSession` callback ran to completion against
- *   the new session. Always `false` when no callback was requested, and
- *   `false` for no-op switches that target the current session. When
- *   `cancelled` is `false`, a callback was requested, and the session
- *   changed, `seeded: false` means the recovered-client-input gate failed
- *   and skipped the callback: the new session and its durable queue remain
- *   authoritative, but nothing was seeded into it. Callers that treat a
- *   non-cancelled result as "the seed landed" must check `seeded`.
- */
-export interface AgentSessionReplacementResult {
-	cancelled: boolean;
-	seeded: boolean;
-}
-
 export interface AgentSessionNewSessionOptions {
 	parentSessionRef?: SessionReference;
 	preserveReviewRunId?: string;
@@ -109,6 +94,13 @@ export interface AgentSessionNewSessionOptions {
 	baseRef?: string;
 	/** Write the new session before it opens, through its log writer. */
 	setup?: (writer: SessionWriter) => Promise<void>;
+	/**
+	 * Runs once the new session opened, before the runtime leaves the current
+	 * one, which is still open and admits no new work: a handoff writes its
+	 * acknowledgement through the source's own writer here. A failure keeps the
+	 * runtime on the current session and discards the new one.
+	 */
+	beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
 	assertConversationGenerationCurrent?: () => void;
@@ -152,6 +144,8 @@ type MoveOutcome =
 	| { readonly cancelled: true }
 	| {
 			readonly cancelled: false;
+			/** The conversation the runtime is on: the one moved to, or the current one for a no-op switch. */
+			readonly sessionId: string;
 			/** The conversation moved to; absent for a no-op switch to the current session. */
 			readonly to?: HostedConversation;
 			/** Whether a requested `withSession` may run: the recovered-input gate passed. */
@@ -448,16 +442,16 @@ export class AgentSessionRuntime {
 	private async seed(
 		outcome: MoveOutcome,
 		withSession: ((ctx: ReplacedSessionContext) => Promise<void>) | undefined,
-	): Promise<AgentSessionReplacementResult & { selectedText?: string }> {
-		if (outcome.cancelled) return { cancelled: true, seeded: false };
-		const selectedText = outcome.selectedText === undefined ? {} : { selectedText: outcome.selectedText };
-		if (outcome.seeded !== undefined) return { cancelled: false, seeded: outcome.seeded, ...selectedText };
+	): Promise<SessionIntentResult> {
+		if (outcome.cancelled) return { cancelled: true };
+		const { sessionId } = outcome;
+		if (outcome.seeded !== undefined) return { cancelled: false, sessionId, seeded: outcome.seeded };
 		const to = outcome.to;
 		if (!withSession || !to || !outcome.seedable || this.current !== to || this.ended) {
-			return { cancelled: false, seeded: false, ...selectedText };
+			return { cancelled: false, sessionId, seeded: false };
 		}
 		await withSession(to.session.createReplacedSessionContext());
-		return { cancelled: false, seeded: true, ...selectedText };
+		return { cancelled: false, sessionId, seeded: true };
 	}
 
 	/**
@@ -483,6 +477,8 @@ export class AgentSessionRuntime {
 			commitPublication?: (to: HostedConversation) => Promise<void>;
 			/** Runs inside the move only before a durable publication; otherwise the caller seeds after the move. */
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+			/** Runs once the target opened and the source is fenced, right before the move. */
+			beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
 		} = {},
 	): Promise<MoveOutcome> {
 		const prepare = this.prepareSessionReplacement;
@@ -525,6 +521,9 @@ export class AgentSessionRuntime {
 				sessionId: to.id,
 				cwd: to.session.sessionManager.getCwd(),
 			});
+			options.assertConversationGenerationCurrent?.();
+			// The last step before the move: what it writes through the source stays true only if the move happens.
+			await options.beforeMove?.(source, to);
 			options.assertConversationGenerationCurrent?.();
 		} catch (error) {
 			return await abandonOpen(error);
@@ -581,6 +580,7 @@ export class AgentSessionRuntime {
 			}
 			return {
 				cancelled: false,
+				sessionId: to.id,
 				to,
 				seedable,
 				seeded,
@@ -589,6 +589,7 @@ export class AgentSessionRuntime {
 		}
 		return {
 			cancelled: false,
+			sessionId: to.id,
 			to,
 			seedable,
 			...(opened.selectedText === undefined ? {} : { selectedText: opened.selectedText }),
@@ -673,13 +674,10 @@ export class AgentSessionRuntime {
 		throw failure;
 	}
 
-	async switchSessionById(
-		sessionId: string,
-		options?: AgentSessionSwitchOptions,
-	): Promise<AgentSessionReplacementResult> {
+	async switchSessionById(sessionId: string, options?: AgentSessionSwitchOptions): Promise<SessionIntentResult> {
 		const outcome = await this.runMove(async (source) => {
 			assertValidSessionId(sessionId);
-			if (sessionId === source.id) return { cancelled: false, seedable: false };
+			if (sessionId === source.id) return { cancelled: false, sessionId: source.id, seedable: false };
 			const sessionDir = source.session.sessionManager.getSessionDir() || getDefaultSessionDir(source.cwd);
 			const target = await findSessionInfoById(sessionDir, sessionId);
 			if (this.current !== source) throw new Error("Stale agent session structural operation");
@@ -688,20 +686,18 @@ export class AgentSessionRuntime {
 			}
 			return this.switchWithin(source, target.ref, target.cwd ? options : { ...options, cwdOverride: source.cwd });
 		}, options?.assertConversationGenerationCurrent);
-		const { cancelled, seeded } = await this.seed(outcome, options?.withSession);
-		return { cancelled, seeded };
+		return this.seed(outcome, options?.withSession);
 	}
 
 	async switchSession(
 		sessionRef: SessionReference,
 		options?: AgentSessionSwitchOptions,
-	): Promise<AgentSessionReplacementResult> {
+	): Promise<SessionIntentResult> {
 		const outcome = await this.runMove(
 			(source) => this.switchWithin(source, sessionRef, options),
 			options?.assertConversationGenerationCurrent,
 		);
-		const { cancelled, seeded } = await this.seed(outcome, options?.withSession);
-		return { cancelled, seeded };
+		return this.seed(outcome, options?.withSession);
 	}
 
 	/**
@@ -718,7 +714,7 @@ export class AgentSessionRuntime {
 		const currentSessionRef = source.session.sessionRef;
 		if (currentSessionRef !== undefined && sessionRefsEqual(sessionRef, currentSessionRef)) {
 			// Nothing changes, so a requested withSession callback never runs.
-			return Promise.resolve({ cancelled: false, seedable: false });
+			return Promise.resolve({ cancelled: false, sessionId: source.id, seedable: false });
 		}
 		return this.replace(
 			source,
@@ -747,7 +743,7 @@ export class AgentSessionRuntime {
 		);
 	}
 
-	async newSession(options?: AgentSessionNewSessionOptions): Promise<AgentSessionReplacementResult> {
+	async newSession(options?: AgentSessionNewSessionOptions): Promise<SessionIntentResult> {
 		const outcome = await this.runMove(async (source) => {
 			if (options?.replaceReviewGeneral && !options.preserveReviewRunId)
 				throw new Error("replaceReviewGeneral requires preserveReviewRunId");
@@ -798,6 +794,7 @@ export class AgentSessionRuntime {
 							? { assertConversationGenerationCurrent: options.assertConversationGenerationCurrent }
 							: {}),
 						...(options?.rebindRequestId === undefined ? {} : { rebindRequestId: options.rebindRequestId }),
+						...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
 						...(options?.replaceReviewGeneral
 							? {
 									commitPublication: async (to: HostedConversation) => {
@@ -814,8 +811,7 @@ export class AgentSessionRuntime {
 				await generalReplacement?.dispose();
 			}
 		}, options?.assertConversationGenerationCurrent);
-		const { cancelled, seeded } = await this.seed(outcome, options?.withSession);
-		return { cancelled, seeded };
+		return this.seed(outcome, options?.withSession);
 	}
 
 	/**
@@ -882,109 +878,37 @@ export class AgentSessionRuntime {
 			};
 		}
 
-		const sourceSessionId = sourceSession.sessionId;
+		// The new session is written before it opens; the source records the handoff while still open.
+		const handoff = createPlanHandoff(sourceSession, sourcePlan, expectedRevision);
 		const sourceSessionRef = sourceSession.sessionRef;
-		const sourceManager = sourceSession.sessionManager;
-		const sourceModel = sourceSession.model;
-		const sourceThinking = sourceSession.thinkingLevel;
-		const sourceFastMode = sourceSession.fastModeEnabled;
-		const sourceReviewState = captureReviewStateForHandoff(sourceManager);
-		let execution: PlanExecution | undefined;
 		const replacement = await this.newSession({
 			...(sourceSessionRef ? { parentSessionRef: sourceSessionRef } : {}),
-			setup: async (writer) => {
-				await restoreReviewStateFromHandoff(writer, sourceReviewState);
-				execution = {
-					id: randomUUID(),
-					approvedRevision: expectedRevision,
-					strategy,
-					sourceSessionId,
-					targetSessionId: writer.sessionManager.getSessionId(),
-				};
-				await writer.appendPlanningState({
-					mode: "build",
-					plan: {
-						...clonePlanState(sourcePlan),
-						revision: sourcePlan.revision + 1,
-						phase: "active",
-						execution,
-					},
-				});
-				if (sourceModel) {
-					await writer.appendModelChange(sourceModel.provider, sourceModel.id);
-				}
-				await writer.appendThinkingLevelChange(sourceThinking);
-				if (sourceFastMode) {
-					await writer.appendFastModeChange(true);
-				}
-			},
-			withSession: async (context) => {
-				if (!execution) {
-					throw new Error("Plan execution session was not initialized");
-				}
-				// The source conversation closed before this post-move handoff
-				// callback. Reopen persisted sources as the new exclusive writer;
-				// in-memory sources remain reusable.
-				const handoffManager = sourceSessionRef ? await SessionManager.open(sourceSessionRef) : sourceManager;
-				try {
-					await handoffManager.logWriter.appendPlanningState({
-						mode: "build",
-						plan: {
-							...clonePlanState(sourcePlan),
-							revision: sourcePlan.revision + 1,
-							phase: "handed_off",
-							execution,
-						},
-					});
-				} catch (error) {
-					if (sourceSessionRef) {
-						try {
-							await handoffManager.closePersistence();
-						} catch (closeError) {
-							throw new AggregateError(
-								[error, closeError],
-								"Plan handoff failed and its source manager could not be closed",
-							);
-						}
-					}
-					throw error;
-				}
-				if (sourceSessionRef) await handoffManager.closePersistence();
-				const activePlan = this.session.planningState.plan;
-				if (!activePlan || activePlan.phase !== "active") {
-					throw new Error("Plan execution session did not restore its active plan");
-				}
-				void context
-					.sendMessage(
-						{
-							customType: PLAN_EXECUTION_CUSTOM_TYPE,
-							content: createPlanExecutionPrompt(activePlan),
-							display: true,
-						},
-						{ triggerTurn: true },
-					)
-					.catch(() => undefined);
-			},
+			setup: (writer) => handoff.setup(writer),
+			beforeMove: (source) => handoff.beforeMove(source),
+			withSession: (context) => handoff.start(this.session, context),
 			...(assertConversationGenerationCurrent ? { assertConversationGenerationCurrent } : {}),
 		});
-		if (replacement.cancelled || !replacement.seeded || !execution) {
+		if (replacement.cancelled || !replacement.seeded) {
 			throw new Error("Plan execution session was not created");
 		}
 		return {
 			planning: this.session.planningState,
-			selectedSessionId: execution.targetSessionId,
+			selectedSessionId: replacement.sessionId,
 			started: true,
 		};
 	}
 
+	/** A fork before a user message also returns that message's text. */
 	async fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
-	): Promise<AgentSessionReplacementResult & { selectedText?: string }> {
+	): Promise<{ cancelled: true } | { cancelled: false; sessionId: string; seeded: boolean; selectedText?: string }> {
 		const outcome = await this.runMove((source) =>
 			this.replace(source, { kind: "fork", source, entryId, position: options?.position ?? "before" }),
 		);
-		return this.seed(outcome, options?.withSession);
+		const result = await this.seed(outcome, options?.withSession);
+		if (result.cancelled || outcome.cancelled || outcome.selectedText === undefined) return result;
+		return { ...result, selectedText: outcome.selectedText };
 	}
 
 	/**

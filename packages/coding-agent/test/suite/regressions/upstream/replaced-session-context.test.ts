@@ -107,10 +107,7 @@ describe("regression #2860: replaced session callbacks", () => {
 				commandContextActions: {
 					waitForIdle: () => session.waitForIdle(),
 					newSession: async (options) => runtime.newSession(options),
-					fork: async (entryId, options) => {
-						const result = await runtime.fork(entryId, options);
-						return { cancelled: result.cancelled, seeded: result.seeded };
-					},
+					fork: (entryId, options) => runtime.fork(entryId, options),
 					navigateTree: async (targetId, options) => {
 						const result = await session.navigateTree(targetId, {
 							summarize: options?.summarize,

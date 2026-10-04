@@ -220,7 +220,26 @@ function dataResponse<K extends string, D extends TSchema>(command: K, data: D):
 	) as TObject<DataResponseProperties<K, D>>;
 }
 
-const cancelledDataSchema = Type.Object({ cancelled: Type.Boolean() }, { additionalProperties: false });
+const cancelledIntentSchema = Type.Object({ cancelled: Type.Literal(true) }, { additionalProperties: false });
+
+/**
+ * A structural intent's outcome (`new_session`, `switch_session`,
+ * `switch_session_by_id`, `clone`, `open_review_session`): cancelled, or the
+ * id of the session the client is on now.
+ */
+export const RpcSessionIntentResponseSchema = Type.Union([
+	cancelledIntentSchema,
+	Type.Object({ cancelled: Type.Literal(false), sessionId: Type.String() }, { additionalProperties: false }),
+]);
+
+/** A fork's outcome: cancelled, or the forked session's id and the text of the message it forked before. */
+export const RpcForkResponseSchema = Type.Union([
+	cancelledIntentSchema,
+	Type.Object(
+		{ cancelled: Type.Literal(false), sessionId: Type.String(), text: Type.String() },
+		{ additionalProperties: false },
+	),
+]);
 
 export const RpcMcpServersResponseSchema = Type.Object(
 	{ servers: Type.Array(RpcMcpServerSummarySchema) },
@@ -292,7 +311,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	steer: voidResponse("steer"),
 	follow_up: voidResponse("follow_up"),
 	abort: voidResponse("abort"),
-	new_session: dataResponse("new_session", cancelledDataSchema),
+	new_session: dataResponse("new_session", RpcSessionIntentResponseSchema),
 	set_agent_mode: dataResponse("set_agent_mode", RpcPlanningStateSchema),
 	plan_execute: dataResponse("plan_execute", RpcPlanExecutionResultSchema),
 	plan_change: dataResponse("plan_change", RpcPlanningStateSchema),
@@ -349,7 +368,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	get_review_general: dataResponse("get_review_general", RpcReviewGeneralSchema),
 	get_review_result: dataResponse("get_review_result", RpcReviewWorkflowResultResponseSchema),
 	list_review_workflows: dataResponse("list_review_workflows", RpcReviewWorkflowListResponseSchema),
-	open_review_session: dataResponse("open_review_session", cancelledDataSchema),
+	open_review_session: dataResponse("open_review_session", RpcSessionIntentResponseSchema),
 	acknowledge_review: dataResponse("acknowledge_review", RpcReviewAcknowledgmentResponseSchema),
 	record_review_finding_outcome: dataResponse(
 		"record_review_finding_outcome",
@@ -530,13 +549,10 @@ export const RPC_RESPONSE_SCHEMAS = {
 		Type.Object({ contexts: Type.Array(RpcSessionContextSchema, { maxItems: 64 }) }, { additionalProperties: false }),
 	),
 	export_html: dataResponse("export_html", Type.Object({ path: Type.String() }, { additionalProperties: false })),
-	switch_session: dataResponse("switch_session", cancelledDataSchema),
-	switch_session_by_id: dataResponse("switch_session_by_id", cancelledDataSchema),
-	fork: dataResponse(
-		"fork",
-		Type.Object({ text: Type.String(), cancelled: Type.Boolean() }, { additionalProperties: false }),
-	),
-	clone: dataResponse("clone", cancelledDataSchema),
+	switch_session: dataResponse("switch_session", RpcSessionIntentResponseSchema),
+	switch_session_by_id: dataResponse("switch_session_by_id", RpcSessionIntentResponseSchema),
+	fork: dataResponse("fork", RpcForkResponseSchema),
+	clone: dataResponse("clone", RpcSessionIntentResponseSchema),
 	get_fork_messages: dataResponse(
 		"get_fork_messages",
 		Type.Object(

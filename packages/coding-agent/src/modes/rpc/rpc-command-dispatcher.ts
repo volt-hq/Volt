@@ -2,6 +2,8 @@ import { stripVTControlCharacters } from "node:util";
 import { RPC_STABLE_ERROR_CODES } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { SessionIntentResult } from "../../core/extensions/index.ts";
+import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
 import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	type HostActionInvocationContext,
@@ -14,7 +16,6 @@ import {
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../core/remote/iroh/agent-options.ts";
-import { createReviewSeedMessage } from "../../core/review.ts";
 import { assertReviewDiscussionRpcAllowed } from "../../core/review-discussion-policy.ts";
 import { ReviewDiscussionConfigurationError } from "../../core/review-discussions.ts";
 import { getReviewGeneral } from "../../core/review-general.ts";
@@ -60,6 +61,7 @@ import type {
 	RpcPromptResponse,
 	RpcRegisterPushTargetResponse,
 	RpcResponse,
+	RpcSessionIntentResponse,
 	RpcSessionListItem,
 	RpcSessionState,
 	RpcSessionTreePage,
@@ -235,6 +237,11 @@ export function createRpcErrorResponse(
 }
 
 export { getRpcErrorResponseTarget };
+
+/** A structural intent's response data: cancelled, or the id of the session the client moved to. */
+function projectSessionIntent(result: SessionIntentResult): RpcSessionIntentResponse {
+	return result.cancelled ? { cancelled: true } : { cancelled: false, sessionId: result.sessionId };
+}
 
 function projectReviewTargetIdentity(
 	identity: HydratedReviewRunRecord["target"]["identity"],
@@ -433,7 +440,7 @@ export async function handleRpcCommand(
 						assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
 					})
 				: await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
-			return createRpcSuccessResponse(id, "new_session", { cancelled: result.cancelled });
+			return createRpcSuccessResponse(id, "new_session", projectSessionIntent(result));
 		}
 
 		case "set_agent_mode": {
@@ -652,8 +659,7 @@ export async function handleRpcCommand(
 		}
 
 		case "open_review_session": {
-			const sourceSessionManager = session.sessionManager;
-			const record = await getCanonicalReviewRun(sourceSessionManager, command.runId);
+			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record?.result)
 				return createRpcErrorResponse(
 					id,
@@ -666,56 +672,12 @@ export async function handleRpcCommand(
 			);
 			if (unknownIds.length > 0)
 				return createRpcErrorResponse(id, "open_review_session", `Unknown finding ids: ${unknownIds.join(", ")}`);
-			const seedMessage = createReviewSeedMessage(record, command.findingIds);
-			let targetSessionManager: SessionManager | undefined;
-			let acknowledgedAt: number | undefined;
+			const handoff = createReviewFixHandoff(record, command.findingIds);
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
-				setup: async (writer) => {
-					targetSessionManager = writer.sessionManager;
-					await appendReviewRun(writer, record);
-				},
-				withSession: async (sessionContext) => {
-					await sessionContext.sendMessage(seedMessage);
-					const target = runtimeHost.session;
-					if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
-						throw new Error("Review session was not initialized");
-					}
-					acknowledgedAt = (
-						await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
-					).acknowledgedAt;
-				},
+				setup: (writer) => handoff.setup(writer),
+				beforeMove: (source) => handoff.beforeMove(source),
 			});
-			if (!result.cancelled && !result.seeded) {
-				return createRpcErrorResponse(
-					id,
-					"open_review_session",
-					`Review session was opened without findings; the durable run remains available: ${command.runId}`,
-				);
-			}
-			if (result.seeded && command.findingIds === undefined) {
-				if (acknowledgedAt === undefined) throw new Error("Review session was seeded without acknowledgment");
-				const sourceSessionRef = sourceSessionManager.getSessionRef();
-				const acknowledgmentManager = sourceSessionRef
-					? await SessionManager.open(sourceSessionRef)
-					: sourceSessionManager;
-				try {
-					await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
-				} catch (error) {
-					if (sourceSessionRef) {
-						try {
-							await acknowledgmentManager.closePersistence();
-						} catch (closeError) {
-							throw new AggregateError(
-								[error, closeError],
-								"Review acknowledgment failed and its source manager could not be closed",
-							);
-						}
-					}
-					throw error;
-				}
-				if (sourceSessionRef) await acknowledgmentManager.closePersistence();
-			}
-			return createRpcSuccessResponse(id, "open_review_session", { cancelled: result.cancelled });
+			return createRpcSuccessResponse(id, "open_review_session", projectSessionIntent(result));
 		}
 
 		case "acknowledge_review": {
@@ -1267,7 +1229,7 @@ export async function handleRpcCommand(
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
-			return createRpcSuccessResponse(id, "switch_session", { cancelled: result.cancelled });
+			return createRpcSuccessResponse(id, "switch_session", projectSessionIntent(result));
 		}
 
 		case "switch_session_by_id": {
@@ -1277,15 +1239,18 @@ export async function handleRpcCommand(
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
-			return createRpcSuccessResponse(id, "switch_session_by_id", { cancelled: result.cancelled });
+			return createRpcSuccessResponse(id, "switch_session_by_id", projectSessionIntent(result));
 		}
 
 		case "fork": {
 			const result = await runtimeHost.fork(command.entryId);
-			if (!result.cancelled) {
-				await context.rebindSession();
-			}
-			return createRpcSuccessResponse(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
+			if (result.cancelled) return createRpcSuccessResponse(id, "fork", { cancelled: true });
+			await context.rebindSession();
+			return createRpcSuccessResponse(id, "fork", {
+				cancelled: false,
+				sessionId: result.sessionId,
+				text: result.selectedText ?? "",
+			});
 		}
 
 		case "clone": {
@@ -1297,7 +1262,7 @@ export async function handleRpcCommand(
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}
-			return createRpcSuccessResponse(id, "clone", { cancelled: result.cancelled });
+			return createRpcSuccessResponse(id, "clone", projectSessionIntent(result));
 		}
 
 		case "get_fork_messages": {

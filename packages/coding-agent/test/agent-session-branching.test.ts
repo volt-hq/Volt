@@ -98,9 +98,13 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		expect(userMessages[0].text).toBe("Say hello");
 
 		const result = await runtimeHost.fork(userMessages[0].entryId);
-		expect(result.cancelled).toBe(false);
 		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say hello");
+		expect(result).toEqual({
+			cancelled: false,
+			sessionId: session.sessionId,
+			seeded: false,
+			selectedText: "Say hello",
+		});
 
 		expect(session.messages.length).toBe(0);
 		expect(session.sessionRef).toBeDefined();
@@ -119,9 +123,8 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		expect(session.messages.length).toBeGreaterThan(0);
 
 		const result = await runtimeHost.fork(userMessages[0].entryId);
-		expect(result.cancelled).toBe(false);
 		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say hi");
+		expect(result).toEqual({ cancelled: false, sessionId: session.sessionId, seeded: false, selectedText: "Say hi" });
 
 		expect(session.messages.length).toBe(0);
 		expect(session.sessionRef).toBeUndefined();
@@ -144,9 +147,13 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 
 		const secondMessage = userMessages[1];
 		const result = await runtimeHost.fork(secondMessage.entryId);
-		expect(result.cancelled).toBe(false);
 		session = runtimeHost.session;
-		expect(result.selectedText).toBe("Say two");
+		expect(result).toEqual({
+			cancelled: false,
+			sessionId: session.sessionId,
+			seeded: false,
+			selectedText: "Say two",
+		});
 
 		expect(session.messages.length).toBe(2);
 		expect(session.messages[0].role).toBe("user");

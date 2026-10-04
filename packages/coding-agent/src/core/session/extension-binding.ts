@@ -333,20 +333,21 @@ export class SessionExtensionBinding {
 
 	/**
 	 * Session control for extension commands. Without a client that handles it
-	 * the action does nothing; for an invoking client that has left it reports
-	 * cancelled, so the extension does not act as if it ran.
+	 * a session intent reports cancelled: the session did not change. A tree
+	 * navigation does nothing, and reports cancelled for an invoking client that
+	 * has left, so the extension does not act as if it ran.
 	 */
 	private createCommandActions(): ExtensionCommandContextActions {
 		const actions = () => this.actionClient()?.commandContextActions;
-		const outcome = () => ({ cancelled: this.invokerLeft(), seeded: false });
+		const unchanged = { cancelled: true } as const;
 		return {
 			waitForIdle: () => actions()?.waitForIdle() ?? Promise.resolve(),
-			newSession: (options) => actions()?.newSession(options) ?? Promise.resolve(outcome()),
-			fork: (entryId, options) => actions()?.fork(entryId, options) ?? Promise.resolve(outcome()),
+			newSession: (options) => actions()?.newSession(options) ?? Promise.resolve(unchanged),
+			fork: (entryId, options) => actions()?.fork(entryId, options) ?? Promise.resolve(unchanged),
 			navigateTree: (targetId, options) =>
 				actions()?.navigateTree(targetId, options) ?? Promise.resolve({ cancelled: this.invokerLeft() }),
 			switchSession: (sessionRef, options) =>
-				actions()?.switchSession(sessionRef, options) ?? Promise.resolve(outcome()),
+				actions()?.switchSession(sessionRef, options) ?? Promise.resolve(unchanged),
 			reload: () => actions()?.reload() ?? Promise.resolve(),
 		};
 	}

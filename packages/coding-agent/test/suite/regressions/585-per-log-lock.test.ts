@@ -225,7 +225,11 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(lockState(sourceRef)).toBe("held");
 		elsewhere.close();
 
-		await expect(runtime.switchSession(targetRef)).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(runtime.switchSession(targetRef)).resolves.toEqual({
+			cancelled: false,
+			sessionId: targetRef.sessionId,
+			seeded: false,
+		});
 		expect(runtime.session.sessionId).toBe(targetRef.sessionId);
 		expect(lockState(targetRef)).toBe("held");
 		expect(lockState(sourceRef)).toBe("free");
@@ -287,7 +291,11 @@ describe("regression #585: one writer per conversation log", () => {
 			daemonRuntimeLock = undefined;
 			return transaction();
 		});
-		await expect(runtime.switchSession(targetRef)).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(runtime.switchSession(targetRef)).resolves.toEqual({
+			cancelled: false,
+			sessionId: targetRef.sessionId,
+			seeded: false,
+		});
 		expect(steps).toEqual([`prepare:${targetRef.sessionId}:held`, "commit"]);
 		expect(runtime.session.sessionId).toBe(targetRef.sessionId);
 		expect(lockState(targetRef)).toBe("held");

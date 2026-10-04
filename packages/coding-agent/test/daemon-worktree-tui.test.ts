@@ -802,7 +802,11 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 			workspaceName: "parent-workspace",
 			baseRef: "origin/main",
 		});
-		expect(result).toEqual({ cancelled: false, seeded: false });
+		expect(result).toEqual({
+			cancelled: false,
+			sessionId: fixture.runtime.session.sessionId,
+			seeded: false,
+		});
 		expect(fixture.createdSessions).toHaveLength(1);
 		const created = fixture.createdSessions[0]!;
 		expect(created.cwd).toBe(worktreeCwd);

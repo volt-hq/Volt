@@ -405,7 +405,7 @@ describe("AgentSessionRuntime characterization", () => {
 			},
 		});
 
-		expect(result).toEqual({ cancelled: false, seeded: false });
+		expect(result).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: false });
 		expect(runtime.session.sessionManager.getConversationState().context.fastMode).toBe(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
@@ -595,6 +595,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect((await runtime.listSessions()).some((session) => session.sessionId === target.getSessionId())).toBe(true);
 		await expect(runtime.switchSessionById(target.getSessionId())).resolves.toEqual({
 			cancelled: false,
+			sessionId: target.getSessionId(),
 			seeded: false,
 		});
 		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
@@ -833,8 +834,11 @@ describe("AgentSessionRuntime characterization", () => {
 		const previousSessionRef = runtime.session.sessionRef;
 
 		const successResult = await runtime.fork(userMessage.entryId);
-		expect(successResult.cancelled).toBe(false);
-		expect(successResult.selectedText).toBe("hello");
+		expect(successResult).toMatchObject({
+			cancelled: false,
+			sessionId: runtime.session.sessionId,
+			selectedText: "hello",
+		});
 		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
@@ -846,13 +850,13 @@ describe("AgentSessionRuntime characterization", () => {
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelResult = await runtime.fork(userMessage.entryId);
-		expect(cancelResult).toEqual({ cancelled: true, seeded: false });
+		expect(cancelResult).toEqual({ cancelled: true });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" }]);
 
 		events.length = 0;
 		cancelNextFork = true;
 		const cancelAtResult = await runtime.fork("missing-entry", { position: "at" });
-		expect(cancelAtResult).toEqual({ cancelled: true, seeded: false });
+		expect(cancelAtResult).toEqual({ cancelled: true });
 		expect(events).toEqual([{ type: "session_before_fork", entryId: "missing-entry", position: "at" }]);
 	});
 
@@ -878,7 +882,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(leafId).toBeTruthy();
 
 		const result = await runtime.fork(leafId!, { position: "at" });
-		expect(result).toEqual({ cancelled: false, seeded: false, selectedText: undefined });
+		expect(result).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: false });
 		expect(runtime.session.sessionRef).not.toEqual(previousSessionRef);
 		expect(
 			runtime.session.messages.map((message) => ({
@@ -993,7 +997,7 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(runtime.session.sessionRef).toBeUndefined();
 
 		const result = await runtime.fork(leafId!, { position: "at" });
-		expect(result).toEqual({ cancelled: false, seeded: false, selectedText: undefined });
+		expect(result).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: false });
 		expect(runtime.session.sessionRef).toBeUndefined();
 		expect(
 			runtime.session.messages.map((message) => ({

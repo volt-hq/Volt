@@ -95,13 +95,18 @@ export type OpenConversationResult =
 			readonly selectedText?: string;
 	  };
 
-export interface OpenForResult {
-	readonly cancelled: boolean;
-	/** Whether `withSession` ran to completion against the new conversation. */
-	readonly seeded: boolean;
-	readonly conversation?: HostedConversation;
-	readonly selectedText?: string;
-}
+/** The outcome of a structural intent: cancelled, or the conversation the client moved to. */
+export type OpenForResult =
+	| { readonly cancelled: true }
+	| {
+			readonly cancelled: false;
+			/** The id of the conversation the client moved to. */
+			readonly sessionId: string;
+			/** Whether `withSession` ran to completion against the new conversation. */
+			readonly seeded: boolean;
+			readonly conversation: HostedConversation;
+			readonly selectedText?: string;
+	  };
 
 /** Thrown for a structural intent inside an owner-lifetime conversation. */
 export class PinnedConversationError extends Error {
@@ -562,42 +567,57 @@ export class ConversationHost {
 	/**
 	 * Open `target` for `client` and move the client there, then close the
 	 * source per its anchor and the host's unattached rule. One client's
-	 * structural intents run one at a time. `withSession` runs against the new
-	 * conversation after the move.
+	 * structural intents run one at a time. `beforeMove` runs once the target
+	 * opened, while the source is still open and fenced for the leave, so a
+	 * handoff writes its acknowledgement through the source's own writer; a
+	 * failure there discards the target and keeps the client on the source.
+	 * `withSession` runs against the new conversation after the move.
 	 */
 	async openFor(
 		client: HostClient,
 		target: ConversationTarget,
 		options: Omit<OpenConversationOptions, "from"> & {
+			beforeMove?: (from: HostedConversation | undefined, to: HostedConversation) => Promise<void>;
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		} = {},
 	): Promise<OpenForResult> {
-		const { withSession, ...openOptions } = options;
+		const { beforeMove, withSession, ...openOptions } = options;
 		const moved = await this.serialize(client.id, async () => {
 			const from = this.conversationOf(client);
 			const opened = await this.open(target, { ...openOptions, ...(from === undefined ? {} : { from }) });
 			if (opened.cancelled) return undefined;
 			const to = opened.conversation;
+			let releaseSource: (() => void) | undefined;
 			try {
+				if (beforeMove) {
+					releaseSource = from?.holdForLeave();
+					await beforeMove(from, to);
+				}
 				await this.move(client, to);
 			} catch (error) {
+				releaseSource?.();
 				if (this.clientsOf(to).length === 0 && !to.closed) {
 					await this.discard(to).catch(() => undefined);
 				}
 				throw error;
 			}
+			// A source that stays open for its other clients admits work again.
+			if (from && !from.closed) releaseSource?.();
 			return opened;
 		});
-		if (!moved) return { cancelled: true, seeded: false };
+		if (!moved) return { cancelled: true };
+		const to = moved.conversation;
+		const sessionId = to.id;
 		let seeded = false;
 		if (withSession) {
-			await withSession(moved.conversation.session.createReplacedSessionContext());
+			await withSession(to.session.createReplacedSessionContext());
 			seeded = true;
 		}
 		return {
 			cancelled: false,
+			sessionId,
 			seeded,
-			conversation: moved.conversation,
+			conversation: to,
 			...(moved.selectedText === undefined ? {} : { selectedText: moved.selectedText }),
 		};
 	}

@@ -19,7 +19,7 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/core/extensions/index.ts";
-import { ConversationHost, type WhenUnattached } from "../../src/core/host/conversation-host.ts";
+import { ConversationHost, type OpenForResult, type WhenUnattached } from "../../src/core/host/conversation-host.ts";
 import type { CreateAgentSessionRuntimeFactory, HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -31,6 +31,12 @@ export type RecordedLifecycleEvent = (
 	| SessionShutdownEvent
 	| SessionStartEvent
 ) & { sessionId: string };
+
+/** The result of a structural intent that moved its client; throws when it was cancelled. */
+export function moved(result: OpenForResult): Extract<OpenForResult, { cancelled: false }> {
+	if (result.cancelled) throw new Error("Expected the client to move");
+	return result;
+}
 
 export interface HostHarnessOptions {
 	/** Extra extension behavior, added to the recording extension. */

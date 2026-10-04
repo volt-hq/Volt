@@ -65,7 +65,11 @@ describe("#342 empty review handoffs", () => {
 		const { root, source, runtime } = await fixture();
 		const original = source.getSessionRef()!;
 		const sessionDir = join(root, "other-store");
-		await expect(runtime.newSession({ sessionDir })).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(runtime.newSession({ sessionDir })).resolves.toEqual({
+			cancelled: false,
+			sessionId: expect.any(String),
+			seeded: false,
+		});
 		expect(runtime.session.sessionManager.getSessionDir()).toBe(sessionDir);
 		expect(runtime.session.sessionRef!.storeId).not.toBe(original.storeId);
 		expect(runtime.session.sessionId).not.toBe(original.sessionId);

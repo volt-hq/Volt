@@ -1,4 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { REVIEW_FIX_ACTION_ID, REVIEW_RERUN_ACTION_ID } from "../src/core/host-actions.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import { acknowledgeReviewRun, appendReviewRun, getReviewRun, type ReviewRunRecord } from "../src/core/review-state.ts";
@@ -112,27 +113,23 @@ describe("InteractiveMode durable review actions", () => {
 			await acknowledgeReviewRun(manager.logWriter, "review:test", testCase.acknowledgedAt);
 		}
 		const replacementManager = SessionManager.inMemory("/workspace");
-		const seedMessages: object[] = [];
 		const fakeThis = {
 			session: { sessionManager: manager, sessionWriter: manager.logWriter as SessionWriter },
 			runtimeHost: {
 				newSession: vi.fn(
 					async (options: {
 						setup(writer: SessionWriter): Promise<void>;
-						withSession(context: { sendMessage(message: object): Promise<void> }): Promise<void>;
+						beforeMove(source: HostedConversation, target: HostedConversation): Promise<void>;
 					}) => {
 						await options.setup(replacementManager.logWriter);
-						// The replacement is the current session when `withSession` runs.
-						fakeThis.session = {
-							sessionManager: replacementManager,
-							sessionWriter: replacementManager.logWriter,
-						};
-						await options.withSession({
-							sendMessage: async (message) => {
-								seedMessages.push(message);
-							},
-						});
-						return { cancelled: false, seeded: true };
+						const target = { sessionManager: replacementManager, sessionWriter: replacementManager.logWriter };
+						// The source is still the current session, and open, when `beforeMove` runs.
+						await options.beforeMove(
+							{ session: fakeThis.session } as unknown as HostedConversation,
+							{ session: target } as unknown as HostedConversation,
+						);
+						fakeThis.session = target;
+						return { cancelled: false, sessionId: replacementManager.getSessionId(), seeded: false };
 					},
 				),
 			},
@@ -149,6 +146,7 @@ describe("InteractiveMode durable review actions", () => {
 				findingIds: testCase.findingIds,
 			}),
 		).resolves.toMatchObject({ status: "completed" });
+		const seedMessages = replacementManager.getBranch().filter((entry) => entry.type === "custom_message");
 		expect(seedMessages).toHaveLength(1);
 		const seedMessage = seedMessages[0] as { details?: { findings?: Array<{ id: string }> } };
 		expect(seedMessage.details?.findings?.map((finding) => finding.id)).toEqual(["finding-1", "finding-2"]);

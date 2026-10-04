@@ -113,7 +113,8 @@ describe("durable review General publication", () => {
 	it("replaces repeatedly, preserves canonical source and does not promote ordinary aliases or reopened history", async () => {
 		const { runtime, root, directory, source, original, options, managers } = await fixture();
 		for (const revision of [1, 2]) {
-			expect(await runtime.newSession(options)).toEqual({ cancelled: false, seeded: false });
+			const opened = await runtime.newSession(options);
+			expect(opened).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: false });
 			expect(await getReviewGeneral(runtime.session.sessionManager, "run")).toEqual({
 				runId: "run",
 				sourceSessionId: original.sessionId,
@@ -208,7 +209,7 @@ describe("durable review General publication", () => {
 					});
 				},
 			}),
-		).toEqual({ cancelled: false, seeded: true });
+		).toEqual({ cancelled: false, sessionId: runtime.session.sessionId, seeded: true });
 		await subscription.flush();
 		expect(writes).toHaveLength(3);
 		expect(writes.at(-1)).toMatchObject({
@@ -298,7 +299,11 @@ describe("durable review General publication", () => {
 				throw new Error("Subscriber snapshot failed");
 			});
 		});
-		await expect(runtime.newSession(options)).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(runtime.newSession(options)).resolves.toEqual({
+			cancelled: false,
+			sessionId: expect.any(String),
+			seeded: false,
+		});
 		await expect(subscription.flush()).rejects.toThrow("closed");
 		expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
 		expect(await getReviewGeneral(source, "run")).toMatchObject({
@@ -355,7 +360,7 @@ describe("durable review General publication", () => {
 		const initial = await getReviewGeneral(source, "run");
 		vi.spyOn(runtime.session.extensionRunner, "hasHandlers").mockReturnValueOnce(true);
 		vi.spyOn(runtime.session.extensionRunner, "emit").mockResolvedValueOnce({ cancel: true });
-		expect(await runtime.newSession(options)).toEqual({ cancelled: true, seeded: false });
+		expect(await runtime.newSession(options)).toEqual({ cancelled: true });
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 		let stale = false;
 		await expect(

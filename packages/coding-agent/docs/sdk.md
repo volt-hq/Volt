@@ -205,7 +205,7 @@ const runtime = await createAgentSessionRuntime(createRuntime, {
 
 Important behavior:
 
-- `runtime.session` changes after those operations
+- `runtime.session` changes after those operations; `newSession()`, `switchSession()`, and `fork()` resolve with `{ cancelled: true }` or `{ cancelled: false, sessionId, seeded }`, where `sessionId` is the session the runtime is on now (`fork()` also returns `selectedText` for a fork before a user message)
 - event subscriptions are attached to a specific `AgentSession`, so re-subscribe after replacement
 - if you use extensions, attach your client to the new session with `await runtime.session.attachExtensionClient({ id, mode, ... }).ready`; the first client to attach a session binds its extensions and fires `session_start` once, and later clients only add their UI, error listener, and session actions; the returned `detach()` removes the client
 - creation returns diagnostics on `runtime.diagnostics`
