@@ -26,6 +26,31 @@
 			"volt-source": "./src/wire-limits.ts",
 			"import": "./dist/wire-limits.js"
 		},
+		"./daemon-control": {
+			"types": "./dist/daemon-control.d.ts",
+			"volt-source": "./src/daemon-control.ts",
+			"import": "./dist/daemon-control.js"
+		},
+		"./remote-handshake": {
+			"types": "./dist/remote-handshake.d.ts",
+			"volt-source": "./src/remote-handshake.ts",
+			"import": "./dist/remote-handshake.js"
+		},
+		"./remote-access": {
+			"types": "./dist/remote-access.d.ts",
+			"volt-source": "./src/remote-access.ts",
+			"import": "./dist/remote-access.js"
+		},
+		"./push": {
+			"types": "./dist/push.d.ts",
+			"volt-source": "./src/push.ts",
+			"import": "./dist/push.js"
+		},
+		"./workspace": {
+			"types": "./dist/workspace.d.ts",
+			"volt-source": "./src/workspace.ts",
+			"import": "./dist/workspace.js"
+		},
 		"./contract/protocol-schema.json": "./contract/protocol-schema.json",
 		"./package.json": "./package.json"
 	},

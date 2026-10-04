@@ -27,8 +27,11 @@ export const REMOTE_CAPABILITIES = [
 export const RemoteCapabilitySchema = stringEnum(REMOTE_CAPABILITIES);
 export type RemoteCapability = Static<typeof RemoteCapabilitySchema>;
 
-/** A set of capabilities: no duplicates. */
-export const RemoteCapabilitiesSchema = Type.Array(RemoteCapabilitySchema, { uniqueItems: true });
+/** A set of capabilities: no duplicates, so never more entries than there are capabilities. */
+export const RemoteCapabilitiesSchema = Type.Array(RemoteCapabilitySchema, {
+	maxItems: REMOTE_CAPABILITIES.length,
+	uniqueItems: true,
+});
 
 export const REMOTE_GRANT_SCHEMA_VERSION = 1;
 

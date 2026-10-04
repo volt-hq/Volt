@@ -7,12 +7,9 @@ import {
 	ControlLineDecoder,
 	type ControlRequest,
 	type ControlResponse,
+	ControlValidators,
 	encodeControlLine,
 	type HelloAck,
-	isControlEvent,
-	isControlResponse,
-	isHelloAck,
-	isRelayPreamble,
 	PROTOCOL_VERSION,
 	type RelayPreamble,
 } from "./control-protocol.ts";
@@ -252,7 +249,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				}
 				for (const message of messages) {
 					if (!acked) {
-						if (!isHelloAck(message)) {
+						if (!ControlValidators.helloAck.Check(message)) {
 							failDial(new Error("daemon did not answer hello"));
 							return;
 						}
@@ -299,7 +296,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						resolve();
 						continue;
 					}
-					if (isControlResponse(message)) {
+					if (ControlValidators.response.Check(message)) {
 						const entry = pending.get(message.id);
 						if (entry) {
 							if (isProvisionalControlResponse(message)) {
@@ -317,8 +314,18 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						}
 						continue;
 					}
-					if (isControlEvent(message)) {
+					if (ControlValidators.event.Check(message)) {
 						options.onEvent?.(message);
+						continue;
+					}
+					// A response the contract rejects still settles its request instead
+					// of leaving the caller waiting until the connection closes.
+					const id =
+						typeof message === "object" && message !== null ? (message as { id?: unknown }).id : undefined;
+					const entry = typeof id === "string" ? pending.get(id) : undefined;
+					if (typeof id === "string" && entry) {
+						pending.delete(id);
+						entry.reject(new Error(`daemon sent an invalid control response for request ${id}`));
 					}
 				}
 			});
@@ -434,14 +441,14 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						// payload and must never be JSON-decoded.
 						decoder.pushEach(chunk, (message) => {
 							if (!acked) {
-								if (!isHelloAck(message) || !message.ok) {
+								if (!ControlValidators.helloAck.Check(message) || !message.ok) {
 									fail(new Error("relay hello rejected"));
 									return "stop";
 								}
 								acked = true;
 								return "continue";
 							}
-							if (!isRelayPreamble(message)) {
+							if (!ControlValidators.relayPreamble.Check(message)) {
 								fail(new Error("expected relay preamble"));
 								return "stop";
 							}

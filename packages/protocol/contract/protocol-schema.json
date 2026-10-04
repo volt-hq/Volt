@@ -520,6 +520,2401 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.ClientKind": {
+			"type": "string",
+			"enum": [
+				"tui",
+				"cli"
+			]
+		},
+		"Control.ClientStatus": {
+			"type": "object",
+			"required": [
+				"clientNodeId",
+				"pairedAtMs"
+			],
+			"properties": {
+				"clientNodeId": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"pairedAtMs": {
+					"type": "number"
+				},
+				"lastSeenAtMs": {
+					"type": "number"
+				},
+				"allowedTools": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"usesDefaultTools": {
+					"type": "boolean"
+				},
+				"rpcGrant": {
+					"$ref": "#/$defs/RemoteGrant"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.EnvironmentStatus": {
+			"type": "object",
+			"required": [
+				"source"
+			],
+			"properties": {
+				"source": {
+					"type": "string",
+					"enum": [
+						"login-shell",
+						"inherited"
+					]
+				},
+				"base": {
+					"type": "string",
+					"enum": [
+						"service",
+						"systemd",
+						"minimal"
+					]
+				},
+				"shell": {
+					"type": "string"
+				},
+				"durationMs": {
+					"type": "number"
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Control.Event.relay_offer"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.relay_closed"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.viewer_event"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.viewer_end"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.theme_snapshot"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.keep_awake_changed"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.pairing_progress"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.daemon_shutdown"
+				}
+			]
+		},
+		"Control.Event.daemon_shutdown": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "daemon_shutdown"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.keep_awake_changed": {
+			"type": "object",
+			"required": [
+				"type",
+				"keepAwake"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "keep_awake_changed"
+				},
+				"keepAwake": {
+					"$ref": "#/$defs/Control.KeepAwakeStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.pairing_progress": {
+			"type": "object",
+			"required": [
+				"type",
+				"requestId",
+				"phase"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "pairing_progress"
+				},
+				"requestId": {
+					"type": "string"
+				},
+				"phase": {
+					"type": "string",
+					"enum": [
+						"ticket",
+						"qr",
+						"waiting",
+						"completed",
+						"failed"
+					]
+				},
+				"ticket": {
+					"type": "string"
+				},
+				"qrLines": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"clientNodeId": {
+					"type": "string"
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.relay_closed": {
+			"type": "object",
+			"required": [
+				"type",
+				"relayId",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_closed"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/Control.RelayCloseReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.relay_offer": {
+			"type": "object",
+			"required": [
+				"type",
+				"relayId",
+				"relayToken",
+				"workspaceName",
+				"sessionId",
+				"clientNodeId",
+				"connectionId",
+				"streamId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_offer"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"relayToken": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"clientNodeId": {
+					"type": "string"
+				},
+				"connectionId": {
+					"type": "string"
+				},
+				"streamId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.theme_snapshot": {
+			"type": "object",
+			"required": [
+				"type",
+				"themeName",
+				"tokens"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "theme_snapshot"
+				},
+				"themeName": {
+					"type": "string"
+				},
+				"tokens": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {
+							"type": "string"
+						}
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.viewer_end": {
+			"type": "object",
+			"required": [
+				"type",
+				"viewerFeedId",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "viewer_end"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				},
+				"reason": {
+					"type": "string",
+					"enum": [
+						"granted",
+						"cancelled",
+						"error"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.viewer_event": {
+			"type": "object",
+			"required": [
+				"type",
+				"viewerFeedId",
+				"seq",
+				"event"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "viewer_event"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				},
+				"seq": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"event": {
+					"x-volt-opaque": "a draining daemon runtime's session event as JSON, or {kind: 'truncated'} after a buffer overflow; deleted with the viewer feed"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Fatal": {
+			"type": "object",
+			"required": [
+				"type",
+				"error"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "fatal"
+				},
+				"error": {
+					"type": "string",
+					"x-volt-known-values": [
+						"invalid_hello",
+						"frame_too_large"
+					]
+				}
+			},
+			"additionalProperties": true
+		},
+		"Control.Hello": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"role",
+						"protocolVersion",
+						"pid",
+						"version",
+						"client"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "hello"
+						},
+						"role": {
+							"type": "string",
+							"const": "control"
+						},
+						"protocolVersion": {
+							"type": "number"
+						},
+						"pid": {
+							"type": "number"
+						},
+						"version": {
+							"type": "string"
+						},
+						"client": {
+							"$ref": "#/$defs/Control.ClientKind"
+						},
+						"controlToken": {
+							"type": "string"
+						},
+						"capabilities": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						}
+					},
+					"additionalProperties": true
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"role",
+						"protocolVersion",
+						"relayId",
+						"relayToken"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "hello"
+						},
+						"role": {
+							"type": "string",
+							"const": "relay"
+						},
+						"protocolVersion": {
+							"type": "number"
+						},
+						"relayId": {
+							"type": "string"
+						},
+						"relayToken": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": true
+				}
+			]
+		},
+		"Control.HelloAck": {
+			"type": "object",
+			"required": [
+				"type",
+				"ok"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "hello_ack"
+				},
+				"ok": {
+					"type": "boolean"
+				},
+				"error": {
+					"type": "string",
+					"x-volt-known-values": [
+						"protocol_mismatch",
+						"shutting_down",
+						"bad_relay_token",
+						"auth_failed"
+					]
+				},
+				"connectionId": {
+					"type": "string"
+				},
+				"version": {
+					"type": "string"
+				},
+				"protocolVersion": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": true
+		},
+		"Control.KeepAwakeStatus": {
+			"type": "object",
+			"required": [
+				"enabled",
+				"state"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"state": {
+					"type": "string",
+					"enum": [
+						"disabled",
+						"active",
+						"degraded"
+					]
+				},
+				"method": {
+					"type": "string"
+				},
+				"reason": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.LeaseReleaseReason": {
+			"type": "string",
+			"enum": [
+				"quit",
+				"switch",
+				"connection_lost",
+				"shutdown",
+				"retention_expired",
+				"workspace_unregistered"
+			]
+		},
+		"Control.LeaseState": {
+			"type": "string",
+			"enum": [
+				"unowned",
+				"daemon-active",
+				"daemon-detached",
+				"daemon-draining",
+				"tui-owned"
+			]
+		},
+		"Control.LeaseStatus": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"sessionId",
+				"state",
+				"relayCount",
+				"streamCount"
+			],
+			"properties": {
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"state": {
+					"$ref": "#/$defs/Control.LeaseState"
+				},
+				"relayCount": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"streamCount": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.RelayCloseReason": {
+			"type": "string",
+			"enum": [
+				"phone_disconnected",
+				"tui_disconnected",
+				"lease_transferred",
+				"workspace_unregistered",
+				"host_shutdown",
+				"error"
+			]
+		},
+		"Control.RelayCredentialStatus": {
+			"type": "object",
+			"required": [
+				"state"
+			],
+			"properties": {
+				"state": {
+					"type": "string",
+					"enum": [
+						"unpaired",
+						"pairing",
+						"active",
+						"expired",
+						"subscription_inactive",
+						"revocation_pending"
+					]
+				},
+				"expiresAt": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"nextRefreshAt": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.RelayPreamble": {
+			"type": "object",
+			"required": [
+				"type",
+				"relayId",
+				"handshake",
+				"authorization",
+				"connectionId",
+				"streamId",
+				"resolvedTarget"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_preamble"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"handshake": {
+					"type": "object",
+					"required": [
+						"hello",
+						"response",
+						"initialInput"
+					],
+					"properties": {
+						"hello": {
+							"$ref": "#/$defs/RemoteHandshake.ParsedHello"
+						},
+						"response": {
+							"$ref": "#/$defs/RemoteHandshake.Success"
+						},
+						"initialInput": {
+							"type": "array",
+							"items": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 255
+							}
+						}
+					},
+					"additionalProperties": false
+				},
+				"authorization": {
+					"type": "object",
+					"required": [
+						"workspaceNames",
+						"workspaces",
+						"clientNodeId",
+						"workspaceName",
+						"workspacePath",
+						"allowedTools",
+						"rpcGrant"
+					],
+					"properties": {
+						"workspaceNames": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/IrohRemoteWorkspaceName"
+							}
+						},
+						"workspaces": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/IrohRemoteWorkspaceStatus"
+							}
+						},
+						"clientNodeId": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"workspacePath": {
+							"type": "string"
+						},
+						"allowedTools": {
+							"type": "string"
+						},
+						"rpcGrant": {
+							"$ref": "#/$defs/RemoteGrant"
+						},
+						"worktreeId": {
+							"type": "string"
+						},
+						"worktreePath": {
+							"type": "string"
+						},
+						"worktreeSourceRootRelativePath": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"hostNodeId": {
+					"type": "string"
+				},
+				"relayMode": {
+					"$ref": "#/$defs/RemoteHandshake.RelayMode"
+				},
+				"relayUrls": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"connectionId": {
+					"type": "string"
+				},
+				"streamId": {
+					"type": "string"
+				},
+				"resolvedTarget": {
+					"type": "object",
+					"required": [
+						"sessionId",
+						"selection",
+						"workspaceName",
+						"workspacePath"
+					],
+					"properties": {
+						"sessionId": {
+							"type": "string"
+						},
+						"selection": {
+							"type": "string",
+							"enum": [
+								"created",
+								"created_after_missing",
+								"resumed"
+							]
+						},
+						"requestedSessionId": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"workspacePath": {
+							"type": "string"
+						},
+						"worktreeId": {
+							"type": "string"
+						},
+						"workingDirectory": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.RelayRpcCommand": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"type": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": true,
+			"description": "A phone RPC command, validated by the daemon per command type."
+		},
+		"Control.RelayRpcResponse": {
+			"type": "object",
+			"patternProperties": {
+				"^.*$": {}
+			},
+			"x-volt-opaque": "the RPC response to a relayed phone command, forwarded verbatim"
+		},
+		"Control.RemotePolicyStatus": {
+			"type": "object",
+			"required": [
+				"allowTools",
+				"detachedRuntimeTtlMs"
+			],
+			"properties": {
+				"allowTools": {
+					"anyOf": [
+						{
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"detachedRuntimeTtlMs": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.RemoteTransportHealth": {
+			"type": "object",
+			"required": [
+				"state"
+			],
+			"properties": {
+				"state": {
+					"type": "string",
+					"enum": [
+						"starting",
+						"ready",
+						"degraded",
+						"unavailable"
+					]
+				},
+				"wrapperVersion": {
+					"type": "string"
+				},
+				"reasonCode": {
+					"type": "string",
+					"enum": [
+						"extension_missing",
+						"native_binding_missing",
+						"endpoint_start_failed",
+						"host_storage_full"
+					]
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Control.Request.status"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.shutdown"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.lease_acquire"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.lease_release"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.work_observe"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.pair_request"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.pair_cancel"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.clients_list"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.relay_credential_revoke"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.relay_credential_check"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.client_access_update"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.client_revoke"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.client_approve_repair"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.workspace_register"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.workspace_unregister"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_create"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_adopt"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_list"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_remove"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_prune"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_resolve"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_restore"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worktree_bind"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.theme_set"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.keep_awake_set"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.viewer_subscribe"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.viewer_unsubscribe"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.viewer_abort"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.relay_rpc"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.relay_notification_delivery"
+				}
+			]
+		},
+		"Control.Request.client_access_update": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"clientNodeId",
+						"expectedRevision",
+						"access"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "client_access_update"
+						},
+						"id": {
+							"type": "string"
+						},
+						"clientNodeId": {
+							"type": "string"
+						},
+						"expectedRevision": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 9007199254740991
+						},
+						"access": {
+							"$ref": "#/$defs/RemoteAccessPresetName"
+						},
+						"allowedTools": {
+							"not": {}
+						},
+						"rpcCapabilities": {
+							"not": {}
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"clientNodeId",
+						"expectedRevision",
+						"allowedTools",
+						"rpcCapabilities"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "client_access_update"
+						},
+						"id": {
+							"type": "string"
+						},
+						"clientNodeId": {
+							"type": "string"
+						},
+						"expectedRevision": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 9007199254740991
+						},
+						"access": {
+							"not": {}
+						},
+						"allowedTools": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"rpcCapabilities": {
+							"$ref": "#/$defs/RemoteCapabilities"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"Control.Request.client_approve_repair": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"clientNodeId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "client_approve_repair"
+				},
+				"id": {
+					"type": "string"
+				},
+				"clientNodeId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.client_revoke": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"clientNodeId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "client_revoke"
+				},
+				"id": {
+					"type": "string"
+				},
+				"clientNodeId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.clients_list": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "clients_list"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.keep_awake_set": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"enabled"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "keep_awake_set"
+				},
+				"id": {
+					"type": "string"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.lease_acquire": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "lease_acquire"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"force": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.lease_release": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"sessionId",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "lease_release"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/Control.LeaseReleaseReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.pair_cancel": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"requestId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "pair_cancel"
+				},
+				"id": {
+					"type": "string"
+				},
+				"requestId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.pair_request": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "pair_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"access": {
+							"$ref": "#/$defs/RemoteAccessPresetName"
+						},
+						"allowedTools": {
+							"not": {}
+						},
+						"rpcCapabilities": {
+							"not": {}
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"id",
+						"allowedTools",
+						"rpcCapabilities"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "pair_request"
+						},
+						"id": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"access": {
+							"not": {}
+						},
+						"allowedTools": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"rpcCapabilities": {
+							"$ref": "#/$defs/RemoteCapabilities"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"Control.Request.relay_credential_check": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_credential_check"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.relay_credential_revoke": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_credential_revoke"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.relay_notification_delivery": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"clientNodeId",
+				"workspaceName",
+				"sessionId",
+				"notification"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_notification_delivery"
+				},
+				"id": {
+					"type": "string"
+				},
+				"clientNodeId": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"notification": {
+					"$ref": "#/$defs/IrohRemotePushNotification"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.relay_rpc": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"clientNodeId",
+				"workspaceName",
+				"sessionId",
+				"command"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_rpc"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"clientNodeId": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"command": {
+					"$ref": "#/$defs/Control.RelayRpcCommand"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.shutdown": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "shutdown"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.status": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "status"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.theme_set": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"theme"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "theme_set"
+				},
+				"id": {
+					"type": "string"
+				},
+				"theme": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.viewer_abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"viewerFeedId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "viewer_abort"
+				},
+				"id": {
+					"type": "string"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.viewer_subscribe": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"viewerFeedId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "viewer_subscribe"
+				},
+				"id": {
+					"type": "string"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.viewer_unsubscribe": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"viewerFeedId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "viewer_unsubscribe"
+				},
+				"id": {
+					"type": "string"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.work_observe": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"sessionId",
+				"gitContext"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "work_observe"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[\\s\\S]{1,256}$"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[\\s\\S]{1,128}$"
+				},
+				"gitContext": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"repository",
+								"branch",
+								"headOid"
+							],
+							"properties": {
+								"repository": {
+									"type": "string",
+									"maxLength": 256,
+									"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+								},
+								"branch": {
+									"type": "string",
+									"maxLength": 1024,
+									"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
+								},
+								"headOid": {
+									"type": "string",
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+								},
+								"baseRef": {
+									"type": "string",
+									"maxLength": 1024,
+									"pattern": "^[^\\u0000\\r\\n]{0,1024}$"
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.workspace_register": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"name",
+				"path"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "workspace_register"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.workspace_unregister": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"name"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "workspace_unregister"
+				},
+				"id": {
+					"type": "string"
+				},
+				"name": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_adopt": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"path"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_adopt"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"worktreeName": {
+					"type": "string"
+				},
+				"baseRef": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_bind": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"worktreeId",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_bind"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"worktreeId": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"acquireLease": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_create": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_create"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"worktreeName": {
+					"type": "string"
+				},
+				"branch": {
+					"type": "string"
+				},
+				"baseRef": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_list": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_list"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_prune": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_prune"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"purgeRecovery": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_remove": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"worktreeId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_remove"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"worktreeId": {
+					"type": "string"
+				},
+				"force": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_resolve": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"path"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_resolve"
+				},
+				"id": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worktree_restore": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"path",
+				"sessionRef"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_restore"
+				},
+				"id": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"sessionRef": {
+					"$ref": "#/$defs/SessionReference"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Control.Response.ok"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.error"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.lease_granted"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.lease_pending"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.lease_denied"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.status_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.keep_awake_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.clients_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.client_access_updated"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worktree_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worktrees_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worktree_resolve_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worktree_prune_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.pair_started"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.relay_rpc_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.relay_push_delivery_result"
+				}
+			]
+		},
+		"Control.Response.client_access_updated": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"client"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "client_access_updated"
+				},
+				"id": {
+					"type": "string"
+				},
+				"client": {
+					"$ref": "#/$defs/Control.ClientStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.clients_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"clients"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "clients_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"clients": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.ClientStatus"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.error": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"code",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "error"
+				},
+				"id": {
+					"type": "string"
+				},
+				"code": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.keep_awake_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"keepAwake"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "keep_awake_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"keepAwake": {
+					"$ref": "#/$defs/Control.KeepAwakeStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.lease_denied": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "lease_denied"
+				},
+				"id": {
+					"type": "string"
+				},
+				"reason": {
+					"type": "string",
+					"enum": [
+						"held_by_tui",
+						"force_unsupported",
+						"draining_elsewhere"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.lease_granted": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"sessionId",
+				"handoff"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "lease_granted"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"handoff": {
+					"type": "string",
+					"enum": [
+						"cold",
+						"warm",
+						"none"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.lease_pending": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"viewerFeedId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "lease_pending"
+				},
+				"id": {
+					"type": "string"
+				},
+				"viewerFeedId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.ok": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "ok"
+				},
+				"id": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.pair_started": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"requestId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "pair_started"
+				},
+				"id": {
+					"type": "string"
+				},
+				"requestId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.relay_push_delivery_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"status"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_push_delivery_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"status": {
+					"$ref": "#/$defs/IrohRemotePushNotificationDeliveryStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.relay_rpc_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"response"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_rpc_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"response": {
+					"$ref": "#/$defs/Control.RelayRpcResponse"
+				},
+				"workspaceMetadata": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceMetadataSnapshot"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.status_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"version",
+				"protocolVersion",
+				"pid",
+				"startedAtMs",
+				"environment",
+				"leases",
+				"phoneConnections",
+				"workspaces",
+				"clients",
+				"remoteTransport",
+				"keepAwake"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "status_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"version": {
+					"type": "string"
+				},
+				"protocolVersion": {
+					"type": "number"
+				},
+				"pid": {
+					"type": "number"
+				},
+				"startedAtMs": {
+					"type": "number"
+				},
+				"environment": {
+					"$ref": "#/$defs/Control.EnvironmentStatus"
+				},
+				"capabilities": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"leases": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.LeaseStatus"
+					}
+				},
+				"phoneConnections": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"workspaces": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.WorkspaceStatus"
+					}
+				},
+				"clients": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.ClientStatus"
+					}
+				},
+				"revokedClients": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.RevokedClientStatus"
+					}
+				},
+				"remoteTransport": {
+					"$ref": "#/$defs/Control.RemoteTransportHealth"
+				},
+				"relayCredential": {
+					"$ref": "#/$defs/Control.RelayCredentialStatus"
+				},
+				"remotePolicy": {
+					"$ref": "#/$defs/Control.RemotePolicyStatus"
+				},
+				"keepAwake": {
+					"$ref": "#/$defs/Control.KeepAwakeStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worktree_prune_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"results"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_prune_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"results": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"workspaceName",
+							"removedRecords",
+							"orphanCheckouts"
+						],
+						"properties": {
+							"workspaceName": {
+								"type": "string"
+							},
+							"removedRecords": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"orphanCheckouts": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"purgedRecoveryCheckouts": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							}
+						},
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worktree_resolve_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"workspacePath",
+				"worktreeId",
+				"worktreePath"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_resolve_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"workspacePath": {
+					"type": "string"
+				},
+				"worktreeId": {
+					"type": "string"
+				},
+				"worktreePath": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worktree_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"worktree"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktree_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"worktree": {
+					"$ref": "#/$defs/Control.WorktreeStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worktrees_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"worktrees"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worktrees_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"worktrees": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.WorktreeStatus"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.RevokedClientStatus": {
+			"type": "object",
+			"required": [
+				"clientNodeId",
+				"pairedAtMs",
+				"revokedAtMs"
+			],
+			"properties": {
+				"clientNodeId": {
+					"type": "string"
+				},
+				"label": {
+					"type": "string"
+				},
+				"pairedAtMs": {
+					"type": "number"
+				},
+				"lastSeenAtMs": {
+					"type": "number"
+				},
+				"revokedAtMs": {
+					"type": "number"
+				},
+				"rePairApprovedAtMs": {
+					"type": "number"
+				},
+				"rpcGrant": {
+					"$ref": "#/$defs/RemoteGrant"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorkspaceStatus": {
+			"type": "object",
+			"required": [
+				"name",
+				"path"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"allowedTools": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorktreeStatus": {
+			"type": "object",
+			"required": [
+				"id",
+				"workspaceName",
+				"path",
+				"branch",
+				"createdAt",
+				"sessionIds"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"branch": {
+					"type": "string"
+				},
+				"baseRef": {
+					"type": "string"
+				},
+				"createdAt": {
+					"type": "number"
+				},
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"available": {
+					"type": "boolean"
+				},
+				"dirty": {
+					"type": "boolean"
+				},
+				"aheadBehind": {
+					"type": "object",
+					"required": [
+						"ahead",
+						"behind"
+					],
+					"properties": {
+						"ahead": {
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						},
+						"behind": {
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"CustomMessage": {
 			"type": "object",
 			"required": [
@@ -5608,6 +8003,245 @@
 				"queue"
 			]
 		},
+		"IrohRemotePushNotification": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"eventId",
+						"hostNodeId",
+						"title",
+						"body",
+						"kind"
+					],
+					"properties": {
+						"eventId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"hostNodeId": {
+							"type": "string",
+							"pattern": "^[0-9a-f]{64}$"
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"body": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"workspaceName": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"kind": {
+							"type": "string",
+							"enum": [
+								"conversation_completed",
+								"action_completed",
+								"host_notice"
+							]
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"eventId",
+						"hostNodeId",
+						"title",
+						"body",
+						"kind",
+						"planId"
+					],
+					"properties": {
+						"eventId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"hostNodeId": {
+							"type": "string",
+							"pattern": "^[0-9a-f]{64}$"
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"body": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"workspaceName": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"kind": {
+							"type": "string",
+							"const": "plan_ready"
+						},
+						"planId": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 128
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"eventId",
+						"hostNodeId",
+						"title",
+						"body",
+						"kind",
+						"workflowId"
+					],
+					"properties": {
+						"eventId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"hostNodeId": {
+							"type": "string",
+							"pattern": "^[0-9a-f]{64}$"
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"body": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 512
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"workspaceName": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+(?: [^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+)*$",
+							"x-volt-max-utf8-bytes": 128
+						},
+						"kind": {
+							"type": "string",
+							"const": "review_completed"
+						},
+						"workflowId": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
+							"x-volt-max-utf8-bytes": 128
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"IrohRemotePushNotificationDeliveryStatus": {
+			"type": "string",
+			"enum": [
+				"sent",
+				"no_push_target",
+				"duplicate",
+				"failed",
+				"invalid_target"
+			]
+		},
+		"IrohRemoteWorkspaceAvailabilityStatus": {
+			"x-volt-expected": "be a supported workspace status",
+			"type": "string",
+			"enum": [
+				"available",
+				"missing",
+				"unavailable"
+			]
+		},
+		"IrohRemoteWorkspaceMetadataSnapshot": {
+			"type": "object",
+			"required": [
+				"workspaceNames",
+				"workspaces"
+			],
+			"properties": {
+				"workspaceNames": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IrohRemoteWorkspaceName"
+					}
+				},
+				"workspaces": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IrohRemoteWorkspaceStatus"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"IrohRemoteWorkspaceName": {
+			"type": "string",
+			"maxLength": 255,
+			"pattern": "^[^\\u0000-\\u001f\\u007f]{1,255}$",
+			"x-volt-max-utf8-bytes": 1024,
+			"x-volt-expected": "be a workspace name of 1-255 characters without ASCII control characters"
+		},
+		"IrohRemoteWorkspaceStatus": {
+			"type": "object",
+			"required": [
+				"name",
+				"status"
+			],
+			"properties": {
+				"name": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				},
+				"status": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceAvailabilityStatus"
+				}
+			},
+			"additionalProperties": false
+		},
 		"LiveItem": {
 			"anyOf": [
 				{
@@ -9441,6 +12075,7 @@
 			"items": {
 				"$ref": "#/$defs/RemoteCapability"
 			},
+			"maxItems": 8,
 			"uniqueItems": true
 		},
 		"RemoteCapability": {
@@ -9478,6 +12113,699 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RemoteHandshake.ConversationMetadata": {
+			"type": "object",
+			"required": [
+				"target",
+				"sessionId",
+				"selection"
+			],
+			"properties": {
+				"target": {
+					"x-volt-expected": "be a supported conversation target",
+					"type": "string",
+					"enum": [
+						"last",
+						"new",
+						"session"
+					]
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RemoteHandshake.SessionId"
+				},
+				"selection": {
+					"$ref": "#/$defs/RemoteHandshake.ConversationSelection"
+				},
+				"worktreeId": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				},
+				"workingDirectory": {
+					"$ref": "#/$defs/RemoteHandshake.WorkingDirectory"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RemoteHandshake.ConversationSelection": {
+			"x-volt-expected": "be a supported conversation selection",
+			"type": "string",
+			"enum": [
+				"resumed",
+				"created",
+				"created_missing_last"
+			]
+		},
+		"RemoteHandshake.ConversationTarget": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"target"
+					],
+					"properties": {
+						"target": {
+							"type": "string",
+							"const": "last"
+						},
+						"sessionId": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"worktreeId": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workingDirectory": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"target",
+						"sessionId"
+					],
+					"properties": {
+						"target": {
+							"type": "string",
+							"const": "new"
+						},
+						"sessionId": {
+							"$ref": "#/$defs/RemoteHandshake.SessionId"
+						},
+						"worktreeId": {
+							"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+						},
+						"workingDirectory": {
+							"$ref": "#/$defs/RemoteHandshake.WorkingDirectory"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"target",
+						"sessionId"
+					],
+					"properties": {
+						"target": {
+							"type": "string",
+							"const": "session"
+						},
+						"sessionId": {
+							"$ref": "#/$defs/RemoteHandshake.SessionId"
+						},
+						"worktreeId": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workingDirectory": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RemoteHandshake.Failure": {
+			"type": "object",
+			"required": [
+				"type",
+				"success",
+				"error"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "volt_iroh_handshake"
+				},
+				"success": {
+					"type": "boolean",
+					"const": false
+				},
+				"outcome": {
+					"$ref": "#/$defs/RemoteHandshake.Outcome"
+				},
+				"hostNodeId": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"workspace": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RemoteHandshake.SessionId"
+				},
+				"retryAfterMs": {
+					"type": "number",
+					"x-volt-expected": "be a finite number"
+				},
+				"error": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				}
+			},
+			"additionalProperties": true
+		},
+		"RemoteHandshake.Hello": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"conversation"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"conversation": {
+							"$ref": "#/$defs/RemoteHandshake.ConversationTarget"
+						},
+						"workspaceDiscovery": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workspaceManagement": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": true
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"workspaceDiscovery"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"workspaceDiscovery": {
+							"$ref": "#/$defs/RemoteHandshake.WorkspaceDiscoveryTarget"
+						},
+						"conversation": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workspaceManagement": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": true
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"workspaceManagement"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"workspaceManagement": {
+							"$ref": "#/$defs/RemoteHandshake.WorkspaceManagementTarget"
+						},
+						"conversation": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						},
+						"workspaceDiscovery": {
+							"not": {},
+							"x-volt-expected": "be absent"
+						}
+					},
+					"additionalProperties": true
+				}
+			]
+		},
+		"RemoteHandshake.HostMetadata": {
+			"type": "object",
+			"required": [
+				"workspace",
+				"workspaceNames",
+				"workspaces",
+				"features",
+				"cwd"
+			],
+			"properties": {
+				"workspace": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				},
+				"workspaceNames": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IrohRemoteWorkspaceName"
+					}
+				},
+				"workspaces": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IrohRemoteWorkspaceStatus"
+					}
+				},
+				"features": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"x-volt-expected": "be a non-empty string"
+					},
+					"minItems": 1,
+					"x-volt-expected": "be a non-empty string array"
+				},
+				"hostNodeId": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"relayMode": {
+					"$ref": "#/$defs/RemoteHandshake.RelayMode"
+				},
+				"relayUrls": {
+					"$ref": "#/$defs/RemoteHandshake.RelayUrls"
+				},
+				"hostName": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"userName": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"cwd": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RemoteHandshake.Outcome": {
+			"x-volt-expected": "be a known Iroh remote outcome",
+			"type": "string",
+			"enum": [
+				"host_unreachable",
+				"host_storage_full",
+				"invalid_workspace",
+				"invalid_conversation_target",
+				"conversation_streams_unsupported",
+				"pairing_secret_expired",
+				"pairing_secret_consumed",
+				"client_unknown",
+				"client_revoked",
+				"workspace_unavailable",
+				"workspace_missing",
+				"workspace_forbidden",
+				"workspace_authorization_removed",
+				"workspace_unregistered",
+				"session_unavailable",
+				"duplicate_conversation_connection",
+				"conversation_in_use",
+				"conversation_locked",
+				"host_identity_mismatch",
+				"saved_host_invalid"
+			]
+		},
+		"RemoteHandshake.ParsedHello": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"mode",
+						"conversation"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"mode": {
+							"type": "string",
+							"const": "conversation"
+						},
+						"conversation": {
+							"$ref": "#/$defs/RemoteHandshake.ConversationTarget"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"mode",
+						"workspaceDiscovery"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"mode": {
+							"type": "string",
+							"const": "workspaceDiscovery"
+						},
+						"workspaceDiscovery": {
+							"$ref": "#/$defs/RemoteHandshake.WorkspaceDiscoveryTarget"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"protocol",
+						"workspace",
+						"mode",
+						"workspaceManagement"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "volt_iroh_hello"
+						},
+						"protocol": {
+							"type": "string",
+							"const": "volt-rpc/0"
+						},
+						"workspace": {
+							"$ref": "#/$defs/IrohRemoteWorkspaceName"
+						},
+						"secret": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientLabel": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"clientNodeId": {
+							"type": "string",
+							"minLength": 1,
+							"x-volt-expected": "be a non-empty string"
+						},
+						"mode": {
+							"type": "string",
+							"const": "workspaceManagement"
+						},
+						"workspaceManagement": {
+							"$ref": "#/$defs/RemoteHandshake.WorkspaceManagementTarget"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RemoteHandshake.RelayMode": {
+			"x-volt-expected": "be a supported relay mode",
+			"type": "string",
+			"enum": [
+				"disabled",
+				"development",
+				"production"
+			]
+		},
+		"RemoteHandshake.RelayUrls": {
+			"type": "array",
+			"items": {
+				"type": "string",
+				"minLength": 1,
+				"x-volt-expected": "be a non-empty string"
+			},
+			"minItems": 1,
+			"x-volt-expected": "be a non-empty array of relay URLs"
+		},
+		"RemoteHandshake.Response": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/RemoteHandshake.Success"
+				},
+				{
+					"$ref": "#/$defs/RemoteHandshake.Failure"
+				}
+			]
+		},
+		"RemoteHandshake.SessionId": {
+			"type": "string",
+			"pattern": "^[a-z0-9_-]{1,128}$",
+			"x-volt-expected": "match lowercase remote session ID syntax"
+		},
+		"RemoteHandshake.Success": {
+			"type": "object",
+			"required": [
+				"type",
+				"success",
+				"workspace",
+				"clientNodeId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "volt_iroh_handshake"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"workspace": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"hostNodeId": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"clientNodeId": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"features": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"x-volt-expected": "be a non-empty string"
+					}
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				},
+				"conversation": {
+					"$ref": "#/$defs/RemoteHandshake.ConversationMetadata"
+				},
+				"workspaceDiscovery": {
+					"$ref": "#/$defs/RemoteHandshake.WorkspaceDiscoveryTarget"
+				},
+				"workspaceManagement": {
+					"$ref": "#/$defs/RemoteHandshake.WorkspaceManagementTarget"
+				},
+				"remoteHost": {
+					"$ref": "#/$defs/RemoteHandshake.HostMetadata"
+				},
+				"child": {
+					"type": "string",
+					"minLength": 1,
+					"x-volt-expected": "be a non-empty string"
+				}
+			},
+			"additionalProperties": true
+		},
+		"RemoteHandshake.WorkingDirectory": {
+			"type": "string",
+			"pattern": "^(?![A-Za-z]:)(?!\\.{1,2}(?:/|$))(?![.][Gg][Ii][Tt](?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/(?!\\.{1,2}(?:/|$))(?![.][Gg][Ii][Tt](?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+)*$",
+			"maxLength": 4096,
+			"x-volt-max-utf8-bytes": 8192,
+			"x-volt-expected": "be a relative POSIX path inside the workspace"
+		},
+		"RemoteHandshake.WorkspaceDiscoveryTarget": {
+			"type": "object",
+			"required": [
+				"purpose"
+			],
+			"properties": {
+				"purpose": {
+					"x-volt-expected": "be a supported workspaceDiscovery purpose",
+					"type": "string",
+					"enum": [
+						"list_sessions",
+						"agent_options",
+						"session_contexts",
+						"review"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RemoteHandshake.WorkspaceManagementTarget": {
+			"type": "object",
+			"required": [
+				"purpose"
+			],
+			"properties": {
+				"purpose": {
+					"x-volt-expected": "be a supported workspaceManagement purpose",
+					"type": "string",
+					"enum": [
+						"unregister_workspace",
+						"manage_worktrees",
+						"list_workspace_directories"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RemoteHandshake.WorktreeId": {
+			"type": "string",
+			"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
+			"x-volt-expected": "match lowercase worktree id syntax"
 		},
 		"ReviewWorkflowStarted": {
 			"type": "object",

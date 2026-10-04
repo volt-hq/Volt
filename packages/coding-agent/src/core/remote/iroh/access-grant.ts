@@ -1,28 +1,21 @@
+import {
+	REMOTE_ACCESS_PRESET_CAPABILITIES,
+	REMOTE_ACCESS_PRESET_NAMES,
+	REMOTE_CAPABILITIES,
+	REMOTE_GRANT_SCHEMA_VERSION,
+	type RemoteAccessPresetName,
+	type RemoteCapability,
+	type RemoteGrant,
+} from "@hansjm10/volt-protocol/remote-access";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, normalizeIrohRemoteAllowTools } from "./protocol.ts";
 
-export const IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION = 1 as const;
-
-export const IROH_REMOTE_RPC_CAPABILITIES = [
-	"conversation.observe.v1",
-	"conversation.control.v1",
-	"model.select.v1",
-	"integrations.manage.v1",
-	"worktrees.manage.v1",
-	"host.manage.v1",
-	"workspace.manage.v1",
-	"diagnostics.upload.v1",
-] as const;
-
-export type IrohRemoteRpcCapability = (typeof IROH_REMOTE_RPC_CAPABILITIES)[number];
-
-export interface IrohRemoteRpcGrant {
-	schemaVersion: typeof IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION;
-	revision: number;
-	capabilities: IrohRemoteRpcCapability[];
-}
-
-export const IROH_REMOTE_ACCESS_PRESET_NAMES = ["coding", "review", "chat", "full"] as const;
-export type IrohRemoteAccessPresetName = (typeof IROH_REMOTE_ACCESS_PRESET_NAMES)[number];
+// The protocol's remote-access vocabulary under the names the coding agent exports.
+export const IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION = REMOTE_GRANT_SCHEMA_VERSION;
+export const IROH_REMOTE_RPC_CAPABILITIES = REMOTE_CAPABILITIES;
+export const IROH_REMOTE_ACCESS_PRESET_NAMES = REMOTE_ACCESS_PRESET_NAMES;
+export type IrohRemoteRpcCapability = RemoteCapability;
+export type IrohRemoteRpcGrant = RemoteGrant;
+export type IrohRemoteAccessPresetName = RemoteAccessPresetName;
 
 export interface IrohRemoteAccessPreset {
 	readonly name: IrohRemoteAccessPresetName;
@@ -30,32 +23,23 @@ export interface IrohRemoteAccessPreset {
 	readonly capabilities: readonly IrohRemoteRpcCapability[];
 }
 
-const STANDARD_CAPABILITIES = Object.freeze<IrohRemoteRpcCapability[]>([
-	"conversation.observe.v1",
-	"conversation.control.v1",
-	"model.select.v1",
-	// A paired device is the user's own; host-action responses, keep-awake, and
-	// capability advertisement (host_action_requests.v1) work out of the box.
-	"host.manage.v1",
-]);
-
 export const IROH_REMOTE_ACCESS_PRESETS: Readonly<Record<IrohRemoteAccessPresetName, IrohRemoteAccessPreset>> =
 	Object.freeze({
 		coding: Object.freeze({
 			name: "coding",
 			allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
-			capabilities: STANDARD_CAPABILITIES,
+			capabilities: REMOTE_ACCESS_PRESET_CAPABILITIES.coding,
 		}),
 		review: Object.freeze({
 			name: "review",
 			allowedTools: "read,grep,find,ls",
-			capabilities: STANDARD_CAPABILITIES,
+			capabilities: REMOTE_ACCESS_PRESET_CAPABILITIES.review,
 		}),
-		chat: Object.freeze({ name: "chat", allowedTools: "", capabilities: STANDARD_CAPABILITIES }),
+		chat: Object.freeze({ name: "chat", allowedTools: "", capabilities: REMOTE_ACCESS_PRESET_CAPABILITIES.chat }),
 		full: Object.freeze({
 			name: "full",
 			allowedTools: DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
-			capabilities: Object.freeze([...IROH_REMOTE_RPC_CAPABILITIES]),
+			capabilities: REMOTE_ACCESS_PRESET_CAPABILITIES.full,
 		}),
 	});
 

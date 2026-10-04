@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import type { RelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import {
 	RELAY_TOKEN_TTL_MS,
@@ -73,16 +74,23 @@ const RELAY_AUTHORIZATION = {
 	rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 };
 
-const HANDSHAKE_VERBATIM = {
+const HANDSHAKE_VERBATIM: RelayPreamble["handshake"] = {
 	hello: {
 		type: "volt_iroh_hello",
 		protocol: "volt-rpc/0",
 		workspace: "ws",
+		clientLabel: "phône 📱",
 		mode: "conversation",
 		conversation: { target: "session", sessionId: "s-1" },
-		clientInfo: { label: "phône 📱", nested: [1, 2, { deep: true }], nullish: null },
 	},
-	response: { child: "volt", features: ["multi_streams.v1", "conversation_streams.v1"] },
+	response: {
+		type: "volt_iroh_handshake",
+		success: true,
+		workspace: "ws",
+		clientNodeId: "n-phone-a",
+		child: "volt",
+		features: ["multi_streams.v1", "conversation_streams.v1"],
+	},
 	initialInput: [104, 105, 10],
 };
 

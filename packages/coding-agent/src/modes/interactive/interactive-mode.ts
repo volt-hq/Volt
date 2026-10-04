@@ -113,7 +113,6 @@ import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScop
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
-import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
 import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
@@ -2289,11 +2288,7 @@ export class InteractiveMode {
 			opened.finished();
 			return;
 		}
-		const handshake = preamble.handshake as {
-			hello: IrohRemoteHello;
-			response: IrohRemoteHandshakeSuccess;
-			initialInput?: number[];
-		};
+		const handshake = preamble.handshake;
 		const authorizationSubset = preamble.authorization;
 		const authorization = createTuiRelayAuthorization(authorizationSubset);
 		const rpcGrant = authorization.client.rpcGrant;

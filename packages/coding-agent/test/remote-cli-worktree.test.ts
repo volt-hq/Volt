@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { isControlRequest, isControlResponse } from "../src/daemon/control-protocol.ts";
+import { admitControlRequest, ControlValidators } from "../src/daemon/control-protocol.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import { getWorktreesRoot } from "../src/daemon/worktree-manager.ts";
@@ -12,9 +12,9 @@ import { main } from "../src/main.ts";
 
 describe("worktree control protocol shapes", () => {
 	it("accepts well-formed worktree_* requests and rejects malformed ones", () => {
-		expect(isControlRequest({ type: "worktree_create", id: "1", workspaceName: "ws" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_create", id: "1", workspaceName: "ws" })).toBe(true);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "worktree_create",
 				id: "1",
 				workspaceName: "ws",
@@ -23,12 +23,12 @@ describe("worktree control protocol shapes", () => {
 				baseRef: "main",
 			}),
 		).toBe(true);
-		expect(isControlRequest({ type: "worktree_create", id: "1" })).toBe(false);
-		expect(isControlRequest({ type: "worktree_create", id: "1", workspaceName: "ws", branch: 42 })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_create", id: "1" })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_create", id: "1", workspaceName: "ws", branch: 42 })).toBe(false);
 
-		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: "/tmp/wt" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: "/tmp/wt" })).toBe(true);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "worktree_adopt",
 				id: "1",
 				workspaceName: "ws",
@@ -37,32 +37,43 @@ describe("worktree control protocol shapes", () => {
 				baseRef: "main",
 			}),
 		).toBe(true);
-		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws" })).toBe(false);
-		expect(isControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: 42 })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws" })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_adopt", id: "1", workspaceName: "ws", path: 42 })).toBe(false);
 
-		expect(isControlRequest({ type: "worktree_list", id: "1" })).toBe(true);
-		expect(isControlRequest({ type: "worktree_list", id: "1", workspaceName: "ws" })).toBe(true);
-		expect(isControlRequest({ type: "worktree_list", id: "1", workspaceName: 42 })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_list", id: "1" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_list", id: "1", workspaceName: "ws" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_list", id: "1", workspaceName: 42 })).toBe(false);
 
-		expect(isControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x" })).toBe(
+			true,
+		);
 		expect(
-			isControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x", force: true }),
+			admitControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x", force: true }),
 		).toBe(true);
-		expect(isControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws" })).toBe(false);
+		expect(admitControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws" })).toBe(false);
 		expect(
-			isControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x", force: "yes" }),
+			admitControlRequest({ type: "worktree_remove", id: "1", workspaceName: "ws", worktreeId: "x", force: "yes" }),
 		).toBe(false);
 
-		expect(isControlRequest({ type: "worktree_prune", id: "1" })).toBe(true);
-		expect(isControlRequest({ type: "worktree_prune", id: "1", workspaceName: "ws" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_prune", id: "1" })).toBe(true);
+		expect(admitControlRequest({ type: "worktree_prune", id: "1", workspaceName: "ws" })).toBe(true);
 	});
 
 	it("accepts well-formed worktree_* responses", () => {
-		expect(isControlResponse({ type: "worktree_result", id: "1", worktree: { id: "x" } })).toBe(true);
-		expect(isControlResponse({ type: "worktree_result", id: "1", worktree: "x" })).toBe(false);
-		expect(isControlResponse({ type: "worktrees_result", id: "1", worktrees: [] })).toBe(true);
-		expect(isControlResponse({ type: "worktrees_result", id: "1", worktrees: {} })).toBe(false);
-		expect(isControlResponse({ type: "worktree_prune_result", id: "1", results: [] })).toBe(true);
+		const worktree = {
+			id: "x",
+			workspaceName: "ws",
+			path: "/tmp/wt",
+			branch: "volt/x",
+			createdAt: 1,
+			sessionIds: [],
+		};
+		expect(ControlValidators.response.Check({ type: "worktree_result", id: "1", worktree })).toBe(true);
+		expect(ControlValidators.response.Check({ type: "worktree_result", id: "1", worktree: { id: "x" } })).toBe(false);
+		expect(ControlValidators.response.Check({ type: "worktree_result", id: "1", worktree: "x" })).toBe(false);
+		expect(ControlValidators.response.Check({ type: "worktrees_result", id: "1", worktrees: [] })).toBe(true);
+		expect(ControlValidators.response.Check({ type: "worktrees_result", id: "1", worktrees: {} })).toBe(false);
+		expect(ControlValidators.response.Check({ type: "worktree_prune_result", id: "1", results: [] })).toBe(true);
 	});
 });
 

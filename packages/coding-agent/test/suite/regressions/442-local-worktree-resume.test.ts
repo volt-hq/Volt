@@ -19,7 +19,7 @@ import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/sess
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import { createDaemonClient } from "../../../src/daemon/control-client.ts";
-import { isControlRequest } from "../../../src/daemon/control-protocol.ts";
+import { admitControlRequest } from "../../../src/daemon/control-protocol.ts";
 import { startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
@@ -175,10 +175,10 @@ describe("#442 local archived-worktree resume", () => {
 			sessionId: "session",
 			sessionGeneration: "generation",
 		};
-		expect(isControlRequest({ ...request, sessionRef })).toBe(true);
-		expect(isControlRequest({ ...request, sessionId: "session" })).toBe(false);
+		expect(admitControlRequest({ ...request, sessionRef })).toBe(true);
+		expect(admitControlRequest({ ...request, sessionId: "session" })).toBe(false);
 		for (const field of Object.keys(sessionRef)) {
-			expect(isControlRequest({ ...request, sessionRef: { ...sessionRef, [field]: "" } })).toBe(false);
+			expect(admitControlRequest({ ...request, sessionRef: { ...sessionRef, [field]: "" } })).toBe(false);
 		}
 	});
 

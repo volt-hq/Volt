@@ -1,9 +1,10 @@
 /**
  * The protocol contract: the top-level RPC wire unions, the protocol frames
  * (`ClientFrame`, `HostFrame`, and their intents, queries, live values, and
- * projected entries), every named schema (wire frames, log entries, and
- * `UiNode`), and the numeric limits block — everything the JSON Schema
- * artifact (contract/protocol-schema.json) is generated from by
+ * projected entries), the daemon control plane, the Iroh remote handshake,
+ * every named schema (wire frames, log entries, and `UiNode`), and the
+ * numeric limits block — everything the JSON Schema artifact
+ * (contract/protocol-schema.json) is generated from by
  * scripts/generate-protocol-schema.ts.
  */
 
@@ -63,6 +64,34 @@ import {
 	RpcTranscriptEntryEventSchema,
 } from "./conversation.ts";
 import {
+	CONTROL_EVENT_SCHEMAS,
+	CONTROL_REQUEST_SCHEMAS,
+	CONTROL_RESPONSE_SCHEMAS,
+	ControlClientKindSchema,
+	ControlClientStatusSchema,
+	ControlEventSchema,
+	ControlFatalSchema,
+	ControlHelloAckSchema,
+	ControlHelloSchema,
+	ControlKeepAwakeStatusSchema,
+	ControlLeaseReleaseReasonSchema,
+	ControlLeaseStateSchema,
+	ControlLeaseStatusSchema,
+	ControlRelayCloseReasonSchema,
+	ControlRelayCredentialStatusSchema,
+	ControlRelayPreambleSchema,
+	ControlRelayRpcCommandSchema,
+	ControlRelayRpcResponseSchema,
+	ControlRequestSchema,
+	ControlResponseSchema,
+	ControlRevokedClientStatusSchema,
+	ControlWorkspaceStatusSchema,
+	ControlWorktreeStatusSchema,
+	DaemonEnvironmentStatusSchema,
+	DaemonRemotePolicyStatusSchema,
+	RemoteTransportHealthSchema,
+} from "./daemon-control.ts";
+import {
 	BashExecutionMessageSchema,
 	ClientInputCommandSchema,
 	ClientInputPayloadSchema,
@@ -90,7 +119,6 @@ import {
 	RpcModelsChangedEventSchema,
 	RpcPendingHostActionsResponseSchema,
 	RpcPromptCacheChangedEventSchema,
-	RpcRemoteTerminalEventSchema,
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
@@ -226,6 +254,7 @@ import {
 	RpcWorkflowStatusSchema,
 	RpcWorkflowToolEventSchema,
 } from "./projections.ts";
+import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import { QUERY_FRAME_SCHEMAS, QUERY_NAMES, QUERY_SCHEMAS, QueryFrameSchema, QueryNameSchema } from "./queries.ts";
 import {
 	RemoteAccessPresetNameSchema,
@@ -233,6 +262,26 @@ import {
 	RemoteCapabilitySchema,
 	RemoteGrantSchema,
 } from "./remote-access.ts";
+import {
+	IrohRemoteConversationHandshakeMetadataSchema,
+	IrohRemoteConversationSelectionSchema,
+	IrohRemoteConversationTargetSchema,
+	IrohRemoteHandshakeFailureSchema,
+	IrohRemoteHandshakeResponseSchema,
+	IrohRemoteHandshakeSuccessSchema,
+	IrohRemoteHelloSchema,
+	IrohRemoteHelloWireSchema,
+	IrohRemoteHostHandshakeMetadataSchema,
+	IrohRemoteOutcomeSchema,
+	IrohRemoteRelayModeSchema,
+	IrohRemoteRelayUrlsSchema,
+	IrohRemoteSessionIdSchema,
+	IrohRemoteWorkingDirectorySchema,
+	IrohRemoteWorkspaceDiscoveryTargetSchema,
+	IrohRemoteWorkspaceManagementTargetSchema,
+	IrohRemoteWorktreeIdSchema,
+	RpcRemoteTerminalEventSchema,
+} from "./remote-handshake.ts";
 import {
 	RPC_RESPONSE_SCHEMAS,
 	RpcBashResultSchema,
@@ -400,6 +449,12 @@ import {
 	RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
 	RPC_WIRE_MAX_SAFE_INTEGER,
 } from "./wire-limits.ts";
+import {
+	IrohRemoteWorkspaceAvailabilityStatusSchema,
+	IrohRemoteWorkspaceMetadataSnapshotSchema,
+	IrohRemoteWorkspaceNameSchema,
+	IrohRemoteWorkspaceStatusSchema,
+} from "./workspace.ts";
 
 // ============================================================================
 // Top-level wire unions
@@ -728,6 +783,55 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	UiTreeItem: UiTreeItemSchema,
 	UiTreeNode: UiTreeNodeSchema,
 	UiNode: UiNodeSchema,
+
+	// Push notifications and the workspace catalog
+	IrohRemotePushNotification: IrohRemotePushNotificationSchema,
+	IrohRemotePushNotificationDeliveryStatus: IrohRemotePushNotificationDeliveryStatusSchema,
+	IrohRemoteWorkspaceName: IrohRemoteWorkspaceNameSchema,
+	IrohRemoteWorkspaceAvailabilityStatus: IrohRemoteWorkspaceAvailabilityStatusSchema,
+	IrohRemoteWorkspaceStatus: IrohRemoteWorkspaceStatusSchema,
+	IrohRemoteWorkspaceMetadataSnapshot: IrohRemoteWorkspaceMetadataSnapshotSchema,
+
+	// Iroh remote handshake
+	"RemoteHandshake.SessionId": IrohRemoteSessionIdSchema,
+	"RemoteHandshake.WorktreeId": IrohRemoteWorktreeIdSchema,
+	"RemoteHandshake.WorkingDirectory": IrohRemoteWorkingDirectorySchema,
+	"RemoteHandshake.Outcome": IrohRemoteOutcomeSchema,
+	"RemoteHandshake.RelayMode": IrohRemoteRelayModeSchema,
+	"RemoteHandshake.RelayUrls": IrohRemoteRelayUrlsSchema,
+	"RemoteHandshake.ConversationTarget": IrohRemoteConversationTargetSchema,
+	"RemoteHandshake.WorkspaceDiscoveryTarget": IrohRemoteWorkspaceDiscoveryTargetSchema,
+	"RemoteHandshake.WorkspaceManagementTarget": IrohRemoteWorkspaceManagementTargetSchema,
+	"RemoteHandshake.Hello": IrohRemoteHelloWireSchema,
+	"RemoteHandshake.ParsedHello": IrohRemoteHelloSchema,
+	"RemoteHandshake.ConversationSelection": IrohRemoteConversationSelectionSchema,
+	"RemoteHandshake.ConversationMetadata": IrohRemoteConversationHandshakeMetadataSchema,
+	"RemoteHandshake.HostMetadata": IrohRemoteHostHandshakeMetadataSchema,
+	"RemoteHandshake.Success": IrohRemoteHandshakeSuccessSchema,
+	"RemoteHandshake.Failure": IrohRemoteHandshakeFailureSchema,
+	"RemoteHandshake.Response": IrohRemoteHandshakeResponseSchema,
+
+	// Daemon control plane: shared vocabulary and envelopes
+	"Control.LeaseState": ControlLeaseStateSchema,
+	"Control.LeaseReleaseReason": ControlLeaseReleaseReasonSchema,
+	"Control.ClientKind": ControlClientKindSchema,
+	"Control.RelayCloseReason": ControlRelayCloseReasonSchema,
+	"Control.KeepAwakeStatus": ControlKeepAwakeStatusSchema,
+	"Control.LeaseStatus": ControlLeaseStatusSchema,
+	"Control.WorkspaceStatus": ControlWorkspaceStatusSchema,
+	"Control.WorktreeStatus": ControlWorktreeStatusSchema,
+	"Control.ClientStatus": ControlClientStatusSchema,
+	"Control.RevokedClientStatus": ControlRevokedClientStatusSchema,
+	"Control.RemotePolicyStatus": DaemonRemotePolicyStatusSchema,
+	"Control.RelayCredentialStatus": ControlRelayCredentialStatusSchema,
+	"Control.RemoteTransportHealth": RemoteTransportHealthSchema,
+	"Control.EnvironmentStatus": DaemonEnvironmentStatusSchema,
+	"Control.RelayRpcCommand": ControlRelayRpcCommandSchema,
+	"Control.RelayRpcResponse": ControlRelayRpcResponseSchema,
+	"Control.Hello": ControlHelloSchema,
+	"Control.HelloAck": ControlHelloAckSchema,
+	"Control.Fatal": ControlFatalSchema,
+	"Control.RelayPreamble": ControlRelayPreambleSchema,
 };
 
 /** Protocol schemas registered under their own names, before the per-intent, per-query, and per-frame entries. */
@@ -782,7 +886,9 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 /**
  * Every named definition of the artifact. Per-command and per-response
  * members are keyed `RpcCommand.<type>` / `RpcResponse.<command>`, and the
- * four wire unions follow them. Each core log entry type contributes
+ * four wire unions follow them. Daemon control messages are keyed
+ * `Control.Request.<type>` / `Control.Response.<type>` / `Control.Event.<type>`,
+ * each followed by its union. Each core log entry type contributes
  * `LogEntryPayload.<type>` and `LogEntry.<type>`; the `LogEntry` union closes
  * the legacy map.
  *
@@ -807,6 +913,18 @@ export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	registry.set("RpcClientMessage", RpcClientMessageSchema);
 	registry.set("RpcResponse", RpcResponseSchema);
 	registry.set("RpcServerEvent", RpcServerEventSchema);
+	for (const [type, schema] of Object.entries(CONTROL_REQUEST_SCHEMAS)) {
+		registry.set(`Control.Request.${type}`, schema);
+	}
+	registry.set("Control.Request", ControlRequestSchema);
+	for (const [type, schema] of Object.entries(CONTROL_RESPONSE_SCHEMAS)) {
+		registry.set(`Control.Response.${type}`, schema);
+	}
+	registry.set("Control.Response", ControlResponseSchema);
+	for (const [type, schema] of Object.entries(CONTROL_EVENT_SCHEMAS)) {
+		registry.set(`Control.Event.${type}`, schema);
+	}
+	registry.set("Control.Event", ControlEventSchema);
 	for (const definition of Object.values(CORE_LOG_ENTRY_TYPES)) {
 		registry.set(`LogEntryPayload.${definition.type}`, definition.payload);
 		registry.set(`LogEntry.${definition.type}`, definition.schema);

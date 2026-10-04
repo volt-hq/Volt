@@ -1,5 +1,10 @@
 import { stat } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import type {
+	IrohRemoteWorkspaceAvailabilityStatus,
+	IrohRemoteWorkspaceMetadataSnapshot,
+	IrohRemoteWorkspaceStatus,
+} from "@hansjm10/volt-protocol/workspace";
 import { isIrohRemoteWorkspaceName } from "./handshake.ts";
 import { normalizeIrohRemoteAllowTools } from "./protocol.ts";
 import {
@@ -9,17 +14,11 @@ import {
 	type IrohRemoteWorkspace,
 } from "./state.ts";
 
-export type IrohRemoteWorkspaceAvailabilityStatus = "available" | "missing" | "unavailable";
-
-export interface IrohRemoteWorkspaceStatus {
-	name: string;
-	status: IrohRemoteWorkspaceAvailabilityStatus;
-}
-
-export interface IrohRemoteWorkspaceMetadataSnapshot {
-	workspaceNames: string[];
-	workspaces: IrohRemoteWorkspaceStatus[];
-}
+export type {
+	IrohRemoteWorkspaceAvailabilityStatus,
+	IrohRemoteWorkspaceMetadataSnapshot,
+	IrohRemoteWorkspaceStatus,
+} from "@hansjm10/volt-protocol/workspace";
 
 export type IrohRemoteWorkspaceAvailabilityClassifier = (
 	workspace: IrohRemoteWorkspace,
