@@ -13,8 +13,11 @@ import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
 import type { RpcConversationAuthority } from "../../../src/core/rpc/types.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import {
+	type LegacyRemoteRpcModeOptions,
+	runLegacyRemoteRpcMode,
+} from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
-import { type RpcModeOptions, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { adoptTestSession, connectTestClient, type TestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
@@ -135,7 +138,7 @@ async function connect(target: TestHost, ordered = false, observeOnly = false) {
 				writeRejectedResponse: (value) => subscription!.enqueueControl(value),
 			})
 		: pair.server;
-	const binding: RpcModeOptions["orderedConversation"] = subscription
+	const binding: LegacyRemoteRpcModeOptions["orderedConversation"] = subscription
 		? {
 				get subscriptionId() {
 					return subscription!.subscriptionId;
@@ -155,7 +158,7 @@ async function connect(target: TestHost, ordered = false, observeOnly = false) {
 			}
 		: undefined;
 	const ready = deferred();
-	const mode = runRpcMode(target.host, conversation, {
+	const mode = runLegacyRemoteRpcMode(target.host, conversation, {
 		transport,
 		onReady: ready.resolve,
 		anchor: false,

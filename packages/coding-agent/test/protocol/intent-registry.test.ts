@@ -378,7 +378,11 @@ describe("intent descriptors", () => {
 describe("query admission", () => {
 	it("rejects unknown queries, profiles that may not run them, and invalid parameters", async () => {
 		const ctx = { services: {}, profile: LOCAL_INTENT_PROFILE };
-		await expect(queryRegistry.runFrame(ctx, "history", {})).rejects.toMatchObject({ code: "unknown_query" });
+		await expect(queryRegistry.runFrame(ctx, "no_such_query", {})).rejects.toMatchObject({ code: "unknown_query" });
+		// The projected-log reads need a protocol subscriber.
+		await expect(queryRegistry.runFrame(ctx, "history", { before: 1, limit: 1 })).rejects.toMatchObject({
+			code: "unavailable",
+		});
 		await expect(
 			queryRegistry.runFrame({ ...ctx, profile: remote() }, "subagent_definitions", {}),
 		).rejects.toMatchObject({ code: "not_allowed" });

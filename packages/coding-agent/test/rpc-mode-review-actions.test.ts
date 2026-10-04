@@ -285,7 +285,7 @@ vi.mock("../src/core/host/session-intents.ts", async (importOriginal) => {
 	return { ...actual, openNewSession: intentMocks.openNewSession };
 });
 
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 
 interface CollectingTransport {
 	transport: RpcTransport;
@@ -451,7 +451,7 @@ async function startMode(
 	const ready = new Promise<void>((resolve) => {
 		readyResolve = resolve;
 	});
-	const modePromise = runRpcMode(fake.host, fake.conversation, {
+	const modePromise = runLegacyRemoteRpcMode(fake.host, fake.conversation, {
 		transport,
 		exitProcess: false,
 		onReady: readyResolve,

@@ -1,14 +1,15 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { openNewSession } from "../../../src/core/host/session-intents.ts";
 import type { RpcCloseHandler, RpcTransport } from "../../../src/core/rpc/transport.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../../../src/core/rpc/types.ts";
 import type { SubagentEvent, SubagentHandle, SubagentResult } from "../../../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../../../src/core/tools/index.ts";
-import { createInProcessRpcClient } from "../../../src/modes/rpc/in-process-rpc-client.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
+import { createLegacyRpcClient } from "../../utilities/legacy-rpc-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 // Structural intents answer cancelled unless a test moves the client itself.
@@ -72,6 +73,7 @@ function createFakeSubagentScaffold(): {
 	const handle: SubagentHandle = {
 		id: "sa_child",
 		sessionId: "child-session",
+		conversation: {} as HostedConversation,
 		prompt: vi.fn(async () => undefined),
 		abort: vi.fn(async () => undefined),
 		getState: async () => ({}) as RpcSessionState,
@@ -135,7 +137,7 @@ async function startRpcModeForHarness(
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+	const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
 		anchor: false,
 		onReady: resolveReady,
 		transport,
@@ -377,7 +379,7 @@ describe("issue #44: delta-based message_update RPC frames", () => {
 
 		const events: RpcClientEvent[] = [];
 		const runtimeHost = createFakeRuntimeHost(harness);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation, {
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation, {
 			anchor: false,
 			onEvent: (event) => {
 				events.push(event);

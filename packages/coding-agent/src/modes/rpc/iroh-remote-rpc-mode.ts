@@ -41,7 +41,7 @@ import {
 	StreamProjector,
 	serializeJsonLine,
 } from "../../core/rpc/index.ts";
-import { type RpcModeOptions, runRpcMode } from "./rpc-mode.ts";
+import { type LegacyRemoteRpcModeOptions, runLegacyRemoteRpcMode } from "./legacy-remote-rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
@@ -55,15 +55,15 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	/** Recheck persisted authority at each command boundary when the host owns grant state. */
 	isRpcGrantCurrent?: () => boolean | Promise<boolean>;
 	decorateOutbound?: IrohRemoteOutboundValueDecorator;
-	/** See `RpcModeOptions.anchor`; a phone never anchors its conversation. */
+	/** See `LegacyRemoteRpcModeOptions.anchor`; a phone never anchors its conversation. */
 	anchor?: boolean;
-	/** A phone follows its structural intents by redirect: see `RpcModeOptions.redirect`. */
-	redirect?: RpcModeOptions["redirect"];
-	reviewDiscussions?: RpcModeOptions["reviewDiscussions"];
+	/** A phone follows its structural intents by redirect: see `LegacyRemoteRpcModeOptions.redirect`. */
+	redirect?: LegacyRemoteRpcModeOptions["redirect"];
+	reviewDiscussions?: LegacyRemoteRpcModeOptions["reviewDiscussions"];
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
 	onClientCapabilitiesChanged?: (features: string[]) => void;
 	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
-	onWorkflowEvent?: RpcModeOptions["onWorkflowEvent"];
+	onWorkflowEvent?: LegacyRemoteRpcModeOptions["onWorkflowEvent"];
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
@@ -74,8 +74,8 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	 */
 	suppressExtensionUiRequests?: boolean;
 	/** The final frame for a redirect client that left its conversation. */
-	detachedTerminal?: RpcModeOptions["detachedTerminal"];
-	onClientDetached?: RpcModeOptions["onClientDetached"];
+	detachedTerminal?: LegacyRemoteRpcModeOptions["detachedTerminal"];
+	onClientDetached?: LegacyRemoteRpcModeOptions["onClientDetached"];
 	workspaceName?: string;
 	workspacePath: string;
 	/** Extra roots (worktree parent checkout, worktrees root) redacted on every outbound frame. */
@@ -87,7 +87,7 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	/** Installs the idempotent owner for the physical conversation stream. */
 	onConversationLifecycleReady?: (lifecycle: IrohRemoteConversationLifecycle) => void;
 	/** Runs only after RPC has bound the session and completed extension/resource binding. */
-	onReady?: RpcModeOptions["onReady"];
+	onReady?: LegacyRemoteRpcModeOptions["onReady"];
 }
 
 export interface IrohRemoteConversationLifecycle {
@@ -343,7 +343,7 @@ export function runIrohRemoteRpcMode(
 		closePhysicalConversationStream();
 	};
 	retireConversationStream = retireConversation;
-	// Register before runRpcMode installs the close-deferring handler. A natural
+	// Register before runLegacyRemoteRpcMode installs the close-deferring handler. A natural
 	// peer EOF must retire the feed and cancel its delivery promises before RPC
 	// shutdown waits for transport backpressure.
 	const detachRawCloseRetirement = irohTransport.onClose?.((error) => retireConversation(error)) ?? (() => {});
@@ -408,7 +408,7 @@ export function runIrohRemoteRpcMode(
 	// ready would couple reads to physical bootstrap delivery and deadlock peer
 	// EOF behind a blocked native writer. Feed errors still retire the lifecycle.
 	void orderedSubscription.ready.catch(() => {});
-	return runRpcMode(host, conversation, {
+	return runLegacyRemoteRpcMode(host, conversation, {
 		allowUiActionInvocation: true,
 		// Only a client that may answer dialogs (extension_ui_response is a control command) shows extension UI.
 		extensionUi:

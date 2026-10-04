@@ -114,7 +114,6 @@ async function setup(
 		agentDir: parentFixture.tempDir,
 		resourceLoader,
 		parentSessionManager: parentManager,
-		requestTimeoutMs: 5_000,
 		retainRuntimeOnDispose: options.retainRuntimeOnDispose,
 		subagentContext: options.subagentContext,
 		onRuntimeCreated: (event) => {

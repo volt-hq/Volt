@@ -2,7 +2,7 @@ import { RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLoopbackRpcTransportPair, type RpcTransport } from "../../../src/core/rpc/index.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness, type HostHarness } from "../host-harness.ts";
 
@@ -42,7 +42,7 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 		const client = new RpcTransportClient({ transport: pair.client });
 		await client.start();
 		const ready = Promise.withResolvers<void>();
-		const closed = runRpcMode(harness.host, source, {
+		const closed = runLegacyRemoteRpcMode(harness.host, source, {
 			transport: recording(pair.server, frames),
 			onReady: ready.resolve,
 		});

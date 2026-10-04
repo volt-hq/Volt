@@ -284,6 +284,24 @@ export class LogSeed {
 		);
 	}
 
+	/** A custom message, which enters the model context; `display` says whether transcripts show it. */
+	customMessage(customType: string, content: string, display: boolean, options: { readonly id?: string } = {}): this {
+		return this.add(
+			{ type: "custom_message", visibility: "public", payload: { customType, content, display } },
+			options.id,
+		);
+	}
+
+	/** Name the conversation. */
+	sessionName(name: string, options: { readonly id?: string } = {}): this {
+		return this.add({ type: "session_info", visibility: "public", payload: { name } }, options.id);
+	}
+
+	/** A host product record, such as the starting Git context, which no client fold reads. */
+	hostRecord(type: string, payload: Record<string, unknown>, options: { readonly id?: string } = {}): this {
+		return this.add({ type, visibility: "host", payload } as unknown as EntryBody, options.id);
+	}
+
 	custom(customType: string, data?: unknown, options: { readonly id?: string } = {}): this {
 		return this.add(
 			{ type: "custom", visibility: "public", payload: { customType, ...(data === undefined ? {} : { data }) } },

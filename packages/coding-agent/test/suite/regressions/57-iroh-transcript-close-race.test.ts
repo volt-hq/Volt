@@ -49,7 +49,7 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 	});
 	const recv = new ManualIrohRecvStream();
 	const send = new BlockingFinishIrohSendStream();
-	// The conversation's projection feed subscribes to the session as it opens.
+	// The conversation's projection feed subscribes to the session as it opens, then its live feed.
 	const { host, conversation } = createTestConversation(harness.session, {
 		cwd: harness.tempDir,
 		agentDir: harness.tempDir,
@@ -63,7 +63,7 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 	});
 
 	try {
-		await vi.waitFor(() => expect(sessionListeners).toHaveLength(1));
+		await vi.waitFor(() => expect(sessionListeners).toHaveLength(2));
 		expect(parseWrittenObjects(send)[0]).toMatchObject({
 			type: "conversation_bootstrap",
 			delivery: { cursor: 0 },

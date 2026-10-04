@@ -17,6 +17,14 @@
  * outlives the clients that saw it, so a client that attaches later, or
  * reconnects, finds it again. Host action progress (`host_action/<id>`)
  * reaches the clients that accept approvals.
+ *
+ * Streaming items (the streaming assistant message and running tools) are
+ * part of the state until the entry that commits them is applied
+ * (`commit`). Every delivery carries `basedOn`, the log position when it was
+ * published; a delivery whose `basedOn` differs from the previous one while
+ * something streams repeats the streaming state first, so a client that
+ * discards streaming items on a new `basedOn` (RFC §6.1) holds the same state
+ * as the host (see live-fold.ts).
  */
 
 import { randomUUID } from "node:crypto";
@@ -35,11 +43,27 @@ import {
 } from "@hansjm10/volt-protocol";
 import { Compile, type Validator } from "typebox/compile";
 import type { HostActionDecision, HostActionRequest, HostActionUpdate, HostInteraction } from "../host-interaction.ts";
+import {
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveItems,
+	isLiveStreaming,
+	type LiveCommit,
+	type LiveFoldState,
+	liveStreamingItems,
+} from "../protocol/live-fold.ts";
 
 /** A change to a client's live state; with `reset`, `items` replace everything the client held. */
 export interface LiveUpdate {
 	readonly reset: boolean;
+	/** The log position when the change was published: what its streaming items build on. */
+	readonly basedOn: number;
 	readonly items: readonly LiveItem[];
+}
+
+export interface LiveStateOptions {
+	/** The conversation's log position; 0 by default. */
+	readonly head?: () => number;
 }
 
 /** A client's view of a conversation's live state. */
@@ -251,25 +275,48 @@ export function hostRequestTimeout(timeout: number | undefined): { timeoutMs?: n
 	return timeout !== undefined && Number.isFinite(timeout) && timeout > 0 ? { timeoutMs: Math.ceil(timeout) } : {};
 }
 
+const STREAMING_ITEM_TYPES: ReadonlySet<LiveItem["type"]> = new Set([
+	"assistant_start",
+	"assistant_delta",
+	"assistant_end",
+	"tool",
+]);
+
 export class LiveState {
-	private readonly values = new Map<string, LiveValue>();
+	private readonly head: () => number;
+	private fold: LiveFoldState = emptyLiveFold();
+	/** The `basedOn` of the last published batch. */
+	private publishedBasedOn = -1;
 	private readonly clients = new Map<string, AttachedClient>();
 	private readonly pending = new Map<string, PendingEntry>();
 	/** Published batches not yet delivered to every client, in order. */
-	private readonly outbox: Array<{ readonly seq: number; readonly items: readonly LiveItem[] }> = [];
+	private readonly outbox: Array<{
+		readonly seq: number;
+		readonly basedOn: number;
+		readonly items: readonly LiveItem[];
+	}> = [];
 	private nextSeq = 0;
 	private delivering = false;
 	private closed = false;
 	private interaction: HostInteraction | undefined;
 
+	constructor(options: LiveStateOptions = {}) {
+		this.head = options.head ?? (() => 0);
+	}
+
 	/** The current value under `key`. */
 	get(key: string): LiveValue | undefined {
-		return this.values.get(key);
+		return this.fold.values.get(key);
 	}
 
 	/** Every current value, in the order its key was first set. */
 	entries(): Array<[string, LiveValue]> {
-		return [...this.values];
+		return [...this.fold.values];
+	}
+
+	/** The whole state: keyed values and what streams, as of the last published change. */
+	snapshot(): LiveFoldState {
+		return this.fold;
 	}
 
 	/**
@@ -280,12 +327,12 @@ export class LiveState {
 		if (this.clients.has(clientId)) throw new Error(`Live client ${clientId} is already attached`);
 		const attached: AttachedClient = { id: clientId, client, since: this.nextSeq, shown: new Set() };
 		if (this.closed) {
-			this.deliver(attached, { reset: true, items: [] });
+			this.deliver(attached, { reset: true, basedOn: this.readHead(), items: [] });
 			return () => {};
 		}
 		this.clients.set(clientId, attached);
 		const items: LiveItem[] = [];
-		for (const [key, value] of this.values) {
+		for (const [key, value] of this.fold.values) {
 			const gate = gateOf(key, value);
 			if (gate !== undefined) {
 				if (!acceptsKind(client, gate)) continue;
@@ -293,11 +340,12 @@ export class LiveState {
 			}
 			items.push({ type: "set", key, value });
 		}
-		this.deliver(attached, { reset: true, items });
+		items.push(...liveStreamingItems(this.fold));
+		this.deliver(attached, { reset: true, basedOn: this.readHead(), items });
 		return () => {
 			if (this.clients.get(clientId) !== attached) return;
 			this.clients.delete(clientId);
-			this.deliver(attached, { reset: true, items: [] });
+			this.deliver(attached, { reset: true, basedOn: this.readHead(), items: [] });
 		};
 	}
 
@@ -321,7 +369,7 @@ export class LiveState {
 	/** Remove the value under `key`, if any. A pending host request ends through its own lifecycle. */
 	clear(key: string): void {
 		if (key.startsWith("host_request/")) throw new TypeError("Host requests end when answered or cancelled");
-		if (this.closed || !this.values.has(key)) return;
+		if (this.closed || !this.fold.values.has(key)) return;
 		this.publish([{ type: "clear", key }]);
 	}
 
@@ -329,7 +377,7 @@ export class LiveState {
 	clearMatching(prefixes: readonly string[]): void {
 		if (this.closed) return;
 		const items: LiveItem[] = [];
-		for (const key of this.values.keys()) {
+		for (const key of this.fold.values.keys()) {
 			if (!key.startsWith("host_request/") && prefixes.some((prefix) => key.startsWith(prefix))) {
 				items.push({ type: "clear", key });
 			}
@@ -347,6 +395,25 @@ export class LiveState {
 	setEditorText(text: string): void {
 		if (this.closed) return;
 		this.publish([{ type: "directive", directive: "set_editor_text", text }]);
+	}
+
+	/** Publish streaming items: the streaming assistant message and tool progress. */
+	stream(items: readonly LiveItem[]): void {
+		if (items.some((item) => !STREAMING_ITEM_TYPES.has(item.type))) {
+			throw new TypeError("Only assistant and tool items stream");
+		}
+		if (this.closed || items.length === 0) return;
+		this.publish(items);
+	}
+
+	/**
+	 * An entry committed what streamed: the assistant message, or a tool's
+	 * result. It leaves the streaming state without a delivery, as each client
+	 * drops it when it applies the entry.
+	 */
+	commit(commit: LiveCommit): void {
+		if (this.closed) return;
+		this.fold = foldLiveCommit(this.fold, commit);
 	}
 
 	/**
@@ -496,10 +563,11 @@ export class LiveState {
 		if (this.closed) return;
 		for (const entry of [...this.pending.values()]) this.settle(entry, { status: "cancelled", reason: "closed" });
 		this.closed = true;
-		this.values.clear();
+		this.fold = emptyLiveFold(this.fold.basedOn);
 		const clients = [...this.clients.values()];
 		this.clients.clear();
-		for (const attached of clients) this.deliver(attached, { reset: true, items: [] });
+		const basedOn = this.readHead();
+		for (const attached of clients) this.deliver(attached, { reset: true, basedOn, items: [] });
 	}
 
 	private settle(entry: PendingEntry, outcome: HostRequestOutcome): void {
@@ -524,11 +592,13 @@ export class LiveState {
 	 * change after that batch, as every other client does.
 	 */
 	private publish(items: readonly LiveItem[]): void {
-		for (const item of items) {
-			if (item.type === "set") this.values.set(item.key, item.value);
-			else if (item.type === "clear") this.values.delete(item.key);
-		}
-		this.outbox.push({ seq: this.nextSeq++, items });
+		const basedOn = this.readHead();
+		// Clients discard streaming items when `basedOn` changes: repeat what still streams.
+		const resync =
+			basedOn !== this.publishedBasedOn && isLiveStreaming(this.fold) ? liveStreamingItems(this.fold) : [];
+		this.publishedBasedOn = basedOn;
+		this.fold = foldLiveItems({ ...this.fold, basedOn }, items);
+		this.outbox.push({ seq: this.nextSeq++, basedOn, items: resync.length === 0 ? items : [...resync, ...items] });
 		if (this.delivering) return;
 		this.delivering = true;
 		try {
@@ -536,11 +606,22 @@ export class LiveState {
 				for (const attached of [...this.clients.values()]) {
 					if (batch.seq < attached.since || this.clients.get(attached.id) !== attached) continue;
 					const visible = this.visible(attached, batch.items);
-					if (visible.length > 0) this.deliver(attached, { reset: false, items: visible });
+					if (visible.length > 0) {
+						this.deliver(attached, { reset: false, basedOn: batch.basedOn, items: visible });
+					}
 				}
 			}
 		} finally {
 			this.delivering = false;
+		}
+	}
+
+	/** The log position; a failing source reads as the last published position. */
+	private readHead(): number {
+		try {
+			return this.head();
+		} catch {
+			return Math.max(0, this.publishedBasedOn);
 		}
 	}
 

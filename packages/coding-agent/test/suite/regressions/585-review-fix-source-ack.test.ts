@@ -8,7 +8,7 @@ import {
 } from "../../../src/core/review-state.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
@@ -103,7 +103,7 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 		const client = new RpcTransportClient({ transport: pair.client });
 		await client.start();
 		const ready = Promise.withResolvers<void>();
-		const closed = runRpcMode(harness.host, source, {
+		const closed = runLegacyRemoteRpcMode(harness.host, source, {
 			transport: pair.server,
 			onReady: ready.resolve,
 		});

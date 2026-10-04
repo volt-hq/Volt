@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationProjectionSubscription } from "../../../src/core/rpc/conversation-projection-feed.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/loopback-transport.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { adoptTestSession, connectTestClient, type TestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
@@ -48,7 +48,7 @@ async function connect(target: TestHost) {
 	});
 	await subscription.ready;
 	const ready = deferred();
-	const mode = runRpcMode(target.host, conversation, {
+	const mode = runLegacyRemoteRpcMode(target.host, conversation, {
 		transport: pair.server,
 		onReady: ready.resolve,
 		anchor: false,

@@ -6609,6 +6609,11 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false

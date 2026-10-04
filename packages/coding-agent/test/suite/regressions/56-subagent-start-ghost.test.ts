@@ -97,7 +97,6 @@ async function createTestContext(options: {
 		cwd: tmpdir(),
 		agentDir: tmpdir(),
 		resourceLoader,
-		requestTimeoutMs: 5_000,
 		onRuntimeCreated: () => registration,
 	});
 	return {

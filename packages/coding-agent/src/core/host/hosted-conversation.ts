@@ -19,6 +19,7 @@ import type { CreateAgentSessionResult } from "../sdk.ts";
 import { type CommittedSessionEntry, isHostOnlySessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
+import { feedLiveState, type LiveFeed } from "./live-feed.ts";
 import type { LiveState } from "./live-state.ts";
 import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
 
@@ -168,6 +169,8 @@ export class HostedConversation {
 	 * host closes the conversation, which releases the lock. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
+	/** Feeds the live state from the session until the conversation closes. */
+	private readonly liveFeed: LiveFeed;
 	private detachTranscriptCommits: () => void;
 	private _reviewWorkflows?: ReviewWorkflowManager;
 	private recovery?: RecoveredClientInputsTask;
@@ -185,6 +188,7 @@ export class HostedConversation {
 		this.openedAs = options.openedAs;
 		this.projectionSource = this.createProjectionSource();
 		this.projectionFeed = new ConversationProjectionFeed(this.projectionSource);
+		this.liveFeed = feedLiveState(this.session);
 		this.detachTranscriptCommits = this.subscribeTranscriptCommits();
 		const session = this.session;
 		void session.lost.then((error) => {
@@ -197,8 +201,10 @@ export class HostedConversation {
 
 	/**
 	 * The conversation's live state: extension status, widgets, and title,
-	 * dialogs, approvals, and MCP authorization flows. The host attaches each
-	 * client's `live` view when the client joins; it closes with the session.
+	 * dialogs, approvals, MCP authorization flows, the run phase, Git and
+	 * prompt-cache status, token use, intent availability, background jobs,
+	 * review workflows, and what streams. The host attaches each client's
+	 * `live` view when the client joins; it closes with the session.
 	 */
 	get liveState(): LiveState {
 		return this.session.liveState;
@@ -225,7 +231,10 @@ export class HostedConversation {
 	 */
 	get reviewWorkflows(): ReviewWorkflowManager {
 		this._reviewWorkflows ??= new ReviewWorkflowManager({
-			publishEvent: (event) => this.projectionFeed.publishExternal(event),
+			publishEvent: (event) => {
+				this.liveFeed.workflowEvent(event);
+				this.projectionFeed.publishExternal(event);
+			},
 		});
 		return this._reviewWorkflows;
 	}
@@ -419,6 +428,7 @@ export class HostedConversation {
 		await this.abortRecovery(moved ? "session_replacement" : "disposal");
 		this.detachTranscriptCommits();
 		this.detachTranscriptCommits = () => {};
+		this.liveFeed.close();
 		const shutdownErrors: unknown[] = [];
 		try {
 			await emitSessionShutdownEvent(this.session.extensionRunner, {
@@ -449,6 +459,7 @@ export class HostedConversation {
 			await this.waitForHolds();
 			this.detachTranscriptCommits();
 			this.detachTranscriptCommits = () => {};
+			this.liveFeed.close();
 			this.projectionFeed.close();
 			const session = this.session;
 			await finalizeConversationSession(

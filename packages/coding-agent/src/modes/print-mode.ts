@@ -3,7 +3,8 @@
  *
  * Used for:
  * - `volt -p "prompt"` - text output
- * - `volt --mode json "prompt"` - JSON event stream
+ * - `volt --mode json "prompt"` - the conversation as protocol frames on the
+ *   local profile (docs/json.md): a snapshot, then its entries and live lane
  */
 
 import { randomUUID } from "node:crypto";
@@ -14,7 +15,8 @@ import type { HostedConversation } from "../core/host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../core/host/session-intents.ts";
 import type { HostClient } from "../core/host/targets.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
-import { type ProjectionDiagnostic, StreamProjector } from "../core/rpc/stream-projection.ts";
+import { localProfile } from "../core/protocol/profiles.ts";
+import { Subscription, type SubscriptionEnd } from "../core/protocol/server/subscription.ts";
 import { killTrackedDetachedChildren } from "../utils/shell.ts";
 
 /**
@@ -44,31 +46,31 @@ export async function runPrintMode(
 	const { mode, messages = [], initialMessage, initialImages } = options;
 	let exitCode = 0;
 	let current = conversation;
-	let unsubscribe: (() => void) | undefined;
 	/** Set when the session the run is on lost its log: a commit it could not confirm. */
 	let conversationLoss: string | undefined;
-	let streamProjector: StreamProjector | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 	const session = (): AgentSession => current.session;
 
+	/** JSON mode: the conversation the run is on as one subscription's frames, from a snapshot. */
+	let subscription: Subscription | undefined;
+	let subscriptions = 0;
 	const subscribe = (): void => {
-		unsubscribe?.();
-		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
-		const projector = new StreamProjector();
-		streamProjector = projector;
-		unsubscribe = session().subscribe(
-			(event) => {
-				if (mode === "json") {
-					const batch = projector.push(event);
-					reportProjectionDiagnostics("json-print", batch.diagnostics);
-					for (const frame of batch.frames) {
-						writeRawStdout(`${JSON.stringify(frame)}\n`);
-					}
-				}
-			},
-			{ monitorGitContext: false },
-		);
+		if (mode !== "json") return;
+		subscription = new Subscription({
+			subscriptionId: `json-${++subscriptions}`,
+			liveClientId: `${client.id}:json-${subscriptions}`,
+			conversation: current,
+			profile: localProfile,
+			sink: { send: (frame) => writeRawStdout(`${JSON.stringify(localProfile.redact(frame))}\n`) },
+			live: true,
+			accepts: () => false,
+		});
+		subscription.start("snapshot");
+	};
+	const endSubscription = (end: SubscriptionEnd): void => {
+		subscription?.end(end);
+		subscription = undefined;
 	};
 
 	const observeLoss = (observed: HostedConversation): void => {
@@ -104,7 +106,9 @@ export async function runPrintMode(
 				reload: () => session().reload(),
 			},
 			onError: (err) => {
-				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
+				// JSON mode tells its reader on the live lane, as RPC clients are told.
+				if (subscription) subscription.notice("error", `${err.event}: ${err.error}`, err.extensionPath);
+				else console.error(`Extension error (${err.extensionPath}): ${err.error}`);
 			},
 		},
 		move: {
@@ -114,6 +118,7 @@ export async function runPrintMode(
 			},
 			onMoved: (to) => {
 				observeLoss(to);
+				endSubscription({ reason: "moved", target: to.id });
 				subscribe();
 			},
 		},
@@ -122,9 +127,7 @@ export async function runPrintMode(
 	const disposeRuntime = async (): Promise<void> => {
 		if (disposed) return;
 		disposed = true;
-		unsubscribe?.();
-		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
-		streamProjector = undefined;
+		endSubscription({ reason: "closed" });
 		await (host.conversationOf(client) ? host.detach(client) : host.close(current));
 	};
 
@@ -150,13 +153,6 @@ export async function runPrintMode(
 	observeLoss(conversation);
 
 	try {
-		if (mode === "json") {
-			const header = session().sessionManager.getHeader();
-			if (header) {
-				writeRawStdout(`${JSON.stringify(header)}\n`);
-			}
-		}
-
 		await host.attach(client, conversation);
 		subscribe();
 
@@ -203,11 +199,5 @@ export async function runPrintMode(
 		}
 		await disposeRuntime();
 		await flushRawStdout();
-	}
-}
-
-function reportProjectionDiagnostics(boundary: string, diagnostics: readonly ProjectionDiagnostic[]): void {
-	for (const diagnostic of diagnostics) {
-		console.error(`[stream-projection:${boundary}] ${diagnostic.code}: ${diagnostic.message}`, diagnostic);
 	}
 }

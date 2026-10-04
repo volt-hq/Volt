@@ -1095,6 +1095,7 @@ export class SessionManager {
 	private lane: Promise<void> = Promise.resolve();
 	private readonly entryListeners = new Set<SessionEntryListener>();
 	private readonly branchListeners = new Set<SessionBranchListener>();
+	private readonly ordinalListeners = new Set<(ordinal: number) => void>();
 	/** The log was handed to a live session's conversation (`takeLog`); only that conversation appends to it. */
 	private logTaken = false;
 	/**
@@ -1434,6 +1435,15 @@ export class SessionManager {
 			if (entry.type === "leaf") this._notifyBranchListeners(entry.parentId, entry.targetId);
 			else this._notifyEntryListeners(entry);
 		}
+		if (write.entries.length === 0) return;
+		const ordinal = this.getOrdinal();
+		for (const listener of this.ordinalListeners) {
+			try {
+				listener(ordinal);
+			} catch {
+				// The log is authoritative; a position observer cannot fail a commit.
+			}
+		}
 	}
 
 	private _notifyEntryListeners(entry: CommittedSessionEntry): void {
@@ -1504,6 +1514,32 @@ export class SessionManager {
 		const end = Math.min(afterOrdinal + limit, lastOrdinal) + 1;
 		const entries = this.fileEntries.slice(afterOrdinal + 1, end) as CommittedSessionEntry[];
 		return { entries: cloneCanonicalData(entries, "Session entry page"), lastOrdinal };
+	}
+
+	/**
+	 * Committed entries with ordinal > afterOrdinal in ordinal order, host-only
+	 * records included, at most `limit` of them: the manager's own entries,
+	 * which callers must not change. A synchronous read for in-process
+	 * projections; `readEntries` is the copying, paged form.
+	 */
+	committedEntriesAfter(afterOrdinal: number, limit = Number.POSITIVE_INFINITY): readonly CommittedSessionEntry[] {
+		const lastOrdinal = this.getOrdinal();
+		const start = Math.max(0, afterOrdinal);
+		if (start >= lastOrdinal) return [];
+		const end = Math.min(lastOrdinal, start + limit);
+		// fileEntries[0] is the header; entry ordinals are their contiguous indexes.
+		return this.fileEntries.slice(start + 1, end + 1) as CommittedSessionEntry[];
+	}
+
+	/**
+	 * Observe the log position after every committed batch, host-only records
+	 * included, once the batch's entry and branch listeners ran.
+	 */
+	subscribeOrdinal(listener: (ordinal: number) => void): () => void {
+		this.ordinalListeners.add(listener);
+		return () => {
+			this.ordinalListeners.delete(listener);
+		};
 	}
 
 	/**
@@ -1596,6 +1632,11 @@ export class SessionManager {
 	getEntry(id: string): SessionEntry | undefined {
 		const entry = this.byId.get(id);
 		return entry && !isHostOnlySessionEntry(entry) ? entry : undefined;
+	}
+
+	/** A committed entry by id, host-only records included: the manager's own entry, which callers must not change. */
+	getCommittedEntry(id: string): CommittedSessionEntry | undefined {
+		return this.byId.get(id) as CommittedSessionEntry | undefined;
 	}
 
 	/**

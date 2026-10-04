@@ -946,7 +946,7 @@ Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of th
 
 ### ctx.hasUI
 
-`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) that work in both TUI and RPC modes. In RPC mode, some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extension-ui-protocol)).
+`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) that work in both TUI and RPC modes. In RPC mode, some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extensions-in-rpc-mode)).
 
 ### ctx.cwd
 
@@ -2838,7 +2838,7 @@ const highlighted = highlightCode(code, lang, theme);
 | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
 |------|------------|-------------|-------|
 | Interactive | `"tui"` | `true` | Full TUI with terminal rendering |
-| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs and notifications via JSON protocol; `custom()` returns `undefined`. See [rpc.md](rpc.md) |
+| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs as host requests, notifications and status on the protocol's live lane; `custom()` returns `undefined`. See [rpc.md](rpc.md#extensions-in-rpc-mode) |
 | JSON (`--mode json`) | `"json"` | `false` | Event stream to stdout; UI methods are no-ops |
 | Print (`-p`) | `"print"` | `false` | Extensions run but can't prompt |
 

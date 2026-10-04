@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import type { QueryResult } from "@hansjm10/volt-protocol";
+import type { QueryName, QueryResult } from "@hansjm10/volt-protocol";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
@@ -14,7 +14,8 @@ import { mcpManagerOf, workspaceService } from "../intents/host.ts";
 import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
-import { defineQuery, type QueryDefinition, QueryRejectedError, type RegisteredQueryName } from "./types.ts";
+import { contentQuery, historyQuery } from "./log.ts";
+import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 
 const observe = ["conversation.observe.v1"] as const;
 const integrations = ["integrations.manage.v1"] as const;
@@ -492,6 +493,8 @@ export const reviewWorkflowsQuery = defineQuery({
 export const BUILTIN_QUERIES = {
 	intents: intentsQuery,
 	intent_completions: intentCompletionsQuery,
+	history: historyQuery,
+	content: contentQuery,
 	models: modelsQuery,
 	sessions: sessionsQuery,
 	settings: settingsQuery,
@@ -520,4 +523,4 @@ export const BUILTIN_QUERIES = {
 	"review.general": reviewGeneralQuery,
 	"review.result": reviewResultQuery,
 	"review.workflows": reviewWorkflowsQuery,
-} as const satisfies { readonly [N in RegisteredQueryName]: QueryDefinition<N> };
+} as const satisfies { readonly [N in QueryName]: QueryDefinition<N> };

@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
+import { spawnRpcClient } from "../src/client/protocol-client.ts";
 
 const tempDirs: string[] = [];
 
@@ -31,210 +31,155 @@ function isProcessRunning(pid: number): boolean {
 	}
 }
 
+/** A child that answers frames with `handle(frame)`, written as JSON lines. */
+function protocolChild(handle: string, prelude = ""): string {
+	return writeChildScript(`
+${prelude}
+let buffer = "";
+function writeJson(value) {
+	process.stdout.write(JSON.stringify(value) + "\\n");
+}
+${handle}
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+	buffer += chunk;
+	let newlineIndex;
+	while ((newlineIndex = buffer.indexOf("\\n")) !== -1) {
+		const line = buffer.slice(0, newlineIndex);
+		buffer = buffer.slice(newlineIndex + 1);
+		if (line) handle(JSON.parse(line));
+	}
+});
+process.stdin.resume();
+`);
+}
+
+/** Answer hello and a snapshot subscription the way a host does, then call `after(frame)` for other frames. */
+const WELCOME_AND_SNAPSHOT = `
+function welcomeAndSnapshot(frame) {
+	if (frame.type === "hello") {
+		writeJson({ type: "welcome", protocol: 1, connectionId: "c", profile: "local", server: { name: "test", version: "1" }, conversation: "conv" });
+		return true;
+	}
+	if (frame.type === "subscribe") {
+		writeJson({
+			type: "snapshot",
+			subscriptionId: frame.subscriptionId,
+			conversation: "conv",
+			ordinal: 0,
+			state: { leafId: null, entries: [], earlier: false, model: null, thinkingLevel: "off", fastMode: false, planning: null, name: null, labels: [], queue: [] },
+		});
+		writeJson({ type: "live", subscriptionId: frame.subscriptionId, basedOn: 0, seq: 1, reset: true, items: [] });
+		return true;
+	}
+	return false;
+}
+`;
+
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
 
-describe("RpcClient child process failures", () => {
-	test("rejects start when the child process exits before readiness", async () => {
-		const client = new RpcClient({
-			cliPath: writeChildScript(`
+describe("spawnRpcClient child process failures", () => {
+	test("rejects when the child process exits before welcoming the client", async () => {
+		const cliPath = writeChildScript(`
 process.stderr.write("startup exploded");
 setTimeout(() => {
 	process.exit(42);
 }, 10);
 process.stdin.resume();
-`),
-			requestTimeoutMs: 1000,
-		});
-
-		await expect(client.start()).rejects.toThrow(
-			/RPC readiness probe failed: Agent process exited \(code=42 signal=null\).*startup exploded/s,
+`);
+		await expect(spawnRpcClient({ cliPath, requestTimeoutMs: 1000 })).rejects.toThrow(
+			/Agent process exited \(code=42 signal=null\).*startup exploded/s,
 		);
 	});
 
-	test("cleans up the child process when readiness probe fails", async () => {
+	test("ends the child process when the host refuses the connection", async () => {
 		const dir = createTempDir();
-		const childPath = join(dir, "child.mjs");
 		const pidMarker = join(dir, "pid");
-		writeFileSync(
-			childPath,
-			`
-import { writeFileSync } from "node:fs";
-
-writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));
-
-let buffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	buffer += chunk;
-	let newlineIndex;
-	while ((newlineIndex = buffer.indexOf("\\n")) !== -1) {
-		const line = buffer.slice(0, newlineIndex);
-		buffer = buffer.slice(newlineIndex + 1);
-		if (!line) {
-			continue;
-		}
-		const command = JSON.parse(line);
-		if (command.type === "get_state") {
-			process.stdout.write(JSON.stringify({
-				id: command.id,
-				type: "response",
-				command: "get_state",
-				success: false,
-				error: "boot failed",
-			}) + "\\n");
-		}
-	}
-});
-process.stdin.resume();
-`,
+		const cliPath = protocolChild(
+			`function handle(frame) {
+	if (frame.type === "hello") writeJson({ type: "fatal", code: "protocol_mismatch", message: "boot failed" });
+}`,
+			`import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));`,
 		);
-		const client = new RpcClient({ cliPath: childPath, requestTimeoutMs: 1000 });
-
-		await expect(client.start()).rejects.toThrow(/RPC readiness probe failed: boot failed/);
+		await expect(spawnRpcClient({ cliPath, requestTimeoutMs: 1000 })).rejects.toThrow(
+			/The host ended the connection: protocol_mismatch \(boot failed\)/,
+		);
 		const pid = Number(readFileSync(pidMarker, "utf8"));
 		await expect.poll(() => isProcessRunning(pid)).toBe(false);
 	});
 
-	test("cleans up the child process when readiness probe times out", async () => {
+	test("ends the child process when it never welcomes the client", async () => {
 		const dir = createTempDir();
-		const childPath = join(dir, "child.mjs");
-		const readinessMarker = join(dir, "readiness-probe-seen");
 		const pidMarker = join(dir, "pid");
-		writeFileSync(
-			childPath,
-			`
-import { writeFileSync } from "node:fs";
-
-writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));
-
-process.stdin.once("data", () => {
-	writeFileSync(${JSON.stringify(readinessMarker)}, "readiness probe seen");
-});
-process.stdin.resume();
-`,
+		const cliPath = protocolChild(
+			"function handle() {}",
+			`import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(pidMarker)}, String(process.pid));`,
 		);
-		const client = new RpcClient({ cliPath: childPath, requestTimeoutMs: 1000 });
-
-		await expect(client.start()).rejects.toThrow(
-			/RPC readiness probe failed: Timeout waiting for response to get_state/,
-		);
-		expect(existsSync(readinessMarker)).toBe(true);
+		await expect(spawnRpcClient({ cliPath, requestTimeoutMs: 1000 })).rejects.toThrow(/Timeout waiting for welcome/);
 		const pid = Number(readFileSync(pidMarker, "utf8"));
 		await expect.poll(() => isProcessRunning(pid)).toBe(false);
 	});
 
-	test("allows startup extension UI events to be handled before start resolves", async () => {
-		const client = new RpcClient({
-			cliPath: writeChildScript(`
-let buffer = "";
-let pendingGetStateId;
-
-function writeJson(value) {
-	process.stdout.write(JSON.stringify(value) + "\\n");
-}
-
-function handleCommand(command) {
-	if (command.type === "get_state") {
-		pendingGetStateId = command.id;
+	test("lets a client answer a host request asked before it caught up", async () => {
+		const cliPath = protocolChild(
+			`${WELCOME_AND_SNAPSHOT}
+let subscriptionId;
+function handle(frame) {
+	if (frame.type === "hello") return welcomeAndSnapshot(frame);
+	if (frame.type === "subscribe") {
+		subscriptionId = frame.subscriptionId;
 		writeJson({
-			type: "extension_ui_request",
-			id: "startup",
-			method: "confirm",
-			title: "Continue?",
-			message: "Ready?",
+			type: "live",
+			subscriptionId,
+			basedOn: 0,
+			seq: 1,
+			reset: true,
+			items: [{ type: "set", key: "host_request/startup", value: { kind: "host_request", requestId: "startup", request: { kind: "confirm", title: "Continue?", message: "Ready?" } } }],
 		});
 		return;
 	}
-	if (command.type === "extension_ui_response" && command.id === "startup") {
-		writeJson({
-			id: pendingGetStateId,
-			type: "response",
-			command: "get_state",
-			success: true,
-			data: {},
-		});
+	if (frame.type === "host_response" && frame.requestId === "startup") {
+		writeJson({ type: "live", subscriptionId, basedOn: 0, seq: 2, items: [{ type: "clear", key: "host_request/startup" }] });
 	}
-}
-
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	buffer += chunk;
-	let newlineIndex;
-	while ((newlineIndex = buffer.indexOf("\\n")) !== -1) {
-		const line = buffer.slice(0, newlineIndex);
-		buffer = buffer.slice(newlineIndex + 1);
-		if (line) {
-			handleCommand(JSON.parse(line));
-		}
-	}
-});
-process.stdin.resume();
-`),
+}`,
+		);
+		const answered: string[] = [];
+		const client = await spawnRpcClient({
+			cliPath,
 			requestTimeoutMs: 1000,
+			hostRequests: ["confirm"],
+			onFrame: (frame, self) => {
+				if (frame.type !== "live") return;
+				for (const item of frame.items) {
+					if (item.type === "set" && item.value.kind === "host_request") {
+						answered.push(item.value.requestId);
+						self.answer(item.value.requestId, { confirmed: true });
+					}
+				}
+			},
 		});
-		const events: Array<{ type: string; id?: string }> = [];
-		client.onEvent((event) => {
-			events.push(event);
-			if (event.type === "extension_ui_request" && event.id === "startup") {
-				void client.sendExtensionUIResponse({ type: "extension_ui_response", id: event.id, confirmed: true });
-			}
-		});
-
 		try {
-			await client.start();
-			expect(events).toContainEqual(
-				expect.objectContaining({ type: "extension_ui_request", id: "startup", method: "confirm" }),
-			);
+			expect(answered).toEqual(["startup"]);
+			await expect.poll(() => client.live.values.has("host_request/startup")).toBe(false);
 		} finally {
 			await client.stop();
 		}
 	});
 
-	test("rejects an in-flight request when the child process exits", async () => {
-		const client = new RpcClient({
-			cliPath: writeChildScript(`
-let buffer = "";
-
-function writeJson(value) {
-	process.stdout.write(JSON.stringify(value) + "\\n");
-}
-
-function handleCommand(command) {
-	if (command.type === "get_state") {
-		writeJson({
-			id: command.id,
-			type: "response",
-			command: "get_state",
-			success: true,
-			data: {},
-		});
-		return;
-	}
+	test("rejects an in-flight intent when the child process exits", async () => {
+		const cliPath = protocolChild(`${WELCOME_AND_SNAPSHOT}
+function handle(frame) {
+	if (welcomeAndSnapshot(frame)) return;
 	process.exit(43);
-}
-
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk) => {
-	buffer += chunk;
-	let newlineIndex;
-	while ((newlineIndex = buffer.indexOf("\\n")) !== -1) {
-		const line = buffer.slice(0, newlineIndex);
-		buffer = buffer.slice(newlineIndex + 1);
-		if (line) {
-			handleCommand(JSON.parse(line));
-		}
-	}
-});
-process.stdin.resume();
-`),
-		});
-
-		await client.start();
-
-		await expect(client.getCommands()).rejects.toThrow(/Agent process exited \(code=43 signal=null\)/);
+}`);
+		const client = await spawnRpcClient({ cliPath, requestTimeoutMs: 1000 });
+		await expect(client.intent("abort", {})).rejects.toThrow(/Agent process exited \(code=43 signal=null\)/);
+		await client.stop();
 	});
 });

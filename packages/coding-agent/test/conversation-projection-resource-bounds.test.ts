@@ -3,6 +3,7 @@ import type { AssistantMessage, AssistantMessageEvent, Usage } from "@hansjm10/v
 import { describe, expect, it } from "vitest";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { projectSubagentDetails } from "../src/core/protocol/projection/tool-view.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
@@ -13,7 +14,6 @@ import {
 } from "../src/core/rpc/conversation-projection-feed.ts";
 import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
 import { projectRpcBoundedString, projectRpcQueueUpdate, projectRpcUtf8Prefix } from "../src/core/rpc/session-state.ts";
-import { projectSubagentDetails } from "../src/core/rpc/transcript.ts";
 import type { RpcConversationActiveAssistant } from "../src/core/rpc/types.ts";
 import type { SessionEntry, SessionManager } from "../src/core/session-manager.ts";
 import {

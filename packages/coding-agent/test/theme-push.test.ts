@@ -6,7 +6,7 @@ import {
 	HOST_THEME_TOKENS_FEATURE,
 	sanitizeHostThemeTokens,
 } from "../src/daemon/theme-push.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 describe("host theme token push (§9.5)", () => {
@@ -81,7 +81,7 @@ describe("host theme token push (§9.5)", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		void runRpcMode(host, conversation, {
+		void runLegacyRemoteRpcMode(host, conversation, {
 			transport,
 			onReady: resolveReady,
 			onClientCapabilitiesChanged: (features) => capabilityUpdates.push(features),

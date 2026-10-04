@@ -16,7 +16,7 @@ import {
 	createIrohRemoteCloseDeferringRpcTransport,
 	createIrohRemoteHostCommandRpcTransport,
 } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createTestConversation } from "./iroh-stream-doubles.ts";
 
 class ManualRpcTransport implements RpcTransport {
@@ -343,7 +343,7 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
 			anchor: false,
 			onReady: resolveReady,
 			transport,
@@ -406,7 +406,7 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
 			anchor: false,
 			onReady: resolveReady,
 			transport,
@@ -471,7 +471,7 @@ describe("Iroh remote lifecycle command contract", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtime.target.host, runtime.target.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
 			anchor: false,
 			onReady: resolveReady,
 			transport,

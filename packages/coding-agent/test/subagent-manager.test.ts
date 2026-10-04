@@ -229,7 +229,6 @@ describe("SubagentManager", () => {
 			parentSessionManager: options.parentSessionManager,
 			retainRuntimeOnDispose: options.retainRuntimeOnDispose,
 			onRuntimeCreated: options.onRuntimeCreated,
-			requestTimeoutMs: 5_000,
 		});
 
 		cleanups.push(async () => {

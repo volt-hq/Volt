@@ -224,7 +224,6 @@ describe("subagent recovery notice", () => {
 			cwd: tmpdir(),
 			agentDir: tmpdir(),
 			resourceLoader,
-			requestTimeoutMs: 5_000,
 			parentSessionManager: reopened,
 		});
 		const harness = await createHarness({

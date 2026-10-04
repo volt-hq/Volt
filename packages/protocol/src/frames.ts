@@ -188,6 +188,8 @@ export const WelcomeFrameSchema = Type.Object(
 		connectionId: id,
 		profile: ProfileNameSchema,
 		server: peerSchema,
+		/** The conversation the host attached the connection to, when it has one: subscribe to it. */
+		conversation: Type.Optional(LogSessionIdSchema),
 	},
 	closed,
 );

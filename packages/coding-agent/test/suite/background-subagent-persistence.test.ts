@@ -82,7 +82,6 @@ async function setup(withConfiguredAuth = true) {
 		agentDir: fixture.tempDir,
 		resourceLoader,
 		parentSessionManager: parent,
-		requestTimeoutMs: 5_000,
 	});
 	manager.subscribeActivities(() => published.resolve());
 	const startByName = manager.startByName.bind(manager);

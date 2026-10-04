@@ -13,11 +13,11 @@ import {
 } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionQueuedMessage } from "../agent-session.ts";
 import { DEFAULT_PLANNING_STATE } from "../planning.ts";
+import { projectSubagentDetails } from "../protocol/projection/tool-view.ts";
 import { projectReviewDiscussionLink } from "../review-discussions.ts";
 import { isValidClientMessageId } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { listRpcBackgroundJobs } from "./background-jobs.ts";
-import { projectSubagentDetails } from "./transcript.ts";
 import type {
 	RpcActiveToolExecution,
 	RpcProjectionCollectionTruncation,

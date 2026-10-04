@@ -19,7 +19,7 @@ import {
 	type UiActionDiscoverySession,
 } from "../src/core/rpc/ui-actions.ts";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 const model: Model<Api> = {
@@ -427,7 +427,7 @@ it("invokes compaction actions through RPC with durable replies and shared state
 	const started = new Promise<void>((resolve) => {
 		ready = resolve;
 	});
-	const running = runRpcMode(host, conversation, {
+	const running = runLegacyRemoteRpcMode(host, conversation, {
 		transport,
 		onReady: ready,
 		anchor: false,

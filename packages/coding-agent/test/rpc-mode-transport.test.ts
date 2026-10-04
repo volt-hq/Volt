@@ -8,7 +8,7 @@ import { createIrohRemoteExplicitAccess, type IrohRemoteRpcCapability } from "..
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { RpcGitContext } from "../src/core/rpc/types.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 import { createLiveRecorder } from "./utilities/live-recorder.ts";
 
@@ -151,7 +151,7 @@ async function startRpcModeHarness(hosted: FakeHosted): Promise<RpcModeHarness> 
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(hosted.host, hosted.conversation, { onReady: resolveReady, transport });
+	const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { onReady: resolveReady, transport });
 	await ready;
 	await vi.waitFor(() => expect(lineHandler).toBeDefined());
 
@@ -233,7 +233,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			onReady: () => {
 				resolveReady();
 			},
@@ -448,7 +448,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			onReady: () => {
 				resolveReady();
 			},
@@ -593,7 +593,7 @@ describe("RPC mode caller-provided transports", () => {
 			const ready = new Promise<void>((resolve) => {
 				resolveReady = resolve;
 			});
-			const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+			const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 				anchor: false,
 				onReady: resolveReady,
 				transport,
@@ -757,7 +757,7 @@ describe("RPC mode caller-provided transports", () => {
 			const ready = new Promise<void>((resolve) => {
 				resolveReady = resolve;
 			});
-			const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+			const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 				anchor: false,
 				onReady: resolveReady,
 				transport,
@@ -852,7 +852,10 @@ describe("RPC mode caller-provided transports", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { onReady: resolveReady, transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
+			onReady: resolveReady,
+			transport,
+		});
 		await ready;
 		await vi.waitFor(() => expect(lineHandler).toBeDefined());
 		lineHandler?.(
@@ -1041,7 +1044,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			onReady: () => {
 				resolveReady();
 			},
@@ -1121,7 +1124,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			onReady: () => {
 				resolveReady();
 			},
@@ -1172,7 +1175,7 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const { hosted, dispose } = createRuntimeHost();
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport });
 		await vi.waitFor(() => expect(lineHandler).toBeDefined());
 
 		lineHandler?.(JSON.stringify({ id: "write-failure", type: "unknown_command" }));
@@ -1210,7 +1213,7 @@ describe("RPC mode caller-provided transports", () => {
 			}),
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport });
 		await vi.waitFor(() => expect(lineHandler).toBeDefined());
 
 		lineHandler?.(
@@ -1264,7 +1267,7 @@ describe("RPC mode caller-provided transports", () => {
 			{ onClose: dispose },
 		);
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport });
 		await vi.waitFor(() => expect(sessionEventHandler).toBeDefined());
 		await vi.waitFor(() => expect(backpressureHandler).toBeDefined());
 
@@ -1315,7 +1318,7 @@ describe("RPC mode caller-provided transports", () => {
 			{ onClose: dispose },
 		);
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport });
 		// Startup ends as soon as the transport closes, without waiting for the pending bind.
 		void modePromise.catch(() => {});
 		await vi.waitFor(() => {
@@ -1369,7 +1372,7 @@ describe("RPC mode caller-provided transports", () => {
 		);
 
 		liveState = hosted.conversation.liveState;
-		await expect(runRpcMode(hosted.host, hosted.conversation, { transport })).rejects.toBe(startupError);
+		await expect(runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport })).rejects.toBe(startupError);
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(transport.write).not.toHaveBeenCalled();
 		expect(detachInput).toHaveBeenCalledOnce();
@@ -1403,7 +1406,7 @@ describe("RPC mode caller-provided transports", () => {
 			{ onClose: dispose },
 		);
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			transport,
 			onReady: () => {
 				throw readyError;
@@ -1445,7 +1448,7 @@ describe("RPC mode caller-provided transports", () => {
 			const ready = new Promise<void>((resolve) => {
 				resolveReady = resolve;
 			});
-			const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+			const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 				transport,
 				onReady: () => {
 					resolveReady();
@@ -1489,7 +1492,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			anchor: false,
 			transport,
 			onReady: () => {
@@ -1527,7 +1530,7 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const { hosted, dispose } = createRuntimeHost();
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, { transport });
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, { transport });
 		await vi.waitFor(() => expect(closeHandler).toBeDefined());
 
 		closeHandler?.(inputError);
@@ -1563,7 +1566,7 @@ describe("RPC mode caller-provided transports", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			transport,
 			onReady: () => {
 				resolveReady();
@@ -1603,7 +1606,7 @@ describe("RPC mode host requests on the remote profile", () => {
 			close: vi.fn(async () => {}),
 		};
 		const ready = Promise.withResolvers<void>();
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			anchor: false,
 			onReady: ready.resolve,
 			remoteGrant: createIrohRemoteExplicitAccess([], capabilities).rpcGrant,
@@ -1743,7 +1746,7 @@ describe("RPC mode stdio transport", () => {
 			resolveReady = resolve;
 		});
 
-		const modePromise = runRpcMode(hosted.host, hosted.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(hosted.host, hosted.conversation, {
 			exitProcess: false,
 			onReady: () => {
 				resolveReady();

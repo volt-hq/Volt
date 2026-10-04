@@ -17,7 +17,7 @@ import type { ConversationFactory } from "../../../src/core/host/hosted-conversa
 import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestHost } from "../../utilities/host-client.ts";
 
@@ -302,7 +302,7 @@ describe("regression #585: one writer per conversation log", () => {
 			ready = resolve;
 		});
 		const writes: object[] = [];
-		const mode = runRpcMode(host, conversation, {
+		const mode = runLegacyRemoteRpcMode(host, conversation, {
 			exitProcess: false,
 			anchor: false,
 			onReady: ready,
@@ -355,7 +355,7 @@ describe("regression #585: one writer per conversation log", () => {
 		const started = new Promise<void>((resolve) => {
 			ready = resolve;
 		});
-		const mode = runRpcMode(host, conversation, {
+		const mode = runLegacyRemoteRpcMode(host, conversation, {
 			exitProcess,
 			onReady: ready,
 			transport: {

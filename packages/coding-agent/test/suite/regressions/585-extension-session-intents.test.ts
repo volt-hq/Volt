@@ -4,7 +4,7 @@ import { ClientScope } from "../../../src/core/host/client-scope.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
@@ -137,7 +137,7 @@ describe("regression #585: extension session control returns the id of the sessi
 		const client = new RpcTransportClient({ transport: pair.client });
 		await client.start();
 		const ready = Promise.withResolvers<void>();
-		const closed = runRpcMode(harness.host, source, { transport: pair.server, onReady: ready.resolve });
+		const closed = runLegacyRemoteRpcMode(harness.host, source, { transport: pair.server, onReady: ready.resolve });
 		await Promise.race([ready.promise, closed]);
 		cleanups.push(async () => {
 			await client.stop();

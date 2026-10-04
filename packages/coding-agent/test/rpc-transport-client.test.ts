@@ -28,13 +28,13 @@ import type { ExtensionClient } from "../src/core/session/extension-binding.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
-import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
 import { createIrohRemoteCloseDeferringRpcTransport } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { RpcClientBase } from "../src/modes/rpc/rpc-client-base.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
 import { createTestModel } from "./iroh-stream-doubles.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import { createLegacyRpcClient } from "./utilities/legacy-rpc-client.ts";
 
 const AGENT_MODE_ACTION_ID = "agent.mode";
 const CONTEXT_AUTO_COMPACTION_ACTION_ID = "context.auto_compaction";
@@ -845,7 +845,7 @@ describe("Iroh remote RPC filter", () => {
 	});
 });
 
-describe("runRpcMode", () => {
+describe("runLegacyRemoteRpcMode", () => {
 	test("aborts startup extension UI waits when the transport closes", async () => {
 		const pair = createLoopbackRpcTransportPair();
 		const dispose = vi.fn(async () => {});
@@ -861,7 +861,7 @@ describe("runRpcMode", () => {
 		const runtimeHost = createRuntimeHost(dispose, async (_client, liveState) => {
 			await confirmThroughLiveState(liveState, "Startup", "Continue?");
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			transport: pair.server,
 			exitProcess: false,
 		});
@@ -895,7 +895,10 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport,
+			exitProcess: false,
+		});
 		void modePromise.catch(() => {});
 		let modeSettled = false;
 		void modePromise.then(
@@ -948,7 +951,10 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport,
+			exitProcess: false,
+		});
 		void modePromise.catch(() => {});
 		let modeSettled = false;
 		void modePromise.then(
@@ -1001,7 +1007,10 @@ describe("runRpcMode", () => {
 			transport: pair.server,
 			waitForPromptCompletion: () => Promise.resolve(),
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, { transport, exitProcess: false });
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
+			transport,
+			exitProcess: false,
+		});
 		void modePromise.catch(() => {});
 
 		await startupRequest;
@@ -1052,7 +1061,7 @@ describe("runRpcMode", () => {
 			responses.push(JSON.parse(line) as Record<string, unknown>);
 		});
 		const runtimeHost = createRuntimeHost(dispose);
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			transport: pair.server,
 			exitProcess: false,
 		});
@@ -1177,7 +1186,7 @@ describe("runRpcMode", () => {
 				waitForPromptCompletion: () => Promise.resolve(),
 			}),
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			allowUiActionInvocation: true,
 			exitProcess: false,
 			remoteGrant: createIrohRemotePresetAccess("full").rpcGrant,
@@ -1405,11 +1414,11 @@ describe("runRpcMode", () => {
 	});
 });
 
-describe("createInProcessRpcClient", () => {
+describe("createLegacyRpcClient", () => {
 	test("runs RPC mode against a runtime in the same process", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		await expect(client.getState()).resolves.toMatchObject({
 			thinkingLevel: "off",
@@ -1436,7 +1445,7 @@ describe("createInProcessRpcClient", () => {
 			setModel,
 			setThinkingLevel,
 		});
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1471,7 +1480,7 @@ describe("createInProcessRpcClient", () => {
 			activeAgentRun: { startedAt: 1_782_470_400_000 },
 			isStreaming: true,
 		});
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1490,7 +1499,7 @@ describe("createInProcessRpcClient", () => {
 			activeCompaction: { reason: "threshold", startedAt: 1_782_470_400_000 },
 			isCompacting: true,
 		});
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getState()).resolves.toMatchObject({
@@ -1516,7 +1525,7 @@ describe("createInProcessRpcClient", () => {
 			newSession,
 			setSessionName,
 		});
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			await expect(client.getUiCapabilities()).resolves.toEqual({
@@ -1783,7 +1792,7 @@ describe("createInProcessRpcClient", () => {
 			model: createModel({ reasoning: true }),
 			thinkingLevel: "high",
 		});
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 		const fastStates: RpcUiActionStateChangedEvent["state"][] = [];
 		client.onEvent((event) => {
 			if (event.type === "ui_action_state_changed") fastStates.push(event.state);
@@ -1851,7 +1860,7 @@ describe("createInProcessRpcClient", () => {
 	test("routes review action invocation through RPC built-in actions", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, { cwd: tmpdir() });
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -1912,7 +1921,7 @@ describe("createInProcessRpcClient", () => {
 		];
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, { commands, prompts, skills });
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2042,7 +2051,7 @@ describe("createInProcessRpcClient", () => {
 		};
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, resources);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2115,7 +2124,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			{ cwd: repo },
 		);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2147,7 +2156,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			{ cwd: noRepoDir },
 		);
-		const noRepoClient = await createInProcessRpcClient(noRepoRuntimeHost.host, noRepoRuntimeHost.conversation);
+		const noRepoClient = await createLegacyRpcClient(noRepoRuntimeHost.host, noRepoRuntimeHost.conversation);
 		try {
 			await expect(noRepoClient.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "")).resolves.toEqual([]);
 		} finally {
@@ -2181,7 +2190,7 @@ describe("createInProcessRpcClient", () => {
 				prompt,
 			},
 		);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2227,7 +2236,7 @@ describe("createInProcessRpcClient", () => {
 			async () => {},
 			resources,
 		);
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			const actions = await client.getUiActions("all");
@@ -2263,7 +2272,7 @@ describe("createInProcessRpcClient", () => {
 
 	test("sends extension UI responses from in-process clients", async () => {
 		const runtimeHost = createRuntimeHost(vi.fn(async () => {}));
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation);
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation);
 
 		try {
 			let unsubscribe = () => {};
@@ -2300,7 +2309,7 @@ describe("createInProcessRpcClient", () => {
 			}
 		});
 
-		const client = await createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation, {
+		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation, {
 			onEvent(event, pendingClient) {
 				if (event.type === "extension_ui_request" && event.method === "confirm") {
 					const responsePromise = pendingClient.sendExtensionUIResponse({
@@ -2330,7 +2339,7 @@ describe("createInProcessRpcClient", () => {
 			throw bindError;
 		});
 
-		await expect(createInProcessRpcClient(runtimeHost.host, runtimeHost.conversation)).rejects.toBe(bindError);
+		await expect(createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation)).rejects.toBe(bindError);
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
@@ -2346,7 +2355,7 @@ describe("createInProcessRpcClient", () => {
 
 		try {
 			const owned = createRuntimeHost(dispose);
-			const thrown = await createInProcessRpcClient(owned.host, owned.conversation, {
+			const thrown = await createLegacyRpcClient(owned.host, owned.conversation, {
 				anchor: true,
 				onEvent: () => undefined,
 			}).catch((error: unknown) => error);
@@ -2370,7 +2379,7 @@ describe("createInProcessRpcClient", () => {
 		try {
 			const retained = createRuntimeHost(dispose);
 			await expect(
-				createInProcessRpcClient(retained.host, retained.conversation, {
+				createLegacyRpcClient(retained.host, retained.conversation, {
 					anchor: false,
 					onEvent: () => undefined,
 				}),

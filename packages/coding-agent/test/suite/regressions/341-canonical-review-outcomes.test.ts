@@ -30,12 +30,12 @@ import {
 import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import {
 	createRpcErrorResponse,
 	handleRpcCommand,
 	type RpcCommandDispatcherContext,
 } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { RpcCommand, RpcResponse } from "../../../src/modes/rpc/rpc-types.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { createHarness } from "../harness.ts";
@@ -538,7 +538,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		});
 		const writes: object[] = [];
 		const alias = aliases[0]!;
-		const mode = runRpcMode(alias.host, alias.conversation, {
+		const mode = runLegacyRemoteRpcMode(alias.host, alias.conversation, {
 			exitProcess: false,
 			anchor: false,
 			...(alias.reviewDiscussions === undefined ? {} : { reviewDiscussions: alias.reviewDiscussions }),

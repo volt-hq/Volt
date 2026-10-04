@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { feedLiveState } from "../src/core/host/live-feed.ts";
 import { getClientMessageId } from "../src/core/messages.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -39,16 +40,6 @@ vi.mock("../src/core/output-guard.js", () => ({
 		rpcIo.outputLines.push(line);
 		rpcIo.outputObserver?.(line);
 	},
-}));
-
-vi.mock("../src/core/theme/runtime.js", () => ({
-	theme: {},
-	Theme: class {},
-	getAvailableThemesWithPaths: () => [],
-	getThemeByName: () => undefined,
-	setRegisteredThemes: () => {},
-	setTheme: () => ({ success: true }),
-	setThemeInstance: () => {},
 }));
 
 vi.mock("../src/modes/rpc/jsonl.js", () => ({
@@ -101,10 +92,29 @@ function parseOutputLines(outputLines: string[]): ParsedOutputLine[] {
 		.map((line) => JSON.parse(line) as ParsedOutputLine);
 }
 
-function getPromptResponses(outputLines: string[], id: string): ParsedOutputLine[] {
+/** The `accepted` and `rejected` frames of the intent `intentId`. */
+function getOutcomes(outputLines: string[], intentId: string): ParsedOutputLine[] {
 	return parseOutputLines(outputLines).filter(
-		(record) => record.id === id && record.type === "response" && record.command === "prompt",
+		(record) => record.intentId === intentId && (record.type === "accepted" || record.type === "rejected"),
 	);
+}
+
+/** The committed message entries of `role`. */
+function getMessageEntries(outputLines: string[], role: string): ParsedOutputLine[] {
+	return parseOutputLines(outputLines).filter((record) => {
+		const entry = record.entry as { type?: string; payload?: { message?: { role?: string } } } | undefined;
+		return record.type === "entry" && entry?.type === "message" && entry.payload?.message?.role === role;
+	});
+}
+
+function sendFrame(frame: object): void {
+	if (!rpcIo.lineHandler) throw new Error("RPC mode reads no input yet");
+	rpcIo.lineHandler(JSON.stringify(frame));
+}
+
+/** A prompt intent: its intent id is the prompt's durable client message id. */
+function sendPrompt(clientMessageId: string, message: string, extra: Record<string, unknown> = {}): void {
+	sendFrame({ type: "prompt", intentId: clientMessageId, input: { message, ...extra } });
 }
 
 type FakeRuntimeHost = ReturnType<typeof createFakeHost> & { conversation: HostedConversation };
@@ -167,6 +177,7 @@ async function createRuntimeHost(options: {
 	});
 
 	options.configureSession?.(session);
+	const liveFeed = feedLiveState(session);
 
 	const runtimeHost = { ...createFakeHost(), conversation: createFakeConversation(session).conversation };
 
@@ -175,6 +186,7 @@ async function createRuntimeHost(options: {
 		sessionManager,
 		getStreamCallCount: () => streamCallCount,
 		cleanup: async () => {
+			liveFeed.close();
 			try {
 				if (session.isStreaming) {
 					await session.abort();
@@ -208,21 +220,30 @@ async function startRpcMode(options: {
 	rpcIo.outputObserver = undefined;
 
 	const { runtimeHost, sessionManager, getStreamCallCount, cleanup } = await createRuntimeHost(options);
-	void runRpcMode(runtimeHost.host, runtimeHost.conversation);
+	const ready = Promise.withResolvers<void>();
+	void runRpcMode(runtimeHost.host, runtimeHost.conversation, { onReady: ready.resolve });
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
+	sendFrame({ type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests: [] } });
+	await ready.promise;
+	sendFrame({
+		type: "subscribe",
+		subscriptionId: "s",
+		conversation: runtimeHost.conversation.id,
+		after: "snapshot",
+	});
 
 	return { lineHandler: rpcIo.lineHandler!, sessionManager, getStreamCallCount, cleanup };
 }
 
-describe("RPC prompt response semantics", () => {
+describe("RPC prompt intent outcomes", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
 		rpcIo.outputObserver = undefined;
 	});
 
-	it("emits one failure response when prompt preflight rejects", async () => {
-		const { lineHandler, cleanup } = await startRpcMode({
+	it("rejects once when prompt preflight rejects", async () => {
+		const { cleanup } = await startRpcMode({
 			withAuth: false,
 			responseDelayMs: 0,
 			model: {
@@ -240,19 +261,20 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			lineHandler(JSON.stringify({ id: "b1", type: "prompt", clientMessageId: "client-b1", message: "Hello" }));
+			sendPrompt("client-b1", "Hello");
 
 			await vi.waitFor(() => {
-				const responses = getPromptResponses(rpcIo.outputLines, "b1");
-				expect(responses).toHaveLength(1);
-				expect(responses[0]).toMatchObject({
-					id: "b1",
-					type: "response",
-					command: "prompt",
-					success: false,
-					error: expect.stringContaining(
-						"No API key found for fake-provider.\n\nUse /login to log into a provider via OAuth or API key. See:",
-					),
+				const outcomes = getOutcomes(rpcIo.outputLines, "client-b1");
+				expect(outcomes).toHaveLength(1);
+				expect(outcomes[0]).toMatchObject({
+					type: "rejected",
+					intentId: "client-b1",
+					reason: {
+						code: "failed",
+						message: expect.stringContaining(
+							"No API key found for fake-provider.\n\nUse /login to log into a provider via OAuth or API key. See:",
+						),
+					},
 				});
 			});
 		} finally {
@@ -260,22 +282,22 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
-	it("emits one success response when prompt preflight succeeds", async () => {
+	it("accepts once when prompt preflight succeeds, after the input committed", async () => {
 		const sessionDir = join(tmpdir(), `volt-rpc-durable-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(sessionDir, { recursive: true });
 		const manager = await SessionManager.create(sessionDir, sessionDir);
-		const { lineHandler, cleanup } = await startRpcMode({
+		const { cleanup } = await startRpcMode({
 			withAuth: true,
 			responseDelayMs: 0,
 			sessionManager: manager,
 		});
-		let successObservedCanonicalCommit = false;
+		let acceptedObservedCanonicalCommit = false;
 		rpcIo.outputObserver = (line) => {
-			const response = parseOutputLines([line]).find(
-				(record) => record.id === "b2" && record.type === "response" && record.success === true,
+			const accepted = parseOutputLines([line]).find(
+				(record) => record.intentId === "client-b2" && record.type === "accepted",
 			);
-			if (!response) return;
-			successObservedCanonicalCommit =
+			if (!accepted) return;
+			acceptedObservedCanonicalCommit =
 				manager.getClientInput("client-b2")?.state === "completed" &&
 				manager
 					.getEntries()
@@ -286,35 +308,21 @@ describe("RPC prompt response semantics", () => {
 		};
 
 		try {
-			lineHandler(JSON.stringify({ id: "b2", type: "prompt", clientMessageId: "client-b2", message: "Hello" }));
+			sendPrompt("client-b2", "Hello");
 
 			await vi.waitFor(() => {
-				const responses = getPromptResponses(rpcIo.outputLines, "b2");
-				expect(responses).toHaveLength(1);
-				expect(responses[0]).toMatchObject({
-					id: "b2",
-					type: "response",
-					command: "prompt",
-					success: true,
-					data: {
-						clientMessageId: "client-b2",
-						outcome: "admitted",
-						canonicalEntryId: expect.any(String),
-					},
-				});
+				const outcomes = getOutcomes(rpcIo.outputLines, "client-b2");
+				expect(outcomes).toHaveLength(1);
+				expect(outcomes[0]).toMatchObject({ type: "accepted", intentId: "client-b2", ordinals: expect.any(Array) });
 			});
-			expect(successObservedCanonicalCommit).toBe(true);
+			expect(acceptedObservedCanonicalCommit).toBe(true);
 			const persisted = await loadPersistedSessionSnapshot(manager);
 			expect(JSON.stringify(persisted.entries)).toContain('"clientMessageId":"client-b2"');
+			// The subscriber receives the user message entry with its client message id.
 			await vi.waitFor(() => {
-				const userEnd = parseOutputLines(rpcIo.outputLines).find(
-					(record) =>
-						record.type === "message_end" &&
-						(record.message as Record<string, unknown> | undefined)?.role === "user",
-				);
-				expect(userEnd).toMatchObject({
-					message: { role: "user", clientMessageId: "client-b2" },
-				});
+				expect(getMessageEntries(rpcIo.outputLines, "user")).toMatchObject([
+					{ entry: { payload: { clientMessageId: "client-b2" }, view: { clientMessageId: "client-b2" } } },
+				]);
 			});
 		} finally {
 			await cleanup();
@@ -324,17 +332,14 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
-	it("replays success after immediate teardown without dispatching the same durable input again", async () => {
+	it("accepts a retry after immediate teardown without dispatching the same durable input again", async () => {
 		const sessionDir = join(tmpdir(), `volt-rpc-crash-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(sessionDir, { recursive: true });
 		const manager = await SessionManager.create(sessionDir, sessionDir);
 		const sessionRef = manager.getSessionRef();
 		if (!sessionRef) throw new Error("expected a persisted session reference");
-		const command = {
-			type: "prompt",
-			clientMessageId: "client-success-crash",
-			message: "Commit before acknowledging",
-		};
+		const clientMessageId = "client-success-crash";
+		const message = "Commit before acknowledging";
 		const first = await startRpcMode({
 			withAuth: true,
 			responseDelayMs: 250,
@@ -343,45 +348,27 @@ describe("RPC prompt response semantics", () => {
 		let second: Awaited<ReturnType<typeof startRpcMode>> | undefined;
 
 		try {
-			first.lineHandler(JSON.stringify({ ...command, id: "before-crash" }));
+			sendPrompt(clientMessageId, message);
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "before-crash")).toMatchObject([
-					{
-						id: "before-crash",
-						success: true,
-						data: {
-							clientMessageId: command.clientMessageId,
-							outcome: "admitted",
-							canonicalEntryId: expect.any(String),
-						},
-					},
-				]);
+				expect(getOutcomes(rpcIo.outputLines, clientMessageId)).toMatchObject([{ type: "accepted" }]);
 			});
-			expect(manager.getClientInput(command.clientMessageId)?.state).toBe("completed");
+			expect(manager.getClientInput(clientMessageId)?.state).toBe("completed");
 			expect(first.getStreamCallCount()).toBe(1);
 			await first.cleanup();
 
+			rpcIo.outputLines = [];
+			rpcIo.lineHandler = undefined;
 			const reopened = await SessionManager.open(sessionRef, sessionDir);
 			second = await startRpcMode({ withAuth: true, responseDelayMs: 0, sessionManager: reopened });
-			second.lineHandler(JSON.stringify({ ...command, id: "after-crash" }));
+			sendPrompt(clientMessageId, message);
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "after-crash")).toMatchObject([
-					{
-						id: "after-crash",
-						success: true,
-						data: {
-							clientMessageId: command.clientMessageId,
-							outcome: "completed",
-							canonicalEntryId: expect.any(String),
-						},
-					},
-				]);
+				expect(getOutcomes(rpcIo.outputLines, clientMessageId)).toMatchObject([{ type: "accepted" }]);
 			});
 			expect(second.getStreamCallCount()).toBe(0);
 			expect(
 				reopened
 					.getConversationState()
-					.context.messages.filter((message) => getClientMessageId(message) === command.clientMessageId),
+					.context.messages.filter((entry) => getClientMessageId(entry) === clientMessageId),
 			).toHaveLength(1);
 		} finally {
 			await first.cleanup();
@@ -392,7 +379,7 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
-	it("reports busy preflight separately from provider streaming", async () => {
+	it("shows a busy phase while the prompt waits in preflight, before the provider streams", async () => {
 		let releaseInput: () => void = () => undefined;
 		const inputRelease = new Promise<void>((resolve) => {
 			releaseInput = resolve;
@@ -401,7 +388,7 @@ describe("RPC prompt response semantics", () => {
 		const inputStarted = new Promise<void>((resolve) => {
 			notifyInputStarted = resolve;
 		});
-		const { lineHandler, cleanup } = await startRpcMode({
+		const { cleanup } = await startRpcMode({
 			withAuth: true,
 			responseDelayMs: 0,
 			configureSession: (session) => {
@@ -417,34 +404,32 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			lineHandler(
-				JSON.stringify({
-					id: "busy-prompt",
-					type: "prompt",
-					clientMessageId: "client-busy",
-					message: "Wait in preflight",
-				}),
-			);
+			sendPrompt("client-busy", "Wait in preflight");
 			await inputStarted;
-			lineHandler(JSON.stringify({ id: "busy-state", type: "get_state" }));
-
 			await vi.waitFor(() => {
-				const response = parseOutputLines(rpcIo.outputLines).find((record) => record.id === "busy-state");
-				expect(response).toMatchObject({
-					type: "response",
-					command: "get_state",
-					success: true,
-					data: { isStreaming: false, isBusy: true },
-				});
+				const phases = parseOutputLines(rpcIo.outputLines).flatMap((record) =>
+					record.type === "live"
+						? (record.items as Array<Record<string, unknown>>).filter(
+								(item) => item.type === "set" && item.key === "phase",
+							)
+						: [],
+				);
+				expect(phases.at(-1)).toMatchObject({ value: { kind: "phase", busy: true } });
 			});
+			const streamed = parseOutputLines(rpcIo.outputLines).some(
+				(record) =>
+					record.type === "live" &&
+					(record.items as Array<Record<string, unknown>>).some((item) => item.type === "assistant_start"),
+			);
+			expect(streamed).toBe(false);
 		} finally {
 			releaseInput();
 			await cleanup();
 		}
 	});
 
-	it("reports handled identified prompts as completed without waiting for a canonical row", async () => {
-		const { lineHandler, sessionManager, getStreamCallCount, cleanup } = await startRpcMode({
+	it("accepts handled identified prompts without a canonical row", async () => {
+		const { sessionManager, getStreamCallCount, cleanup } = await startRpcMode({
 			withAuth: true,
 			responseDelayMs: 0,
 			configureSession: (session) => {
@@ -456,43 +441,21 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			lineHandler(
-				JSON.stringify({
-					id: "handled-prompt",
-					type: "prompt",
-					clientMessageId: "client-handled",
-					message: "Handled without a model turn",
-				}),
-			);
+			sendPrompt("client-handled", "Handled without a model turn");
 
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "handled-prompt")).toMatchObject([
-					{
-						id: "handled-prompt",
-						success: true,
-						data: {
-							clientMessageId: "client-handled",
-							outcome: "completed",
-						},
-					},
-				]);
+				expect(getOutcomes(rpcIo.outputLines, "client-handled")).toMatchObject([{ type: "accepted" }]);
 			});
 			expect(sessionManager.getClientInput("client-handled")).toMatchObject({ state: "completed" });
 			expect(sessionManager.getClientInput("client-handled")?.canonicalEntryId).toBeUndefined();
 			expect(getStreamCallCount()).toBe(0);
-			expect(
-				parseOutputLines(rpcIo.outputLines).filter(
-					(record) =>
-						record.type === "message_end" &&
-						(record.message as Record<string, unknown> | undefined)?.role === "user",
-				),
-			).toHaveLength(0);
+			expect(getMessageEntries(rpcIo.outputLines, "user")).toHaveLength(0);
 		} finally {
 			await cleanup();
 		}
 	});
 
-	it("joins concurrent retries while preserving each request RPC id", async () => {
+	it("joins concurrent retries of one input into one dispatch and accepts each", async () => {
 		let releaseInput!: () => void;
 		let markInputStarted!: () => void;
 		const inputRelease = new Promise<void>((resolve) => {
@@ -501,7 +464,7 @@ describe("RPC prompt response semantics", () => {
 		const inputStarted = new Promise<void>((resolve) => {
 			markInputStarted = resolve;
 		});
-		const { lineHandler, cleanup } = await startRpcMode({
+		const { cleanup } = await startRpcMode({
 			withAuth: true,
 			responseDelayMs: 0,
 			configureSession: (session) => {
@@ -517,34 +480,20 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			const command = {
-				type: "prompt",
-				clientMessageId: "client-concurrent-retry",
-				message: "One dispatch",
-			};
-			lineHandler(JSON.stringify({ ...command, id: "concurrent-original" }));
+			sendPrompt("client-concurrent-retry", "One dispatch");
 			await inputStarted;
-			lineHandler(JSON.stringify({ ...command, id: "concurrent-retry" }));
+			sendPrompt("client-concurrent-retry", "One dispatch");
 			releaseInput();
 
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "concurrent-original")).toMatchObject([
-					{ id: "concurrent-original", success: true },
-				]);
-				expect(getPromptResponses(rpcIo.outputLines, "concurrent-retry")).toMatchObject([
-					{ id: "concurrent-retry", success: true },
+				expect(getOutcomes(rpcIo.outputLines, "client-concurrent-retry")).toMatchObject([
+					{ type: "accepted" },
+					{ type: "accepted" },
 				]);
 			});
 			await vi.waitFor(() => {
-				const messageEnds = parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "message_end");
-				expect(
-					messageEnds.filter((record) => (record.message as Record<string, unknown> | undefined)?.role === "user"),
-				).toHaveLength(1);
-				expect(
-					messageEnds.filter(
-						(record) => (record.message as Record<string, unknown> | undefined)?.role === "assistant",
-					),
-				).toHaveLength(1);
+				expect(getMessageEntries(rpcIo.outputLines, "user")).toHaveLength(1);
+				expect(getMessageEntries(rpcIo.outputLines, "assistant")).toHaveLength(1);
 			});
 		} finally {
 			releaseInput();
@@ -552,37 +501,19 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
-	it("emits one success response when prompt is queued during streaming", async () => {
-		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
+	it("accepts a prompt queued while the agent streams", async () => {
+		const { cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
 
 		try {
-			lineHandler(
-				JSON.stringify({ id: "b3-start", type: "prompt", clientMessageId: "client-b3-start", message: "Start" }),
-			);
+			sendPrompt("client-b3-start", "Start");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "b3-start")).toHaveLength(1);
+				expect(getOutcomes(rpcIo.outputLines, "client-b3-start")).toHaveLength(1);
 			});
 
-			rpcIo.outputLines = [];
-			lineHandler(
-				JSON.stringify({
-					id: "b3",
-					type: "prompt",
-					clientMessageId: "client-b3",
-					message: "Queue this",
-					streamingBehavior: "followUp",
-				}),
-			);
+			sendPrompt("client-b3", "Queue this", { streamingBehavior: "followUp" });
 
 			await vi.waitFor(() => {
-				const responses = getPromptResponses(rpcIo.outputLines, "b3");
-				expect(responses).toHaveLength(1);
-				expect(responses[0]).toMatchObject({
-					id: "b3",
-					type: "response",
-					command: "prompt",
-					success: true,
-				});
+				expect(getOutcomes(rpcIo.outputLines, "client-b3")).toMatchObject([{ type: "accepted" }]);
 			});
 
 			await sleep(150);
@@ -591,97 +522,41 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
-	it("answers completed retries under each RPC id without replaying the turn", async () => {
-		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+	it("accepts completed retries without replaying the turn and rejects a conflicting reuse", async () => {
+		const { cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
 
 		try {
-			lineHandler(
-				JSON.stringify({
-					id: "retry-original",
-					type: "prompt",
-					clientMessageId: "client-retry-complete",
-					message: "Only once",
-				}),
-			);
+			sendPrompt("client-retry-complete", "Only once");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "retry-original")).toMatchObject([
-					{
-						data: {
-							clientMessageId: "client-retry-complete",
-							outcome: "admitted",
-							canonicalEntryId: expect.any(String),
-						},
-					},
-				]);
-				const assistantEnds = parseOutputLines(rpcIo.outputLines).filter(
-					(record) =>
-						record.type === "message_end" &&
-						(record.message as Record<string, unknown> | undefined)?.role === "assistant",
-				);
-				expect(assistantEnds).toHaveLength(1);
+				expect(getOutcomes(rpcIo.outputLines, "client-retry-complete")).toMatchObject([{ type: "accepted" }]);
+				expect(getMessageEntries(rpcIo.outputLines, "assistant")).toHaveLength(1);
 			});
 
-			lineHandler(
-				JSON.stringify({
-					id: "retry-replay",
-					type: "prompt",
-					clientMessageId: "client-retry-complete",
-					message: "Only once",
-				}),
-			);
+			sendPrompt("client-retry-complete", "Only once");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "retry-replay")).toMatchObject([
-					{
-						id: "retry-replay",
-						type: "response",
-						command: "prompt",
-						success: true,
-						data: {
-							clientMessageId: "client-retry-complete",
-							outcome: "completed",
-							canonicalEntryId: expect.any(String),
-						},
-					},
+				expect(getOutcomes(rpcIo.outputLines, "client-retry-complete")).toMatchObject([
+					{ type: "accepted" },
+					{ type: "accepted" },
 				]);
 			});
 
-			lineHandler(
-				JSON.stringify({
-					id: "retry-conflict",
-					type: "prompt",
-					clientMessageId: "client-retry-complete",
-					message: "Different input",
-				}),
-			);
+			sendPrompt("client-retry-complete", "Different input");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "retry-conflict")).toMatchObject([
-					{
-						id: "retry-conflict",
-						type: "response",
-						command: "prompt",
-						success: false,
-						error: expect.stringContaining("client_input_conflict"),
-						errorCode: "client_input_conflict",
-					},
-				]);
+				expect(getOutcomes(rpcIo.outputLines, "client-retry-complete").at(-1)).toMatchObject({
+					type: "rejected",
+					reason: { code: "conflict", message: expect.stringContaining("client_input_conflict") },
+				});
 			});
 
-			const transcriptEnds = parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "message_end");
-			expect(
-				transcriptEnds.filter((record) => (record.message as Record<string, unknown> | undefined)?.role === "user"),
-			).toHaveLength(1);
-			expect(
-				transcriptEnds.filter(
-					(record) => (record.message as Record<string, unknown> | undefined)?.role === "assistant",
-				),
-			).toHaveLength(1);
+			expect(getMessageEntries(rpcIo.outputLines, "user")).toHaveLength(1);
+			expect(getMessageEntries(rpcIo.outputLines, "assistant")).toHaveLength(1);
 		} finally {
 			await cleanup();
 		}
 	});
 
-	it("replays a durable prompt failure under a new RPC id", async () => {
-		const { lineHandler, cleanup } = await startRpcMode({
+	it("rejects a retried durable prompt failure the same way", async () => {
+		const { cleanup } = await startRpcMode({
 			withAuth: false,
 			responseDelayMs: 0,
 			model: {
@@ -699,31 +574,22 @@ describe("RPC prompt response semantics", () => {
 		});
 
 		try {
-			const command = {
-				type: "prompt",
-				clientMessageId: "client-retry-failed",
-				message: "Cannot dispatch",
-			};
-			lineHandler(JSON.stringify({ ...command, id: "failed-original" }));
+			sendPrompt("client-retry-failed", "Cannot dispatch");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "failed-original")).toMatchObject([
-					{ id: "failed-original", success: false, error: expect.stringContaining("No API key found") },
+				expect(getOutcomes(rpcIo.outputLines, "client-retry-failed")).toMatchObject([
+					{ type: "rejected", reason: { message: expect.stringContaining("No API key found") } },
 				]);
 			});
 
-			lineHandler(JSON.stringify({ ...command, id: "failed-replay" }));
+			sendPrompt("client-retry-failed", "Cannot dispatch");
 			await vi.waitFor(() => {
-				expect(getPromptResponses(rpcIo.outputLines, "failed-replay")).toMatchObject([
-					{ id: "failed-replay", success: false, error: expect.stringContaining("No API key found") },
+				expect(getOutcomes(rpcIo.outputLines, "client-retry-failed")).toMatchObject([
+					{ type: "rejected" },
+					{ type: "rejected", reason: { message: expect.stringContaining("No API key found") } },
 				]);
 			});
 
-			const userEnds = parseOutputLines(rpcIo.outputLines).filter(
-				(record) =>
-					record.type === "message_end" &&
-					(record.message as Record<string, unknown> | undefined)?.role === "user",
-			);
-			expect(userEnds).toHaveLength(0);
+			expect(getMessageEntries(rpcIo.outputLines, "user")).toHaveLength(0);
 		} finally {
 			await cleanup();
 		}

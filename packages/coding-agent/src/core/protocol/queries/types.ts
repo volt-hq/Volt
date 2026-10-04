@@ -7,15 +7,7 @@
 import type { QueryErrorCode, QueryName, QueryParams, QueryResult, RemoteCapability } from "@hansjm10/volt-protocol";
 import type { IntentContext } from "../intents/types.ts";
 
-/**
- * Queries a later slice serves: `history` and `content` read the projected
- * log, so they arrive with the single transcript projection.
- */
-export type DeferredQueryName = "history" | "content";
-
-export type RegisteredQueryName = Exclude<QueryName, DeferredQueryName>;
-
-export interface QueryDefinition<N extends RegisteredQueryName> {
+export interface QueryDefinition<N extends QueryName> {
 	readonly name: N;
 	/** `conversation` queries read one conversation; `host` queries read the host. */
 	readonly scope: "conversation" | "host";
@@ -26,7 +18,7 @@ export interface QueryDefinition<N extends RegisteredQueryName> {
 	run(ctx: IntentContext, params: QueryParams<N>): Promise<QueryResult<N>>;
 }
 
-export function defineQuery<N extends RegisteredQueryName>(definition: QueryDefinition<N>): QueryDefinition<N> {
+export function defineQuery<N extends QueryName>(definition: QueryDefinition<N>): QueryDefinition<N> {
 	return definition;
 }
 

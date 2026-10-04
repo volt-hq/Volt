@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionStats } from "../src/core/agent-session.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import type { ConversationFactory, SubagentRuntimeContext } from "../src/core/host/hosted-conversation.ts";
+import type {
+	ConversationFactory,
+	HostedConversation,
+	SubagentRuntimeContext,
+} from "../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -479,7 +483,6 @@ describe("subagent tool", () => {
 			resourceLoader,
 			...(options.subagentContext ? { subagentContext: options.subagentContext } : {}),
 			onRuntimeCreated: options.onRuntimeCreated,
-			requestTimeoutMs: 5_000,
 		});
 		cleanups.push({
 			cleanup: async () => {
@@ -517,6 +520,7 @@ describe("subagent tool", () => {
 		return {
 			id: result.id,
 			sessionId: result.sessionId,
+			conversation: {} as HostedConversation,
 			prompt: async (task) => {
 				options.onPrompt?.(task);
 			},
@@ -550,6 +554,7 @@ describe("subagent tool", () => {
 			handle: {
 				id: options.id,
 				sessionId: options.sessionId,
+				conversation: {} as HostedConversation,
 				prompt: async (task) => {
 					options.prompts.push({ agent: options.agent, task });
 				},
@@ -2754,6 +2759,7 @@ describe("subagent tool", () => {
 		const handle: SubagentHandle = {
 			id: "sa_abort",
 			sessionId: "session_abort",
+			conversation: {} as HostedConversation,
 			prompt: async () => {
 				promptStarted = true;
 				resolvePromptStarted();
@@ -2805,6 +2811,7 @@ describe("subagent tool", () => {
 		const handle: SubagentHandle = {
 			id: "sa_hung_abort",
 			sessionId: "session_hung_abort",
+			conversation: {} as HostedConversation,
 			prompt: async () => {
 				resolvePromptStarted();
 				await never;
@@ -2938,6 +2945,7 @@ describe("subagent tool", () => {
 		const handle: SubagentHandle = {
 			id: result.id,
 			sessionId: result.sessionId,
+			conversation: {} as HostedConversation,
 			prompt: async () => undefined,
 			abort: async () => undefined,
 			getState: async (): Promise<RpcSessionState> => {

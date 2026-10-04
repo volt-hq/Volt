@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionMode, SessionStartEvent } from "../../../src/core/extensions/types.ts";
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
+import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
-import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 import { createHarness } from "../harness.ts";
@@ -23,7 +23,7 @@ async function open(fixture: ExtensionRuntime): Promise<ConnectedClient> {
 	client.onEvent((event) => events.push(event));
 	await client.start();
 	const ready = Promise.withResolvers<void>();
-	const closed = runRpcMode(fixture.host, fixture.conversation, {
+	const closed = runLegacyRemoteRpcMode(fixture.host, fixture.conversation, {
 		transport: pair.server,
 		anchor: false,
 		onReady: ready.resolve,

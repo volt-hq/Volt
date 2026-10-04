@@ -1,0 +1,286 @@
+/**
+ * One subscription's writer (RFC §6.1): the projected entries of a
+ * conversation from a position, and its live lane.
+ *
+ * Entries are read lazily from the log by a cursor, never queued: the writer
+ * projects what the log holds after the cursor whenever the log advances or a
+ * live frame is due. Live frames are queued with the log position they were
+ * published at (`basedOn`). Invariant W: a live frame is written only after
+ * every visible entry up to its `basedOn`, so a client never sees streaming
+ * state ahead of the entries it builds on. A batch whose last entries the
+ * profile hides ends with a `head` frame, so the client's position covers
+ * them.
+ *
+ * `seq` restarts at 1 with every live reset. When the queued live frames
+ * outgrow the profile's bound, they are dropped and the subscription takes a
+ * fresh reset from the live state instead; entries are never dropped.
+ */
+
+import {
+	clientActiveBranch,
+	clientFold,
+	clientSnapshot,
+	type HostFrame,
+	type HostRequestKind,
+	type LiveItem,
+	type ProjectedEntry,
+} from "@hansjm10/volt-protocol";
+import type { HostedConversation } from "../../host/hosted-conversation.ts";
+import type { LiveUpdate } from "../../host/live-state.ts";
+import type { Profile } from "../profiles.ts";
+import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
+import type { ProjectionSource } from "../projection/transcript.ts";
+
+/** Where a subscription writes its frames, in order. */
+export interface SubscriptionSink {
+	send(frame: HostFrame): void;
+}
+
+export interface SubscriptionOptions {
+	readonly subscriptionId: string;
+	/** The id the subscription's live view attaches to the conversation's live state under. */
+	readonly liveClientId: string;
+	readonly conversation: HostedConversation;
+	readonly profile: Profile;
+	readonly sink: SubscriptionSink;
+	/** Whether the subscriber receives the live lane. */
+	readonly live: boolean;
+	/** Whether the subscriber is asked host requests of `kind`. */
+	readonly accepts: (kind: HostRequestKind) => boolean;
+}
+
+interface QueuedLive {
+	readonly basedOn: number;
+	readonly reset: boolean;
+	readonly items: readonly LiveItem[];
+	/** Serialized size, measured only for frames queued while the writer runs. */
+	readonly bytes: number;
+}
+
+export type SubscriptionEnd =
+	| { readonly reason: "unsubscribed" | "closed" | "lost" | "shutdown" }
+	| { readonly reason: "moved"; readonly target: string };
+
+/** The projected entries of a log up to `ordinal`, in order. */
+export function projectLog(
+	conversation: HostedConversation,
+	profile: Profile,
+	afterOrdinal: number,
+	throughOrdinal: number,
+): ProjectedEntry[] {
+	const sessionManager = conversation.session.sessionManager;
+	const source = sessionProjectionSource(sessionManager);
+	const projected: ProjectedEntry[] = [];
+	for (const entry of sessionManager.committedEntriesAfter(afterOrdinal, throughOrdinal - afterOrdinal)) {
+		const entryFrame = projectEntry(entry, source, profile);
+		if (entryFrame) projected.push(entryFrame);
+	}
+	return projected;
+}
+
+export class Subscription {
+	readonly id: string;
+	readonly conversation: HostedConversation;
+	private readonly options: SubscriptionOptions;
+	private readonly source: ProjectionSource;
+	/** The newest ordinal the subscriber's position covers. */
+	private cursor = 0;
+	private readonly queue: QueuedLive[] = [];
+	private queuedBytes = 0;
+	private seq = 0;
+	/** The `basedOn` of the newest queued live frame. */
+	private basedOn = 0;
+	private pumping = false;
+	private again = false;
+	private replacingLive = false;
+	private detachLive: (() => void) | undefined;
+	private releaseGit: (() => void) | undefined;
+	private unsubscribeLog: (() => void) | undefined;
+	private ended = false;
+
+	constructor(options: SubscriptionOptions) {
+		this.options = options;
+		this.id = options.subscriptionId;
+		this.conversation = options.conversation;
+		this.source = sessionProjectionSource(options.conversation.session.sessionManager);
+	}
+
+	get isEnded(): boolean {
+		return this.ended;
+	}
+
+	/**
+	 * Start after the subscriber's position, or from a snapshot. A position
+	 * past the log, or further back than the profile replays, is answered with
+	 * a snapshot at the current position.
+	 */
+	start(after: number | "snapshot"): void {
+		const sessionManager = this.conversation.session.sessionManager;
+		const head = sessionManager.getOrdinal();
+		if (after === "snapshot" || after > head || head - after > this.options.profile.limits.maxReplay) {
+			this.writeSnapshot(head);
+		} else {
+			this.cursor = after;
+		}
+		this.unsubscribeLog = sessionManager.subscribeOrdinal(() => this.pump());
+		if (this.options.live) {
+			this.releaseGit = this.conversation.session.gitContextProvider.retainObservation();
+			this.attachLive();
+		}
+		this.pump();
+	}
+
+	/** Write what is due: queued live frames after the entries they build on, then the log's tail. */
+	pump(): void {
+		if (this.ended) return;
+		if (this.pumping) {
+			this.again = true;
+			return;
+		}
+		this.pumping = true;
+		try {
+			do {
+				this.again = false;
+				for (let frame = this.queue.shift(); frame !== undefined && !this.ended; frame = this.queue.shift()) {
+					this.queuedBytes -= frame.bytes;
+					this.writeEntriesThrough(frame.basedOn);
+					this.writeLive(frame);
+				}
+				if (!this.ended) this.writeEntriesThrough(this.conversation.session.sessionManager.getOrdinal());
+			} while (this.again && !this.ended);
+		} finally {
+			this.pumping = false;
+		}
+	}
+
+	/** A transient notice on the live lane; it changes no streaming scope. */
+	notice(level: "info" | "warning" | "error", message: string, source?: string): void {
+		if (!this.options.live || this.ended) return;
+		this.receive({
+			reset: false,
+			basedOn: this.basedOn,
+			items: [{ type: "notice", level, message, ...(source === undefined ? {} : { source }) }],
+		});
+	}
+
+	/** End the subscription: what the log holds is written first, then `ended`. */
+	end(end: SubscriptionEnd): void {
+		if (this.ended) return;
+		this.pump();
+		this.ended = true;
+		this.release();
+		this.options.sink.send(
+			end.reason === "moved"
+				? { type: "ended", subscriptionId: this.id, reason: "moved", target: end.target }
+				: { type: "ended", subscriptionId: this.id, reason: end.reason },
+		);
+	}
+
+	/** Stop without a frame: the connection is gone. */
+	dispose(): void {
+		if (this.ended) return;
+		this.ended = true;
+		this.release();
+	}
+
+	private release(): void {
+		this.queue.length = 0;
+		this.queuedBytes = 0;
+		this.unsubscribeLog?.();
+		this.unsubscribeLog = undefined;
+		this.replacingLive = true;
+		this.detachLive?.();
+		this.detachLive = undefined;
+		this.releaseGit?.();
+		this.releaseGit = undefined;
+	}
+
+	private attachLive(): void {
+		this.detachLive = this.conversation.liveState.attach(this.options.liveClientId, {
+			acceptsHostRequest: (kind) => this.options.accepts(kind),
+			apply: (update) => this.receive(update),
+		});
+	}
+
+	private receive(update: LiveUpdate): void {
+		if (this.ended || this.replacingLive) return;
+		// A reset replaces whatever is queued.
+		if (update.reset) {
+			this.queue.length = 0;
+			this.queuedBytes = 0;
+		}
+		const bytes = this.pumping ? JSON.stringify(update.items).length : 0;
+		this.queue.push({ basedOn: update.basedOn, reset: update.reset, items: update.items, bytes });
+		this.basedOn = update.basedOn;
+		this.queuedBytes += bytes;
+		if (this.queuedBytes > this.options.profile.limits.liveQueueBytes) {
+			this.replaceLive();
+			return;
+		}
+		this.pump();
+	}
+
+	/** Drop the queued live frames and start over from a reset of the current live state. */
+	private replaceLive(): void {
+		this.queue.length = 0;
+		this.queuedBytes = 0;
+		this.replacingLive = true;
+		try {
+			this.detachLive?.();
+		} finally {
+			this.replacingLive = false;
+		}
+		this.attachLive();
+	}
+
+	private writeSnapshot(ordinal: number): void {
+		const profile = this.options.profile;
+		const projected = projectLog(this.conversation, profile, 0, ordinal);
+		const state = clientFold(projected);
+		const tail = profile.limits.snapshotTail;
+		const snapshot =
+			projected.length <= tail
+				? clientSnapshot(state)
+				: { ...clientSnapshot(state), entries: clientActiveBranch(state).slice(-tail), earlier: true };
+		this.options.sink.send({
+			type: "snapshot",
+			subscriptionId: this.id,
+			conversation: this.conversation.id,
+			ordinal,
+			state: snapshot,
+		});
+		this.cursor = ordinal;
+	}
+
+	/** Write the visible entries up to `ordinal`, and `head` when the last of them are hidden. */
+	private writeEntriesThrough(ordinal: number): void {
+		if (ordinal <= this.cursor) return;
+		const entries = this.conversation.session.sessionManager.committedEntriesAfter(
+			this.cursor,
+			ordinal - this.cursor,
+		);
+		if (entries.length === 0) return;
+		let written = this.cursor;
+		for (const entry of entries) {
+			const projected = projectEntry(entry, this.source, this.options.profile);
+			if (!projected) continue;
+			this.options.sink.send({ type: "entry", subscriptionId: this.id, entry: projected });
+			written = entry.ordinal;
+		}
+		const last = entries[entries.length - 1]!.ordinal;
+		if (written < last) this.options.sink.send({ type: "head", subscriptionId: this.id, ordinal: last });
+		this.cursor = last;
+	}
+
+	private writeLive(frame: QueuedLive): void {
+		this.seq = frame.reset ? 1 : this.seq + 1;
+		this.options.sink.send({
+			type: "live",
+			subscriptionId: this.id,
+			basedOn: frame.basedOn,
+			seq: this.seq,
+			...(frame.reset ? { reset: true } : {}),
+			items: [...frame.items],
+		});
+	}
+}

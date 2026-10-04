@@ -5,7 +5,6 @@
  */
 
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { supportsFastInference } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../../agent-session.ts";
 import { executePlan } from "../../host/plan-handoff.ts";
 import { openFork, openNewSession, openStoredSessionById } from "../../host/session-intents.ts";
@@ -14,16 +13,8 @@ import { projectRpcBackgroundJob } from "../../rpc/background-jobs.ts";
 import type { RpcPromptResponse } from "../../rpc/types.ts";
 import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
-import { agentModeState, fastModeState, isIntentStateBusy } from "./state.ts";
-import {
-	defineIntent,
-	INTENT_ENABLED,
-	type IntentAvailability,
-	type IntentContext,
-	IntentRejectedError,
-	type IntentTarget,
-	type IntentView,
-} from "./types.ts";
+import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
+import { defineIntent, INTENT_ENABLED, type IntentContext, IntentRejectedError, type IntentTarget } from "./types.ts";
 
 const control = ["conversation.control.v1"] as const;
 const modelSelect = ["model.select.v1"] as const;
@@ -275,24 +266,6 @@ export const setThinkingLevelIntent = defineIntent({
 		return session.thinkingLevel;
 	},
 });
-
-function fastModeAvailability(view: IntentView, input?: { enabled: boolean }): IntentAvailability {
-	const { state } = view;
-	if (state.isStreaming) {
-		return { enabled: false, reason: "Fast mode is not available while the agent is streaming" };
-	}
-	if (isIntentStateBusy(state)) {
-		return { enabled: false, reason: "Fast mode is not available while an agent operation is running" };
-	}
-	if (state.isCompacting) {
-		return { enabled: false, reason: "Fast mode is not available while compaction is running" };
-	}
-	if (state.fastModeEnabled === true || input?.enabled === false) return INTENT_ENABLED;
-	if (!state.model || !supportsFastInference(state.model)) {
-		return { enabled: false, reason: "Fast mode is not supported for the current provider and model" };
-	}
-	return INTENT_ENABLED;
-}
 
 export const setFastModeIntent = defineIntent({
 	name: "set_fast_mode",
