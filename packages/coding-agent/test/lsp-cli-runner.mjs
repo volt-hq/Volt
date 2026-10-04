@@ -46,7 +46,8 @@ if (process.argv[2] === "--child") {
 				toolResults: report.toolEnds.length,
 				fauxRequests: report.requests.length,
 				persistedToolResults: report.persisted.length,
-				agentSettled: report.events.some((event) => event.type === "agent_settled"),
+				frames: report.frames.length,
+				ended: report.frames.at(-1)?.type === "ended",
 				exitCode: report.exitCode,
 				cleanup: report.cleanup,
 			}));

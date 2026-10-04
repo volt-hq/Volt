@@ -40,8 +40,8 @@ An isolated child registers `registerFauxProvider` and queues `fauxToolCall`
 responses, writes its own `models.json`, and imports production `src/cli.ts` with
 `--mode json`. It does **not** inject tools, create a session directly, replace
 settings/services, or mock diagnostics. Production startup creates the ordinary
-write/edit/LSP tools, manager, process transport, JSON projector, and persisted
-session store.
+write/edit/LSP tools, manager, process transport, protocol subscription (JSON mode writes its
+local-profile frames), and persisted session store.
 
 The fake server is launched by ordinary settings using the absolute Node
 executable plus `fake-lsp-server.mjs`. Its existing text scanner turns `ERROR`
@@ -52,11 +52,14 @@ hover uses the server's synthetic response.
 Each check compares:
 
 - Every mutation's actual disk content at the next provider request.
-- `tool_execution_end` content, `details.lsp`, and `isError`.
+- Each tool result's entry frame (content, `details.lsp`, and `isError`), after
+  the live `tool` end item that streamed its `isError`.
 - The same tool-result content/error flag delivered to the next faux request.
 - Tool results read back from the authoritative SQLite store, including evidence
   retained when automatic diagnostic prose is suppressed.
-- A final assistant response, `agent_settled`, normal child exit, and cleanup.
+- A final assistant response, a live `phase` that settles once, a stream that
+  starts with a snapshot and ends with `ended{closed}`, normal child exit, and
+  cleanup.
 - Server initialize/document-sync/hover/publication acknowledgements; status and
   disabled automatic checks must not start a server.
 

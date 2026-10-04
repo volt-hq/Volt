@@ -917,24 +917,38 @@ async function runDaemonScenario(options, setActiveCleanup) {
 	}
 }
 
-function assertRpcIdleState(state) {
-	if (!isRecord(state)) throw new Error("RPC get_state returned no state object");
-	assert.equal(state.isStreaming, false);
-	assert.equal(state.isBusy, false);
-	assert.equal(state.isCompacting, false);
-	assert.equal(state.messageCount, 0);
-	assert.equal(state.pendingMessageCount, 0);
-	assert.deepEqual(state.steeringQueue, []);
-	assert.deepEqual(state.followUpQueue, []);
-	assert.equal(state.activeTools, undefined);
-	assert.equal(state.activeCompaction, undefined);
-	assert.equal(state.activeRetry, undefined);
+/** The client's view after subscribing: an empty conversation with an idle phase and nothing streaming. */
+function assertRpcIdleState(snapshot, live) {
+	if (!isRecord(snapshot?.state)) throw new Error("RPC snapshot has no state");
+	assert.equal(snapshot.state.entries.filter((entry) => entry.type === "message").length, 0);
+	assert.deepEqual(snapshot.state.queue, []);
+	assert.equal(live.reset, true);
+	assert.deepEqual(
+		live.items.filter((item) => item.type === "assistant_start" || item.type === "tool"),
+		[],
+		"nothing streams",
+	);
+	const phase = live.items.find((item) => item.type === "set" && item.value.kind === "phase")?.value;
+	assert.equal(phase?.busy, false);
+	assert.equal(phase?.operation, null);
+	assert.equal(phase?.run, undefined);
+	assert.equal(phase?.compaction, undefined);
+	assert.equal(phase?.retry, undefined);
 }
 
-async function waitForRpcResponse(stream, requestId, running) {
+/** Say hello, subscribe to the welcomed conversation, and resolve with its snapshot and live reset. */
+async function subscribeRpc(running, subscriptionId) {
+	const { stdin, stdout } = running.child;
 	let buffer = "";
-	return await new Promise((resolveResponse, rejectResponse) => {
-		const timeout = setTimeout(() => rejectResponse(new Error("RPC get_state timed out")), 30_000);
+	let snapshot;
+	return await new Promise((resolveSubscription, rejectSubscription) => {
+		const timeout = setTimeout(() => rejectSubscription(new Error("RPC subscription timed out")), 30_000);
+		const finish = (error, value) => {
+			clearTimeout(timeout);
+			stdout.off("data", onData);
+			if (error) rejectSubscription(error);
+			else resolveSubscription(value);
+		};
 		const onData = (chunk) => {
 			buffer += chunk;
 			while (true) {
@@ -943,29 +957,42 @@ async function waitForRpcResponse(stream, requestId, running) {
 				const line = buffer.slice(0, newline).trim();
 				buffer = buffer.slice(newline + 1);
 				if (!line) continue;
-				let message;
+				let frame;
 				try {
-					message = JSON.parse(line);
+					frame = JSON.parse(line);
 				} catch (error) {
-					clearTimeout(timeout);
-					rejectResponse(error);
+					finish(error);
 					return;
 				}
-				if (message?.type === "response" && message.id === requestId && message.command === "get_state") {
-					clearTimeout(timeout);
-					stream.off("data", onData);
-					resolveResponse(message);
+				if (frame?.type === "fatal") {
+					finish(new Error(`RPC ended the connection: ${frame.code} (${frame.message})`));
+					return;
+				}
+				if (frame?.type === "welcome") {
+					if (typeof frame.conversation !== "string") {
+						finish(new Error("RPC welcome named no conversation"));
+						return;
+					}
+					stdin.write(
+						`${JSON.stringify({ type: "subscribe", subscriptionId, conversation: frame.conversation, after: "snapshot" })}\n`,
+					);
+				} else if (frame?.type === "snapshot" && frame.subscriptionId === subscriptionId) {
+					snapshot = frame;
+				} else if (frame?.type === "live" && frame.subscriptionId === subscriptionId && snapshot) {
+					finish(undefined, { snapshot, live: frame });
 					return;
 				}
 			}
 		};
-		stream.setEncoding("utf8");
-		stream.on("data", onData);
-		running.exit.then((result) => {
-			clearTimeout(timeout);
-			stream.off("data", onData);
-			rejectResponse(new Error(`RPC exited before get_state (code ${result.code})`));
-		}, rejectResponse);
+		stdout.setEncoding("utf8");
+		stdout.on("data", onData);
+		running.exit.then(
+			(result) => finish(new Error(`RPC exited before its snapshot (code ${result.code})`)),
+			(error) => finish(error),
+		);
+		stdin.write(
+			`${JSON.stringify({ type: "hello", protocol: 1, client: { name: "memory-benchmark", version: "1" }, accepts: { hostRequests: [] } })}\n`,
+		);
 	});
 }
 
@@ -1003,14 +1030,10 @@ async function runRpcScenario(options, setActiveCleanup) {
 		context.cleanup.add("terminate RPC benchmark", () => terminateProcessTree(running.child.pid, running.child));
 		const hello = await context.snapshotServer.waitForHello();
 		assert.equal(hello.pid, running.child.pid);
-		const requestId = "memory-benchmark-ready";
-		const responsePromise = waitForRpcResponse(running.child.stdout, requestId, running);
-		running.child.stdin.write(`${JSON.stringify({ id: requestId, type: "get_state" })}\n`);
-		const response = await responsePromise;
-		if (response.success !== true) throw new Error(response.error ?? "RPC get_state failed");
-		assertRpcIdleState(response.data);
+		const { snapshot, live } = await subscribeRpc(running, "memory-benchmark-ready");
+		assertRpcIdleState(snapshot, live);
 		const checkpoint = await captureCheckpoint(context.snapshotServer, "idle", startedAt, options.settleMs);
-		checkpoint.invariants = { getState: "success", messageCount: response.data.messageCount };
+		checkpoint.invariants = { subscribed: "snapshot", ordinal: snapshot.ordinal, entries: snapshot.state.entries.length };
 		await context.snapshotServer.release();
 		running.child.stdin.end();
 		await waitForExit(running);
