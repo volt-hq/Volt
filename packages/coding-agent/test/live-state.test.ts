@@ -463,6 +463,31 @@ describe("form field patterns", () => {
 		}
 	});
 
+	it("refuses patterns whose repeats can trade characters, which backtrack polynomially", () => {
+		for (const pattern of [
+			"\\w+\\.\\w+",
+			"\\d+(?:\\.\\d+)?",
+			"[^@\\s]+@[^@\\s]+\\.\\w{2,}",
+			"[A-Z][a-z]* [A-Z][a-z]*",
+			"(?<user>[a-z]+):(?<id>\\d+)",
+		]) {
+			expect(isSafeFormPattern(pattern), pattern).toBe(true);
+		}
+		for (const pattern of [
+			"a{0,256}a+a{0,256}\\w{2}",
+			"\\w*\\w*\\w*",
+			"a+.a+",
+			"(?:a|ab)*b*",
+			"\\w+\\s?\\w+",
+			".*x.*",
+			"[a-z]+(?:-[a-z]+)?[a-z]*",
+			"(?:\\d+|x)\\d+",
+			"\\u{1F600}+\\uD83D\\uDE00+",
+		]) {
+			expect(isSafeFormPattern(pattern), pattern).toBe(false);
+		}
+	});
+
 	it("tests every pattern it accepts against an adversarial value quickly", () => {
 		const atom = fc.constantFrom("a", "[ab]", "\\w", ".", "(?:a|a)", "(?:a|ab)", "(?:ab)");
 		const quantifier = fc.constantFrom("", "", "?", "*", "+", "{0,256}", "{2}");
