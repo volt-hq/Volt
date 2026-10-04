@@ -387,6 +387,14 @@ export class AgentSessionRuntime {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
 	}
 
+	/**
+	 * Run `operation` against the current session while its conversation stays
+	 * open: disposal, or a move closing it, waits until the operation settles.
+	 */
+	whileOpen<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+		return this.current.whileOpen(operation);
+	}
+
 	/** Publish a canonical conversation reducer event to every attached subscriber. */
 	publishConversationProjectionEvent(event: object): void {
 		this.conversationProjectionFeed.publishExternal(event);

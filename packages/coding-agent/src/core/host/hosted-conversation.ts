@@ -163,6 +163,8 @@ export class HostedConversation {
 	private detachTranscriptCommits: () => void;
 	private _reviewWorkflows?: ReviewWorkflowManager;
 	private recovery?: RecoveredClientInputsTask;
+	/** Operations the conversation stays open for: closing waits for them. */
+	private readonly holds = new Set<Promise<void>>();
 	private closePromise?: Promise<void>;
 
 	constructor(created: HostedConversationSession, options: HostedConversationOptions) {
@@ -259,6 +261,28 @@ export class HostedConversation {
 				entry,
 			} satisfies ConversationTranscriptCommittedEvent);
 		});
+	}
+
+	/**
+	 * Run `operation` against the session while the conversation stays open: a
+	 * close requested meanwhile, such as a lease handoff disposing the runtime,
+	 * starts only once the operation settles. Rejects once the conversation is
+	 * closing. The operation must not wait for this conversation to close.
+	 */
+	whileOpen<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+		if (this.closePromise) return Promise.reject(new Error("The conversation is closed"));
+		const running = (async () => operation(this.session))();
+		const held = running.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.holds.add(held);
+		void held.then(() => this.holds.delete(held));
+		return running;
+	}
+
+	private async waitForHolds(): Promise<void> {
+		while (this.holds.size > 0) await Promise.all([...this.holds]);
 	}
 
 	/** The conversation's summary, read from its open log. */
@@ -358,9 +382,9 @@ export class HostedConversation {
 	}
 
 	/**
-	 * Close the conversation: abort its detached reviews and input recovery,
-	 * emit `session_shutdown`, then dispose its session, which releases the
-	 * log's lock. A conversation its clients moved away from (`reason` other
+	 * Close the conversation: wait for the operations it stays open for, abort
+	 * its detached reviews and input recovery, emit `session_shutdown`, then
+	 * dispose its session, which releases the log's lock. A conversation its clients moved away from (`reason` other
 	 * than quit) does not wait for the session's admitted prompt work, which
 	 * may be the extension command that moved them. Every caller joins one close.
 	 */
@@ -380,6 +404,7 @@ export class HostedConversation {
 		beforeDispose?: () => void;
 	}): Promise<void> {
 		const moved = event.reason !== "quit";
+		await this.waitForHolds();
 		await this._reviewWorkflows?.abortAll().catch(() => undefined);
 		await this.abortRecovery(moved ? "session_replacement" : "disposal");
 		this.detachTranscriptCommits();
@@ -412,6 +437,7 @@ export class HostedConversation {
 	/** Close a conversation no client ever joined: no `session_shutdown`, its session is disposed. */
 	discard(): Promise<void> {
 		this.closePromise ??= (async () => {
+			await this.waitForHolds();
 			this.detachTranscriptCommits();
 			this.detachTranscriptCommits = () => {};
 			const session = this.session;

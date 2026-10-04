@@ -200,6 +200,34 @@ describe("ConversationHost", () => {
 		expect(harness.host.list()).toHaveLength(2);
 	});
 
+	it("closes a conversation only after the operations it stays open for settle", async () => {
+		const harness = await setup();
+		const conversation = await harness.openStartup();
+		const client = harness.client("anchor", { anchor: true });
+		await harness.host.attach(client, conversation);
+		const operationStarted = Promise.withResolvers<void>();
+		const releaseOperation = Promise.withResolvers<void>();
+		const held = conversation.whileOpen(async (session) => {
+			operationStarted.resolve();
+			await releaseOperation.promise;
+			return session.sessionId;
+		});
+		await operationStarted.promise;
+		const disposeSession = vi.spyOn(conversation.session, "dispose");
+
+		const closing = harness.host.detach(client);
+		await expect(conversation.whileOpen(() => "late")).rejects.toThrow("The conversation is closed");
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(disposeSession).not.toHaveBeenCalled();
+		expect(harness.events.map((event) => event.type)).toEqual(["session_start"]);
+
+		releaseOperation.resolve();
+		await expect(held).resolves.toBe(conversation.id);
+		await closing;
+		expect(disposeSession).toHaveBeenCalledOnce();
+		expect(harness.events.map((event) => event.type)).toEqual(["session_start", "session_shutdown"]);
+	});
+
 	it("closes every conversation on dispose", async () => {
 		const harness = await setup();
 		const first = await harness.openStartup();
