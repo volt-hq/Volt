@@ -158,6 +158,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		sessionId,
 		sessionManager: {
 			flush: vi.fn(async () => {}),
+			getOrdinal: vi.fn(() => 0),
 			getBranch: vi.fn((): object[] => []),
 			getClientInput: vi.fn(() => undefined),
 			getBranchWindow: ({
@@ -192,6 +193,8 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		subscribe: vi.fn((_handler: (event: AgentSessionEvent) => void) => () => {}),
 		thinkingLevel: "off" as const,
 		fastModeEnabled: false,
+		scopedModels: [],
+		supportsThinking: () => false,
 		getPlanningState: () => ({ mode: "build" as const, plan: null }),
 		waitForIdle: vi.fn(async () => {}),
 		activeToolExecutions: new Map(),

@@ -5,7 +5,6 @@ import { RPC_COMMAND_SCHEMAS, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protoc
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
-import type { NewSessionIntentOptions } from "../../src/core/host/session-intents.ts";
 import {
 	createIrohRemoteRpcGrant,
 	getIrohRemoteRpcCommandCapabilities,
@@ -40,6 +39,7 @@ function dispatcherContext(client: TestClient, extra: Record<string, unknown> = 
 		host: client.host,
 		client: client.client,
 		options: {},
+		services: {},
 		assertConversationGenerationCurrent: () => {},
 		...extra,
 	} as unknown as RpcCommandDispatcherContext;
@@ -415,13 +415,7 @@ describe("durable review General publication", () => {
 			},
 			options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
 		});
-		const context = () =>
-			dispatcherContext(client, {
-				createHostActionContext: () => ({
-					session: client.session,
-					newSession: (newSessionOptions?: NewSessionIntentOptions) => client.newSession(newSessionOptions),
-				}),
-			});
+		const context = () => dispatcherContext(client);
 		const command = { type: "get_review_general", runId: "run" } as const;
 		const response = await handleRpcCommand(command, context());
 		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_general).Errors(response)).toEqual([]);

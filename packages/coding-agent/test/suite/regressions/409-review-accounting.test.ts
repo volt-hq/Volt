@@ -596,6 +596,8 @@ describe("#409 initial review accounting", () => {
 		const context = {
 			session: h.session,
 			conversation: { reviewWorkflows: new ReviewWorkflowManager() },
+			options: {},
+			services: {},
 		} as unknown as RpcCommandDispatcherContext;
 		const response = await handleRpcCommand({ type: "get_review_result", runId: record.runId }, context);
 		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_result).Errors(response)).toEqual([]);

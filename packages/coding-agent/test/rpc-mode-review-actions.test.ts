@@ -1,3 +1,4 @@
+import type { RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { SessionIntentResult } from "../src/core/extensions/index.ts";
@@ -7,6 +8,7 @@ import type * as SessionIntents from "../src/core/host/session-intents.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
+import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import {
@@ -443,7 +445,7 @@ function makeFakeHost(
 async function startMode(
 	fake: ReturnType<typeof makeFakeHost>,
 	transport: RpcTransport,
-	options: { requireRemoteSafeUiActions?: boolean } = {},
+	options: { remoteGrant?: RemoteGrant } = {},
 ): Promise<{ modePromise: Promise<void> }> {
 	let readyResolve: () => void = () => {};
 	const ready = new Promise<void>((resolve) => {
@@ -506,7 +508,7 @@ describe("RPC durable review actions", () => {
 		const fake = makeFakeHost();
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(fake, collecting.transport, {
-			requireRemoteSafeUiActions: true,
+			remoteGrant: createIrohRemotePresetAccess("coding").rpcGrant,
 		});
 		collecting.getLineHandler()(
 			JSON.stringify({ id: "invoke", type: "invoke_ui_action", action: "review.uncommitted" }),
@@ -675,6 +677,8 @@ describe("RPC durable review actions", () => {
 		line(
 			JSON.stringify({ id: "open", type: "open_review_session", runId: "review:test", findingIds: ["finding-2"] }),
 		);
+		await vi.waitFor(() => expect(response(collecting.writes, "open")).toBeDefined());
+		console.log("DBG", JSON.stringify(response(collecting.writes, "open")));
 		await vi.waitFor(() =>
 			expect(response(collecting.writes, "open")).toMatchObject({ success: true, data: { cancelled: false } }),
 		);

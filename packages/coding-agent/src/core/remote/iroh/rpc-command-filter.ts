@@ -1,4 +1,3 @@
-import { isRemoteSafeBuiltinHostActionId } from "../../host-actions.ts";
 import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../rpc/correlation.ts";
 import { serializeJsonLine } from "../../rpc/jsonl.ts";
 import {
@@ -86,6 +85,30 @@ export const IROH_REMOTE_RPC_PASSTHROUGH_TYPES = new Set([
 ]);
 
 const IROH_REMOTE_UI_ACTION_PREFIXES = ["extension.command.", "prompt.template.", "skill."] as const;
+
+/**
+ * Built-in UI actions whose intents are remote-safe. The allowlist parity
+ * test keeps this equal to the intent registry's remote safety.
+ */
+const REMOTE_SAFE_BUILTIN_UI_ACTION_IDS: ReadonlySet<string> = new Set([
+	"context.auto_compaction",
+	"context.compaction_threshold",
+	"session.new",
+	"run.cancel",
+	"thinking.fast_mode",
+	"agent.mode",
+	"plan.execute",
+	"plan.change",
+	"plan.discard",
+	"review.uncommitted",
+	"review.branch",
+	"review.pr",
+	"review.commit",
+	"review.fix",
+	"review.feedback",
+	"review.rerun",
+	"review.publish",
+]);
 
 export interface IrohRemoteRpcCommand extends Record<string, unknown> {
 	type: string;
@@ -302,7 +325,7 @@ function getIrohRemoteUiActionCommandResult(
 
 function isIrohRemoteUiActionId(action: string): boolean {
 	return (
-		isRemoteSafeBuiltinHostActionId(action) ||
+		REMOTE_SAFE_BUILTIN_UI_ACTION_IDS.has(action) ||
 		IROH_REMOTE_UI_ACTION_PREFIXES.some((prefix) => action.startsWith(prefix))
 	);
 }

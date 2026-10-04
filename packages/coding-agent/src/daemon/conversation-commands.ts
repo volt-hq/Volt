@@ -2,9 +2,21 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES, type RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
+import {
+	type IntentContext,
+	IntentRejectedError,
+	intentRegistry,
+	WorkspaceIntentError,
+} from "../core/protocol/intents/index.ts";
+import { queryRegistry } from "../core/protocol/queries/index.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
-import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
+import {
+	IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
+	type IrohRemoteDeviceLogUploadRpcResponse,
+	parseIrohRemoteDeviceLogUploadCommand,
+	uploadIrohRemoteDeviceLog,
+} from "../core/remote/iroh/device-log-rpc.ts";
 import { sanitizeIrohRemoteOutbound } from "../core/remote/iroh/outbound-filter.ts";
 import {
 	createIrohRemoteRpcErrorResponse,
@@ -56,6 +68,7 @@ import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../core/subagents/tool-names.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
 import type { LeaseState } from "./lease-broker.ts";
+import { intentWorktreeBackend, remoteIntentProfile } from "./remote-host-intents.ts";
 import { getRegisteredWorkingDirectoryForWorktree } from "./worktree-manager.ts";
 
 export const INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES: ReadonlySet<string> = new Set([
@@ -2018,14 +2031,42 @@ export function getIntegratedConversationIdentityError(
 	return undefined;
 }
 
+/** `upload_device_logs` as its intent, with the command's own checks and responses. */
+async function uploadDeviceLogsIntent(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): Promise<IrohRemoteDeviceLogUploadRpcResponse> {
+	const id = getRpcResponseId(command);
+	const options = { workspacePath: authorization.workspace.path };
+	const request = parseIrohRemoteDeviceLogUploadCommand(command, options);
+	if (!request.ok) return createIrohRemoteRpcErrorResponse(id, IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE, request.error);
+	try {
+		const { outcome } = await intentRegistry.invoke(
+			{
+				services: {
+					workspace: {
+						name: authorization.workspace.name,
+						uploadDeviceLogs: (upload) => uploadIrohRemoteDeviceLog(upload, options),
+					},
+				},
+				profile: remoteIntentProfile(authorization),
+			},
+			"upload_device_logs",
+			{ fileName: request.fileName, content: request.content },
+		);
+		return { id, type: "response", command: IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE, success: true, data: outcome };
+	} catch (error) {
+		if (!(error instanceof WorkspaceIntentError) && !(error instanceof IntentRejectedError)) throw error;
+		return createIrohRemoteRpcErrorResponse(id, IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE, error.message);
+	}
+}
+
 async function createRemoteUploadDeviceLogsRpcResponse(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
 ): Promise<object> {
-	const response = await handleIrohRemoteDeviceLogUploadRpcCommand(command, {
-		workspacePath: authorization.workspace.path,
-	});
+	const response = await uploadDeviceLogsIntent(command, authorization);
 	await logAudit(context.auditLogger, {
 		type: "device_log_uploaded",
 		clientNodeId: authorization.client.nodeId,
@@ -2047,6 +2088,46 @@ function updateAuthorizationWorkspaceMetadata(
 	}));
 }
 
+/**
+ * `unregister_workspace` as its intent: the legacy handler, which checks the
+ * command and answers it, is the intent's effect.
+ */
+async function unregisterWorkspaceIntent(
+	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	context: ConversationCommandContext,
+): Promise<Awaited<ReturnType<typeof handleIrohRemoteWorkspaceUnregisterRpcCommand>>> {
+	if (command.type !== IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE) return { handled: false };
+	let result: Awaited<ReturnType<typeof handleIrohRemoteWorkspaceUnregisterRpcCommand>> | undefined;
+	const unregister = async (): Promise<void> => {
+		result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(command, {
+			classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
+			client: authorization.client,
+			stateManager: context.stateManager,
+		});
+		if (result.handled && result.response.success !== true) throw new WorkspaceIntentError(result.response.error);
+	};
+	try {
+		await intentRegistry.invoke(
+			{
+				services: { workspace: { name: authorization.workspace.name, unregister } },
+				profile: remoteIntentProfile(authorization),
+			},
+			"unregister_workspace",
+			{ workspaceName: typeof command.workspaceName === "string" ? command.workspaceName : "" },
+		);
+	} catch (error) {
+		if (error instanceof WorkspaceIntentError && result) return result;
+		if (!(error instanceof IntentRejectedError)) throw error;
+		return {
+			handled: true,
+			response: createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, error.message),
+		};
+	}
+	if (!result) throw new Error("Workspace unregister finished without an answer");
+	return result;
+}
+
 export async function handleRemoteHostRpcCommand(
 	command: RemoteRpcCommand,
 	authorization: IrohRemoteClientAuthorizationSuccess,
@@ -2064,7 +2145,7 @@ export async function handleRemoteHostRpcCommand(
 		}
 		const worktreeResult = await handleIrohRemoteWorktreeRpcCommand(command, {
 			authorizedWorkspaceName: authorization.workspace.name,
-			backend,
+			backend: intentWorktreeBackend(backend, authorization),
 		});
 		if (!worktreeResult.handled) {
 			return undefined;
@@ -2093,11 +2174,7 @@ export async function handleRemoteHostRpcCommand(
 	}
 	let result: Awaited<ReturnType<typeof handleIrohRemoteWorkspaceUnregisterRpcCommand>>;
 	try {
-		result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(command, {
-			classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
-			client: authorization.client,
-			stateManager: context.stateManager,
-		});
+		result = await unregisterWorkspaceIntent(command, authorization, context);
 	} catch (error) {
 		return createIrohRemoteRpcErrorResponse(
 			getRpcResponseId(command),
@@ -2131,24 +2208,41 @@ export async function handleRemoteHostRpcCommand(
  * conversation-level): any paired client with stream access may toggle it. The
  * wire status strips the host-local mechanism name.
  */
-export function createKeepAwakeRpcResponse(
+export async function createKeepAwakeRpcResponse(
 	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
-): Record<string, unknown> | IrohRemoteRpcErrorResponse {
+): Promise<Record<string, unknown> | IrohRemoteRpcErrorResponse> {
 	const id = getRpcResponseId(command);
 	const keepAwake = context.keepAwake;
 	if (!keepAwake) {
 		return createIrohRemoteRpcErrorResponse(id, command.type, "unsupported_remote_command");
 	}
-	if (command.type === "set_keep_awake") {
-		if (typeof command.enabled !== "boolean") {
-			return createIrohRemoteRpcErrorResponse(id, command.type, "set_keep_awake requires a boolean enabled");
+	const ctx: IntentContext = {
+		services: {
+			keepAwake: {
+				status: () => toRpcKeepAwakeStatus(keepAwake.status),
+				setEnabled: (enabled) => {
+					const status = keepAwake.setEnabled(enabled);
+					context.onKeepAwakeSetting?.(enabled);
+					return toRpcKeepAwakeStatus(status);
+				},
+			},
+		},
+		profile: remoteIntentProfile(authorization),
+	};
+	try {
+		if (command.type === "set_keep_awake") {
+			if (typeof command.enabled !== "boolean") {
+				return createIrohRemoteRpcErrorResponse(id, command.type, "set_keep_awake requires a boolean enabled");
+			}
+			const { outcome } = await intentRegistry.invoke(ctx, "set_keep_awake", { enabled: command.enabled });
+			return createRpcSuccessResponse(id, command.type, { keepAwake: outcome });
 		}
-		const status = keepAwake.setEnabled(command.enabled);
-		context.onKeepAwakeSetting?.(command.enabled);
-		return createRpcSuccessResponse(id, command.type, { keepAwake: toRpcKeepAwakeStatus(status) });
+		return createRpcSuccessResponse(id, command.type, await queryRegistry.run(ctx, "host_status", {}));
+	} catch (error) {
+		return createIrohRemoteRpcErrorResponse(id, command.type, error instanceof Error ? error.message : String(error));
 	}
-	return createRpcSuccessResponse(id, command.type, { keepAwake: toRpcKeepAwakeStatus(keepAwake.status) });
 }
 
 /**
@@ -2156,28 +2250,38 @@ export function createKeepAwakeRpcResponse(
  * conversation-level): any paired client with stream access may set it. The
  * wire status never includes the key itself, only whether one is stored.
  */
-export function createWebSearchKeyRpcResponse(
+export async function createWebSearchKeyRpcResponse(
 	command: RemoteRpcCommand,
+	authorization: IrohRemoteClientAuthorizationSuccess,
 	context: ConversationCommandContext,
-): Record<string, unknown> | IrohRemoteRpcErrorResponse {
+): Promise<Record<string, unknown> | IrohRemoteRpcErrorResponse> {
 	const id = getRpcResponseId(command);
 	const webSearchKey = context.webSearchKey;
 	if (!webSearchKey) {
 		return createIrohRemoteRpcErrorResponse(id, command.type, "unsupported_remote_command");
 	}
-	if (command.type === "set_web_search_key") {
-		const apiKey = command.apiKey;
-		if (apiKey !== undefined && apiKey !== null && typeof apiKey !== "string") {
-			return createIrohRemoteRpcErrorResponse(
-				id,
-				command.type,
-				"set_web_search_key requires apiKey to be a string or null",
+	const ctx: IntentContext = { services: { webSearchKey }, profile: remoteIntentProfile(authorization) };
+	try {
+		if (command.type === "set_web_search_key") {
+			const apiKey = command.apiKey;
+			if (apiKey !== undefined && apiKey !== null && typeof apiKey !== "string") {
+				return createIrohRemoteRpcErrorResponse(
+					id,
+					command.type,
+					"set_web_search_key requires apiKey to be a string or null",
+				);
+			}
+			const { outcome } = await intentRegistry.invoke(
+				ctx,
+				"set_web_search_key",
+				apiKey === undefined ? {} : { apiKey },
 			);
+			return createRpcSuccessResponse(id, command.type, { webSearch: outcome });
 		}
-		const normalized = typeof apiKey === "string" ? apiKey.trim() : "";
-		webSearchKey.set(normalized.length > 0 ? normalized : null);
+		return createRpcSuccessResponse(id, command.type, await queryRegistry.run(ctx, "web_search_status", {}));
+	} catch (error) {
+		return createIrohRemoteRpcErrorResponse(id, command.type, error instanceof Error ? error.message : String(error));
 	}
-	return createRpcSuccessResponse(id, command.type, { webSearch: { configured: webSearchKey.configured } });
 }
 
 export function toRpcKeepAwakeStatus(status: KeepAwakeStatus): RpcKeepAwakeStatus {
@@ -2219,10 +2323,10 @@ export async function handleIntegratedConversationRpcCommand(
 		return await createRemoteListSessionsRpcResponse(command, authorization, context, runtime);
 	}
 	if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
-		return createKeepAwakeRpcResponse(command, context);
+		return await createKeepAwakeRpcResponse(command, authorization, context);
 	}
 	if (command.type === "set_web_search_key" || command.type === "get_web_search_status") {
-		return createWebSearchKeyRpcResponse(command, context);
+		return await createWebSearchKeyRpcResponse(command, authorization, context);
 	}
 	if (INTEGRATED_CONVERSATION_UNSUPPORTED_RPC_TYPES.has(command.type)) {
 		return createIrohRemoteRpcErrorResponse(getRpcResponseId(command), command.type, "unsupported_remote_command");

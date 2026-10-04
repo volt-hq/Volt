@@ -1,0 +1,10 @@
+---
+"@hansjm10/volt-coding-agent": minor
+"@hansjm10/volt-protocol": minor
+---
+
+breaking(sdk): `runRpcMode` takes the paired device's grant as `remoteGrant` instead of the `requireRemoteSafeUiActions` flag, and every RPC command, UI action, remote host command, and TUI slash command now runs through one intent and query registry. ([#585](https://github.com/volt-hq/Volt/issues/585))
+
+With a grant, `runRpcMode` serves its client on the remote profile: only remote-safe commands and UI actions, each within the capabilities the grant holds, as the Iroh command filter already enforced. A parity test proves remote access decisions are unchanged. The protocol gains the workspace and push intents and queries (`register_push_target`, `unregister_workspace`, `create_worktree`, `remove_worktree`, `prepare_pr_review`, `worktrees`, `workspace_directories`, `agent_options`, `session_contexts`, `pr_review`), `web_search_status` beside `host_status` (which now carries only `keepAwake`), and `set_default_model`, `set_default_thinking_level`, and the MCP device and browser sign-in split as intents.
+
+Migration: replace `runRpcMode(host, conversation, { requireRemoteSafeUiActions: true, ... })` with `runRpcMode(host, conversation, { remoteGrant, ... })`, where `remoteGrant` is the client's stored grant (for example `createIrohRemotePresetAccess("coding").rpcGrant`). A malformed grant holds no capabilities. `registerPushTarget` now receives the typed `RpcRegisterPushTargetArgs`. RPC clients see these changes: `set_model` and `set_thinking_level` with the default persisted save that default after the conversation's model or thinking level changes and its events are published, not before (the saved values are the same). `open_review_session`, `rerun_review`, and `publish_review` report an unknown run as `Unknown durable review run: <id>`. `start_mcp_server_auth` with `flow: "browser"` and no `redirectUrl` starts the server's configured sign-in instead of failing. Malformed input that the intent schemas now catch, such as a `start_review_discussions` thinking level outside the protocol's set, is rejected with an `Invalid <intent> input: ...` message.

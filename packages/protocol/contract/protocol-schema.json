@@ -235,7 +235,12 @@
 				"mcp.auth_complete",
 				"mcp.auth_poll",
 				"mcp.auth_cancel",
-				"mcp.logout"
+				"mcp.logout",
+				"register_push_target",
+				"unregister_workspace",
+				"create_worktree",
+				"remove_worktree",
+				"prepare_pr_review"
 			]
 		},
 		"CatalogName": {
@@ -3443,6 +3448,21 @@
 					"$ref": "#/$defs/Frame.intent.mcp.logout"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.register_push_target"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.unregister_workspace"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.create_worktree"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.remove_worktree"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.prepare_pr_review"
+				},
+				{
 					"$ref": "#/$defs/Frame.intent.dynamic"
 				}
 			]
@@ -3641,6 +3661,34 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.compact"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.create_worktree": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "create_worktree"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.create_worktree"
 				}
 			},
 			"additionalProperties": false
@@ -4163,6 +4211,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "prepare_pr_review"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.prepare_pr_review"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.prompt": {
 			"type": "object",
 			"required": [
@@ -4188,6 +4265,64 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.prompt"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.register_push_target": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "register_push_target"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/RpcRegisterPushTargetArgs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.remove_worktree": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "remove_worktree"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.remove_worktree"
 				}
 			},
 			"additionalProperties": false
@@ -5115,6 +5250,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.unregister_workspace": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "unregister_workspace"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.unregister_workspace"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.upload_device_logs": {
 			"type": "object",
 			"required": [
@@ -5211,10 +5375,28 @@
 					"$ref": "#/$defs/Frame.query.host_status"
 				},
 				{
+					"$ref": "#/$defs/Frame.query.web_search_status"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.subagent_definitions"
 				},
 				{
 					"$ref": "#/$defs/Frame.query.job_output"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.agent_options"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.session_contexts"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.worktrees"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.workspace_directories"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.pr_review"
 				},
 				{
 					"$ref": "#/$defs/Frame.query.mcp.capabilities"
@@ -5262,6 +5444,36 @@
 					"$ref": "#/$defs/Frame.query.review.workflows"
 				}
 			]
+		},
+		"Frame.query.agent_options": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "agent_options"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
 		},
 		"Frame.query.content": {
 			"type": "object",
@@ -5784,6 +5996,36 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.query.pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "pr_review"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.pr_review"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.query.review.discussion_source": {
 			"type": "object",
 			"required": [
@@ -5937,6 +6179,37 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.query.session_contexts": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "session_contexts"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.session_contexts"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.query.sessions": {
 			"type": "object",
 			"required": [
@@ -6045,6 +6318,96 @@
 				"query": {
 					"type": "string",
 					"const": "subscription_usage"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.web_search_status": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "web_search_status"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.workspace_directories": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "workspace_directories"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.workspace_directories"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.worktrees": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "worktrees"
 				},
 				"conversation": {
 					"type": "string",
@@ -6819,6 +7182,24 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.create_worktree": {
+			"type": "object",
+			"properties": {
+				"worktreeName": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				},
+				"branch": {
+					"type": "string"
+				},
+				"baseRef": {
+					"type": "string"
+				},
+				"workingDirectory": {
+					"$ref": "#/$defs/RemoteHandshake.WorkingDirectory"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.export_html": {
 			"type": "object",
 			"properties": {
@@ -7082,6 +7463,67 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"expectedPullRequest"
+			],
+			"properties": {
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128,
+					"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+				},
+				"expectedPullRequest": {
+					"type": "object",
+					"required": [
+						"url",
+						"headRefOid"
+					],
+					"properties": {
+						"url": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 2048,
+							"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+						},
+						"headRefOid": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
+		},
 		"IntentInput.prompt": {
 			"type": "object",
 			"required": [
@@ -7096,6 +7538,24 @@
 				},
 				"streamingBehavior": {
 					"$ref": "#/$defs/RpcStreamingBehavior"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.register_push_target": {
+			"$ref": "#/$defs/RpcRegisterPushTargetArgs"
+		},
+		"IntentInput.remove_worktree": {
+			"type": "object",
+			"required": [
+				"worktreeId"
+			],
+			"properties": {
+				"worktreeId": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				},
+				"force": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -7694,6 +8154,18 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.unregister_workspace": {
+			"type": "object",
+			"required": [
+				"workspaceName"
+			],
+			"properties": {
+				"workspaceName": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.upload_device_logs": {
 			"type": "object",
 			"required": [
@@ -7739,6 +8211,69 @@
 		},
 		"IntentOutput.compact": {
 			"$ref": "#/$defs/RpcCompactionResult"
+		},
+		"IntentOutput.create_worktree": {
+			"type": "object",
+			"required": [
+				"worktree"
+			],
+			"properties": {
+				"worktree": {
+					"type": "object",
+					"required": [
+						"id",
+						"branch",
+						"createdAt",
+						"sessionIds"
+					],
+					"properties": {
+						"id": {
+							"type": "string"
+						},
+						"branch": {
+							"type": "string"
+						},
+						"baseRef": {
+							"type": "string"
+						},
+						"createdAt": {
+							"type": "number"
+						},
+						"sessionIds": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"available": {
+							"type": "boolean"
+						},
+						"dirty": {
+							"type": "boolean"
+						},
+						"aheadBehind": {
+							"type": "object",
+							"required": [
+								"ahead",
+								"behind"
+							],
+							"properties": {
+								"ahead": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"behind": {
+									"type": "integer",
+									"minimum": 0
+								}
+							},
+							"additionalProperties": false
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentOutput.export_html": {
 			"type": "object",
@@ -7813,6 +8348,127 @@
 			"properties": {
 				"started": {
 					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"sessionId",
+				"worktreeId",
+				"pullRequest",
+				"disposition"
+			],
+			"properties": {
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128,
+					"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+				},
+				"worktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"pullRequest": {
+					"type": "object",
+					"required": [
+						"provider",
+						"url",
+						"number",
+						"title",
+						"repository",
+						"headRefName",
+						"headRefOid"
+					],
+					"properties": {
+						"provider": {
+							"type": "string",
+							"const": "github"
+						},
+						"url": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 2048,
+							"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+						},
+						"number": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 2147483647
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 512
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"headRefName": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"headRefOid": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+						}
+					},
+					"additionalProperties": false
+				},
+				"disposition": {
+					"type": "string",
+					"enum": [
+						"created",
+						"reused"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.register_push_target": {
+			"$ref": "#/$defs/RpcRegisterPushTargetResponse"
+		},
+		"IntentOutput.remove_worktree": {
+			"type": "object",
+			"required": [
+				"worktreeId",
+				"removed",
+				"stoppedRuntimeCount",
+				"closedStreamCount"
+			],
+			"properties": {
+				"worktreeId": {
+					"$ref": "#/$defs/RemoteHandshake.WorktreeId"
+				},
+				"removed": {
+					"type": "boolean",
+					"const": true
+				},
+				"stoppedRuntimeCount": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"closedStreamCount": {
+					"type": "integer",
+					"minimum": 0
 				}
 			},
 			"additionalProperties": false
@@ -7970,6 +8626,23 @@
 		},
 		"IntentOutput.switch_session": {
 			"$ref": "#/$defs/IntentCancelled"
+		},
+		"IntentOutput.unregister_workspace": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"unregistered"
+			],
+			"properties": {
+				"workspaceName": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				},
+				"unregistered": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentOutput.upload_device_logs": {
 			"type": "object",
@@ -11368,8 +12041,14 @@
 				"settings",
 				"subscription_usage",
 				"host_status",
+				"web_search_status",
 				"subagent_definitions",
 				"job_output",
+				"agent_options",
+				"session_contexts",
+				"worktrees",
+				"workspace_directories",
+				"pr_review",
 				"mcp.capabilities",
 				"mcp.servers",
 				"mcp.server",
@@ -11386,6 +12065,9 @@
 				"review.result",
 				"review.workflows"
 			]
+		},
+		"QueryParams.agent_options": {
+			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.content": {
 			"type": "object",
@@ -11602,6 +12284,36 @@
 		"QueryParams.models": {
 			"$ref": "#/$defs/EmptyInput"
 		},
+		"QueryParams.pr_review": {
+			"type": "object",
+			"properties": {
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
+		},
 		"QueryParams.review.discussion_source": {
 			"$ref": "#/$defs/EmptyInput"
 		},
@@ -11665,6 +12377,24 @@
 			},
 			"additionalProperties": false
 		},
+		"QueryParams.session_contexts": {
+			"type": "object",
+			"required": [
+				"sessionIds"
+			],
+			"properties": {
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RemoteHandshake.SessionId"
+					},
+					"minItems": 1,
+					"maxItems": 64,
+					"uniqueItems": true
+				}
+			},
+			"additionalProperties": false
+		},
 		"QueryParams.sessions": {
 			"type": "object",
 			"properties": {
@@ -11687,6 +12417,24 @@
 		},
 		"QueryParams.subscription_usage": {
 			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.web_search_status": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.workspace_directories": {
+			"type": "object",
+			"properties": {
+				"path": {
+					"$ref": "#/$defs/RemoteHandshake.WorkingDirectory"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.worktrees": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryResult.agent_options": {
+			"$ref": "#/$defs/RpcAgentOptions"
 		},
 		"QueryResult.content": {
 			"type": "object",
@@ -11800,15 +12548,11 @@
 		"QueryResult.host_status": {
 			"type": "object",
 			"required": [
-				"keepAwake",
-				"webSearch"
+				"keepAwake"
 			],
 			"properties": {
 				"keepAwake": {
 					"$ref": "#/$defs/RpcKeepAwakeStatus"
-				},
-				"webSearch": {
-					"$ref": "#/$defs/RpcWebSearchStatus"
 				}
 			},
 			"additionalProperties": false
@@ -11895,6 +12639,69 @@
 			},
 			"additionalProperties": false
 		},
+		"QueryResult.pr_review": {
+			"type": "object",
+			"required": [
+				"workspaceName",
+				"pullRequest"
+			],
+			"properties": {
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"pullRequest": {
+					"type": "object",
+					"required": [
+						"provider",
+						"url",
+						"number",
+						"title",
+						"repository",
+						"headRefName",
+						"headRefOid"
+					],
+					"properties": {
+						"provider": {
+							"type": "string",
+							"const": "github"
+						},
+						"url": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 2048,
+							"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+						},
+						"number": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 2147483647
+						},
+						"title": {
+							"type": "string",
+							"maxLength": 512
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"headRefName": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"headRefOid": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"QueryResult.review.discussion_source": {
 			"type": "object",
 			"required": [
@@ -11957,6 +12764,54 @@
 		"QueryResult.review.workflows": {
 			"$ref": "#/$defs/RpcReviewWorkflowListResponse"
 		},
+		"QueryResult.session_contexts": {
+			"type": "object",
+			"required": [
+				"contexts"
+			],
+			"properties": {
+				"contexts": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"sessionId",
+							"startingGitContext",
+							"workContext"
+						],
+						"properties": {
+							"sessionId": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 128
+							},
+							"startingGitContext": {
+								"anyOf": [
+									{
+										"$ref": "#/$defs/RpcGitContext"
+									},
+									{
+										"type": "null"
+									}
+								]
+							},
+							"workContext": {
+								"anyOf": [
+									{
+										"$ref": "#/$defs/RpcSessionWorkContext"
+									},
+									{
+										"type": "null"
+									}
+								]
+							}
+						},
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
+		},
 		"QueryResult.sessions": {
 			"type": "object",
 			"required": [
@@ -12016,6 +12871,115 @@
 		},
 		"QueryResult.subscription_usage": {
 			"$ref": "#/$defs/RpcSubscriptionUsageReport"
+		},
+		"QueryResult.web_search_status": {
+			"type": "object",
+			"required": [
+				"webSearch"
+			],
+			"properties": {
+				"webSearch": {
+					"$ref": "#/$defs/RpcWebSearchStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.workspace_directories": {
+			"type": "object",
+			"required": [
+				"directories"
+			],
+			"properties": {
+				"path": {
+					"type": "string"
+				},
+				"directories": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"name",
+							"path"
+						],
+						"properties": {
+							"name": {
+								"type": "string"
+							},
+							"path": {
+								"type": "string"
+							}
+						},
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.worktrees": {
+			"type": "object",
+			"required": [
+				"worktrees"
+			],
+			"properties": {
+				"worktrees": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"id",
+							"branch",
+							"createdAt",
+							"sessionIds"
+						],
+						"properties": {
+							"id": {
+								"type": "string"
+							},
+							"branch": {
+								"type": "string"
+							},
+							"baseRef": {
+								"type": "string"
+							},
+							"createdAt": {
+								"type": "number"
+							},
+							"sessionIds": {
+								"type": "array",
+								"items": {
+									"type": "string"
+								}
+							},
+							"available": {
+								"type": "boolean"
+							},
+							"dirty": {
+								"type": "boolean"
+							},
+							"aheadBehind": {
+								"type": "object",
+								"required": [
+									"ahead",
+									"behind"
+								],
+								"properties": {
+									"ahead": {
+										"type": "integer",
+										"minimum": 0
+									},
+									"behind": {
+										"type": "integer",
+										"minimum": 0
+									}
+								},
+								"additionalProperties": false
+							}
+						},
+						"additionalProperties": false
+					}
+				}
+			},
+			"additionalProperties": false
 		},
 		"RejectionCode": {
 			"type": "string",
@@ -21344,16 +22308,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"keepAwake"
-					],
-					"properties": {
-						"keepAwake": {
-							"$ref": "#/$defs/RpcKeepAwakeStatus"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/QueryResult.host_status"
 				}
 			},
 			"additionalProperties": false
@@ -22124,16 +23079,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"webSearch"
-					],
-					"properties": {
-						"webSearch": {
-							"$ref": "#/$defs/RpcWebSearchStatus"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/QueryResult.web_search_status"
 				}
 			},
 			"additionalProperties": false
@@ -22716,95 +23662,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"workspaceName",
-						"sessionId",
-						"worktreeId",
-						"pullRequest",
-						"disposition"
-					],
-					"properties": {
-						"workspaceName": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 255,
-							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
-						},
-						"sessionId": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 128,
-							"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
-						},
-						"worktreeId": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 64,
-							"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
-						},
-						"workingDirectory": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 4096,
-							"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
-						},
-						"pullRequest": {
-							"type": "object",
-							"required": [
-								"provider",
-								"url",
-								"number",
-								"title",
-								"repository",
-								"headRefName",
-								"headRefOid"
-							],
-							"properties": {
-								"provider": {
-									"type": "string",
-									"const": "github"
-								},
-								"url": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 2048,
-									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
-								},
-								"number": {
-									"type": "integer",
-									"minimum": 1,
-									"maximum": 2147483647
-								},
-								"title": {
-									"type": "string",
-									"maxLength": 512
-								},
-								"repository": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 256
-								},
-								"headRefName": {
-									"$ref": "#/$defs/RpcGitRef"
-								},
-								"headRefOid": {
-									"type": "string",
-									"maxLength": 64,
-									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
-								}
-							},
-							"additionalProperties": false
-						},
-						"disposition": {
-							"type": "string",
-							"enum": [
-								"created",
-								"reused"
-							]
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/IntentOutput.prepare_pr_review"
 				}
 			},
 			"additionalProperties": false
@@ -23218,67 +24076,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"workspaceName",
-						"pullRequest"
-					],
-					"properties": {
-						"workspaceName": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 255,
-							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
-						},
-						"pullRequest": {
-							"type": "object",
-							"required": [
-								"provider",
-								"url",
-								"number",
-								"title",
-								"repository",
-								"headRefName",
-								"headRefOid"
-							],
-							"properties": {
-								"provider": {
-									"type": "string",
-									"const": "github"
-								},
-								"url": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 2048,
-									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
-								},
-								"number": {
-									"type": "integer",
-									"minimum": 1,
-									"maximum": 2147483647
-								},
-								"title": {
-									"type": "string",
-									"maxLength": 512
-								},
-								"repository": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 256
-								},
-								"headRefName": {
-									"$ref": "#/$defs/RpcGitRef"
-								},
-								"headRefOid": {
-									"type": "string",
-									"maxLength": 64,
-									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
-								}
-							},
-							"additionalProperties": false
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/QueryResult.pr_review"
 				}
 			},
 			"additionalProperties": false
@@ -23442,16 +24240,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"keepAwake"
-					],
-					"properties": {
-						"keepAwake": {
-							"$ref": "#/$defs/RpcKeepAwakeStatus"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/QueryResult.host_status"
 				}
 			},
 			"additionalProperties": false
@@ -23632,16 +24421,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"webSearch"
-					],
-					"properties": {
-						"webSearch": {
-							"$ref": "#/$defs/RpcWebSearchStatus"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/QueryResult.web_search_status"
 				}
 			},
 			"additionalProperties": false

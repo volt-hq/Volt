@@ -716,7 +716,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 			expect.arrayContaining(["mcp", "mcp__trusted__write_note", "write"]),
 		);
 		expect(connect.mock.calls.map(([server]) => server.id).sort()).toEqual(["ordinary", "trusted"]);
-		const context = { session } as RpcCommandDispatcherContext;
+		const context = { session, options: {}, services: {} } as unknown as RpcCommandDispatcherContext;
 		for (const command of [
 			{ type: "connect_mcp_server", server: "ordinary" },
 			{ type: "list_mcp_tools", server: "ordinary" },

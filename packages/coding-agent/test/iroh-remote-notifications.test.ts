@@ -1,3 +1,4 @@
+// biome-ignore-all assist/source/organizeImports: the RPC mode loads before the daemon commands, so its review module is the mock below.
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { PromptPreflightResult } from "../src/core/agent-session.ts";
@@ -5,7 +6,6 @@ import {
 	type HostedConversation,
 	isConversationTranscriptCommittedEvent,
 } from "../src/core/host/hosted-conversation.ts";
-import { REVIEW_UNCOMMITTED_ACTION_ID } from "../src/core/host-actions.ts";
 import type { PlanningState } from "../src/core/planning.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import {
@@ -23,7 +23,6 @@ import {
 import type { ExecuteReviewWorkflowResult } from "../src/core/review.ts";
 import type { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
-import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
 import {
 	createTestConversation,
 	createTestIrohConversationOptions,
@@ -34,6 +33,8 @@ import {
 	parseWrittenObjects,
 	startIrohRpcMode,
 } from "./iroh-stream-doubles.ts";
+
+const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
 
 const reviewMocks = vi.hoisted(() => ({
 	prepareReviewWorkflow: vi.fn(async (options: { target: unknown }) => ({
@@ -84,6 +85,7 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 });
 
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
 
 const TEST_HOST_NODE_ID = "a".repeat(64);
 

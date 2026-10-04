@@ -70,6 +70,8 @@ function getSuccessfulImages(response: object): RpcMessageImagesResponse {
 async function dispatchLocalRpcCommand(command: RpcCommand, harness: Harness): Promise<RpcResponse> {
 	const response = await handleRpcCommand(command, {
 		session: harness.session,
+		options: {},
+		services: {},
 	} as unknown as RpcCommandDispatcherContext);
 	if (response === undefined) {
 		throw new Error(`Expected immediate local RPC response for ${command.type}`);

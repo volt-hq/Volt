@@ -1,12 +1,23 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
-import type { HostActionInvocationContext, HostActionSessionState } from "../src/core/host-actions.ts";
+import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
+interface FastSession {
+	isBusy: boolean;
+	isStreaming: boolean;
+	isCompacting: boolean;
+	model: Model<Api>;
+	thinkingLevel: "high";
+	readonly fastModeEnabled: boolean;
+	setFastModeEnabled(enabled: boolean): Promise<void>;
+	sessionManager: { getOrdinal(): number };
+}
+
 type FastCommandHarness = {
-	session: HostActionSessionState;
-	createHostActionContext(): HostActionInvocationContext;
+	session: FastSession;
+	intentContext(): IntentContext;
 	showStatus(message: string): void;
 	showWarning(message: string): void;
 };
@@ -45,7 +56,7 @@ function createHarness(options: { busy?: boolean; fastModeEnabled?: boolean; mod
 	const setFastModeEnabled = vi.fn(async (enabled: boolean) => {
 		fastModeEnabled = enabled;
 	});
-	const session: HostActionSessionState = {
+	const session: FastSession = {
 		isBusy: options.busy ?? false,
 		isStreaming: false,
 		isCompacting: false,
@@ -54,20 +65,19 @@ function createHarness(options: { busy?: boolean; fastModeEnabled?: boolean; mod
 		get fastModeEnabled() {
 			return fastModeEnabled;
 		},
+		setFastModeEnabled,
+		sessionManager: { getOrdinal: () => 0 },
 	};
 	const showStatus = vi.fn<(message: string) => void>();
 	const showWarning = vi.fn<(message: string) => void>();
-	const context = {
-		session,
-		abortRun: vi.fn(async () => {}),
-		compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
-		newSession: vi.fn(async () => ({ cancelled: true as const })),
-		renameSession: vi.fn(async () => {}),
-		setFastModeEnabled,
-	} as HostActionInvocationContext;
+	const context: IntentContext = {
+		target: { session, conversation: {}, host: {}, client: {} } as unknown as IntentContext["target"],
+		services: {},
+		profile: LOCAL_INTENT_PROFILE,
+	};
 	const harness: FastCommandHarness = {
 		session,
-		createHostActionContext: () => context,
+		intentContext: () => context,
 		showStatus,
 		showWarning,
 	};

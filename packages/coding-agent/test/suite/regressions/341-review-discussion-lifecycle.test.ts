@@ -6,9 +6,10 @@ import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@h
 import { RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import { BUILTIN_HOST_ACTION_REGISTRY, type HostActionInvocationContext } from "../../../src/core/host-actions.ts";
+import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../../src/core/protocol/intents/index.ts";
 import { getStaticIrohRemoteRpcFilterResult } from "../../../src/core/remote/iroh/rpc-command-filter.ts";
 import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
 import { assertReviewDiscussionRpcAllowed } from "../../../src/core/review-discussion-policy.ts";
@@ -20,10 +21,15 @@ import {
 	type ReviewRunRecord,
 } from "../../../src/core/review-state.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
+import { prepareUiActionInvocation } from "../../../src/core/rpc/ui-actions.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../../../src/core/session-store/client.ts";
-import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
+import {
+	createRpcIntentContext,
+	handleRpcCommand,
+	type RpcCommandDispatcherContext,
+} from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../../src/modes/rpc/rpc-command-validation.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
@@ -39,7 +45,10 @@ function rpcContext(owned: Owned, extra: Record<string, unknown> = {}): RpcComma
 		conversation: owned.conversation,
 		host: owned.host,
 		client: owned.client,
-		...(owned.reviewDiscussions === undefined ? {} : { reviewDiscussions: owned.reviewDiscussions }),
+		services: {
+			abortRun: (session: AgentSession) => session.abort(),
+			...(owned.reviewDiscussions === undefined ? {} : { reviewDiscussions: owned.reviewDiscussions }),
+		},
 		options: {},
 		assertConversationGenerationCurrent: () => {},
 		...extra,
@@ -298,7 +307,11 @@ describe("Regression #341 host sibling lifecycle", () => {
 				},
 				rpcContext(source),
 			);
-			expect(response).toMatchObject({ success: false, error: expect.stringMatching(/unavailable|Unsupported/) });
+			// A thinking level outside the protocol's set fails the intent's input schema.
+			expect(response).toMatchObject({
+				success: false,
+				error: expect.stringMatching(/unavailable|Unsupported|Invalid/),
+			});
 			expect((await api.list("review-341")).discussions).toEqual([]);
 			expect(runtimes).toHaveLength(1);
 		}
@@ -340,20 +353,8 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const link = buildRpcSessionState(child.session).reviewDiscussion!;
 		expect(Compile(RpcReviewDiscussionLinkSchema).Errors(link)).toEqual([]);
 		expect(link).not.toHaveProperty("readOnly");
-		const hostContext: HostActionInvocationContext = {
-			session: child.session,
-			abortRun: () => child.session.abort(),
-			compactContext: (instructions) => child.session.compact(instructions),
-			newSession: (options) => child.newSession(options),
-			renameSession: (name) => child.session.setSessionName(name),
-			executePlan: (id, revision, strategy) => child.executePlan(id, revision, strategy),
-			changePlan: (id, revision) => child.session.changePlan(id, revision),
-			discardPlan: (id, revision) => child.session.discardPlan(id, revision),
-		};
-		const context = rpcContext(child, {
-			options: { allowUiActionInvocation: true },
-			createHostActionContext: () => hostContext,
-		});
+		const context = rpcContext(child, { options: { allowUiActionInvocation: true } });
+		const intentContext = createRpcIntentContext(context);
 		expect(await handleRpcCommand({ type: "bash", command: "printf rpc-fixed > rpc.txt" }, context)).toMatchObject({
 			success: true,
 			data: { exitCode: 0 },
@@ -367,14 +368,19 @@ describe("Regression #341 host sibling lifecycle", () => {
 			title: "Fix",
 			summary: "Fix the selected finding",
 		});
-		expect(BUILTIN_HOST_ACTION_REGISTRY.getDescriptor("plan.execute", hostContext)?.enabled).toBe(true);
-		await expect(
-			BUILTIN_HOST_ACTION_REGISTRY.invoke("plan.execute", hostContext, {
-				planId: plan.id,
-				expectedRevision: plan.revision,
-				strategy: "new_session",
+		expect(
+			intentRegistry.availability(intentRegistry.get("plan_execute"), {
+				state: intentStateOf(child.session),
+				services: {},
+				profile: LOCAL_INTENT_PROFILE,
+			}).enabled,
+		).toBe(true);
+		expect(() =>
+			prepareUiActionInvocation(intentContext, {
+				action: "plan.execute",
+				args: { planId: plan.id, expectedRevision: plan.revision, strategy: "new_session" },
 			}),
-		).rejects.toThrow("source review");
+		).toThrow("source review");
 		expect(
 			await handleRpcCommand({ type: "plan_change", planId: plan.id, expectedRevision: plan.revision }, context),
 		).toMatchObject({ success: true, data: { plan: { phase: "draft" } } });

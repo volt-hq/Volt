@@ -6,7 +6,6 @@ import { createFauxProvider, type FauxProvider, type Model } from "@hansjm10/vol
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { THINKING_FAST_MODE_ACTION_ID } from "../../../src/core/host-actions.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
 import { getUiActionDescriptors } from "../../../src/core/rpc/ui-actions.ts";
@@ -15,6 +14,8 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { appendsEntryType, injectFaultyLog } from "../../utilities/faulty-log.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
+
+const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 
 interface TestRuntime {
 	session: AgentSession;

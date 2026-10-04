@@ -1,11 +1,4 @@
 import { APP_NAME } from "../config.ts";
-import {
-	CONTEXT_COMPACT_SLASH_ALIAS,
-	getBuiltinHostActionSlashCommand,
-	SESSION_NEW_SLASH_ALIAS,
-	SESSION_RENAME_SLASH_ALIAS,
-	THINKING_FAST_MODE_SLASH_ALIAS,
-} from "./host-actions.ts";
 import type { SourceInfo } from "./source-info.ts";
 
 export type SlashCommandSource = "extension" | "prompt" | "skill";
@@ -22,22 +15,22 @@ export interface BuiltinSlashCommand {
 	description: string;
 }
 
-const SESSION_NEW_SLASH_COMMAND = getBuiltinHostActionSlashCommand(SESSION_NEW_SLASH_ALIAS) ?? {
-	name: SESSION_NEW_SLASH_ALIAS,
-	description: "Start a new session",
-};
-const SESSION_RENAME_SLASH_COMMAND = getBuiltinHostActionSlashCommand(SESSION_RENAME_SLASH_ALIAS) ?? {
-	name: SESSION_RENAME_SLASH_ALIAS,
-	description: "Set session display name",
-};
-const CONTEXT_COMPACT_SLASH_COMMAND = getBuiltinHostActionSlashCommand(CONTEXT_COMPACT_SLASH_ALIAS) ?? {
-	name: CONTEXT_COMPACT_SLASH_ALIAS,
-	description: "Manually compact the session context",
-};
-const THINKING_FAST_MODE_SLASH_COMMAND = getBuiltinHostActionSlashCommand(THINKING_FAST_MODE_SLASH_ALIAS) ?? {
-	name: THINKING_FAST_MODE_SLASH_ALIAS,
-	description: "Toggle premium low-latency inference for the current session",
-};
+/**
+ * Slash aliases that invoke one intent, described as their intents are
+ * (`intentRegistry.slashCommands()`; a test keeps the two equal).
+ */
+export const INTENT_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+	{ name: "fast", description: "Request premium low-latency inference capacity for the current session." },
+	{ name: "name", description: "Set the current session display name" },
+	{ name: "clear", description: "Start a new session" },
+	{ name: "compact", description: "Summarize the current session context" },
+];
+
+function intentSlashCommand(name: string): BuiltinSlashCommand {
+	const command = INTENT_SLASH_COMMANDS.find((candidate) => candidate.name === name);
+	if (!command) throw new Error(`No intent has the slash alias /${name}`);
+	return command;
+}
 
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
@@ -47,13 +40,13 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "plan-close", description: "Close a completed or handed-off plan" },
 	{ name: "profile", description: "Show, switch, or create the active settings profile" },
 	{ name: "model", description: "Select model (opens selector UI)" },
-	THINKING_FAST_MODE_SLASH_COMMAND,
+	intentSlashCommand("fast"),
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import a JSONL snapshot as a new session" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
-	SESSION_RENAME_SLASH_COMMAND,
+	intentSlashCommand("name"),
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "usage", description: "Show remaining subscription quota and reset times" },
 	{ name: "lsp", description: "Show LSP server status (/lsp restart, /lsp trace [path|off])" },
@@ -73,8 +66,8 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "extensions", description: "Manage installed extension packages" },
 	{ name: "login", description: "Configure provider authentication" },
 	{ name: "logout", description: "Remove provider authentication" },
-	SESSION_NEW_SLASH_COMMAND,
-	CONTEXT_COMPACT_SLASH_COMMAND,
+	intentSlashCommand("clear"),
+	intentSlashCommand("compact"),
 	{
 		name: "review",
 		description: "Review code (tools, uncommitted, branch, PR, commit); findings start a fresh session",

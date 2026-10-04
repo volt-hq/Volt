@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import { IntentRejectedError, intentRegistry, WorkspaceIntentError } from "../core/protocol/intents/index.ts";
+import { QueryRejectedError, queryRegistry } from "../core/protocol/queries/index.ts";
 import {
 	getIrohRemoteRpcCommandCapabilities,
 	getMissingIrohRemoteRpcCapability,
@@ -44,6 +46,13 @@ import {
 	getRpcResponseId,
 	type RemoteRpcCommand,
 } from "./conversation-commands.ts";
+import {
+	intentAgentOptionsBackend,
+	intentPrReviewBackend,
+	intentSessionContextsBackend,
+	intentWorktreeBackend,
+	remoteIntentProfile,
+} from "./remote-host-intents.ts";
 import { listWorkspaceDirectories } from "./workspace-directory.ts";
 
 const DEFAULT_READ_LIMIT = 64 * 1024;
@@ -234,7 +243,7 @@ export async function runWorkspaceDiscoveryStream(
 		if (hooks.purpose === "review") {
 			const result = await handleIrohRemotePrReviewRpcCommand(parsed.command, {
 				authorizedWorkspaceName: authorization.workspace.name,
-				backend: hooks.prReviews,
+				backend: intentPrReviewBackend(hooks.prReviews, authorization),
 			});
 			if (!(await context.isRpcGrantCurrent())) {
 				context.closeStream("access_updated");
@@ -248,7 +257,7 @@ export async function runWorkspaceDiscoveryStream(
 		if (hooks.purpose === "agent_options") {
 			const result = await handleIrohRemoteAgentOptionsRpcCommand(parsed.command, {
 				authorizedWorkspaceName: authorization.workspace.name,
-				backend: hooks.agentOptions,
+				backend: intentAgentOptionsBackend(hooks.agentOptions, authorization),
 			});
 			if (result.handled) {
 				await writeIrohRemoteJsonLine(stream.send, result.response, authorization);
@@ -258,7 +267,7 @@ export async function runWorkspaceDiscoveryStream(
 		if (hooks.purpose === "session_contexts") {
 			const result = await handleIrohRemoteSessionContextsRpcCommand(parsed.command, {
 				authorizedWorkspaceName: authorization.workspace.name,
-				backend: hooks.sessionContexts,
+				backend: intentSessionContextsBackend(hooks.sessionContexts, authorization),
 			});
 			if (result.handled) {
 				await writeIrohRemoteJsonLine(stream.send, result.response, authorization);
@@ -363,11 +372,37 @@ export async function runWorkspaceManagementStream(
 				);
 				return false;
 			}
-			const listed = await listWorkspaceDirectories(authorization.workspace.path, path);
-			if (!listed.ok) {
+			let listed: { path?: string; directories: { name: string; path: string }[] };
+			try {
+				listed = await queryRegistry.run(
+					{
+						services: {
+							workspace: {
+								name: authorization.workspace.name,
+								listDirectories: async (directoryPath) => {
+									const result = await listWorkspaceDirectories(authorization.workspace.path, directoryPath);
+									if (!result.ok) throw new WorkspaceIntentError(result.error);
+									return {
+										...(result.currentPath === undefined ? {} : { path: result.currentPath }),
+										directories: result.directories,
+									};
+								},
+							},
+						},
+						profile: remoteIntentProfile(authorization),
+					},
+					"workspace_directories",
+					path === undefined ? {} : { path },
+				);
+			} catch (error) {
+				if (!(error instanceof WorkspaceIntentError) && !(error instanceof QueryRejectedError)) throw error;
 				await writeIrohRemoteJsonLine(
 					stream.send,
-					createIrohRemoteRpcErrorResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, listed.error),
+					createIrohRemoteRpcErrorResponse(
+						id,
+						LIST_WORKSPACE_DIRECTORIES_RPC_TYPE,
+						error instanceof WorkspaceIntentError ? error.error : "invalid_working_directory",
+					),
 					authorization,
 				);
 				return false;
@@ -376,8 +411,7 @@ export async function runWorkspaceManagementStream(
 				stream.send,
 				createRpcSuccessResponse(id, LIST_WORKSPACE_DIRECTORIES_RPC_TYPE, {
 					workspaceName: request.workspaceName,
-					...(listed.currentPath === undefined ? {} : { path: listed.currentPath }),
-					directories: listed.directories,
+					...listed,
 				}),
 				authorization,
 			);
@@ -398,27 +432,48 @@ export async function runWorkspaceManagementStream(
 		}
 
 		let excludedClosed = false;
-		const result = await hooks.unregisterWorkspace(request.workspaceName, () => {
-			excludedClosed = true;
-		});
-		if (!result.ok) {
+		let result: { closedStreamCount: number; stoppedRuntimeCount: number } | undefined;
+		try {
+			await intentRegistry.invoke(
+				{
+					services: {
+						workspace: {
+							name: authorization.workspace.name,
+							unregister: async () => {
+								const unregistered = await hooks.unregisterWorkspace(request.workspaceName, () => {
+									excludedClosed = true;
+								});
+								if (!unregistered.ok) throw new WorkspaceIntentError(unregistered.error, unregistered.details);
+								result = unregistered;
+							},
+						},
+					},
+					profile: remoteIntentProfile(authorization),
+				},
+				"unregister_workspace",
+				{ workspaceName: request.workspaceName },
+			);
+		} catch (error) {
+			if (!(error instanceof WorkspaceIntentError) && !(error instanceof IntentRejectedError)) throw error;
+			const failure = error instanceof WorkspaceIntentError ? error : new WorkspaceIntentError(error.message);
 			await hooks.auditLogger
 				.log({
 					type: "workspace_unregistered",
 					clientNodeId: authorization.client.nodeId,
 					workspace: request.workspaceName,
 					success: false,
-					error: result.error,
-					details: { source: "remote_workspace_management_stream", ...(result.details ?? {}) },
+					error: failure.error,
+					details: { source: "remote_workspace_management_stream", ...(failure.details ?? {}) },
 				})
 				.catch(() => {});
 			await writeIrohRemoteJsonLine(
 				stream.send,
-				createIrohRemoteRpcErrorResponse(id, "unregister_workspace", result.error),
+				createIrohRemoteRpcErrorResponse(id, "unregister_workspace", failure.error),
 				authorization,
 			);
 			return false;
 		}
+		if (!result) throw new Error("Workspace unregister finished without a result");
 		await hooks.auditLogger
 			.log({
 				type: "workspace_unregistered",
@@ -497,7 +552,7 @@ export async function runWorktreeManagementStream(
 		if (parsed.command.type === "prepare_pr_review" && hooks.prReviews !== undefined) {
 			const result = await handleIrohRemotePrReviewRpcCommand(parsed.command, {
 				authorizedWorkspaceName: authorization.workspace.name,
-				backend: hooks.prReviews,
+				backend: intentPrReviewBackend(hooks.prReviews, authorization),
 			});
 			if (!(await context.isRpcGrantCurrent())) {
 				context.closeStream("access_updated");
@@ -510,7 +565,7 @@ export async function runWorktreeManagementStream(
 		}
 		const result = await handleIrohRemoteWorktreeRpcCommand(parsed.command, {
 			authorizedWorkspaceName: authorization.workspace.name,
-			backend: hooks.worktrees,
+			backend: intentWorktreeBackend(hooks.worktrees, authorization),
 		});
 		if (!result.handled) {
 			return false;

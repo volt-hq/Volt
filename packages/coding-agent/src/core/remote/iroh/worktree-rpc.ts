@@ -1,3 +1,4 @@
+import type { IrohRemoteWorktreeSummary as ProtocolIrohRemoteWorktreeSummary } from "@hansjm10/volt-protocol";
 import { isIrohRemoteWorkingDirectory, isIrohRemoteWorktreeId } from "./protocol.ts";
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
 
@@ -15,18 +16,7 @@ export const IROH_REMOTE_WORKTREE_RPC_TYPES: ReadonlySet<string> = new Set([
  * Wire shape for a worktree on the iroh remote protocol. NOTE: no filesystem
  * paths ever cross the wire; checkout paths stay host-local.
  */
-export interface IrohRemoteWorktreeSummary {
-	id: string;
-	branch: string;
-	baseRef?: string;
-	createdAt: number;
-	sessionIds: string[];
-	available?: boolean;
-	/** Uncommitted work in the checkout (`git status --porcelain` non-empty). */
-	dirty?: boolean;
-	/** Branch commits vs the base ref (merge-back guidance, design §5.3). */
-	aheadBehind?: { ahead: number; behind: number };
-}
+export type IrohRemoteWorktreeSummary = ProtocolIrohRemoteWorktreeSummary;
 
 /** Host-side backend the RPC helpers delegate to (the daemon's WorktreeManager). */
 export interface IrohRemoteWorktreeRpcBackend {

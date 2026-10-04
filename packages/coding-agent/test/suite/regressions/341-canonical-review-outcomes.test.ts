@@ -213,7 +213,7 @@ async function fixture() {
 				session: runtime.session,
 				conversation: runtime.conversation,
 				host: runtime.host,
-				...(runtime.reviewDiscussions === undefined ? {} : { reviewDiscussions: runtime.reviewDiscussions }),
+				services: runtime.reviewDiscussions === undefined ? {} : { reviewDiscussions: runtime.reviewDiscussions },
 				options: {},
 				assertConversationGenerationCurrent: () => {},
 			} as unknown as RpcCommandDispatcherContext);
