@@ -1036,6 +1036,16 @@ export class AgentSession {
 		return this._modelRegistry;
 	}
 
+	/**
+	 * Suspend admission of new work (turns, bash runs, background jobs, session
+	 * mutations) until the returned release runs. A prompt still preparing its
+	 * turn is refused; work already running continues.
+	 */
+	suspendAdmission(): () => void {
+		this._assertActive();
+		return this._admissionGate.suspend();
+	}
+
 	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
 		this._assertActive();
 		this._tools.setHostInteraction(hostInteraction);
@@ -2031,6 +2041,15 @@ export class AgentSession {
 			void this._trackAdmittedAncillaryWork(attachment.ready);
 			return attachment;
 		});
+	}
+
+	/**
+	 * Detach every client from the session's extensions: UI, errors, and
+	 * session actions stop reaching them. Clients that moved to another
+	 * conversation leave this one before its `session_shutdown`.
+	 */
+	detachExtensionClients(): void {
+		this._extensions.releaseClients();
 	}
 
 	reload(): Promise<void> {

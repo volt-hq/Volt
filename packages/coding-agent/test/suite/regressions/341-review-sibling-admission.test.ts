@@ -478,6 +478,14 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		);
 		const resetting = f.source.reviewDiscussions!.reset(first.discussionId, first.sessionId, "reset");
 		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
+		const oldChild = f.registry.findOwner("ws", first.sessionId)!;
+		const disposeRequested = Promise.withResolvers<void>();
+		const disposeOldChild = oldChild.runtime.dispose.bind(oldChild.runtime);
+		vi.spyOn(oldChild.runtime, "dispose").mockImplementation(() => {
+			disposeRequested.resolve();
+			return disposeOldChild();
+		});
+		const closeOldSession = vi.spyOn(oldChild.runtime.session, "dispose");
 		let acquired = false;
 		const acquiring = f.broker
 			.acquireForTui({ connectionId: "tui-old", workspaceName: "ws", sessionId: first.sessionId })
@@ -485,7 +493,10 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 				acquired = true;
 				return result;
 			});
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		// The handoff has reached the old child's disposal; the held reset keeps the child open.
+		await disposeRequested.promise;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(closeOldSession).not.toHaveBeenCalled();
 		expect(acquired).toBe(false);
 		release();
 		const reset = await resetting;

@@ -12,17 +12,6 @@ import {
 	withCurrentConversationAuthority,
 } from "./iroh-stream-doubles.ts";
 
-function createStableSessionRunner<TSession>(getSession: () => TSession) {
-	return {
-		async runWithStableSession<TResult>(
-			operation: (session: TSession) => Promise<TResult> | TResult,
-		): Promise<TResult> {
-			const session = getSession();
-			return operation(session);
-		},
-	};
-}
-
 describe("Iroh remote model RPC", () => {
 	test("starts recovered dispatch only after extension session_start and resource discovery binding", async () => {
 		const bindingOrder: string[] = [];
@@ -42,7 +31,6 @@ describe("Iroh remote model RPC", () => {
 			})),
 		};
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
@@ -99,7 +87,6 @@ describe("Iroh remote model RPC", () => {
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 		};
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
@@ -313,7 +300,6 @@ describe("Iroh remote model RPC", () => {
 			modelRegistry,
 		};
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),

@@ -1945,6 +1945,7 @@ export class InteractiveMode {
 						this.loadingAnimation = undefined;
 					}
 					this.statusContainer.clear();
+					const source = this.session;
 					try {
 						const result = await this.runtimeHost.newSession(options);
 						if (!result.cancelled) {
@@ -1953,10 +1954,12 @@ export class InteractiveMode {
 						}
 						return result;
 					} catch (error: unknown) {
-						return this.handleFatalRuntimeError("Failed to create session", error);
+						await this.reportSessionChangeFailure("Failed to create session", error, source);
+						return { cancelled: true, seeded: false };
 					}
 				},
 				fork: async (entryId, options) => {
+					const source = this.session;
 					try {
 						const result = await this.runtimeHost.fork(entryId, options);
 						if (!result.cancelled) {
@@ -1966,7 +1969,8 @@ export class InteractiveMode {
 						}
 						return { cancelled: result.cancelled, seeded: result.seeded };
 					} catch (error: unknown) {
-						return this.handleFatalRuntimeError("Failed to fork session", error);
+						await this.reportSessionChangeFailure("Failed to fork session", error, source);
+						return { cancelled: true, seeded: false };
 					}
 				},
 				navigateTree: async (targetId, options) => {
@@ -2412,6 +2416,16 @@ export class InteractiveMode {
 			await this.daemonAttach.release(previous).catch(() => {});
 		}
 		await this.acquireCurrentSessionLease();
+	}
+
+	/**
+	 * Report a session change that failed. When the new session failed to
+	 * open, the runtime is still on `source` and the TUI keeps running; a
+	 * failure after the move committed ended the runtime, and the TUI exits.
+	 */
+	private async reportSessionChangeFailure(prefix: string, error: unknown, source: AgentSession): Promise<void> {
+		if (this.session !== source) await this.handleFatalRuntimeError(prefix, error);
+		this.showError(`${prefix}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	private async handleFatalRuntimeError(
@@ -7496,6 +7510,7 @@ export class InteractiveMode {
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
 				async (entryId) => {
+					const source = this.session;
 					try {
 						const result = await this.runtimeHost.fork(entryId);
 						if (result.cancelled) {
@@ -7510,7 +7525,7 @@ export class InteractiveMode {
 						this.showStatus("Forked to new session");
 					} catch (error: unknown) {
 						done();
-						this.showError(error instanceof Error ? error.message : String(error));
+						await this.reportSessionChangeFailure("Failed to fork session", error, source);
 					}
 				},
 				() => {
@@ -7530,6 +7545,7 @@ export class InteractiveMode {
 			return;
 		}
 
+		const source = this.session;
 		try {
 			const result = await this.runtimeHost.fork(leafId, { position: "at" });
 			if (result.cancelled) {
@@ -7541,7 +7557,7 @@ export class InteractiveMode {
 			this.editor.setText("");
 			this.showStatus("Cloned to new session");
 		} catch (error: unknown) {
-			this.showError(error instanceof Error ? error.message : String(error));
+			await this.reportSessionChangeFailure("Failed to clone session", error, source);
 		}
 	}
 
@@ -7755,6 +7771,7 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
+		const source = this.session;
 		try {
 			const result = await this.runtimeHost.switchSession(sessionRef, {
 				withSession: options?.withSession,
@@ -7767,7 +7784,7 @@ export class InteractiveMode {
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
-			// Another Volt process has the target open: its lock was refused before this session closed.
+			// Another Volt process has the target open: its lock was refused while this session stayed open.
 			if (
 				error instanceof LocalSessionWorktreeRestoreError ||
 				(error instanceof ConversationLockedError && error.sessionId !== this.session.sessionId)
@@ -7793,7 +7810,8 @@ export class InteractiveMode {
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
-			return this.handleFatalRuntimeError("Failed to resume session", error);
+			await this.reportSessionChangeFailure("Failed to resume session", error, source);
+			return { cancelled: true, seeded: false };
 		}
 	}
 
@@ -8346,6 +8364,7 @@ export class InteractiveMode {
 			return;
 		}
 
+		const source = this.session;
 		try {
 			if (this.loadingAnimation) {
 				this.loadingAnimation.stop();
@@ -8379,7 +8398,7 @@ export class InteractiveMode {
 				this.showError(`Failed to import session: ${error.message}`);
 				return;
 			}
-			await this.handleFatalRuntimeError("Failed to import session", error);
+			await this.reportSessionChangeFailure("Failed to import session", error, source);
 		}
 	}
 
@@ -9014,6 +9033,7 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
+		const source = this.session;
 		try {
 			const response = await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
 				SESSION_NEW_SLASH_ALIAS,
@@ -9027,7 +9047,7 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
 		} catch (error: unknown) {
-			await this.handleFatalRuntimeError("Failed to create session", error);
+			await this.reportSessionChangeFailure("Failed to create session", error, source);
 		}
 	}
 

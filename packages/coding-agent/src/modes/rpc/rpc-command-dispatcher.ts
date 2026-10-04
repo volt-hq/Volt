@@ -339,10 +339,6 @@ export async function handleRpcCommand(
 			// Start prompt handling immediately, but emit the authoritative response only after
 			// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 			let preflightSucceeded = false;
-			let settleAdmission!: () => void;
-			const admission = new Promise<void>((resolve) => {
-				settleAdmission = resolve;
-			});
 			void session
 				.prompt(command.message, {
 					images: command.images,
@@ -362,7 +358,6 @@ export async function handleRpcCommand(
 									: { canonicalEntryId: record.canonicalEntryId }),
 							};
 							context.output(createRpcSuccessResponse(id, "prompt", data));
-							settleAdmission();
 						}
 					},
 				})
@@ -370,11 +365,7 @@ export async function handleRpcCommand(
 					if (!preflightSucceeded) {
 						context.output(createRpcErrorResponse(id, "prompt", e.message, e));
 					}
-					settleAdmission();
 				});
-			// Structural replacement joins this dedicated admission fence, while
-			// ordinary state reads remain responsive during async input hooks.
-			runtimeHost.trackClientInputAdmission?.(session, admission);
 			return undefined;
 		}
 
@@ -567,10 +558,6 @@ export async function handleRpcCommand(
 				streamingBehavior: command.streamingBehavior,
 			});
 			let preflightSucceeded = false;
-			let settleAdmission!: () => void;
-			const admission = new Promise<void>((resolve) => {
-				settleAdmission = resolve;
-			});
 			void session
 				.prompt(invocation.promptText, {
 					streamingBehavior: invocation.promptStreamingBehavior,
@@ -580,7 +567,6 @@ export async function handleRpcCommand(
 						if (result.success) {
 							preflightSucceeded = true;
 							context.output(createRpcSuccessResponse(id, "invoke_ui_action", invocation.response));
-							settleAdmission();
 						}
 					},
 				})
@@ -588,9 +574,7 @@ export async function handleRpcCommand(
 					if (!preflightSucceeded) {
 						context.output(createRpcErrorResponse(id, "invoke_ui_action", e.message, e));
 					}
-					settleAdmission();
 				});
-			runtimeHost.trackClientInputAdmission?.(session, admission);
 			return undefined;
 		}
 

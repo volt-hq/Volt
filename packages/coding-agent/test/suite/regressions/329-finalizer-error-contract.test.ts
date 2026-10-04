@@ -230,7 +230,7 @@ describe("PR #329 finalizer error contract", () => {
 
 			expect(thrown).toBeInstanceOf(AggregateError);
 			if (!(thrown instanceof AggregateError)) throw new Error("expected aggregate runtime cleanup failure");
-			expect(thrown.message).toBe("Agent session runtime cleanup did not complete");
+			expect(thrown.message).toBe("Conversation cleanup did not complete");
 			expect(thrown.errors as unknown[]).toEqual([subagentError, persistenceError]);
 			expect(subagentDisposeCalls).toBe(1);
 			expect(managerCloseCalls).toBe(1);

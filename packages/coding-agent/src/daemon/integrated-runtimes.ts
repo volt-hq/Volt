@@ -1546,9 +1546,10 @@ export class IntegratedRuntimeRegistry {
 		const wasActive = entry.runtime.session.isBusy;
 		let stopSuccess = true;
 		const stopErrors: string[] = [];
-		// dispose() closes structural admission synchronously, then joins the same
-		// per-runtime actor as replacement. Keep registry/lease reservations intact
-		// until that fixed admitted set has settled.
+		// dispose() closes structural admission synchronously, then waits for an
+		// admitted move and for operations holding the conversation open (a review
+		// reset or source write). Keep registry/lease reservations intact until
+		// they have settled.
 		try {
 			await entry.runtime.dispose();
 		} catch (error) {

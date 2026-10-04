@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession, AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
+import type { AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
@@ -2583,9 +2583,6 @@ function createRuntimeHost(
 		startRecoveredClientInputs: vi.fn(async () => {}),
 		dispose,
 		setRebindSession: vi.fn(),
-		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
-			return operation((this as unknown as AgentSessionRuntime).session);
-		},
 	} as unknown as AgentSessionRuntime;
 }
 

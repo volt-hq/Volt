@@ -320,16 +320,16 @@ user sends prompt ────────────────────�
 user sends another prompt ◄────────────────────────────────┘
 
 /clear (new session) or /resume (switch session)
-  ├─► session_before_switch (can cancel)
-  ├─► session_shutdown
-  ├─► session_start { reason: "new" | "resume", previousSessionRef? }
-  └─► resources_discover { reason: "startup" }
+  ├─► session_before_switch (can cancel)            old session
+  ├─► session_start { reason: "new" | "resume", previousSessionRef? }   new session
+  ├─► resources_discover { reason: "startup" }      new session
+  └─► session_shutdown { targetSessionRef }         old session
 
 /fork or /clone
-  ├─► session_before_fork (can cancel)
-  ├─► session_shutdown
-  ├─► session_start { reason: "fork", previousSessionRef? }
-  └─► resources_discover { reason: "startup" }
+  ├─► session_before_fork (can cancel)              old session
+  ├─► session_start { reason: "fork", previousSessionRef? }   new session
+  ├─► resources_discover { reason: "startup" }      new session
+  └─► session_shutdown { targetSessionRef }         old session
 
 /compact or auto-compaction
   ├─► session_before_compact (can cancel or customize)
@@ -432,8 +432,8 @@ volt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
-After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`.
-Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
+A switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
+Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`. The two instances briefly coexist: keep state per instance rather than in module-level variables shared between them.
 
 A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). A TUI takes the daemon's lease before it opens a session the daemon may be hosting, so the two never have the same session open at once. Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
 
@@ -451,7 +451,7 @@ volt.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-After a successful fork or clone, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and optional `previousSessionRef`.
+A fork or clone opens the new session before it closes the old one: the new extension instance receives `session_start` with `reason: "fork"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. A failed open leaves the current session open.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact
@@ -507,7 +507,7 @@ volt.on("session_tree", async (event, ctx) => {
 
 #### session_shutdown
 
-Fired before a started session runtime is torn down. Use this to clean up resources opened from `session_start` or other session-scoped hooks.
+Fired before a started session runtime is torn down. Use this to clean up resources opened from `session_start` or other session-scoped hooks. When a client moves to another session (`reason` `"new"`, `"resume"`, or `"fork"`), the new session has already started and the client has left this one: UI calls from this handler reach no client, so they cannot disturb the new session's UI.
 
 Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) commit like any other: the session is disposed only after the handlers finish. They throw once the session has lost its log because a write could not be confirmed as saved; nothing can be saved after that. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
 
@@ -1168,6 +1168,8 @@ Result:
 - `cancelled`: an extension cancelled the operation; the current session is unchanged
 - `seeded`: `true` only when a requested `withSession` callback ran to completion. `cancelled: false` with `seeded: false` after passing `withSession` means the callback did not run: either the switch was a no-op targeting the current session (`switchSession` only), or the replacement was applied but the callback was skipped because recovered durable client input failed to replay. Check `seeded` before assuming your seed landed. `fork()` and `switchSession()` return the same shape.
 
+`ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` reject inside a subagent's conversation: a subagent stays in the conversation its parent opened for it.
+
 ### ctx.fork(entryId, options?)
 
 Fork from a specific entry, creating a new persisted session:
@@ -1264,7 +1266,7 @@ volt.registerCommand("switch", {
 `withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
 
 Lifecycle and footguns:
-- `withSession` runs only after the old session has emitted `session_shutdown`, the old runtime has been torn down, the replacement session has been rebound, and the new extension instance has already received `session_start`.
+- `withSession` runs only after the new extension instance has received `session_start` and the old session has emitted `session_shutdown` and closed.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `volt` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
 - Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before replacement, `sm` is still the old `SessionManager` object. Do not reuse it after replacement.

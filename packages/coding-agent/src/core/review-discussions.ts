@@ -182,7 +182,7 @@ export class HostReviewDiscussionService {
 							throw new Error("Unknown review finding");
 						return appendReviewFindingTransition(writer, transition);
 					};
-					if (source) return source.runWithStableSession((session) => write(session.sessionWriter));
+					if (source) return source.whileOpen((session) => write(session.sessionWriter));
 					if (!this.host.withSourceWrite) throw new Error("Canonical source writer is unavailable");
 					return this.host.withSourceWrite(runtime, sourceRef, async () => {
 						assertCurrent();
@@ -528,8 +528,8 @@ export class HostReviewDiscussionService {
 			return;
 		const child = await this.prepareChild(runtime, ref, row, assertCurrent);
 		assertCurrent();
-		await child.runWithStableSession(async (session) => {
-			assertCurrent();
+		// The child stays open until the kickoff's durable admission settles.
+		await child.whileOpen(async (session) => {
 			if (session.sessionManager.getClientInput(row.current.kickoffClientMessageId)) return;
 			let resolve!: () => void;
 			let reject!: (error: unknown) => void;
@@ -551,7 +551,6 @@ export class HostReviewDiscussionService {
 					},
 				)
 				.then(resolve, reject);
-			child.trackClientInputAdmission(session, admission);
 			await admission;
 		});
 	}
@@ -625,7 +624,9 @@ export class HostReviewDiscussionService {
 				return { requestId, status: "busy", discussion: await this.project(runtime, store, ref, row) };
 			return reset();
 		}
-		return child.runWithStableSession(async (session) => {
+		// The idle check and the reset are one step for the old child: a lease handoff
+		// disposing it waits until the reset settles, so it cannot start work meanwhile.
+		return child.whileOpen(async (session) => {
 			if (
 				session.isBusy ||
 				session.pendingMessageCount > 0 ||

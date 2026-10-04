@@ -174,8 +174,6 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 			dispose,
 			setRebindSession: vi.fn(),
-			runSessionInterruption: <T>(operation: (session: AgentSessionRuntime["session"]) => T): T =>
-				operation(fanout.session as unknown as AgentSessionRuntime["session"]),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 

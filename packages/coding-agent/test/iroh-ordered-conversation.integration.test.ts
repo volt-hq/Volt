@@ -192,7 +192,6 @@ async function createFixture(
 		onConversationLifecycleReady?: (lifecycle: IrohRemoteConversationLifecycle) => void;
 		onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
 		waitForPhysicalStartup?: boolean;
-		configureRuntimeHost?: (runtimeHost: AgentSessionRuntime) => void;
 		remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	} = {},
 ): Promise<OrderedConversationFixture> {
@@ -223,7 +222,6 @@ async function createFixture(
 			throw new Error("session replacement is not used by this integration fixture");
 		},
 	);
-	options.configureRuntimeHost?.(runtimeHost);
 	const emit = (event: object): void => {
 		for (const listener of [...listeners]) {
 			listener(event);
@@ -665,68 +663,6 @@ describe("Iroh ordered conversation integration", () => {
 			]);
 		} finally {
 			send.releaseBlockedWrite();
-			await fixture.close();
-		}
-	});
-
-	it("leases integrated host commands while interruption commands bypass the held session actor", async () => {
-		let stableSessionCalls = 0;
-		let markStableSessionEntered = () => {};
-		const stableSessionEntered = new Promise<void>((resolve) => {
-			markStableSessionEntered = resolve;
-		});
-		let releaseStableSession = () => {};
-		let stableSessionGate = Promise.resolve();
-		const blockStableSession = (): (() => void) => {
-			stableSessionGate = new Promise<void>((resolve) => {
-				releaseStableSession = resolve;
-			});
-			return releaseStableSession;
-		};
-		const remoteCommandHandler = vi.fn(async (command: Record<string, unknown>) => ({
-			id: typeof command.id === "string" ? command.id : undefined,
-			type: "response",
-			command: command.type,
-			success: true,
-		}));
-		const releaseOrdinaryCommand = blockStableSession();
-		const fixture = await createFixture(() => {}, {
-			remoteCommandHandler,
-			configureRuntimeHost: (runtimeHost) => {
-				const runWithStableSession = runtimeHost.runWithStableSession.bind(runtimeHost);
-				runtimeHost.runWithStableSession = (async (operation) => {
-					stableSessionCalls++;
-					markStableSessionEntered();
-					await stableSessionGate;
-					return runWithStableSession(operation);
-				}) as typeof runtimeHost.runWithStableSession;
-			},
-		});
-		let releaseAbortBypass = () => {};
-		try {
-			fixture.recv.pushLine(JSON.stringify({ id: "host-leased", type: "list_sessions" }));
-			await stableSessionEntered;
-			expect(remoteCommandHandler).not.toHaveBeenCalled();
-
-			releaseOrdinaryCommand();
-			await vi.waitFor(() =>
-				expect(parseWrittenObjects(fixture.send)).toContainEqual(
-					expect.objectContaining({ id: "host-leased", command: "list_sessions", success: true }),
-				),
-			);
-			expect(stableSessionCalls).toBe(1);
-
-			releaseAbortBypass = blockStableSession();
-			fixture.recv.pushLine(JSON.stringify({ id: "host-abort-bypass", type: "abort" }));
-			await vi.waitFor(() =>
-				expect(remoteCommandHandler).toHaveBeenCalledWith(
-					expect.objectContaining({ id: "host-abort-bypass", type: "abort" }),
-				),
-			);
-			expect(stableSessionCalls).toBe(1);
-		} finally {
-			releaseOrdinaryCommand();
-			releaseAbortBypass();
 			await fixture.close();
 		}
 	});

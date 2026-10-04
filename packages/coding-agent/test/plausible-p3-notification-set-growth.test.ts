@@ -29,17 +29,6 @@ function getNotifications(send: { writtenText(): string; writes: number[][] }): 
 	return parseWrittenObjects(send as never).filter((record) => record.type === "notification_request");
 }
 
-function createStableSessionRunner<TSession>(getSession: () => TSession) {
-	return {
-		async runWithStableSession<TResult>(
-			operation: (session: TSession) => Promise<TResult> | TResult,
-		): Promise<TResult> {
-			const session = getSession();
-			return operation(session);
-		},
-	};
-}
-
 describe("P3: iroh remote notification dedupe set growth", () => {
 	test("bounds the per-stream notification dedupe set so old eventIds are eventually evicted", async () => {
 		// The loop drives hundreds of prompts through the async transport queue.
@@ -60,7 +49,6 @@ describe("P3: iroh remote notification dedupe set growth", () => {
 		);
 
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
