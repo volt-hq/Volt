@@ -1145,6 +1145,7 @@ class IrohDaemonService {
 					);
 				}
 			},
+			isAuthorizationCurrent: (authorization) => this.isAuthorizationCurrent(authorization),
 			onConversationMoved: (source, target) => {
 				// The new conversation carries the source's work and pull-request association; the source keeps its own.
 				if (source.workspaceGeneration === undefined || target.workspaceGeneration !== source.workspaceGeneration)
@@ -5166,9 +5167,35 @@ class IrohDaemonService {
 		}
 		const streamClosures = this.initiateActiveStreamRetirement(entries, "access_updated");
 		await streamClosures;
+		const lateEntries = this.collectRuntimesPublishedDuringClosure(nodeId, runtimeEntries);
 		await Promise.allSettled(
-			Array.from(runtimeEntries, (runtimeEntry) => this.runtimes.stopEntry(runtimeEntry, "access_updated")),
+			[...runtimeEntries, ...lateEntries].map((runtimeEntry) =>
+				this.runtimes.stopEntry(runtimeEntry, "access_updated"),
+			),
 		);
+	}
+
+	/**
+	 * Runtimes of `nodeId` published while its streams were closing: a session
+	 * change in flight on one of them publishes the runtime it opened before the
+	 * stream settles. They are fenced like the ones collected before.
+	 */
+	private collectRuntimesPublishedDuringClosure(
+		nodeId: string,
+		known: Iterable<IntegratedRuntimeEntry>,
+		workspaceName?: string,
+	): IntegratedRuntimeEntry[] {
+		const seen = new Set(known);
+		const late = this.runtimes
+			.values()
+			.filter(
+				(entry) =>
+					entry.clientNodeId === nodeId &&
+					!seen.has(entry) &&
+					(workspaceName === undefined || entry.workspaceName === workspaceName),
+			);
+		this.runtimes.fenceReviewOperations(late);
+		return late;
 	}
 
 	private async closeWorkspaceAuthorizationRemovedStreams(nodeId: string, workspaceName: string): Promise<void> {
@@ -5195,6 +5222,7 @@ class IrohDaemonService {
 			(result): result is PromiseFulfilledResult<true> => result.status === "fulfilled" && result.value,
 		).length;
 		closedStreamCount += await this.closeActiveStreamsForClientWorkspace(nodeId, workspaceName, reason);
+		runtimeEntries.push(...this.collectRuntimesPublishedDuringClosure(nodeId, runtimeEntries, workspaceName));
 		for (const entry of runtimeEntries) {
 			closedStreamCount += await this.stopRuntimeEntryAfterStreams(entry, reason);
 		}
@@ -5237,6 +5265,9 @@ class IrohDaemonService {
 		const closedConnectionCount = this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
 		const streamClosures = this.initiateActiveStreamRetirement(entries, ACTIVE_REVOKE_CLOSE_REASON);
 		await streamClosures;
+		for (const lateEntry of this.collectRuntimesPublishedDuringClosure(nodeId, runtimeEntries)) {
+			runtimeEntries.add(lateEntry);
+		}
 		await Promise.allSettled(
 			Array.from(runtimeEntries, (runtimeEntry) => this.runtimes.stopEntry(runtimeEntry, "client_revoked")),
 		);

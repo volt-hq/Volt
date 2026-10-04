@@ -697,7 +697,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		if (!hostTarget) throw new Error("No stream view was attached");
-		await hostTarget({ sessionId: "moved-to", runtime: moved });
+		await (await hostTarget({ sessionId: "moved-to", runtime: moved })).commit();
 
 		const target = registry.findOwner("ws", "moved-to");
 		expect(target).toMatchObject({ lifecycle: "active", clientNodeId: "n-phone-a", runtime: moved });
@@ -722,6 +722,75 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 		expect(registry.findOwner("ws", "shared-source")).toBe(created.entry);
 		expect(runtime.dispose).not.toHaveBeenCalled();
 		await registry.detachSubscriber(created.entry, subscriberB, "transport_closed");
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("publishes nothing for a phone whose access changed during the move, and releases an abandoned target", async () => {
+		const setClientLastSessionId = vi.fn(async () => undefined);
+		let authorizationCurrent = true;
+		let hostTarget: RedirectViewOptions["hostTarget"];
+		const runtime = {
+			cwd: workspacePath,
+			session: createTestSession("revoked-source", null),
+			dispose: vi.fn(async () => {}),
+			attachRedirectClient: vi.fn((options: RedirectViewOptions) => {
+				hostTarget = options.hostTarget;
+				return runtime;
+			}),
+			listSessions: vi.fn(async () => []),
+		} as unknown as AgentSessionRuntime;
+		const registry = new IntegratedRuntimeRegistry({
+			agentDir,
+			auditLogger: new IrohRemoteAuditLogger(),
+			stateManager: new IrohRemoteHostStateManager(),
+			activeStreams: new IrohRemoteActiveStreamRegistry(),
+			detachedRuntimeTtlMs: () => 60_000,
+			getAllowTools: () => undefined,
+			getProjectTrustedForWorkspace: () => false,
+			setClientLastSessionId,
+			isAuthorizationCurrent: async () => authorizationCurrent,
+			createRuntime: async () => ({ runtime, sessionSelection: { kind: "created", sessionId: "revoked-source" } }),
+		});
+		const phone = createAuthorization("n-phone-a");
+		const created = await registry.getOrCreateEntry(
+			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+			phone,
+		);
+		await registry.commitEntry(created.entry, created.sessionSelection, phone, created.attachClaim);
+		created.attachClaim.release();
+		setClientLastSessionId.mockClear();
+		registry.attachStreamView(created.entry, phone);
+		if (!hostTarget) throw new Error("No stream view was attached");
+		const opened = (sessionId: string) =>
+			({
+				cwd: workspacePath,
+				session: createTestSession(sessionId, null),
+				dispose: vi.fn(async () => {}),
+				listSessions: vi.fn(async () => []),
+			}) as unknown as AgentSessionRuntime;
+
+		// The client is revoked while the move writes through the source.
+		const revoked = opened("revoked-target");
+		const prepared = await hostTarget({ sessionId: "revoked-target", runtime: revoked });
+		authorizationCurrent = false;
+		await expect(prepared.commit()).rejects.toThrow("Client access changed");
+		expect(registry.findOwner("ws", "revoked-target")).toBeUndefined();
+		expect(revoked.dispose).toHaveBeenCalled();
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
+
+		// A target the move gave up on is released and never published.
+		authorizationCurrent = true;
+		const abandoned = opened("abandoned-target");
+		const abandonedTarget = await hostTarget({ sessionId: "abandoned-target", runtime: abandoned });
+		await abandonedTarget.abort();
+		expect(registry.findOwner("ws", "abandoned-target")).toBeUndefined();
+		expect(abandoned.dispose).toHaveBeenCalled();
+		await expect(abandonedTarget.commit()).rejects.toThrow("already settled");
+
+		// The source stays usable for the next move.
+		const next = opened("next-target");
+		await (await hostTarget({ sessionId: "next-target", runtime: next })).commit();
+		expect(registry.findOwner("ws", "next-target")).toMatchObject({ lifecycle: "active" });
 		await registry.stopAll("test_cleanup");
 	});
 
@@ -763,7 +832,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 		registry.attachStreamView(created.entry, phone);
 		if (!hostTarget) throw new Error("No stream view was attached");
-		await hostTarget({ sessionId: "stored-session" });
+		await (await hostTarget({ sessionId: "stored-session" })).commit();
 
 		expect(setClientLastSessionId).toHaveBeenCalledExactlyOnceWith("n-phone-a", "ws", "stored-session");
 		expect(registry.findOwner("ws", "stored-session")).toBeUndefined();

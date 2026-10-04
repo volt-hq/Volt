@@ -155,9 +155,12 @@ describe("regression #585: executing a plan in a new session hands it off throug
 		const { harness, source, runtime, ready } = await setup();
 		let hosted: AgentSessionRuntime | undefined;
 		const view = runtime.attachRedirectClient({
-			hostTarget: async (target) => {
-				hosted = target.runtime;
-			},
+			hostTarget: async (target) => ({
+				commit: async () => {
+					hosted = target.runtime;
+				},
+				abort: async () => {},
+			}),
 		});
 		cleanups.push(() => view.dispose());
 
@@ -175,5 +178,31 @@ describe("regression #585: executing a plan in a new session hands it off throug
 		await target.startRecoveredClientInputs();
 		expect(target.session.messages.at(-1)?.role).toBe("assistant");
 		expect(target.session.planningState.plan).toMatchObject({ id: ready.id, phase: "active" });
+	});
+
+	it("prepares the hosted target before writing through the source, and abandons it when that write fails", async () => {
+		const { harness, source, runtime, ready } = await setup();
+		const steps: string[] = [];
+		const handedOff = vi.spyOn(source.session, "markPlanHandedOff").mockImplementationOnce(async () => {
+			steps.push("source write");
+			throw new Error("handoff refused");
+		});
+		const view = runtime.attachRedirectClient({
+			hostTarget: async () => {
+				steps.push("prepare");
+				return {
+					commit: async () => void steps.push("commit"),
+					abort: async () => void steps.push("abort"),
+				};
+			},
+		});
+		cleanups.push(() => view.dispose());
+
+		await expect(view.executePlan(ready.id, ready.revision, "new_session")).rejects.toThrow("handoff refused");
+
+		expect(handedOff).toHaveBeenCalledOnce();
+		expect(steps).toEqual(["prepare", "source write", "abort"]);
+		expect(harness.host.list()).toEqual([source]);
+		expect(source.session.planningState.plan).toMatchObject({ id: ready.id, phase: "ready" });
 	});
 });

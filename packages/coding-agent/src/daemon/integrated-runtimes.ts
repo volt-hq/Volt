@@ -1,6 +1,6 @@
 import { realpath } from "node:fs/promises";
 import { relative, sep } from "node:path";
-import type { AgentSessionRuntime, RedirectTarget } from "../core/agent-session-runtime.ts";
+import type { AgentSessionRuntime, HostedRedirect, RedirectTarget } from "../core/agent-session-runtime.ts";
 import type { IrohRemoteActiveStreamRegistry } from "../core/remote/iroh/active-stream-registry.ts";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
@@ -147,6 +147,8 @@ export interface IntegratedRuntimeRegistryOptions {
 		source: SessionReference,
 		write: () => Promise<T>,
 	) => Promise<T>;
+	/** Whether a stream's authorization still matches persisted client and workspace authority. */
+	isAuthorizationCurrent?: (authorization: IrohRemoteClientAuthorizationSuccess) => Promise<boolean>;
 	/** Called exactly once after a newly-created runtime is published in the registry. */
 	onRuntimePublished?: (entry: IntegratedRuntimeEntry) => void;
 	/** Called once a conversation a phone's structural intent opened from `source` is published as `target`. */
@@ -551,54 +553,85 @@ export class IntegratedRuntimeRegistry {
 		entry: IntegratedRuntimeEntry,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): AgentSessionRuntime {
-		return entry.runtime.attachRedirectClient({
+		const view = entry.runtime.attachRedirectClient({
 			hostTarget: (target) => this.hostRedirectTarget(entry, authorization, target),
 		});
+		// Review discussions authorize through the entry's runtime, which the view serves.
+		view.reviewDiscussions = entry.runtime.reviewDiscussions;
+		return view;
 	}
 
 	/**
-	 * Host the conversation a phone on `source` is being redirected to: publish
-	 * a conversation that opened for it, then record it as the phone's last
-	 * session in the workspace, so `target:"last"` lands there. A failure keeps
-	 * the phone on `source`; a runtime published here stops again.
+	 * Host the conversation a phone on `source` is being redirected to. A
+	 * conversation that opened for it is prepared as a detached runtime here,
+	 * before the move writes anything through the source, and published on
+	 * commit, which also records it as the phone's last session in the
+	 * workspace, so `target:"last"` lands there. Abort releases what was
+	 * prepared; the phone stays on `source`.
 	 */
 	private async hostRedirectTarget(
 		source: IntegratedRuntimeEntry,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		target: RedirectTarget,
-	): Promise<void> {
+	): Promise<HostedRedirect> {
 		if (source.lifecycle !== "active" || this.entries.get(source.key) !== source) {
 			throw new Error("Conversation runtime ownership changed before the session change");
 		}
-		const published = target.runtime
-			? await this.publishMovedConversation(source, authorization, target.runtime)
+		const prepared = target.runtime
+			? await this.prepareMovedConversation(source, authorization, target.runtime)
 			: undefined;
-		try {
-			await this.options.setClientLastSessionId(authorization.client.nodeId, source.workspaceName, target.sessionId);
-		} catch (error) {
-			if (published) await this.stopEntry(published, "conversation_move_failed").catch(() => undefined);
-			throw error;
-		}
-		await this.logAudit({
-			type: "session_changed",
-			clientNodeId: authorization.client.nodeId,
-			workspace: source.workspaceName,
-			success: true,
-			details: { reason: "conversation_moved", previousSessionId: source.sessionId, sessionId: target.sessionId },
-		});
+		return {
+			commit: async () => {
+				await prepared?.publish();
+				try {
+					await this.options.setClientLastSessionId(
+						authorization.client.nodeId,
+						source.workspaceName,
+						target.sessionId,
+					);
+				} catch (error) {
+					// The phone reconnects to the target it is told; only `target:"last"` misses it.
+					await this.logAudit({
+						type: "session_changed",
+						clientNodeId: authorization.client.nodeId,
+						workspace: source.workspaceName,
+						success: false,
+						error: error instanceof Error ? error.message : String(error),
+						details: { reason: "conversation_moved", sessionId: target.sessionId, lastSessionUpdated: false },
+					});
+					return;
+				}
+				await this.logAudit({
+					type: "session_changed",
+					clientNodeId: authorization.client.nodeId,
+					workspace: source.workspaceName,
+					success: true,
+					details: {
+						reason: "conversation_moved",
+						previousSessionId: source.sessionId,
+						sessionId: target.sessionId,
+					},
+				});
+			},
+			abort: async () => {
+				await prepared?.abort();
+			},
+		};
 	}
 
 	/**
-	 * Publish `runtime`, which a structural intent on `source` opened in its
+	 * Prepare `runtime`, which a structural intent on `source` opened in its
 	 * host, as a detached runtime of its own: the source's tool policy, trust,
 	 * and worktree placement, with the session bound to that worktree, under a
-	 * daemon lease. It follows retention until the redirected phone attaches.
+	 * daemon lease. Publishing it rechecks the phone's authorization; it then
+	 * follows retention until the redirected phone attaches. Exactly one of
+	 * `publish` and `abort` must run; a failed publish cleans up itself.
 	 */
-	private async publishMovedConversation(
+	private async prepareMovedConversation(
 		source: IntegratedRuntimeEntry,
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		runtime: AgentSessionRuntime,
-	): Promise<IntegratedRuntimeEntry> {
+	): Promise<{ publish(): Promise<void>; abort(): Promise<void> }> {
 		const sessionId = runtime.session.sessionId;
 		const generation = source.generation;
 		let coordinator: ConversationCoordinator | undefined;
@@ -616,6 +649,27 @@ export class IntegratedRuntimeRegistry {
 			) {
 				throw new Error("Conversation runtime ownership changed before the session change");
 			}
+		};
+		const release = () => {
+			claim?.release();
+			admission?.release();
+		};
+		const cleanUp = async (error: unknown): Promise<never> => {
+			try {
+				await preparation?.release();
+				if (entry && published) await this.stopEntry(entry, "conversation_move_publication_failed");
+				else if (entry && claim) await this.abortPreparedEntry(entry, undefined, claim);
+				else if (coordinator)
+					await coordinator.beginRuntimeRetirement("conversation_move_failed", () =>
+						cleanupUncommittedRuntime(runtime),
+					).settled;
+			} catch (cleanupError) {
+				throw new AggregateError([error, cleanupError], "Conversation move publication and cleanup failed");
+			} finally {
+				admission?.rollback();
+				release();
+			}
+			throw error;
 		};
 		try {
 			assertSource();
@@ -677,56 +731,62 @@ export class IntegratedRuntimeRegistry {
 				toolPolicy: source.toolPolicy,
 			});
 			preparation = undefined;
-			const candidate = entry;
-			const publish = () => {
-				assertSource();
-				this.assertAttachClaimCurrent(candidate, claim!);
-				if (this.findOwner(candidate.workspaceName, candidate.sessionId)) {
-					throw new Error("Conversation runtime publication lost ownership");
-				}
-				candidate.coordinator.activateRuntime();
-				candidate.coordinator.markDetached();
-				this.entries.set(candidate.key, candidate);
-				published = true;
-				admission?.finalize();
-				this.options.onRuntimePublished?.(candidate);
-			};
-			if (entry.worktreePreparation) await entry.worktreePreparation.publish(publish);
-			else publish();
-			delete entry.worktreePreparation;
-			await this.logAudit({
-				type: "runtime_started",
-				clientNodeId: authorization.client.nodeId,
-				workspace: entry.workspaceName,
-				success: true,
-				details: this.getEntryDetails(entry, { previousSessionId: source.sessionId }),
-			});
-			await this.logEntryAudit(entry, "remote_runtime_started", {
-				reason: "conversation_moved",
-				previousSessionId: source.sessionId,
-			});
-			this.options.onConversationMoved?.(source, entry);
-			this.scheduleRetention(entry, "conversation_moved");
-			return entry;
 		} catch (error) {
-			try {
-				await preparation?.release();
-				if (entry && published) await this.stopEntry(entry, "conversation_move_publication_failed");
-				else if (entry && claim) await this.abortPreparedEntry(entry, undefined, claim);
-				else if (coordinator)
-					await coordinator.beginRuntimeRetirement("conversation_move_failed", () =>
-						cleanupUncommittedRuntime(runtime),
-					).settled;
-			} catch (cleanupError) {
-				throw new AggregateError([error, cleanupError], "Conversation move publication and cleanup failed");
-			} finally {
-				admission?.rollback();
-			}
-			throw error;
-		} finally {
-			claim?.release();
-			admission?.release();
+			return await cleanUp(error);
 		}
+		const candidate = entry;
+		let settled = false;
+		return {
+			publish: async () => {
+				if (settled) throw new Error("Conversation move was already settled");
+				settled = true;
+				try {
+					// A client revoked or narrowed during the move publishes nothing.
+					if (this.options.isAuthorizationCurrent && !(await this.options.isAuthorizationCurrent(authorization))) {
+						throw new Error("Client access changed during the session change; reconnect");
+					}
+					const publish = () => {
+						assertSource();
+						this.assertAttachClaimCurrent(candidate, claim!);
+						if (this.findOwner(candidate.workspaceName, candidate.sessionId)) {
+							throw new Error("Conversation runtime publication lost ownership");
+						}
+						candidate.coordinator.activateRuntime();
+						candidate.coordinator.markDetached();
+						this.entries.set(candidate.key, candidate);
+						published = true;
+						admission?.finalize();
+						this.options.onRuntimePublished?.(candidate);
+					};
+					if (candidate.worktreePreparation) await candidate.worktreePreparation.publish(publish);
+					else publish();
+					delete candidate.worktreePreparation;
+				} catch (error) {
+					return await cleanUp(error);
+				}
+				release();
+				await this.logAudit({
+					type: "runtime_started",
+					clientNodeId: authorization.client.nodeId,
+					workspace: candidate.workspaceName,
+					success: true,
+					details: this.getEntryDetails(candidate, { previousSessionId: source.sessionId }),
+				});
+				await this.logEntryAudit(candidate, "remote_runtime_started", {
+					reason: "conversation_moved",
+					previousSessionId: source.sessionId,
+				});
+				this.options.onConversationMoved?.(source, candidate);
+				this.scheduleRetention(candidate, "conversation_moved");
+			},
+			abort: async () => {
+				if (settled) return;
+				settled = true;
+				await cleanUp(new Error("Conversation move was abandoned")).catch((error: unknown) => {
+					if (error instanceof AggregateError) throw error;
+				});
+			},
+		};
 	}
 
 	/** Revoke pending review effects before waiting for affected stream lifecycles to drain. */

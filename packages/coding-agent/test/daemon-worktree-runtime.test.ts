@@ -154,8 +154,9 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 					dispose: vi.fn(async () => {}),
 					listSessions: vi.fn(async () => []),
 				} as unknown as AgentSessionRuntime;
-				if (!hostTarget) throw new Error("No stream view was attached");
-				return { moved, hosted: hostTarget({ sessionId, runtime: moved }) };
+				const host = hostTarget;
+				if (!host) throw new Error("No stream view was attached");
+				return { moved, hosted: host({ sessionId, runtime: moved }).then((hosted) => hosted.commit()) };
 			},
 		};
 	}

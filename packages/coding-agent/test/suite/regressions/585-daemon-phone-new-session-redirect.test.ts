@@ -217,7 +217,7 @@ function createDaemon() {
 			);
 		});
 		await Promise.race([ready.promise, closed]);
-		return { entry, recv, send, closed };
+		return { entry, view, recv, send, closed };
 	}
 
 	return {
@@ -257,6 +257,9 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		);
 		const source = phoneA.entry;
 		expect(phoneB.entry).toBe(source);
+		// Each stream's view authorizes review discussions through the conversation's runtime.
+		expect(phoneA.view.reviewDiscussions).toBeDefined();
+		expect(phoneA.view.reviewDiscussions).toBe(source.runtime.reviewDiscussions);
 		daemon.events.length = 0;
 
 		phoneA.recv.pushLine(newSessionRequest(phoneA.send));

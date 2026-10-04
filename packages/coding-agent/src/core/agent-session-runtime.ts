@@ -112,17 +112,30 @@ export interface RedirectTarget {
 	readonly runtime?: AgentSessionRuntime;
 }
 
+/**
+ * A redirect target a host took: prepared before the move writes anything
+ * through the source, committed once those writes are done, or aborted.
+ */
+export interface HostedRedirect {
+	/** Make the target the client's to reconnect to. A failure keeps the client where it was. */
+	commit(): Promise<void>;
+	/** Release what was prepared for a target that will not be used. */
+	abort(): Promise<void>;
+}
+
 export interface RedirectViewOptions {
 	/**
 	 * Host the conversations the view's structural intents lead its client to,
 	 * before the client is redirected there. A new, forked, or imported
 	 * conversation opens in this runtime's host, which need not fence the
 	 * source, since the view's conversation stays open for its other clients;
-	 * a switch opens nothing. A failure keeps the client where it was and
-	 * discards what opened. Without it, the target's log is written and closed
-	 * for the host the client reconnects through to open.
+	 * a switch opens nothing. The host prepares the target before the move
+	 * writes through the source (a handoff) and commits it after; a failure
+	 * keeps the client where it was and discards what opened. Without it, the
+	 * target's log is written and closed for the host the client reconnects
+	 * through to open.
 	 */
-	readonly hostTarget?: (target: RedirectTarget) => Promise<void>;
+	readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
 }
 
 /** Marks a runtime as a redirect view: see `AgentSessionRuntime.attachRedirectClient`. */
@@ -665,15 +678,33 @@ export class AgentSessionRuntime {
 			const opened = await this.host.openFor(this.client, target, {
 				beforeMove: async (from, to) => {
 					options.assertConversationGenerationCurrent?.();
-					if (from) await beforeMove?.(from);
-					await commitPublication?.(to.session.sessionManager);
 					const runtime = new AgentSessionRuntime(this.host, to);
-					try {
-						await hostTarget({ sessionId: to.id, runtime });
-					} catch (error) {
-						// The target was never handed over: it closes without its extensions having started.
+					// The target closes without its extensions having started.
+					const discard = async () => {
 						await this.host.discard(to).catch(() => undefined);
 						await runtime.dispose().catch(() => undefined);
+					};
+					let hosted: HostedRedirect;
+					try {
+						hosted = await hostTarget({ sessionId: to.id, runtime });
+					} catch (error) {
+						await discard();
+						throw error;
+					}
+					// What can fail is prepared before anything is written through the source.
+					try {
+						options.assertConversationGenerationCurrent?.();
+						if (from) await beforeMove?.(from);
+						await commitPublication?.(to.session.sessionManager);
+					} catch (error) {
+						await hosted.abort().catch(() => undefined);
+						await discard();
+						throw error;
+					}
+					try {
+						await hosted.commit();
+					} catch (error) {
+						await discard();
 						throw error;
 					}
 				},
@@ -689,8 +720,17 @@ export class AgentSessionRuntime {
 		const redirected = await this.host.redirectFor(this.client, target, {
 			beforeMove: async (from) => {
 				options.assertConversationGenerationCurrent?.();
-				await beforeMove?.(from);
-				if (hostTarget && target.kind === "session") await hostTarget({ sessionId: target.ref.sessionId });
+				const hosted =
+					hostTarget && target.kind === "session"
+						? await hostTarget({ sessionId: target.ref.sessionId })
+						: undefined;
+				try {
+					await beforeMove?.(from);
+				} catch (error) {
+					await hosted?.abort().catch(() => undefined);
+					throw error;
+				}
+				await hosted?.commit();
 			},
 			...(commitPublication === undefined ? {} : { publish: commitPublication }),
 		});
