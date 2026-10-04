@@ -7,6 +7,7 @@
  * query results.
  */
 
+import { resolve } from "node:path";
 import { clientFold, clientSnapshot, type HostFrame, type LiveItem } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
@@ -104,9 +105,10 @@ describe("profile redaction", () => {
 	});
 
 	it("the remote profile sends no workspace or worktree root and no provider signature", async () => {
-		const worktree = "/tmp/volt-profile-redaction/worktrees/ws/feature";
-		const checkout = "/tmp/volt-profile-redaction/workspace";
-		const worktreesRoot = "/tmp/volt-profile-redaction/worktrees";
+		// Host-native roots: on Windows, drive-letter paths with backslashes.
+		const worktree = resolve("/tmp/volt-profile-redaction/worktrees/ws/feature");
+		const checkout = resolve("/tmp/volt-profile-redaction/workspace");
+		const worktreesRoot = resolve("/tmp/volt-profile-redaction/worktrees");
 		const roots = [worktree, checkout, worktreesRoot];
 		const pathIn = fc
 			.constantFrom(...roots)
@@ -127,7 +129,7 @@ describe("profile redaction", () => {
 		const leaks = (frame: HostFrame | undefined): string[] => {
 			const wire = JSON.stringify(frame ?? null);
 			return [
-				...roots.filter((root) => wire.includes(root)),
+				...roots.filter((root) => wire.includes(JSON.stringify(root).slice(1, -1))),
 				...(/Signature"|signatureDelta/.test(wire) ? ["signature"] : []),
 			];
 		};

@@ -50,6 +50,31 @@ export interface IrohRpcTransportOptions {
 	 * `RpcSendQueueFullError` instead of growing the queue. Unbounded by default.
 	 */
 	maxQueuedBytes?: number;
+	/** A bound the transport's queue shares with other transports, such as every stream of one device. */
+	queueBudget?: IrohSendQueueBudget;
+}
+
+/** A send queue bound several transports share. */
+export interface IrohSendQueueBudget {
+	readonly maxBytes: number;
+	/** Take `bytes` of the budget; false, taking nothing, when that would exceed it. */
+	reserve(bytes: number): boolean;
+	release(bytes: number): void;
+}
+
+export function createIrohSendQueueBudget(maxBytes: number): IrohSendQueueBudget {
+	let used = 0;
+	return {
+		maxBytes,
+		reserve(bytes) {
+			if (used + bytes > maxBytes) return false;
+			used += bytes;
+			return true;
+		},
+		release(bytes) {
+			used = Math.max(0, used - bytes);
+		},
+	};
 }
 
 /**
@@ -146,9 +171,15 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 			const serialized = serializeJsonLine(value);
 			const serializedBytes = Buffer.from(serialized, "utf8");
 			assertIrohRpcLineWithinLimit(serializedBytes.length - 1, maxLineBytes);
-			if (options.maxQueuedBytes !== undefined && queuedBytes + serializedBytes.length > options.maxQueuedBytes) {
+			const queued = serializedBytes.length;
+			const overStream = options.maxQueuedBytes !== undefined && queuedBytes + queued > options.maxQueuedBytes;
+			if (overStream || options.queueBudget?.reserve(queued) === false) {
 				// The peer stopped keeping up: reset the stream rather than hold more for it.
-				const overflow = recordWriteError(new RpcSendQueueFullError(options.maxQueuedBytes));
+				const overflow = recordWriteError(
+					new RpcSendQueueFullError(
+						overStream ? (options.maxQueuedBytes ?? 0) : (options.queueBudget?.maxBytes ?? queuedBytes),
+					),
+				);
 				localCloseRequested = true;
 				sendClosed = true;
 				void Promise.resolve(options.stream.send.reset?.(closeErrorCode)).catch(() => {});
@@ -156,12 +187,11 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 				emitClose(overflow);
 				throw overflow;
 			}
-			queuedBytes += serializedBytes.length;
-			const queued = serializedBytes.length;
-			const bytes = Array.from(serializedBytes);
+			queuedBytes += queued;
+			// Queued as bytes: the stream's number array is built only when the write runs.
 			const runWrite = (): Promise<void> => {
 				try {
-					return options.stream.send.writeAll(bytes);
+					return options.stream.send.writeAll(Array.from(serializedBytes));
 				} catch (error: unknown) {
 					throw recordWriteError(error);
 				}
@@ -174,6 +204,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 				})
 				.finally(() => {
 					queuedBytes -= queued;
+					options.queueBudget?.release(queued);
 					pendingWrites.delete(writePromise);
 					if (writeQueue === writePromise) {
 						writeQueue = undefined;

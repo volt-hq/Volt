@@ -487,7 +487,8 @@ describe("form field patterns", () => {
 				for (const value of values) {
 					const started = performance.now();
 					regex.test(value);
-					expect(performance.now() - started, source).toBeLessThan(250);
+					// Polynomial even on a slow host; a pattern that backtracks without bound takes seconds.
+					expect(performance.now() - started, source).toBeLessThan(1_000);
 				}
 			}),
 			{ numRuns: 300 },

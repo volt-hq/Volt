@@ -1050,8 +1050,9 @@ describe("sanitizer-mode projection", () => {
 			thinking: `${SANITIZED_ROOT}/thought`,
 			thinkingSignature: opaque,
 		});
+		// An id naming a root is rewritten as text is.
+		expect(sanitized.content[2]).toMatchObject({ id: testSanitizer.sanitizeText(opaque) });
 		expect(sanitized.content[2]).toMatchObject({
-			id: `opaque:${SANITIZED_ROOT}:bytes`,
 			name: `${SANITIZED_ROOT}/tool`,
 			thoughtSignature: opaque,
 			arguments: { path: `${SANITIZED_ROOT}/arg` },

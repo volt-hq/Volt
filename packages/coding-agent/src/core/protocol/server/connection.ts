@@ -351,20 +351,18 @@ function isBranchFenced(type: string): boolean {
 }
 
 /**
- * Queries whose answers cost the host a log, store, or Git read the client
- * chooses the size or number of: each takes one read of the connection's budget.
+ * Queries that cost a read of the connection's budget nothing: small answers
+ * from state the host holds, which a client asks as its user types or after
+ * `changed`. Every other query takes one read.
  */
-const COSTLY_QUERIES: ReadonlySet<string> = new Set([
-	"history",
-	"content",
-	"sessions",
-	"session_contexts",
-	"worktrees",
-	"workspace_directories",
-	"pr_review",
+const FREE_QUERIES: ReadonlySet<string> = new Set([
+	"intent_completions",
+	"settings",
+	"host_status",
+	"web_search_status",
 ]);
 
-/** Snapshots, replays, and costly reads a connection may still request: a refilling bucket. */
+/** Snapshots, replays, and queries a connection may still request: a refilling bucket. */
 class ReadBudget {
 	private readonly burst: number;
 	private readonly refillMs: number;
@@ -850,7 +848,7 @@ export function serveConnection(
 			refuse("unavailable", `${frame.query} is not available on this stream`);
 			return;
 		}
-		if (COSTLY_QUERIES.has(frame.query) && !reads.take()) {
+		if (!FREE_QUERIES.has(frame.query) && !reads.take()) {
 			refuse("unavailable", `Too many ${frame.query} reads; retry later`, Math.min(30_000, reads.retryAfterMs));
 			return;
 		}

@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
-import { type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/rpc/iroh-transport.ts";
+import { createIrohRpcTransport, type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import {
@@ -46,6 +46,7 @@ import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 const native = loadIrohModule();
@@ -938,6 +939,47 @@ describe("iroh daemon lifecycle ownership", () => {
 		expect(lifecycleReasons).toEqual(["host_shutdown"]);
 		expect(fallbackReasons).toEqual([]);
 		expect(owner.installCloseAction(() => {})).toBe(false);
+	});
+
+	it("keeps the stream open while an installed close action writes every final frame, and fences it after", async () => {
+		const finals = [
+			{ type: "ended", subscriptionId: "s1", reason: "shutdown" },
+			{ type: "ended", subscriptionId: "s2", reason: "shutdown" },
+			{ type: "fatal", code: "host_shutdown" },
+		];
+		const deliver = async (fenceAfterMs: number | undefined): Promise<unknown[]> => {
+			const pair = createIrohStreamPair();
+			const owner = new IrohPhysicalStreamOwner(() => {}, pair.host);
+			const fenced = createLifecycleFencedIrohStream(pair.host, owner.signal, () => {});
+			const host = createIrohRpcTransport({ stream: fenced });
+			owner.installCloseAction(
+				async () => {
+					// As a connection's close: every final frame is queued, then the stream is finished.
+					for (const frame of finals) void Promise.resolve(host.write(frame)).catch(() => undefined);
+					await Promise.resolve(host.close()).catch(() => undefined);
+				},
+				fenceAfterMs === undefined ? {} : { fenceAfterMs },
+			);
+			const received: unknown[] = [];
+			const ended = Promise.withResolvers<void>();
+			const phone = createIrohRpcTransport({ stream: pair.phone });
+			phone.onLine((line) => {
+				received.push(JSON.parse(line));
+			});
+			phone.onClose?.(() => ended.resolve());
+			await owner.close("host_shutdown");
+			if (fenceAfterMs !== undefined) {
+				await ended.promise;
+				expect(owner.signal.aborted).toBe(true);
+			} else {
+				await new Promise((resolve) => setTimeout(resolve, 50));
+			}
+			await Promise.resolve(phone.close()).catch(() => undefined);
+			return received;
+		};
+		expect(await deliver(2_000)).toEqual(finals);
+		// Fenced as the close starts, only the write already under way gets out.
+		expect(await deliver(undefined)).toEqual(finals.slice(0, 1));
 	});
 
 	it("falls back to immediate physical close when shutdown wins before lifecycle install", async () => {

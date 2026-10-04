@@ -16,7 +16,13 @@ import {
 	type ServeConnectionOptions,
 	serveConnection,
 } from "../../protocol/server/connection.ts";
-import { createIrohRpcTransport, type IrohBiStreamLike, type IrohBytes } from "../../rpc/iroh-transport.ts";
+import {
+	createIrohRpcTransport,
+	createIrohSendQueueBudget,
+	type IrohBiStreamLike,
+	type IrohBytes,
+	type IrohSendQueueBudget,
+} from "../../rpc/iroh-transport.ts";
 import { attachCompletionNotifications, type CompletionNotificationsOptions } from "./completion-notifications.ts";
 
 export interface IrohRemoteConnectionOptions
@@ -44,6 +50,29 @@ export interface IrohRemoteConnectionOptions
 	readonly limits?: Partial<ProfileLimits>;
 }
 
+/** Bytes all streams of one device may queue together; each stream also keeps its profile's bound. */
+const DEVICE_SEND_QUEUE_BYTES = 128 * 1024 * 1024;
+
+/** The shared send queue bound of each device with open streams, by its `clientKey`. */
+const deviceSendBudgets = new Map<string, { budget: IrohSendQueueBudget; streams: number }>();
+
+function deviceSendBudget(clientKey: string): { budget: IrohSendQueueBudget; release(): void } {
+	let entry = deviceSendBudgets.get(clientKey);
+	if (!entry) {
+		entry = { budget: createIrohSendQueueBudget(DEVICE_SEND_QUEUE_BYTES), streams: 0 };
+		deviceSendBudgets.set(clientKey, entry);
+	}
+	const held = entry;
+	held.streams++;
+	return {
+		budget: held.budget,
+		release() {
+			held.streams--;
+			if (held.streams === 0 && deviceSendBudgets.get(clientKey) === held) deviceSendBudgets.delete(clientKey);
+		},
+	};
+}
+
 /** Serve a paired device's stream until it ends. */
 export function serveIrohRemoteConnection(options: IrohRemoteConnectionOptions): ProtocolConnection {
 	const conversation = options.conversation;
@@ -53,8 +82,10 @@ export function serveIrohRemoteConnection(options: IrohRemoteConnectionOptions):
 		...(conversation === undefined ? {} : { bound: conversation.id }),
 		...(options.limits === undefined ? {} : { limits: options.limits }),
 	});
+	const device = options.clientKey === undefined ? undefined : deviceSendBudget(options.clientKey);
 	const transport = createIrohRpcTransport({
 		stream: options.stream,
+		...(device === undefined ? {} : { queueBudget: device.budget }),
 		...(options.initialInput === undefined ? {} : { initialInput: options.initialInput }),
 		maxLineBytes: profile.limits.frameBytes,
 		...(profile.limits.sendQueueBytes === undefined ? {} : { maxQueuedBytes: profile.limits.sendQueueBytes }),
@@ -77,6 +108,11 @@ export function serveIrohRemoteConnection(options: IrohRemoteConnectionOptions):
 		...(options.clientKey === undefined ? {} : { clientKey: options.clientKey }),
 		...(notifications === undefined ? {} : { onInputAccepted: () => notifications.inputAccepted() }),
 	});
-	void connection.closed.finally(() => notifications?.detach()).catch(() => undefined);
+	void connection.closed
+		.finally(() => {
+			notifications?.detach();
+			device?.release();
+		})
+		.catch(() => undefined);
 	return connection;
 }

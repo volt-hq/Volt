@@ -693,6 +693,8 @@ export class IrohPhysicalStreamOwner {
 	readonly physicalStream: IrohBiStreamLike | undefined;
 	private readonly closeController = new AbortController();
 	private closeAction: IrohPhysicalStreamCloseAction | undefined;
+	/** How long the fence stays open for an installed close action to finish its stream, at most. */
+	private fenceAfterMs: number | undefined;
 	private readonly settledPromise: Promise<void>;
 	private resolveSettled: () => void = () => {};
 	private rejectSettled: (error: unknown) => void = () => {};
@@ -719,11 +721,18 @@ export class IrohPhysicalStreamOwner {
 		return this.closeController.signal;
 	}
 
-	installCloseAction(closeAction: IrohPhysicalStreamCloseAction): boolean {
+	/**
+	 * Install how the stream closes. With `fenceAfterMs`, the stream stays
+	 * usable while the close action runs (at most that long), so the action
+	 * can write its final frames and finish the stream; otherwise it is fenced
+	 * as the close starts.
+	 */
+	installCloseAction(closeAction: IrohPhysicalStreamCloseAction, options: { fenceAfterMs?: number } = {}): boolean {
 		if (this.closeStarted || this.closeAction !== undefined) {
 			return false;
 		}
 		this.closeAction = closeAction;
+		this.fenceAfterMs = options.fenceAfterMs;
 		return true;
 	}
 
@@ -733,9 +742,22 @@ export class IrohPhysicalStreamOwner {
 		}
 		this.closeStarted = true;
 		const closeAction = this.closeAction ?? this.fallbackClose;
+		const fenceAfterMs = this.closeAction === undefined ? undefined : this.fenceAfterMs;
+		const fence = (): void => this.closeController.abort(new IrohStreamLifecycleClosedError());
 		try {
 			const closeResult = closeAction(reason);
-			this.closeController.abort(new IrohStreamLifecycleClosedError());
+			if (fenceAfterMs === undefined) {
+				fence();
+			} else {
+				const timer = setTimeout(fence, fenceAfterMs);
+				timer.unref?.();
+				void Promise.resolve(closeResult)
+					.catch(() => undefined)
+					.finally(() => {
+						clearTimeout(timer);
+						fence();
+					});
+			}
 			Promise.resolve(closeResult).then(this.resolveSettled, this.rejectSettled);
 		} catch (error) {
 			this.closeController.abort(new IrohStreamLifecycleClosedError());
@@ -779,9 +801,10 @@ function isAuthorityTighteningCloseReason(reason: string): boolean {
  * closes end the stream without a frame. A stream that cannot deliver its
  * final frame in time is reset.
  *
- * The stream's owner fences `stream` as this close begins, so the connection
- * can no longer finish it: the final frames are already on their way, and
- * `physical` (the stream under the fence) is finished after them, or reset.
+ * The stream's owner keeps `stream` usable while this close runs, up to the
+ * final-frame timeout. A connection that could not end its stream in time,
+ * or failed to, has `physical` (the stream under the fence) reset; one that
+ * did is finished again, harmlessly.
  */
 async function closeStreamConnection(
 	stream: IrohBiStreamLike,
@@ -803,7 +826,7 @@ async function closeStreamConnection(
 		const delivered = await Promise.race([
 			ending.then(
 				() => true,
-				() => true,
+				() => false,
 			),
 			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), STREAM_FINAL_FRAME_TIMEOUT_MS).unref()),
 		]);
@@ -3345,14 +3368,17 @@ class IrohDaemonService {
 			workspaceName: authorization.workspace.name,
 			close: (reason: string) => owner.close(reason),
 		};
-		const installed = owner.installCloseAction((reason) =>
-			closeStreamConnection(
-				stream,
-				owner.physicalStream ?? stream,
-				reason,
-				entry.connection,
-				details.lifecycleSettled,
-			),
+		const installed = owner.installCloseAction(
+			(reason) =>
+				closeStreamConnection(
+					stream,
+					owner.physicalStream ?? stream,
+					reason,
+					entry.connection,
+					details.lifecycleSettled,
+				),
+			// The connection writes its final frames and finishes the stream before the fence closes it.
+			{ fenceAfterMs: STREAM_FINAL_FRAME_TIMEOUT_MS },
 		);
 		if (!installed) {
 			throw new Error("physical stream closed before active ownership was installed");

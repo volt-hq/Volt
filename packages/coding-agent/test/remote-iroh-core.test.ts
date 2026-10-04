@@ -1,7 +1,7 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { describe, expect, test } from "vitest";
 import {
 	assertIrohRemoteHandshakeHostIdentity,
@@ -4071,7 +4071,12 @@ describe("Iroh remote core helpers", () => {
 			{ workspacePath },
 		) as { message: string };
 		// A URL whose path spells the workspace root still names it: the root is replaced wherever it appears.
-		expect(urlTextSanitized.message).toBe("See https://example.com/workspace/src/index.ts");
+		// (On Windows the root resolves to a drive path, which the URL does not spell.)
+		expect(urlTextSanitized.message).toBe(
+			sep === "/"
+				? "See https://example.com/workspace/src/index.ts"
+				: "See https://example.com/Users/jordan/project/src/index.ts",
+		);
 
 		const keyEdgeSanitized = sanitizeRemoteValue(
 			{

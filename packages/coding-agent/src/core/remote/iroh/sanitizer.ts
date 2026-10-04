@@ -52,7 +52,7 @@ export type IrohRemoteSanitizerValuePreserver = (
 export interface IrohRemoteProjectionSanitizer {
 	sanitizeText(value: string): string;
 	sanitizeValue(value: unknown, preserveEntry?: IrohRemoteSanitizerValuePreserver): unknown;
-	/** Whether `value` holds a redacted root. */
+	/** Whether `value` holds a redacted root: whether text redaction would rewrite it. */
 	containsRoot(value: string): boolean;
 	/**
 	 * The length of the longest end of `value` that begins a redacted root
@@ -134,14 +134,18 @@ function realRoot(root: string): string {
 }
 
 function containsRoot(value: string, context: IrohRemoteOutboundSanitizerContext): boolean {
-	return normalizeWorkspacePathOccurrences(value, context) !== value;
+	// Whatever text redaction would rewrite, including a root spelled without its drive on Windows.
+	return sanitizeRemoteText(value, context) !== value;
 }
 
 function rootPrefixSuffix(value: string, context: IrohRemoteOutboundSanitizerContext): number {
+	// Windows matches roots without regard to case.
+	const text = sep === "\\" ? value.toLowerCase() : value;
 	let longest = 0;
-	for (const root of context.rootForms) {
-		for (let length = Math.min(root.length - 1, value.length); length > longest; length--) {
-			if (value.endsWith(root.slice(0, length))) {
+	for (const form of context.rootForms) {
+		const root = sep === "\\" ? form.toLowerCase() : form;
+		for (let length = Math.min(root.length - 1, text.length); length > longest; length--) {
+			if (text.endsWith(root.slice(0, length))) {
 				longest = length;
 				break;
 			}
@@ -305,7 +309,8 @@ function normalizeWorkspacePathOccurrences(value: string, context: IrohRemoteOut
 	let redacted = false;
 	for (const workspacePathPattern of context.workspacePathPatterns) {
 		const next = normalized.replace(
-			new RegExp(`${workspacePathPattern}(?=$|[\\\\/\\s"'<>),.;:!?}\\]])`, sep === "\\" ? "gi" : "g"),
+			// A root ends where no name character follows: `/root-old` is another directory, `/root|x` is the root.
+			new RegExp(`${workspacePathPattern}(?![\\w-])`, sep === "\\" ? "gi" : "g"),
 			context.remoteWorkspacePath,
 		);
 		redacted ||= next !== normalized;
