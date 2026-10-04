@@ -682,7 +682,8 @@ describe("AgentSessionRuntime characterization", () => {
 			const sessions = await SessionManager.list(tempDir, sessionDir, undefined, {
 				includeMessageFreeDurable: true,
 			});
-			expect(sessions.some((session) => session.id === importedId)).toBe(false);
+			// Imports get new ids: the store holds no session besides the current one.
+			expect(sessions.map((session) => session.id)).toEqual([currentSessionRef.sessionId]);
 			const reopened = await SessionManager.openReadOnly(currentSessionRef);
 			try {
 				expect(reopened.getConversationState().context).toMatchObject({
@@ -734,7 +735,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const sessions = await SessionManager.list(tempDir, sessionDir, undefined, {
 			includeMessageFreeDurable: true,
 		});
-		expect(sessions.some((session) => session.id === importedId)).toBe(false);
+		expect(sessions.map((session) => session.id)).toEqual([currentSessionRef?.sessionId]);
 	});
 
 	it("retains a persisted import when replacement creation fails before installation", async () => {
@@ -742,7 +743,7 @@ describe("AgentSessionRuntime characterization", () => {
 		let preparedRef: SessionReference | undefined;
 		const { runtime, tempDir } = await createRuntimeForTest(() => {}, {
 			beforeCreateRuntime: (sessionManager) => {
-				if (sessionManager.getSessionId() !== importedId) return;
+				if (sessionManager.getForkedFrom()?.sessionId !== importedId) return;
 				preparedRef = sessionManager.getSessionRef();
 				throw new Error("injected import replacement creation failure");
 			},
@@ -767,7 +768,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const sessions = await SessionManager.list(tempDir, sessionDir, undefined, {
 			includeMessageFreeDurable: true,
 		});
-		expect(sessions.find((session) => session.id === importedId)?.ref).toEqual(preparedRef);
+		expect(sessions.find((session) => session.id === preparedRef?.sessionId)?.ref).toEqual(preparedRef);
 	});
 
 	it("preserves a persisted import when replacement fails after installation", async () => {
@@ -778,7 +779,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const currentSessionRef = runtime.session.sessionRef;
 		writeSessionSnapshot(snapshotPath, tempDir, importedId);
 		const unsubscribe = runtime.subscribeSessionWillProject((session) => {
-			if (session.sessionId === importedId) {
+			if (session.sessionManager.getForkedFrom()?.sessionId === importedId) {
 				throw new Error("injected installed import projection failure");
 			}
 		});
@@ -791,14 +792,14 @@ describe("AgentSessionRuntime characterization", () => {
 			unsubscribe();
 		}
 
-		expect(runtime.session.sessionId).toBe(importedId);
+		expect(runtime.session.sessionManager.getForkedFrom()?.sessionId).toBe(importedId);
 		expect(runtime.session.sessionRef).not.toEqual(currentSessionRef);
 		const importedRef = runtime.session.sessionRef;
 		if (!importedRef) throw new Error("Expected the installed import reference");
 		const sessions = await SessionManager.list(tempDir, sessionDir, undefined, {
 			includeMessageFreeDurable: true,
 		});
-		expect(sessions.find((session) => session.id === importedId)?.ref).toEqual(importedRef);
+		expect(sessions.find((session) => session.id === importedRef.sessionId)?.ref).toEqual(importedRef);
 		const reopened = await SessionManager.open(importedRef);
 		try {
 			expect(reopened.getSessionRef()).toEqual(importedRef);

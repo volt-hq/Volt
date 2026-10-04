@@ -390,11 +390,12 @@ export const SubagentSpawnEntryPayloadSchema = Type.Object(
 
 /**
  * First entry of a log created by fork, clone, or import: the source log and
- * the entry the copied branch path ends at. The copied path follows it, so a
- * log stays self-contained.
+ * the entry the copied branch path ends at, or `null` when the copied branch
+ * is empty (a fork before the first message). The copied path follows it, so
+ * a log stays self-contained.
  */
 export const ForkedFromEntryPayloadSchema = Type.Object(
-	{ sessionId: LogSessionIdSchema, entryId: LogEntryIdSchema },
+	{ sessionId: LogSessionIdSchema, entryId: Type.Union([LogEntryIdSchema, Type.Null()]) },
 	closed,
 );
 

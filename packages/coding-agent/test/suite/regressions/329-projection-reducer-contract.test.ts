@@ -1230,7 +1230,7 @@ describe("PR #329 projection reducer contract", () => {
 	});
 
 	describe("fork and import label clearing", () => {
-		it("preserves a committed cleared label through fork construction and reopen", async () => {
+		it("keeps a committed cleared label cleared through fork construction and reopen", async () => {
 			const cwd = join(root, "fork-source-workspace");
 			const sourceDir = join(root, "fork-source-sessions");
 			mkdirSync(cwd, { recursive: true });
@@ -1264,14 +1264,16 @@ describe("PR #329 projection reducer contract", () => {
 				summary: { messageCount: 1, firstMessage: "fork retained", lastActivityTime: Date.parse(CREATED_AT) },
 				messages: [{ role: "user", text: "fork retained" }],
 			});
-			expect(clearedLabelState(forked, targetId)).toEqual(committedPrefix);
-			expect(clearedLabelState(reopened, targetId)).toEqual(committedPrefix);
+			// A fork copies the branch without its label history, so the cleared label stays cleared.
+			const copiedState = { ...committedPrefix, leafType: "message", labelEntries: [] };
+			expect(clearedLabelState(forked, targetId)).toEqual(copiedState);
+			expect(clearedLabelState(reopened, targetId)).toEqual(copiedState);
 			expect((await SessionManager.search(forkCwd, "fork retained", forkDir)).map((session) => session.id)).toEqual([
 				"clear-label-fork",
 			]);
 		});
 
-		it("preserves a committed empty-cleared label through snapshot import and reopen", async () => {
+		it("keeps a committed empty-cleared label cleared through snapshot import and reopen", async () => {
 			const cwd = join(root, "import-source-workspace");
 			const sourceDir = join(root, "import-source-sessions");
 			mkdirSync(cwd, { recursive: true });
@@ -1309,8 +1311,10 @@ describe("PR #329 projection reducer contract", () => {
 				summary: { messageCount: 1, firstMessage: "import retained", lastActivityTime: Date.parse(CREATED_AT) },
 				messages: [{ role: "user", text: "import retained" }],
 			});
-			expect(clearedLabelState(imported, targetId)).toEqual(committedPrefix);
-			expect(clearedLabelState(reopened, targetId)).toEqual(committedPrefix);
+			// An import copies the branch without its label history, so the cleared label stays cleared.
+			const copiedState = { ...committedPrefix, leafType: "message", labelEntries: [] };
+			expect(clearedLabelState(imported, targetId)).toEqual(copiedState);
+			expect(clearedLabelState(reopened, targetId)).toEqual(copiedState);
 			expect(
 				(await SessionManager.search(importCwd, "import retained", importDir)).map((session) => session.id),
 			).toEqual(["clear-label-import"]);

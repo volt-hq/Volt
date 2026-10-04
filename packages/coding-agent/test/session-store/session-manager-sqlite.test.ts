@@ -488,11 +488,15 @@ describe("SQLite-backed SessionManager", () => {
 		await expect(original.lost).resolves.toMatchObject({ reason: "storage" });
 	});
 
-	it("preserves complete parent references across stores", async () => {
+	it("preserves complete parent references across stores, and imports a snapshot as lineage", async () => {
 		const first = fixture();
 		const second = fixture();
 		const parent = await own(SessionManager.create(first.cwd, first.sessionDir));
-		await parent.logWriter.appendMessage({ role: "user", content: "parent", timestamp: Date.now() });
+		const messageId = await parent.logWriter.appendMessage({
+			role: "user",
+			content: "parent",
+			timestamp: Date.now(),
+		});
 		const child = await own(SessionManager.forkFrom(parent.getSessionRef()!, second.cwd, second.sessionDir));
 		const childInfo = (await SessionManager.list(second.cwd, second.sessionDir))[0]!;
 		expect(childInfo.parentSessionRef).toEqual(parent.getSessionRef());
@@ -506,7 +510,10 @@ describe("SQLite-backed SessionManager", () => {
 		const snapshot = await SessionManager.exportJsonlSnapshot(childInfo.ref, snapshotPath);
 		expect(await SessionManager.delete(childInfo.ref, snapshot.lastOrdinal)).toBe(true);
 		const restored = await own(SessionManager.importFromJsonl(snapshotPath, second.cwd, second.sessionDir));
-		expect(restored.getHeader()?.parentSession).toEqual(parent.getSessionRef());
+		// The snapshot's parent locator is not carried: the import's lineage is the snapshot itself.
+		expect(restored.getHeader()?.parentSession).toBeUndefined();
+		expect(restored.getSessionId()).not.toBe(childInfo.id);
+		expect(restored.getForkedFrom()).toEqual({ sessionId: childInfo.id, entryId: messageId });
 	});
 
 	it("keeps another session's manager usable when reconciliation replaces a same-store lease", async () => {

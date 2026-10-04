@@ -27,10 +27,7 @@ export const PRODUCT_SESSION_ENTRY_TYPES = {
 	),
 } as const;
 
-/**
- * Every entry type a session log stores, keyed by `type`. Fork lineage
- * (`forked_from`) joins once forks write it.
- */
+/** Every entry type a session log stores, keyed by `type`. */
 export const SESSION_ENTRY_TYPES = {
 	message: CORE_LOG_ENTRY_TYPES.message,
 	client_input_receipt: CORE_LOG_ENTRY_TYPES.client_input_receipt,
@@ -48,5 +45,6 @@ export const SESSION_ENTRY_TYPES = {
 	session_info: CORE_LOG_ENTRY_TYPES.session_info,
 	leaf: CORE_LOG_ENTRY_TYPES.leaf,
 	subagent_spawn: CORE_LOG_ENTRY_TYPES.subagent_spawn,
+	forked_from: CORE_LOG_ENTRY_TYPES.forked_from,
 	...PRODUCT_SESSION_ENTRY_TYPES,
 } as const;

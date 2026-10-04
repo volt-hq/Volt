@@ -50,7 +50,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	THINKING_FAST_MODE_SLASH_COMMAND,
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
-	{ name: "import", description: "Import and resume a session from a JSONL file" },
+	{ name: "import", description: "Import a JSONL snapshot as a new session" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
 	SESSION_RENAME_SLASH_COMMAND,

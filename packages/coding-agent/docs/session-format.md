@@ -71,8 +71,8 @@ These records do not grant authority through portable JSONL snapshots.
 
 For explicit interchange:
 
-- `SessionManager.importFromJsonl(path, ...)` imports a snapshot into SQLite.
-- CLI path arguments to `--session` and `--fork` perform the same one-time import.
+- `SessionManager.importFromJsonl(path, ...)` imports a snapshot into SQLite as a new session (see [ForkedFromEntry](#forkedfromentry-host-only)).
+- CLI path arguments to `--session` and `--fork`, and `/import`, perform the same one-time import.
 - `SessionManager.exportJsonlSnapshot(ref, outputPath)` writes a portable snapshot and resolves with the ordinal it exported through.
 
 Delete sessions through `/resume` or `SessionManager.delete(ref)`. When the `trash` CLI is available, `/resume` exports a JSONL snapshot to trash before deleting the SQLite record.
@@ -81,7 +81,9 @@ Delete sessions through `/resume` or `SessionManager.delete(ref)`. When the `tra
 
 The current header has `version: 5` for session entries and `snapshotVersion: 1` for the interchange envelope. Import requires both exact values and rejects unmarked or older JSONL.
 
-A snapshot contains the header, then the session's public entries with contiguous ordinals starting at 1, then exactly one final `leaf` entry that records the active leaf. Malformed or truncated final lines are rejected. Client-input records, starting Git context, PR review bindings, subagent links, and transport-owned `clientMessageId` values are never accepted as interchange data. Import appends the public entries to a new log, which assigns their ordinals again.
+A snapshot contains the header, then the session's public entries with contiguous ordinals starting at 1, then exactly one final `leaf` entry that records the active leaf. Malformed or truncated final lines are rejected. Client-input records, starting Git context, PR review bindings, subagent links, fork lineage, and transport-owned `clientMessageId` values are never accepted as interchange data.
+
+Import creates a session with a new ID, unless `options.id` (`--session-id` with `--fork`) names one. Its log is a fork of the snapshot at its active leaf: a `forked_from` entry naming the snapshot's session ID and leaf, then the snapshot's active branch with ordinals assigned again, then its labels. Other branches of the snapshot are not imported.
 
 ## Source Files
 
@@ -290,6 +292,7 @@ A public entry's parent is always a public entry. A host entry's `parentId` is t
 | `client_input_queued` | host | Queued delivery of a client input |
 | `client_input_state` | host | Client input state change |
 | `subagent_spawn` | host | Durable subagent spawn edge |
+| `forked_from` | host | Lineage of a forked, cloned, or imported session; always the first entry |
 | `session_start_git_context` | host | First Git observation (coding-agent product type) |
 | `pr_review_binding` | host | PR checkout a review session is bound to (coding-agent product type) |
 
@@ -303,13 +306,13 @@ The first line of an exported snapshot is metadata only and is not part of the t
 {"type":"session","version":5,"snapshotVersion":1,"id":"uuid","timestamp":"2026-08-31T14:00:00.000Z","cwd":"/path/to/project"}
 ```
 
-A snapshot exported from a session with a persisted parent carries the complete host-local store locator needed to restore that relationship. `parentSessionDirectory` can identify the parent session's active SQLite store directory:
+A snapshot exported from a session with a persisted parent carries the complete host-local store locator of that parent. `parentSessionDirectory` can identify the parent session's active SQLite store directory:
 
 ```json
 {"type":"session","version":5,"snapshotVersion":1,"id":"uuid","timestamp":"2026-08-31T14:00:00.000Z","cwd":"/path/to/project","parentSessionDirectory":"/path/to/parent/store","parentStoreId":"store-uuid","parentSessionId":"parent-uuid","parentSessionGeneration":"parent-generation-uuid"}
 ```
 
-A subagent session's header also carries `"origin":"subagent"`. Every snapshot header includes the session `cwd`, and a parent locator can include another host path. Treat snapshots as sensitive local interchange artifacts. These store locators are accepted only during local snapshot import and never cross the remote RPC surface.
+A subagent session's header also carries `"origin":"subagent"`. Every snapshot header includes the session `cwd`, and a parent locator can include another host path. Treat snapshots as sensitive local interchange artifacts. Import validates a parent locator but does not carry it into the imported session, whose lineage names the snapshot instead; locators never cross the remote RPC surface.
 
 ### SessionMessageEntry
 
@@ -482,6 +485,16 @@ When a session opens, accepted inputs with a queued delivery are replayed in adm
 
 The durable edge to a subagent child session started by a `subagent` tool call. It records `toolCallId`, `subagentId`, `agent`, `childSessionId`, the child's `childSessionRef` when it is persisted, and the `requestKey` of the spawn request. The edge is settled once the tool call has a persisted result produced by the tool itself.
 
+### ForkedFromEntry (host-only)
+
+The first entry of a session created by fork, clone, or import, at ordinal 1 with `parentId: null`. `sessionId` is the source session, and `entryId` is the source entry the copied branch ends at, or `null` when the copied branch is empty (a fork before the first message, or an import of a snapshot with no active leaf).
+
+```json
+{"type":"forked_from","id":"f0e1d2c3","parentId":null,"timestamp":"2026-10-03T12:00:00.000Z","ordinal":1,"sessionId":"source-uuid","entryId":"b2c3d4e5"}
+```
+
+The copied branch follows it in the same commit: the public entries from the root to `entryId`, keeping their IDs, each with its `parentId` relinked to the copied entry before it (the first to `null`), ordinals assigned again, and client input identities dropped. Label entries are not copied as such. A `label` entry follows for each copied entry with a label. The session never reads its source, so it stays readable after the source is deleted. A log holds at most one lineage entry, and only at ordinal 1. `SessionManager.getForkedFrom()` returns `{ sessionId, entryId }`. The listing's `parentSessionRef` still records a persisted fork's or clone's source, so a parent can be found across stores; an import has none.
+
 ### SessionStartGitContextEntry (host-only)
 
 A newly created current-format session records its first **definitive** path-free
@@ -607,9 +620,9 @@ Persisted factories and store queries are asynchronous. `inMemory()` remains syn
 - `await SessionManager.findContinuation(cwd, sessionDir?)` - Find that session's reference without opening it.
 - `SessionManager.inMemory(cwd?, options?)` - Create a session without persistence.
 - `await SessionManager.openInMemory(log, cwd?)` - Open an in-memory session over an existing `ConversationLog`.
-- `await SessionManager.createBranched(source, leafId)` - Create a session holding the branch from the root to `leafId` of `source`; persisted beside a persisted source, which becomes its parent.
-- `await SessionManager.forkFrom(sourceRef, targetCwd, sessionDir?, options?)` - Copy a stored session into a new persisted session.
-- `await SessionManager.importFromJsonl(inputPath, targetCwd?, sessionDir?, options?)` - Import one JSONL snapshot.
+- `await SessionManager.createBranched(source, leafId)` - Create a session holding the branch from the root to `leafId` of `source` (`null` for an empty branch) after its [lineage](#forkedfromentry-host-only); persisted beside a persisted source, which becomes its parent.
+- `await SessionManager.forkFrom(sourceRef, targetCwd, sessionDir?, options?)` - Copy a stored session's active branch into a new persisted session after its lineage. `options` takes `id` and `origin`.
+- `await SessionManager.importFromJsonl(inputPath, targetCwd?, sessionDir?, options?)` - Import one JSONL snapshot as a new session; `options.id` names it, otherwise it gets a new ID.
 - `await SessionManager.exportJsonlSnapshot(ref, outputPath)` - Export one JSONL snapshot; resolves with `{ lastOrdinal }`.
 - `await SessionManager.delete(ref, expectedOrdinal?)` - Delete a persisted session. Takes its lock, and refuses when the session has moved past `expectedOrdinal`.
 
@@ -651,6 +664,7 @@ Tree reads return public entries only.
 - `getCwd()`, `getSessionDir()`, `getSessionId()`
 - `getSessionRef()` - Current persisted reference, or `undefined` in memory.
 - `isPersisted()` - Whether the session uses SQLite persistence.
+- `getForkedFrom()` - The source session and entry of a forked, cloned, or imported session, or `undefined`.
 - `getStartingGitContext()`, `getPrReviewBinding()`, `getSubagentSpawnEntries()`, `getSessionEntrySummary()`
 
 ### Writing

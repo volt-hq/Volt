@@ -489,6 +489,13 @@ function parseSessionEntry(
 				}
 			}
 			break;
+		case "forked_from":
+			// Lineage is the first entry of its log: a root at ordinal 1.
+			assertValidSessionIdValue(entry.sessionId, "$.sessionId");
+			if (entry.entryId !== null) idValue(entry.entryId, "$.entryId");
+			if (entry.parentId !== null) fail("$.parentId", "lineage must be a root entry");
+			if (mode === "persisted" && entry.ordinal !== 1) fail("$.ordinal", "lineage must be the first entry");
+			break;
 		default:
 			fail("$.type", `unsupported entry type ${JSON.stringify(type)}`);
 	}

@@ -1666,7 +1666,8 @@ describe("durable client input idempotency", () => {
 		expect(fork.getClientInput("source-queued")).toBeUndefined();
 		expect(clientInputRecovery(fork.getConversationState()).records).toEqual([]);
 		const forkSnapshot = await loadPersistedSessionSnapshot(fork);
-		expect(forkSnapshot.entries).toEqual([]);
+		expect(forkSnapshot.entries.map((entry) => entry.type)).toEqual(["forked_from"]);
+		expect(fork.getForkedFrom()).toEqual({ sessionId: source.getSessionId(), entryId: null });
 		expect(forkSnapshot.clientInputs).toEqual([]);
 	});
 

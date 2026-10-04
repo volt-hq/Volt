@@ -235,12 +235,21 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		const context = manager.getConversationState().context;
 
 		expect.soft(runtime.session.sessionRef).toBeUndefined();
+		expect
+			.soft(manager.getForkedFrom())
+			.toEqual({ sessionId: "in-memory-canonical-import", entryId: "in-memory-displayed" });
+		// The branch keeps its ids; its label is written again after it, with its timestamp.
 		expect.soft(importedEntries.map((entry) => [entry.id, entry.timestamp])).toEqual([
 			["in-memory-root", rootTimestamp],
-			["in-memory-label", labelTimestamp],
 			["in-memory-displayed", displayedTimestamp],
 		]);
-		expect.soft(manager.getLeafId()).toBe("in-memory-displayed");
+		expect.soft(manager.getLeafEntry()).toMatchObject({
+			type: "label",
+			parentId: "in-memory-displayed",
+			timestamp: labelTimestamp,
+			targetId: "in-memory-root",
+			label: "in-memory checkpoint",
+		});
 		expect.soft(rootEntry && manager.getLabel(rootEntry.id)).toBe("in-memory checkpoint");
 		expect.soft(rootNode?.label).toBe("in-memory checkpoint");
 		expect.soft(rootNode?.labelTimestamp).toBe(labelTimestamp);
@@ -397,7 +406,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		]);
 	});
 
-	it("reopens the cleared name, selected branch, leaf, and displayed-message activity time", async () => {
+	it("reopens the cleared name, active branch, leaf, and displayed-message activity time", async () => {
 		const { runtime, cwd, sessionDir, root, modelProvider, modelId } = await createRuntimeFixture();
 		const snapshotPath = join(root, "derived-import.jsonl");
 		const rootTimestamp = "2025-01-01T00:01:00.000Z";
@@ -481,11 +490,12 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 			await SessionManager.list(cwd, sessionDir, undefined, {
 				includeMessageFreeDurable: true,
 			})
-		).find((session) => session.id === "derived-import");
+		).find((session) => session.id === importedRef.sessionId);
 
 		expect.soft(reopened.getSessionName()).toBeUndefined();
 		expect.soft(stored?.name).toBeUndefined();
-		expect.soft(rootNode?.children.map((node) => entryText(node.entry)).sort()).toEqual(["abandoned", "active"]);
+		// An import copies the snapshot's active branch only.
+		expect.soft(rootNode?.children.map((node) => entryText(node.entry))).toEqual(["active"]);
 		expect.soft(reopened.getLeafEntry()).toMatchObject({
 			type: "custom_message",
 			customType: "rfc.displayed",
@@ -502,7 +512,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 			)
 			.toBe(Date.parse(displayedTimestamp));
 		expect.soft(reopened.getSessionEntrySummary()).toEqual({
-			messageCount: 4,
+			messageCount: 3,
 			firstMessage: "root",
 			lastActivityTime: Date.parse(displayedTimestamp),
 		});
@@ -607,11 +617,12 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		expect(injected).toBe(true);
 		expect(importError).toBeInstanceOf(Error);
 
+		// The import's row has a new id; the runtime's own session is the other row.
 		const adoptedRow = (
 			await SessionManager.list(cwd, sessionDir, undefined, {
 				includeMessageFreeDurable: true,
 			})
-		).find((session) => session.id === importedId);
+		).find((session) => session.id !== "runtime-source");
 		expect(adoptedRow).toBeDefined();
 		if (!adoptedRow) throw new Error("Expected the failed import's adopted row to remain");
 		const reopened = await SessionManager.open(adoptedRow.ref);

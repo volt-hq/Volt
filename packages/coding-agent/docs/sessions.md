@@ -17,7 +17,7 @@ volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a n
 
 Use `/session` in interactive mode to see the current store directory, session ID, message count, tokens, and cost.
 
-JSONL is not live storage. It is used only for explicit snapshot import and export; passing a path to `--session` or `--fork` imports a current `snapshotVersion: 1` snapshot into SQLite.
+JSONL is not live storage. It is used only for explicit snapshot import and export; passing a path to `--session` or `--fork` imports a current `snapshotVersion: 1` snapshot into SQLite as a new session (see [Fork Lineage](#fork-lineage)).
 
 Session listing, exact-ID resolution, continuation candidate selection, and remote discovery read materialized summaries without loading transcript entries. Picker search is a deep scan over extracted user, assistant, and displayed custom-message text. It processes one session document at a time, but latency still grows with searchable history and query complexity; JavaScript regex searches have no general runtime bound.
 
@@ -61,6 +61,7 @@ Extensions observe the stop through the aborted `ctx.signal` of their commands a
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
+| `/import <file>` | Import a JSONL snapshot as a new session |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 
@@ -157,6 +158,19 @@ Selecting the root user message resets the leaf to an empty conversation and pla
 
 Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session ID.
 
+### Fork Lineage
+
+A forked, cloned, or imported session does not read its source. Its log starts with a `forked_from` entry that names the source session and the entry the copy ends at, followed by a copy of the source's branch from the root to that entry and the labels on it. The copied entries keep their IDs. Other branches of the source stay only in the source.
+
+| Source | Copied branch | `forked_from` names |
+|--------|---------------|---------------------|
+| `/fork` on a user message | Up to the entry before the message, which goes to the editor | The session and that entry, or no entry when the message is the first entry |
+| `/clone` | Up to the current leaf | The session and its leaf |
+| `--fork <id>` | The source's active branch | The source and its leaf |
+| `/import`, or a path to `--session` or `--fork` | The snapshot's active branch | The snapshot's session ID and leaf |
+
+An imported session gets a new ID. With `--fork <path>`, `--session-id` chooses it instead. A snapshot's parent locator is not carried into the imported session; its lineage names the snapshot.
+
 ## Branch Summaries
 
 When `/tree` switches away from one branch to another, volt can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
@@ -171,6 +185,6 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 ## Session Format
 
-Each session in the SQLite store is a log of entries: messages, model, thinking-level, and Fast mode changes, plan state, labels, compactions, branch summaries, extension entries, and host-only records such as branch moves and queued input. Explicit JSONL snapshots serialize the public session tree for interchange; they are not reopened as live storage.
+Each session in the SQLite store is a log of entries: messages, model, thinking-level, and Fast mode changes, plan state, labels, compactions, branch summaries, extension entries, and host-only records such as branch moves, queued input, and fork lineage. Explicit JSONL snapshots serialize the public session tree for interchange; they are not reopened as live storage.
 
 For the log format, snapshot parsers, and the full `SessionManager` API, see [Session Format](session-format.md).
