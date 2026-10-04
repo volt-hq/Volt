@@ -327,8 +327,9 @@ UnregisterRelay(k) ==
                     disposePending, drainPhase, drainCancelled, grantSettled, pendingAttaches >>
 
 \* beginDaemonAttach "proceed": a provisional attach is now in flight.  Keeps an
-\* otherwise-unowned key alive so it cannot be rekeyed/dropped from under the
-\* attach.  (lease-broker.ts L147-167)
+\* otherwise-unowned key alive so it cannot be dropped from under the attach.
+\* A TUI moving to another session releases one key and acquires another
+\* (ReleaseTui, AcquireUnowned); it never moves a key.  (lease-broker.ts L147-167)
 BeginDaemonAttach(k) ==
     /\ Lease[k] \in {"unowned", "daemon-active", "daemon-detached"}
     /\ pendingAttaches[k] < MaxPending
@@ -407,29 +408,6 @@ RetentionDispose(k) ==
     /\ UNCHANGED << owner, streamCount, relayCount, runtimeStreaming,
                     disposePending, drainPhase, drainCancelled, grantSettled, pendingAttaches >>
 
-\* rekey(ws, old, new) into a genuinely FREE destination.  The refusal branch the
-\* code takes when the destination is occupied (lease-broker.ts L511-526) is
-\* modeled as this action being DISABLED when kNew is live -- an unguarded move
-\* would overwrite kNew and break OwnershipUnique / RuntimeIffDaemon there, which
-\* is exactly why the guard exists (I7).  We model the tui-owned source (the case
-\* with the session_rekeyed_reconnect relay close, L531-534); daemon-state rekey
-\* is a plain relabel that preserves every invariant trivially.
-RekeyMove(kOld, kNew) ==
-    /\ kOld # kNew
-    /\ Lease[kOld] = "tui-owned"
-    /\ ~ disposePending[kOld]
-    /\ Lease[kNew] = "unowned"
-    /\ relayCount[kNew] = 0
-    /\ streamCount[kNew] = 0
-    /\ pendingAttaches[kNew] = 0
-    /\ ~ runtimeEntry[kNew]
-    /\ ~ disposePending[kNew]
-    /\ Lease'      = [Lease      EXCEPT ![kOld] = "unowned",   ![kNew] = "tui-owned"]
-    /\ owner'      = [owner      EXCEPT ![kOld] = NoTUI,       ![kNew] = owner[kOld]]
-    /\ relayCount' = [relayCount EXCEPT ![kOld] = 0,           ![kNew] = 0]
-    /\ UNCHANGED << streamCount, runtimeStreaming, runtimeEntry, disposePending,
-                    drainPhase, drainCancelled, grantSettled, pendingAttaches >>
-
 -----------------------------------------------------------------------------
 Next ==
     \E k \in Keys :
@@ -455,7 +433,6 @@ Next ==
         \/ RuntimeStartTurn(k)
         \/ RuntimeEndTurn(k)
         \/ RetentionDispose(k)
-        \/ \E kNew \in Keys : RekeyMove(k, kNew)
 
 -----------------------------------------------------------------------------
 (* Fairness: a started drain must make progress, so the two drain pumps get     *)

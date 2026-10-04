@@ -191,8 +191,8 @@ It does **not** prove:
 
 ## Build order for the remaining modules
 
-`LeaseBroker` first (done) — it's the spine, and it mints the close reasons
-(`lease_transferred`, `session_rekeyed_reconnect`) the others consume.
+`LeaseBroker` first (done) — it's the spine, and it mints the close reason
+(`lease_transferred`) the others consume.
 Then `RelayViewer` (shares the connection-drop trigger; where "lost turn" and
 "stuck drain" actually manifest) → `SessionTarget` (small, high value: the
 wrong-pin class) → `ClientAuth` (self-contained, security-critical) → `ClientConn`

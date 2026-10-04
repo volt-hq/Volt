@@ -54,9 +54,6 @@ function createHarness() {
 		commitTuiLeaseHandoff: () => {},
 		cancelTuiLeaseHandoff: () => {},
 		releaseTuiLease: () => {},
-		prepareTuiLeaseRekey: () => {},
-		commitTuiLeaseRekey: () => {},
-		rollbackTuiLeaseRekey: () => {},
 		onDrainEnded: (record, _viewerFeedId, reason) => {
 			drainEnded.push({ key: key(record.workspaceName, record.sessionId), reason });
 		},

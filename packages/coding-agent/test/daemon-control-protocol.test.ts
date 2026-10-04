@@ -50,16 +50,6 @@ describe("control protocol framing", () => {
 				reason: "workspace_unregistered",
 			},
 			{
-				type: "lease_rekey_prepare",
-				id: "5",
-				workspaceName: "volt",
-				oldSessionId: "s-1",
-				newSessionId: "s-2",
-			},
-			{ type: "lease_rekey_commit", id: "5a", transactionId: "tx-1" },
-			{ type: "lease_rekey_rollback", id: "5b", transactionId: "tx-1" },
-			{ type: "lease_rekey_dispose", id: "5c", transactionId: "tx-1" },
-			{
 				type: "work_observe",
 				id: "5d",
 				workspaceName: "volt",
@@ -135,7 +125,6 @@ describe("control protocol framing", () => {
 			{ type: "lease_granted", id: "3", workspaceName: "volt", sessionId: "s-1", handoff: "warm" },
 			{ type: "lease_pending", id: "4", viewerFeedId: "vf-1" },
 			{ type: "lease_denied", id: "5", reason: "held_by_tui" },
-			{ type: "lease_rekey_prepared", id: "5a", transactionId: "tx-1" },
 			{
 				type: "status_result",
 				id: "6",
@@ -249,8 +238,25 @@ describe("control protocol framing", () => {
 		}
 	});
 
-	it("rejects a prepared-rekey response without its transaction id", () => {
-		expect(isControlResponse({ type: "lease_rekey_prepared", id: "5a" })).toBe(false);
+	it("rejects the removed lease rekey messages", () => {
+		// A TUI moving to another session releases one lease and acquires the other instead.
+		for (const type of ["lease_rekey_prepare", "lease_rekey_commit", "lease_rekey_rollback", "lease_rekey_dispose"]) {
+			expect(
+				isControlRequest({
+					type,
+					id: "5",
+					workspaceName: "volt",
+					oldSessionId: "s-1",
+					newSessionId: "s-2",
+					transactionId: "tx-1",
+				}),
+				type,
+			).toBe(false);
+		}
+		expect(isControlResponse({ type: "lease_rekey_prepared", id: "5a", transactionId: "tx-1" })).toBe(false);
+		expect(
+			isControlRequest({ type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1", reason: "rekey" }),
+		).toBe(false);
 	});
 
 	it("rejects lease release without a recognized reason", () => {

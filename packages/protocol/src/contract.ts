@@ -82,6 +82,7 @@ import {
 	RpcModelsChangedEventSchema,
 	RpcPendingHostActionsResponseSchema,
 	RpcPromptCacheChangedEventSchema,
+	RpcRemoteTerminalEventSchema,
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
@@ -386,6 +387,7 @@ export const RpcServerEventSchema = Type.Union([
 	RpcPromptCacheChangedEventSchema,
 	RpcUiActionStateChangedEventSchema,
 	RpcPlanningStateChangedEventSchema,
+	RpcRemoteTerminalEventSchema,
 ]);
 
 // ============================================================================
@@ -605,6 +607,7 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcSubagentEndEvent: RpcSubagentEndEventSchema,
 	RpcSubagentDisposedEvent: RpcSubagentDisposedEventSchema,
 	RpcModelsChangedEvent: RpcModelsChangedEventSchema,
+	RpcRemoteTerminalEvent: RpcRemoteTerminalEventSchema,
 
 	// Response bodies without another home
 	RpcSessionStats: RpcSessionStatsSchema,

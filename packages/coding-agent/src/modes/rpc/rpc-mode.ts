@@ -16,7 +16,7 @@ import * as crypto from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
+import type { AgentSessionRuntime, RuntimeClientDetachment } from "../../core/agent-session-runtime.ts";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -198,6 +198,18 @@ export interface RpcModeOptions {
 	 * through a desktop TUI attaches without it: dialogs and status stay there.
 	 */
 	extensionUi?: boolean;
+	/**
+	 * Defaults to true. Whether this client takes the session's host-action
+	 * requests (approvals). A stream relayed through a desktop TUI leaves them
+	 * with the TUI, which keeps answering them.
+	 */
+	hostActions?: boolean;
+	/**
+	 * The final frame for a redirect view's client that left its conversation
+	 * (see `AgentSessionRuntime.onClientDetached`): after the response of the
+	 * command that redirected it, the stream ends with this frame.
+	 */
+	detachedTerminal?: (detachment: RuntimeClientDetachment) => object | undefined;
 	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
 	requireRemoteSafeUiActions?: boolean;
 	/** Remote host callback for registering platform push notification targets. */
@@ -590,6 +602,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
 	const requireRemoteSafeUiActions = options.requireRemoteSafeUiActions ?? false;
 	const showsExtensionUi = options.extensionUi ?? true;
+	const takesHostActions = options.hostActions ?? true;
+	/** Set once a redirect view's client left its conversation: the stream only writes its final frame. */
+	let clientDetached = false;
 	/** This client's identity on the session's extensions; its commands run in its client scope. */
 	const extensionClientId = crypto.randomUUID();
 	const shouldRestoreStdout = !options.transport && !shouldExitProcess;
@@ -736,6 +751,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let hasBoundConversationSession = false;
 
 	const setSessionHostInteraction = (targetSession: AgentSession): void => {
+		if (!takesHostActions) return;
 		const sessionWithHostInteraction = targetSession as {
 			setHostInteraction?: (hostInteraction: HostInteraction) => void;
 		};
@@ -989,10 +1005,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		},
 	});
 
-	// When a phone relays through a running TUI the SAME runtimeHost is shared and
-	// survives this mode (shouldDisposeRuntimeOnClose === false). Capture the TUI's
-	// own rebind handler so it can be restored on exit; otherwise the TUI's session
-	// changes would keep running this RPC-mode handler after the phone disconnects.
+	// A runtime shared with another host survives this mode
+	// (shouldDisposeRuntimeOnClose === false). Capture the host's own rebind
+	// handler so it can be restored on exit; otherwise the host's session changes
+	// would keep running this RPC-mode handler after the client disconnects.
 	const previousRebindSession = runtimeHost.getRebindSession?.();
 	const detachSessionWillProject = runtimeHost.subscribeSessionWillProject?.(() => {
 		retireConversationControlCapabilities();
@@ -1005,7 +1021,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			await rebindSession();
 		});
 	}
+	let stopObservingClientDetachment = (): void => {};
 	const restoreRebindSession = (): void => {
+		stopObservingClientDetachment();
 		detachSessionReplacement?.();
 		detachSessionWillProject?.();
 		detachOrderedAuthorityChanges?.();
@@ -1033,6 +1051,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	};
 
 	const rebindSession = async (): Promise<void> => {
+		// A client redirected elsewhere stays bound to its conversation until its stream ends.
+		if (clientDetached) return;
 		unsubscribe?.();
 		unsubscribe = undefined;
 		// Correlated control replies are capabilities over the conversation state
@@ -1700,7 +1720,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	};
 
 	const handleQueuedParsedInput = async (parsed: unknown): Promise<void> => {
-		if (shuttingDown) {
+		// Input queued behind the command that moved a redirected client never reaches its old conversation.
+		if (shuttingDown || clientDetached) {
 			return;
 		}
 		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
@@ -1826,6 +1847,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				return;
 			}
 			void shutdown().catch(() => {});
+		}) ?? (() => {});
+
+	// A redirect view's client left its conversation, redirected by a command or
+	// because the conversation closed. The command's response goes first; the
+	// stream then ends with the host's final frame.
+	stopObservingClientDetachment =
+		runtimeHost.onClientDetached?.((detachment) => {
+			if (shuttingDown || clientDetached) return;
+			clientDetached = true;
+			const terminal = options.detachedTerminal?.(detachment);
+			const queued = enqueueInputTask(async () => {
+				if (terminal && !shuttingDown) {
+					output(terminal);
+					await waitForTransportBackpressure();
+				}
+				await shutdown();
+			});
+			if (!queued) void shutdown().catch(() => {});
 		}) ?? (() => {});
 
 	// A runtime this RPC host owns ends when its session loses its log; a host

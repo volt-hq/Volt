@@ -36,7 +36,6 @@ export type LeaseReleaseReason =
 	| "quit"
 	| "switch"
 	| "connection_lost"
-	| "rekey"
 	| "shutdown"
 	| "retention_expired"
 	| "workspace_unregistered";
@@ -112,10 +111,6 @@ export type ControlRequest =
 			sessionId: string;
 			reason: LeaseReleaseReason;
 	  }
-	| { type: "lease_rekey_prepare"; id: string; workspaceName: string; oldSessionId: string; newSessionId: string }
-	| { type: "lease_rekey_commit"; id: string; transactionId: string }
-	| { type: "lease_rekey_rollback"; id: string; transactionId: string }
-	| { type: "lease_rekey_dispose"; id: string; transactionId: string }
 	| {
 			type: "work_observe";
 			id: string;
@@ -350,7 +345,6 @@ export function isRemoteTransportPairingAvailable(health: RemoteTransportHealth 
 export type ControlResponse =
 	| { type: "ok"; id: string }
 	| { type: "error"; id: string; code: string; message: string }
-	| { type: "lease_rekey_prepared"; id: string; transactionId: string }
 	| { type: "lease_granted"; id: string; workspaceName: string; sessionId: string; handoff: "cold" | "warm" | "none" }
 	| { type: "lease_pending"; id: string; viewerFeedId: string }
 	// lease_pending is provisional; the terminal response for the same id arrives
@@ -425,7 +419,6 @@ export type RelayCloseReason =
 	| "phone_disconnected"
 	| "tui_disconnected"
 	| "lease_transferred"
-	| "session_rekeyed_reconnect"
 	| "workspace_unregistered"
 	| "host_shutdown"
 	| "error";
@@ -633,7 +626,6 @@ function isLeaseReleaseReason(value: unknown): value is LeaseReleaseReason {
 		value === "quit" ||
 		value === "switch" ||
 		value === "connection_lost" ||
-		value === "rekey" ||
 		value === "shutdown" ||
 		value === "retention_expired" ||
 		value === "workspace_unregistered"
@@ -763,16 +755,6 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 				typeof value.sessionId === "string" &&
 				isLeaseReleaseReason(value.reason)
 			);
-		case "lease_rekey_prepare":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.oldSessionId === "string" &&
-				typeof value.newSessionId === "string"
-			);
-		case "lease_rekey_commit":
-		case "lease_rekey_rollback":
-		case "lease_rekey_dispose":
-			return typeof value.transactionId === "string";
 		case "work_observe": {
 			if (
 				typeof value.workspaceName !== "string" ||
@@ -907,8 +889,6 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "client_access_updated":
 		case "pair_started":
 			return true;
-		case "lease_rekey_prepared":
-			return typeof value.transactionId === "string";
 		case "status_result":
 			return (
 				isRemoteTransportHealth(value.remoteTransport) &&

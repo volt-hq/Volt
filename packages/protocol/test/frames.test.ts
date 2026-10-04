@@ -23,6 +23,43 @@ const ASSISTANT = {
 };
 
 describe("wire frames", () => {
+	it("accepts the remote_terminal frames that end a phone stream on purpose", () => {
+		expect(
+			Check(RpcServerEventSchema, {
+				type: "remote_terminal",
+				reason: "lease_transferred",
+				workspace: "volt",
+				sessionId: "s-1",
+				hostNodeId: "a".repeat(64),
+			}),
+		).toBe(true);
+		expect(
+			Check(RpcServerEventSchema, {
+				type: "remote_terminal",
+				reason: "conversation_moved",
+				workspace: "volt",
+				sessionId: "s-1",
+				targetSessionId: "s-2",
+			}),
+		).toBe(true);
+		// A redirect names where to reconnect; the removed rekey reason is gone.
+		expect(
+			Check(RpcServerEventSchema, {
+				type: "remote_terminal",
+				reason: "conversation_moved",
+				workspace: "volt",
+				sessionId: "s-1",
+			}),
+		).toBe(false);
+		expect(
+			Check(RpcServerEventSchema, {
+				type: "remote_terminal",
+				reason: "session_rekeyed_reconnect",
+				workspace: "volt",
+			}),
+		).toBe(false);
+	});
+
 	it("accepts representative client commands and control messages", () => {
 		for (const command of [
 			{ type: "prompt", id: "1", clientMessageId: "c-1", message: "hello", streamingBehavior: "followUp" },

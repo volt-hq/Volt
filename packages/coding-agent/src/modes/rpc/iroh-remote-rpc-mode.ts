@@ -68,10 +68,13 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
 	/**
-	 * Relayed streams: attach without an extension UI surface (dialogs and status
-	 * stay in the owning TUI) and drop any extension_ui_request frame.
+	 * Relayed streams: attach without an extension UI surface (dialogs, status,
+	 * and host-action approvals stay in the owning TUI) and drop any
+	 * extension_ui_request frame.
 	 */
 	suppressExtensionUiRequests?: boolean;
+	/** The final frame for a redirect view's client that left its conversation. */
+	detachedTerminal?: RpcModeOptions["detachedTerminal"];
 	workspaceName?: string;
 	workspacePath: string;
 	/** Extra roots (worktree parent checkout, worktrees root) redacted on every outbound frame. */
@@ -414,6 +417,8 @@ export function runIrohRemoteRpcMode(
 		extensionUi:
 			options.suppressExtensionUiRequests !== true &&
 			hasIrohRemoteRpcCapability(options.rpcGrant, "conversation.control.v1"),
+		hostActions: options.suppressExtensionUiRequests !== true,
+		...(options.detachedTerminal === undefined ? {} : { detachedTerminal: options.detachedTerminal }),
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onReady: options.onReady,
 		onSessionChanged: options.onSessionChanged,
@@ -473,8 +478,13 @@ interface IrohRemoteActiveNotificationAttachment {
 	writeJsonl(notification: IrohRemoteNotificationRequest): Promise<void>;
 }
 
-const notificationReconcilersByRuntime = new WeakMap<
-	AgentSessionRuntime,
+/**
+ * Delivery history per session and client, so one client's streams to a session
+ * share it whichever runtime view serves them (a relaying TUI serves each
+ * stream through a view of its own).
+ */
+const notificationReconcilersBySession = new WeakMap<
+	AgentSessionRuntime["session"],
 	Map<IrohRemoteNotificationClientKey, IrohRemoteNotificationDeliveryReconciler>
 >();
 
@@ -624,10 +634,10 @@ function attachIrohRemoteNotificationDelivery(
 	runtimeHost: AgentSessionRuntime,
 	options: IrohRemoteNotificationDeliveryAttachmentOptions,
 ): IrohRemoteNotificationDeliveryAttachment {
-	let reconcilers = notificationReconcilersByRuntime.get(runtimeHost);
+	let reconcilers = notificationReconcilersBySession.get(runtimeHost.session);
 	if (!reconcilers) {
 		reconcilers = new Map();
-		notificationReconcilersByRuntime.set(runtimeHost, reconcilers);
+		notificationReconcilersBySession.set(runtimeHost.session, reconcilers);
 	}
 	const key = options.clientNodeId ?? anonymousNotificationClient;
 	let reconciler = reconcilers.get(key);

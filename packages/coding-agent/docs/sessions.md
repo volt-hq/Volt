@@ -37,7 +37,7 @@ Quit the session in the other process, or switch that process to another session
 
 Listing and searching read store summaries, and exporting and forking from a session open it read-only: none of them take the lock, so they keep working while the session is open elsewhere. SDK code reads a session the same way with `SessionManager.openReadOnly(ref)`; every write through a read-only manager throws. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
 
-When the interactive TUI opens a session that the daemon is hosting for a phone, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI prints a waiting line until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session. If another TUI has the session open, it refuses with a message.
+When the interactive TUI opens a session that the daemon is hosting for a phone, at startup or with `/resume`, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI waits until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session, leaving the TUI where it was. If another TUI has the session open, it refuses with a message. The session the TUI leaves goes back to the daemon once it closed, so phones on it keep using it.
 
 ### When a Session Stops
 

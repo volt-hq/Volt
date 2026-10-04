@@ -243,6 +243,37 @@ export const RpcAgentStartEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * The final frame of a phone conversation stream the host ends on purpose;
+ * the stream closes after it. `lease_transferred`: another host process
+ * serves the session now; reconnect to the same session. `conversation_moved`:
+ * a session command moved this client to `targetSessionId` after its response;
+ * reconnect with `target: "session"` and that id.
+ */
+export const RpcRemoteTerminalEventSchema = Type.Union([
+	Type.Object(
+		{
+			type: Type.Literal("remote_terminal"),
+			reason: Type.Literal("lease_transferred"),
+			workspace: Type.String(),
+			sessionId: Type.Optional(Type.String()),
+			hostNodeId: Type.Optional(Type.String()),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			type: Type.Literal("remote_terminal"),
+			reason: Type.Literal("conversation_moved"),
+			workspace: Type.String(),
+			sessionId: Type.String(),
+			targetSessionId: Type.String(),
+			hostNodeId: Type.Optional(Type.String()),
+		},
+		{ additionalProperties: false },
+	),
+]);
+
 /** Model catalog changed; clients re-fetch get_available_models. */
 export const RpcModelsChangedEventSchema = Type.Object(
 	{ type: Type.Literal("models_changed") },

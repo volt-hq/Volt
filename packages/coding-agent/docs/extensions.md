@@ -1168,7 +1168,7 @@ Options:
 
 Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
 - `{ cancelled: true }`: the session did not change, because an extension cancelled it or no client handles session changes. No `withSession` callback ran.
-- `{ cancelled: false, sessionId, seeded }`: `sessionId` is the session the invoking client is on now; for `switchSession()` to the current session it is the current one. `seeded` is `true` only when a requested `withSession` callback ran to completion. `seeded: false` after passing `withSession` means the callback did not run: either the switch was a no-op targeting the current session (`switchSession` only), or the callback was skipped because recovered durable client input failed to replay. Check `seeded` before assuming your seed landed. Anything `setup` wrote is in the new session either way.
+- `{ cancelled: false, sessionId, seeded }`: `sessionId` is the session the invoking client is on now; for `switchSession()` to the current session it is the current one. `seeded` is `true` only when a requested `withSession` callback ran to completion. `seeded: false` after passing `withSession` means the callback did not run: the switch was a no-op targeting the current session (`switchSession` only), the callback was skipped because recovered durable client input failed to replay, or the invoking client is a phone relayed through the desktop TUI, whose new session opens in the daemon (see [Clients](#clients)). Check `seeded` before assuming your seed landed. Anything `setup` wrote is in the new session either way.
 
 `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` reject inside a subagent's conversation: a subagent stays in the conversation its parent opened for it.
 
@@ -2399,6 +2399,7 @@ A session's extensions are bound once, by the first client to attach: the TUI, t
 - **UI** (`ctx.ui`) goes to the most recently attached client that shows UI. When a client starts showing UI (it attaches, or a later client leaves), it receives the latest `setStatus`, `setWidget`, and `setTitle` values. A phone relayed through the desktop TUI, or a phone whose access cannot answer dialogs, shows no extension UI: dialogs and status stay with the other clients.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
+- A phone relayed through the desktop TUI changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it write the new session (`setup` runs), and the phone reconnects to it through the daemon, which opens it. The TUI stays on its session, and the source sees `session_before_switch` or `session_before_fork` but no `session_shutdown`. `withSession` cannot run in the TUI's process, so the result reports `seeded: false`.
 
 ### Dialogs
 

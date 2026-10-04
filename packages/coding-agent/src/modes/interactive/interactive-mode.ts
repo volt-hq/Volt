@@ -137,9 +137,15 @@ import {
 	recordReviewFindingOutcome,
 	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
+import type { RpcRemoteTerminalEvent } from "../../core/rpc/types.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
+import {
+	findSessionInfoById,
+	getDefaultSessionDir,
+	SessionManager,
+	type SessionReference,
+} from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
@@ -210,6 +216,7 @@ import { CompactionSummaryMessageComponent } from "./components/compaction-summa
 import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
 import { CustomMessageComponent } from "./components/custom-message.ts";
+import { DaemonLeaseWaitComponent } from "./components/daemon-lease-wait.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
@@ -225,11 +232,14 @@ import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./compon
 import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
 import {
 	type AcquireOutcome,
+	acquireDaemonLease,
 	createDaemonAttach,
 	createDisabledDaemonAttach,
 	createRelayWorkspaceUnregisterRetirement,
 	createTuiRelayAuthorization,
 	type DaemonAttach,
+	DaemonLeaseUnavailableError,
+	type DaemonLeaseWait,
 	type DaemonRelayOffer,
 	type DaemonWorktreeControl,
 	getRelayServingSanitizerOptions,
@@ -353,6 +363,8 @@ const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
+/** How long a lease handover waits for the phones relayed into the session the TUI left to hear where to reconnect. */
+const RELAY_END_TIMEOUT_MS = 2000;
 
 /** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
 function formatElapsedDuration(ms: number): string {
@@ -649,7 +661,15 @@ export class InteractiveMode {
 		if (observation.status !== "definitive") return;
 		void this.daemonAttach.publishGitObservation(this.session.sessionId, observation.gitContext);
 	});
-	private daemonRelayServers = new Set<Promise<void>>();
+	/** Relayed phone conversations this TUI serves, with the session each stays on. */
+	private readonly daemonRelayServers = new Map<Promise<void>, string>();
+	/**
+	 * Lease handovers, in order: once the TUI left a session, its relays end, its
+	 * lease is released, and the lease of the session the TUI shows is acquired.
+	 */
+	private daemonLeaseTail: Promise<void> = Promise.resolve();
+	/** A resume that holds its target's lease while it opens: relay offers for the target wait for it. */
+	private pendingSessionSwitch: { sessionId: string; settled: Promise<void> } | undefined;
 	/** list_sessions cursor state shared across relayed phone conversations. */
 	private readonly relaySessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
 	/**
@@ -658,7 +678,6 @@ export class InteractiveMode {
 	 * served locally reads or writes host state.
 	 */
 	private readonly relayStateManager = new IrohRemoteHostStateManager();
-	private daemonLeaseSessionId: string | undefined;
 	/** This TUI's identity on each session's extensions: it attaches first, so it is their anchor. */
 	private readonly extensionClientId = randomUUID();
 	/** The runtime ended because its session lost its log, and the TUI is exiting. */
@@ -2053,23 +2072,9 @@ export class InteractiveMode {
 		if (!started) await this.daemonAttach.start();
 		const acquireOutcome = await this.acquireCurrentSessionLease();
 		this.bindDaemonWorkObservation(this.session);
-		this.runtimeHost.setPrepareSessionReplacement(async ({ previousSessionId, sessionId, cwd }) => {
-			const rekey = await this.daemonAttach.prepareRekey(previousSessionId, sessionId, cwd);
-			if (!rekey) {
-				return undefined;
-			}
-			return {
-				commit: async () => {
-					await rekey.commit();
-					this.daemonLeaseSessionId = sessionId;
-					this.bindDaemonWorkObservation(this.session);
-				},
-				rollback: () => rekey.rollback(),
-				dispose: async () => {
-					await rekey.dispose();
-					this.daemonLeaseSessionId = undefined;
-				},
-			};
+		// The TUI leaves a session by closing it; the lease follows once it closed.
+		this.runtimeHost.onConversationClosed((sessionId) => {
+			void this.queueDaemonLeaseWork(() => this.handOverDaemonLease(sessionId)).catch(() => undefined);
 		});
 		if (acquireOutcome.kind === "granted" || acquireOutcome.kind === "noop") {
 			// UI subscriptions and the daemon ownership decision are both complete.
@@ -2087,9 +2092,7 @@ export class InteractiveMode {
 		if (this.daemonAttach.connectionState() === "disabled") {
 			return { kind: "noop" };
 		}
-		const sessionId = this.session.sessionId;
-		this.daemonLeaseSessionId = sessionId;
-		const outcome = await this.daemonAttach.acquire(sessionId);
+		const outcome = await this.daemonAttach.acquire(this.session.sessionId, this.sessionManager.getCwd());
 		if (outcome.kind === "denied") {
 			// Multi-TUI is a non-goal: another TUI holds the lease. Phones cannot
 			// reach this session through the daemon until it is released.
@@ -2107,19 +2110,170 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * The TUI left `closedSessionId`, which closed and released its log. The
+	 * phones relayed into it end first, told to reconnect; then its lease is
+	 * released, so the daemon hosts it for them, and the lease of the session
+	 * the TUI shows now is acquired. A quitting TUI releases its lease itself.
+	 */
+	private async handOverDaemonLease(closedSessionId: string): Promise<void> {
+		await this.waitForRelaysToEnd(closedSessionId);
+		if (this.isShuttingDown || this.endingLostSession || this.session.sessionId === closedSessionId) return;
+		await this.daemonAttach.release(closedSessionId, "switch");
+		await this.acquireCurrentSessionLease();
+		this.bindDaemonWorkObservation(this.session);
+	}
+
+	/** Run lease work after the handovers before it, so leases change in order. */
+	private queueDaemonLeaseWork(work: () => Promise<void>): Promise<void> {
+		const queued = this.daemonLeaseTail.then(work);
+		this.daemonLeaseTail = queued.catch(() => undefined);
+		return queued;
+	}
+
+	/** Wait, briefly, for the relays serving `sessionId` to write their final frame and close. */
+	private async waitForRelaysToEnd(sessionId: string): Promise<void> {
+		const servers = [...this.daemonRelayServers].flatMap(([server, served]) =>
+			served === sessionId ? [server] : [],
+		);
+		if (servers.length === 0) return;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, RELAY_END_TIMEOUT_MS);
+			timer.unref?.();
+		});
+		await Promise.race([Promise.allSettled(servers), timeout]);
+		clearTimeout(timer);
+	}
+
+	/**
+	 * Take the lease of a stored session before resuming it: the daemon may host
+	 * it, and granting the lease frees its lock. A pending lease shows the wait
+	 * for the daemon's turn. A session in no registered workspace needs no lease
+	 * (the daemon cannot host it); its workspace is registered once the TUI
+	 * opened it. Resolves `undefined` when the lease was refused or the wait
+	 * cancelled (reported here), else a settle function the caller runs once
+	 * the switch finished: a switch that did not happen hands the lease back and
+	 * points the daemon at the session the TUI still shows.
+	 */
+	private async leaseSessionForSwitch(
+		sessionRef: SessionReference,
+		cwdOverride: string | undefined,
+	): Promise<((switched: boolean) => Promise<void>) | undefined> {
+		const noop = async (): Promise<void> => {};
+		if (this.daemonAttach.connectionState() === "disabled") return noop;
+		const sessionId = sessionRef.sessionId;
+		const cwd = cwdOverride ?? (await findSessionInfoById(sessionRef.sessionDirectory, sessionId))?.cwd;
+		// A session whose cwd is gone has no daemon workspace to lease it in; the
+		// switch asks for a cwd and leases it then.
+		if (cwd === undefined || !fs.existsSync(cwd)) return noop;
+		const settled = Promise.withResolvers<void>();
+		const pending = { sessionId, settled: settled.promise };
+		this.pendingSessionSwitch = pending;
+		const restore = (): Promise<void> =>
+			this.queueDaemonLeaseWork(async () => {
+				await this.daemonAttach.release(sessionId, "switch");
+				await this.acquireCurrentSessionLease();
+			});
+		const finish = (): void => {
+			if (this.pendingSessionSwitch === pending) this.pendingSessionSwitch = undefined;
+			settled.resolve();
+		};
+		let cancelled = false;
+		try {
+			// A handover still running for an earlier move finishes first.
+			await this.daemonLeaseTail;
+			await acquireDaemonLease(this.daemonAttach, sessionId, {
+				cwd,
+				tentative: true,
+				onWaiting: (wait) =>
+					this.showDaemonLeaseWait(sessionId, {
+						abortRemoteTurn: () => wait.abortRemoteTurn(),
+						cancel: () => {
+							cancelled = true;
+							wait.cancel();
+						},
+					}),
+			});
+		} catch (error) {
+			await restore().catch(() => undefined);
+			finish();
+			if (!(error instanceof DaemonLeaseUnavailableError)) throw error;
+			// Cancelling the wait is the user's choice, not a failure.
+			if (cancelled) this.showStatus(error.message);
+			else this.showError(error.message);
+			return undefined;
+		}
+		return async (switched) => {
+			try {
+				// Even without a lease, the attempt pointed the daemon integration at the target.
+				if (!switched && sessionId !== this.session.sessionId) await restore();
+			} finally {
+				finish();
+			}
+		};
+	}
+
+	/**
+	 * Show the wait for the daemon's current turn in a session this TUI is
+	 * opening, in place of the editor. Returns the function that ends it.
+	 */
+	private showDaemonLeaseWait(sessionId: string, wait: DaemonLeaseWait): () => void {
+		const view = new DaemonLeaseWaitComponent(this.ui, sessionId, wait);
+		this.editorContainer.clear();
+		this.editorContainer.addChild(view);
+		this.ui.setFocus(view);
+		this.ui.requestRender();
+		return () => {
+			view.dispose();
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.ui.requestRender();
+		};
+	}
+
+	/**
 	 * Serve a relayed phone conversation from this TUI's in-process runtime
 	 * (§5.6 step 7-9). The daemon has already authenticated the phone and
 	 * resolved the session target; the TUI writes the handshake response itself.
+	 * The phone is a client of the session the TUI shows, through a view of its
+	 * own that stays on it: a session change the phone asks for redirects the
+	 * phone alone (`conversation_moved`), and when the TUI leaves the session the
+	 * phone is told to reconnect (`lease_transferred`), to the daemon then.
 	 */
 	private async serveRelayConversation(offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>): Promise<void> {
+		// A resume holding its target's lease serves the target's phones once it switched.
+		const pendingSwitch = this.pendingSessionSwitch;
+		if (pendingSwitch?.sessionId === offer.sessionId) await pendingSwitch.settled;
+		// An offer for a session this TUI does not show expires; the daemon tells the phone to retry.
+		if (this.isShuttingDown || this.endingLostSession || offer.sessionId !== this.session.sessionId) return;
+		let relayRuntime: AgentSessionRuntime;
+		try {
+			relayRuntime = this.runtimeHost.attachRedirectClient();
+		} catch {
+			// The session is closing: the TUI is leaving it.
+			return;
+		}
 		let opened: OpenedRelay;
 		try {
 			opened = await openRelay();
 		} catch {
+			await relayRuntime.dispose().catch(() => undefined);
 			return;
 		}
+		const conversationSessionId = relayRuntime.session.sessionId;
 		const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
 		const preamble = opened.preamble;
+		const hostNodeId = preamble.hostNodeId;
+		// Serve only the session the daemon authorized the phone for, with the
+		// daemon's identity: the phone verifies the saved host node id in the
+		// handshake response and every notification destination.
+		if (preamble.resolvedTarget.sessionId !== conversationSessionId || hostNodeId === undefined) {
+			relayedStream.close();
+			opened.finished();
+			await relayRuntime.dispose().catch(() => undefined);
+			return;
+		}
 		const handshake = preamble.handshake as {
 			hello: IrohRemoteHello;
 			response: IrohRemoteHandshakeSuccess;
@@ -2131,13 +2285,6 @@ export class InteractiveMode {
 		// Worktree-bound conversations sanitize with the worktree checkout as the
 		// root; the parent checkout and the worktrees root must also redact.
 		const sanitizerOptions = getRelayServingSanitizerOptions(authorizationSubset, getAgentDir());
-
-		// The daemon's identity from the preamble: the phone verifies the saved
-		// host node id in the handshake response and every notification destination.
-		const hostNodeId = preamble.hostNodeId;
-		if (hostNodeId === undefined) {
-			throw new Error("Relay preamble omitted the daemon host node ID");
-		}
 		const responseContext = {
 			hostNodeId,
 			relayMode: preamble.relayMode,
@@ -2160,7 +2307,7 @@ export class InteractiveMode {
 				const handshakeResponse = createIntegratedConversationHandshakeResponse(
 					{ hello: handshake.hello, response: handshake.response },
 					authorization,
-					this.session.sessionId,
+					conversationSessionId,
 					sessionSelection,
 					responseContext,
 					preamble.resolvedTarget.worktreeId,
@@ -2168,17 +2315,11 @@ export class InteractiveMode {
 				);
 				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
 
-				// The relayed runtime's session id can change in place (resume/new/fork
-				// over the same relay). Track the rolling id so each rekey passes the
-				// correct previous id; the immutable offer.sessionId would be stale after
-				// the first change and the daemon's lookup would silently no-op, leaving
-				// the lease keyed on an old session id.
-				let relayedSessionId = offer.sessionId;
 				workspaceUnregisterRetirement = createRelayWorkspaceUnregisterRetirement(
 					this.daemonAttach,
-					() => relayedSessionId,
+					() => conversationSessionId,
 				);
-				await runIrohRemoteRpcMode(this.runtimeHost, {
+				await runIrohRemoteRpcMode(relayRuntime, {
 					rpcGrant,
 					hostNodeId,
 					isRpcIngressOpen: workspaceUnregisterRetirement.isIngressOpen,
@@ -2194,17 +2335,37 @@ export class InteractiveMode {
 						? {}
 						: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 					suppressExtensionUiRequests: true,
+					// Redirected, the phone reconnects to the new session through the
+					// daemon, which hosts it; when the TUI left the session, it
+					// reconnects to the same session.
+					detachedTerminal: (detachment): RpcRemoteTerminalEvent =>
+						detachment.kind === "redirected"
+							? {
+									type: "remote_terminal",
+									reason: "conversation_moved",
+									workspace: authorization.workspace.name,
+									sessionId: conversationSessionId,
+									targetSessionId: detachment.sessionId,
+									hostNodeId,
+								}
+							: {
+									type: "remote_terminal",
+									reason: "lease_transferred",
+									workspace: authorization.workspace.name,
+									sessionId: conversationSessionId,
+									hostNodeId,
+								},
 					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
 					buildConversationSnapshot: createRemoteConversationSnapshotBuilder({
 						authorization,
-						runtime: this.runtimeHost,
+						runtime: relayRuntime,
 					}),
 					projectConversationExternal: createRemoteConversationExternalProjector({
 						authorization,
-						runtime: this.runtimeHost,
+						runtime: relayRuntime,
 					}),
 					onReady: () => {
-						void this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+						void relayRuntime.startRecoveredClientInputs().catch(() => undefined);
 					},
 					onResponseWritten: (response) => workspaceUnregisterRetirement?.onResponseWritten(response),
 					initialInput: handshake.initialInput,
@@ -2212,7 +2373,7 @@ export class InteractiveMode {
 						deliverNotification: (notification) =>
 							this.daemonAttach.relayNotificationDelivery.deliverNotification(
 								authorizationSubset.clientNodeId,
-								relayedSessionId,
+								conversationSessionId,
 								notification,
 							),
 					},
@@ -2224,7 +2385,7 @@ export class InteractiveMode {
 							// the TUI has no host state of its own.
 							const forwarded = await this.daemonAttach.forwardRelayRpc(
 								authorizationSubset.clientNodeId,
-								relayedSessionId,
+								conversationSessionId,
 								rpcCommand,
 							);
 							if (!forwarded) {
@@ -2250,18 +2411,15 @@ export class InteractiveMode {
 								stateManager: this.relayStateManager,
 								sessionListCursors: this.relaySessionListCursors,
 								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-								getConversationBranchEpoch: () => this.runtimeHost.conversationProjectionFeed.branchEpoch,
+								getConversationBranchEpoch: () => relayRuntime.conversationProjectionFeed.branchEpoch,
 								isConversationTranscriptCursorValid: (cursor) =>
-									this.runtimeHost.conversationProjectionFeed.isTranscriptCursorValid(cursor),
+									relayRuntime.conversationProjectionFeed.isTranscriptCursorValid(cursor),
 								registerConversationTranscriptCursor: (cursor) =>
-									this.runtimeHost.conversationProjectionFeed.registerTranscriptCursor(cursor),
+									relayRuntime.conversationProjectionFeed.registerTranscriptCursor(cursor),
 								listRuntimeStates: (workspaceName) => this.daemonAttach.listRuntimeStates(workspaceName),
 							},
-							this.runtimeHost,
+							relayRuntime,
 						);
-					},
-					onSessionChanged: (session) => {
-						relayedSessionId = session.sessionId;
 					},
 				});
 			} catch {
@@ -2270,9 +2428,10 @@ export class InteractiveMode {
 				await workspaceUnregisterRetirement?.finalize();
 				relayedStream.close();
 				opened.finished();
+				await relayRuntime.dispose().catch(() => undefined);
 			}
 		})();
-		this.daemonRelayServers.add(server);
+		this.daemonRelayServers.set(server, conversationSessionId);
 		void server.finally(() => this.daemonRelayServers.delete(server));
 		this.updatePhoneFooterIndicator();
 		await server;
@@ -2308,6 +2467,8 @@ export class InteractiveMode {
 			return;
 		}
 		try {
+			// The phones relayed into the closed session hear where to reconnect first.
+			await this.waitForRelaysToEnd(this.session.sessionId);
 			await this.daemonAttach.release(this.session.sessionId);
 			await this.daemonAttach.dispose();
 		} catch {
@@ -2392,28 +2553,6 @@ export class InteractiveMode {
 		this.readyPlanFocusKey = undefined;
 		this.refreshPlanningUi();
 		this.updateTerminalTitle();
-		await this.reconcileDaemonLease();
-	}
-
-	/**
-	 * Keep the daemon lease pointed at the currently open session. Called after
-	 * every session (re)bind: releases the previous lease and acquires the new
-	 * one when the session id changed (/new, resume, fork, tree navigation).
-	 */
-	private async reconcileDaemonLease(): Promise<void> {
-		if (this.daemonAttach.connectionState() === "disabled") {
-			return;
-		}
-		const sessionId = this.session.sessionId;
-		if (this.daemonLeaseSessionId === sessionId) {
-			return;
-		}
-		const previous = this.daemonLeaseSessionId;
-		this.daemonLeaseSessionId = sessionId;
-		if (previous !== undefined) {
-			await this.daemonAttach.release(previous).catch(() => {});
-		}
-		await this.acquireCurrentSessionLease();
 	}
 
 	/**
@@ -7283,7 +7422,6 @@ export class InteractiveMode {
 			return;
 		}
 		const control: DaemonWorktreeControl = opened.control;
-		let restoreWorktreeContext: (() => void) | undefined;
 		try {
 			let target: { id: string; path: string; branch: string; baseRef?: string } | undefined;
 			if (createRequested) {
@@ -7322,7 +7460,6 @@ export class InteractiveMode {
 			}
 
 			const sessionDir = getDefaultSessionDir(control.workspacePath, agentDir);
-			restoreWorktreeContext = this.daemonAttach.setWorktreeContext(control.workspaceName, target.id);
 			const result = await this.runtimeHost.newSession({
 				cwd: target.path,
 				sessionDir,
@@ -7337,14 +7474,12 @@ export class InteractiveMode {
 				this.showStatus("Worktree session cancelled");
 				return;
 			}
-			restoreWorktreeContext = undefined;
 			this.renderCurrentSessionState();
 			this.showStatus(`New session in worktree ${target.id} (branch ${target.branch}) — ${target.path}`);
 			this.ui.requestRender();
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		} finally {
-			restoreWorktreeContext?.();
 			await control.close().catch(() => {});
 		}
 	}
@@ -7770,11 +7905,27 @@ export class InteractiveMode {
 		}
 		this.statusContainer.clear();
 		const source = this.session;
+		// The target's daemon lease comes first: granting it frees the session's
+		// lock when the daemon hosts it. The lease of the session left behind is
+		// released once that session closed.
+		const switchSession = async (cwdOverride?: string): Promise<SessionIntentResult> => {
+			const settleLease = await this.leaseSessionForSwitch(sessionRef, cwdOverride);
+			if (!settleLease) return { cancelled: true };
+			let switched = false;
+			try {
+				const result = await this.runtimeHost.switchSession(sessionRef, {
+					...(cwdOverride === undefined ? {} : { cwdOverride }),
+					withSession: options?.withSession,
+					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+				});
+				switched = !result.cancelled;
+				return result;
+			} finally {
+				await settleLease(switched || this.session !== source).catch(() => undefined);
+			}
+		};
 		try {
-			const result = await this.runtimeHost.switchSession(sessionRef, {
-				withSession: options?.withSession,
-				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-			});
+			const result = await switchSession();
 			if (result.cancelled) {
 				return result;
 			}
@@ -7796,11 +7947,7 @@ export class InteractiveMode {
 					this.showStatus("Resume cancelled");
 					return { cancelled: true };
 				}
-				const result = await this.runtimeHost.switchSession(sessionRef, {
-					cwdOverride: selectedCwd,
-					withSession: options?.withSession,
-					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-				});
+				const result = await switchSession(selectedCwd);
 				if (result.cancelled) {
 					return result;
 				}

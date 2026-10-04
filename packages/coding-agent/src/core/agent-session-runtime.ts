@@ -100,10 +100,23 @@ export interface AgentSessionNewSessionOptions {
 	 * acknowledgement through the source's own writer here. A failure keeps the
 	 * runtime on the current session and discards the new one.
 	 */
-	beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
+	beforeMove?: (source: HostedConversation) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
 	assertConversationGenerationCurrent?: () => void;
+}
+
+/**
+ * How a redirect view's client left its conversation: redirected to another
+ * conversation by one of its structural intents, or its conversation closed.
+ */
+export type RuntimeClientDetachment =
+	| { readonly kind: "redirected"; readonly sessionId: string }
+	| { readonly kind: "closed" };
+
+/** Marks a runtime as a redirect view: see `AgentSessionRuntime.attachRedirectClient`. */
+interface RedirectView {
+	readonly redirect: true;
 }
 
 function sessionRefsEqual(left: SessionReference, right: SessionReference): boolean {
@@ -167,11 +180,19 @@ type MoveOutcome =
  * Structural operations run one at a time; one admitted for a session that is
  * no longer current fails as stale. A failure after the move committed ends
  * the runtime.
+ *
+ * A redirect view (`attachRedirectClient`) instead stays on its conversation:
+ * its structural operations write the new conversation's log and redirect its
+ * client there, for another host to open.
  */
 export class AgentSessionRuntime {
 	private readonly host: ConversationHost;
 	private current: HostedConversation;
 	private readonly client: HostClient;
+	private readonly redirects: boolean;
+	private readonly clientDetachedListeners = new Set<(detachment: RuntimeClientDetachment) => void>();
+	private clientDetachment: RuntimeClientDetachment | undefined;
+	private stopObservingClose: () => void = () => {};
 	private rebindSession?: (session: AgentSession) => Promise<void>;
 	private prepareSessionReplacement?: (
 		target: AgentSessionReplacementTarget,
@@ -204,8 +225,8 @@ export class AgentSessionRuntime {
 	/** Installed only by a daemon with sibling runtime ownership. */
 	reviewDiscussions?: ReviewDiscussionService;
 
-	/** Over a conversation the host opened. */
-	constructor(host: ConversationHost, conversation: HostedConversation);
+	/** Over a conversation the host opened; a redirect view when `view` says so. */
+	constructor(host: ConversationHost, conversation: HostedConversation, view?: RedirectView);
 	/** Over a session created outside a host, in a host of its own that opens later sessions through `createRuntime`. */
 	constructor(
 		session: AgentSession,
@@ -218,7 +239,7 @@ export class AgentSessionRuntime {
 	constructor(
 		first: ConversationHost | AgentSession,
 		second: HostedConversation | AgentSessionServices,
-		createRuntime?: CreateAgentSessionRuntimeFactory,
+		third?: CreateAgentSessionRuntimeFactory | RedirectView,
 		diagnostics: AgentSessionRuntimeDiagnostic[] = [],
 		modelFallbackMessage?: string,
 		subagentContext?: SubagentRuntimeContext,
@@ -226,26 +247,85 @@ export class AgentSessionRuntime {
 		if (first instanceof ConversationHost) {
 			this.host = first;
 			this.current = second as HostedConversation;
+			this.redirects = typeof third === "object";
 		} else {
 			const services = second as AgentSessionServices;
-			if (!createRuntime) throw new Error("A runtime over a session needs a runtime factory");
-			this.host = new ConversationHost({ factory: createRuntime, agentDir: services.agentDir });
+			if (typeof third !== "function") throw new Error("A runtime over a session needs a runtime factory");
+			this.host = new ConversationHost({ factory: third, agentDir: services.agentDir });
 			this.current = this.host.adoptSession(
 				{ session: first, services, diagnostics, modelFallbackMessage },
 				subagentContext === undefined ? {} : { subagentContext },
 			);
+			this.redirects = false;
 		}
 		if (this.current.closed) throw new Error("Cannot create an agent session runtime over a closed conversation");
-		this.client = {
-			id: randomUUID(),
-			anchor: true,
-			move: { kind: "in_place", onMoved: (to, from) => this.handOver(to, from) },
-		};
+		this.client = this.redirects
+			? {
+					id: randomUUID(),
+					move: {
+						kind: "redirect",
+						redirect: (sessionId) => this.detachClient({ kind: "redirected", sessionId }),
+					},
+				}
+			: {
+					id: randomUUID(),
+					anchor: true,
+					move: { kind: "in_place", onMoved: (to, from) => this.handOver(to, from) },
+				};
 		// Without a surface the attachment registers synchronously; the modes attach their own extension clients.
 		void this.host.attach(this.client, this.current).catch(() => undefined);
+		if (this.redirects) {
+			const conversation = this.current;
+			this.stopObservingClose = this.host.onClosed((closed) => {
+				if (closed === conversation) this.detachClient({ kind: "closed" });
+			});
+		}
 		this.conversationProjectionFeed = new ConversationProjectionFeed(this.current.projectionSource);
 		this.detachProjectionEvents = this.relayProjectionEvents(this.current);
 		this.observeLoss(this.current);
+	}
+
+	/**
+	 * Attach one more client to the current conversation, viewed through a
+	 * runtime of its own that stays on it: the client's structural operations
+	 * write the new conversation's log and redirect the client there
+	 * (`onClientDetached`) instead of moving this runtime. A phone relayed
+	 * through the TUI is served this way. Disposing the view detaches its client.
+	 */
+	attachRedirectClient(): AgentSessionRuntime {
+		return new AgentSessionRuntime(this.host, this.current, { redirect: true });
+	}
+
+	/**
+	 * Observe a redirect view's client leaving its conversation: redirected by
+	 * one of its structural operations, or the conversation closed. Fires at
+	 * most once; a listener added afterwards hears it at once. Never fires for
+	 * a runtime that moves in place.
+	 */
+	onClientDetached(listener: (detachment: RuntimeClientDetachment) => void): () => void {
+		if (this.clientDetachment) {
+			listener(this.clientDetachment);
+			return () => {};
+		}
+		this.clientDetachedListeners.add(listener);
+		return () => {
+			this.clientDetachedListeners.delete(listener);
+		};
+	}
+
+	private detachClient(detachment: RuntimeClientDetachment): void {
+		if (this.clientDetachment || this.disposePromise) return;
+		this.clientDetachment = detachment;
+		// A client that left its conversation has no structural operations left.
+		this.ended = true;
+		this.stopObservingClose();
+		for (const listener of [...this.clientDetachedListeners]) listener(detachment);
+		this.clientDetachedListeners.clear();
+	}
+
+	/** Observe every conversation this runtime's host closes, by session id, once it closed and released its log. */
+	onConversationClosed(listener: (sessionId: string) => void): () => void {
+		return this.host.onClosed((conversation) => listener(conversation.id));
 	}
 
 	private relayProjectionEvents(conversation: HostedConversation): () => void {
@@ -427,7 +507,8 @@ export class AgentSessionRuntime {
 			if (this.ended || this.current !== source || source.session.conversationGenerationRevision !== generation) {
 				throw new Error("Stale agent session structural operation");
 			}
-			source.assertNotBusy();
+			// A redirect view's conversation stays open for its other clients.
+			if (!this.redirects) source.assertNotBusy();
 			return operation(source);
 		};
 		const result = this.moveTail.then(run, run);
@@ -471,16 +552,18 @@ export class AgentSessionRuntime {
 			/** The stored session being opened, when the target is one. */
 			existingSession?: SessionReference & { cwdOverride?: string };
 			/**
-			 * The last durable step, after the move and `withSession`; the projection
-			 * publishes the new identity after it. Any failure before it ends the runtime.
+			 * The last durable step, after the move and `withSession`, with the target's
+			 * log; the projection publishes the new identity after it. Any failure
+			 * before it ends the runtime.
 			 */
-			commitPublication?: (to: HostedConversation) => Promise<void>;
+			commitPublication?: (target: SessionManager) => Promise<void>;
 			/** Runs inside the move only before a durable publication; otherwise the caller seeds after the move. */
 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 			/** Runs once the target opened and the source is fenced, right before the move. */
-			beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
+			beforeMove?: (source: HostedConversation) => Promise<void>;
 		} = {},
 	): Promise<MoveOutcome> {
+		if (this.redirects) return this.redirectTo(target, options);
 		const prepare = this.prepareSessionReplacement;
 		let transaction: AgentSessionReplacementTransaction | undefined;
 		let opened: OpenConversationResult;
@@ -523,7 +606,7 @@ export class AgentSessionRuntime {
 			});
 			options.assertConversationGenerationCurrent?.();
 			// The last step before the move: what it writes through the source stays true only if the move happens.
-			await options.beforeMove?.(source, to);
+			await options.beforeMove?.(source);
 			options.assertConversationGenerationCurrent?.();
 		} catch (error) {
 			return await abandonOpen(error);
@@ -572,7 +655,7 @@ export class AgentSessionRuntime {
 					}
 				};
 				assertPublicationCurrent("before");
-				await commitPublication(to);
+				await commitPublication(to.session.sessionManager);
 				assertPublicationCurrent("during");
 				this.conversationProjectionFeed.commitSourceRebind(options.rebindRequestId);
 			} catch (error) {
@@ -593,6 +676,39 @@ export class AgentSessionRuntime {
 			to,
 			seedable,
 			...(opened.selectedText === undefined ? {} : { selectedText: opened.selectedText }),
+		};
+	}
+
+	/**
+	 * A redirect view's structural operation: write `target`'s log and redirect
+	 * the client there; this runtime stays on its conversation. `withSession`
+	 * cannot run, since the new conversation opens in the host the client
+	 * reconnects through.
+	 */
+	private async redirectTo(
+		target: ConversationTarget,
+		options: {
+			assertConversationGenerationCurrent?: () => void;
+			commitPublication?: (target: SessionManager) => Promise<void>;
+			beforeMove?: (source: HostedConversation) => Promise<void>;
+		},
+	): Promise<MoveOutcome> {
+		if (target.kind === "adopt") throw new Error("A redirect view cannot adopt a conversation");
+		options.assertConversationGenerationCurrent?.();
+		const { beforeMove, commitPublication } = options;
+		const redirected = await this.host.redirectFor(this.client, target, {
+			beforeMove: async (from) => {
+				options.assertConversationGenerationCurrent?.();
+				await beforeMove?.(from);
+			},
+			...(commitPublication === undefined ? {} : { publish: commitPublication }),
+		});
+		if (redirected.cancelled) return { cancelled: true };
+		return {
+			cancelled: false,
+			sessionId: redirected.sessionId,
+			seedable: false,
+			...(redirected.selectedText === undefined ? {} : { selectedText: redirected.selectedText }),
 		};
 	}
 
@@ -797,9 +913,9 @@ export class AgentSessionRuntime {
 						...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
 						...(options?.replaceReviewGeneral
 							? {
-									commitPublication: async (to: HostedConversation) => {
+									commitPublication: async (target: SessionManager) => {
 										if (!generalReplacement) throw new Error("Review General replacement was not prepared");
-										await generalReplacement.commit(to.session.sessionManager);
+										await generalReplacement.commit(target);
 									},
 									// A durable destination finishes seeding before it publishes.
 									...(options.withSession ? { withSession: options.withSession } : {}),
@@ -827,6 +943,12 @@ export class AgentSessionRuntime {
 	): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }> {
 		if (this.session.isReviewDiscussion && strategy === "new_session") {
 			throw new Error("Finding discussions execute plans in the current context; reset through the source review");
+		}
+		if (this.redirects && strategy === "new_session") {
+			// The execution turn would have to start in a conversation that opens in another host.
+			throw new Error(
+				"Executing a plan in a new session is unavailable while this session is open on the desktop; execute it in the current context or from the desktop",
+			);
 		}
 		const sourceSession = this.session;
 		const sourcePlanning = sourceSession.planningState;
@@ -932,7 +1054,8 @@ export class AgentSessionRuntime {
 	/**
 	 * Close the runtime's conversation (`session_shutdown` with reason quit,
 	 * then the before-invalidate hook, then disposal) after any structural
-	 * operation already admitted. Every caller joins one disposal.
+	 * operation already admitted. A redirect view only detaches its client.
+	 * Every caller joins one disposal.
 	 */
 	dispose(): Promise<void> {
 		if (this.disposePromise) {
@@ -946,6 +1069,12 @@ export class AgentSessionRuntime {
 			this.detachProjectionEvents();
 			this.detachProjectionEvents = () => {};
 			this.conversationProjectionFeed.dispose();
+			this.stopObservingClose();
+			this.clientDetachedListeners.clear();
+			if (this.redirects) {
+				await this.host.detach(this.client);
+				return;
+			}
 			if (this.failed) return;
 			await this.host.close(this.current, {
 				reason: "quit",

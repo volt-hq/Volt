@@ -119,15 +119,12 @@ describe("InteractiveMode durable review actions", () => {
 				newSession: vi.fn(
 					async (options: {
 						setup(writer: SessionWriter): Promise<void>;
-						beforeMove(source: HostedConversation, target: HostedConversation): Promise<void>;
+						beforeMove(source: HostedConversation): Promise<void>;
 					}) => {
 						await options.setup(replacementManager.logWriter);
 						const target = { sessionManager: replacementManager, sessionWriter: replacementManager.logWriter };
 						// The source is still the current session, and open, when `beforeMove` runs.
-						await options.beforeMove(
-							{ session: fakeThis.session } as unknown as HostedConversation,
-							{ session: target } as unknown as HostedConversation,
-						);
+						await options.beforeMove({ session: fakeThis.session } as unknown as HostedConversation);
 						fakeThis.session = target;
 						return { cancelled: false, sessionId: replacementManager.getSessionId(), seeded: false };
 					},

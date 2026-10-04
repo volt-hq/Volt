@@ -1,0 +1,10 @@
+---
+"@hansjm10/volt-coding-agent": minor
+"@hansjm10/volt-protocol": minor
+---
+
+breaking(remote): Switching sessions in the desktop TUI no longer takes attached phones along, and a phone relayed through the TUI changes sessions on its own. ([#585](https://github.com/volt-hq/Volt/issues/585))
+
+When the TUI starts or switches to another session (`/new`, `/resume`, `/fork`, `/clone`, `/import`, `/worktree`, or an extension), it opens the new session, closes the one it left, releases that session's daemon lease, and takes the new session's lease; `/resume` takes the target's lease first and, while the daemon finishes a phone's turn in it, waits in the TUI (the interrupt key stops that turn, Ctrl+C cancels and keeps the current session). Phones on the session the TUI left stay on it: their stream ends with `remote_terminal` reason `lease_transferred` and they reconnect to the same session, which the daemon hosts again. A phone relayed through the TUI that starts a new session, opens a review session, or runs an extension command that changes sessions gets its response, then `remote_terminal` reason `conversation_moved` with `targetSessionId`; the TUI stays on its session. Executing a plan in a new session from a relayed phone is refused; execute it in the current context or from the desktop. Relayed phones no longer take over host-action approvals, which stay with the TUI. The `remote_terminal` frame has a schema in the protocol contract (`RpcRemoteTerminalEvent`).
+
+Migration: phone clients reconnect with `target: "session"` and the frame's `targetSessionId` after `conversation_moved`, and to the same session after `lease_transferred`; the `session_rekeyed_reconnect` closure no longer occurs. Extension `withSession` callbacks do not run for a relayed phone's session change (`seeded: false`). The daemon control protocol drops `lease_rekey_prepare`, `lease_rekey_commit`, `lease_rekey_rollback`, `lease_rekey_dispose`, `lease_rekey_prepared`, and the `rekey` release reason; restart a running daemon (`volt daemon restart`) after upgrading.

@@ -200,9 +200,6 @@ async function startOwnedRelayDaemonHarness(): Promise<OwnedRelayDaemonHarness> 
 		commitTuiLeaseHandoff: () => {},
 		cancelTuiLeaseHandoff: () => {},
 		releaseTuiLease: () => {},
-		prepareTuiLeaseRekey: () => {},
-		commitTuiLeaseRekey: () => {},
-		rollbackTuiLeaseRekey: () => {},
 		audit: () => {},
 	});
 	const handleRequest = async (connection: ControlConnection, request: ControlRequest): Promise<void> => {
