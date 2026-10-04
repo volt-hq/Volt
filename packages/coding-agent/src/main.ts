@@ -9,7 +9,6 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { createSessionId } from "@hansjm10/volt-agent-core";
 import { type ImageContent, modelsAreEqual } from "@hansjm10/volt-ai";
 import { ProcessTerminal, setKeybindings } from "@hansjm10/volt-tui";
 import chalk from "chalk";
@@ -390,7 +389,7 @@ async function forkSessionOrExit(
 ): Promise<SessionManager> {
 	try {
 		return source.type === "path"
-			? await SessionManager.importFromJsonl(source.path, cwd, sessionDir, { id: sessionId ?? createSessionId() })
+			? await SessionManager.importFromJsonl(source.path, cwd, sessionDir, { id: sessionId })
 			: await SessionManager.forkFrom(source.ref, cwd, sessionDir, { id: sessionId });
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);

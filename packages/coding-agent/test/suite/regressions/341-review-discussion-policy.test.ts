@@ -222,7 +222,8 @@ describe("Regression #341: persisted review discussion policy", () => {
 		const snapshot = join(root, "child.jsonl");
 		await SessionManager.exportJsonlSnapshot(childRef, snapshot);
 		await SessionManager.delete(childRef);
-		const imported = await SessionManager.importFromJsonl(snapshot, root, directory);
+		// Imports mint new ids; reuse the deleted child's id explicitly, as `--session-id` does.
+		const imported = await SessionManager.importFromJsonl(snapshot, root, directory, { id: childRef.sessionId });
 		managers.push(imported);
 		expect(imported.getSessionId()).toBe(childRef.sessionId);
 		expect(imported.getSessionRef()?.sessionGeneration).not.toBe(childRef.sessionGeneration);

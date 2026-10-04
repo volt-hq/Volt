@@ -22,6 +22,7 @@ import {
 	type CustomEntryPayload,
 	type CustomMessageEntryPayload,
 	type FastModeChangeEntryPayload,
+	type ForkedFromEntryPayload,
 	type LabelEntryPayload,
 	type LeafEntryPayload,
 	type ModelChangeEntryPayload,
@@ -355,6 +356,16 @@ export interface SubagentSpawnEntry extends SessionEntryBase, SubagentSpawnEntry
 	type: "subagent_spawn";
 }
 
+/**
+ * Lineage of a session created by fork, clone, or import: the source session
+ * and the entry its copied branch ends at (`null` for an empty branch). Always
+ * the first entry of its log, followed by the copied branch. Host metadata
+ * only.
+ */
+export interface ForkedFromEntry extends SessionEntryBase, ForkedFromEntryPayload {
+	type: "forked_from";
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -374,7 +385,8 @@ export type SessionEntry =
 	| SessionStartGitContextEntry
 	| PrReviewBindingEntry
 	| LeafEntry
-	| SubagentSpawnEntry;
+	| SubagentSpawnEntry
+	| ForkedFromEntry;
 
 /** Host-only input admission WAL records. These never participate in the conversation branch or projection. */
 export function isClientInputWalEntry(
@@ -1541,6 +1553,15 @@ export class SessionManager {
 		return gitContext === undefined ? undefined : cloneCanonicalData(gitContext, "Session starting Git context");
 	}
 
+	/**
+	 * The session this one was forked, cloned, or imported from, and the entry
+	 * its copied branch ends at (`null` for an empty branch); `undefined` for a
+	 * session that was not copied from another.
+	 */
+	getForkedFrom(): ForkedFromEntryPayload | undefined {
+		return this.derivedState.forkedFrom;
+	}
+
 	/** Get the incrementally maintained lifetime message summary for session listing. */
 	getSessionEntrySummary(): SessionEntrySummary {
 		return sessionEntrySummary(this.derivedState);
@@ -1894,33 +1915,68 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a session holding only the branch from the root to `leafId` of
-	 * `source`, with the labels on it: persisted beside a persisted source,
-	 * which becomes its parent session, otherwise in memory. `source` may be
-	 * live or read-only; it is only read.
+	 * The first commit of a session copied from this one's branch ending at
+	 * `entryId` (`null` for an empty branch), read from this session now:
+	 * `forked_from` at ordinal 1, then the branch's public entries with their
+	 * ids (parents relinked, ordinals reassigned, client input identities
+	 * stripped, label entries left out), then a label entry for each copied
+	 * entry with a label.
 	 */
-	static async createBranched(source: SessionManager, leafId: string): Promise<SessionManager> {
-		source._assertNotLost();
-		if (source.reviewDiscussion) {
-			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
-		}
-		const path = source.getBranch(leafId);
-		if (path.length === 0) throw new Error(`Entry ${leafId} not found`);
-
-		const retained: SessionEntry[] = [];
-		const retainedIds = new Set<string>();
+	private _lineage(entryId: string | null): (write: SessionWrite) => void {
+		const path = entryId === null ? [] : this.getBranch(entryId);
+		if (entryId !== null && path.length === 0) throw new Error(`Entry ${entryId} not found`);
+		const copied: SessionEntry[] = [];
+		const copiedIds = new Set<string>();
 		let parentId: string | null = null;
 		for (const entry of path) {
 			if (entry.type === "label") continue;
 			const copy = withoutClientInputIdentity({ ...entry, parentId });
 			delete copy.ordinal;
-			retained.push(copy);
-			retainedIds.add(copy.id);
+			copied.push(copy);
+			copiedIds.add(copy.id);
 			parentId = copy.id;
 		}
-		const labels = [...source.labelsById]
-			.filter(([targetId]) => retainedIds.has(targetId))
-			.map(([targetId, label]) => ({ targetId, label, timestamp: source.labelTimestampsById.get(targetId)! }));
+		const labels = [...this.labelsById]
+			.filter(([targetId]) => copiedIds.has(targetId))
+			.map(([targetId, label]) => ({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! }));
+		const lineage: ForkedFromEntry = {
+			type: "forked_from",
+			id: generateId(copiedIds),
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			sessionId: this.sessionId,
+			entryId,
+		};
+		return (write) => {
+			write.append(lineage);
+			for (const entry of copied) write.append(entry);
+			let labelParentId = copied.at(-1)?.id ?? null;
+			for (const { targetId, label, timestamp } of labels) {
+				labelParentId = write.append({
+					type: "label",
+					id: generateId(write),
+					parentId: labelParentId,
+					timestamp,
+					targetId,
+					label,
+				});
+			}
+		};
+	}
+
+	/**
+	 * Create a session holding only the branch from the root to `leafId` of
+	 * `source` (`null` for an empty branch), after its lineage, with the labels
+	 * on it: persisted beside a persisted source, which becomes its parent
+	 * session, otherwise in memory. `source` may be live or read-only; it is
+	 * only read.
+	 */
+	static async createBranched(source: SessionManager, leafId: string | null): Promise<SessionManager> {
+		source._assertNotLost();
+		if (source.reviewDiscussion) {
+			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
+		}
+		const lineage = source._lineage(leafId);
 		const parentSession = source.getSessionRef();
 		const origin = source.getHeader()?.origin;
 		const options: NewSessionOptions = {
@@ -1931,20 +1987,7 @@ export class SessionManager {
 			? await SessionManager.create(source.cwd, source.sessionDir, options)
 			: SessionManager.inMemory(source.cwd, options);
 		try {
-			await target._commit((write) => {
-				for (const entry of retained) write.append(entry);
-				let labelParentId = retained.at(-1)?.id ?? null;
-				for (const { targetId, label, timestamp } of labels) {
-					labelParentId = write.append({
-						type: "label",
-						id: generateId(write),
-						parentId: labelParentId,
-						timestamp,
-						targetId,
-						label,
-					});
-				}
-			}, true);
+			await target._commit(lineage, true);
 		} catch (error) {
 			try {
 				await target.closePersistence();
@@ -1988,7 +2031,12 @@ export class SessionManager {
 		return manager;
 	}
 
-	/** Import an explicit JSONL snapshot into SQLite; the JSONL file is never reopened as live storage. */
+	/**
+	 * Import an explicit JSONL snapshot into SQLite as a new session: its
+	 * lineage names the snapshot's session and active leaf, followed by the
+	 * snapshot's active branch. The session gets a new id unless `options.id`
+	 * names one. The JSONL file is never reopened as live storage.
+	 */
 	static async importFromJsonl(
 		inputPath: string,
 		targetCwd?: string,
@@ -2011,72 +2059,31 @@ export class SessionManager {
 		const sourceEntries = loadEntriesFromFile(resolvedPath);
 		if (sourceEntries.length === 0) throw new Error(`Cannot import invalid session JSONL: ${resolvedPath}`);
 		const header = assertCurrentSessionSnapshot(sourceEntries);
-
 		const cwd = targetCwd ?? header.cwd;
-		const parentSession =
-			header.parentSessionDirectory !== undefined &&
-			header.parentStoreId !== undefined &&
-			header.parentSessionId !== undefined &&
-			header.parentSessionGeneration !== undefined
-				? sessionReference(
-						header.parentSessionDirectory,
-						header.parentStoreId,
-						header.parentSessionId,
-						header.parentSessionGeneration,
-					)
-				: undefined;
 
-		const sourceById = new Map<string, SessionEntry>();
-		let sourceLeafId: string | null = null;
-		for (const entry of sourceEntries) {
-			if (entry.type === "session") continue;
-			sourceById.set(entry.id, entry);
-			if (entry.type === "leaf") sourceLeafId = entry.targetId;
-			else sourceLeafId = entry.id;
-		}
-		const nearestPublicParent = (parentId: string | null): string | null => {
-			let currentId = parentId;
-			const visited = new Set<string>();
-			while (currentId) {
-				if (visited.has(currentId)) throw new Error("Imported session contains a host-only parent cycle");
-				visited.add(currentId);
-				const current = sourceById.get(currentId);
-				if (!current) throw new Error(`Imported session references an unavailable entry: ${currentId}`);
-				if (!isHostOnlySessionEntry(current)) return current.id;
-				currentId = current.parentId;
+		// The snapshot as a session of its own, in memory: the source of the imported branch.
+		const snapshot = SessionManager.inMemory(cwd, { id: header.id });
+		await snapshot._commit((write) => {
+			for (const entry of sourceEntries.slice(1) as CommittedSessionEntry[]) {
+				const { ordinal: _ordinal, ...unordered } = entry;
+				write.append(unordered);
 			}
-			return null;
-		};
-		const publicEntries = sourceEntries
-			.filter((entry): entry is SessionEntry => entry.type !== "session" && !isHostOnlySessionEntry(entry))
-			.map((entry) => withoutClientInputIdentity({ ...entry, parentId: nearestPublicParent(entry.parentId) }))
-			.map((entry) => {
-				delete entry.ordinal;
-				return entry;
-			});
-		const finalLeafId = nearestPublicParent(sourceLeafId);
-		const targetId = options?.id ?? header.id;
-		const newSessionOptions = {
-			id: targetId,
-			...(parentSession === undefined ? {} : { parentSession }),
+		}, true);
+		const lineage = snapshot._lineage(snapshot.getLeafId());
+		const newSessionOptions: NewSessionOptions = {
+			id: options?.id ?? createSessionId(),
 			...(header.origin === undefined ? {} : { origin: header.origin }),
 		};
-		const stage = async (manager: SessionManager): Promise<void> => {
-			await manager._commit((write) => {
-				for (const entry of publicEntries) write.append(entry);
-				if (finalLeafId === null) write.leaf(null);
-				else if (finalLeafId !== write.leafId) write.branch(finalLeafId);
-			}, true);
-		};
-
-		const validationManager = SessionManager.inMemory(cwd, newSessionOptions);
-		await stage(validationManager);
-		if (!persist) return validationManager;
+		if (!persist) {
+			const manager = SessionManager.inMemory(cwd, newSessionOptions);
+			await manager._commit(lineage, true);
+			return manager;
+		}
 
 		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
 		const manager = await SessionManager.create(cwd, dir, newSessionOptions);
 		try {
-			await stage(manager);
+			await manager._commit(lineage, true);
 			return manager;
 		} catch (error) {
 			try {
@@ -2093,7 +2100,10 @@ export class SessionManager {
 			SessionManager._importFromJsonl(inputPath, targetCwd, undefined, undefined, false);
 	}
 
-	/** Fork a stored session into a new persisted session in another cwd/store. */
+	/**
+	 * Fork a stored session's active branch into a new persisted session in
+	 * another cwd or store, after its lineage.
+	 */
 	static async forkFrom(
 		sourceRef: SessionReference,
 		targetCwd: string,
@@ -2108,34 +2118,12 @@ export class SessionManager {
 					"Finding discussions cannot fork their source-linked identity; reset through the source review instead",
 				);
 			}
-			const sourceLeafId = source.getLeafId();
+			const lineage = source._lineage(source.getLeafId());
 			target = await SessionManager.create(targetCwd, sessionDir, {
 				...options,
 				parentSession: sourceRef,
 			});
-			const sourceById = source.byId;
-			const nearestPublicParent = (parentId: string | null): string | null => {
-				let currentId = parentId;
-				while (currentId) {
-					const current = sourceById.get(currentId);
-					if (!current) return null;
-					if (!isHostOnlySessionEntry(current)) return current.id;
-					currentId = current.parentId;
-				}
-				return null;
-			};
-			const entries = source
-				.getEntries()
-				.map((entry) => withoutClientInputIdentity({ ...entry, parentId: nearestPublicParent(entry.parentId) }))
-				.map((entry) => {
-					delete entry.ordinal;
-					return entry;
-				});
-			await target._commit((write) => {
-				for (const entry of entries) write.append(entry);
-				if (sourceLeafId === null) write.leaf(null);
-				else if (write.leafId !== sourceLeafId) write.branch(sourceLeafId);
-			}, true);
+			await target._commit(lineage, true);
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
 			if (target) {

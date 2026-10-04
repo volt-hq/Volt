@@ -192,6 +192,12 @@ describe("log entry envelope", () => {
 		expect(Check(LogEntrySchema, entryOf("forked_from", { payload: { sessionId: "-bad-", entryId: "e1" } }))).toBe(
 			false,
 		);
+		expect(Check(LogEntrySchema, entryOf("forked_from", { payload: { sessionId: "source", entryId: null } }))).toBe(
+			true,
+		);
+		expect(Check(LogEntrySchema, entryOf("forked_from", { payload: { sessionId: "source", entryId: "" } }))).toBe(
+			false,
+		);
 	});
 
 	it("validates payload vocabularies", () => {

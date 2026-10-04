@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
+import type { ForkedFromEntryPayload } from "@hansjm10/volt-protocol/entries";
 import { RPC_SESSION_QUEUE_MAX_ITEMS } from "@hansjm10/volt-protocol/wire-limits";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { PrReviewPlacement } from "../pr-review-placement.ts";
@@ -46,6 +47,8 @@ export interface SessionDerivedState {
 	name: string | undefined;
 	startingGitContext: RpcGitContext | null | undefined;
 	prReviewBinding: PrReviewPlacement | undefined;
+	/** The session's lineage: its source log and the entry its copied branch ends at. */
+	forkedFrom: ForkedFromEntryPayload | undefined;
 	labelsById: Map<string, string>;
 	labelTimestampsById: Map<string, string>;
 	clientInputsById: Map<string, ClientInputRecord>;
@@ -87,6 +90,7 @@ function createEmptySessionDerivedState(headerTimestamp: string): SessionDerived
 		name: undefined,
 		startingGitContext: undefined,
 		prReviewBinding: undefined,
+		forkedFrom: undefined,
 		labelsById: new Map(),
 		labelTimestampsById: new Map(),
 		clientInputsById: new Map(),
@@ -200,6 +204,7 @@ export function cloneSessionDerivedState(state: SessionDerivedState): SessionDer
 		name: state.name,
 		startingGitContext: cloneStartingGitContext(state.startingGitContext),
 		prReviewBinding: state.prReviewBinding === undefined ? undefined : structuredClone(state.prReviewBinding),
+		forkedFrom: state.forkedFrom,
 		labelsById: new Map(state.labelsById),
 		labelTimestampsById: new Map(state.labelTimestampsById),
 		clientInputsById: new Map(
@@ -500,6 +505,9 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 	if (entry.type === "pr_review_binding" && state.prReviewBinding !== undefined) {
 		throw new Error("Session contains more than one PR review binding entry");
 	}
+	if (entry.type === "forked_from" && entry.ordinal !== 1) {
+		throw new Error(`Lineage entry ${entry.id} must be the first entry of its session`);
+	}
 	const nextMessageSummary = { ...state.messageSummary };
 	accumulateMessageSummary(nextMessageSummary, entry);
 	const clientInput = reduceClientInputEntry(state, entry);
@@ -513,6 +521,9 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 		state.startingGitContext = cloneStartingGitContext(entry.gitContext);
 	}
 	if (entry.type === "pr_review_binding") state.prReviewBinding = structuredClone(entry.placement);
+	if (entry.type === "forked_from") {
+		state.forkedFrom = Object.freeze({ sessionId: entry.sessionId, entryId: entry.entryId });
+	}
 	if (entry.type === "label") {
 		if (entry.label) {
 			state.labelsById.set(entry.targetId, entry.label);

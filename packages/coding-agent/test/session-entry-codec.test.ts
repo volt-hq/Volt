@@ -129,6 +129,16 @@ function validEntries(): Array<Record<string, unknown>> {
 	];
 }
 
+/** Fork lineage: always the root entry at ordinal 1 of its log. */
+function lineageEntry(): Record<string, unknown> {
+	return { ...base("forked_from", "lineage", 1), sessionId: "source-session", entryId: "source-entry" };
+}
+
+/** Every entry type, valid on its own. */
+function everyEntryType(): Array<Record<string, unknown>> {
+	return [...validEntries(), lineageEntry()];
+}
+
 /** A message the host queues for delivery, as an extension's follow-up. */
 function hostMessage() {
 	return { role: "custom", customType: "extension", content: "notice", display: true, timestamp: MESSAGE_TIMESTAMP };
@@ -158,11 +168,12 @@ const REQUIRED_TYPE_FIELD: Record<string, string> = {
 	session_start_git_context: "gitContext",
 	leaf: "targetId",
 	subagent_spawn: "requestKey",
+	forked_from: "entryId",
 };
 
 describe("session entry codec", () => {
 	it("round-trips every canonical entry type and derives its envelope", () => {
-		for (const value of validEntries()) {
+		for (const value of everyEntryType()) {
 			const parsed = parsePersistedSessionEntry(value);
 			expect(parsed).toEqual(value);
 			expect(sessionEntryEnvelope(parsed)).toEqual({
@@ -178,6 +189,7 @@ describe("session entry codec", () => {
 					"session_start_git_context",
 					"leaf",
 					"subagent_spawn",
+					"forked_from",
 				].includes(String(value.type)),
 			});
 		}
@@ -190,7 +202,7 @@ describe("session entry codec", () => {
 			message: { role: "user", content: "hello", timestamp: MESSAGE_TIMESTAMP },
 			clientMessageId: "client-1",
 		};
-		for (const value of [...validEntries(), identified]) {
+		for (const value of [...everyEntryType(), identified]) {
 			const parsed = parsePersistedSessionEntry(value);
 			const definition = SESSION_ENTRY_TYPES[parsed.type];
 			const payloadKeys = new Set(Object.keys(definition.payload.properties));
@@ -213,10 +225,26 @@ describe("session entry codec", () => {
 		);
 	});
 
-	it("rejects protocol entry types this store does not write yet", () => {
-		expect(() =>
-			parsePersistedSessionEntry({ ...base("forked_from", "fork", 1), sessionId: "source", entryId: "entry" }),
-		).toThrow('unsupported entry type "forked_from"');
+	it("accepts fork lineage only as the root entry at ordinal 1", () => {
+		const lineage = lineageEntry();
+		expect(parsePersistedSessionEntry({ ...lineage, entryId: null })).toEqual({ ...lineage, entryId: null });
+		const { ordinal: _ordinal, ...admitted } = lineage;
+		expect(parseSessionEntryForAdmission(admitted)).toEqual(admitted);
+		expect(() => parsePersistedSessionEntry({ ...lineage, entryId: "" })).toThrow("$.entryId: must not be empty");
+		expect(() => parsePersistedSessionEntry({ ...lineage, sessionId: "-bad-" })).toThrow(
+			"$.sessionId: invalid session identity",
+		);
+		expect(() => parsePersistedSessionEntry({ ...lineage, parentId: "message" })).toThrow(
+			"$.parentId: lineage must be a root entry",
+		);
+		expect(() => parsePersistedSessionEntry({ ...lineage, ordinal: 2 })).toThrow(
+			"$.ordinal: lineage must be the first entry",
+		);
+		const copied = { ...entryOf("message", 2), parentId: null };
+		expect(validatePersistedSessionEntrySequence([lineage, copied])).toEqual([lineage, copied]);
+		expect(() => validatePersistedSessionEntrySequence([entryOf("message", 1), { ...lineage, ordinal: 2 }])).toThrow(
+			"lineage must be the first entry",
+		);
 	});
 
 	it("validates host input origins and the messages a host input queues", () => {
@@ -240,7 +268,7 @@ describe("session entry codec", () => {
 	});
 
 	it("rejects unknown and missing fields for every entry type", () => {
-		for (const value of validEntries()) {
+		for (const value of everyEntryType()) {
 			expect(() => parsePersistedSessionEntry({ ...value, unsupported: true })).toThrow("unknown property");
 			const missing = structuredClone(value);
 			delete missing[REQUIRED_TYPE_FIELD[String(value.type)]!];

@@ -1708,43 +1708,6 @@ export class AgentSessionRuntime {
 			if (!currentSessionRef) {
 				throw new Error("Persisted session is missing a session reference");
 			}
-			const sessionDir = this.session.sessionManager.getSessionDir();
-			if (!targetLeafId) {
-				const sessionManager = await SessionManager.create(this.cwd, sessionDir, {
-					parentSession: currentSessionRef,
-				});
-				let managerTransferred = false;
-				try {
-					this.assertStructuralOperationCurrent(operation);
-					managerTransferred = true;
-					const replacement = await this.replaceCurrentSession({
-						operation,
-						reason: "fork",
-						previousSessionId,
-						sessionManager,
-						create: () =>
-							this.createRuntime({
-								cwd: this.cwd,
-								agentDir: this.services.agentDir,
-								sessionManager,
-								...this.getReplacementGitContextOptions(this.cwd),
-								sessionStartEvent: { type: "session_start", reason: "fork", previousSessionRef },
-								profile: this.getReplacementProfile(),
-								subagentContext: this.subagentContext,
-							}),
-						withSession: options?.withSession,
-					});
-					return { cancelled: false, seeded: replacement.seeded, selectedText };
-				} catch (error) {
-					if (managerTransferred) throw error;
-					return await closeOwnedSessionManager(
-						sessionManager,
-						error,
-						"Session fork failed and its owned manager could not be closed",
-					);
-				}
-			}
-
 			const sessionManager = await SessionManager.createBranched(this.session.sessionManager, targetLeafId);
 			let managerTransferred = false;
 			try {
@@ -1778,9 +1741,7 @@ export class AgentSessionRuntime {
 			}
 		}
 
-		const sessionManager = targetLeafId
-			? await SessionManager.createBranched(this.session.sessionManager, targetLeafId)
-			: SessionManager.inMemory(this.cwd);
+		const sessionManager = await SessionManager.createBranched(this.session.sessionManager, targetLeafId);
 		this.assertStructuralOperationCurrent(operation);
 		const replacement = await this.replaceCurrentSession({
 			operation,

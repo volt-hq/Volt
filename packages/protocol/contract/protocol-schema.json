@@ -1515,10 +1515,17 @@
 					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				},
 				"entryId": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
 				}
 			},
 			"additionalProperties": false

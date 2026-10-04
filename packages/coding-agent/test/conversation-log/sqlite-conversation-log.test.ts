@@ -108,6 +108,18 @@ function customDraft(id: string, parentId: string | null): ConversationLogEntryD
 	};
 }
 
+/** Fork lineage naming an empty source branch. */
+function lineageDraft(id: string): ConversationLogEntryDraft {
+	return {
+		id,
+		parentId: null,
+		type: "forked_from",
+		timestamp: "2026-01-01T00:00:00.000Z",
+		visibility: "host",
+		payload: { sessionId: "source-session", entryId: null },
+	};
+}
+
 type Observed =
 	| { readonly status: "committed"; readonly first: number; readonly last: number }
 	| { readonly status: "rolled_back" }
@@ -479,9 +491,9 @@ describe("SqliteConversationLog", () => {
 
 	it("rolls back entries the session store does not hold and stays writable", async () => {
 		const log = await createLog();
-		const forked = { ...customDraft("a", null), type: "forked_from", visibility: "host", payload: {} };
 		for (const entries of [
-			[forked],
+			// Lineage is only ever the first entry.
+			[customDraft("a", null), lineageDraft("b")],
 			[{ ...customDraft("a", null), visibility: "host" }],
 			[customDraft("a", "missing-parent")],
 			[{ ...customDraft("a", null), payload: { customType: "test", id: "b" } }],
@@ -494,6 +506,29 @@ describe("SqliteConversationLog", () => {
 		expect(
 			await log.append({ expectedOrdinal: 0, commitId: commitIdFor(log, "c1"), entries: [customDraft("a", null)] }),
 		).toEqual({ status: "committed", first: 1, last: 1 });
+	});
+
+	it("stores fork lineage as the first entry and reads it back after reopening", async () => {
+		const log = await createLog();
+		expect(
+			await log.append({
+				expectedOrdinal: 0,
+				commitId: commitIdFor(log, "c1"),
+				entries: [lineageDraft("lineage"), customDraft("a", null)],
+			}),
+		).toEqual({ status: "committed", first: 1, last: 2 });
+		expect(
+			(await log.append({ expectedOrdinal: 2, commitId: commitIdFor(log, "c2"), entries: [lineageDraft("again")] }))
+				.status,
+		).toBe("rolled_back");
+		await log.close();
+		const reopened = await openLog(log);
+		expect(
+			(await reopened.read(0, 10)).entries.map(({ ordinal, type, payload }) => [ordinal, type, payload]),
+		).toEqual([
+			[1, "forked_from", { sessionId: "source-session", entryId: null }],
+			[2, "custom", { customType: "test" }],
+		]);
 	});
 
 	it("stores the client inputs the kernel writes: host messages and withdrawn inputs", async () => {
