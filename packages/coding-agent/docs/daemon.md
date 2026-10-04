@@ -216,7 +216,7 @@ Everything lives under `~/.volt/agent/daemon/` (mode `0700`):
 | `voltd.pid` | Advisory pidfile; liveness truth is always a socket probe |
 | `voltd.log` | Daemon log (`volt daemon logs`) |
 | `state.json` | Iroh secret key, paired clients, workspaces, settings (`0600`) |
-| `work-state.json` | Private, bounded session-to-change and pull-request associations (`0600`) |
+| `changes.json` | Private, bounded session-to-change and pull-request associations (`0600`) |
 | `audit.jsonl` | Append-only audit log (pairing, leases, relays, lifecycle) |
 
 On first start the daemon migrates the legacy `remote/iroh-host.json` state
@@ -352,7 +352,7 @@ When the TUI owns the lease, phone prompts run with the TUI session's full
 local tool set. `remote.allowTools` applies only to daemon-owned headless
 runtimes — see [Security](security.md).
 
-## Work and pull-request association
+## Change and pull-request association
 
 The daemon observes fresh path-free Git branch state from whichever process
 owns a conversation lease. Daemon runtimes publish directly; a TUI may publish
@@ -380,12 +380,12 @@ refreshed once it is merged or closed. A closed PR that is later reopened is
 picked up again only when a session returns to its branch. Reads never wait on
 GitHub; they return the stored status.
 
-Associations are stored separately in private `work-state.json`. The file uses
+Associations are stored separately in private `changes.json`. The file uses
 opaque local IDs and a salted hash of the common Git directory, and stores each
 linked PR's repository host, owner, and name so its status can be refreshed
 after the branch is gone. Checkout paths, repository identities, credentials,
 raw provider output, and provider diagnostics are not projected to phones. A
-`sessions` entry's `workContext` contains only the opaque change ID,
+`sessions` entry's `changeContext` contains only the opaque change ID,
 repository display name, effective branch, resolution state, and bounded PR
 summary described in [Iroh Remote Protocol](iroh-remote-protocol.md#workspace-streams).
 

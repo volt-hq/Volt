@@ -80,8 +80,8 @@ const REQUESTS: ByType<ControlRequest> = {
 		sessionId: "s-1",
 		reason: "workspace_unregistered",
 	},
-	work_observe: {
-		type: "work_observe",
+	change_observe: {
+		type: "change_observe",
 		id: "5",
 		workspaceName: "volt",
 		sessionId: "s-1",
@@ -176,7 +176,7 @@ const REVIEW_NOTIFICATION = {
 const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, unknown>> } = {
 	lease_acquire: [{ sessionId: undefined }, { force: "yes" }],
 	lease_release: [{ reason: undefined }, { reason: "rekey" }, { reason: "workspace_removed" }],
-	work_observe: [
+	change_observe: [
 		{ gitContext: { repository: "repo", branch: "feature/work", headOid: "not-an-oid" } },
 		{ gitContext: { repository: "repo", branch: "feature/work\npoison", headOid: HEAD_OID } },
 		{ gitContext: { repository: "", branch: "main", headOid: HEAD_OID } },
@@ -496,7 +496,7 @@ describe("daemon control contract", () => {
 	});
 
 	it("admits a null Git context and a branch without a base", () => {
-		const request = REQUESTS.work_observe;
+		const request = REQUESTS.change_observe;
 		expect(admitControlRequest({ ...request, gitContext: null })).toBe(true);
 		expect(admitControlRequest({ ...request, gitContext: { repository: "r", branch: "b", headOid: HEAD_OID } })).toBe(
 			true,

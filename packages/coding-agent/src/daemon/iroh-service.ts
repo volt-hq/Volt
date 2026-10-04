@@ -220,7 +220,7 @@ type ManagedRelayRefreshOutcome =
 	| { status: "superseded" }
 	| { status: "failed"; message: string };
 
-export function isExactTuiWorkObservationLeaseHolder(
+export function isExactTuiChangeObservationLeaseHolder(
 	connection: Pick<ControlConnection, "client" | "connectionId">,
 	lease: Pick<LeaseRecord, "state" | "tuiConnectionId"> | undefined,
 ): boolean {
@@ -353,9 +353,9 @@ export interface IrohDaemonServiceDependencies {
 		kind: "conversation" | "workspace_discovery" | "workspace_management" | "worktree_management" | "relay",
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): void | Promise<void>;
-	/** Pause a TUI Work receipt after its daemon revision is claimed and before validation (test-only race injection). */
-	beforeTuiWorkObservationValidation?(
-		request: Readonly<Extract<ControlRequest, { type: "work_observe" }>>,
+	/** Pause a TUI change receipt after its daemon revision is claimed and before validation (test-only race injection). */
+	beforeTuiChangeObservationValidation?(
+		request: Readonly<Extract<ControlRequest, { type: "change_observe" }>>,
 	): void | Promise<void>;
 	/** Override native relay-recovery capabilities and timing (test-only). */
 	relayWatchApiSafe?: boolean;
@@ -516,7 +516,7 @@ interface ClientConnectionRecord {
 	supervisor: IrohConnectionSupervisor;
 }
 
-interface TuiWorkAuthorityClaim {
+interface TuiChangeAuthorityClaim {
 	readonly connectionId: string;
 	readonly revision: bigint;
 	workspaceGeneration: number | undefined;
@@ -975,12 +975,12 @@ class IrohDaemonService {
 	private readonly trustStore: ProjectTrustStore;
 	private readonly conversationCoordinators = new ConversationCoordinatorRegistry();
 	private readonly runtimes: IntegratedRuntimeRegistry;
-	private readonly runtimeWorkObservers = new Map<IntegratedRuntimeEntry, GitContextObservationBinding>();
+	private readonly runtimeChangeObservers = new Map<IntegratedRuntimeEntry, GitContextObservationBinding>();
 	private readonly runtimeCompactionFailureObservers = new Map<IntegratedRuntimeEntry, () => void>();
 	private readonly runtimeConversationLossObservers = new Map<IntegratedRuntimeEntry, () => void>();
-	private readonly tuiWorkAuthorities = new Map<string, TuiWorkAuthorityClaim>();
-	private readonly tuiWorkRetirementTasks = new Set<Promise<void>>();
-	private tuiWorkReceiptRevision = 0n;
+	private readonly tuiChangeAuthorities = new Map<string, TuiChangeAuthorityClaim>();
+	private readonly tuiChangeRetirementTasks = new Set<Promise<void>>();
+	private tuiChangeReceiptRevision = 0n;
 	private readonly worktrees: WorktreeManager;
 	private readonly prReviewCheckouts: PrReviewCheckoutManager;
 	private readonly worktreeRetention: WorktreeRetentionSweeper;
@@ -1169,7 +1169,7 @@ class IrohDaemonService {
 				});
 			},
 			onRuntimePublished: (entry) => {
-				this.startRuntimeWorkObservation(entry);
+				this.startRuntimeChangeObservation(entry);
 				if (!this.runtimeCompactionFailureObservers.has(entry)) {
 					this.runtimeCompactionFailureObservers.set(
 						entry,
@@ -1192,15 +1192,15 @@ class IrohDaemonService {
 			},
 			isAuthorizationCurrent: (authorization) => this.isAuthorizationCurrent(authorization),
 			onConversationMoved: (source, target) => {
-				// The new conversation carries the source's work and pull-request association; the source keeps its own.
+				// The new conversation carries the source's change and pull-request association; the source keeps its own.
 				if (source.workspaceGeneration === undefined || target.workspaceGeneration !== source.workspaceGeneration)
 					return;
-				void this.services.work
+				void this.services.changes
 					.inheritSession(source.workspaceName, source.workspaceGeneration, source.sessionId, target.sessionId)
 					.catch(() => {});
 			},
 			onRuntimeDisposed: (entry) => {
-				this.stopRuntimeWorkObservation(entry);
+				this.stopRuntimeChangeObservation(entry);
 				this.runtimeCompactionFailureObservers.get(entry)?.();
 				this.runtimeCompactionFailureObservers.delete(entry);
 				this.runtimeConversationLossObservers.get(entry)?.();
@@ -1319,28 +1319,28 @@ class IrohDaemonService {
 		this.ready = { promise: readyPromise, resolve: readyResolve, reject: readyReject };
 	}
 
-	private startRuntimeWorkObservation(entry: IntegratedRuntimeEntry): void {
-		if (entry.workspaceGeneration === undefined || this.runtimeWorkObservers.has(entry)) return;
+	private startRuntimeChangeObservation(entry: IntegratedRuntimeEntry): void {
+		if (entry.workspaceGeneration === undefined || this.runtimeChangeObservers.has(entry)) return;
 		let binding!: GitContextObservationBinding;
 		const publish = (observation: GitContextObservation): void => {
 			if (
 				observation.status !== "definitive" ||
-				this.runtimeWorkObservers.get(entry) !== binding ||
+				this.runtimeChangeObservers.get(entry) !== binding ||
 				entry.lifecycle !== "active"
 			) {
 				return;
 			}
 			const gitContext = observation.gitContext;
 			if (!gitContext || gitContext.stale || gitContext.head.kind !== "branch") {
-				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
+				this.services.changes.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
 				return;
 			}
 			const location = discoverGitWorktree(entry.runtime.conversation.cwd);
 			if (!location) {
-				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
+				this.services.changes.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
 				return;
 			}
-			void this.services.work
+			void this.services.changes
 				.observe({
 					workspaceName: entry.workspaceName,
 					workspaceGeneration: entry.workspaceGeneration!,
@@ -1356,102 +1356,102 @@ class IrohDaemonService {
 				.catch(() => {});
 		};
 		binding = new GitContextObservationBinding(publish, { monitor: true });
-		this.runtimeWorkObservers.set(entry, binding);
+		this.runtimeChangeObservers.set(entry, binding);
 		// The runtime serves one conversation for its whole life.
 		binding.bind(entry.runtime.conversation.session.gitContextProvider);
 	}
 
-	private stopRuntimeWorkObservation(entry: IntegratedRuntimeEntry): void {
-		const binding = this.runtimeWorkObservers.get(entry);
+	private stopRuntimeChangeObservation(entry: IntegratedRuntimeEntry): void {
+		const binding = this.runtimeChangeObservers.get(entry);
 		if (binding) {
-			this.runtimeWorkObservers.delete(entry);
+			this.runtimeChangeObservers.delete(entry);
 			binding.dispose();
 		}
 		if (entry.workspaceGeneration === undefined) return;
-		void this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration, entry.sessionId);
+		void this.services.changes.retireSession(entry.workspaceName, entry.workspaceGeneration, entry.sessionId);
 	}
 
-	private tuiWorkKey(workspaceName: string, sessionId: string): string {
+	private tuiChangeKey(workspaceName: string, sessionId: string): string {
 		return `${workspaceName}\0${sessionId}`;
 	}
 
-	private claimTuiWorkAuthority(
+	private claimTuiChangeAuthority(
 		workspaceName: string,
 		sessionId: string,
 		connectionId: string,
-	): TuiWorkAuthorityClaim {
-		const key = this.tuiWorkKey(workspaceName, sessionId);
-		const previous = this.tuiWorkAuthorities.get(key);
-		const claim: TuiWorkAuthorityClaim = {
+	): TuiChangeAuthorityClaim {
+		const key = this.tuiChangeKey(workspaceName, sessionId);
+		const previous = this.tuiChangeAuthorities.get(key);
+		const claim: TuiChangeAuthorityClaim = {
 			connectionId,
-			revision: ++this.tuiWorkReceiptRevision,
+			revision: ++this.tuiChangeReceiptRevision,
 			workspaceGeneration: previous?.workspaceGeneration,
 		};
-		this.tuiWorkAuthorities.set(key, claim);
+		this.tuiChangeAuthorities.set(key, claim);
 		return claim;
 	}
 
-	private isCurrentTuiWorkAuthority(key: string, claim: TuiWorkAuthorityClaim): boolean {
-		return this.tuiWorkAuthorities.get(key)?.revision === claim.revision;
+	private isCurrentTuiChangeAuthority(key: string, claim: TuiChangeAuthorityClaim): boolean {
+		return this.tuiChangeAuthorities.get(key)?.revision === claim.revision;
 	}
 
-	private retireTuiWorkAuthorityClaim(
+	private retireTuiChangeAuthorityClaim(
 		key: string,
 		workspaceName: string,
 		sessionId: string,
-		claim: TuiWorkAuthorityClaim,
+		claim: TuiChangeAuthorityClaim,
 	): Promise<void> {
-		if (!this.isCurrentTuiWorkAuthority(key, claim)) return Promise.resolve();
-		this.tuiWorkAuthorities.delete(key);
+		if (!this.isCurrentTuiChangeAuthority(key, claim)) return Promise.resolve();
+		this.tuiChangeAuthorities.delete(key);
 		return claim.workspaceGeneration === undefined
 			? Promise.resolve()
-			: this.services.work.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
+			: this.services.changes.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
 	}
 
-	private retireTuiWorkAuthority(workspaceName: string, sessionId: string, connectionId?: string): Promise<void> {
-		const key = this.tuiWorkKey(workspaceName, sessionId);
-		const claim = this.tuiWorkAuthorities.get(key);
+	private retireTuiChangeAuthority(workspaceName: string, sessionId: string, connectionId?: string): Promise<void> {
+		const key = this.tuiChangeKey(workspaceName, sessionId);
+		const claim = this.tuiChangeAuthorities.get(key);
 		if (!claim || (connectionId !== undefined && claim.connectionId !== connectionId)) return Promise.resolve();
-		return this.retireTuiWorkAuthorityClaim(key, workspaceName, sessionId, claim);
+		return this.retireTuiChangeAuthorityClaim(key, workspaceName, sessionId, claim);
 	}
 
-	private retireCurrentTuiWorkObservation(
+	private retireCurrentTuiChangeObservation(
 		key: string,
 		workspaceName: string,
 		sessionId: string,
-		claim: TuiWorkAuthorityClaim,
+		claim: TuiChangeAuthorityClaim,
 	): Promise<void> {
-		if (!this.isCurrentTuiWorkAuthority(key, claim) || claim.workspaceGeneration === undefined) {
+		if (!this.isCurrentTuiChangeAuthority(key, claim) || claim.workspaceGeneration === undefined) {
 			return Promise.resolve();
 		}
-		return this.services.work.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
+		return this.services.changes.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
 	}
 
-	private retireTuiWorkWorkspace(workspaceName: string): Promise<void> {
-		for (const [key, claim] of this.tuiWorkAuthorities) {
-			if (key.startsWith(`${workspaceName}\0`) && this.isCurrentTuiWorkAuthority(key, claim)) {
-				this.tuiWorkAuthorities.delete(key);
+	private retireTuiChangeWorkspace(workspaceName: string): Promise<void> {
+		for (const [key, claim] of this.tuiChangeAuthorities) {
+			if (key.startsWith(`${workspaceName}\0`) && this.isCurrentTuiChangeAuthority(key, claim)) {
+				this.tuiChangeAuthorities.delete(key);
 			}
 		}
-		return this.services.work.retireWorkspace(workspaceName);
+		return this.services.changes.retireWorkspace(workspaceName);
 	}
 
-	private trackTuiWorkRetirement(task: Promise<void>): void {
+	private trackTuiChangeRetirement(task: Promise<void>): void {
 		const tracked = task.catch((error: unknown) => {
-			this.log("warn", "failed to retire TUI Work observation after control disconnect", {
+			this.log("warn", "failed to retire TUI change observation after control disconnect", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});
-		this.tuiWorkRetirementTasks.add(tracked);
-		void tracked.finally(() => this.tuiWorkRetirementTasks.delete(tracked));
+		this.tuiChangeRetirementTasks.add(tracked);
+		void tracked.finally(() => this.tuiChangeRetirementTasks.delete(tracked));
 	}
 
-	private async handleTuiWorkObservation(
+	private async handleTuiChangeObservation(
 		connection: ControlConnection,
-		request: Extract<ControlRequest, { type: "work_observe" }>,
+		request: Extract<ControlRequest, { type: "change_observe" }>,
 	): Promise<void> {
 		const assertLease = (): boolean =>
-			isExactTuiWorkObservationLeaseHolder(
+			isExactTuiChangeObservationLeaseHolder(
 				connection,
 				this.leaseBroker.lookup(request.workspaceName, request.sessionId),
 			);
@@ -1459,12 +1459,12 @@ class IrohDaemonService {
 			connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
 			return;
 		}
-		const key = this.tuiWorkKey(request.workspaceName, request.sessionId);
-		const claim = this.claimTuiWorkAuthority(request.workspaceName, request.sessionId, connection.connectionId);
-		const isCurrentRevision = (): boolean => this.isCurrentTuiWorkAuthority(key, claim);
+		const key = this.tuiChangeKey(request.workspaceName, request.sessionId);
+		const claim = this.claimTuiChangeAuthority(request.workspaceName, request.sessionId, connection.connectionId);
+		const isCurrentRevision = (): boolean => this.isCurrentTuiChangeAuthority(key, claim);
 		const initialRetirement =
 			request.gitContext === null
-				? this.retireCurrentTuiWorkObservation(key, request.workspaceName, request.sessionId, claim)
+				? this.retireCurrentTuiChangeObservation(key, request.workspaceName, request.sessionId, claim)
 				: Promise.resolve();
 		const finishIfSuperseded = async (): Promise<boolean> => {
 			if (isCurrentRevision()) return false;
@@ -1472,7 +1472,7 @@ class IrohDaemonService {
 			connection.send({ type: "ok", id: request.id });
 			return true;
 		};
-		await this.dependencies.beforeTuiWorkObservationValidation?.(request);
+		await this.dependencies.beforeTuiChangeObservationValidation?.(request);
 		if (await finishIfSuperseded()) return;
 
 		const state = await this.stateManager.getState();
@@ -1488,13 +1488,13 @@ class IrohDaemonService {
 		claim.workspaceGeneration = workspaceGeneration;
 		if (request.gitContext === null) {
 			if (!assertLease()) {
-				await this.retireTuiWorkAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
+				await this.retireTuiChangeAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
 				connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
 				return;
 			}
 			await Promise.all([
 				initialRetirement,
-				this.retireCurrentTuiWorkObservation(key, request.workspaceName, request.sessionId, claim),
+				this.retireCurrentTuiChangeObservation(key, request.workspaceName, request.sessionId, claim),
 			]);
 			connection.send({ type: "ok", id: request.id });
 			return;
@@ -1561,11 +1561,11 @@ class IrohDaemonService {
 			(candidate) => candidate.workspaceName === request.workspaceName,
 		)?.generation;
 		if (!assertLease() || !currentWorkspace || currentGeneration !== workspaceGeneration) {
-			await this.retireTuiWorkAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
+			await this.retireTuiChangeAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
 			connection.send({ type: "error", id: request.id, code: "authority_changed", message: "authority changed" });
 			return;
 		}
-		void this.services.work
+		void this.services.changes
 			.observe(
 				{
 					workspaceName: request.workspaceName,
@@ -1743,8 +1743,8 @@ class IrohDaemonService {
 				}
 				return states;
 			},
-			getWorkContext: (workspaceName, workspaceGeneration, sessionId) =>
-				this.services.work.getWorkContext(workspaceName, workspaceGeneration, sessionId),
+			getChangeContext: (workspaceName, workspaceGeneration, sessionId) =>
+				this.services.changes.getChangeContext(workspaceName, workspaceGeneration, sessionId),
 			unregisterWorkspace: (workspaceName, keep) => this.unregisterWorkspaceForRemote(workspaceName, keep),
 		};
 		return this.remoteIntentHostValue;
@@ -3398,7 +3398,7 @@ class IrohDaemonService {
 		}
 		const removeActiveStream = this.activeStreams.register(entry);
 		// Every client stream, including short discovery reads, keeps linked PR status polling fast.
-		const releaseClientActivity = this.services.work.retainClientActivity();
+		const releaseClientActivity = this.services.changes.retainClientActivity();
 		let removed = false;
 		return {
 			entry,
@@ -3526,10 +3526,10 @@ class IrohDaemonService {
 					? owner.runtime.conversation.session.sessionManager.getStartingGitContext()
 					: undefined;
 			},
-			getWorkContext: (sessionId) =>
+			getChangeContext: (sessionId) =>
 				authorization.workspaceGeneration === undefined
 					? undefined
-					: this.services.work.getWorkContext(
+					: this.services.changes.getChangeContext(
 							authorization.workspace.name,
 							authorization.workspaceGeneration,
 							sessionId,
@@ -4973,10 +4973,10 @@ class IrohDaemonService {
 		this.runtimes.fenceReviewOperations(
 			this.runtimes.values().filter((entry) => entry.workspaceName === workspaceName),
 		);
-		for (const entry of this.runtimeWorkObservers.keys()) {
-			if (entry.workspaceName === workspaceName) this.stopRuntimeWorkObservation(entry);
+		for (const entry of this.runtimeChangeObservers.keys()) {
+			if (entry.workspaceName === workspaceName) this.stopRuntimeChangeObservation(entry);
 		}
-		const workRetirement = this.retireTuiWorkWorkspace(workspaceName);
+		const changeRetirement = this.retireTuiChangeWorkspace(workspaceName);
 		const closedStreamCount = await this.closeActiveStreamsForWorkspace(
 			workspaceName,
 			WORKSPACE_UNREGISTERED_CLOSE_REASON,
@@ -4993,7 +4993,7 @@ class IrohDaemonService {
 				.cleanupUnregisteredWorkspace({ name: workspaceName, path: exclusions.workspacePath })
 				.catch(() => {});
 		}
-		await workRetirement;
+		await changeRetirement;
 		return { closedStreamCount, stoppedRuntimeCount };
 	}
 
@@ -5362,8 +5362,8 @@ class IrohDaemonService {
 
 	async handleRequest(connection: ControlConnection, request: ControlRequest): Promise<boolean> {
 		switch (request.type) {
-			case "work_observe": {
-				await this.handleTuiWorkObservation(connection, request);
+			case "change_observe": {
+				await this.handleTuiChangeObservation(connection, request);
 				return true;
 			}
 			case "lease_acquire": {
@@ -5420,7 +5420,7 @@ class IrohDaemonService {
 					connection.send({ type: "error", id: request.id, code: result.code, message: "lease not held" });
 					return true;
 				}
-				await this.retireTuiWorkAuthority(request.workspaceName, request.sessionId, connection.connectionId);
+				await this.retireTuiChangeAuthority(request.workspaceName, request.sessionId, connection.connectionId);
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}
@@ -5889,16 +5889,16 @@ class IrohDaemonService {
 
 	onControlConnectionClosed(connection: ControlConnection): void {
 		this.leaseBroker.releaseAllForConnection(connection.connectionId);
-		const workRetirements: Promise<void>[] = [];
-		for (const [key, claim] of this.tuiWorkAuthorities) {
+		const changeRetirements: Promise<void>[] = [];
+		for (const [key, claim] of this.tuiChangeAuthorities) {
 			if (claim.connectionId !== connection.connectionId) continue;
 			const separator = key.indexOf("\0");
-			workRetirements.push(
-				this.retireTuiWorkAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
+			changeRetirements.push(
+				this.retireTuiChangeAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
 			);
 		}
-		if (workRetirements.length > 0) {
-			this.trackTuiWorkRetirement(Promise.all(workRetirements).then(() => undefined));
+		if (changeRetirements.length > 0) {
+			this.trackTuiChangeRetirement(Promise.all(changeRetirements).then(() => undefined));
 		}
 		const admission = this.admission.tryAcquire();
 		if (!admission) {
@@ -5965,14 +5965,14 @@ class IrohDaemonService {
 		// ownership commits, relay offers, and turn-starting commands now fail
 		// closed against the same state.
 		this.admission.close();
-		const workRetirements: Promise<void>[] = [];
-		for (const [key, claim] of this.tuiWorkAuthorities) {
+		const changeRetirements: Promise<void>[] = [];
+		for (const [key, claim] of this.tuiChangeAuthorities) {
 			const separator = key.indexOf("\0");
-			workRetirements.push(
-				this.retireTuiWorkAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
+			changeRetirements.push(
+				this.retireTuiChangeAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
 			);
 		}
-		await Promise.allSettled([...workRetirements, ...this.tuiWorkRetirementTasks]);
+		await Promise.allSettled([...changeRetirements, ...this.tuiChangeRetirementTasks]);
 		await this.stopRelayRecoveryMonitor();
 		this.clearManagedRelayCredentialRefreshTimer();
 		if (this.relayCredentialExpiryTimer !== undefined) {

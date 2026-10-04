@@ -142,7 +142,7 @@ await resourceLoader.reload();
 const { session } = await createAgentSession({
   resourceLoader,
   sessionManager: SessionManager.inMemory(),
-  extensionWorkLimits: { firstRequestWaitMs: 100 },
+  extensionServicesLimits: { firstRequestWaitMs: 100 },
 });
 try {
   await session.prompt("Explain src/config.ts:20");

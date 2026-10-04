@@ -1,19 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
-	ExtensionWorkBoundary,
-	ExtensionWorkExecutionResult,
-	ExtensionWorkManagerOptions,
-} from "../src/core/extensions/work-host.ts";
+	ExtensionServicesBoundary,
+	ExtensionServicesExecutionResult,
+	ExtensionServicesManagerOptions,
+} from "../src/core/extensions/services-host.ts";
 import {
-	DEFAULT_EXTENSION_WORK_LIMITS,
-	ExtensionWorkManager,
-	withoutExtensionWork,
-} from "../src/core/extensions/work-runtime.ts";
+	DEFAULT_EXTENSION_SERVICES_LIMITS,
+	ExtensionServicesManager,
+	withoutExtensionServices,
+} from "../src/core/extensions/services-runtime.ts";
 import type {
-	ExtensionWorkContext,
-	ExtensionWorkTaskContext,
-	ExtensionWorkTaskHandle,
-} from "../src/core/extensions/work-types.ts";
+	ExtensionServicesContext,
+	ExtensionServicesTaskContext,
+	ExtensionServicesTaskHandle,
+} from "../src/core/extensions/services-types.ts";
 
 function deferred<T>() {
 	let resolve!: (value: T) => void;
@@ -23,9 +23,9 @@ function deferred<T>() {
 	return { promise, resolve };
 }
 
-const managers: ExtensionWorkManager[] = [];
+const managers: ExtensionServicesManager[] = [];
 const implementation = {};
-function readResult(revision = "v1"): ExtensionWorkExecutionResult {
+function readResult(revision = "v1"): ExtensionServicesExecutionResult {
 	return {
 		status: "ok",
 		implementation,
@@ -40,7 +40,7 @@ function readResult(revision = "v1"): ExtensionWorkExecutionResult {
 		},
 	};
 }
-function boundary(key = "input-1", revision = 1): ExtensionWorkBoundary {
+function boundary(key = "input-1", revision = 1): ExtensionServicesBoundary {
 	return {
 		key,
 		attemptId: `attempt-${revision}`,
@@ -58,9 +58,9 @@ function boundary(key = "input-1", revision = 1): ExtensionWorkBoundary {
 		},
 	};
 }
-function setup(options: Partial<ExtensionWorkManagerOptions> = {}) {
-	const execute = vi.fn<ExtensionWorkManagerOptions["execute"]>(async () => readResult());
-	const manager = new ExtensionWorkManager({
+function setup(options: Partial<ExtensionServicesManagerOptions> = {}) {
+	const execute = vi.fn<ExtensionServicesManagerOptions["execute"]>(async () => readResult());
+	const manager = new ExtensionServicesManager({
 		execute,
 		isCurrent: () => true,
 		onBoundary: () => {},
@@ -71,21 +71,21 @@ function setup(options: Partial<ExtensionWorkManagerOptions> = {}) {
 	manager.boundary(boundary());
 	return { manager, execute };
 }
-function context(manager: ExtensionWorkManager, owner = "one"): ExtensionWorkContext {
+function context(manager: ExtensionServicesManager, owner = "one"): ExtensionServicesContext {
 	const value = manager.getContext(owner);
 	if (!value) throw new Error("Missing work context");
 	return value;
 }
 function start(
-	work: ExtensionWorkContext,
-	callback: (task: ExtensionWorkTaskContext) => Promise<void>,
+	work: ExtensionServicesContext,
+	callback: (task: ExtensionServicesTaskContext) => Promise<void>,
 	key = "test",
-): ExtensionWorkTaskHandle {
+): ExtensionServicesTaskHandle {
 	const result = work.tasks.start({ key, label: "Test" }, callback);
 	if (result.status !== "started") throw new Error(`Unexpected admission: ${result.status}`);
 	return result.task;
 }
-async function contribute(manager: ExtensionWorkManager, owner = "one", key = "source") {
+async function contribute(manager: ExtensionServicesManager, owner = "one", key = "source") {
 	const task = start(
 		context(manager, owner),
 		async (ctx) => {
@@ -106,7 +106,7 @@ afterEach(async () => {
 	vi.useRealTimers();
 });
 
-describe("extension managed work", () => {
+describe("extension managed services", () => {
 	it("owns snapshots and invalidates retained facades without reviving a retired scope", async () => {
 		const { manager } = setup();
 		const work = context(manager);
@@ -142,7 +142,7 @@ describe("extension managed work", () => {
 		const { manager, execute } = setup();
 		await contribute(manager);
 		const entered = deferred<void>();
-		const release = deferred<ExtensionWorkExecutionResult>();
+		const release = deferred<ExtensionServicesExecutionResult>();
 		execute.mockImplementationOnce(async () => {
 			entered.resolve();
 			return release.promise;
@@ -220,7 +220,7 @@ describe("extension managed work", () => {
 
 	it("retains capacity until fire-and-forget operations actually drain", async () => {
 		const entered = deferred<void>();
-		const release = deferred<ExtensionWorkExecutionResult>();
+		const release = deferred<ExtensionServicesExecutionResult>();
 		const returned = deferred<void>();
 		const { manager } = setup({
 			limits: { perRuntimeTasks: 1 },
@@ -230,7 +230,7 @@ describe("extension managed work", () => {
 			},
 		});
 		const work = context(manager);
-		let retained: ExtensionWorkTaskContext | undefined;
+		let retained: ExtensionServicesTaskContext | undefined;
 		const task = start(work, async (ctx) => {
 			retained = ctx;
 			void ctx.repository.readText({ path: "file.ts" });
@@ -256,7 +256,7 @@ describe("extension managed work", () => {
 			expect(work.tasks.start({ key: "nested", label: "Nested" }, async () => {})).toMatchObject({
 				status: "denied",
 			});
-			await withoutExtensionWork(async () => {
+			await withoutExtensionServices(async () => {
 				await Promise.resolve();
 				expect(await ctx.repository.readText({ path: "secret" })).toEqual({
 					status: "denied",
@@ -294,10 +294,10 @@ describe("extension managed work", () => {
 		vi.useFakeTimers();
 		const { manager, execute } = setup();
 		await contribute(manager);
-		const release = deferred<ExtensionWorkExecutionResult>();
+		const release = deferred<ExtensionServicesExecutionResult>();
 		execute.mockImplementation(async () => release.promise);
 		const collecting = manager.collect(1, () => true);
-		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
+		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_SERVICES_LIMITS.collectionMs);
 		expect(await collecting).toBeUndefined();
 		expect(manager.getStatus("one").contributions).toEqual([
 			{ key: "source", status: "omitted", reason: "validation_deadline" },
@@ -322,7 +322,7 @@ describe("extension managed work", () => {
 			for (const key of ["one", "two", "three"]) await contribute(manager, "one", key);
 			execute.mockClear();
 			execute.mockImplementation(async () => {
-				clock.mockReturnValue(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs + 1);
+				clock.mockReturnValue(DEFAULT_EXTENSION_SERVICES_LIMITS.collectionMs + 1);
 				return readResult();
 			});
 			expect(await manager.collect(1, () => true)).toBeUndefined();
@@ -338,7 +338,7 @@ describe("extension managed work", () => {
 	it("keeps a completed source mismatch definitive when the deadline also expires", async () => {
 		vi.useFakeTimers();
 		const clock = vi.spyOn(performance, "now").mockReturnValue(0);
-		const release = deferred<ExtensionWorkExecutionResult>();
+		const release = deferred<ExtensionServicesExecutionResult>();
 		try {
 			const { manager, execute } = setup();
 			await start(context(manager), async (task) => {
@@ -351,7 +351,7 @@ describe("extension managed work", () => {
 			}).wait();
 			execute.mockResolvedValueOnce(readResult("v2")).mockImplementationOnce(() => release.promise);
 			const collecting = manager.collect(1, () => true);
-			await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
+			await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_SERVICES_LIMITS.collectionMs);
 			expect(await collecting).toBeUndefined();
 			expect(manager.getStatus("one").contributions).toEqual([
 				{ key: "source", status: "omitted", reason: "source_unverified" },
@@ -404,19 +404,19 @@ describe("extension managed work", () => {
 		expect(execute).toHaveBeenCalledTimes(1);
 		expect(
 			() =>
-				new ExtensionWorkManager({
+				new ExtensionServicesManager({
 					execute,
 					isCurrent: () => true,
 					onBoundary: () => {},
 					onOperation: () => {},
 					limits: { perRuntimeTasks: 100 },
 				}),
-		).toThrow("Invalid extension work limit");
+		).toThrow("Invalid extension services limit");
 	});
 
 	it("revokes returned task contexts and guards against late contributions", async () => {
 		const { manager } = setup();
-		let retained: ExtensionWorkTaskContext | undefined;
+		let retained: ExtensionServicesTaskContext | undefined;
 		await start(context(manager), async (task) => {
 			retained = task;
 		}).wait();

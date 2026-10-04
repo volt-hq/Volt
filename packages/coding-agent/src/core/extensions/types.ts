@@ -95,10 +95,10 @@ export type { PolicyRegistration } from "./policy-registration.ts";
 import type {
 	ExtensionOperationEvent,
 	ExtensionOperationOrigin,
-	ExtensionWorkContext,
-	ExtensionWorkStatus,
+	ExtensionServicesContext,
+	ExtensionServicesStatus,
 	RequestBoundaryEvent,
-} from "./work-types.ts";
+} from "./services-types.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -333,8 +333,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
-	/** Optional managed work for this captured conversational scope; absent in policy/idle contexts. */
-	readonly work?: ExtensionWorkContext;
+	/** Optional managed services for this captured conversational scope; absent in policy/idle contexts. */
+	readonly services?: ExtensionServicesContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Run mode of the client that opened the session. Use "tui" to guard terminal-only UI such as custom components. */
@@ -1387,8 +1387,8 @@ export interface ExtensionAPI {
 	 */
 	setLabel(entryId: string, label: string | undefined): Promise<void>;
 
-	/** Bounded metadata for this extension's managed work; does not grant execution authority. */
-	getWorkStatus(): ExtensionWorkStatus;
+	/** Bounded metadata for this extension's managed tasks; does not grant execution authority. */
+	getServicesStatus(): ExtensionServicesStatus;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1640,7 +1640,7 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => Pr
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
-	getWorkStatus(owner: string): ExtensionWorkStatus;
+	getServicesStatus(owner: string): ExtensionServicesStatus;
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;

@@ -3,9 +3,9 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import { ExtensionServicesManager } from "../src/core/extensions/services-runtime.ts";
+import type { ExtensionServicesContext, ExtensionServicesTaskHandle } from "../src/core/extensions/services-types.ts";
 import type { ExtensionAPI, ExtensionFactory } from "../src/core/extensions/types.ts";
-import { ExtensionWorkManager } from "../src/core/extensions/work-runtime.ts";
-import type { ExtensionWorkContext, ExtensionWorkTaskHandle } from "../src/core/extensions/work-types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
@@ -28,13 +28,13 @@ async function setup(factories: ExtensionFactory[]) {
 		session,
 		ModelRegistry.inMemory(AuthStorage.inMemory()),
 	);
-	const work = new ExtensionWorkManager({
+	const work = new ExtensionServicesManager({
 		isCurrent: () => true,
 		execute: async () => ({ status: "unavailable", reason: "test" }),
 		onBoundary: (event) => runner.emitRequestBoundary(event),
 		onOperation: (event) => runner.emitExtensionOperation(event),
 	});
-	runner.bindWork(work);
+	runner.bindServices(work);
 	cleanup.push(async () => {
 		runner.invalidate();
 		await work.close();
@@ -60,14 +60,14 @@ async function setup(factories: ExtensionFactory[]) {
 	return { runner, work, boundary };
 }
 
-describe("extension work API binding", () => {
+describe("extension services API binding", () => {
 	it("binds isolated extension ownership and exposes bounded status through the extension API", async () => {
 		let first!: ExtensionAPI;
 		let second!: ExtensionAPI;
-		const handles: ExtensionWorkTaskHandle[] = [];
+		const handles: ExtensionServicesTaskHandle[] = [];
 		const make: ExtensionFactory = (api) => {
 			api.on("request_boundary", (_event, ctx) => {
-				const admitted = ctx.work!.tasks.start({ key: "same", label: "Test" }, async (task) => {
+				const admitted = ctx.services!.tasks.start({ key: "same", label: "Test" }, async (task) => {
 					task.context.put({ key: "same", text: "suggestion" });
 				});
 				if (admitted.status === "started") handles.push(admitted.task);
@@ -86,9 +86,9 @@ describe("extension work API binding", () => {
 		boundary();
 		await Promise.all(handles.map((handle) => handle.wait()));
 		expect(handles).toHaveLength(2);
-		expect(first.getWorkStatus().tasks).toHaveLength(1);
-		expect(second.getWorkStatus().tasks).toHaveLength(1);
-		expect(first.getWorkStatus().tasks[0].id).not.toBe(second.getWorkStatus().tasks[0].id);
+		expect(first.getServicesStatus().tasks).toHaveLength(1);
+		expect(second.getServicesStatus().tasks).toHaveLength(1);
+		expect(first.getServicesStatus().tasks[0].id).not.toBe(second.getServicesStatus().tasks[0].id);
 	});
 
 	it("does not await boundary callbacks and contains asynchronous observer errors", async () => {
@@ -112,9 +112,9 @@ describe("extension work API binding", () => {
 		await pending;
 		await Promise.resolve();
 		expect(report).toHaveBeenCalledWith({
-			extensionPath: "<extension-work>",
+			extensionPath: "<extension-services>",
 			event: "request_boundary",
-			error: "Extension work observer failed",
+			error: "Extension services observer failed",
 		});
 	});
 
@@ -123,7 +123,7 @@ describe("extension work API binding", () => {
 		const { runner, boundary } = await setup([
 			(api) => {
 				api.on("tool_result", (_event, ctx) => {
-					expect(ctx.work).toBeUndefined();
+					expect(ctx.services).toBeUndefined();
 					if (ctx.signal) expect(ctx.signal).toBe(signal);
 					throw new Error("private policy exception");
 				});
@@ -147,7 +147,7 @@ describe("extension work API binding", () => {
 	});
 
 	it("prevents async operation-observer feedback through a captured facade", async () => {
-		let captured!: ExtensionWorkContext;
+		let captured!: ExtensionServicesContext;
 		let finished!: () => void;
 		const observed = new Promise<void>((resolve) => {
 			finished = resolve;
@@ -155,18 +155,18 @@ describe("extension work API binding", () => {
 		const { boundary } = await setup([
 			(api) => {
 				api.on("request_boundary", (_event, ctx) => {
-					ctx.work!.tasks.start({ key: "read", label: "Read" }, async (task) => {
+					ctx.services!.tasks.start({ key: "read", label: "Read" }, async (task) => {
 						await task.repository.readText({ path: "x" });
 					});
 				});
 			},
 			(api) => {
 				api.on("request_boundary", (_event, ctx) => {
-					captured = ctx.work!;
+					captured = ctx.services!;
 				});
 				api.on("extension_operation", async (_event, ctx) => {
 					await Promise.resolve();
-					expect(ctx.work).toBeUndefined();
+					expect(ctx.services).toBeUndefined();
 					expect(captured.tasks.start({ key: "loop", label: "Loop" }, async () => {})).toMatchObject({
 						status: "denied",
 					});

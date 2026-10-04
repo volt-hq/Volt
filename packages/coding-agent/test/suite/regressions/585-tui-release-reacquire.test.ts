@@ -88,7 +88,7 @@ describe("regression #585: the TUI releases the session it leaves and acquires t
 				return tui.conversation;
 			},
 			options: { daemonAttach: fakeAttach(steps, outcomes) },
-			daemonWorkObservation: { bind: vi.fn(), dispose: vi.fn() },
+			daemonChangeObservation: { bind: vi.fn(), dispose: vi.fn() },
 			daemonRelayServers: new Map<Promise<void>, string>(),
 			daemonLeaseTail: Promise.resolve(),
 			isShuttingDown: false,

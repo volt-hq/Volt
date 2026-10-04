@@ -79,7 +79,7 @@ Source paths above are relative to `packages/coding-agent/src/core/`. Existing s
 
 Names below are proposed TypeScript API names, not existing exports. Final declarations must preserve these semantics. Add three facilities rather than exposing `AgentSession`, `LspManager`, or mutable internal registries:
 
-1. `ctx.work`: a scoped facade for a stable snapshot, managed tasks, and context contributions.
+1. `ctx.services`: a scoped facade for a stable snapshot, managed tasks, and context contributions.
 2. `task.repository`: bounded read-only operations available only within an admitted managed task.
 3. `request_boundary` and diagnostic-only `extension_operation` events, with bounded wait requests at the first boundary.
 
@@ -87,7 +87,7 @@ Use existing `tool_execution_end` events to schedule passive triage after foregr
 
 ### 4.1 Snapshot and scope
 
-`ctx.work` is present only for an active conversational request scope. It is absent during extension factory execution, idle commands, raw input interception, compaction, and tree summarization. Calls through a retained facade remain bound to its original scope, never whichever session happens to be current later.
+`ctx.services` is present only for an active conversational request scope. It is absent during extension factory execution, idle commands, raw input interception, compaction, and tree summarization. Calls through a retained facade remain bound to its original scope, never whichever session happens to be current later.
 
 The snapshot is an owned readonly value containing:
 
@@ -299,7 +299,7 @@ The [security model](security.md) remains trusted in-process extensions. Managed
 
 `extension_operation` is diagnostic-only and non-blocking. It contains extension/task-or-validation/scope/operation identity, service kind, terminal status, elapsed time, byte counts, and coverage. Do not emit raw paths, source text, hook arguments, model prompts, credentials, or arbitrary exception messages/stacks in generic diagnostics; use fixed bounded reason codes. Full content is extension-local until explicitly contributed. Suppress the initiating extension's own operation notifications by default. Opting in does not grant reactive execution: the asynchronous-lineage prohibition in section 5 still applies.
 
-Provide `volt.getWorkStatus()` as a bounded extension-local metadata snapshot for tasks, contributions, and exclusion reasons. It is usable from an idle command without retaining an obsolete execution facade and grants no execution authority. A deterministic example command can render it through current UI facilities. Use current extension error/status facilities for TUI, print/JSON, and RPC; no new native mobile inspector or protocol is part of this phase. Runtime diagnostics must remain observable without a terminal and must not influence task outcomes if an observer throws.
+Provide `volt.getServicesStatus()` as a bounded extension-local metadata snapshot for tasks, contributions, and exclusion reasons. It is usable from an idle command without retaining an obsolete execution facade and grants no execution authority. A deterministic example command can render it through current UI facilities. Use current extension error/status facilities for TUI, print/JSON, and RPC; no new native mobile inspector or protocol is part of this phase. Runtime diagnostics must remain observable without a terminal and must not influence task outcomes if an observer throws.
 
 ## 10. Implementation sequence
 

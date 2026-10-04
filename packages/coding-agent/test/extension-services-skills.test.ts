@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ExtensionSkillCatalog } from "../src/core/extensions/work-skills.ts";
+import { ExtensionSkillCatalog } from "../src/core/extensions/services-skills.ts";
 import { DefaultResourceLoader } from "../src/core/resource-loader.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { loadSkillsFromDir } from "../src/core/skills.ts";

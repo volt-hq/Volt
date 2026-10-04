@@ -5,15 +5,15 @@ import { fileURLToPath } from "node:url";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import type {
-	ExtensionWorkLocationsResult,
-	ExtensionWorkReadResult,
-	ExtensionWorkSnapshot,
-	ExtensionWorkSymbolsResult,
-	ExtensionWorkTaskContext,
-	ExtensionWorkTaskHandle,
-} from "../../src/core/extensions/work-types.ts";
+	ExtensionServicesLocationsResult,
+	ExtensionServicesReadResult,
+	ExtensionServicesSnapshot,
+	ExtensionServicesSymbolsResult,
+	ExtensionServicesTaskContext,
+	ExtensionServicesTaskHandle,
+} from "../../src/core/extensions/services-types.ts";
+import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import { loadSkillsFromDir, type Skill } from "../../src/core/skills.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -33,16 +33,16 @@ async function setup(options: HarnessOptions) {
 	await harness.session.setSessionName("remaining foundation test");
 	return harness;
 }
-function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?: ExtensionFactory) {
-	let handle!: ExtensionWorkTaskHandle;
+function consumer(run: (task: ExtensionServicesTaskContext) => Promise<void>, extra?: ExtensionFactory) {
+	let handle!: ExtensionServicesTaskHandle;
 	let api!: ExtensionAPI;
-	let snapshot!: ExtensionWorkSnapshot;
+	let snapshot!: ExtensionServicesSnapshot;
 	const factory: ExtensionFactory = async (volt) => {
 		api = volt;
 		volt.on("request_boundary", (event, ctx) => {
-			snapshot = ctx.work!.snapshot;
+			snapshot = ctx.services!.snapshot;
 			if (!event.first) return;
-			const admission = ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, run);
+			const admission = ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, run);
 			if (admission.status === "started") handle = admission.task;
 		});
 		volt.registerTool({
@@ -93,12 +93,12 @@ describe("remaining extension foundation through AgentSession", () => {
 		async (firstRequestWaitMs) => {
 			let projection: Context | undefined;
 			const harness = await setup({
-				extensionWorkLimits: { firstRequestWaitMs },
+				extensionServicesLimits: { firstRequestWaitMs },
 				extensionFactories: [
 					(volt) => {
 						volt.on("request_boundary", (_event, ctx) => {
-							ctx.work!.context.requestWait(100);
-							ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
+							ctx.services!.context.requestWait(100);
+							ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
 								task.context.put({ key: "hint", text: "first-request preparation" });
 							});
 						});
@@ -122,7 +122,7 @@ describe("remaining extension foundation through AgentSession", () => {
 
 	it("reads a loaded global skill through its handle even when general read is inactive", async () => {
 		const fixture = await skill();
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		const extension = consumer(async (task) => {
 			result = await task.repository.readSkill({ resourceId: task.snapshot.skills[0].resourceId });
 			if (result.status === "ok")
@@ -143,7 +143,7 @@ describe("remaining extension foundation through AgentSession", () => {
 		expect(extension.snapshot().skills[0]).toMatchObject({ name: "sample", scope: "user", origin: "top-level" });
 		expect(extension.snapshot().skills[0]).not.toHaveProperty("filePath");
 		expect(context.messages.map(getMessageText).join("\n")).toContain("prepared skill body");
-		expect(extension.api().getWorkStatus().contributions).toEqual([{ key: "skill", status: "admitted" }]);
+		expect(extension.api().getServicesStatus().contributions).toEqual([{ key: "skill", status: "admitted" }]);
 		expect(JSON.stringify(harness.session.messages)).not.toContain("prepared skill body");
 	});
 
@@ -155,7 +155,7 @@ describe("remaining extension foundation through AgentSession", () => {
 			await mkdir(secretDirectory);
 			const secret = join(secretDirectory, "SKILL.md");
 			await writeFile(secret, "adjacent private bytes");
-			let result: ExtensionWorkReadResult | undefined;
+			let result: ExtensionServicesReadResult | undefined;
 			const reducerText: string[] = [];
 			const extension = consumer(
 				async (task) => {
@@ -195,7 +195,7 @@ describe("remaining extension foundation through AgentSession", () => {
 
 	it.each(["redact", "remove", "edit"] as const)("withholds skill context after %s", async (kind) => {
 		const fixture = await skill();
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		let loaded = fixture.loaded;
 		const extension = consumer(
 			async (task) => {
@@ -241,7 +241,7 @@ describe("remaining extension foundation through AgentSession", () => {
 	it.each(["normal", "redact", "patch"] as const)(
 		"routes managed semantic reads through native LSP and policies: %s",
 		async (kind) => {
-			const results: Array<ExtensionWorkSymbolsResult | ExtensionWorkLocationsResult> = [];
+			const results: Array<ExtensionServicesSymbolsResult | ExtensionServicesLocationsResult> = [];
 			const extension = consumer(
 				async (task) => {
 					results.push(await task.repository.symbols({ path: "source.managed" }));

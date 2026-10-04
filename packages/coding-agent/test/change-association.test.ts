@@ -12,15 +12,15 @@ import type {
 	CodeHostPullRequestStatusProvider,
 	CodeHostPullRequestStatusRequest,
 } from "../src/core/code-host/types.ts";
-import { isExactTuiWorkObservationLeaseHolder } from "../src/daemon/iroh-service.ts";
-import { WorkAssociationService } from "../src/daemon/work-association.ts";
+import { ChangeAssociationService } from "../src/daemon/change-association.ts";
 import {
-	parseWorkState,
-	WORK_STATE_MAX_BYTES,
-	WORK_STATE_MAX_REPOSITORIES,
-	type WorkBindingMutationResult,
-	WorkStateStore,
-} from "../src/daemon/work-state.ts";
+	CHANGE_STORE_MAX_BYTES,
+	CHANGE_STORE_MAX_REPOSITORIES,
+	type ChangeBindingMutationResult,
+	ChangeStore,
+	parseChangesFile,
+} from "../src/daemon/changes-store.ts";
+import { isExactTuiChangeObservationLeaseHolder } from "../src/daemon/iroh-service.ts";
 
 const OID_A = "0123456789abcdef0123456789abcdef01234567";
 const OID_B = "abcdef0123456789abcdef0123456789abcdef01";
@@ -34,7 +34,7 @@ function tempDirectory(label: string): string {
 }
 
 function statePath(label: string): string {
-	return join(tempDirectory(label), "daemon", "work-state.json");
+	return join(tempDirectory(label), "daemon", "changes.json");
 }
 
 function repository(owner: string, name: string): CanonicalCodeHostRepository {
@@ -144,12 +144,12 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 }
 
 async function statusFixture(label: string) {
-	const store = new WorkStateStore({ path: statePath(label), writeStateFile: async () => {} });
+	const store = new ChangeStore({ path: statePath(label), writeStateFile: async () => {} });
 	await store.load();
 	const discovery = new FakeDiscoveryProvider();
 	discovery.outcome = resolved(42);
 	const status = new FakeStatusProvider();
-	const service = new WorkAssociationService({
+	const service = new ChangeAssociationService({
 		store,
 		discoveryProvider: discovery,
 		statusProvider: status,
@@ -160,7 +160,7 @@ async function statusFixture(label: string) {
 
 /** Resolve a PR on its branch, then switch the session to `main`, as after a merge. */
 async function linkOffBranch(
-	service: WorkAssociationService,
+	service: ChangeAssociationService,
 	overrides: Parameters<typeof observation>[0] = {},
 ): Promise<void> {
 	await service.observe(observation(overrides));
@@ -175,7 +175,7 @@ function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
-interface WorkStateFixtureChange {
+interface ChangesFixtureChange {
 	id: string;
 	updatedAt: number;
 	resolutionState?: "resolved" | "none";
@@ -185,8 +185,8 @@ interface WorkStateFixtureChange {
 	boundSessions?: string[];
 }
 
-/** Write a strict Work state file directly so unbound and terminal changes can be expressed. */
-function writeWorkStateFixture(path: string, changes: WorkStateFixtureChange[]): void {
+/** Write a strict changes file directly so unbound and terminal changes can be expressed. */
+function writeChangesFixture(path: string, changes: ChangesFixtureChange[]): void {
 	mkdirSync(join(path, ".."), { recursive: true });
 	const state = {
 		version: 1,
@@ -251,10 +251,10 @@ afterEach(() => {
 	}
 });
 
-describe("WorkStateStore", () => {
+describe("ChangeStore", () => {
 	it("persists owner-only bounded state without checkout paths and reloads it", async () => {
-		const path = statePath("work-state-reload");
-		const store = new WorkStateStore({ path });
+		const path = statePath("changes-reload");
+		const store = new ChangeStore({ path });
 		await store.load();
 		const binding = await store.bindObservation({
 			...observation(),
@@ -287,9 +287,9 @@ describe("WorkStateStore", () => {
 		expect(serialized).not.toContain(".git");
 		expect(serialized).not.toContain("github:github.com");
 
-		const reopened = new WorkStateStore({ path });
+		const reopened = new ChangeStore({ path });
 		await reopened.load();
-		expect(reopened.getWorkContext("volt", 1, "session-a", 200)).toMatchObject({
+		expect(reopened.getChangeContext("volt", 1, "session-a", 200)).toMatchObject({
 			changeId: binding.change.id,
 			repository: "Volt",
 			branch: "feature/work",
@@ -300,20 +300,20 @@ describe("WorkStateStore", () => {
 	});
 
 	it("backs up malformed and oversized state and regenerates a strict empty file", async () => {
-		const path = statePath("work-state-corrupt");
+		const path = statePath("changes-corrupt");
 		mkdirSync(join(path, ".."), { recursive: true });
 		writeFileSync(path, "{malformed", { mode: 0o666 });
 		chmodSync(path, 0o666);
 		let now = 123;
-		const store = new WorkStateStore({ path, now: () => now });
+		const store = new ChangeStore({ path, now: () => now });
 		const loaded = await store.load();
 		expect(loaded.corruptBackupPath).toBe(`${path}.corrupt-123`);
 		expect(loaded.state.repositories).toEqual([]);
 		if (process.platform !== "win32") expect(statSync(path).mode & 0o777).toBe(0o600);
 		expect(() =>
-			parseWorkState({
+			parseChangesFile({
 				...loaded.state,
-				repositories: Array.from({ length: WORK_STATE_MAX_REPOSITORIES + 1 }, () => ({})),
+				repositories: Array.from({ length: CHANGE_STORE_MAX_REPOSITORIES + 1 }, () => ({})),
 			}),
 		).toThrow(/invalid|unsupported/i);
 		now++;
@@ -321,8 +321,8 @@ describe("WorkStateStore", () => {
 	});
 
 	it("resets persisted resolved pull requests that lack their repository", async () => {
-		const path = statePath("work-state-missing-repository");
-		const store = new WorkStateStore({ path });
+		const path = statePath("changes-missing-repository");
+		const store = new ChangeStore({ path });
 		await store.load();
 		const binding = await store.bindObservation({ ...observation(), baseBranch: false, now: 100 });
 		await store.applyDiscovery(
@@ -348,18 +348,18 @@ describe("WorkStateStore", () => {
 		delete persisted.changes[0]!.pullRequest!.repository;
 		writeFileSync(path, JSON.stringify(persisted), { mode: 0o600 });
 
-		const reopened = new WorkStateStore({ path, now: () => 500 });
+		const reopened = new ChangeStore({ path, now: () => 500 });
 		const loaded = await reopened.load();
 		expect(loaded.corruptBackupPath).toBe(`${path}.corrupt-500`);
 		expect(loaded.state.changes).toEqual([]);
-		expect(reopened.getWorkContext("volt", 1, "session-a")).toBeUndefined();
+		expect(reopened.getChangeContext("volt", 1, "session-a")).toBeUndefined();
 		await reopened.close();
 	});
 
 	it("trims by serialized bytes while retaining the successful mutation", async () => {
-		const path = statePath("work-state-byte-trim");
+		const path = statePath("changes-byte-trim");
 		let persisted = "";
-		const store = new WorkStateStore({
+		const store = new ChangeStore({
 			path,
 			writeStateFile: async (_path, content) => {
 				persisted = content;
@@ -376,7 +376,7 @@ describe("WorkStateStore", () => {
 		let latestSessionId = "";
 		let latestChangeId = "";
 		let latestRepositoryId = "";
-		let latestResult: WorkBindingMutationResult | undefined;
+		let latestResult: ChangeBindingMutationResult | undefined;
 		let evictionObserved = false;
 
 		for (let index = 0; index < 1000; index++) {
@@ -396,7 +396,7 @@ describe("WorkStateStore", () => {
 			latestChangeId = result.change.id;
 			latestRepositoryId = result.repository.id;
 			latestResult = result;
-			const parsed = parseWorkState(JSON.parse(persisted) as unknown);
+			const parsed = parseChangesFile(JSON.parse(persisted) as unknown);
 			if (!parsed.bindings.some((binding) => binding.sessionId === oldestSessionId)) {
 				evictionObserved = true;
 				break;
@@ -404,8 +404,8 @@ describe("WorkStateStore", () => {
 		}
 
 		expect(evictionObserved).toBe(true);
-		expect(Buffer.byteLength(persisted, "utf8")).toBeLessThanOrEqual(WORK_STATE_MAX_BYTES);
-		const persistedState = parseWorkState(JSON.parse(persisted) as unknown);
+		expect(Buffer.byteLength(persisted, "utf8")).toBeLessThanOrEqual(CHANGE_STORE_MAX_BYTES);
+		const persistedState = parseChangesFile(JSON.parse(persisted) as unknown);
 		const latestBinding = persistedState.bindings.find((binding) => binding.sessionId === latestSessionId);
 		expect(latestBinding).toMatchObject({
 			changeId: latestChangeId,
@@ -414,7 +414,7 @@ describe("WorkStateStore", () => {
 		});
 		expect(persistedState.changes.some((change) => change.id === latestChangeId)).toBe(true);
 		expect(persistedState.repositories.some((repository) => repository.id === latestRepositoryId)).toBe(true);
-		if (!latestResult) throw new Error("expected a retained Work mutation result");
+		if (!latestResult) throw new Error("expected a retained change mutation result");
 
 		expect(
 			await store.applyDiscovery(
@@ -458,7 +458,7 @@ describe("WorkStateStore", () => {
 				now: 1,
 			}),
 		).toBe(true);
-		const finalState = parseWorkState(JSON.parse(persisted) as unknown);
+		const finalState = parseChangesFile(JSON.parse(persisted) as unknown);
 		expect(finalState.bindings.find((binding) => binding.sessionId === inheritedSessionId)).toMatchObject({
 			changeId: latestChangeId,
 			repositoryId: latestRepositoryId,
@@ -466,18 +466,18 @@ describe("WorkStateStore", () => {
 		});
 		expect(finalState.repositories.some((repository) => repository.id === latestRepositoryId)).toBe(true);
 		expect(finalState.repositories.some((repository) => repository.id === crossRepository.repository.id)).toBe(true);
-		expect(Buffer.byteLength(persisted, "utf8")).toBeLessThanOrEqual(WORK_STATE_MAX_BYTES);
+		expect(Buffer.byteLength(persisted, "utf8")).toBeLessThanOrEqual(CHANGE_STORE_MAX_BYTES);
 
 		writeFileSync(path, persisted, { mode: 0o600 });
 		await store.close();
-		const reopened = new WorkStateStore({ path });
+		const reopened = new ChangeStore({ path });
 		await reopened.load();
 		expect(reopened.getBinding(workspaceName, 1, inheritedSessionId)).toMatchObject({ changeId: latestChangeId });
 		await reopened.close();
 	});
 
 	it("shares feature changes, isolates base branches, and rebinds unresolved branch moves", async () => {
-		const store = new WorkStateStore({ path: statePath("work-state-binding") });
+		const store = new ChangeStore({ path: statePath("changes-binding") });
 		await store.load();
 		const featureA = await store.bindObservation({ ...observation({ sessionId: "a" }), baseBranch: false, now: 1 });
 		const featureB = await store.bindObservation({ ...observation({ sessionId: "b" }), baseBranch: false, now: 2 });
@@ -506,8 +506,8 @@ describe("WorkStateStore", () => {
 	});
 
 	it("lists bound open and draft pull requests as the watch set, newest first and bounded", async () => {
-		const path = statePath("work-state-watch-set");
-		writeWorkStateFixture(path, [
+		const path = statePath("changes-watch-set");
+		writeChangesFixture(path, [
 			{ id: "open", updatedAt: 10, number: 1 },
 			{ id: "shared", updatedAt: 20, number: 2, boundSessions: ["shared-a", "shared-b"] },
 			{ id: "draft", updatedAt: 30, number: 3, status: "draft" },
@@ -516,7 +516,7 @@ describe("WorkStateStore", () => {
 			{ id: "unbound", updatedAt: 60, number: 6, boundSessions: [] },
 			{ id: "unresolved", updatedAt: 70, resolutionState: "none" },
 		]);
-		const store = new WorkStateStore({ path });
+		const store = new ChangeStore({ path });
 		expect((await store.load()).corruptBackupPath).toBeUndefined();
 
 		expect(store.listWatchedPullRequests(10).map((entry) => entry.changeId)).toEqual(["draft", "shared", "open"]);
@@ -532,15 +532,15 @@ describe("WorkStateStore", () => {
 	});
 
 	it("applies fenced batched status results without touching discovery backoff", async () => {
-		const path = statePath("work-state-apply-statuses");
-		writeWorkStateFixture(path, [
+		const path = statePath("changes-apply-statuses");
+		writeChangesFixture(path, [
 			{ id: "open", updatedAt: 10, number: 1 },
 			{ id: "draft", updatedAt: 20, number: 2, status: "draft" },
 			{ id: "moved", updatedAt: 30, number: 3 },
 			{ id: "merged", updatedAt: 40, number: 4, status: "merged" },
 		]);
 		let writes = 0;
-		const store = new WorkStateStore({
+		const store = new ChangeStore({
 			path,
 			writeStateFile: async () => {
 				writes++;
@@ -593,10 +593,10 @@ describe("WorkStateStore", () => {
 		expect(store.getChange("moved")).toMatchObject({ checkedAt: 100, pullRequest: { status: "open" } });
 		expect(store.getChange("merged")).toMatchObject({ checkedAt: 100, pullRequest: { status: "merged" } });
 		expect(store.listWatchedPullRequests(10).map((entry) => entry.changeId)).toEqual(["moved", "draft"]);
-		expect(store.getWorkContext("volt", 1, "open", 1999)).toMatchObject({
+		expect(store.getChangeContext("volt", 1, "open", 1999)).toMatchObject({
 			pullRequest: { status: "merged", stale: false },
 		});
-		expect(store.getWorkContext("volt", 1, "open", 2000)).toMatchObject({ pullRequest: { stale: true } });
+		expect(store.getChangeContext("volt", 1, "open", 2000)).toMatchObject({ pullRequest: { stale: true } });
 
 		expect(
 			await store.applyPullRequestStatuses(
@@ -624,21 +624,25 @@ describe("WorkStateStore", () => {
 			updatedAt: 20,
 			pullRequest: { status: "draft" },
 		});
-		expect(store.getWorkContext("volt", 1, "draft", 500)).toMatchObject({
+		expect(store.getChangeContext("volt", 1, "draft", 500)).toMatchObject({
 			pullRequest: { status: "draft", stale: true },
 		});
 		await store.close();
 	});
 });
 
-describe("TUI Work observation authority", () => {
+describe("TUI change observation authority", () => {
 	it("accepts only the exact TUI connection holding the session lease", () => {
 		const lease = { state: "tui-owned" as const, tuiConnectionId: "connection-a" };
-		expect(isExactTuiWorkObservationLeaseHolder({ client: "tui", connectionId: "connection-a" }, lease)).toBe(true);
-		expect(isExactTuiWorkObservationLeaseHolder({ client: "tui", connectionId: "connection-b" }, lease)).toBe(false);
-		expect(isExactTuiWorkObservationLeaseHolder({ client: "cli", connectionId: "connection-a" }, lease)).toBe(false);
+		expect(isExactTuiChangeObservationLeaseHolder({ client: "tui", connectionId: "connection-a" }, lease)).toBe(true);
+		expect(isExactTuiChangeObservationLeaseHolder({ client: "tui", connectionId: "connection-b" }, lease)).toBe(
+			false,
+		);
+		expect(isExactTuiChangeObservationLeaseHolder({ client: "cli", connectionId: "connection-a" }, lease)).toBe(
+			false,
+		);
 		expect(
-			isExactTuiWorkObservationLeaseHolder(
+			isExactTuiChangeObservationLeaseHolder(
 				{ client: "tui", connectionId: "connection-a" },
 				{ state: "daemon-active", tuiConnectionId: "connection-a" },
 			),
@@ -646,34 +650,34 @@ describe("TUI Work observation authority", () => {
 	});
 });
 
-describe("WorkAssociationService", () => {
+describe("ChangeAssociationService", () => {
 	it("shares slash-delimited feature branches ending in a default base branch name", async () => {
-		const store = new WorkStateStore({ path: statePath("work-prefixed-feature") });
+		const store = new ChangeStore({ path: statePath("changes-prefixed-feature") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		await service.observe(observation({ sessionId: "feature-a", branch: "feature/main" }));
 		await service.observe(observation({ sessionId: "feature-b", branch: "feature/main" }));
-		expect(service.getWorkContext("volt", 1, "feature-b")?.changeId).toBe(
-			service.getWorkContext("volt", 1, "feature-a")?.changeId,
+		expect(service.getChangeContext("volt", 1, "feature-b")?.changeId).toBe(
+			service.getChangeContext("volt", 1, "feature-a")?.changeId,
 		);
 		await service.close();
 	});
 
 	it("keeps an exact positive association sticky across checkout changes and branch reuse", async () => {
 		let now = 100;
-		const store = new WorkStateStore({ path: statePath("work-sticky"), now: () => now });
+		const store = new ChangeStore({ path: statePath("changes-sticky"), now: () => now });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		provider.outcome = resolved(42);
-		const service = new WorkAssociationService({ store, discoveryProvider: provider, now: () => now });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider, now: () => now });
 		await service.observe(observation());
-		const initial = service.getWorkContext("volt", 1, "session-a")!;
+		const initial = service.getChangeContext("volt", 1, "session-a")!;
 		expect(initial).toMatchObject({ branch: "feature/work", pullRequest: { number: 42 } });
 
 		now++;
 		await service.observe(observation({ branch: "main", headOid: OID_B }));
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			changeId: initial.changeId,
 			branch: "feature/work",
 			pullRequest: { number: 42 },
@@ -683,7 +687,7 @@ describe("WorkAssociationService", () => {
 		now++;
 		provider.outcome = resolved(99);
 		await service.observe(observation({ sessionId: "session-reuse", headOid: OID_B }));
-		expect(service.getWorkContext("volt", 1, "session-reuse")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-reuse")).toMatchObject({
 			changeId: initial.changeId,
 			pullRequest: { number: 42 },
 		});
@@ -692,7 +696,7 @@ describe("WorkAssociationService", () => {
 
 	it("refreshes and rearms a sticky association after its branch head advances", async () => {
 		vi.useFakeTimers({ now: 1000 });
-		const store = new WorkStateStore({ path: statePath("work-sticky-head-refresh") });
+		const store = new ChangeStore({ path: statePath("changes-sticky-head-refresh") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		provider.resolver = async (request) => {
@@ -702,9 +706,9 @@ describe("WorkAssociationService", () => {
 				pullRequest: { ...outcome.pullRequest, matchedHeadOid: request.headOid },
 			};
 		};
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		await service.observe(observation({ headOid: OID_A }));
-		const changeId = service.getWorkContext("volt", 1, "session-a")!.changeId;
+		const changeId = service.getChangeContext("volt", 1, "session-a")!.changeId;
 		const initialCheckedAt = store.getChange(changeId)!.checkedAt;
 
 		await vi.advanceTimersByTimeAsync(1000);
@@ -726,45 +730,45 @@ describe("WorkAssociationService", () => {
 		await service.close();
 	});
 
-	it("inherits Work context for a replacement session without moving or overwriting bindings", async () => {
-		const path = statePath("work-session-inheritance");
-		const store = new WorkStateStore({ path });
+	it("inherits the change context for a replacement session without moving or overwriting bindings", async () => {
+		const path = statePath("changes-session-inheritance");
+		const store = new ChangeStore({ path });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		provider.outcome = resolved(42);
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		await service.observe(observation({ sessionId: "source" }));
-		const source = service.getWorkContext("volt", 1, "source")!;
+		const source = service.getChangeContext("volt", 1, "source")!;
 
 		expect(await service.inheritSession("volt", 1, "source", "review-session")).toBe(true);
 		await service.retireSession("volt", 1, "source");
-		expect(service.getWorkContext("volt", 1, "review-session")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "review-session")).toMatchObject({
 			changeId: source.changeId,
 			pullRequest: { number: 42 },
 		});
 
 		provider.outcome = resolved(99);
 		await service.observe(observation({ sessionId: "existing", branch: "feature/other", headOid: OID_B }));
-		const existing = service.getWorkContext("volt", 1, "existing")!;
+		const existing = service.getChangeContext("volt", 1, "existing")!;
 		expect(existing.changeId).not.toBe(source.changeId);
 		expect(await service.inheritSession("volt", 1, "source", "existing")).toBe(false);
-		expect(service.getWorkContext("volt", 1, "existing")?.changeId).toBe(existing.changeId);
+		expect(service.getChangeContext("volt", 1, "existing")?.changeId).toBe(existing.changeId);
 		await service.close();
 
-		const reopened = new WorkStateStore({ path });
+		const reopened = new ChangeStore({ path });
 		await reopened.load();
-		expect(reopened.getWorkContext("volt", 1, "source")?.changeId).toBe(source.changeId);
-		expect(reopened.getWorkContext("volt", 1, "review-session")?.changeId).toBe(source.changeId);
+		expect(reopened.getChangeContext("volt", 1, "source")?.changeId).toBe(source.changeId);
+		expect(reopened.getChangeContext("volt", 1, "review-session")?.changeId).toBe(source.changeId);
 		await reopened.close();
 	});
 
 	it("fences delayed discovery by session binding generation, repository, branch, and OID", async () => {
-		const store = new WorkStateStore({ path: statePath("work-cas") });
+		const store = new ChangeStore({ path: statePath("changes-cas") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		const resolvers = new Map<string, (outcome: CodeHostPullRequestDiscoveryOutcome) => void>();
 		provider.resolver = (request) => new Promise((resolve) => resolvers.set(request.branch, resolve));
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		const first = service.observe(observation());
 		await waitFor(() => resolvers.has("feature/work"));
 		const second = service.observe(observation({ branch: "feature/new", headOid: OID_B }));
@@ -775,7 +779,7 @@ describe("WorkAssociationService", () => {
 		});
 		resolvers.get("feature/new")!({ state: "none" });
 		await Promise.all([first, second]);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			branch: "feature/new",
 			resolutionState: "none",
 		});
@@ -783,12 +787,12 @@ describe("WorkAssociationService", () => {
 	});
 
 	it("rejects delayed discovery after another session advances the shared change head", async () => {
-		const store = new WorkStateStore({ path: statePath("work-shared-head-cas") });
+		const store = new ChangeStore({ path: statePath("changes-shared-head-cas") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		const resolvers = new Map<string, (outcome: CodeHostPullRequestDiscoveryOutcome) => void>();
 		provider.resolver = (request) => new Promise((resolve) => resolvers.set(request.headOid, resolve));
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 
 		const older = service.observe(observation({ sessionId: "older", headOid: OID_A }));
 		await waitFor(() => resolvers.has(OID_A));
@@ -797,8 +801,8 @@ describe("WorkAssociationService", () => {
 		resolvers.get(OID_B)!({ state: "none" });
 		await newer;
 
-		const newerContext = service.getWorkContext("volt", 1, "newer");
-		const olderContext = service.getWorkContext("volt", 1, "older");
+		const newerContext = service.getChangeContext("volt", 1, "newer");
+		const olderContext = service.getChangeContext("volt", 1, "older");
 		const changeId = newerContext!.changeId;
 		const changeSnapshot = store.getChange(changeId);
 		expect(changeSnapshot).toMatchObject({ headOid: OID_B, resolutionState: "none" });
@@ -808,8 +812,8 @@ describe("WorkAssociationService", () => {
 		await older;
 
 		expect(store.getChange(changeId)).toEqual(changeSnapshot);
-		expect(service.getWorkContext("volt", 1, "older")).toEqual(olderContext);
-		expect(service.getWorkContext("volt", 1, "newer")).toEqual(newerContext);
+		expect(service.getChangeContext("volt", 1, "older")).toEqual(olderContext);
+		expect(service.getChangeContext("volt", 1, "newer")).toEqual(newerContext);
 		await service.close();
 	});
 
@@ -817,8 +821,8 @@ describe("WorkAssociationService", () => {
 		const writeGate = createDeferred();
 		let writeCount = 0;
 		let blockingWriteStarted = false;
-		const store = new WorkStateStore({
-			path: statePath("work-guarded-binding"),
+		const store = new ChangeStore({
+			path: statePath("changes-guarded-binding"),
 			writeStateFile: async () => {
 				writeCount++;
 				if (writeCount === 2) {
@@ -836,7 +840,7 @@ describe("WorkAssociationService", () => {
 		await waitFor(() => blockingWriteStarted);
 
 		const provider = new FakeDiscoveryProvider();
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		let currentRevision = true;
 		const stale = service.observe(
 			observation({ sessionId: "stale", branch: "feature/stale", headOid: OID_B }),
@@ -856,8 +860,8 @@ describe("WorkAssociationService", () => {
 		const writeGate = createDeferred();
 		let writeCount = 0;
 		let observationWriteStarted = false;
-		const store = new WorkStateStore({
-			path: statePath("work-retirement-drain"),
+		const store = new ChangeStore({
+			path: statePath("changes-retirement-drain"),
 			writeStateFile: async () => {
 				writeCount++;
 				if (writeCount === 2) {
@@ -868,7 +872,7 @@ describe("WorkAssociationService", () => {
 		});
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		let currentRevision = true;
 		const observing = service.observe(observation(), () => currentRevision);
 		await waitFor(() => observationWriteStarted);
@@ -885,7 +889,7 @@ describe("WorkAssociationService", () => {
 
 		expect(retirementSettled).toBe(true);
 		expect(provider.requests).toEqual([]);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			branch: "feature/work",
 			resolutionState: "unavailable",
 		});
@@ -894,7 +898,7 @@ describe("WorkAssociationService", () => {
 
 	it("retires active discovery without waiting for the provider or allowing timers to reactivate", async () => {
 		vi.useFakeTimers({ now: 1000 });
-		const store = new WorkStateStore({ path: statePath("work-retired-discovery") });
+		const store = new ChangeStore({ path: statePath("changes-retired-discovery") });
 		await store.load();
 		const discoveryStarted = createDeferred();
 		const discoveryGate = createDeferred();
@@ -904,13 +908,13 @@ describe("WorkAssociationService", () => {
 			await discoveryGate.promise;
 			return { state: "none" };
 		};
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		const observing = service.observe(observation());
 		await discoveryStarted.promise;
 
 		await service.retireSession("volt", 1, "session-a");
 		expect(provider.active).toBe(1);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			resolutionState: "unavailable",
 		});
 		discoveryGate.resolve();
@@ -918,19 +922,19 @@ describe("WorkAssociationService", () => {
 		await vi.advanceTimersByTimeAsync(15 * 60_000);
 
 		expect(provider.requests).toHaveLength(1);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			resolutionState: "unavailable",
 		});
 		await service.close();
 	});
 
 	it("deduplicates in-flight and cached discovery and enforces provider concurrency", async () => {
-		const store = new WorkStateStore({ path: statePath("work-dedupe") });
+		const store = new ChangeStore({ path: statePath("changes-dedupe") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		const pending: Array<(outcome: CodeHostPullRequestDiscoveryOutcome) => void> = [];
 		provider.resolver = () => new Promise((resolve) => pending.push(resolve));
-		const service = new WorkAssociationService({
+		const service = new ChangeAssociationService({
 			store,
 			discoveryProvider: provider,
 			providerConcurrency: 1,
@@ -960,7 +964,7 @@ describe("WorkAssociationService", () => {
 
 	it("contains thrown scheduled discovery failures and retries them with backoff", async () => {
 		vi.useFakeTimers({ now: 1000 });
-		const store = new WorkStateStore({ path: statePath("work-scheduled-provider-failure") });
+		const store = new ChangeStore({ path: statePath("changes-scheduled-provider-failure") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		let attempts = 0;
@@ -970,7 +974,7 @@ describe("WorkAssociationService", () => {
 			return { state: "none" };
 		};
 		const failures: Array<{ phase: string; message: string }> = [];
-		const service = new WorkAssociationService({
+		const service = new ChangeAssociationService({
 			store,
 			discoveryProvider: provider,
 			onRefreshError: (phase, error) => {
@@ -983,14 +987,14 @@ describe("WorkAssociationService", () => {
 		await store.flush();
 		expect(provider.requests).toHaveLength(2);
 		expect(failures).toEqual([{ phase: "discovery", message: "scheduled provider failure" }]);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			resolutionState: "unavailable",
 		});
 
 		await vi.advanceTimersByTimeAsync(30_000);
 		await store.flush();
 		expect(provider.requests).toHaveLength(3);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({ resolutionState: "none" });
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({ resolutionState: "none" });
 		await service.close();
 	});
 
@@ -998,8 +1002,8 @@ describe("WorkAssociationService", () => {
 		vi.useFakeTimers({ now: 1000 });
 		let failWrites = false;
 		let writeAttempts = 0;
-		const store = new WorkStateStore({
-			path: statePath("work-scheduled-persistence-failure"),
+		const store = new ChangeStore({
+			path: statePath("changes-scheduled-persistence-failure"),
 			writeStateFile: async () => {
 				writeAttempts++;
 				if (failWrites) throw new Error("scheduled persistence failure");
@@ -1008,7 +1012,7 @@ describe("WorkAssociationService", () => {
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
 		const failures: Array<{ phase: string; message: string }> = [];
-		const service = new WorkAssociationService({
+		const service = new ChangeAssociationService({
 			store,
 			discoveryProvider: provider,
 			onRefreshError: (phase, error) => {
@@ -1016,7 +1020,7 @@ describe("WorkAssociationService", () => {
 			},
 		});
 		await service.observe(observation());
-		const changeId = service.getWorkContext("volt", 1, "session-a")!.changeId;
+		const changeId = service.getChangeContext("volt", 1, "session-a")!.changeId;
 		const initialWriteAttempts = writeAttempts;
 
 		failWrites = true;
@@ -1034,26 +1038,26 @@ describe("WorkAssociationService", () => {
 
 	it("uses unavailable state and backoff while offline, disabled, or untrusted without provider calls", async () => {
 		let now = 1000;
-		const store = new WorkStateStore({ path: statePath("work-offline"), now: () => now });
+		const store = new ChangeStore({ path: statePath("changes-offline"), now: () => now });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
-		const service = new WorkAssociationService({
+		const service = new ChangeAssociationService({
 			store,
 			discoveryProvider: provider,
 			now: () => now,
 			isOnline: () => false,
 		});
 		await service.observe(observation());
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({ resolutionState: "unavailable" });
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({ resolutionState: "unavailable" });
 		expect(provider.requests).toEqual([]);
 		now++;
 		await service.observe(observation());
 		expect(provider.requests).toEqual([]);
 		await service.close();
 
-		const disabledStore = new WorkStateStore({ path: statePath("work-disabled") });
+		const disabledStore = new ChangeStore({ path: statePath("changes-disabled") });
 		await disabledStore.load();
-		const disabled = new WorkAssociationService({
+		const disabled = new ChangeAssociationService({
 			store: disabledStore,
 			discoveryProvider: provider,
 			enabled: false,
@@ -1061,19 +1065,19 @@ describe("WorkAssociationService", () => {
 		await disabled.observe(observation({ sessionId: "disabled" }));
 		await disabled.close();
 
-		const untrustedStore = new WorkStateStore({ path: statePath("work-untrusted") });
+		const untrustedStore = new ChangeStore({ path: statePath("changes-untrusted") });
 		await untrustedStore.load();
-		const untrusted = new WorkAssociationService({ store: untrustedStore, discoveryProvider: provider });
+		const untrusted = new ChangeAssociationService({ store: untrustedStore, discoveryProvider: provider });
 		await untrusted.observe(observation({ sessionId: "untrusted", trusted: false }));
 		await untrusted.close();
 		expect(provider.requests).toEqual([]);
 	});
 
 	it("keeps repositories distinct by registered workspace generation and common Git directory", async () => {
-		const store = new WorkStateStore({ path: statePath("work-repositories") });
+		const store = new ChangeStore({ path: statePath("changes-repositories") });
 		await store.load();
 		const provider = new FakeDiscoveryProvider();
-		const service = new WorkAssociationService({ store, discoveryProvider: provider });
+		const service = new ChangeAssociationService({ store, discoveryProvider: provider });
 		await service.observe(observation({ sessionId: "root", cwd: "/workspace/root" }));
 		await service.observe(
 			observation({
@@ -1082,8 +1086,8 @@ describe("WorkAssociationService", () => {
 				commonGitDir: "/workspace/volt/.git",
 			}),
 		);
-		expect(service.getWorkContext("volt", 1, "root")?.changeId).toBe(
-			service.getWorkContext("volt", 1, "worktree")?.changeId,
+		expect(service.getChangeContext("volt", 1, "root")?.changeId).toBe(
+			service.getChangeContext("volt", 1, "worktree")?.changeId,
 		);
 		await service.observe(
 			observation({
@@ -1092,14 +1096,14 @@ describe("WorkAssociationService", () => {
 				cwd: "/workspace/root",
 			}),
 		);
-		expect(service.getWorkContext("volt", 2, "replacement")?.changeId).not.toBe(
-			service.getWorkContext("volt", 1, "root")?.changeId,
+		expect(service.getChangeContext("volt", 2, "replacement")?.changeId).not.toBe(
+			service.getChangeContext("volt", 1, "root")?.changeId,
 		);
 		await service.close();
 	});
 });
 
-describe("WorkAssociationService background PR status refresh", () => {
+describe("ChangeAssociationService background PR status refresh", () => {
 	it("stays dormant until started, then polls immediately and every 15 minutes while idle", async () => {
 		vi.useFakeTimers({ now: 1000 });
 		const { service, status } = await statusFixture("work-status-idle");
@@ -1172,7 +1176,7 @@ describe("WorkAssociationService background PR status refresh", () => {
 		await service.observe(observation({ branch: "main", headOid: OID_B }));
 		expect(status.requests).toHaveLength(1);
 		await vi.advanceTimersByTimeAsync(0);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			branch: "feature/work",
 			pullRequest: { number: 42, status: "merged", stale: false },
 		});
@@ -1197,7 +1201,7 @@ describe("WorkAssociationService background PR status refresh", () => {
 		await service.retireSession("volt", 1, "session-a");
 		expect(status.requests).toHaveLength(1);
 		await vi.advanceTimersByTimeAsync(0);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			pullRequest: { number: 42, status: "merged", stale: false },
 		});
 		await service.close();
@@ -1205,13 +1209,13 @@ describe("WorkAssociationService background PR status refresh", () => {
 
 	it("never polls when pull request discovery is disabled", async () => {
 		vi.useFakeTimers({ now: 1000 });
-		const path = statePath("work-status-disabled");
-		writeWorkStateFixture(path, [{ id: "open", updatedAt: 10, number: 42 }]);
-		const store = new WorkStateStore({ path, writeStateFile: async () => {} });
+		const path = statePath("changes-status-disabled");
+		writeChangesFixture(path, [{ id: "open", updatedAt: 10, number: 42 }]);
+		const store = new ChangeStore({ path, writeStateFile: async () => {} });
 		await store.load();
 		expect(store.listWatchedPullRequests(10)).toHaveLength(1);
 		const status = new FakeStatusProvider();
-		const service = new WorkAssociationService({ store, statusProvider: status, enabled: false });
+		const service = new ChangeAssociationService({ store, statusProvider: status, enabled: false });
 		service.start();
 		service.retainClientActivity();
 		await service.retireSession("volt", 1, "open");
@@ -1235,7 +1239,7 @@ describe("WorkAssociationService background PR status refresh", () => {
 		service.start();
 		await vi.advanceTimersByTimeAsync(0);
 		expect(status.requests).toHaveLength(1);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			pullRequest: { status: "open", stale: true },
 		});
 
@@ -1251,7 +1255,7 @@ describe("WorkAssociationService background PR status refresh", () => {
 		expect(status.requests).toHaveLength(3);
 		await vi.advanceTimersByTimeAsync(1);
 		expect(status.requests).toHaveLength(4);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			pullRequest: { status: "open", stale: false },
 		});
 		await vi.advanceTimersByTimeAsync(60_000);
@@ -1266,8 +1270,8 @@ describe("WorkAssociationService background PR status refresh", () => {
 		await linkOffBranch(service, { sessionId: "b", commonGitDir: "/b/.git" });
 		discovery.outcome = resolved(43);
 		await linkOffBranch(service, { sessionId: "c", commonGitDir: "/c/.git" });
-		expect(service.getWorkContext("volt", 1, "a")?.changeId).not.toBe(
-			service.getWorkContext("volt", 1, "b")?.changeId,
+		expect(service.getChangeContext("volt", 1, "a")?.changeId).not.toBe(
+			service.getChangeContext("volt", 1, "b")?.changeId,
 		);
 
 		status.statuses.set(42, "merged");
@@ -1275,9 +1279,9 @@ describe("WorkAssociationService background PR status refresh", () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(status.requests).toHaveLength(1);
 		expect(status.requests[0]!.pullRequests.map((pullRequest) => pullRequest.number).sort()).toEqual([42, 43]);
-		expect(service.getWorkContext("volt", 1, "a")).toMatchObject({ pullRequest: { status: "merged" } });
-		expect(service.getWorkContext("volt", 1, "b")).toMatchObject({ pullRequest: { status: "merged" } });
-		expect(service.getWorkContext("volt", 1, "c")).toMatchObject({ pullRequest: { number: 43, status: "open" } });
+		expect(service.getChangeContext("volt", 1, "a")).toMatchObject({ pullRequest: { status: "merged" } });
+		expect(service.getChangeContext("volt", 1, "b")).toMatchObject({ pullRequest: { status: "merged" } });
+		expect(service.getChangeContext("volt", 1, "c")).toMatchObject({ pullRequest: { number: 43, status: "open" } });
 		await service.close();
 	});
 
@@ -1285,7 +1289,7 @@ describe("WorkAssociationService background PR status refresh", () => {
 		vi.useFakeTimers({ now: 1000 });
 		const { service, status, store } = await statusFixture("work-status-close");
 		await linkOffBranch(service);
-		const changeId = service.getWorkContext("volt", 1, "session-a")!.changeId;
+		const changeId = service.getChangeContext("volt", 1, "session-a")!.changeId;
 		status.resolver = (request) =>
 			new Promise((resolve) => {
 				request.signal?.addEventListener(
@@ -1313,13 +1317,13 @@ describe("WorkAssociationService background PR status refresh", () => {
 		status.statuses.set(42, "merged");
 		service.start();
 		await vi.advanceTimersByTimeAsync(0);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({ pullRequest: { status: "merged" } });
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({ pullRequest: { status: "merged" } });
 
 		discovery.outcome = resolved(42, "merged");
 		await vi.advanceTimersByTimeAsync(120_000);
 		await service.observe(observation());
 		expect(discovery.requests).toHaveLength(2);
-		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+		expect(service.getChangeContext("volt", 1, "session-a")).toMatchObject({
 			pullRequest: { status: "merged", stale: false },
 		});
 		await service.close();

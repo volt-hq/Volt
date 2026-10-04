@@ -13,55 +13,55 @@ import { opaque, stringEnum } from "./helpers.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcReviewDiscussionLinkSchema } from "./review-discussions.ts";
 import {
-	RPC_WORK_BRANCH_MAX_CHARS,
-	RPC_WORK_CHANGE_ID_MAX_CHARS,
-	RPC_WORK_PROVIDER_MAX_CHARS,
-	RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS,
-	RPC_WORK_REPOSITORY_MAX_CHARS,
+	RPC_CHANGE_BRANCH_MAX_CHARS,
+	RPC_CHANGE_ID_MAX_CHARS,
+	RPC_CHANGE_PROVIDER_MAX_CHARS,
+	RPC_CHANGE_PULL_REQUEST_TITLE_MAX_CHARS,
+	RPC_CHANGE_REPOSITORY_MAX_CHARS,
 } from "./wire-limits.ts";
 
-export const RpcSessionWorkPullRequestSchema = Type.Object(
+export const RpcSessionChangePullRequestSchema = Type.Object(
 	{
-		provider: Type.String({ minLength: 1, maxLength: RPC_WORK_PROVIDER_MAX_CHARS }),
+		provider: Type.String({ minLength: 1, maxLength: RPC_CHANGE_PROVIDER_MAX_CHARS }),
 		number: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
-		title: Type.String({ maxLength: RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS }),
+		title: Type.String({ maxLength: RPC_CHANGE_PULL_REQUEST_TITLE_MAX_CHARS }),
 		status: stringEnum(["open", "draft", "merged", "closed"]),
 		stale: Type.Boolean(),
 	},
 	{ additionalProperties: false },
 );
 
-const rpcSessionWorkBaseProperties = {
-	changeId: Type.String({ minLength: 1, maxLength: RPC_WORK_CHANGE_ID_MAX_CHARS }),
-	repository: Type.String({ minLength: 1, maxLength: RPC_WORK_REPOSITORY_MAX_CHARS }),
-	branch: Type.String({ minLength: 1, maxLength: RPC_WORK_BRANCH_MAX_CHARS }),
+const rpcSessionChangeBaseProperties = {
+	changeId: Type.String({ minLength: 1, maxLength: RPC_CHANGE_ID_MAX_CHARS }),
+	repository: Type.String({ minLength: 1, maxLength: RPC_CHANGE_REPOSITORY_MAX_CHARS }),
+	branch: Type.String({ minLength: 1, maxLength: RPC_CHANGE_BRANCH_MAX_CHARS }),
 };
 
-/** Sanitized provider-neutral Work association exposed only through session lists. */
-export const RpcSessionWorkContextSchema = Type.Union([
+/** Sanitized provider-neutral change association exposed only through session lists. */
+export const RpcSessionChangeContextSchema = Type.Union([
 	Type.Object(
 		{
-			...rpcSessionWorkBaseProperties,
+			...rpcSessionChangeBaseProperties,
 			resolutionState: Type.Literal("resolved"),
-			pullRequest: RpcSessionWorkPullRequestSchema,
+			pullRequest: RpcSessionChangePullRequestSchema,
 		},
 		{ additionalProperties: false },
 	),
 	Type.Object(
 		{
-			...rpcSessionWorkBaseProperties,
+			...rpcSessionChangeBaseProperties,
 			resolutionState: stringEnum(["none", "ambiguous", "unavailable"]),
 		},
 		{ additionalProperties: false },
 	),
 ]);
-export type RpcSessionWorkContext = Static<typeof RpcSessionWorkContextSchema>;
+export type RpcSessionChangeContext = Static<typeof RpcSessionChangeContextSchema>;
 
 export const RpcSessionContextSchema = Type.Object(
 	{
 		sessionId: Type.String({ minLength: 1, maxLength: 128 }),
 		startingGitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
-		workContext: Type.Union([RpcSessionWorkContextSchema, Type.Null()]),
+		changeContext: Type.Union([RpcSessionChangeContextSchema, Type.Null()]),
 	},
 	{ additionalProperties: false },
 );
@@ -80,8 +80,8 @@ export const RpcSessionListItemSchema = Type.Object(
 		origin: Type.Optional(Type.Literal("subagent")),
 		/** First host-observed path-free Git state for this session. */
 		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
-		/** Daemon-owned Work association, when one has been observed. */
-		workContext: Type.Optional(RpcSessionWorkContextSchema),
+		/** Daemon-owned change association, when one has been observed. */
+		changeContext: Type.Optional(RpcSessionChangeContextSchema),
 		/** Which host process serves the session now, when one does (daemon hosts only). */
 		runtimeState: Type.Optional(stringEnum(["tui-owned", "daemon-active", "daemon-detached", "daemon-draining"])),
 		/** The daemon-managed worktree the session is bound to. */

@@ -43,12 +43,12 @@ This slice is still a medium-to-large runtime PR. Keep it reviewable through the
 Implement only these parts of the parent design:
 
 - `volt.on("request_boundary", handler)`: notification-only conversational boundary with host-issued scope/attempt identity and cause. No optional-wait fields or method in this PR.
-- `ctx.work`: scoped readonly snapshot plus task admission; absent outside an eligible conversational scope, and always absent in policy/diagnostic callbacks. Include current inputs, execution mode, cwd, model identity, and available managed read capabilities. Do not introduce a new skill catalog API yet; existing explicit resource inspection remains unchanged.
-- `ctx.work.tasks.start({ key, label, timeoutMs? }, callback)`: immediate handle or typed admission result; no nested managed starts.
+- `ctx.services`: scoped readonly snapshot plus task admission; absent outside an eligible conversational scope, and always absent in policy/diagnostic callbacks. Include current inputs, execution mode, cwd, model identity, and available managed read capabilities. Do not introduce a new skill catalog API yet; existing explicit resource inspection remains unchanged.
+- `ctx.services.tasks.start({ key, label, timeoutMs? }, callback)`: immediate handle or typed admission result; no nested managed starts.
 - Task handle: identity/status, `cancel()`, and cancellable `wait()`; no arbitrary result-persistence API.
 - Task context: captured snapshot, fixed signal/deadline, `repository.readText`, `repository.findPaths`, `repository.searchText`, and `context.put/remove`.
 - `volt.on("extension_operation", handler)`: bounded diagnostic-only observation, not a reactive work trigger.
-- `volt.getWorkStatus()`: extension-local task/contribution metadata available even while idle.
+- `volt.getServicesStatus()`: extension-local task/contribution metadata available even while idle.
 - Host-stamped origin on extension `tool_call`/`tool_result` policy events. Do not add preparation fields to public RPC or canonical tool messages.
 
 Keep data JSON-owned and types erasable. Do not expose internal managers, accept caller-selected ownership IDs, grant a generic tool executor, or add permissive `any` types to make the adapter convenient.
@@ -57,7 +57,7 @@ Configuration stays small: validated host limits passed through the SDK/session 
 
 ## 3. Accepted implementation checklist
 
-The requirements below record the accepted plan. The implementation consolidates task, scope, evidence, and collection ownership into `work-runtime.ts`, its host-only interfaces into `work-host.ts`, and public contracts into `work-types.ts`; it does not create separate manager layers for each checklist heading. Native structured producers share `tools/repository-observation.ts`. No authorization, storage, or RPC redesign was needed.
+The requirements below record the accepted plan. The implementation consolidates task, scope, evidence, and collection ownership into `services-runtime.ts`, its host-only interfaces into `services-host.ts`, and public contracts into `services-types.ts`; it does not create separate manager layers for each checklist heading. Native structured producers share `tools/repository-observation.ts`. No authorization, storage, or RPC redesign was needed.
 
 The end-to-end path and documentation are implemented. Focused Harness/session/runtime/producer tests pass, and an independent security review's policy-registration, task-join, and delayed-timer findings have behavioral regressions. Final validation on 2026-09-18: `npm run check` passed; `./test.sh` passed with 8,397 tests passed and 829 skipped across the workspace. The test launcher restored the auth file. No paid inference, daemon restart, or mobile build was used.
 
@@ -68,7 +68,7 @@ Primary files:
 - `packages/agent/src/harness/{types.ts,agent-harness.ts}`.
 - `packages/agent/src/types.ts` only if existing committed-delivery metadata cannot carry the necessary identity.
 - `packages/coding-agent/src/core/agent-session.ts`.
-- `packages/coding-agent/src/core/extensions/work-runtime.ts` (scope ownership).
+- `packages/coding-agent/src/core/extensions/services-runtime.ts` (scope ownership).
 
 Work:
 
@@ -87,7 +87,7 @@ Verification: focused Harness boundary tests for direct input, direct SDK steer/
 
 Primary files:
 
-- `packages/coding-agent/src/core/extensions/work-runtime.ts` (task and process-level admission).
+- `packages/coding-agent/src/core/extensions/services-runtime.ts` (task and process-level admission).
 - `packages/coding-agent/src/core/extensions/{types.ts,runner.ts,loader.ts}`.
 - `packages/coding-agent/src/core/agent-session.ts` lifecycle wiring.
 
@@ -108,7 +108,7 @@ Verification: deterministic admission/cancellation unit tests, fire-and-forget r
 Primary files:
 
 - `packages/coding-agent/src/core/tools/{read.ts,find.ts,grep.ts}` and narrowly shared internal producer module(s).
-- `packages/coding-agent/src/core/extensions/{work-host.ts,work-runtime.ts}`.
+- `packages/coding-agent/src/core/extensions/{services-host.ts,services-runtime.ts}`.
 - Existing authorization from `packages/coding-agent/src/core/operation-authorization.ts` (unchanged).
 - Policy extraction from `packages/coding-agent/src/core/agent-session.ts` and internal runner support.
 
@@ -131,7 +131,7 @@ Verification: native text/search parity; grant/mode restrictions; blocking and a
 
 Primary files:
 
-- `packages/coding-agent/src/core/extensions/work-runtime.ts` contains the bounded evidence/contribution store and collection-validation owner.
+- `packages/coding-agent/src/core/extensions/services-runtime.ts` contains the bounded evidence/contribution store and collection-validation owner.
 - Boundary wiring in `packages/coding-agent/src/core/agent-session.ts` and the Harness adapter from step 1.
 
 Work:
@@ -179,10 +179,10 @@ Work:
 Added test files:
 
 - `packages/agent/test/harness/agent-harness-request-boundary.test.ts`.
-- `packages/coding-agent/test/extension-work-runtime.test.ts`.
-- `packages/coding-agent/test/extension-work-runner.test.ts`.
+- `packages/coding-agent/test/extension-services-runtime.test.ts`.
+- `packages/coding-agent/test/extension-services-runner.test.ts`.
 - `packages/coding-agent/test/repository-observation.test.ts`.
-- `packages/coding-agent/test/suite/extension-work.test.ts` using `test/suite/harness.ts` and the faux provider.
+- `packages/coding-agent/test/suite/extension-services.test.ts` using `test/suite/harness.ts` and the faux provider.
 
 Private factories live in the relevant test or a test-only fixture, not a new example/package. If tracking reveals a specific existing bug, put its regression under `test/suite/regressions/<issue-number>-<slug>.test.ts`; do not invent an issue number.
 
@@ -199,10 +199,10 @@ node ../../node_modules/vitest/dist/cli.js --run --config vitest.harness.config.
 ```bash
 cd packages/coding-agent
 node ../../node_modules/vitest/dist/cli.js --run \
-  test/extension-work-runtime.test.ts \
-  test/extension-work-runner.test.ts \
+  test/extension-services-runtime.test.ts \
+  test/extension-services-runner.test.ts \
   test/repository-observation.test.ts \
-  test/suite/extension-work.test.ts \
+  test/suite/extension-services.test.ts \
   test/extensions-runner.test.ts \
   test/extension-runner-stale-inertness.test.ts \
   test/agent-session-conversation-generation.test.ts \

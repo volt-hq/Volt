@@ -23,8 +23,8 @@ import type {
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
 	RpcKeepAwakeStatus,
+	RpcSessionChangeContextSchema,
 	RpcSessionListItemSchema,
-	RpcSessionWorkContextSchema,
 } from "@hansjm10/volt-protocol";
 import {
 	DYNAMIC_INTENT_PATTERN,
@@ -66,7 +66,7 @@ import { listWorkspaceDirectories } from "./workspace-directory.ts";
 import { getRegisteredWorkingDirectoryForWorktree, getWorktreesRoot } from "./worktree-manager.ts";
 
 type SessionListItem = Static<typeof RpcSessionListItemSchema>;
-type SessionWorkContext = Static<typeof RpcSessionWorkContextSchema>;
+type SessionChangeContext = Static<typeof RpcSessionChangeContextSchema>;
 export type RemoteSessionRuntimeState = Exclude<LeaseState, "unowned">;
 
 /** Longest session title a device is sent, in Unicode scalars. */
@@ -89,11 +89,11 @@ export interface RemoteIntentHost {
 	/** Which host process serves each live session of a workspace. */
 	listRuntimeStates?(workspaceName: string): ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** The daemon's change and pull request association of a session. */
-	getWorkContext?(
+	getChangeContext?(
 		workspaceName: string,
 		workspaceGeneration: number,
 		sessionId: string,
-	): SessionWorkContext | undefined;
+	): SessionChangeContext | undefined;
 	/**
 	 * Unregister the workspace and retire its streams, runtimes, and relays,
 	 * except what `keep` names: the requesting stream, so it is still answered.
@@ -154,10 +154,14 @@ function truncateScalars(value: string, limit: number): string {
 }
 
 /** A session's work context with only the fields a device may see. */
-function projectWorkContext(workContext: SessionWorkContext): SessionWorkContext {
-	const base = { changeId: workContext.changeId, repository: workContext.repository, branch: workContext.branch };
-	if (workContext.resolutionState !== "resolved") return { ...base, resolutionState: workContext.resolutionState };
-	const { provider, number, title, status, stale } = workContext.pullRequest;
+function projectChangeContext(changeContext: SessionChangeContext): SessionChangeContext {
+	const base = {
+		changeId: changeContext.changeId,
+		repository: changeContext.repository,
+		branch: changeContext.branch,
+	};
+	if (changeContext.resolutionState !== "resolved") return { ...base, resolutionState: changeContext.resolutionState };
+	const { provider, number, title, status, stale } = changeContext.pullRequest;
 	return { ...base, resolutionState: "resolved", pullRequest: { provider, number, title, status, stale } };
 }
 
@@ -227,10 +231,10 @@ function timestamp(value: string | Date): string {
 /**
  * The sessions of the stream's workspace, newest first: its stored sessions,
  * the live summary of the stream's conversation, the worktree each is bound
- * to, which host process serves it, and the daemon's work association.
+ * to, which host process serves it, and the daemon's change association.
  */
 export async function listRemoteWorkspaceSessions(
-	host: Pick<RemoteIntentHost, "agentDir" | "stateManager" | "listRuntimeStates" | "getWorkContext">,
+	host: Pick<RemoteIntentHost, "agentDir" | "stateManager" | "listRuntimeStates" | "getChangeContext">,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	current?: HostedConversation | string,
 ): Promise<SessionListItem[]> {
@@ -322,10 +326,10 @@ export async function listRemoteWorkspaceSessions(
 	} catch {
 		// Runtime presence is best-effort.
 	}
-	if (authorization.workspaceGeneration !== undefined && host.getWorkContext) {
+	if (authorization.workspaceGeneration !== undefined && host.getChangeContext) {
 		for (const { item } of sessions.values()) {
-			const workContext = host.getWorkContext(workspace.name, authorization.workspaceGeneration, item.sessionId);
-			if (workContext) item.workContext = projectWorkContext(workContext);
+			const changeContext = host.getChangeContext(workspace.name, authorization.workspaceGeneration, item.sessionId);
+			if (changeContext) item.changeContext = projectChangeContext(changeContext);
 		}
 	}
 	return [...sessions.values()]

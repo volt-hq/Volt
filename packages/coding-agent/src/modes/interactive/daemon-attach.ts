@@ -810,7 +810,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					: null;
 			try {
 				await activeClient.request({
-					type: "work_observe",
+					type: "change_observe",
 					workspaceName: lease.workspaceName,
 					sessionId,
 					gitContext: branchContext,

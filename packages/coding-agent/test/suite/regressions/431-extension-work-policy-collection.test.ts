@@ -4,8 +4,8 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../../src/core/agent-session.ts";
+import type { ExtensionServicesTaskHandle } from "../../../src/core/extensions/services-types.ts";
 import type { ExtensionAPI, PolicyRegistration } from "../../../src/core/extensions/types.ts";
-import type { ExtensionWorkTaskHandle } from "../../../src/core/extensions/work-types.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 describe("managed context collection policy fence (#431)", () => {
@@ -13,7 +13,7 @@ describe("managed context collection policy fence (#431)", () => {
 		"checks %s policies after an earlier source has validated",
 		async (kind) => {
 			let api!: ExtensionAPI;
-			let handle: ExtensionWorkTaskHandle | undefined;
+			let handle: ExtensionServicesTaskHandle | undefined;
 			let providerContext: Context | undefined;
 			let releaseB!: () => void;
 			const pendingB = new Promise<void>((resolve) => {
@@ -31,7 +31,7 @@ describe("managed context collection policy fence (#431)", () => {
 						api = volt;
 						volt.on("request_boundary", (event, ctx) => {
 							if (!event.first) return;
-							const admission = ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
+							const admission = ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
 								for (const key of ["a", "b", "c"]) {
 									const read = await task.repository.readText({ path: `${key}.txt` });
 									if (read.status !== "ok") throw new Error(read.status);
@@ -128,7 +128,7 @@ describe("managed context collection policy fence (#431)", () => {
 					else expect(text).not.toContain(`prepared source ${key}`);
 				}
 				if (kind !== "unchanged") expect(text).not.toContain("Extension context");
-				expect(api.getWorkStatus().contributions).toEqual(
+				expect(api.getServicesStatus().contributions).toEqual(
 					["a", "b", "c"].map((key) =>
 						kind === "unchanged"
 							? { key, status: "admitted" }

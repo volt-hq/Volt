@@ -4,28 +4,28 @@ import type { JsonObject } from "@hansjm10/volt-ai";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { RepositoryObservation } from "../tools/repository-observation.ts";
 import type {
-	ExtensionWorkBoundary,
-	ExtensionWorkCollection,
-	ExtensionWorkExecutionResult,
-	ExtensionWorkManagerOptions,
-} from "./work-host.ts";
+	ExtensionServicesBoundary,
+	ExtensionServicesCollection,
+	ExtensionServicesExecutionResult,
+	ExtensionServicesManagerOptions,
+} from "./services-host.ts";
 import type {
 	ExtensionOperationOrigin,
-	ExtensionWorkContext,
-	ExtensionWorkContribution,
-	ExtensionWorkEvidence,
-	ExtensionWorkFailure,
-	ExtensionWorkLimits,
-	ExtensionWorkReadResult,
-	ExtensionWorkService,
-	ExtensionWorkSnapshot,
-	ExtensionWorkStatus,
-	ExtensionWorkTaskAdmission,
-	ExtensionWorkTaskContext,
-	ExtensionWorkTaskHandle,
-	ExtensionWorkTaskSpec,
-	ExtensionWorkTaskSummary,
-} from "./work-types.ts";
+	ExtensionServicesContext,
+	ExtensionServicesContribution,
+	ExtensionServicesEvidence,
+	ExtensionServicesFailure,
+	ExtensionServicesLimits,
+	ExtensionServicesReadResult,
+	ExtensionServicesService,
+	ExtensionServicesSnapshot,
+	ExtensionServicesStatus,
+	ExtensionServicesTaskAdmission,
+	ExtensionServicesTaskContext,
+	ExtensionServicesTaskHandle,
+	ExtensionServicesTaskSpec,
+	ExtensionServicesTaskSummary,
+} from "./services-types.ts";
 
 const invocation = new AsyncLocalStorage<"task" | "forbidden">();
 let processTasks = 0;
@@ -36,16 +36,16 @@ const MAX_RESULT_BYTES = 50 * 1024;
 const MAX_CONTRIBUTIONS = 8;
 const KEY = /^[a-zA-Z0-9._-]{1,80}$/;
 
-/** Policy and observation callbacks cannot reenter managed work, including after an await. */
-export function withoutExtensionWork<T>(callback: () => T): T {
+/** Policy and observation callbacks cannot reenter managed tasks, including after an await. */
+export function withoutExtensionServices<T>(callback: () => T): T {
 	return invocation.run("forbidden", callback);
 }
 
-export function extensionWorkForbidden(): boolean {
+export function extensionServicesForbidden(): boolean {
 	return invocation.getStore() === "forbidden";
 }
 
-export const DEFAULT_EXTENSION_WORK_LIMITS: Readonly<ExtensionWorkLimits> = Object.freeze({
+export const DEFAULT_EXTENSION_SERVICES_LIMITS: Readonly<ExtensionServicesLimits> = Object.freeze({
 	perExtensionTasks: 2,
 	perRuntimeTasks: 4,
 	taskTimeoutMs: 10_000,
@@ -68,7 +68,7 @@ interface Budget {
 }
 
 interface Evidence {
-	public: ExtensionWorkEvidence;
+	public: ExtensionServicesEvidence;
 	owner: string;
 	input: JsonObject;
 	service: "readText" | "readSkill";
@@ -77,7 +77,7 @@ interface Evidence {
 }
 
 interface Contribution {
-	value: ExtensionWorkContribution;
+	value: ExtensionServicesContribution;
 	revision: number;
 	readyAt: number;
 	admission?: object;
@@ -87,7 +87,7 @@ interface Contribution {
 
 interface Scope {
 	key: string;
-	snapshot: ExtensionWorkSnapshot;
+	snapshot: ExtensionServicesSnapshot;
 	controller: AbortController;
 	allowNewWork: boolean;
 	waitRequestedMs: number;
@@ -100,8 +100,8 @@ interface Scope {
 interface Task {
 	owner: string;
 	scope: Scope;
-	snapshot: ExtensionWorkSnapshot;
-	summary: ExtensionWorkTaskSummary;
+	snapshot: ExtensionServicesSnapshot;
+	summary: ExtensionServicesTaskSummary;
 	controller: AbortController;
 	deadline: number;
 	accepting: boolean;
@@ -110,17 +110,20 @@ interface Task {
 	settled: Promise<void>;
 }
 
-const failure = (status: ExtensionWorkFailure["status"], reason: string): ExtensionWorkFailure => ({ status, reason });
+const failure = (status: ExtensionServicesFailure["status"], reason: string): ExtensionServicesFailure => ({
+	status,
+	reason,
+});
 
-/** One runtime's optional work. This owner has no model, message, or persistence capability. */
-export class ExtensionWorkManager {
-	private readonly options: ExtensionWorkManagerOptions;
-	private readonly limits: ExtensionWorkLimits;
+/** One runtime's extension services. This owner has no model, message, or persistence capability. */
+export class ExtensionServicesManager {
+	private readonly options: ExtensionServicesManagerOptions;
+	private readonly limits: ExtensionServicesLimits;
 	private readonly runtimeId = randomUUID();
 	private readonly extensionIds = new Map<string, string>();
 	private readonly tasks = new Set<Task>();
-	private readonly history: Array<{ owner: string; summary: ExtensionWorkTaskSummary }> = [];
-	private readonly lastContributions = new Map<string, ExtensionWorkStatus["contributions"]>();
+	private readonly history: Array<{ owner: string; summary: ExtensionServicesTaskSummary }> = [];
+	private readonly lastContributions = new Map<string, ExtensionServicesStatus["contributions"]>();
 	private readonly operations = new Set<Promise<unknown>>();
 	private scope: Scope | undefined;
 	private blockedKey: string | undefined;
@@ -129,19 +132,19 @@ export class ExtensionWorkManager {
 	private readonly pendingAdmissions = new Set<(admitted: boolean) => void>();
 	private closed = false;
 
-	constructor(options: ExtensionWorkManagerOptions) {
+	constructor(options: ExtensionServicesManagerOptions) {
 		this.options = options;
-		this.limits = { ...DEFAULT_EXTENSION_WORK_LIMITS };
-		for (const key of Object.keys(options.limits ?? {}) as Array<keyof ExtensionWorkLimits>) {
+		this.limits = { ...DEFAULT_EXTENSION_SERVICES_LIMITS };
+		for (const key of Object.keys(options.limits ?? {}) as Array<keyof ExtensionServicesLimits>) {
 			const value = options.limits?.[key];
 			if (
-				!(key in DEFAULT_EXTENSION_WORK_LIMITS) ||
+				!(key in DEFAULT_EXTENSION_SERVICES_LIMITS) ||
 				value === undefined ||
 				!Number.isSafeInteger(value) ||
 				value < 0 ||
 				value > (key === "firstRequestWaitMs" ? 100 : this.limits[key])
 			) {
-				throw new TypeError(`Invalid extension work limit: ${key}`);
+				throw new TypeError(`Invalid extension services limit: ${key}`);
 			}
 			this.limits[key] = value;
 		}
@@ -165,7 +168,7 @@ export class ExtensionWorkManager {
 		return this.extensionIds.get(owner) === extensionId;
 	}
 
-	boundary(boundary: ExtensionWorkBoundary): void {
+	boundary(boundary: ExtensionServicesBoundary): void {
 		if (this.closed || !this.options.isCurrent() || boundary.key === this.blockedKey) return;
 		const first = this.scope?.key !== boundary.key;
 		if (first) {
@@ -173,7 +176,7 @@ export class ExtensionWorkManager {
 			this.scope = {
 				key: boundary.key,
 				snapshot: {
-					...cloneCanonicalData(boundary.snapshot, "Extension work snapshot"),
+					...cloneCanonicalData(boundary.snapshot, "Extension services snapshot"),
 					scopeId: randomUUID(),
 					runtimeId: this.runtimeId,
 				},
@@ -187,7 +190,7 @@ export class ExtensionWorkManager {
 			};
 		} else if (this.scope) {
 			this.scope.snapshot = {
-				...cloneCanonicalData(boundary.snapshot, "Extension work snapshot"),
+				...cloneCanonicalData(boundary.snapshot, "Extension services snapshot"),
 				scopeId: this.scope.snapshot.scopeId,
 				runtimeId: this.runtimeId,
 			};
@@ -211,13 +214,13 @@ export class ExtensionWorkManager {
 		}
 	}
 
-	getContext(owner: string): ExtensionWorkContext | undefined {
+	getContext(owner: string): ExtensionServicesContext | undefined {
 		const scope = this.scope;
-		if (!scope || !this.current(scope) || extensionWorkForbidden()) return undefined;
+		if (!scope || !this.current(scope) || extensionServicesForbidden()) return undefined;
 		this.extensionId(owner);
-		const snapshot = cloneCanonicalData(scope.snapshot, "Extension work context");
+		const snapshot = cloneCanonicalData(scope.snapshot, "Extension services context");
 		return {
-			snapshot: cloneCanonicalData(snapshot, "Extension work snapshot"),
+			snapshot: cloneCanonicalData(snapshot, "Extension services snapshot"),
 			context: {
 				requestWait: (milliseconds) => {
 					if (!Number.isSafeInteger(milliseconds) || milliseconds < 0)
@@ -240,7 +243,7 @@ export class ExtensionWorkManager {
 		};
 	}
 
-	getStatus(owner: string): ExtensionWorkStatus {
+	getStatus(owner: string): ExtensionServicesStatus {
 		const contributions = this.scope?.contributions.get(owner);
 		return cloneCanonicalData(
 			{
@@ -256,17 +259,17 @@ export class ExtensionWorkManager {
 						}))
 					: (this.lastContributions.get(owner) ?? []),
 			},
-			"Extension work status",
+			"Extension services status",
 		);
 	}
 
 	private start(
 		scope: Scope,
 		owner: string,
-		snapshot: ExtensionWorkSnapshot,
-		spec: ExtensionWorkTaskSpec,
-		callback: (task: ExtensionWorkTaskContext) => Promise<void>,
-	): ExtensionWorkTaskAdmission {
+		snapshot: ExtensionServicesSnapshot,
+		spec: ExtensionServicesTaskSpec,
+		callback: (task: ExtensionServicesTaskContext) => Promise<void>,
+	): ExtensionServicesTaskAdmission {
 		if (invocation.getStore()) return failure("denied", "recursive_work");
 		if (!this.current(scope)) return failure("invalidated", "scope_invalidated");
 		if (!scope.allowNewWork) return failure("denied", "final_response");
@@ -324,7 +327,7 @@ export class ExtensionWorkManager {
 				// Returned/throwing callbacks cannot leave orphaned operations behind.
 				const cancelled = task.summary.state === "cancelling";
 				// Abort listeners run in the dispatching context, not their registration lineage.
-				withoutExtensionWork(() => task.controller.abort());
+				withoutExtensionServices(() => task.controller.abort());
 				await Promise.allSettled([...task.operations]);
 				clearTimeout(timer);
 				task.summary.state =
@@ -348,10 +351,10 @@ export class ExtensionWorkManager {
 		task.accepting = false;
 		task.summary.state = "cancelling";
 		task.summary.reason = reason;
-		withoutExtensionWork(() => task.controller.abort());
+		withoutExtensionServices(() => task.controller.abort());
 	}
 
-	private handle(task: Task): ExtensionWorkTaskHandle {
+	private handle(task: Task): ExtensionServicesTaskHandle {
 		return {
 			id: task.summary.id,
 			status: () => ({ ...task.summary }),
@@ -380,7 +383,7 @@ export class ExtensionWorkManager {
 		};
 	}
 
-	private taskContext(task: Task): ExtensionWorkTaskContext {
+	private taskContext(task: Task): ExtensionServicesTaskContext {
 		return {
 			snapshot: cloneCanonicalData(task.snapshot, "Extension task snapshot"),
 			signal: task.controller.signal,
@@ -432,7 +435,7 @@ export class ExtensionWorkManager {
 		task: Task,
 		service: "readText" | "readSkill",
 		raw: JsonObject,
-	): Promise<ExtensionWorkReadResult> {
+	): Promise<ExtensionServicesReadResult> {
 		let input: JsonObject;
 		try {
 			input = cloneCanonicalData(raw, "Read arguments");
@@ -444,7 +447,7 @@ export class ExtensionWorkManager {
 		const revoked = this.taskFailure(task);
 		if (revoked) return revoked;
 		if (result.observation.kind !== "read") return failure("unsupported", "observation_unavailable");
-		const publicEvidence: ExtensionWorkEvidence = {
+		const publicEvidence: ExtensionServicesEvidence = {
 			id: randomUUID(),
 			path: result.observation.path,
 			startLine: result.observation.startLine,
@@ -482,8 +485,8 @@ export class ExtensionWorkManager {
 			: failure("unsupported", "observation_unavailable");
 	}
 
-	private taskFailure(task: Task): ExtensionWorkFailure | undefined {
-		if (extensionWorkForbidden()) return failure("denied", "recursive_work");
+	private taskFailure(task: Task): ExtensionServicesFailure | undefined {
+		if (extensionServicesForbidden()) return failure("denied", "recursive_work");
 		if (!this.current(task.scope)) return failure("invalidated", "scope_invalidated");
 		if (!task.accepting || task.controller.signal.aborted) return failure("cancelled", "task_closed");
 		if (Date.now() >= task.deadline) {
@@ -495,9 +498,9 @@ export class ExtensionWorkManager {
 
 	private taskOperation(
 		task: Task,
-		service: ExtensionWorkService,
+		service: ExtensionServicesService,
 		input: JsonObject,
-	): Promise<ExtensionWorkExecutionResult> {
+	): Promise<ExtensionServicesExecutionResult> {
 		const denied = this.taskFailure(task);
 		if (denied) return Promise.resolve(denied);
 		const operation = this.execute(
@@ -523,11 +526,11 @@ export class ExtensionWorkManager {
 		owner: string,
 		ownerId: string,
 		ownerKind: "task" | "validation",
-		service: ExtensionWorkService,
+		service: ExtensionServicesService,
 		rawInput: JsonObject,
 		signal: AbortSignal,
 		taskBudget?: Budget,
-	): Promise<ExtensionWorkExecutionResult> {
+	): Promise<ExtensionServicesExecutionResult> {
 		if (!this.current(scope)) return failure("invalidated", "scope_invalidated");
 		if (signal.aborted) return failure("cancelled", "operation_cancelled");
 		if (
@@ -563,7 +566,7 @@ export class ExtensionWorkManager {
 		};
 		const startedAt = performance.now();
 		let bytes = 0;
-		let result: ExtensionWorkExecutionResult = failure("failed", "operation_failed");
+		let result: ExtensionServicesExecutionResult = failure("failed", "operation_failed");
 		const operation = Promise.resolve().then(() => {
 			if (signal.aborted || !this.current(scope)) return failure("cancelled", "operation_cancelled");
 			return this.options.execute({ service, input, signal, origin });
@@ -595,7 +598,7 @@ export class ExtensionWorkManager {
 			}
 			try {
 				void Promise.resolve(
-					withoutExtensionWork(() =>
+					withoutExtensionServices(() =>
 						this.options.onOperation({
 							type: "extension_operation",
 							extensionId,
@@ -617,7 +620,7 @@ export class ExtensionWorkManager {
 		return result;
 	}
 
-	private put(task: Task, raw: ExtensionWorkContribution): { status: "accepted" } | ExtensionWorkFailure {
+	private put(task: Task, raw: ExtensionServicesContribution): { status: "accepted" } | ExtensionServicesFailure {
 		const denied = this.taskFailure(task);
 		if (denied) return denied;
 		const value = cloneCanonicalData(raw, "Extension context contribution");
@@ -658,7 +661,7 @@ export class ExtensionWorkManager {
 		revision: number,
 		policiesCurrent: () => boolean,
 		maxBytes = this.limits.suffixBytes,
-	): Promise<ExtensionWorkCollection | undefined> {
+	): Promise<ExtensionServicesCollection | undefined> {
 		const scope = this.scope;
 		const waitMs = scope?.waitPending ? scope.waitRequestedMs : 0;
 		if (scope) scope.waitPending = false;

@@ -81,7 +81,7 @@ export interface CreateAgentSessionFromServicesOptions {
 	excludeTools?: CreateAgentSessionOptions["excludeTools"];
 	noTools?: CreateAgentSessionOptions["noTools"];
 	customTools?: ToolDefinition[];
-	extensionWorkLimits?: CreateAgentSessionOptions["extensionWorkLimits"];
+	extensionServicesLimits?: CreateAgentSessionOptions["extensionServicesLimits"];
 	hostInteraction?: HostInteraction;
 	subagentToolManager?: SubagentToolManager;
 	/** Share language servers with other sessions of the same runtime factory. */
@@ -279,7 +279,7 @@ export async function createAgentSessionFromServices(
 		excludeTools: options.excludeTools,
 		noTools: options.noTools,
 		customTools: options.customTools,
-		extensionWorkLimits: options.extensionWorkLimits,
+		extensionServicesLimits: options.extensionServicesLimits,
 		sessionStartEvent: options.sessionStartEvent,
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,

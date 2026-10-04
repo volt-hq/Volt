@@ -1827,21 +1827,21 @@ volt.registerCommand("my-setup-teardown", {
 
 ## Managed context preparation
 
-Extensions can prepare optional repository context without running another agent or changing the selected model. Nothing runs automatically: an extension must subscribe and start work. This API ships no classifier or preparation extension.
+Extensions can prepare optional repository context without running another agent or changing the selected model. Nothing runs automatically: an extension must subscribe and start a task. This API ships no classifier or preparation extension.
 
 ### Request boundaries and ownership
 
 `request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), `first` for the request scope, and `waitAvailableMs` for the host's first-boundary allowance. Returned promises do not delay the model; exceptions are contained.
 
-`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, `revision` (the log ordinal the request builds on), cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
+`ctx.services` captures the current request scope and a detached snapshot: runtime/branch/scope identity, `revision` (the log ordinal the request builds on), cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
 
 Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload, a session change, and when the session ends because a write could not be confirmed as saved. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
 
 ```typescript
 // Illustrative API use, not a built-in extension or default behavior.
 volt.on("request_boundary", (event, ctx) => {
-  if (!event.first || !ctx.work) return;
-  ctx.work.tasks.start({ key: "readme", label: "Read project overview" }, async (task) => {
+  if (!event.first || !ctx.services) return;
+  ctx.services.tasks.start({ key: "readme", label: "Read project overview" }, async (task) => {
     const result = await task.repository.readText({ path: "README.md", limit: 40 });
     if (result.status !== "ok") return;
     task.context.put({
@@ -1885,7 +1885,7 @@ Semantic locations have canonical absolute paths and 1-based `startLine`, `start
 
 ### Optional first-request waiting
 
-Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 100. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
+Ready-only remains the default. A host may configure SDK `extensionServicesLimits.firstRequestWaitMs` from 0 to 100. During the synchronous first `request_boundary` callback, an extension may call `ctx.services.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
 
 The first collection waits for the tasks admitted at that boundary, only until they settle, the allowance expires, or the scope is revoked. Timeout does not cancel useful ongoing preparation. Retries and later turns receive no renewed wait; late contributions cannot enter an already collected request. CPU-bound trusted extension code is not preempted, but results beyond the deadline are excluded from that attempt.
 
@@ -1899,13 +1899,13 @@ Even with an opted-in wait, first-call improvement is not guaranteed. Source val
 
 ### Limits, diagnostics, and disable behavior
 
-Defaults allow two unsettled tasks per extension, four per runtime, and eight process-wide. Task deadlines default to 10 seconds with a 30-second ceiling. Each task can make 16 managed calls and return 256 KiB of source data; the scope shares 64 calls and 1 MiB including validation. Contributions are capped at 4 KiB each, 8 KiB per extension, and a 16 KiB request suffix. Source collection is bounded to 100 ms. A host can tighten limits through SDK `extensionWorkLimits`.
+Defaults allow two unsettled tasks per extension, four per runtime, and eight process-wide. Task deadlines default to 10 seconds with a 30-second ceiling. Each task can make 16 managed calls and return 256 KiB of source data; the scope shares 64 calls and 1 MiB including validation. Contributions are capped at 4 KiB each, 8 KiB per extension, and a 16 KiB request suffix. Source collection is bounded to 100 ms. A host can tighten limits through SDK `extensionServicesLimits`.
 
 Task completion includes draining owned operations. Return, throw, or cancellation does not release capacity while an unawaited host operation remains active. Non-cooperative callbacks remain fenced and charged; arbitrary in-process code is not forcibly terminated.
 
-`volt.getWorkStatus()` returns this extension's bounded task summaries and contribution states/reasons, including while idle. `extension_operation` provides content-free operation metadata. It is diagnostic-only, suppresses the initiating extension's own observations, and grants no reactive execution. Use foreground `tool_execution_end` for triage instead of scheduling managed work from a result reducer.
+`volt.getServicesStatus()` returns this extension's bounded task summaries and contribution states/reasons, including while idle. `extension_operation` provides content-free operation metadata. It is diagnostic-only, suppresses the initiating extension's own observations, and grants no reactive execution. Use foreground `tool_execution_end` for triage instead of scheduling managed tasks from a result reducer.
 
-Use the existing extension resource configuration and reload/restart to disable an extension. Excluded modules do not run their factories; reload revokes old managed work. Explicit CLI `-e` and SDK-injected factories remain explicit loads.
+Use the existing extension resource configuration and reload/restart to disable an extension. Excluded modules do not run their factories; reload revokes old managed tasks. Explicit CLI `-e` and SDK-injected factories remain explicit loads.
 
 **Trust boundary:** extensions remain trusted code with full process permissions. These services do not sandbox Node filesystem/HTTP access, existing `volt.exec`, or captured messaging APIs. Auxiliary-provider data export must be explicitly configured by that extension. There is no auxiliary inference, network upload, or transparent tool-result cache built into this API.
 

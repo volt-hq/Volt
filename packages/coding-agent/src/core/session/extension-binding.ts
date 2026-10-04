@@ -44,7 +44,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { theme } from "../theme/runtime.ts";
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import type { ModelSettings } from "./model-settings.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
 
@@ -112,7 +112,7 @@ export interface SessionExtensionBindingHost {
 	readonly liveState: LiveState;
 	conversation(): Conversation<AgentTool>;
 	tools(): SessionToolRuntime;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	background(): SessionBackgroundContinuation;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */
@@ -621,7 +621,7 @@ export class SessionExtensionBinding {
 
 	private bindExtensionCore(runner: ExtensionRunner): void {
 		const session = this.host.session;
-		runner.bindWork(this.host.extensionWork().workManager);
+		runner.bindServices(this.host.extensionServices().servicesManager);
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -757,8 +757,8 @@ export class SessionExtensionBinding {
 	private async reloadRuntime(): Promise<void> {
 		// The dialogs the extensions asked end with them; the reloaded extensions ask again.
 		for (const request of this.extensionRequests) request.abort();
-		this.host.extensionWork().invalidate();
-		await this.host.extensionWork().reopen();
+		this.host.extensionServices().invalidate();
+		await this.host.extensionServices().reopen();
 		const previousFlagValues = this.extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this.extensionRunner, { type: "session_shutdown", reason: "reload" });
 		this.host.assertActive();

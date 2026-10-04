@@ -5,9 +5,9 @@
  */
 import type {
 	ExtensionAPI,
-	ExtensionWorkReadResult,
-	ExtensionWorkSkill,
-	ExtensionWorkTaskContext,
+	ExtensionServicesReadResult,
+	ExtensionServicesSkill,
+	ExtensionServicesTaskContext,
 } from "@hansjm10/volt-coding-agent";
 
 const WAIT_MS = 100;
@@ -28,7 +28,7 @@ function words(text: string): Set<string> {
 	return new Set((text.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) ?? []).filter((word) => !STOP_WORDS.has(word)));
 }
 
-function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): ExtensionWorkSkill | undefined {
+function selectSkill(prompt: string, skills: readonly ExtensionServicesSkill[]): ExtensionServicesSkill | undefined {
 	const terms = words(prompt);
 	const names = new Set(prompt.toLowerCase().match(/[a-z0-9-]+/g));
 	const ranked = skills.map((skill) => {
@@ -104,7 +104,12 @@ function selectSources(prompt: string, truncated: boolean): SourceCandidate[] {
 	return sources;
 }
 
-function contribute(task: ExtensionWorkTaskContext, key: string, label: string, result: ExtensionWorkReadResult): void {
+function contribute(
+	task: ExtensionServicesTaskContext,
+	key: string,
+	label: string,
+	result: ExtensionServicesReadResult,
+): void {
 	if (task.signal.aborted || result.status !== "ok" || !result.text.trim()) return;
 	// Streaming decode drops an incomplete final UTF-8 sequence rather than changing source bytes.
 	const excerpt = new TextDecoder("utf-8", { ignoreBOM: true }).decode(
@@ -122,7 +127,11 @@ function contribute(task: ExtensionWorkTaskContext, key: string, label: string, 
 	});
 }
 
-async function prepareSource(task: ExtensionWorkTaskContext, source: SourceCandidate, index: number): Promise<void> {
+async function prepareSource(
+	task: ExtensionServicesTaskContext,
+	source: SourceCandidate,
+	index: number,
+): Promise<void> {
 	let offset = source.line ?? 1;
 	let limit = READ_LINES;
 	let expectedPath: string | undefined;
@@ -151,10 +160,10 @@ async function prepareSource(task: ExtensionWorkTaskContext, source: SourceCandi
 
 export default function contextPreparation(volt: ExtensionAPI): void {
 	volt.on("request_boundary", (event, ctx) => {
-		const work = ctx.work;
-		if (!work || !event.first) return;
+		const services = ctx.services;
+		if (!services || !event.first) return;
 		// Bound synchronous selection. Do not mine explicitly expanded skill bodies for more work.
-		const inputs = work.snapshot.inputs.slice(-8);
+		const inputs = services.snapshot.inputs.slice(-8);
 		if (inputs.some(({ text }) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
 		const prompt = inputs
 			.map(({ text }) => text.slice(0, 8192))
@@ -167,16 +176,16 @@ export default function contextPreparation(volt: ExtensionAPI): void {
 		if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
 		// A partial catalog cannot establish an unambiguous skill match.
 		const skill =
-			!work.snapshot.skillsTruncated && work.snapshot.services.includes("readSkill")
-				? selectSkill(prompt, work.snapshot.skills)
+			!services.snapshot.skillsTruncated && services.snapshot.services.includes("readSkill")
+				? selectSkill(prompt, services.snapshot.skills)
 				: undefined;
-		const sources = work.snapshot.services.includes("readText")
+		const sources = services.snapshot.services.includes("readText")
 			? selectSources(prompt, truncated).filter(
-					(source) => !source.symbol || work.snapshot.services.includes("symbols"),
+					(source) => !source.symbol || services.snapshot.services.includes("symbols"),
 				)
 			: [];
 		if (!skill && sources.length === 0) return;
-		const admission = work.tasks.start(
+		const admission = services.tasks.start(
 			{ key: "prepare-context", label: "Prepare context", timeoutMs: TASK_MS },
 			async (task) => {
 				const operations = sources.map((source, index) => prepareSource(task, source, index));
@@ -199,6 +208,6 @@ export default function contextPreparation(volt: ExtensionAPI): void {
 				await Promise.all(operations);
 			},
 		);
-		if (admission.status === "started") work.context.requestWait(WAIT_MS);
+		if (admission.status === "started") services.context.requestWait(WAIT_MS);
 	});
 }

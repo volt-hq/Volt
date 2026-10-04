@@ -428,7 +428,7 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		reason: ControlLeaseReleaseReasonSchema,
 	}),
 	/** Path-free authoritative Git state from the exact TUI lease holder. */
-	work_observe: withId("work_observe", {
+	change_observe: withId("change_observe", {
 		workspaceName: codePoints(1, 256),
 		sessionId: codePoints(1, 128),
 		gitContext: Type.Union([
@@ -536,7 +536,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.shutdown,
 	CONTROL_REQUEST_SCHEMAS.lease_acquire,
 	CONTROL_REQUEST_SCHEMAS.lease_release,
-	CONTROL_REQUEST_SCHEMAS.work_observe,
+	CONTROL_REQUEST_SCHEMAS.change_observe,
 	CONTROL_REQUEST_SCHEMAS.pair_request,
 	CONTROL_REQUEST_SCHEMAS.pair_cancel,
 	CONTROL_REQUEST_SCHEMAS.clients_list,
