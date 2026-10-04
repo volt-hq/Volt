@@ -10,6 +10,7 @@ export * from "./conversation/fold.ts";
 export * from "./conversation/in-memory-log.ts";
 export * from "./conversation/log.ts";
 export * from "./conversation/messages.ts";
+export * from "./conversation/work.ts";
 // Proxy utilities
 export * from "./proxy.ts";
 // Types

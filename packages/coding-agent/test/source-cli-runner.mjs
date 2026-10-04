@@ -17,6 +17,7 @@ const jiti = createJiti(import.meta.url, {
 		"@hansjm10/volt-protocol/remote-access": fileURLToPath(new URL("packages/protocol/src/remote-access.ts", repoRoot)),
 		"@hansjm10/volt-protocol/push": fileURLToPath(new URL("packages/protocol/src/push.ts", repoRoot)),
 		"@hansjm10/volt-protocol/workspace": fileURLToPath(new URL("packages/protocol/src/workspace.ts", repoRoot)),
+		"@hansjm10/volt-protocol/work": fileURLToPath(new URL("packages/protocol/src/work.ts", repoRoot)),
 		"@hansjm10/volt-tui": fileURLToPath(new URL("packages/tui/src/index.ts", repoRoot)),
 	},
 });

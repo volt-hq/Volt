@@ -3,17 +3,19 @@
  * `clientFold(entries)` over the projected entries it received (RFC §4.3,
  * §6.1). It mirrors the kernel fold for what clients see: the active leaf, the
  * branch's model, thinking level, Fast mode, and planning state, the name,
- * labels, the pending client inputs (the delivery queue), and fork lineage.
+ * labels, the pending client inputs (the delivery queue), fork lineage, and
+ * work: every open item and the newest {@link CLIENT_WORK_FINISHED_MAX}
+ * finished ones.
  *
  * The fold is pure and tolerant of what profiles hide. Ordinals must increase
- * but may skip; a parent, input, or label target the client never received is
- * not an error. A `public` entry becomes the leaf when appended, a `leaf` entry
- * moves it, and other host entries never do, exactly as in the kernel.
- * Moving to another branch re-derives the branch values along the entries the
- * client holds; values with no change on that path come from `base`: the
- * defaults for a fold from the first entry, or the snapshot's values when a
- * bounded snapshot (`earlier: true`) stands in for the history before its
- * entries.
+ * but may skip; a parent, input, label target, or work item the client never
+ * received is not an error. A `public` entry becomes the leaf when appended, a
+ * `leaf` entry moves it, and other host entries never do, exactly as in the
+ * kernel. Moving to another branch re-derives the branch values along the
+ * entries the client holds; values with no change on that path come from
+ * `base`: the defaults for a fold from the first entry, or the snapshot's
+ * values when a bounded snapshot (`earlier: true`) stands in for the history
+ * before its entries.
  *
  * A snapshot frame carries `ClientSnapshot` at ordinal N; `clientRestore(N,
  * snapshot)` followed by the entries after N equals the fold of every entry.
@@ -33,11 +35,26 @@ import {
 	LogEntryIdSchema,
 	LogEntryOrdinalSchema,
 	LogEntryTimestampSchema,
+	type WorkCheckpointEntryPayload,
+	WorkChildSchema,
+	type WorkFinishedEntryPayload,
+	WorkResultChildSchema,
+	type WorkStartedEntryPayload,
 } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
 import { type PlanningState, RpcPlanningStateSchema } from "./planning.ts";
 import { RpcClientMessageIdSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import { isPublicProjectedEntryType, type ProjectedEntry, ProjectedEntrySchema } from "./projected.ts";
+import { UiNodeSchema } from "./ui-node.ts";
+import {
+	WorkDeliverySchema,
+	WorkKindSchema,
+	WorkOutcomeSchema,
+	WorkProgressSchema,
+	WorkStateSchema,
+	WorkTextSchema,
+	WorkTitleSchema,
+} from "./work.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -82,6 +99,51 @@ export const ClientQueuedInputSchema = Type.Object(
 );
 export type ClientQueuedInput = Static<typeof ClientQueuedInputSchema>;
 
+/** How many finished work items a client keeps beside its open ones: the most recently finished. */
+export const CLIENT_WORK_FINISHED_MAX = 64;
+
+/** The result metadata a client keeps; output and data are fetched by work id. */
+export const ClientWorkResultSchema = Type.Object(
+	{
+		summary: Type.Optional(WorkTextSchema),
+		child: Type.Optional(WorkResultChildSchema),
+		/** Present when the work has output; `truncated` when only its tail was kept. */
+		output: Type.Optional(Type.Object({ truncated: Type.Boolean() }, closed)),
+	},
+	closed,
+);
+export type ClientWorkResult = Static<typeof ClientWorkResultSchema>;
+
+/** One work item as its `work_*` entries describe it. */
+export const ClientWorkItemSchema = Type.Object(
+	{
+		workId: LogEntryIdSchema,
+		kind: WorkKindSchema,
+		title: WorkTitleSchema,
+		parentWorkId: Type.Optional(LogEntryIdSchema),
+		cancellable: Type.Boolean(),
+		delivery: WorkDeliverySchema,
+		resume: Type.Boolean(),
+		toolCallId: Type.Optional(LogEntryIdSchema),
+		child: Type.Optional(WorkChildSchema),
+		/** The latest open state; kept when the work finishes. */
+		state: WorkStateSchema,
+		/** Present once the work finished. */
+		outcome: Type.Optional(WorkOutcomeSchema),
+		/** The latest checkpoint's progress and detail. */
+		progress: Type.Optional(WorkProgressSchema),
+		detail: Type.Optional(UiNodeSchema),
+		result: Type.Optional(ClientWorkResultSchema),
+		error: Type.Optional(WorkTextSchema),
+		startedOrdinal: LogEntryOrdinalSchema,
+		/** The newest entry that changed the item. */
+		updatedOrdinal: LogEntryOrdinalSchema,
+		finishedOrdinal: Type.Optional(LogEntryOrdinalSchema),
+	},
+	closed,
+);
+export type ClientWorkItem = Static<typeof ClientWorkItemSchema>;
+
 /** A client fold result, as a snapshot frame carries it at its ordinal. */
 export const ClientSnapshotSchema = Type.Object(
 	{
@@ -100,6 +162,8 @@ export const ClientSnapshotSchema = Type.Object(
 		queue: Type.Array(ClientQueuedInputSchema),
 		/** Present on a conversation created by fork, clone, or import. */
 		forkedFrom: Type.Optional(ForkedFromEntryPayloadSchema),
+		/** Open work and the newest finished work, by start ordinal; absent when there is none. */
+		work: Type.Optional(Type.Array(ClientWorkItemSchema)),
 	},
 	closed,
 );
@@ -138,6 +202,8 @@ export interface ClientState extends ClientBranchValues {
 	/** Pending client inputs by admission ordinal. */
 	readonly queue: readonly ClientQueuedInput[];
 	readonly forkedFrom: ForkedFromEntryPayload | null;
+	/** Open work and the newest {@link CLIENT_WORK_FINISHED_MAX} finished items, by work id in start order. */
+	readonly work: ReadonlyMap<string, ClientWorkItem>;
 	/** Branch values before the oldest entry the client holds. */
 	readonly base: ClientBranchValues;
 }
@@ -172,6 +238,7 @@ const EMPTY_STATE: ClientState = Object.freeze({
 	labels: new Map(),
 	queue: Object.freeze([]),
 	forkedFrom: null,
+	work: new Map(),
 	base: DEFAULT_CLIENT_BRANCH_VALUES,
 });
 
@@ -218,6 +285,7 @@ class ClientStateBuilder {
 	private labels: ReadonlyMap<string, ClientLabelValue>;
 	private queue: readonly ClientQueuedInput[];
 	private forkedFrom: ForkedFromEntryPayload | null;
+	private work: ReadonlyMap<string, ClientWorkItem>;
 
 	constructor(basis: ClientState) {
 		this.basis = basis;
@@ -233,6 +301,7 @@ class ClientStateBuilder {
 		this.labels = basis.labels;
 		this.queue = basis.queue;
 		this.forkedFrom = basis.forkedFrom;
+		this.work = basis.work;
 	}
 
 	apply(entry: ProjectedEntry): void {
@@ -274,7 +343,8 @@ class ClientStateBuilder {
 			this.name === basis.name &&
 			this.labels === basis.labels &&
 			this.queue === basis.queue &&
-			this.forkedFrom === basis.forkedFrom;
+			this.forkedFrom === basis.forkedFrom &&
+			this.work === basis.work;
 		if (unchanged) return basis;
 		return Object.freeze({
 			ordinal: this.ordinal,
@@ -290,11 +360,12 @@ class ClientStateBuilder {
 			labels: this.labels,
 			queue: this.queue,
 			forkedFrom: this.forkedFrom,
+			work: this.work,
 			base: basis.base,
 		});
 	}
 
-	/** Name, labels, lineage, and client inputs: the records that do not depend on the branch. */
+	/** Name, labels, lineage, client inputs, and work: the records that do not depend on the branch. */
 	private applyRecords(entry: ProjectedEntry): void {
 		switch (entry.type) {
 			case "client_input_receipt":
@@ -319,6 +390,15 @@ class ClientStateBuilder {
 				return;
 			case "forked_from":
 				if (entry.payload) this.forkedFrom = entry.payload;
+				return;
+			case "work_started":
+				if (entry.payload) this.startWork(entry.payload, entry.ordinal);
+				return;
+			case "work_checkpoint":
+				if (entry.payload) this.checkpointWork(entry.payload, entry.ordinal);
+				return;
+			case "work_finished":
+				if (entry.payload) this.finishWork(entry.payload, entry.ordinal);
 				return;
 			default:
 				return;
@@ -429,6 +509,75 @@ class ClientStateBuilder {
 		this.queue = queue;
 	}
 
+	private startWork(payload: WorkStartedEntryPayload, ordinal: number): void {
+		if (this.work.has(payload.workId)) return;
+		this.setWork(
+			Object.freeze({
+				workId: payload.workId,
+				kind: payload.kind,
+				title: payload.title,
+				...(payload.parentWorkId === undefined ? {} : { parentWorkId: payload.parentWorkId }),
+				cancellable: payload.cancellable,
+				delivery: payload.delivery,
+				resume: payload.resume,
+				...(payload.toolCallId === undefined ? {} : { toolCallId: payload.toolCallId }),
+				...(payload.child === undefined ? {} : { child: payload.child }),
+				state: payload.state,
+				startedOrdinal: ordinal,
+				updatedOrdinal: ordinal,
+			}),
+		);
+	}
+
+	private checkpointWork(payload: WorkCheckpointEntryPayload, ordinal: number): void {
+		const item = this.work.get(payload.workId);
+		if (!item || item.outcome !== undefined) return;
+		this.setWork(
+			Object.freeze({
+				...item,
+				...(payload.state === undefined ? {} : { state: payload.state }),
+				...(payload.progress === undefined ? {} : { progress: payload.progress }),
+				...(payload.detail === undefined ? {} : { detail: payload.detail }),
+				updatedOrdinal: ordinal,
+			}),
+		);
+	}
+
+	/** Finish an open item, then drop the oldest finished items beyond {@link CLIENT_WORK_FINISHED_MAX}. */
+	private finishWork(payload: WorkFinishedEntryPayload, ordinal: number): void {
+		const item = this.work.get(payload.workId);
+		if (!item || item.outcome !== undefined) return;
+		const { summary, child, output } = payload.result ?? {};
+		const result: ClientWorkResult = {
+			...(summary === undefined ? {} : { summary }),
+			...(child === undefined ? {} : { child }),
+			...(output === undefined ? {} : { output: { truncated: output.truncated } }),
+		};
+		this.setWork(
+			Object.freeze({
+				...item,
+				outcome: payload.outcome,
+				...(Object.keys(result).length === 0 ? {} : { result }),
+				...(payload.error === undefined ? {} : { error: payload.error }),
+				updatedOrdinal: ordinal,
+				finishedOrdinal: ordinal,
+			}),
+		);
+		const work = this.writableMap(this.work);
+		const finished = [...work.values()]
+			.filter((candidate) => candidate.finishedOrdinal !== undefined)
+			.sort((left, right) => (left.finishedOrdinal ?? 0) - (right.finishedOrdinal ?? 0));
+		for (const evicted of finished.slice(0, Math.max(0, finished.length - CLIENT_WORK_FINISHED_MAX))) {
+			work.delete(evicted.workId);
+		}
+	}
+
+	private setWork(item: ClientWorkItem): void {
+		const work = this.writableMap(this.work);
+		this.work = work;
+		work.set(item.workId, item);
+	}
+
 	private setLabel(targetId: string, label: string | undefined, timestamp: string): void {
 		if (!label && !this.labels.has(targetId)) return;
 		const labels = this.writableMap(this.labels);
@@ -494,6 +643,7 @@ export function clientSnapshot(state: ClientState): ClientSnapshot {
 		})),
 		queue: [...state.queue],
 		...(state.forkedFrom === null ? {} : { forkedFrom: state.forkedFrom }),
+		...(state.work.size === 0 ? {} : { work: [...state.work.values()] }),
 	};
 }
 
@@ -536,6 +686,11 @@ export function clientRestore(ordinal: number, snapshot: ClientSnapshot): Client
 				.map((input) => Object.freeze({ ...input })),
 		),
 		forkedFrom: snapshot.forkedFrom ?? null,
+		work: new Map(
+			[...(snapshot.work ?? [])]
+				.sort((left, right) => left.startedOrdinal - right.startedOrdinal)
+				.map((item) => [item.workId, Object.freeze({ ...item })]),
+		),
 		base: snapshot.earlier ? values : DEFAULT_CLIENT_BRANCH_VALUES,
 	});
 }

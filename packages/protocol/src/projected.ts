@@ -183,6 +183,9 @@ export const PROJECTED_ENTRY_TYPES = {
 	leaf: projectedEntryType("leaf", core.leaf.payload),
 	subagent_spawn: projectedEntryType("subagent_spawn", core.subagent_spawn.payload),
 	forked_from: projectedEntryType("forked_from", core.forked_from.payload),
+	work_started: projectedEntryType("work_started", core.work_started.payload),
+	work_checkpoint: projectedEntryType("work_checkpoint", core.work_checkpoint.payload),
+	work_finished: projectedEntryType("work_finished", core.work_finished.payload),
 } as const satisfies { [K in CoreLogEntryTypeName]: ProjectedEntryType<K> };
 
 export type ProjectedEntryTypeName = keyof typeof PROJECTED_ENTRY_TYPES;

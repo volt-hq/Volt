@@ -2,14 +2,17 @@ import type { AssistantMessage, StopReason } from "@hansjm10/volt-ai";
 import * as fc from "fast-check";
 import type { Static } from "typebox";
 import {
+	CLIENT_WORK_FINISHED_MAX,
 	type ClientBranchValues,
 	type ClientLabel,
 	type ClientQueuedInput,
+	type ClientWorkItem,
 	DEFAULT_CLIENT_BRANCH_VALUES,
 } from "../src/client-fold.ts";
 import type { ClientInputCommand, ClientInputState, ForkedFromEntryPayload } from "../src/entries.ts";
 import type { RpcThinkingLevelSchema } from "../src/primitives.ts";
 import { isPublicProjectedEntryType, type ProjectedEntry } from "../src/projected.ts";
+import type { WorkDelivery, WorkKind, WorkOutcome } from "../src/work.ts";
 
 type ThinkingLevel = Static<typeof RpcThinkingLevelSchema>;
 
@@ -40,7 +43,17 @@ export type ProjectedLogOp =
 	| { kind: "queue"; pick: number }
 	| { kind: "transition"; pick: number; choice: number }
 	| { kind: "complete"; pick: number }
-	| { kind: "spawn" };
+	| { kind: "spawn" }
+	| {
+			kind: "work_start";
+			workKind: number;
+			delivery: number;
+			resume: boolean;
+			awaiting: boolean;
+			parent: number | null;
+	  }
+	| { kind: "work_checkpoint"; pick: number; cancelling: boolean; progress: boolean }
+	| { kind: "work_finish"; pick: number; outcome: number; result: boolean };
 
 const text = fc.string({ maxLength: 8 });
 const pick = fc.nat({ max: 1_000 });
@@ -87,7 +100,40 @@ const opArbitrary: fc.Arbitrary<ProjectedLogOp> = fc.oneof(
 	{ weight: 3, arbitrary: fc.record({ kind: fc.constant("transition" as const), pick, choice: pick }) },
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("complete" as const), pick }) },
 	fc.record({ kind: fc.constant("spawn" as const) }),
+	{
+		weight: 3,
+		arbitrary: fc.record({
+			kind: fc.constant("work_start" as const),
+			workKind: fc.nat({ max: 3 }),
+			delivery: fc.nat({ max: 2 }),
+			resume: fc.boolean(),
+			awaiting: fc.boolean(),
+			parent: fc.option(pick, { nil: null }),
+		}),
+	},
+	{
+		weight: 2,
+		arbitrary: fc.record({
+			kind: fc.constant("work_checkpoint" as const),
+			pick,
+			cancelling: fc.boolean(),
+			progress: fc.boolean(),
+		}),
+	},
+	{
+		weight: 2,
+		arbitrary: fc.record({
+			kind: fc.constant("work_finish" as const),
+			pick,
+			outcome: fc.nat({ max: 3 }),
+			result: fc.boolean(),
+		}),
+	},
 );
+
+const WORK_KINDS: readonly WorkKind[] = ["job", "subagent", "review", "ext:swarm-review/run"];
+const WORK_DELIVERIES: readonly WorkDelivery[] = ["none", "message", "wake"];
+const WORK_OUTCOMES: readonly WorkOutcome[] = ["completed", "failed", "cancelled", "interrupted"];
 
 const MODELS = [
 	{ provider: "anthropic", modelId: "claude-a" },
@@ -113,6 +159,8 @@ export interface ExpectedClientState {
 	readonly labels: readonly ClientLabel[];
 	readonly queue: readonly ClientQueuedInput[];
 	readonly forkedFrom: ForkedFromEntryPayload | null;
+	/** Open work and the newest finished work, by start ordinal. */
+	readonly work: readonly ClientWorkItem[];
 }
 
 export interface ProjectedLog {
@@ -211,6 +259,8 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 	let leafId: string | null = null;
 	let name: string | null = null;
 	let forkedFrom: ForkedFromEntryPayload | null = null;
+	const work = new Map<string, ClientWorkItem>();
+	const openWork = () => [...work.values()].filter((item) => item.outcome === undefined);
 
 	const append = (draft: Draft): ProjectedEntry => {
 		const ordinal = entries.length + 1;
@@ -462,6 +512,85 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 					},
 				});
 				break;
+			case "work_start": {
+				const workId = `w${ordinal}`;
+				const parentWorkId = op.parent === null ? undefined : choose([...work.keys()], op.parent);
+				const kind = WORK_KINDS[op.workKind] ?? "job";
+				const payload = {
+					workId,
+					kind,
+					title: `Work ${ordinal}`,
+					...(parentWorkId === undefined ? {} : { parentWorkId }),
+					input: { ordinal },
+					cancellable: op.resume,
+					delivery: WORK_DELIVERIES[op.delivery] ?? "none",
+					resume: op.resume,
+					state: op.awaiting ? ("awaiting_approval" as const) : ("running" as const),
+					...(kind === "subagent" ? { child: { conversation: `child-${ordinal}` } } : {}),
+				};
+				append({ parentId: leafId, type: "work_started", payload });
+				const { input: _input, ...item } = payload;
+				work.set(workId, { ...item, startedOrdinal: ordinal, updatedOrdinal: ordinal });
+				break;
+			}
+			case "work_checkpoint": {
+				const item = choose(openWork(), op.pick);
+				if (!item) break;
+				const state = op.cancelling ? ("cancelling" as const) : item.state === "cancelling" ? undefined : "running";
+				const progress = op.progress ? { text: `step ${ordinal}`, value: 1, max: 2 } : undefined;
+				append({
+					parentId: leafId,
+					type: "work_checkpoint",
+					payload: {
+						workId: item.workId,
+						...(state === undefined ? {} : { state }),
+						...(progress === undefined ? {} : { progress }),
+					},
+				});
+				work.set(item.workId, {
+					...item,
+					...(state === undefined ? {} : { state }),
+					...(progress === undefined ? {} : { progress }),
+					updatedOrdinal: ordinal,
+				});
+				break;
+			}
+			case "work_finish": {
+				const item = choose(openWork(), op.pick);
+				if (!item) break;
+				const outcome = WORK_OUTCOMES[op.outcome] ?? "completed";
+				append({
+					parentId: leafId,
+					type: "work_finished",
+					payload: {
+						workId: item.workId,
+						outcome,
+						...(op.result
+							? {
+									result: {
+										summary: "done",
+										output: { text: "tail", truncated: true },
+										data: { findings: 1 },
+									},
+								}
+							: {}),
+					},
+				});
+				work.set(item.workId, {
+					...item,
+					outcome,
+					...(op.result ? { result: { summary: "done", output: { truncated: true } } } : {}),
+					updatedOrdinal: ordinal,
+					finishedOrdinal: ordinal,
+				});
+				const finished = [...work.values()]
+					.filter((candidate) => candidate.finishedOrdinal !== undefined)
+					.sort((left, right) => (left.finishedOrdinal ?? 0) - (right.finishedOrdinal ?? 0));
+				for (const evicted of finished.slice(0, Math.max(0, finished.length - CLIENT_WORK_FINISHED_MAX))) {
+					work.delete(evicted.workId);
+				}
+				break;
+			}
 		}
 	}
 
@@ -489,6 +618,7 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 			labels: [...labels].map(([targetId, value]) => ({ targetId, ...value })),
 			queue,
 			forkedFrom,
+			work: [...work.values()],
 		},
 	};
 }

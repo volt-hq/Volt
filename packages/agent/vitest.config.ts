@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcSchemas = fileURLToPath(new URL("../ai/src/schemas.ts", import.meta.url));
 const protocolSrcEntries = fileURLToPath(new URL("../protocol/src/entries.ts", import.meta.url));
+const protocolSrcWork = fileURLToPath(new URL("../protocol/src/work.ts", import.meta.url));
 
 export default defineConfig({
 	test: {
@@ -18,6 +19,7 @@ export default defineConfig({
 			{ find: /^@hansjm10\/volt-ai$/, replacement: aiSrcIndex },
 			{ find: /^@hansjm10\/volt-ai\/schemas$/, replacement: aiSrcSchemas },
 			{ find: /^@hansjm10\/volt-protocol\/entries$/, replacement: protocolSrcEntries },
+			{ find: /^@hansjm10\/volt-protocol\/work$/, replacement: protocolSrcWork },
 		],
 	},
 });

@@ -35,7 +35,20 @@ import {
 	RpcStreamingBehaviorSchema,
 	RpcThinkingLevelSchema,
 } from "./primitives.ts";
+import { UiNodeSchema } from "./ui-node.ts";
 import { RPC_WIRE_MAX_SAFE_INTEGER } from "./wire-limits.ts";
+import {
+	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
+	WORK_DATA_MAX_SERIALIZED_BYTES,
+	WORK_INPUT_MAX_SERIALIZED_BYTES,
+	WORK_OUTPUT_MAX_UTF8_BYTES,
+	WorkDeliverySchema,
+	WorkKindSchema,
+	WorkOutcomeSchema,
+	WorkProgressSchema,
+	WorkTextSchema,
+	WorkTitleSchema,
+} from "./work.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -225,7 +238,9 @@ export type ClientInputPayload = Static<typeof ClientInputPayloadSchema>;
 /**
  * The queue intent persisted after preflight, before queue admission is
  * acknowledged. A host input may queue the messages it delivers in `messages`
- * instead of a user message; its `message` and `images` are then empty.
+ * instead of a user message; its `message` and `images` are then empty. A
+ * host input with `wake: false` never starts a turn: it rides the next turn
+ * that runs anyway (a `message` work notice).
  */
 export const ClientInputQueuedPayloadSchema = Type.Object(
 	{
@@ -233,6 +248,7 @@ export const ClientInputQueuedPayloadSchema = Type.Object(
 		message: Type.String(),
 		images: RpcConversationInputImagesSchema,
 		messages: Type.Optional(Type.Array(LogMessageSchema, { minItems: 1 })),
+		wake: Type.Optional(Type.Literal(false)),
 	},
 	closed,
 );
@@ -400,6 +416,114 @@ export const ForkedFromEntryPayloadSchema = Type.Object(
 );
 
 // ============================================================================
+// Work (RFC §7; vocabulary and bounds in work.ts)
+// ============================================================================
+
+/** The conversation work runs in: a subagent's child log. `ref` locates it when the child is persisted. */
+export const WorkChildSchema = Type.Object(
+	{ conversation: LogSessionIdSchema, ref: Type.Optional(SessionReferenceSchema) },
+	closed,
+);
+
+/** A conversation finished work seeded, such as a review's discussion. */
+export const WorkResultChildSchema = Type.Object({ conversation: LogSessionIdSchema }, closed);
+
+/** What finished work produced. Clients see the metadata; output and data are fetched by work id. */
+export const WorkResultSchema = Type.Object(
+	{
+		summary: Type.Optional(WorkTextSchema),
+		/** The output's tail; `truncated` when older output was dropped to fit. */
+		output: Type.Optional(
+			Type.Object(
+				{
+					text: Type.String({ "x-volt-max-utf8-bytes": WORK_OUTPUT_MAX_UTF8_BYTES }),
+					truncated: Type.Boolean(),
+				},
+				closed,
+			),
+		),
+		child: Type.Optional(WorkResultChildSchema),
+		/** Kind-specific result data. */
+		data: Type.Optional(
+			Type.Unsafe<JsonValue>(
+				Type.Unknown({
+					"x-volt-opaque": "kind-specific JSON result data",
+					"x-volt-max-serialized-bytes": WORK_DATA_MAX_SERIALIZED_BYTES,
+				}),
+			),
+		),
+	},
+	closed,
+);
+
+/**
+ * Work started. The kind's delivery policy and resumability are copied in, so
+ * reconciliation and delivery are functions of the log alone.
+ */
+export const WorkStartedEntryPayloadSchema = Type.Object(
+	{
+		workId: LogEntryIdSchema,
+		kind: WorkKindSchema,
+		title: WorkTitleSchema,
+		/** The work that started this one: earlier in this log, or for a subagent possibly in its parent's log. */
+		parentWorkId: Type.Optional(LogEntryIdSchema),
+		/** The kind's input. */
+		input: Type.Unsafe<JsonValue>(
+			Type.Unknown({
+				"x-volt-opaque": "kind-specific JSON input",
+				"x-volt-max-serialized-bytes": WORK_INPUT_MAX_SERIALIZED_BYTES,
+			}),
+		),
+		cancellable: Type.Boolean(),
+		delivery: WorkDeliverySchema,
+		/** Open work of a resumable kind is suspended after a restart instead of interrupted. */
+		resume: Type.Boolean(),
+		state: stringEnum(["awaiting_approval", "running"]),
+		/** The tool call that started the work. */
+		toolCallId: Type.Optional(LogEntryIdSchema),
+		child: Type.Optional(WorkChildSchema),
+	},
+	closed,
+);
+
+/** A coarse checkpoint: a state transition or a kind phase. Fine-grained progress uses the live lane. */
+export const WorkCheckpointEntryPayloadSchema = Type.Object(
+	{
+		workId: LogEntryIdSchema,
+		state: Type.Optional(stringEnum(["running", "cancelling"])),
+		progress: Type.Optional(WorkProgressSchema),
+		detail: Type.Optional(UiNodeSchema),
+	},
+	{ ...closed, "x-volt-max-serialized-bytes": WORK_CHECKPOINT_MAX_SERIALIZED_BYTES },
+);
+
+export const WorkFinishedEntryPayloadSchema = Type.Object(
+	{
+		workId: LogEntryIdSchema,
+		outcome: WorkOutcomeSchema,
+		result: Type.Optional(WorkResultSchema),
+		error: Type.Optional(WorkTextSchema),
+	},
+	closed,
+);
+
+/** The details of a `work_notice` custom message: metadata only; the output is fetched by work id. */
+export const WorkNoticeDetailsSchema = Type.Object(
+	{
+		workId: LogEntryIdSchema,
+		kind: WorkKindSchema,
+		title: WorkTitleSchema,
+		outcome: stringEnum(["completed", "failed"]),
+		summary: Type.Optional(WorkTextSchema),
+		error: Type.Optional(WorkTextSchema),
+		child: Type.Optional(WorkResultChildSchema),
+		/** Present when the work has output. */
+		output: Type.Optional(Type.Object({ truncated: Type.Boolean() }, closed)),
+	},
+	closed,
+);
+
+// ============================================================================
 // Core entry types
 // ============================================================================
 
@@ -428,6 +552,9 @@ export const CORE_LOG_ENTRY_TYPES = {
 	leaf: defineLogEntryType("leaf", "host", LeafEntryPayloadSchema),
 	subagent_spawn: defineLogEntryType("subagent_spawn", "host", SubagentSpawnEntryPayloadSchema),
 	forked_from: defineLogEntryType("forked_from", "host", ForkedFromEntryPayloadSchema),
+	work_started: defineLogEntryType("work_started", "host", WorkStartedEntryPayloadSchema),
+	work_checkpoint: defineLogEntryType("work_checkpoint", "host", WorkCheckpointEntryPayloadSchema),
+	work_finished: defineLogEntryType("work_finished", "host", WorkFinishedEntryPayloadSchema),
 } as const;
 
 export type CoreLogEntryTypeName = keyof typeof CORE_LOG_ENTRY_TYPES;
@@ -458,3 +585,10 @@ export type SessionInfoEntryPayload = Static<typeof SessionInfoEntryPayloadSchem
 export type LeafEntryPayload = Static<typeof LeafEntryPayloadSchema>;
 export type SubagentSpawnEntryPayload = Static<typeof SubagentSpawnEntryPayloadSchema>;
 export type ForkedFromEntryPayload = Static<typeof ForkedFromEntryPayloadSchema>;
+export type WorkChild = Static<typeof WorkChildSchema>;
+export type WorkResultChild = Static<typeof WorkResultChildSchema>;
+export type WorkResult = Static<typeof WorkResultSchema>;
+export type WorkStartedEntryPayload = Static<typeof WorkStartedEntryPayloadSchema>;
+export type WorkCheckpointEntryPayload = Static<typeof WorkCheckpointEntryPayloadSchema>;
+export type WorkFinishedEntryPayload = Static<typeof WorkFinishedEntryPayloadSchema>;
+export type WorkNoticeDetails = Static<typeof WorkNoticeDetailsSchema>;

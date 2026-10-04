@@ -5,8 +5,8 @@
  *
  * Light subpaths for hosts that must not load the whole package:
  * `@hansjm10/volt-protocol/entries`, `/git-context`, `/wire-limits`,
- * `/daemon-control`, `/remote-handshake`, `/remote-access`, `/push`, and
- * `/workspace`.
+ * `/daemon-control`, `/remote-handshake`, `/remote-access`, `/push`,
+ * `/workspace`, and `/work`.
  */
 
 export * from "./agent-options.ts";
@@ -36,4 +36,5 @@ export * from "./session.ts";
 export * from "./subscription-usage.ts";
 export * from "./ui-node.ts";
 export * from "./wire-limits.ts";
+export * from "./work.ts";
 export * from "./workspace.ts";

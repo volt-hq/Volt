@@ -47,6 +47,15 @@
 			"lineMaxChars": 4096,
 			"imageDataMaxChars": 1048576
 		},
+		"work": {
+			"titleMaxChars": 200,
+			"textMaxChars": 2000,
+			"inputMaxSerializedBytes": 16384,
+			"checkpointMaxSerializedBytes": 8192,
+			"outputMaxUtf8Bytes": 51200,
+			"dataMaxSerializedBytes": 65536,
+			"clientFinishedMax": 64
+		},
 		"protocol": {
 			"version": 1,
 			"reservedFrameTypes": [
@@ -278,6 +287,10 @@
 						"$ref": "#/$defs/LogMessage"
 					},
 					"minItems": 1
+				},
+				"wake": {
+					"type": "boolean",
+					"const": false
 				}
 			},
 			"additionalProperties": false
@@ -466,6 +479,122 @@
 				},
 				"forkedFrom": {
 					"$ref": "#/$defs/LogEntryPayload.forked_from"
+				},
+				"work": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientWorkItem"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"ClientWorkItem": {
+			"type": "object",
+			"required": [
+				"workId",
+				"kind",
+				"title",
+				"cancellable",
+				"delivery",
+				"resume",
+				"state",
+				"startedOrdinal",
+				"updatedOrdinal"
+			],
+			"properties": {
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"kind": {
+					"$ref": "#/$defs/WorkKind"
+				},
+				"title": {
+					"$ref": "#/$defs/WorkTitle"
+				},
+				"parentWorkId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"cancellable": {
+					"type": "boolean"
+				},
+				"delivery": {
+					"$ref": "#/$defs/WorkDelivery"
+				},
+				"resume": {
+					"type": "boolean"
+				},
+				"toolCallId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"child": {
+					"$ref": "#/$defs/WorkChild"
+				},
+				"state": {
+					"$ref": "#/$defs/WorkState"
+				},
+				"outcome": {
+					"$ref": "#/$defs/WorkOutcome"
+				},
+				"progress": {
+					"$ref": "#/$defs/WorkProgress"
+				},
+				"detail": {
+					"$ref": "#/$defs/UiNode"
+				},
+				"result": {
+					"$ref": "#/$defs/ClientWorkResult"
+				},
+				"error": {
+					"$ref": "#/$defs/WorkText"
+				},
+				"startedOrdinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"updatedOrdinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"finishedOrdinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false
+		},
+		"ClientWorkResult": {
+			"type": "object",
+			"properties": {
+				"summary": {
+					"$ref": "#/$defs/WorkText"
+				},
+				"child": {
+					"$ref": "#/$defs/WorkResultChild"
+				},
+				"output": {
+					"type": "object",
+					"required": [
+						"truncated"
+					],
+					"properties": {
+						"truncated": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -9892,6 +10021,15 @@
 				},
 				{
 					"$ref": "#/$defs/LogEntry.forked_from"
+				},
+				{
+					"$ref": "#/$defs/LogEntry.work_started"
+				},
+				{
+					"$ref": "#/$defs/LogEntry.work_checkpoint"
+				},
+				{
+					"$ref": "#/$defs/LogEntry.work_finished"
 				}
 			]
 		},
@@ -10833,6 +10971,171 @@
 			},
 			"additionalProperties": false
 		},
+		"LogEntry.work_checkpoint": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp",
+				"visibility",
+				"payload"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_checkpoint"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"visibility": {
+					"type": "string",
+					"const": "host"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_checkpoint"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LogEntry.work_finished": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp",
+				"visibility",
+				"payload"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_finished"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"visibility": {
+					"type": "string",
+					"const": "host"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_finished"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LogEntry.work_started": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp",
+				"visibility",
+				"payload"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_started"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"visibility": {
+					"type": "string",
+					"const": "host"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_started"
+				}
+			},
+			"additionalProperties": false
+		},
 		"LogEntryPayload.branch_summary": {
 			"type": "object",
 			"required": [
@@ -11232,6 +11535,123 @@
 			},
 			"additionalProperties": false
 		},
+		"LogEntryPayload.work_checkpoint": {
+			"type": "object",
+			"required": [
+				"workId"
+			],
+			"properties": {
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"state": {
+					"type": "string",
+					"enum": [
+						"running",
+						"cancelling"
+					]
+				},
+				"progress": {
+					"$ref": "#/$defs/WorkProgress"
+				},
+				"detail": {
+					"$ref": "#/$defs/UiNode"
+				}
+			},
+			"additionalProperties": false,
+			"x-volt-max-serialized-bytes": 8192
+		},
+		"LogEntryPayload.work_finished": {
+			"type": "object",
+			"required": [
+				"workId",
+				"outcome"
+			],
+			"properties": {
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"outcome": {
+					"$ref": "#/$defs/WorkOutcome"
+				},
+				"result": {
+					"$ref": "#/$defs/WorkResult"
+				},
+				"error": {
+					"$ref": "#/$defs/WorkText"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LogEntryPayload.work_started": {
+			"type": "object",
+			"required": [
+				"workId",
+				"kind",
+				"title",
+				"input",
+				"cancellable",
+				"delivery",
+				"resume",
+				"state"
+			],
+			"properties": {
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"kind": {
+					"$ref": "#/$defs/WorkKind"
+				},
+				"title": {
+					"$ref": "#/$defs/WorkTitle"
+				},
+				"parentWorkId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"input": {
+					"x-volt-opaque": "kind-specific JSON input",
+					"x-volt-max-serialized-bytes": 16384
+				},
+				"cancellable": {
+					"type": "boolean"
+				},
+				"delivery": {
+					"$ref": "#/$defs/WorkDelivery"
+				},
+				"resume": {
+					"type": "boolean"
+				},
+				"state": {
+					"type": "string",
+					"enum": [
+						"awaiting_approval",
+						"running"
+					]
+				},
+				"toolCallId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"child": {
+					"$ref": "#/$defs/WorkChild"
+				}
+			},
+			"additionalProperties": false
+		},
 		"LogEntryVisibility": {
 			"type": "string",
 			"enum": [
@@ -11317,6 +11737,15 @@
 				},
 				{
 					"$ref": "#/$defs/ProjectedEntry.forked_from"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.work_started"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.work_checkpoint"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.work_finished"
 				}
 			]
 		},
@@ -12165,6 +12594,153 @@
 			},
 			"additionalProperties": false
 		},
+		"ProjectedEntry.work_checkpoint": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_checkpoint"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_checkpoint"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.work_finished": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_finished"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_finished"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.work_started": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "work_started"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.work_started"
+				}
+			},
+			"additionalProperties": false
+		},
 		"ProjectedPayload.branch_summary": {
 			"$ref": "#/$defs/LogEntryPayload.branch_summary"
 		},
@@ -12227,6 +12803,15 @@
 		},
 		"ProjectedPayload.thinking_level_change": {
 			"$ref": "#/$defs/LogEntryPayload.thinking_level_change"
+		},
+		"ProjectedPayload.work_checkpoint": {
+			"$ref": "#/$defs/LogEntryPayload.work_checkpoint"
+		},
+		"ProjectedPayload.work_finished": {
+			"$ref": "#/$defs/LogEntryPayload.work_finished"
+		},
+		"ProjectedPayload.work_started": {
+			"$ref": "#/$defs/LogEntryPayload.work_started"
 		},
 		"QueryErrorCode": {
 			"type": "string",
@@ -20457,6 +21042,230 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"WorkChild": {
+			"type": "object",
+			"required": [
+				"conversation"
+			],
+			"properties": {
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"ref": {
+					"$ref": "#/$defs/SessionReference"
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkDelivery": {
+			"type": "string",
+			"enum": [
+				"none",
+				"message",
+				"wake"
+			]
+		},
+		"WorkKind": {
+			"anyOf": [
+				{
+					"type": "string",
+					"enum": [
+						"job",
+						"subagent",
+						"review",
+						"host_action"
+					]
+				},
+				{
+					"type": "string",
+					"pattern": "^ext:[a-z0-9][a-z0-9-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$"
+				}
+			],
+			"x-volt-expected": "be a built-in work kind or ext:<extension>/<kind>"
+		},
+		"WorkNoticeDetails": {
+			"type": "object",
+			"required": [
+				"workId",
+				"kind",
+				"title",
+				"outcome"
+			],
+			"properties": {
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"kind": {
+					"$ref": "#/$defs/WorkKind"
+				},
+				"title": {
+					"$ref": "#/$defs/WorkTitle"
+				},
+				"outcome": {
+					"type": "string",
+					"enum": [
+						"completed",
+						"failed"
+					]
+				},
+				"summary": {
+					"$ref": "#/$defs/WorkText"
+				},
+				"error": {
+					"$ref": "#/$defs/WorkText"
+				},
+				"child": {
+					"$ref": "#/$defs/WorkResultChild"
+				},
+				"output": {
+					"type": "object",
+					"required": [
+						"truncated"
+					],
+					"properties": {
+						"truncated": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkOutcome": {
+			"type": "string",
+			"enum": [
+				"completed",
+				"failed",
+				"cancelled",
+				"interrupted"
+			]
+		},
+		"WorkProgress": {
+			"type": "object",
+			"properties": {
+				"text": {
+					"$ref": "#/$defs/UiNodeText"
+				},
+				"value": {
+					"type": "number",
+					"minimum": 0
+				},
+				"max": {
+					"type": "number",
+					"exclusiveMinimum": 0
+				},
+				"steps": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/WorkProgressStep"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkProgressStep": {
+			"type": "object",
+			"required": [
+				"key",
+				"label",
+				"status"
+			],
+			"properties": {
+				"key": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 256
+				},
+				"label": {
+					"$ref": "#/$defs/UiNodeText"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"pending",
+						"active",
+						"done",
+						"failed",
+						"skipped"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkResult": {
+			"type": "object",
+			"properties": {
+				"summary": {
+					"$ref": "#/$defs/WorkText"
+				},
+				"output": {
+					"type": "object",
+					"required": [
+						"text",
+						"truncated"
+					],
+					"properties": {
+						"text": {
+							"type": "string",
+							"x-volt-max-utf8-bytes": 51200
+						},
+						"truncated": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				"child": {
+					"$ref": "#/$defs/WorkResultChild"
+				},
+				"data": {
+					"x-volt-opaque": "kind-specific JSON result data",
+					"x-volt-max-serialized-bytes": 65536
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkResultChild": {
+			"type": "object",
+			"required": [
+				"conversation"
+			],
+			"properties": {
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"WorkState": {
+			"type": "string",
+			"enum": [
+				"awaiting_approval",
+				"running",
+				"cancelling"
+			]
+		},
+		"WorkText": {
+			"type": "string",
+			"maxLength": 2000,
+			"pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$",
+			"x-volt-expected": "be text without terminal control sequences"
+		},
+		"WorkTitle": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 200,
+			"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$",
+			"x-volt-expected": "be one non-empty line without terminal control sequences"
 		}
 	}
 }

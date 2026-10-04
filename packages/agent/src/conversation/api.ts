@@ -24,7 +24,12 @@ import type {
 	Usage,
 	UserMessage,
 } from "@hansjm10/volt-ai";
-import type { LogEntryType } from "@hansjm10/volt-protocol/entries";
+import type {
+	LogEntryType,
+	WorkCheckpointEntryPayload,
+	WorkFinishedEntryPayload,
+	WorkStartedEntryPayload,
+} from "@hansjm10/volt-protocol/entries";
 import type {
 	AgentAbortSource,
 	AgentDeliveryKind,
@@ -48,6 +53,7 @@ import type {
 	ConversationLogLossReason,
 	ConversationLogLostError,
 } from "./log.ts";
+import type { WorkReconciliation, WorkRecord } from "./work.ts";
 
 // ============================================================================
 // Errors
@@ -464,7 +470,11 @@ export interface ConversationNavigationResult {
 	readonly summaryEntryId?: string;
 }
 
-/** An entry the host appends: a registered product type, or a core `custom`, `custom_message`, `message`, or `subagent_spawn`. */
+/**
+ * An entry the host appends: a registered product type, or a core `custom`,
+ * `custom_message`, `message`, or `subagent_spawn`. Work entries are written
+ * only through `Conversation.work`.
+ */
 export interface ConversationEntryInput {
 	readonly type: string;
 	readonly payload: unknown;
@@ -476,6 +486,57 @@ export interface ConversationHostOperationContext {
 	readonly stream: StreamFn;
 	state(): ConversationState;
 	append(entries: readonly ConversationEntryInput[]): Promise<readonly ConversationLogEntry[]>;
+}
+
+// ============================================================================
+// Work
+// ============================================================================
+
+/** Work to start: its `work_started` payload. The id is generated when absent; the state is `running` by default. */
+export type ConversationWorkStart = Omit<WorkStartedEntryPayload, "workId" | "state"> & {
+	readonly workId?: string;
+	readonly state?: WorkStartedEntryPayload["state"];
+};
+
+/** A coarse checkpoint: a state transition or a kind phase. */
+export type ConversationWorkCheckpoint = Omit<WorkCheckpointEntryPayload, "workId">;
+
+export type ConversationWorkFinish = Omit<WorkFinishedEntryPayload, "workId"> & {
+	/**
+	 * The notice a completed or failed `message` or `wake` item queues: its
+	 * text (a line naming the work and its outcome by default), or `false` to
+	 * deliver nothing.
+	 */
+	readonly deliver?: false | { readonly text: string };
+};
+
+export interface ConversationWorkFinished {
+	readonly record: WorkRecord;
+	/** The host input that delivers the work's notice, when one was queued with the finish. */
+	readonly notice?: { readonly clientMessageId: string; readonly wake: boolean };
+}
+
+/** The conversation's work: every change is one durable batch. */
+export interface ConversationWork {
+	/**
+	 * Finish, in one batch, the open work a previous runtime left without an
+	 * executor (`interrupted`); resumable work stays open, suspended. Runs once
+	 * per runtime, before any work starts: later calls return the first result.
+	 */
+	reconcile(): Promise<WorkReconciliation>;
+	/** Start work. Rejected until `reconcile` ran. */
+	start(work: ConversationWorkStart): Promise<WorkRecord>;
+	checkpoint(workId: string, checkpoint: ConversationWorkCheckpoint): Promise<WorkRecord>;
+	/**
+	 * Finish open work. A completed or failed item of a `message` or `wake`
+	 * kind queues its notice in the same batch: a host steer whose
+	 * `work_notice` custom message carries the result's metadata. A `wake`
+	 * notice starts a turn on an idle conversation; a `message` notice rides
+	 * the next turn. Both survive a restart as durable queued input.
+	 */
+	finish(workId: string, finish: ConversationWorkFinish): Promise<ConversationWorkFinished>;
+	/** Withdraw a queued host input, such as a notice whose result was already read. False once it is delivered or settled. */
+	withdrawHostInput(clientMessageId: string): Promise<boolean>;
 }
 
 export type ConversationPromptCacheRefreshResult =
