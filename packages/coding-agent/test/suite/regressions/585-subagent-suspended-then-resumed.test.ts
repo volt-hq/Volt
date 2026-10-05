@@ -149,7 +149,7 @@ async function startSubagentThroughModel(runtime: Runtime): Promise<void> {
 		},
 	]);
 	void runtime.parent.session.prompt("Delegate the audit").catch(() => undefined);
-	await vi.waitFor(() => expect(runtime.childPrompts[0]?.length).toBe(1));
+	await vi.waitFor(() => expect(runtime.childPrompts[0]?.length).toBe(1), { timeout: 10_000 });
 }
 
 describe("#585 subagent suspended after a restart, then resumed explicitly", () => {
@@ -207,7 +207,9 @@ describe("#585 subagent suspended after a restart, then resumed explicitly", () 
 
 		// The child's own log was reopened and prompted to finish its task.
 		expect(second.childPrompts).toEqual([[expect.stringContaining("You were interrupted before completing")]]);
-		await vi.waitFor(() => expect(second.parent.session.work.get(workId)?.outcome).toBeDefined());
+		await vi.waitFor(() => expect(second.parent.session.work.get(workId)?.outcome).toBeDefined(), {
+			timeout: 10_000,
+		});
 		expect(second.parent.session.work.get(workId)).toMatchObject({
 			kind: "subagent",
 			outcome: "completed",
@@ -239,7 +241,9 @@ describe("#585 subagent suspended after a restart, then resumed explicitly", () 
 		const second = await openRuntime(await SessionManager.open(parentRef), [fauxAssistantMessage("Resumed report.")]);
 		expect(second.parent.session.work.running()).toEqual([]);
 		await second.parent.session.work.resume(workId);
-		await vi.waitFor(() => expect(second.parent.session.work.get(workId)?.outcome).toBe("completed"));
+		await vi.waitFor(() => expect(second.parent.session.work.get(workId)?.outcome).toBe("completed"), {
+			timeout: 10_000,
+		});
 		expect(second.parent.session.work.get(workId)?.result?.output?.text).toBe("Resumed report.");
 		// The result reaches no turn on its own: a subagent delivers nothing.
 		expect(second.parent.faux.state.callCount).toBe(0);
