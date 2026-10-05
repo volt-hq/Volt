@@ -12,7 +12,7 @@ import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
-import type { HostInteraction } from "../host-interaction.ts";
+import type { HostActions } from "../session/host-actions.ts";
 import type { ToolDiagnosticsProvider } from "../tools/diagnostics-provider.ts";
 import type { LspNavigationProvider } from "../tools/lsp.ts";
 import type { LspClient, LspDiagnostic, LspDiagnosticResult, LspPosition, LspRange } from "./client.ts";
@@ -78,7 +78,8 @@ export interface LspManagerOptions {
 	 */
 	projectCwd?: string;
 	config: ResolvedLspConfig;
-	hostInteraction?: HostInteraction;
+	/** Runs reviewed installs once a client approves them; without it, installs are never offered. */
+	hostActions?: HostActions;
 	/** Used only for a private core; a shared core keeps the runner it was created with. */
 	installRunner?: LspInstallRunner;
 	/** Host-owned live policy; false in restricted modes. Checked again after consent. */
@@ -343,7 +344,7 @@ function findSymbolPosition(content: string, symbol: string, line?: number): Lsp
 /**
  * Per-session LSP view. Server processes and startup/failure accounting live in
  * an LspServerCore that may be shared with other sessions; delivery history,
- * failure reporting, host interaction, and install policy stay per view.
+ * failure reporting, host actions, and install policy stay per view.
  */
 export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvider, LspServerCoreSubscriber {
 	private cwd: string;
@@ -362,7 +363,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private reportedFailures = new WeakMap<ServerFailureState, LspStartFailureEvent>();
 	/** Failure records for which this view already took its one past-the-breaker install offer. */
 	private breakerInstallOffers = new WeakSet<ServerFailureState>();
-	private hostInteraction: HostInteraction | undefined;
+	private readonly hostActions: HostActions | undefined;
 	private installAllowed: () => boolean;
 	private installInitiator: LspInstallInitiator;
 	private viewDisposed = false;
@@ -387,10 +388,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 		this.core = this.lease.core;
 		this.projectCwd = this.core.projectCwd;
-		this.hostInteraction = options.hostInteraction;
+		this.hostActions = options.hostActions;
 		this.installAllowed = options.installAllowed ?? (() => true);
 		this.installInitiator = {
-			host: () => this.hostInteraction,
+			hostActions: () => this.hostActions,
 			installAllowed: () => this.installAllowed(),
 		};
 		this.unsubscribe = this.core.subscribe(this);
@@ -399,10 +400,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	/** View or shared core disposed. */
 	private get disposed(): boolean {
 		return this.viewDisposed || this.core.isDisposed;
-	}
-
-	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
-		this.hostInteraction = hostInteraction;
 	}
 
 	/** @internal Core notification. */
@@ -1719,7 +1716,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		if (
 			!recipe ||
 			this.disposed ||
-			!this.hostInteraction ||
+			!this.hostActions ||
 			isManagedLspObservation() ||
 			!this.installAllowed() ||
 			/^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "") ||

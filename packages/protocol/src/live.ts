@@ -14,9 +14,9 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`,
- * `host_action/<id>`. A value's `kind` is its key's family. `workflow`, `subagent`, and `host_action` are interim values until work
- * items replace them (Phase 4).
+ * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`. A
+ * value's `kind` is its key's family. `workflow` and `subagent` are interim
+ * values until work items replace them (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
  * until answered; any client that accepts the request's kind may answer with
@@ -89,7 +89,7 @@ export const HostRequestSchema = Type.Union([
 		},
 		closed,
 	),
-	/** A host action (a command, a push) waiting for the user's approval. */
+	/** A host action (a command, a push) waiting for the user's approval; `requestId` is its `host_action` work id. */
 	Type.Object(
 		{
 			kind: Type.Literal("approval"),
@@ -277,18 +277,6 @@ export const LiveSubagentValueSchema = Type.Object(
 	closed,
 );
 
-/** A host action's progress after approval (interim until work items). */
-export const LiveHostActionValueSchema = Type.Object(
-	{
-		kind: Type.Literal("host_action"),
-		action: Type.String(),
-		status: stringEnum(["running", "completed", "failed", "cancelled"]),
-		message: Type.Optional(Type.String()),
-		exitCode: Type.Optional(Type.Union([Type.Integer(), Type.Null()])),
-	},
-	closed,
-);
-
 /** Every live value, keyed by kind. */
 export const LIVE_VALUE_SCHEMAS = {
 	phase: LivePhaseValueSchema,
@@ -303,7 +291,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	work: LiveWorkValueSchema,
 	workflow: LiveWorkflowValueSchema,
 	subagent: LiveSubagentValueSchema,
-	host_action: LiveHostActionValueSchema,
 } as const;
 
 export type LiveValueKind = keyof typeof LIVE_VALUE_SCHEMAS;
@@ -321,7 +308,6 @@ export const LiveValueSchema = Type.Union([
 	LiveWorkValueSchema,
 	LiveWorkflowValueSchema,
 	LiveSubagentValueSchema,
-	LiveHostActionValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
 
@@ -343,7 +329,6 @@ export const LIVE_KEYED_KINDS = [
 	"work",
 	"workflow",
 	"subagent",
-	"host_action",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Longest id in a keyed live key, in characters. */

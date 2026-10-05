@@ -15,6 +15,7 @@ import {
 	type IntentContext,
 	IntentRejectedError,
 	type IntentView,
+	missingCapability,
 } from "./types.ts";
 
 const control = ["conversation.control.v1"] as const;
@@ -33,11 +34,26 @@ const WORK_REJECTIONS: Readonly<Record<WorkErrorCode, RejectionCode>> = {
 	closed: "ended",
 };
 
-/** Run a work operation, answering a refusal with its protocol code. */
-async function workOperation<T>(ctx: IntentContext, operation: (work: WorkRegistry) => Promise<T>): Promise<T> {
+/**
+ * Run a work operation on `workId`, answering a refusal with its protocol
+ * code. A remote client needs the capabilities the work's kind requires too.
+ */
+async function workOperation<T>(
+	ctx: IntentContext,
+	workId: string,
+	operation: (work: WorkRegistry) => Promise<T>,
+): Promise<T> {
 	ctx.assertCurrent?.();
+	const work = targetOf(ctx).conversation.work;
+	const missing =
+		ctx.profile.name === "local" ? undefined : missingCapability(ctx.profile.grant, work.requires(workId));
+	if (missing !== undefined) {
+		throw new IntentRejectedError("not_allowed", `Remote capability required: ${missing}`, {
+			requiredCapability: missing,
+		});
+	}
 	try {
-		return await operation(targetOf(ctx).conversation.work);
+		return await operation(work);
 	} catch (error) {
 		if (error instanceof WorkError) throw new IntentRejectedError(WORK_REJECTIONS[error.code], error.message);
 		throw error;
@@ -74,7 +90,7 @@ export const cancelWorkIntent = defineIntent({
 			: INTENT_ENABLED;
 	},
 	async run(ctx, input) {
-		await workOperation(ctx, (work) => work.cancel(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.cancel(input.workId));
 	},
 });
 
@@ -90,7 +106,7 @@ export const openWorkIntent = defineIntent({
 	whileBusy: "run",
 	run(ctx, input) {
 		const { host, client } = targetOf(ctx);
-		return workOperation(ctx, (work) =>
+		return workOperation(ctx, input.workId, (work) =>
 			work.open(input.workId, {
 				host,
 				client,
@@ -118,7 +134,7 @@ export const resumeWorkIntent = defineIntent({
 	whileBusy: "run",
 	available: (view, input) => openWorkAvailability(view, input?.workId),
 	async run(ctx, input) {
-		await workOperation(ctx, (work) => work.resume(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.resume(input.workId));
 	},
 });
 

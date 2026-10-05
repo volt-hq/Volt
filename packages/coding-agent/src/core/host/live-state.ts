@@ -3,7 +3,7 @@
  * its transient items, and its pending host requests.
  *
  * Keyed values (extension status, widgets, and title; pending host requests;
- * host action progress) persist until the host clears or replaces them.
+ * work progress) persist until the host clears or replaces them.
  * Notices and editor directives reach the clients attached when they are
  * raised and are not kept. A client attached with `attach` first receives the
  * current values as a reset, then every change in order; detaching it, or
@@ -15,8 +15,7 @@
  * the first valid answer wins. A request ends when it is answered, when its
  * requester aborts it, when it times out, or when the conversation closes. It
  * outlives the clients that saw it, so a client that attaches later, or
- * reconnects, finds it again. Host action progress (`host_action/<id>`)
- * reaches the clients that accept approvals.
+ * reconnects, finds it again.
  *
  * Streaming items (the streaming assistant message and running tools) are
  * part of the state until the entry that commits them is applied
@@ -42,7 +41,6 @@ import {
 	type UiNodeFormField,
 } from "@hansjm10/volt-protocol";
 import { Compile, type Validator } from "typebox/compile";
-import type { HostActionDecision, HostActionRequest, HostActionUpdate, HostInteraction } from "../host-interaction.ts";
 import {
 	emptyLiveFold,
 	foldLiveCommit,
@@ -126,15 +124,10 @@ interface AttachedClient {
 	readonly client: LiveClient;
 	/** Changes published from this sequence number on reach the client; earlier ones are in its reset. */
 	readonly since: number;
-	/** Gated keys (host requests, host action progress) the client holds. */
+	/** Host requests the client holds. */
 	readonly shown: Set<string>;
 }
 
-const HOST_ACTION_TERMINAL_STATUSES: ReadonlySet<HostActionUpdate["status"]> = new Set([
-	"completed",
-	"failed",
-	"cancelled",
-]);
 const IDENTIFIER_MAX_UTF8_BYTES = 256;
 
 let liveValueValidator: Validator | undefined;
@@ -189,15 +182,9 @@ function acceptsKind(client: LiveClient, kind: HostRequestKind): boolean {
 	}
 }
 
-function isGatedKey(key: string): boolean {
-	return key.startsWith("host_request/") || key.startsWith("host_action/");
-}
-
-/** The host request kind a client must accept to see `value` under `key`, if the key is gated. */
-function gateOf(key: string, value: LiveValue): HostRequestKind | undefined {
-	if (value.kind === "host_request") return value.request.kind;
-	if (key.startsWith("host_action/")) return "approval";
-	return undefined;
+/** The host request kind a client must accept to see `value`, if it is a host request. */
+function gateOf(value: LiveValue): HostRequestKind | undefined {
+	return value.kind === "host_request" ? value.request.kind : undefined;
 }
 
 /** Longest form field pattern, in characters. */
@@ -632,12 +619,6 @@ function answers(request: HostRequest, response: HostResponse): boolean {
 	}
 }
 
-const HOST_ACTION_CANCEL_MESSAGES: Record<Exclude<HostRequestCancelReason, "unavailable">, string> = {
-	aborted: "Host action cancelled",
-	timeout: "Host action timed out",
-	closed: "The conversation closed",
-};
-
 /** A whole-millisecond timeout, or none for an absent, non-positive, or non-finite one. */
 export function hostRequestTimeout(timeout: number | undefined): { timeoutMs?: number } {
 	return timeout !== undefined && Number.isFinite(timeout) && timeout > 0 ? { timeoutMs: Math.ceil(timeout) } : {};
@@ -666,7 +647,6 @@ export class LiveState {
 	private nextSeq = 0;
 	private delivering = false;
 	private closed = false;
-	private interaction: HostInteraction | undefined;
 
 	constructor(options: LiveStateOptions = {}) {
 		this.head = options.head ?? (() => 0);
@@ -701,7 +681,7 @@ export class LiveState {
 		this.clients.set(clientId, attached);
 		const items: LiveItem[] = [];
 		for (const [key, value] of this.fold.values) {
-			const gate = gateOf(key, value);
+			const gate = gateOf(value);
 			if (gate !== undefined) {
 				if (!acceptsKind(client, gate)) continue;
 				attached.shown.add(key);
@@ -863,71 +843,6 @@ export class LiveState {
 		return "accepted";
 	}
 
-	/**
-	 * Approvals and host action progress through this live state: a request is
-	 * an `approval` host request under the action's id, and progress is
-	 * `host_action/<id>`, cleared once the action finished.
-	 */
-	get hostInteraction(): HostInteraction {
-		this.interaction ??= {
-			requestAction: (request, options) => this.requestAction(request, options?.signal),
-			updateAction: (update) => this.updateAction(update),
-		};
-		return this.interaction;
-	}
-
-	private async requestAction(
-		request: HostActionRequest,
-		signal: AbortSignal | undefined,
-	): Promise<HostActionDecision> {
-		const outcome = await this.request(
-			{
-				kind: "approval",
-				action: request.action,
-				title: request.title,
-				...(request.message === undefined ? {} : { message: request.message }),
-				...(request.confirmLabel === undefined ? {} : { confirmLabel: request.confirmLabel }),
-				...(request.cancelLabel === undefined ? {} : { cancelLabel: request.cancelLabel }),
-				...(request.commandPreview === undefined ? {} : { commandPreview: request.commandPreview }),
-				...(request.blocking === undefined ? {} : { blocking: request.blocking }),
-				...(request.destructive === undefined ? {} : { destructive: request.destructive }),
-				...(request.metadata === undefined ? {} : { metadata: request.metadata }),
-				...hostRequestTimeout(request.timeoutMs),
-			},
-			{ id: request.id, ...(signal === undefined ? {} : { signal }) },
-		);
-		if (outcome.status === "cancelled") {
-			return outcome.reason === "unavailable"
-				? { decision: "unavailable" }
-				: { decision: "dismissed", message: HOST_ACTION_CANCEL_MESSAGES[outcome.reason] };
-		}
-		const response = outcome.response;
-		if (!("decision" in response)) return { decision: "dismissed" };
-		return { decision: response.decision, ...(response.message === undefined ? {} : { message: response.message }) };
-	}
-
-	private updateAction(update: HostActionUpdate): void {
-		const key = liveKey("host_action", update.id);
-		const value: LiveValue = {
-			kind: "host_action",
-			action: update.action,
-			status: update.status,
-			...(update.message === undefined ? {} : { message: update.message }),
-			...(update.exitCode === undefined ? {} : { exitCode: update.exitCode }),
-		};
-		if (!keyFits(key, value) || !isLiveValue(value)) throw new TypeError(`Invalid host action update ${update.id}`);
-		if (this.closed) return;
-		// A finished action's last status reaches the clients; nothing of it stays.
-		this.publish(
-			HOST_ACTION_TERMINAL_STATUSES.has(update.status)
-				? [
-						{ type: "set", key, value },
-						{ type: "clear", key },
-					]
-				: [{ type: "set", key, value }],
-		);
-	}
-
 	/** End every pending request, clear every value, and detach every client. Later calls do nothing. */
 	close(): void {
 		if (this.closed) return;
@@ -995,21 +910,19 @@ export class LiveState {
 		}
 	}
 
-	/** The part of `items` `attached` may see; a gated value it no longer may see is cleared for it. */
+	/** The part of `items` `attached` may see: host requests only of the kinds it accepts. */
 	private visible(attached: AttachedClient, items: readonly LiveItem[]): LiveItem[] {
 		const visible: LiveItem[] = [];
 		for (const item of items) {
 			if (item.type === "set") {
-				const gate = gateOf(item.key, item.value);
+				const gate = gateOf(item.value);
 				if (gate === undefined) {
 					visible.push(item);
 				} else if (acceptsKind(attached.client, gate)) {
 					attached.shown.add(item.key);
 					visible.push(item);
-				} else if (attached.shown.delete(item.key)) {
-					visible.push({ type: "clear", key: item.key });
 				}
-			} else if (item.type === "clear" && isGatedKey(item.key)) {
+			} else if (item.type === "clear" && item.key.startsWith("host_request/")) {
 				if (attached.shown.delete(item.key)) visible.push(item);
 			} else {
 				visible.push(item);

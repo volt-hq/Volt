@@ -12,7 +12,6 @@ import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
-import type { HostInteraction } from "../host-interaction.ts";
 import { resolveLspConfig } from "../lsp/config.ts";
 import { LspManager, type LspServerStatus } from "../lsp/manager.ts";
 import type { LspServerPool } from "../lsp/server-pool.ts";
@@ -53,6 +52,7 @@ import {
 import { createToolDefinitionFromAgentTool } from "../tools/tool-definition-wrapper.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
+import type { HostActions } from "./host-actions.ts";
 import type { SessionJobs } from "./jobs.ts";
 import { McpAuthRequests } from "./mcp-auth-requests.ts";
 
@@ -100,6 +100,8 @@ export interface SessionToolRuntimeHost {
 	readonly planningController: PlanningToolController;
 	/** The conversation's live state, where MCP authorization flows wait for the user. */
 	readonly liveState: LiveState;
+	/** Runs host actions, such as LSP server installs, once a client approves them. */
+	readonly hostActions: HostActions;
 	conversation(): Conversation<AgentTool>;
 	extensions(): SessionExtensionBinding;
 	extensionServices(): SessionExtensionServices;
@@ -127,7 +129,6 @@ export type SessionToolRuntimeOptions = Pick<
 	| "allowUnlistedExtensionTools"
 	| "excludedToolNames"
 	| "baseToolsOverride"
-	| "hostInteraction"
 	| "lspServerPool"
 	| "subagentToolManager"
 	| "mcpManager"
@@ -152,7 +153,6 @@ export class SessionToolRuntime {
 	private lspManager?: LspManager;
 	private readonly lspServerPool?: LspServerPool;
 	private lspEnabled = false;
-	private hostInteraction?: HostInteraction;
 	private subagentToolManager?: SubagentToolManager;
 	private mcpManager?: McpManager;
 	private unsubscribeMcpManager?: () => void;
@@ -185,7 +185,6 @@ export class SessionToolRuntime {
 		this.allowUnlistedExtensionTools = options.allowUnlistedExtensionTools ?? false;
 		this.excludedToolNames = options.excludedToolNames ? new Set(options.excludedToolNames) : undefined;
 		this.baseToolsOverride = options.baseToolsOverride;
-		this.hostInteraction = options.hostInteraction;
 		this.lspServerPool = options.lspServerPool;
 		this.subagentToolManager = options.subagentToolManager;
 		this.mcpManager = options.mcpManager;
@@ -206,11 +205,6 @@ export class SessionToolRuntime {
 	/** The options the base system prompt was built from. */
 	get baseSystemPromptOptions(): BuildSystemPromptOptions {
 		return this.baseSystemPromptBuildOptions;
-	}
-
-	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
-		this.hostInteraction = hostInteraction;
-		this.lspManager?.setHostInteraction(hostInteraction);
 	}
 
 	/** LSP status for the /lsp command. */
@@ -754,7 +748,7 @@ export class SessionToolRuntime {
 			cwd: this.host.cwd,
 			projectCwd: this.lexicalProjectCwd,
 			config: lspConfig,
-			hostInteraction: this.hostInteraction,
+			hostActions: this.host.hostActions,
 			installAllowed: () => !this.host.isDisposed() && this.host.operationGrantProfile() === undefined,
 			...(this.lspServerPool
 				? { server: this.lspServerPool.acquire({ projectCwd: this.lexicalProjectCwd, config: lspConfig }) }

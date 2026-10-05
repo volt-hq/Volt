@@ -6,6 +6,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../s
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { attachApprover } from "./host-action-doubles.ts";
 import { createDirectorySymlinkSync } from "./symlink-utils.ts";
 
 const FAKE_SERVER = join(__dirname, "fixtures", "fake-lsp-server.mjs");
@@ -75,8 +76,7 @@ describe("AgentSession projectCwd propagation", () => {
 			settingsManager: SettingsManager.inMemory({ lsp: { enabled: true } }),
 			sessionManager: SessionManager.inMemory(root),
 		});
-		const requestAction = vi.fn(async () => ({ decision: "denied" as const }));
-		session.setHostInteraction({ requestAction });
+		const approvals = attachApprover(session.liveState, () => ({ decision: "denied" }));
 		vi.stubEnv("PATH", root);
 		vi.stubEnv("VOLT_OFFLINE", "0");
 		try {
@@ -90,7 +90,8 @@ describe("AgentSession projectCwd propagation", () => {
 					{} as never,
 				);
 			expect(result.isError).toBe(true);
-			expect(requestAction).not.toHaveBeenCalled();
+			expect(approvals.requests).toEqual([]);
+			expect(session.work.list()).toEqual([]);
 		} finally {
 			session.dispose();
 			await session.waitForClosed();

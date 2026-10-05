@@ -138,13 +138,16 @@ describe("LiveState host requests", () => {
 		live.attach("phone", dialogsOnly);
 		live.attach("manager", manager);
 
-		const decision = live.hostInteraction.requestAction({
-			id: "lsp-install-1",
-			action: "lsp.install_server",
-			title: "Install?",
-			commandPreview: "npm install -g typescript",
-			timeoutMs: 60_000,
-		});
+		const decision = live.request(
+			{
+				kind: "approval",
+				action: "lsp.install_server",
+				title: "Install?",
+				commandPreview: "npm install -g typescript",
+				timeoutMs: 60_000,
+			},
+			{ id: "lsp-install-1" },
+		);
 		expect(dialogsOnly.items()).toEqual([]);
 		expect(manager.pending()).toEqual([
 			{
@@ -161,29 +164,13 @@ describe("LiveState host requests", () => {
 		expect(live.answer("lsp-install-1", { decision: "approved" }, "phone")).toBe("not_allowed");
 		expect(live.answer("lsp-install-1", { confirmed: true }, "manager")).toBe("invalid");
 		expect(live.answer("lsp-install-1", { decision: "approved", message: "ok" }, "manager")).toBe("accepted");
-		await expect(decision).resolves.toEqual({ decision: "approved", message: "ok" });
-
-		live.hostInteraction.updateAction?.({ id: "lsp-install-1", action: "lsp.install_server", status: "running" });
-		live.hostInteraction.updateAction?.({
-			id: "lsp-install-1",
-			action: "lsp.install_server",
-			status: "completed",
-			exitCode: 0,
+		await expect(decision).resolves.toEqual({
+			status: "answered",
+			response: { decision: "approved", message: "ok" },
+			clientId: "manager",
 		});
 		expect(dialogsOnly.items()).toEqual([]);
-		expect(manager.items().slice(-3)).toEqual([
-			{
-				type: "set",
-				key: "host_action/lsp-install-1",
-				value: { kind: "host_action", action: "lsp.install_server", status: "running" },
-			},
-			{
-				type: "set",
-				key: "host_action/lsp-install-1",
-				value: { kind: "host_action", action: "lsp.install_server", status: "completed", exitCode: 0 },
-			},
-			{ type: "clear", key: "host_action/lsp-install-1" },
-		]);
+		expect(manager.items().at(-1)).toEqual({ type: "clear", key: "host_request/lsp-install-1" });
 		expect(live.entries()).toEqual([]);
 	});
 
@@ -191,8 +178,9 @@ describe("LiveState host requests", () => {
 		vi.useFakeTimers();
 		const live = new LiveState();
 		await expect(live.request(confirm)).resolves.toEqual({ status: "cancelled", reason: "unavailable" });
-		await expect(live.hostInteraction.requestAction({ id: "a", action: "x", title: "t" })).resolves.toEqual({
-			decision: "unavailable",
+		await expect(live.request({ kind: "approval", action: "x", title: "t" }, { id: "a" })).resolves.toEqual({
+			status: "cancelled",
+			reason: "unavailable",
 		});
 
 		const client = createLiveRecorder();
@@ -324,21 +312,6 @@ describe("LiveState host requests", () => {
 		live.attach("late", { acceptsHostRequest: () => true, apply: (update) => record("late", update) });
 		await live.request(confirm);
 		expect(order).toEqual(["eager:set", "late:set", "eager:clear", "late:clear"]);
-	});
-
-	it("clears gated progress for a client that stops accepting approvals", () => {
-		const live = new LiveState();
-		let accepting = true;
-		const client = createLiveRecorder();
-		live.attach("phone", { ...client, acceptsHostRequest: () => accepting });
-		live.hostInteraction.updateAction?.({ id: "action", action: "x", status: "running" });
-		accepting = false;
-		live.hostInteraction.updateAction?.({ id: "action", action: "x", status: "running", message: "still" });
-		live.hostInteraction.updateAction?.({ id: "action", action: "x", status: "completed" });
-		expect(client.items()).toEqual([
-			{ type: "set", key: "host_action/action", value: { kind: "host_action", action: "x", status: "running" } },
-			{ type: "clear", key: "host_action/action" },
-		]);
 	});
 });
 

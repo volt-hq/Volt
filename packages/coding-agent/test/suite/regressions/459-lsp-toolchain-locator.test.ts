@@ -12,11 +12,11 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HostActionUpdate, HostInteraction } from "../../../src/core/host-interaction.ts";
 import { resolveLspLaunch } from "../../../src/core/lsp/command-resolver.ts";
 import { type LspSettings, resolveLspConfig } from "../../../src/core/lsp/config.ts";
 import { LspManager } from "../../../src/core/lsp/manager.ts";
 import { type LspLocatorHost, toolchainLocatorFor } from "../../../src/core/lsp/toolchain-locator.ts";
+import { type Approver, testHostActions } from "../../host-action-doubles.ts";
 
 const fake = join(__dirname, "../../fixtures/fake-lsp-server.mjs");
 const windows = process.platform === "win32";
@@ -348,8 +348,8 @@ function managerFixture(
 	writeFileSync(path, "symbol\n");
 	vi.stubEnv("PATH", bin);
 	vi.stubEnv("VOLT_OFFLINE", "0");
-	const updates: HostActionUpdate[] = [];
-	const requestAction = vi.fn<HostInteraction["requestAction"]>(async () => ({ decision: "approved" }));
+	const requestAction = vi.fn<Approver>(async () => ({ decision: "approved" }));
+	const host = testHostActions(requestAction);
 	const installRunner = vi.fn(async (command: readonly string[]) => {
 		install(command);
 		return { exitCode: 0, output: "installed" };
@@ -357,12 +357,14 @@ function managerFixture(
 	const manager = new LspManager({
 		cwd: root,
 		config: resolveLspConfig({ idleShutdownMs: 0, ...settings }),
-		hostInteraction: { requestAction, updateAction: (update) => void updates.push(update) },
+		hostActions: host.actions,
 		installRunner,
 	});
 	managers.push(manager);
 	const status = (name: string) => manager.getStatus().find((entry) => entry.name === name);
-	return { manager, root, bin, path, updates, requestAction, installRunner, status };
+	/** Each install action that finished: the state it last ran in, and its outcome. */
+	const ran = () => host.finished.map((record) => [record.state, record.outcome ?? "open"]);
+	return { manager, root, bin, path, ran, requestAction, installRunner, status };
 }
 
 describe("LSP toolchain locator integration (#459)", () => {
@@ -392,7 +394,7 @@ describe("LSP toolchain locator integration (#459)", () => {
 		const item = goFixture();
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.requestAction).toHaveBeenCalledTimes(1);
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
+		expect(item.ran()).toEqual([["running", "completed"]]);
 		item.manager.restart();
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.requestAction).toHaveBeenCalledTimes(1);
@@ -487,7 +489,7 @@ describe("LSP toolchain locator integration (#459)", () => {
 			expect(item.requestAction.mock.calls[0][0].commandPreview).toBe(
 				"rustup component add rust-analyzer --toolchain stable",
 			);
-			expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
+			expect(item.ran()).toEqual([["running", "completed"]]);
 			item.manager.restart();
 			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 			expect(item.requestAction).toHaveBeenCalledTimes(1);
@@ -519,7 +521,7 @@ describe("LSP toolchain locator integration (#459)", () => {
 			["rustup", "component", "add", "rust-analyzer", "--toolchain", "pinned"],
 			expect.anything(),
 		);
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
+		expect(item.ran()).toEqual([["running", "completed"]]);
 		// The workspace's own toolchain already had the component; no second prompt.
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.requestAction).toHaveBeenCalledTimes(1);

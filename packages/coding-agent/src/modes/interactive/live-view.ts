@@ -1,9 +1,9 @@
 /**
  * The TUI's view of the live state of the conversation it shows: extension
- * status, string widgets, and title; notices and editor text; and the dialogs
- * and approvals it answers in process, shown one at a time in the order they
- * were asked. A request another client answered, or that ended, closes
- * without an answer.
+ * status, string widgets, and title; notices and editor text; the progress
+ * of the work this host runs; and the dialogs and approvals it answers in
+ * process, shown one at a time in the order they were asked. A request
+ * another client answered, or that ended, closes without an answer.
  */
 
 import type { HostRequest, HostRequestKind, HostResponse, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
@@ -23,7 +23,8 @@ export interface LiveViewHost {
 	setTitle(title: string | undefined): void;
 	notify(level: "info" | "warning" | "error", message: string): void;
 	setEditorText(text: string): void;
-	showHostAction(progress: Extract<LiveValue, { kind: "host_action" }>): void;
+	/** Work `workId` reported progress, or, without a value, its executor detached. */
+	showWork(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void;
 }
 
 const TUI_HOST_REQUESTS: ReadonlySet<HostRequestKind> = new Set(["select", "confirm", "input", "editor", "approval"]);
@@ -94,8 +95,8 @@ export class TuiLiveView implements LiveClient {
 			case "host_request":
 				this.requests.set(value.requestId, value.request);
 				return;
-			case "host_action":
-				this.host.showHostAction(value);
+			case "work":
+				this.host.showWork(value.workId, value);
 				return;
 			default:
 				return;
@@ -122,6 +123,9 @@ export class TuiLiveView implements LiveClient {
 			case "host_request":
 				this.requests.delete(id);
 				if (this.showing?.requestId === id) this.closeShowing();
+				return;
+			case "work":
+				this.host.showWork(id, undefined);
 				return;
 			default:
 				return;

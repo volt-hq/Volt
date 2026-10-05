@@ -12,6 +12,7 @@ import { projectTranscriptItem } from "../src/core/protocol/projection/transcrip
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createLspTool } from "../src/core/tools/lsp.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
+import { type Approver, testHostActions } from "./host-action-doubles.ts";
 import { createHarness } from "./suite/harness.ts";
 
 const fake = join(__dirname, "fixtures/fake-lsp-server.mjs");
@@ -209,7 +210,7 @@ describe("built-in TypeScript compatibility and consent", () => {
 		chmodSync(executable, 0o755);
 		vi.stubEnv("PATH", root);
 		vi.stubEnv("VOLT_FAKE_TS_VERSION", version);
-		const requestAction = vi.fn(async () => ({ decision: consent }));
+		const requestAction = vi.fn<Approver>(async () => ({ decision: consent }));
 		const installRunner = vi.fn(async () => {
 			vi.stubEnv("VOLT_FAKE_TS_VERSION", "7.0.2");
 			return { exitCode: 0, output: "" };
@@ -217,7 +218,7 @@ describe("built-in TypeScript compatibility and consent", () => {
 		const value = new LspManager({
 			cwd: root,
 			config: resolveLspConfig({ idleShutdownMs: 0 }),
-			hostInteraction: { requestAction },
+			hostActions: testHostActions(requestAction).actions,
 			installRunner,
 		});
 		owned.push(value);

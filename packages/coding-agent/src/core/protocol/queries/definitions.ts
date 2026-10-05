@@ -13,6 +13,7 @@ import { mcpManagerOf, workspaceService } from "../intents/host.ts";
 import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
+import { missingCapability } from "../intents/types.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 
@@ -213,7 +214,16 @@ export const workOutputQuery = defineQuery({
 	remote: "safe",
 	requires: observe,
 	async run(ctx, params) {
-		const output = targetOf(ctx).conversation.work.output(params.workId);
+		const { work } = targetOf(ctx).conversation;
+		// A remote client needs what the work's kind requires too: a host action's output takes host management.
+		const missing =
+			ctx.profile.name === "local" ? undefined : missingCapability(ctx.profile.grant, work.requires(params.workId));
+		if (missing !== undefined) {
+			throw new QueryRejectedError("not_allowed", `Remote capability required: ${missing}`, {
+				requiredCapability: missing,
+			});
+		}
+		const output = work.output(params.workId);
 		if (!output) throw new QueryRejectedError("invalid_input", `Unknown work ${JSON.stringify(params.workId)}`);
 		// Plain text, its paths redacted for the subscriber before it is cut into chunks.
 		let plain = stripVTControlCharacters(output.text)
