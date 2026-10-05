@@ -69,6 +69,7 @@ import {
 	reviewUncommittedIntent,
 } from "./review.ts";
 import type { IntentDefinition } from "./types.ts";
+import { cancelWorkIntent, openWorkIntent, resumeWorkIntent, startSubagentIntent } from "./work.ts";
 
 /**
  * Every built-in intent's definition, in protocol order. A function, so the
@@ -102,6 +103,10 @@ export function createBuiltinIntents() {
 		subagent_start: subagentStartIntent,
 		subagent_abort: subagentAbortIntent,
 		subagent_dispose: subagentDisposeIntent,
+		cancel_work: cancelWorkIntent,
+		open_work: openWorkIntent,
+		resume_work: resumeWorkIntent,
+		start_subagent: startSubagentIntent,
 		review_uncommitted: reviewUncommittedIntent,
 		review_branch: reviewBranchIntent,
 		review_pr: reviewPrIntent,

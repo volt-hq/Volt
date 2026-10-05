@@ -1,12 +1,11 @@
 /**
  * One conversation a `ConversationHost` opened. It serves one log for its
  * whole life: its session, the cwd-bound services the session was created
- * with, its live state, its detached reviews, the one-shot recovery of
- * durable queued input, and its managed-worktree pin are fixed until it
- * closes.
+ * with, its live state, its work registry, its detached reviews, the
+ * one-shot recovery of durable queued input, and its managed-worktree pin
+ * are fixed until it closes.
  */
 
-import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { releaseLocalSessionWorktree } from "../../daemon/session-worktree.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AgentSessionDiagnostic, AgentSessionServices } from "../agent-session-services.ts";
@@ -14,9 +13,11 @@ import type { ProjectTrustContext, SessionShutdownEvent, SessionStartEvent } fro
 import { emitSessionShutdownEvent } from "../extensions/runner.ts";
 import { ReviewWorkflowManager } from "../review-workflows.ts";
 import type { CreateAgentSessionResult } from "../sdk.ts";
+import { wakingInputRecovery } from "../session/client-inputs.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
+import { WorkRegistry } from "../work/registry.ts";
 import { feedLiveState, type LiveFeed } from "./live-feed.ts";
 import type { LiveState } from "./live-state.ts";
 import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
@@ -140,6 +141,13 @@ export class HostedConversation {
 	 * host closes the conversation, which releases the lock. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
+	/**
+	 * The conversation's work (RFC §7): its kinds, the executors of the work
+	 * it runs, and the cancel, resume, and open paths every client shares.
+	 * The host reconciles the work a previous runtime left when it opens the
+	 * conversation; closing stops every executor.
+	 */
+	readonly work: WorkRegistry;
 	/** Feeds the live state from the session until the conversation closes. */
 	private readonly liveFeed: LiveFeed;
 	private _reviewWorkflows?: ReviewWorkflowManager;
@@ -158,10 +166,17 @@ export class HostedConversation {
 		this.openedAs = options.openedAs;
 		this.liveFeed = feedLiveState(this.session);
 		const session = this.session;
+		this.work = new WorkRegistry({
+			work: () => session.conversationWork,
+			state: () => session.sessionManager.getConversationState(),
+			live: () => session.liveState,
+			turnId: () => session.turnId,
+		});
 		void session.lost.then((error) => {
 			if (this.closePromise) return;
-			// Reviews persist through the lost session's manager and cannot finish.
+			// Reviews and work persist through the lost session's manager and cannot finish; the next open reconciles the work.
 			void this._reviewWorkflows?.abortAll().catch(() => undefined);
+			void this.work.cancelAll("closed").catch(() => undefined);
 			this.lostSignal.resolve(error);
 		});
 	}
@@ -169,8 +184,8 @@ export class HostedConversation {
 	/**
 	 * The conversation's live state: extension status, widgets, and title,
 	 * dialogs, approvals, MCP authorization flows, the run phase, Git and
-	 * prompt-cache status, token use, intent availability, background jobs,
-	 * review workflows, and what streams. The host attaches each client's
+	 * prompt-cache status, token use, intent availability, work progress,
+	 * background jobs, review workflows, and what streams. The host attaches each client's
 	 * `live` view when the client joins; it closes with the session.
 	 */
 	get liveState(): LiveState {
@@ -268,7 +283,7 @@ export class HostedConversation {
 	}
 
 	private diagnoseRecoveryFailure(): void {
-		const recovery = clientInputRecovery(this.session.sessionManager.getConversationState());
+		const recovery = wakingInputRecovery(this.session.sessionManager.getConversationState());
 		const message =
 			recovery.kind === "blocked"
 				? `Client input ${JSON.stringify(recovery.blocker.clientMessageId)} has an ambiguous post-restart outcome; later durable queued input remains visible but fenced from automatic replay.`
@@ -306,7 +321,7 @@ export class HostedConversation {
 		if (this._reviewWorkflows?.hasActiveWorkflows) {
 			throw new Error("Cannot change sessions while a detached review is active; cancel or wait for it to finish");
 		}
-		const recovery = clientInputRecovery(session.sessionManager.getConversationState());
+		const recovery = wakingInputRecovery(session.sessionManager.getConversationState());
 		if (recovery.kind === "blocked") {
 			throw new Error("Cannot replace the session while a durable client input outcome is ambiguous");
 		}
@@ -327,11 +342,12 @@ export class HostedConversation {
 	}
 
 	/**
-	 * Close the conversation: wait for the operations it stays open for, abort
-	 * its detached reviews and input recovery, emit `session_shutdown`, then
-	 * dispose its session, which releases the log's lock. A conversation its clients moved away from (`reason` other
-	 * than quit) does not wait for the session's admitted prompt work, which
-	 * may be the extension command that moved them. Every caller joins one close.
+	 * Close the conversation: wait for the operations it stays open for, stop
+	 * its work, abort its detached reviews and input recovery, emit
+	 * `session_shutdown`, then dispose its session, which releases the log's
+	 * lock. A conversation its clients moved away from (`reason` other than
+	 * quit) does not wait for the session's admitted prompt work, which may be
+	 * the extension command that moved them. Every caller joins one close.
 	 */
 	close(event: {
 		reason: SessionShutdownEvent["reason"];
@@ -350,6 +366,7 @@ export class HostedConversation {
 	}): Promise<void> {
 		const moved = event.reason !== "quit";
 		await this.waitForHolds();
+		await this.work.cancelAll("closed").catch(() => undefined);
 		await this._reviewWorkflows?.abortAll().catch(() => undefined);
 		await this.abortRecovery(moved ? "session_replacement" : "disposal");
 		this.liveFeed.close();
@@ -380,6 +397,7 @@ export class HostedConversation {
 	discard(): Promise<void> {
 		this.closePromise ??= (async () => {
 			await this.waitForHolds();
+			await this.work.cancelAll("closed").catch(() => undefined);
 			this.liveFeed.close();
 			const session = this.session;
 			await finalizeConversationSession(

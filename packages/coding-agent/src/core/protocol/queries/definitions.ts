@@ -1,5 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
-import type { QueryName, QueryResult } from "@hansjm10/volt-protocol";
+import { CONTENT_TEXT_MAX_SCALARS, type QueryName, type QueryResult } from "@hansjm10/volt-protocol";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
@@ -223,6 +223,33 @@ export const jobOutputQuery = defineQuery({
 					.replace(/\r\n?/g, "\n")
 					.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
 			},
+		};
+	},
+});
+
+export const workOutputQuery = defineQuery({
+	name: "work_output",
+	scope: "conversation",
+	remote: "safe",
+	requires: observe,
+	async run(ctx, params) {
+		const output = targetOf(ctx).conversation.work.output(params.workId);
+		if (!output) throw new QueryRejectedError("invalid_input", `Unknown work ${JSON.stringify(params.workId)}`);
+		// Plain text, its paths redacted for the subscriber before it is cut into chunks.
+		const plain = stripVTControlCharacters(output.text)
+			.replace(/\r\n?/g, "\n")
+			.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+		const scalars = Array.from(ctx.subscriber ? ctx.subscriber.source(plain) : plain);
+		const offset = Math.min(params.offset ?? 0, scalars.length);
+		const end = Math.min(scalars.length, offset + CONTENT_TEXT_MAX_SCALARS);
+		return {
+			workId: params.workId,
+			text: scalars.slice(offset, end).join(""),
+			offset,
+			nextOffset: end < scalars.length ? end : null,
+			totalScalars: scalars.length,
+			truncated: output.truncated,
+			final: output.final,
 		};
 	},
 });
@@ -510,6 +537,7 @@ export const BUILTIN_QUERIES = {
 	web_search_status: webSearchStatusQuery,
 	subagent_definitions: subagentDefinitionsQuery,
 	job_output: jobOutputQuery,
+	work_output: workOutputQuery,
 	agent_options: agentOptionsQuery,
 	session_contexts: sessionContextsQuery,
 	worktrees: worktreesQuery,

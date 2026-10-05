@@ -13,9 +13,10 @@
  * position, and are rejected `stale` once the branch switched after it.
  *
  * Structural intents (`new_session`, `switch_session`, `fork`, `clone`,
- * `review_open_session`) answer `accepted{conversation}` when they moved the
- * client, followed by `ended{moved, target}` on its subscription; their
- * result is present only when they were cancelled.
+ * `review_open_session`, and `open_work` when it moves the client) answer
+ * `accepted{conversation}` when they moved the client, followed by
+ * `ended{moved, target}` on its subscription; their result is present only
+ * when they were cancelled.
  *
  * Frame type names are reserved: no intent is named like a frame.
  */
@@ -228,6 +229,32 @@ export const INTENT_SCHEMAS = {
 	},
 	subagent_abort: { input: Type.Object({ subagentId: Type.String() }, closed) },
 	subagent_dispose: { input: Type.Object({ subagentId: Type.String() }, closed) },
+
+	// Work (RFC §7): work items of the conversation, by work id
+	/** Cancel open work; rejected `not_allowed` when its kind is not cancellable. */
+	cancel_work: { input: Type.Object({ workId: LogEntryIdSchema }, closed) },
+	/**
+	 * Open the conversation work runs in or produced: a subagent's child, which
+	 * the result names for the client to subscribe to, or a conversation the
+	 * client moves to (`accepted{conversation}`, then `ended{moved}`).
+	 */
+	open_work: {
+		input: Type.Object({ workId: LogEntryIdSchema }, closed),
+		output: Type.Union([IntentCancelledSchema, Type.Object({ conversation: LogSessionIdSchema }, closed)]),
+	},
+	/** Continue suspended work: open work of a resumable kind that no executor runs since a restart. */
+	resume_work: { input: Type.Object({ workId: LogEntryIdSchema }, closed) },
+	/** Start a subagent: the work item that runs it and the child conversation to subscribe to. */
+	start_subagent: {
+		input: Type.Object(
+			{
+				agent: Type.String({ minLength: 1 }),
+				prompt: Type.String({ "x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES }),
+			},
+			closed,
+		),
+		output: Type.Object({ workId: LogEntryIdSchema, conversation: LogSessionIdSchema }, closed),
+	},
 
 	// Review
 	review_uncommitted: { input: Type.Object(reviewOptions, closed), output: ReviewWorkflowStartedSchema },

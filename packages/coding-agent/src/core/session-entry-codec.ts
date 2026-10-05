@@ -17,6 +17,7 @@ import {
 	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
 	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
 } from "@hansjm10/volt-protocol/wire-limits";
+import { type WorkEntryPayload, workPayloadBoundsError } from "@hansjm10/volt-protocol/work";
 import { Check } from "typebox/value";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { parsePlanningState } from "./planning.ts";
@@ -352,6 +353,14 @@ function validatePrReviewPlacement(value: unknown): void {
 		fail(`${path}.pullRequest`, "inconsistent canonical repository identity");
 }
 
+/** A work entry's payload against its schema and the byte bounds JSON Schema cannot express. */
+function validateWorkEntry(entry: Record<string, unknown>, type: WorkEntryPayload["type"]): void {
+	const { type: _type, id: _id, parentId: _parentId, timestamp: _timestamp, ordinal: _ordinal, ...payload } = entry;
+	if (!Check(SESSION_ENTRY_TYPES[type].payload, payload)) fail("$", `invalid ${type} payload`);
+	const bounds = workPayloadBoundsError({ type, payload } as WorkEntryPayload);
+	if (bounds !== undefined) fail("$", bounds);
+}
+
 function baseKeys(mode: "admission" | "persisted"): string[] {
 	return mode === "persisted"
 		? ["type", "id", "parentId", "timestamp", "ordinal"]
@@ -495,6 +504,11 @@ function parseSessionEntry(
 			if (entry.entryId !== null) idValue(entry.entryId, "$.entryId");
 			if (entry.parentId !== null) fail("$.parentId", "lineage must be a root entry");
 			if (mode === "persisted" && entry.ordinal !== 1) fail("$.ordinal", "lineage must be the first entry");
+			break;
+		case "work_started":
+		case "work_checkpoint":
+		case "work_finished":
+			validateWorkEntry(entry, type);
 			break;
 		default:
 			fail("$.type", `unsupported entry type ${JSON.stringify(type)}`);
@@ -980,7 +994,7 @@ export function normalizeClientInputPayload(command: ClientInputCommand, value: 
 export function normalizeClientInputQueuedPayload(value: unknown): ClientInputQueuedPayload {
 	const canonical = cloneCanonicalData(value, "Queued client input payload");
 	const input = record(canonical, "queuedInput");
-	exactKeys(input, "queuedInput", ["delivery", "message"], ["images", "messages"]);
+	exactKeys(input, "queuedInput", ["delivery", "message"], ["images", "messages", "wake"]);
 	if (input.delivery !== "steer" && input.delivery !== "follow_up") {
 		throw new Error("Client input queued delivery is invalid");
 	}
@@ -988,7 +1002,10 @@ export function normalizeClientInputQueuedPayload(value: unknown): ClientInputQu
 		delivery: input.delivery,
 		...normalizeClientInputContent(input.message, input.images),
 	};
-	if (input.messages === undefined) return queued;
+	if (input.messages === undefined) {
+		if (input.wake !== undefined) throw new Error("Only queued host messages may be quiet");
+		return queued;
+	}
 	// A host input queues the messages it delivers, validated like message entries.
 	if (!Array.isArray(input.messages) || input.messages.length === 0) {
 		throw new Error("Client input queued messages must be a non-empty array");
@@ -996,7 +1013,13 @@ export function normalizeClientInputQueuedPayload(value: unknown): ClientInputQu
 	for (const [index, message] of input.messages.entries()) {
 		validateAgentMessage(message, `queuedInput.messages[${index}]`);
 	}
-	return { ...queued, messages: input.messages as NonNullable<ClientInputQueuedPayload["messages"]> };
+	// Quiet host input (a `message` work notice) never starts a turn.
+	if (input.wake !== undefined && input.wake !== false) throw new Error("Client input queued wake is invalid");
+	return {
+		...queued,
+		messages: input.messages as NonNullable<ClientInputQueuedPayload["messages"]>,
+		...(input.wake === false ? { wake: false as const } : {}),
+	};
 }
 
 export function digestClientInputPayload(command: ClientInputCommand, input: ClientInputPayload): string {

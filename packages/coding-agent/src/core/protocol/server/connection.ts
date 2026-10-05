@@ -80,13 +80,14 @@ import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscri
 /** Frames a connection holds for its intent and query lane, at most. */
 const MAX_PENDING_FRAMES = 256;
 
-/** Intents that move the client to another conversation. */
+/** Intents that may move the client to another conversation. */
 const STRUCTURAL_INTENTS: ReadonlySet<string> = new Set([
 	"new_session",
 	"switch_session",
 	"fork",
 	"clone",
 	"review_open_session",
+	"open_work",
 ]);
 
 /** Intents whose acceptance changes the `settings` catalog. */

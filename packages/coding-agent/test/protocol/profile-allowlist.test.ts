@@ -799,3 +799,34 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 		expect(sourceOwned("plan_execute", { strategy: "retain_context" })).toBe(false);
 	});
 });
+
+describe("work intents and queries keep the authorization of the paths they replace", () => {
+	/** Each work intent or query, and the intent or query of the path it replaces (Phase 4 plan §4). */
+	const REPLACED: ReadonlyArray<{ readonly work: Mapping; readonly replaced: Mapping }> = [
+		{ work: intents("cancel_work"), replaced: intents("cancel_job") },
+		{ work: intents("cancel_work"), replaced: intents("review_cancel_workflow") },
+		{ work: intents("resume_work"), replaced: intents("cancel_job") },
+		{ work: intents("open_work"), replaced: intents("review_open_session") },
+		{ work: intents("start_subagent"), replaced: intents("subagent_start") },
+		{ work: queries("work_output"), replaced: queries("job_output") },
+	];
+
+	it("requires the same capabilities and remote safety, deciding every grant alike", async () => {
+		for (const { work, replaced } of REPLACED) {
+			const name = JSON.stringify(work);
+			expect(mappedRequires(work), name).toEqual(mappedRequires(replaced));
+			expect(mappedRemoteSafe(work), name).toBe(mappedRemoteSafe(replaced));
+			for (const grant of everyGrant()) {
+				expect(await registryDecision(work, grant), `${name} ${grant.capabilities}`).toEqual(
+					await registryDecision(replaced, grant),
+				);
+			}
+		}
+	});
+
+	it("fences no work intent on the branch: work is not on a branch", () => {
+		for (const name of ["cancel_work", "open_work", "resume_work", "start_subagent"] as const) {
+			expect(intentRegistry.get(name).fence, name).toBe("none");
+		}
+	});
+});

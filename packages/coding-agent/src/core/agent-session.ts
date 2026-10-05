@@ -24,7 +24,7 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "@hansjm10/volt-agent-core";
-import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
+import { AdmissionGate, Conversation, type ConversationLog, type ConversationWork } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
@@ -998,6 +998,20 @@ export class AgentSession {
 	 */
 	get sessionWriter(): SessionWriter {
 		return this._sessionWriter;
+	}
+
+	/**
+	 * The conversation's work writes (RFC §7.1): the only way `work_*` entries
+	 * reach the log. The hosted conversation's work registry is their caller.
+	 */
+	get conversationWork(): ConversationWork {
+		return this._conversation.work;
+	}
+
+	/** The running turn's operation id, if a turn runs: work started meanwhile belongs to it. */
+	get turnId(): string | undefined {
+		const operation = this._conversation.operation;
+		return operation?.kind === "turn" ? operation.id : undefined;
 	}
 
 	/**

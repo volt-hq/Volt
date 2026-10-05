@@ -29,6 +29,7 @@ import {
 	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	type RemoteCapability,
 	type RemoteGrant,
+	WORK_NOTICE_CUSTOM_TYPE,
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer } from "../remote/iroh/sanitizer.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
@@ -118,6 +119,9 @@ const LOCAL_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"leaf",
 	"subagent_spawn",
 	"forked_from",
+	"work_started",
+	"work_checkpoint",
+	"work_finished",
 ]);
 
 const UNBOUNDED = Number.MAX_SAFE_INTEGER;
@@ -145,7 +149,11 @@ export const localProfile: Profile = Object.freeze({
 	conversations: () => true,
 });
 
-/** State entries a remote client folds: their payloads, redacted, reach it. */
+/**
+ * State entries a remote client folds: their payloads, redacted, reach it.
+ * Work entries carry no input, child locator, output, or result data
+ * (projection/entries.ts); output is read with `work_output`.
+ */
 const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"client_input_receipt",
 	"client_input_queued",
@@ -159,6 +167,9 @@ const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"leaf",
 	"subagent_spawn",
 	"forked_from",
+	"work_started",
+	"work_checkpoint",
+	"work_finished",
 ]);
 
 /**
@@ -175,6 +186,7 @@ export function getRemoteVisibleCustomMessageRole(
 			return "assistant";
 		case "background_job_notification":
 		case "subagent_recovery":
+		case WORK_NOTICE_CUSTOM_TYPE:
 			return "system";
 		default:
 			return undefined;
