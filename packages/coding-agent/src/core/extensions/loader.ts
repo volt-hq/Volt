@@ -9,6 +9,13 @@
  * git must be a package with a manifest. Two extensions never share an id: a
  * user's or temporary extension beats a project's, and otherwise the earlier
  * one in load order wins. The later one is not loaded and is reported.
+ *
+ * An extension that settings disable (`extensions.<id>.enabled: false`) owns
+ * its id but does not run: no factory runs and a package's entry is not
+ * imported until it is enabled. Each instance has a lifetime; once retired
+ * (disabled, reloaded, or failed), its `volt` throws, its event-bus
+ * listeners are removed, and the providers it registered are unregistered by
+ * whoever retires it.
  */
 
 import * as fs from "node:fs";
@@ -42,7 +49,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { isSafeFormPattern } from "../host/live-state.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
-import { createSyntheticSourceInfo, type SourceScope } from "../source-info.ts";
+import { createSyntheticSourceInfo, type SourceInfo, type SourceScope } from "../source-info.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
 import {
@@ -62,9 +69,11 @@ import {
 	type Extension,
 	type ExtensionAPI,
 	type ExtensionCompletionProvider,
+	type ExtensionDeclaration,
 	type ExtensionDefinition,
 	type ExtensionFactory,
 	type ExtensionIntentOptions,
+	ExtensionLifetime,
 	type ExtensionRuntime,
 	type LoadExtensionsResult,
 	type MessageRenderer,
@@ -425,14 +434,25 @@ function createExtensionAPI(
 	cwd: string,
 	eventBus: EventBus,
 ): ExtensionAPI {
+	// Calls throw once the runtime's generation is stale or this instance retired.
+	const assertActive = (): void => {
+		runtime.assertActive();
+		extension.lifetime.assertActive();
+	};
+	// Registrations and changes throw once the instance stopped too: a disabled extension contributes and
+	// steers nothing more, while what it runs (its tool calls) finishes.
+	const assertRunning = (): void => {
+		runtime.assertActive();
+		extension.lifetime.assertRunning();
+	};
 	const api = {
 		get settings() {
-			runtime.assertActive();
+			assertActive();
 			return runtime.settings.values(extension);
 		},
 
 		updateSettings(values: Readonly<Record<string, unknown>>, options?: { readonly scope?: ExtensionSettingsScope }) {
-			runtime.assertActive();
+			assertRunning();
 			return runtime.settings.update(extension, values, options?.scope ?? "global");
 		},
 
@@ -441,11 +461,11 @@ function createExtensionAPI(
 			if (!EXTENSION_EVENTS.has(event)) {
 				throw new Error(`Extension '${extension.id}' subscribes to unknown event '${event}'`);
 			}
-			return extension.handlers.register(event, handler, runtime.assertActive);
+			return extension.handlers.register(event, handler, assertRunning);
 		},
 
 		registerTool(tool: ToolDefinition): void {
-			runtime.assertActive();
+			assertRunning();
 			if (RESERVED_PLAN_TOOL_NAMES.has(tool.name)) {
 				throw new Error(`Extension tool '${tool.name}' is reserved by native Plan mode`);
 			}
@@ -458,7 +478,7 @@ function createExtensionAPI(
 		},
 
 		registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void {
-			runtime.assertActive();
+			assertRunning();
 			validateExtensionCommandName(name);
 			if (RESERVED_PLAN_COMMAND_NAMES.has(name)) {
 				throw new Error(`Extension command '/${name}' is reserved by native Plan mode`);
@@ -471,7 +491,7 @@ function createExtensionAPI(
 		},
 
 		registerIntent(name: string, options: ExtensionIntentOptions): string {
-			runtime.assertActive();
+			assertRunning();
 			const intent = validateIntent(extension.id, name, options);
 			if (extension.intents.has(name)) throw new Error(`Intent ${name} is already registered`);
 			if (extension.intents.size >= EXTENSION_INTENTS_MAX) {
@@ -482,7 +502,7 @@ function createExtensionAPI(
 		},
 
 		registerShortcut(shortcut: KeyId, options: { description?: string; intent: string }): void {
-			runtime.assertActive();
+			assertRunning();
 			if (typeof shortcut !== "string" || shortcut.trim().length === 0) {
 				throw new TypeError("A shortcut needs a key");
 			}
@@ -500,7 +520,7 @@ function createExtensionAPI(
 		},
 
 		registerCompletionProvider(name: string, provider: ExtensionCompletionProvider): void {
-			runtime.assertActive();
+			assertRunning();
 			validateContributionName("completion provider", name);
 			if (!isRecord(provider)) throw new TypeError(`Completion provider ${name} must be declared as an object`);
 			const { trigger, remote = false, complete } = provider;
@@ -531,7 +551,7 @@ function createExtensionAPI(
 			name: string,
 			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 		): void {
-			runtime.assertActive();
+			assertRunning();
 			extension.flags.set(name, { ...options, name, extensionId: extension.id });
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
 				runtime.flagValues.set(name, options.default);
@@ -539,7 +559,7 @@ function createExtensionAPI(
 		},
 
 		registerWorkKind(name: string, kind?: WorkKindDeclaration): void {
-			runtime.assertActive();
+			assertRunning();
 			const declaration = validateWorkKind(name, kind);
 			if (extension.workKinds.has(name)) throw new Error(`Work kind ${name} is already registered`);
 			if (extension.workKinds.size >= EXTENSION_KINDS_MAX) {
@@ -550,12 +570,12 @@ function createExtensionAPI(
 		},
 
 		registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-			runtime.assertActive();
+			assertRunning();
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
 		},
 
 		registerMessagePresenter<T>(customType: string, present: MessagePresenter<T>): void {
-			runtime.assertActive();
+			assertRunning();
 			if (typeof customType !== "string" || customType.length === 0) {
 				throw new TypeError("A message presenter needs the custom type it presents");
 			}
@@ -565,49 +585,49 @@ function createExtensionAPI(
 
 		// Flag access - checks extension registered it, reads from runtime
 		getFlag(name: string): boolean | string | undefined {
-			runtime.assertActive();
+			assertActive();
 			if (!extension.flags.has(name)) return undefined;
 			return runtime.flagValues.get(name);
 		},
 
 		// Action methods - delegate to shared runtime
 		sendMessage(message, options): void {
-			runtime.assertActive();
+			assertRunning();
 			runtime.sendMessage(message, options);
 		},
 
 		sendUserMessage(content, options): void {
-			runtime.assertActive();
+			assertRunning();
 			runtime.sendUserMessage(content, options);
 		},
 
 		appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): Promise<void> {
-			runtime.assertActive();
+			assertRunning();
 			return runtime.appendEntry(customType, data);
 		},
 
 		setSessionName(name: string): Promise<void> {
-			runtime.assertActive();
+			assertRunning();
 			return runtime.setSessionName(name);
 		},
 
 		getSessionName(): string | undefined {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getSessionName();
 		},
 
 		setLabel(entryId: string, label: string | undefined): Promise<void> {
-			runtime.assertActive();
+			assertRunning();
 			return runtime.setLabel(entryId, label);
 		},
 
 		getServicesStatus() {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getServicesStatus(extension.id);
 		},
 
 		exec(command: string, args: string[], options?: ExecOptions) {
-			runtime.assertActive();
+			assertActive();
 			if (!extension.manifest.permissions?.includes("exec")) {
 				return Promise.reject(new ExtensionPermissionError(extension.id, "exec", "volt.exec"));
 			}
@@ -615,68 +635,76 @@ function createExtensionAPI(
 		},
 
 		getActiveTools(): string[] {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getActiveTools();
 		},
 
 		getAllTools() {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getAllTools();
 		},
 
 		setActiveTools(toolNames: string[]): void {
-			runtime.assertActive();
+			assertRunning();
 			runtime.setActiveTools(toolNames);
 		},
 
 		getCommands() {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getCommands();
 		},
 
 		setModel(model) {
-			runtime.assertActive();
+			assertRunning();
 			return runtime.setModel(model);
 		},
 
 		getThinkingLevel() {
-			runtime.assertActive();
+			assertActive();
 			return runtime.getThinkingLevel();
 		},
 
 		setThinkingLevel(level) {
-			runtime.assertActive();
+			assertRunning();
 			runtime.setThinkingLevel(level);
 		},
 
 		registerProvider(name: string, config: ProviderConfig) {
-			runtime.assertActive();
+			assertRunning();
 			requirePermission(extension, "providers", "volt.registerProvider");
 			runtime.registerProvider(name, config, extension.id);
+			extension.providers.add(name);
 		},
 
 		unregisterProvider(name: string) {
-			runtime.assertActive();
+			assertRunning();
 			requirePermission(extension, "providers", "volt.unregisterProvider");
 			runtime.unregisterProvider(name, extension.id);
+			extension.providers.delete(name);
 		},
 
 		events: {
 			emit(channel, data) {
-				runtime.assertActive();
+				assertRunning();
 				eventBus.emit(channel, data);
 			},
 			on(channel, handler) {
-				runtime.assertActive();
-				return eventBus.on(channel, (data) => {
+				assertRunning();
+				const unsubscribe = eventBus.on(channel, (data) => {
 					try {
-						runtime.assertActive();
+						assertActive();
 					} catch {
 						// Shared buses may outlive this extension generation.
 						return;
 					}
 					return handler(data);
 				});
+				// A retired instance's listeners leave the bus.
+				const forget = extension.lifetime.onRetire(unsubscribe);
+				return () => {
+					forget();
+					unsubscribe();
+				};
 			},
 		},
 	} as ExtensionAPI;
@@ -875,7 +903,81 @@ function createExtension(candidate: Candidate): Extension {
 		intents: new Map(),
 		completionProviders: new Map(),
 		workKinds: new Map(),
+		providers: new Set(),
+		clientRegistrations: new Set(),
+		lifetime: new ExtensionLifetime(),
 	};
+}
+
+/**
+ * Retire an instance whose load failed: its calls throw, and the providers it
+ * registered go, whether still queued for the runner or applied.
+ */
+function retireFailed(extension: Extension, runtime: ExtensionRuntime): void {
+	extension.lifetime.retire(`Extension ${extension.id} failed to load`);
+	const queued = runtime.pendingProviderRegistrations.some(
+		(registration) => registration.extensionId === extension.id,
+	);
+	if (queued) {
+		runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter(
+			(registration) => registration.extensionId !== extension.id,
+		);
+	} else {
+		for (const name of extension.providers) {
+			try {
+				runtime.unregisterProvider(name, extension.id);
+			} catch {
+				// The provider is gone either way.
+			}
+		}
+	}
+	extension.providers.clear();
+}
+
+/**
+ * Run `candidate`'s factory into `runtime` as a new instance; `sourceInfo`
+ * replaces the instance's own source. A failed instance is retired.
+ */
+async function runCandidate(
+	candidate: Candidate,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+	sourceInfo?: SourceInfo,
+): Promise<Extension> {
+	const factory = await candidate.factory();
+	const extension = createExtension(candidate);
+	if (sourceInfo !== undefined) extension.sourceInfo = sourceInfo;
+	try {
+		await factory(createExtensionAPI(extension, runtime, cwd, eventBus));
+	} catch (error) {
+		retireFailed(extension, runtime);
+		throw error;
+	}
+	return extension;
+}
+
+/** An extension that owns its id; `load` runs a new instance of it into `runtime`. */
+function declareCandidate(
+	candidate: Candidate,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+	error?: string,
+): ExtensionDeclaration {
+	const declared = createExtension(candidate);
+	const declaration: ExtensionDeclaration = {
+		id: declared.id,
+		manifest: declared.manifest,
+		version: declared.version,
+		path: declared.path,
+		resolvedPath: declared.resolvedPath,
+		sourceInfo: declared.sourceInfo,
+		fingerprint: declared.fingerprint,
+		...(error === undefined ? {} : { error }),
+		load: () => runCandidate(candidate, cwd, eventBus, runtime, declaration.sourceInfo),
+	};
+	return declaration;
 }
 
 /**
@@ -886,7 +988,7 @@ function createExtension(candidate: Candidate): Extension {
  */
 function settleIds(
 	candidates: readonly Candidate[],
-	loaded: readonly Extension[],
+	loaded: readonly { readonly id: string; readonly path: string }[],
 	errors: LoadExtensionsResult["errors"],
 ): Candidate[] {
 	const taken = new Map(loaded.map((extension) => [extension.id, extension.path]));
@@ -929,18 +1031,15 @@ export async function loadExtensionFromFactory(
 	runtime: ExtensionRuntime,
 	label = "<inline>",
 ): Promise<Extension> {
-	const candidate = definitionCandidate(definition, label, "temporary");
-	const extension = createExtension(candidate);
-	const api = createExtensionAPI(extension, runtime, resolvePath(cwd), eventBus);
-	await (await candidate.factory())(api);
-	return extension;
+	return runCandidate(definitionCandidate(definition, label, "temporary"), resolvePath(cwd), eventBus, runtime);
 }
 
 /**
  * Load extensions from paths and SDK definitions, in order. Each manifest is
- * read first; then the extensions that own their ids run their factories.
- * `loaded` are extensions already loaded into the same runtime, whose ids
- * stay theirs.
+ * read first; then the extensions that own their ids and that the runtime's
+ * settings enable run their factories. Every extension that owns its id is
+ * declared, running or not. `loaded` are extensions already loaded into the
+ * same runtime, whose ids stay theirs.
  */
 export async function loadExtensions(
 	sources: ReadonlyArray<string | ExtensionSource>,
@@ -965,22 +1064,56 @@ export async function loadExtensions(
 		}
 	}
 
+	const declarations: ExtensionDeclaration[] = [];
 	for (const candidate of settleIds(candidates, loaded, errors)) {
-		try {
-			const factory = await candidate.factory();
-			const extension = createExtension(candidate);
-			await factory(createExtensionAPI(extension, resolvedRuntime, resolvedCwd, resolvedEventBus));
-			extensions.push(extension);
-		} catch (error) {
-			errors.push({ path: candidate.path, error: loadError(error) });
+		let error: string | undefined;
+		if (resolvedRuntime.settings.enabled(candidate.manifest.id)) {
+			try {
+				extensions.push(await runCandidate(candidate, resolvedCwd, resolvedEventBus, resolvedRuntime));
+			} catch (failure) {
+				error = loadError(failure);
+				errors.push({ path: candidate.path, error });
+			}
 		}
+		declarations.push(declareCandidate(candidate, resolvedCwd, resolvedEventBus, resolvedRuntime, error));
 	}
 
 	return {
 		extensions,
+		declarations,
 		errors,
 		runtime: resolvedRuntime,
 	};
+}
+
+/**
+ * Read what `sources` declare, as {@link loadExtensions} does, without running
+ * any factory: each source that owns its id (against `declared`, the ids the
+ * runtime's extensions own already) becomes a declaration whose `load` runs it
+ * into `runtime`. A single file's module is evaluated to read its manifest, as
+ * loading does: only paths from trusted locations may be given.
+ */
+export async function declareExtensions(
+	sources: ReadonlyArray<ExtensionSource>,
+	cwd: string,
+	eventBus: EventBus,
+	runtime: ExtensionRuntime,
+	declared: readonly { readonly id: string; readonly path: string }[],
+): Promise<{ declarations: ExtensionDeclaration[]; errors: LoadExtensionsResult["errors"] }> {
+	const errors: LoadExtensionsResult["errors"] = [];
+	const resolvedCwd = resolvePath(cwd);
+	const candidates: Candidate[] = [];
+	for (const source of sources) {
+		try {
+			candidates.push(await prepareExtension(source, resolvedCwd));
+		} catch (error) {
+			errors.push({ path: source.path, error: loadError(error) });
+		}
+	}
+	const declarations = settleIds(candidates, declared, errors).map((candidate) =>
+		declareCandidate(candidate, resolvedCwd, eventBus, runtime),
+	);
+	return { declarations, errors };
 }
 
 function isExtensionFile(name: string): boolean {

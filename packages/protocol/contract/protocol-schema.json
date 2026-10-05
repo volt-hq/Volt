@@ -12219,6 +12219,29 @@
 				},
 				"child": {
 					"$ref": "#/$defs/WorkChild"
+				},
+				"requires": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RemoteCapability"
+					},
+					"uniqueItems": true
+				},
+				"remote": {
+					"type": "object",
+					"required": [
+						"cancel",
+						"resume"
+					],
+					"properties": {
+						"cancel": {
+							"type": "boolean"
+						},
+						"resume": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

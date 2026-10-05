@@ -24,7 +24,14 @@ export function wrapRegisteredTool(
 	runner: ExtensionRunner,
 	lostSignal?: AbortSignal,
 ): AgentTool {
-	const tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext(registeredTool.extensionId));
+	const wrapped = wrapToolDefinition(registeredTool.definition, () =>
+		runner.createContext(registeredTool.extensionId),
+	);
+	// Disabling the extension waits for its tool calls to settle before its instance retires.
+	const tool: AgentTool = {
+		...wrapped,
+		execute: (...args) => runner.trackToolCall(registeredTool.extensionId, () => wrapped.execute(...args)),
+	};
 	if (!lostSignal) return tool;
 	return {
 		...tool,

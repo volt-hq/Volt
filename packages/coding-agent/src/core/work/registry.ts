@@ -33,6 +33,13 @@
  * closing leaves its work open for the next open to reconcile. Removing a
  * kind (its extension reloaded) stops its work the same way, without
  * waiting: what the executors return or report afterwards no longer counts.
+ * Removing it with a grace period (its extension was disabled) cancels its
+ * work instead: each executor is aborted and waited for up to the grace
+ * period, and work still open then finishes `cancelled`.
+ *
+ * A kind's remote policy (`requires`, `remote`) is copied into `work_started`,
+ * so what a remote client may do with work stays known after its kind is
+ * removed; while the kind is registered, its current policy applies too.
  */
 
 import { randomUUID } from "node:crypto";
@@ -204,6 +211,12 @@ export interface WorkKindDefinition {
 	 * progress replaces it; one the presenter throws for is left out.
 	 */
 	detail?(work: WorkDetailInput): UiNode | undefined;
+}
+
+/** How removing a kind cancels its open work: how long its executors get to stop, and the error the work finishes with. */
+export interface WorkKindCancellation {
+	readonly graceMs: number;
+	readonly error: string;
 }
 
 export interface WorkStartOptions {
@@ -473,9 +486,12 @@ export class WorkRegistry {
 	 * Register a kind. The returned function removes it and stops the work it
 	 * runs without waiting for the executors, whose results and reports no
 	 * longer count: resumable work stays open, suspended, and other work
-	 * finishes `interrupted`.
+	 * finishes `interrupted`. With `cancel`, it cancels the kind's open work
+	 * instead, cancellable or not: each executor is aborted and waited for up
+	 * to `graceMs`, and work still open then finishes `cancelled` with `error`.
+	 * The kind accepts no new work meanwhile.
 	 */
-	register(definition: WorkKindDefinition): () => Promise<void> {
+	register(definition: WorkKindDefinition): (cancel?: WorkKindCancellation) => Promise<void> {
 		if (!BUILTIN_KINDS.has(definition.kind) && !EXTENSION_WORK_KIND.test(definition.kind)) {
 			throw new WorkError("invalid", `Invalid work kind ${JSON.stringify(definition.kind)}`);
 		}
@@ -486,12 +502,73 @@ export class WorkRegistry {
 			throw new WorkError("invalid", `Work kind ${definition.kind} is already registered`);
 		}
 		this.kinds.set(definition.kind, definition);
-		return async () => {
+		return async (cancel) => {
 			if (this.kinds.get(definition.kind) !== definition) return;
 			this.kinds.delete(definition.kind);
+			if (cancel) {
+				await this.cancelKind(definition, cancel);
+				return;
+			}
 			const stopping = [...this.active.values()].filter((active) => active.definition === definition);
 			await Promise.all(stopping.map((active) => this.leave(active, `Work kind ${definition.kind} was removed`)));
 		};
+	}
+
+	/**
+	 * Cancel the open work of a kind just removed: abort each executor, wait
+	 * up to the grace period, then finish what is still open `cancelled`.
+	 * Never rejects.
+	 */
+	private async cancelKind(definition: WorkKindDefinition, cancel: WorkKindCancellation): Promise<void> {
+		const stopping = [...this.active.values()].filter((active) => active.definition === definition);
+		for (const active of stopping) {
+			if (active.detached || active.cancelling) continue;
+			active.cancelling = true;
+			const record = this.get(active.workId);
+			if (record?.outcome === undefined && record?.state !== "cancelling") {
+				void this.write(active, () => this.host.work().checkpoint(active.workId, { state: "cancelling" })).catch(
+					() => undefined,
+				);
+			}
+			active.controller.abort(new Error(cancel.error));
+		}
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const grace = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, cancel.graceMs);
+			timer.unref?.();
+		});
+		await Promise.race([Promise.all(stopping.map((active) => active.done.promise)), grace]);
+		if (timer !== undefined) clearTimeout(timer);
+		// Executors that ignored the abort are left behind; their work ends without them.
+		await Promise.all(stopping.map((active) => this.abandon(active, cancel.error)));
+		// Open work without an executor here ends as well: no executor of the kind can run it again.
+		for (const record of this.list()) {
+			if (record.kind !== definition.kind || record.outcome !== undefined || this.active.has(record.workId))
+				continue;
+			await this.host
+				.work()
+				.finish(record.workId, { outcome: "cancelled", error: workText(cancel.error), deliver: false })
+				.catch(() => undefined);
+		}
+	}
+
+	/** Finish `active`'s work `cancelled` without its executor, which no longer counts. Never rejects. */
+	private async abandon(active: ActiveWork, error: string): Promise<void> {
+		if (active.detached) return;
+		active.detached = true;
+		this.clearCheckpoint(active);
+		try {
+			await active.writes.catch(() => undefined);
+			if (this.get(active.workId)?.outcome === undefined) {
+				await this.host
+					.work()
+					.finish(active.workId, { outcome: "cancelled", error: workText(error), deliver: false });
+			}
+		} catch {
+			// A lost log is reconciled by the next open.
+		} finally {
+			this.detach(active);
+		}
 	}
 
 	/**
@@ -540,6 +617,10 @@ export class WorkRegistry {
 				state: options.state ?? (definition.approval === true ? "awaiting_approval" : "running"),
 				...(options.toolCallId === undefined ? {} : { toolCallId: options.toolCallId }),
 				...(options.child === undefined ? {} : { child: options.child }),
+				...(definition.requires === undefined || definition.requires.length === 0
+					? {}
+					: { requires: [...new Set(definition.requires)] }),
+				...(definition.remote === undefined ? {} : { remote: { ...definition.remote } }),
 			});
 			const active = this.attach(record, definition);
 			// A kind removed while the work started runs none of it.
@@ -600,13 +681,16 @@ export class WorkRegistry {
 	}
 
 	/**
-	 * Whether a paired remote device may cancel or resume `record`: as its
-	 * kind's `remote` policy allows, and never for a kind this host has not
-	 * registered. Its kind's `requires` applies besides.
+	 * Whether a paired remote device may cancel or resume `record`: as the
+	 * `remote` policy its kind declared when it started allows, and never for
+	 * a kind this host has not registered. Its `requires` applies besides.
 	 */
 	remoteAllows(record: WorkRecord, operation: "cancel" | "resume"): boolean {
 		const definition = this.kinds.get(record.kind);
-		return definition !== undefined && (definition.remote?.[operation] ?? true);
+		// Both what the work recorded and what its kind says now must allow it.
+		return (
+			definition !== undefined && (record.remote?.[operation] ?? true) && (definition.remote?.[operation] ?? true)
+		);
 	}
 
 	/**
@@ -771,16 +855,14 @@ export class WorkRegistry {
 
 	/**
 	 * The remote capabilities, beyond an intent's or query's own, a client
-	 * needs to act on `workId`: its kind's `requires`. Undefined for work of an
-	 * extension kind this host does not know (its extension is not loaded),
-	 * whose requirements it cannot tell: no remote client acts on it.
+	 * needs to act on `workId`: what its kind required when the work started,
+	 * as `work_started` records it (so it holds after the kind is removed),
+	 * and what the kind requires now.
 	 */
-	requires(workId: string): readonly RemoteCapability[] | undefined {
+	requires(workId: string): readonly RemoteCapability[] {
 		const record = this.get(workId);
 		if (!record) return [];
-		const definition = this.kinds.get(record.kind);
-		if (definition) return definition.requires ?? [];
-		return BUILTIN_KINDS.has(record.kind) ? [] : undefined;
+		return [...new Set([...(record.requires ?? []), ...(this.kinds.get(record.kind)?.requires ?? [])])];
 	}
 
 	/** The output of `workId`, or undefined for unknown work. */

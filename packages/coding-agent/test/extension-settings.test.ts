@@ -293,6 +293,36 @@ describe("extension settings storage", () => {
 		});
 	});
 
+	it("stores whether an extension runs per scope, keeping its settings; a trusted project's choice wins", async () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getExtensionEnabled("demo")).toBe(true);
+		await storeExtensionSettings(manager, "demo", SETTINGS, "global", { verbose: true });
+		manager.setExtensionEnabled("demo", "global", false);
+		await manager.flush();
+		expect(manager.getExtensionEnabled("demo")).toBe(false);
+		expect(manager.getStoredExtensionEnabled("demo", "global")).toBe(false);
+		expect(manager.getStoredExtensionEnabled("demo", "project")).toBeUndefined();
+		expect(readJson(join(agentDir, "settings.json")).extensions).toEqual({
+			demo: { settings: { verbose: true }, enabled: false },
+		});
+		// Storing settings keeps the choice.
+		await storeExtensionSettings(manager, "demo", SETTINGS, "global", { verbose: false });
+		expect(manager.getExtensionEnabled("demo")).toBe(false);
+
+		manager.setExtensionEnabled("demo", "project", true);
+		await manager.flush();
+		expect(manager.getExtensionEnabled("demo")).toBe(true);
+		expect(new ExtensionSettingsRuntime(manager).enabled("demo")).toBe(true);
+
+		const untrusted = SettingsManager.create(projectDir, agentDir, { projectTrusted: false });
+		expect(untrusted.getExtensionEnabled("demo")).toBe(false);
+		expect(untrusted.getStoredExtensionEnabled("demo", "project")).toBeUndefined();
+		expect(() => untrusted.setExtensionEnabled("demo", "project", false)).toThrow(
+			"Project is not trusted; refusing to write project settings",
+		);
+		expect(new ExtensionSettingsRuntime().enabled("demo")).toBe(true);
+	});
+
 	it("neither reads nor writes project values for an untrusted project", async () => {
 		const trusted = SettingsManager.create(projectDir, agentDir);
 		await storeExtensionSettings(trusted, "demo", SETTINGS, "project", { maxLoops: 9 });

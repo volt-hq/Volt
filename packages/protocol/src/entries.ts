@@ -35,6 +35,7 @@ import {
 	RpcStreamingBehaviorSchema,
 	RpcThinkingLevelSchema,
 } from "./primitives.ts";
+import { RemoteCapabilitySchema } from "./remote-access.ts";
 import { UiNodeSchema } from "./ui-node.ts";
 import { RPC_WIRE_MAX_SAFE_INTEGER } from "./wire-limits.ts";
 import {
@@ -438,8 +439,10 @@ export const WorkResultSchema = Type.Object(
 );
 
 /**
- * Work started. The kind's delivery policy and resumability are copied in, so
- * reconciliation and delivery are functions of the log alone.
+ * Work started. The kind's delivery policy, resumability, and remote policy
+ * are copied in, so reconciliation, delivery, and what a remote client may do
+ * with the work are functions of the log alone, whether or not the kind is
+ * registered now (its extension may be disabled).
  */
 export const WorkStartedEntryPayloadSchema = Type.Object(
 	{
@@ -463,6 +466,10 @@ export const WorkStartedEntryPayloadSchema = Type.Object(
 		/** The tool call that started the work. */
 		toolCallId: Type.Optional(LogEntryIdSchema),
 		child: Type.Optional(WorkChildSchema),
+		/** Remote capabilities a client needs, beyond an intent's or query's own, to act on the work or read its output. */
+		requires: Type.Optional(Type.Array(RemoteCapabilitySchema, { uniqueItems: true })),
+		/** Whether a paired remote device may cancel or resume the work at all; it may when absent. */
+		remote: Type.Optional(Type.Object({ cancel: Type.Boolean(), resume: Type.Boolean() }, closed)),
 	},
 	closed,
 );

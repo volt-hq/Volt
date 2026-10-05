@@ -10,8 +10,11 @@
  *
  * A runner generation's kinds are removed when the extensions reload, which
  * interrupts the work they run: what its executors return or report
- * afterwards no longer counts (WorkRegistry.register). Extension kinds do not
- * resume, so a restart interrupts their open work too.
+ * afterwards no longer counts (WorkRegistry.register). Disabling one
+ * extension removes its kinds and cancels their work instead: each executor
+ * is aborted and waited for up to {@link EXTENSION_DISABLE_GRACE_MS}, then
+ * what is still open finishes `cancelled`. Extension kinds do not resume, so
+ * a restart interrupts their open work too.
  *
  * An executor sees the work id, an abort signal, progress, checkpoints, and
  * output; never the host, its clients, or the session. Its result keeps a
@@ -42,7 +45,13 @@ import type {
 } from "../extensions/types.ts";
 import { normalizeUiNode } from "../ui/normalize.ts";
 import { refuseThenable, type WorkDetailInput, type WorkDetailPresenter } from "../ui/presentation.ts";
-import { type WorkContext, type WorkExecution, type WorkRegistry, workText } from "./registry.ts";
+import {
+	type WorkContext,
+	type WorkExecution,
+	type WorkKindCancellation,
+	type WorkRegistry,
+	workText,
+} from "./registry.ts";
 
 /** A kind's name within its extension. */
 const WORK_KIND_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -52,6 +61,9 @@ export const EXTENSION_KINDS_MAX = 16;
 
 /** Most items of one extension kind running at once. */
 export const EXTENSION_KIND_MAX_ACTIVE = 8;
+
+/** How long disabling an extension waits for its work's executors to stop before it finishes the work without them. */
+export const EXTENSION_DISABLE_GRACE_MS = 10_000;
 
 /** Most steps extension progress keeps. */
 const PROGRESS_STEPS_MAX = 64;
@@ -188,7 +200,7 @@ export type StartWorkHandler = (
 
 interface OwnedKind {
 	readonly kind: WorkKind;
-	readonly remove: () => Promise<void>;
+	readonly remove: (cancel?: WorkKindCancellation) => Promise<void>;
 }
 
 /** The extension kinds registered in one conversation's work registry. */
@@ -259,6 +271,21 @@ export class ExtensionKinds {
 	/** Whether work `workId` is of a kind of the extension with manifest id `extensionId`. */
 	owns(extensionId: string, workId: string): boolean {
 		return this.work().get(workId)?.kind.startsWith(`ext:${extensionId}/`) === true;
+	}
+
+	/**
+	 * Remove the kinds of the extension with manifest id `extensionId`, which
+	 * was disabled: their open work is cancelled, waited for up to `graceMs`,
+	 * then finished `cancelled`. Resolves once that work finished.
+	 */
+	retire(extensionId: string, graceMs = EXTENSION_DISABLE_GRACE_MS): Promise<void> {
+		const owned = this.kinds.get(extensionId);
+		this.kinds.delete(extensionId);
+		for (const key of [...this.refused]) if (key.startsWith(`${extensionId}\u0000`)) this.refused.delete(key);
+		const error = `Extension ${extensionId} was disabled`;
+		return Promise.all([...(owned?.values() ?? [])].map((kind) => kind.remove({ graceMs, error }))).then(
+			() => undefined,
+		);
 	}
 
 	/** Remove every kind, interrupting the work they run. Resolves once that work finished. */
