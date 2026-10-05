@@ -97,6 +97,16 @@ describe("store catalog", () => {
 		expect(result.warnings[0]).toContain(warning);
 	});
 
+	it("keeps terminal sequences and line breaks from catalog keys out of warnings", () => {
+		const result = validateStoreCatalog(
+			testCatalog({ ...testCatalogEntry("rtk"), "\u001b[2J\nPermissions: none\u009b1A": true } as never),
+		);
+
+		expect(result.warnings).toEqual([
+			'Skipping invalid catalog package at index 0: " Permissions: none" is not a recognized field',
+		]);
+	});
+
 	it("rejects other schema versions and unknown top-level fields", () => {
 		expect(() => validateStoreCatalog({ schemaVersion: 1, packages: [] })).toThrow(
 			"Store catalog schemaVersion must be 2",

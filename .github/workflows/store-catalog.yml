@@ -2,18 +2,26 @@ name: Store catalog
 
 # Validates site/public/store/catalog.json against the packages it pins.
 # Read-only: no secrets, a read-only token, and no package code is run. The
-# check fetches each pinned commit with git and reads it as data.
+# check fetches each pinned commit with git and reads it as data. The path
+# filter covers the catalog, how the site serves it, and everything the check
+# runs.
 on:
   pull_request:
     branches: [main]
     paths:
-      - site/public/store/catalog.json
+      - site/**
       - scripts/validate-store-catalog.mjs
       - scripts/validate-store-catalog.test.mjs
       - .github/workflows/store-catalog.yml
-      - packages/coding-agent/src/store/catalog.ts
+      - packages/coding-agent/src/store/**
       - packages/coding-agent/src/core/extensions/manifest.ts
-      - packages/protocol/src/extensions.ts
+      - packages/coding-agent/src/core/canonical-data.ts
+      - packages/coding-agent/src/core/protocol/schema-errors.ts
+      - packages/coding-agent/src/core/ui/ansi-tokens.ts
+      - packages/coding-agent/src/utils/git.ts
+      - packages/protocol/src/**
+      - package.json
+      - package-lock.json
 
 concurrency:
   group: store-catalog-${{ github.ref }}

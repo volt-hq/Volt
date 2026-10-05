@@ -434,6 +434,36 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(rendered).toContain("  entry: extensions/example.ts\n  permissions: none");
 	});
 
+	it("renders package and manifest text without terminal sequences or forged lines", async () => {
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "volt-example",
+				version: "1.2.3",
+				description: "Example\u001b[2J\nPermissions: none",
+				volt: { id: "volt-example", displayName: "Volt Example", entry: "extensions/example.ts", "\u001b[1A": 1 },
+			}),
+		);
+		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
+		const resolved: StoreResolvedSource = {
+			input: packageDir,
+			source: packageDir,
+			kind: "local",
+			pinned: false,
+			tracking: false,
+			warnings: [],
+		};
+
+		const rendered = renderStoreInstallPlan(
+			buildStoreInstallPlan({ resolved, inspection, scope: "user", scriptPolicy: "never" }),
+		);
+
+		expect(rendered).not.toContain("\u001b[2J");
+		expect(rendered).not.toContain("\u001b[1A");
+		expect(rendered).toContain("Description: Example Permissions: none");
+		expect(rendered).toContain('Invalid extension manifest: "" is not a recognized field');
+	});
+
 	it("renders catalog git plans with package names and shortened source labels", async () => {
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 		const resolved: StoreResolvedSource = {

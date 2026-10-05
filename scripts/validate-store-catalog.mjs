@@ -2,19 +2,25 @@
 /**
  * Validate the store catalog against the packages it pins (RFC §8.4).
  *
- * For every entry: the catalog parses as schema version 2 without warnings;
- * the source pins a full commit on an allowlisted host over HTTPS; the commit
- * is on a branch of that repository (a commit reachable only from a fork or a
- * pull request ref is refused); the package declares a valid manifest whose
- * id, display name, version, and permissions match the entry, and lists the
- * resources the entry names; the entry's repo link points into the pinned
- * repository; no file in the package refers to an
- * `@earendil-works/` module; and the package has no submodules. An entry whose
- * pin is new or changed against the base catalog needs a new review record.
+ * The catalog parses as schema version 2 without warnings, every review date
+ * has passed, every repo link points into the pinned repository, and an entry
+ * whose pin is new or changed against the base catalog carries a new review
+ * record. For every entry, the pinned commit:
+ * - is fetched over HTTPS from an allowlisted host and is on a branch of its
+ *   repository (a commit reachable only from a fork or a pull request ref is
+ *   refused, though the host serves it by hash);
+ * - declares a valid manifest whose id, display name, version, permissions,
+ *   and resources match the entry;
+ * - locks its dependencies: a version 3 package-lock.json whose root lists
+ *   package.json's dependencies and whose packages resolve from the npm
+ *   registry with sha512 integrity;
+ * - contains its files as plain files: no submodules, symbolic links, Git LFS
+ *   pointers or filters, or paths that differ only in case;
+ * - has no file that refers to an `@earendil-works/` module.
  *
- * It reads packages as data and never runs their code: it fetches the pinned
- * commit with git (hooks off, HTTPS only), reads package.json and the file
- * tree, and installs nothing.
+ * It reads packages as data and never runs their code: git fetches and checks
+ * out the pinned commit with hooks, filters, credential helpers, and system
+ * and global configuration off, and nothing is installed.
  *
  * Usage: node --conditions=volt-source scripts/validate-store-catalog.mjs [--catalog <path>] [--base-ref <rev>]
  */
@@ -22,7 +28,7 @@
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { readPackageManifest } from "../packages/coding-agent/src/core/extensions/manifest.ts";
 import {
@@ -33,9 +39,11 @@ import {
 
 export const CATALOG_PATH = "site/public/store/catalog.json";
 const FORBIDDEN_MODULE_PREFIX = "@earendil-works/";
+const LFS_POINTER_PREFIX = "version https://git-lfs.github.com/spec/";
+const NPM_REGISTRY = "https://registry.npmjs.org/";
 const GIT_TIMEOUT_MS = 120_000;
 const RESOURCE_KEYS = ["skills", "prompts", "themes"];
-// Git options for untrusted repositories: HTTPS only, no hooks, no credential helpers or prompts.
+// Git options for untrusted repositories: HTTPS only, no hooks, no credential helpers.
 const GIT_SAFE_CONFIG = [
 	"-c",
 	"protocol.allow=never",
@@ -46,10 +54,26 @@ const GIT_SAFE_CONFIG = [
 	"-c",
 	"credential.helper=",
 ];
-const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1" };
+// No system or global configuration (so no filter drivers, LFS, or URL rewrites), no prompts, no lazy fetches.
+const GIT_ENV = {
+	...process.env,
+	GIT_CONFIG_NOSYSTEM: "1",
+	GIT_CONFIG_GLOBAL: "/dev/null",
+	GIT_LFS_SKIP_SMUDGE: "1",
+	GIT_TERMINAL_PROMPT: "0",
+	GIT_NO_LAZY_FETCH: "1",
+};
 
 function isRecord(value) {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Text for the CI log with control and bidirectional characters escaped, so package data cannot forge log lines. */
+export function escapeForLog(text) {
+	return String(text).replace(
+		/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+		(character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+	);
 }
 
 function git(args, options = {}) {
@@ -85,10 +109,19 @@ function readBaseEntries(baseRaw) {
 	return entries;
 }
 
+/** Whether `link` is the repository at `pin` or a page inside it, after URL normalization. */
+function linksIntoRepository(link, pin) {
+	const url = new URL(link);
+	const path = url.pathname.toLowerCase().replace(/\/+$/, "");
+	const repository = `/${pin.path.toLowerCase()}`;
+	return url.host === pin.host && (path === repository || path.startsWith(`${repository}/`));
+}
+
 /**
- * Check the catalog itself: it parses without warnings, every review date is
- * past, and an entry whose pin is new or changed against the base carries a
- * new review record (dated no earlier than the old one, with its own notes).
+ * Check the catalog itself: it parses without warnings, every review date has
+ * passed, every repo link points into its repository, and an entry whose pin
+ * is new or changed against the base carries a new review record: dated no
+ * earlier than the entry's previous review, with notes no earlier review has.
  */
 export function checkCatalog(raw, baseRaw, latestDate = latestReviewDate()) {
 	const problems = [];
@@ -102,28 +135,29 @@ export function checkCatalog(raw, baseRaw, latestDate = latestReviewDate()) {
 		return { catalog: undefined, changed: new Set(), problems };
 	}
 	const baseEntries = readBaseEntries(baseRaw);
+	const baseNotes = new Set(
+		[...baseEntries.values()].map((entry) => (isRecord(entry.review) ? entry.review.notes : undefined)),
+	);
 	const changed = new Set();
 	for (const entry of catalog.packages) {
 		if (entry.review.date > latestDate) {
 			problems.push(`${entry.id}: review.date ${entry.review.date} is in the future`);
 		}
-		const { repo } = getCatalogPackagePin(entry);
-		const link = entry.repo.toLowerCase();
-		if (link !== repo.toLowerCase() && !link.startsWith(`${repo.toLowerCase()}/`)) {
-			problems.push(`${entry.id}: repo ${entry.repo} is not a link into ${repo}`);
+		const pin = getCatalogPackagePin(entry);
+		if (!linksIntoRepository(entry.repo, pin)) {
+			problems.push(`${entry.id}: repo ${entry.repo} is not a link into ${pin.repo}`);
 		}
 		const base = baseEntries.get(entry.id);
 		if (base?.source === entry.source) continue;
 		changed.add(entry.id);
-		const baseReview = isRecord(base?.review) ? base.review : undefined;
-		if (baseReview === undefined) continue;
-		if (typeof baseReview.date === "string" && entry.review.date < baseReview.date) {
-			problems.push(
-				`${entry.id}: the pin changed, but review.date ${entry.review.date} is older than the previous review (${baseReview.date})`,
-			);
+		if (baseNotes.has(entry.review.notes)) {
+			problems.push(`${entry.id}: the pin changed, but its review notes repeat an earlier review's; review the new commit`);
 		}
-		if (entry.review.notes === baseReview.notes) {
-			problems.push(`${entry.id}: the pin changed, but the review notes are the previous review's; review the new commit`);
+		const baseDate = isRecord(base?.review) ? base.review.date : undefined;
+		if (typeof baseDate === "string" && entry.review.date < baseDate) {
+			problems.push(
+				`${entry.id}: the pin changed, but review.date ${entry.review.date} is older than the previous review (${baseDate})`,
+			);
 		}
 	}
 	return { catalog, changed, problems };
@@ -135,21 +169,86 @@ function sameSet(left, right) {
 	return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+function sameRecord(left, right) {
+	const a = Object.entries(left ?? {}).sort(([x], [y]) => x.localeCompare(y));
+	const b = Object.entries(right ?? {}).sort(([x], [y]) => x.localeCompare(y));
+	return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** What could make a checkout differ from the reviewed tree, or differ between machines. */
+function checkoutHazards(files) {
+	const problems = [];
+	const seen = new Map();
+	for (const file of files) {
+		const folded = file.path.toLowerCase();
+		if (seen.has(folded)) {
+			problems.push(`${file.path} and ${seen.get(folded)} differ only in case`);
+		}
+		seen.set(folded, file.path);
+		if (file.mode === "160000") {
+			problems.push(`${file.path} is a submodule; store packages contain their files`);
+			continue;
+		}
+		if (file.mode === "120000") {
+			problems.push(`${file.path} is a symbolic link; store packages contain plain files`);
+			continue;
+		}
+		const name = basename(file.path);
+		if (name === ".lfsconfig" || file.content.subarray(0, LFS_POINTER_PREFIX.length).toString() === LFS_POINTER_PREFIX) {
+			problems.push(`${file.path} uses Git LFS; store packages contain their files`);
+		}
+		if (name === ".gitattributes" && /\bfilter=/.test(file.content.toString("utf8"))) {
+			problems.push(`${file.path} assigns a filter; a checkout must not depend on local filters`);
+		}
+	}
+	return problems;
+}
+
+/** Problems with how the package locks its dependencies; none when it has none. */
+function checkLockfile(packageJson, files) {
+	if (Object.keys({ ...packageJson.dependencies, ...packageJson.optionalDependencies }).length === 0) return [];
+	const lockfile = files.find((file) => file.path === "package-lock.json");
+	if (lockfile === undefined) {
+		return ["package.json has dependencies but no package-lock.json; lock them at the pinned commit"];
+	}
+	let lock;
+	try {
+		lock = JSON.parse(lockfile.content.toString("utf8"));
+	} catch {
+		return ["package-lock.json is not JSON"];
+	}
+	const problems = [];
+	if (lock.lockfileVersion !== 3) problems.push("package-lock.json must be lockfileVersion 3");
+	const packages = isRecord(lock.packages) ? lock.packages : {};
+	const root = isRecord(packages[""]) ? packages[""] : {};
+	if (
+		!sameRecord(root.dependencies, packageJson.dependencies) ||
+		!sameRecord(root.optionalDependencies, packageJson.optionalDependencies)
+	) {
+		problems.push("package-lock.json does not lock package.json's dependencies; refresh it");
+	}
+	for (const [path, entry] of Object.entries(packages)) {
+		if (path === "") continue;
+		if (!isRecord(entry) || typeof entry.resolved !== "string" || !entry.resolved.startsWith(NPM_REGISTRY)) {
+			problems.push(`package-lock.json ${path} does not resolve from ${NPM_REGISTRY}`);
+		} else if (typeof entry.integrity !== "string" || !entry.integrity.startsWith("sha512-")) {
+			problems.push(`package-lock.json ${path} has no sha512 integrity`);
+		}
+	}
+	return problems;
+}
+
 /**
  * Check one fetched package against its catalog entry. `pkg` is
  * `{ dir, files: [{ path, mode, content }] }`: the pinned commit checked out at
  * `dir`, and every entry of its tree with the blob contents.
  */
 export function checkPackage(entry, pkg) {
-	const problems = [];
-	for (const file of pkg.files) {
-		if (file.mode === "160000") {
-			problems.push(`${file.path} is a submodule; store packages must contain their files`);
-		} else if (file.content.includes(FORBIDDEN_MODULE_PREFIX)) {
-			problems.push(`${file.path} refers to ${FORBIDDEN_MODULE_PREFIX}*; use the @hansjm10/* modules Volt serves`);
-		}
-	}
-
+	const hazards = checkoutHazards(pkg.files);
+	if (hazards.length > 0) return hazards;
+	const problems = pkg.files
+		.filter((file) => file.content.includes(FORBIDDEN_MODULE_PREFIX))
+		.map((file) => `${file.path} refers to ${FORBIDDEN_MODULE_PREFIX}*; use the @hansjm10/* modules Volt serves`);
 	let declared;
 	try {
 		declared = readPackageManifest(pkg.dir);
@@ -173,11 +272,12 @@ export function checkPackage(entry, pkg) {
 			`manifest permissions [${permissions.join(", ")}] are not the catalog permissions [${entry.permissions.join(", ")}]`,
 		);
 	}
-	const volt = JSON.parse(readFileSync(join(pkg.dir, "package.json"), "utf8")).volt;
-	const resources = ["extensions", ...RESOURCE_KEYS.filter((key) => volt[key] !== undefined)];
+	const packageJson = JSON.parse(readFileSync(join(pkg.dir, "package.json"), "utf8"));
+	const resources = ["extensions", ...RESOURCE_KEYS.filter((key) => packageJson.volt[key] !== undefined)];
 	if (!sameSet(resources, entry.resources)) {
 		problems.push(`package resources [${resources.join(", ")}] are not the catalog resources [${entry.resources.join(", ")}]`);
 	}
+	problems.push(...checkLockfile(packageJson, pkg.files));
 	return problems;
 }
 
@@ -186,7 +286,6 @@ export function fetchPinnedPackage(pin, dir) {
 	if (!STORE_CATALOG_GIT_HOSTS.includes(pin.host)) throw new Error(`host ${pin.host} is not allowlisted`);
 	git(["init", "--quiet", dir]);
 	git(["-C", dir, "fetch", "--quiet", "--depth=1", "--no-tags", pin.repo, pin.commit]);
-	git(["-C", dir, "checkout", "--quiet", "--detach", pin.commit]);
 	const tree = git(["-C", dir, "ls-tree", "-r", "-z", "--full-tree", pin.commit])
 		.split("\0")
 		.filter(Boolean)
@@ -210,10 +309,14 @@ export function fetchPinnedPackage(pin, dir) {
 			offset = headerEnd + 1 + size + 1;
 		}
 	}
-	return {
-		dir,
-		files: tree.map((entry) => ({ path: entry.path, mode: entry.mode, content: contents.get(entry.path) ?? Buffer.alloc(0) })),
-	};
+	const files = tree.map((entry) => ({
+		path: entry.path,
+		mode: entry.mode,
+		content: contents.get(entry.path) ?? Buffer.alloc(0),
+	}));
+	// Check out only a tree of plain files, so the manifest is read from what was scanned.
+	if (checkoutHazards(files).length === 0) git(["-C", dir, "checkout", "--quiet", "--detach", pin.commit]);
+	return { dir, files };
 }
 
 /** Whether the pinned commit is on a branch of its repository: a branch tip, or an ancestor of one. */
@@ -235,8 +338,10 @@ export function isOnBranch(pin, dir) {
 	return git(["-C", dir, "for-each-ref", "--contains", pin.commit, "refs/remotes/src"]).trim() !== "";
 }
 
+/** The catalog at `baseRef`; undefined when that commit has none. Throws when `baseRef` names no commit. */
 function readBaseCatalog(baseRef) {
 	if (baseRef === undefined) return undefined;
+	execFileSync("git", ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`], { stdio: "ignore" });
 	try {
 		return execFileSync("git", ["show", `${baseRef}:${CATALOG_PATH}`], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 	} catch {
@@ -263,7 +368,7 @@ function parseArgs(argv) {
 function main() {
 	const options = parseArgs(process.argv.slice(2));
 	const { catalog, changed, problems } = checkCatalog(readFileSync(options.catalog, "utf8"), readBaseCatalog(options.baseRef));
-	for (const problem of problems) console.log(`FAIL catalog: ${problem}`);
+	for (const problem of problems) console.log(escapeForLog(`FAIL catalog: ${problem}`));
 	let failures = problems.length;
 	for (const entry of catalog?.packages ?? []) {
 		const workDir = mkdtempSync(join(tmpdir(), "volt-store-catalog-"));
@@ -281,9 +386,11 @@ function main() {
 		}
 		const label = `${entry.id} ${entry.version} @ ${entry.review.commit.slice(0, 12)}${changed.has(entry.id) ? " (new pin)" : ""}`;
 		if (entryProblems.length === 0) {
-			console.log(`ok   ${label}: [${entry.permissions.join(", ")}] reviewed by ${entry.review.reviewer} on ${entry.review.date}`);
+			console.log(
+				escapeForLog(`ok   ${label}: [${entry.permissions.join(", ")}] reviewed by ${entry.review.reviewer} on ${entry.review.date}`),
+			);
 		}
-		for (const problem of entryProblems) console.log(`FAIL ${label}: ${problem}`);
+		for (const problem of entryProblems) console.log(escapeForLog(`FAIL ${label}: ${problem}`));
 		failures += entryProblems.length;
 	}
 	console.log(failures === 0 ? "Store catalog: PASS" : `Store catalog: ${failures} problem(s)`);

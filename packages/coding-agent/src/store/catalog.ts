@@ -24,6 +24,7 @@ import {
 import { Type } from "typebox";
 import { Compile, type Validator } from "typebox/compile";
 import { formatSchemaError } from "../core/protocol/schema-errors.ts";
+import { stripTerminalControls } from "../core/ui/ansi-tokens.ts";
 import { parseGitUrl } from "../utils/git.ts";
 
 export const DEFAULT_STORE_CATALOG_URL = "https://volt-cli.dev/store/catalog.json";
@@ -246,6 +247,11 @@ export function getCatalogPackagePin(pkg: StoreCatalogPackage): StoreCatalogPin 
 	return pin;
 }
 
+/** Catalog text echoed in a warning, on one line and without terminal sequences: warnings are printed as they are. */
+function printable(text: string): string {
+	return stripTerminalControls(text).replaceAll("\n", " ");
+}
+
 function isCalendarDate(value: string): boolean {
 	const date = new Date(`${value}T00:00:00Z`);
 	return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
@@ -295,7 +301,7 @@ export function validateStoreCatalog(value: unknown): StoreCatalogValidationResu
 	}
 	const unknownField = Object.keys(value).find((key) => key !== "schemaVersion" && key !== "packages");
 	if (unknownField !== undefined) {
-		throw new Error(`Store catalog field "${unknownField}" is not recognized`);
+		throw new Error(`Store catalog field "${printable(unknownField)}" is not recognized`);
 	}
 
 	const warnings: string[] = [];
@@ -304,7 +310,7 @@ export function validateStoreCatalog(value: unknown): StoreCatalogValidationResu
 	for (let index = 0; index < value.packages.length; index++) {
 		const result = validateCatalogPackage(value.packages[index]);
 		if ("error" in result) {
-			warnings.push(`Skipping invalid catalog package at index ${index}: ${result.error}`);
+			warnings.push(`Skipping invalid catalog package at index ${index}: ${printable(result.error)}`);
 			continue;
 		}
 		if (seenIds.has(result.pkg.id)) {

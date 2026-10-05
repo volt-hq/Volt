@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { checkCatalog, checkPackage, fetchPinnedPackage, isOnBranch } from "./validate-store-catalog.mjs";
+import { checkCatalog, checkPackage, escapeForLog, fetchPinnedPackage, isOnBranch } from "./validate-store-catalog.mjs";
 
 const COMMIT = "0123456789abcdef0123456789abcdef01234567";
 const NEXT_COMMIT = "89abcdef0123456789abcdef0123456789abcdef";
@@ -28,6 +28,10 @@ function entry(overrides = {}, commit = COMMIT) {
 
 function catalog(...packages) {
 	return JSON.stringify({ schemaVersion: 2, packages });
+}
+
+function reviewed(pkg, review) {
+	return { ...pkg, review: { ...pkg.review, ...review } };
 }
 
 test("a catalog without changed pins passes", () => {
@@ -59,34 +63,51 @@ test("a new entry or an entry repinned from a v1 base counts as a new pin", () =
 
 test("a changed pin needs a new review record", () => {
 	const base = catalog(entry());
-	const copied = entry({}, NEXT_COMMIT);
 	assert.match(
-		checkCatalog(catalog(copied), base, "2026-10-06").problems.join("\n"),
-		/rtk: the pin changed, but the review notes are the previous review's/,
+		checkCatalog(catalog(entry({}, NEXT_COMMIT)), base, "2026-10-06").problems.join("\n"),
+		/rtk: the pin changed, but its review notes repeat an earlier review's/,
 	);
-	const backdated = entry({}, NEXT_COMMIT);
-	backdated.review = { ...backdated.review, date: "2026-10-01", notes: "Reviewed the fix." };
+	const backdated = reviewed(entry({}, NEXT_COMMIT), { date: "2026-10-01", notes: "Reviewed the fix." });
 	assert.match(
 		checkCatalog(catalog(backdated), base, "2026-10-06").problems.join("\n"),
 		/review.date 2026-10-01 is older than the previous review \(2026-10-05\)/,
 	);
-	const reviewed = entry({}, NEXT_COMMIT);
-	reviewed.review = { ...reviewed.review, date: "2026-10-06", notes: "Reviewed the fix." };
-	assert.deepEqual(checkCatalog(catalog(reviewed), base, "2026-10-06").problems, []);
+	const fresh = reviewed(entry({}, NEXT_COMMIT), { date: "2026-10-06", notes: "Reviewed the fix." });
+	assert.deepEqual(checkCatalog(catalog(fresh), base, "2026-10-06").problems, []);
 });
 
-test("the repo link must point into the pinned repository", () => {
-	const result = checkCatalog(catalog(entry({ repo: "https://github.com/someone/else" })), undefined, "2026-10-06");
-	assert.deepEqual(result.problems, [
-		"rtk: repo https://github.com/someone/else is not a link into https://github.com/volt-hq/Volt",
-	]);
-	const prefix = checkCatalog(catalog(entry({ repo: "https://github.com/volt-hq/Volt-evil" })), undefined, "2026-10-06");
-	assert.equal(prefix.problems.length, 1);
+test("a renamed entry cannot reuse another entry's review notes", () => {
+	const base = catalog(entry());
+	const renamed = entry({ id: "rtk-two" }, NEXT_COMMIT);
+	assert.match(
+		checkCatalog(catalog(renamed), base, "2026-10-06").problems.join("\n"),
+		/rtk-two: the pin changed, but its review notes repeat an earlier review's/,
+	);
+});
+
+test("the repo link must point into the pinned repository after URL normalization", () => {
+	for (const repo of [
+		"https://github.com/someone/else",
+		"https://github.com/volt-hq/Volt-evil",
+		"https://github.com/volt-hq/Volt/../../attacker/evil",
+		"https://github.com/volt-hq/Volt/%2e%2e/%2e%2e/attacker/evil",
+		"https://gitlab.com/volt-hq/Volt",
+	]) {
+		const result = checkCatalog(catalog(entry({ repo })), undefined, "2026-10-06");
+		assert.deepEqual(result.problems, [`rtk: repo ${repo} is not a link into https://github.com/volt-hq/Volt`], repo);
+	}
+	for (const repo of ["https://github.com/volt-hq/Volt", "https://github.com/Volt-HQ/volt/tree/store/rtk"]) {
+		assert.deepEqual(checkCatalog(catalog(entry({ repo })), undefined, "2026-10-06").problems, [], repo);
+	}
 });
 
 test("a review dated in the future fails", () => {
 	const result = checkCatalog(catalog(entry()), undefined, "2026-10-04");
 	assert.deepEqual(result.problems, ["rtk: review.date 2026-10-05 is in the future"]);
+});
+
+test("log lines escape control and bidirectional characters", () => {
+	assert.equal(escapeForLog("a\n::error::forged\u001b[31m\u202e"), "a\\u000a::error::forged\\u001b[31m\\u202e");
 });
 
 let tempDir;
@@ -151,15 +172,84 @@ test("a package without a valid manifest fails", () => {
 	assert.match(checkPackage(entry(), escaping).join("\n"), /invalid manifest: "entry" must be a relative path/);
 });
 
-test("references to @earendil-works modules and submodules fail", () => {
+test("references to @earendil-works modules fail", () => {
 	const pkg = writePackage(
 		{ name: "volt-rtk", version: "0.2.0", volt: manifest },
 		{ "extensions/rtk.ts": 'import type { ExtensionAPI } from "@earendil-works/volt-coding-agent";\n' },
 	);
-	pkg.files.push({ path: "vendor/lib", mode: "160000", content: Buffer.alloc(0) });
 	assert.deepEqual(checkPackage(entry(), pkg), [
 		"extensions/rtk.ts refers to @earendil-works/*; use the @hansjm10/* modules Volt serves",
-		"vendor/lib is a submodule; store packages must contain their files",
+	]);
+});
+
+test("a tree a checkout could change fails before its manifest is read", () => {
+	const pkg = writePackage({ name: "volt-rtk", version: "0.2.0", volt: manifest }, { "extensions/rtk.ts": "" });
+	pkg.files.push(
+		{ path: "vendor/lib", mode: "160000", content: Buffer.alloc(0) },
+		{ path: "link.ts", mode: "120000", content: Buffer.from("/dev/zero") },
+		{ path: "big.ts", mode: "100644", content: Buffer.from("version https://git-lfs.github.com/spec/v1\noid sha256:00\n") },
+		{ path: ".lfsconfig", mode: "100644", content: Buffer.from("[lfs]\n\turl = https://example.com/lfs\n") },
+		{ path: ".gitattributes", mode: "100644", content: Buffer.from("*.ts filter=lfs diff=lfs merge=lfs\n") },
+		{ path: "Extensions/RTK.ts", mode: "100644", content: Buffer.alloc(0) },
+	);
+	assert.deepEqual(checkPackage(entry(), pkg), [
+		"vendor/lib is a submodule; store packages contain their files",
+		"link.ts is a symbolic link; store packages contain plain files",
+		"big.ts uses Git LFS; store packages contain their files",
+		".lfsconfig uses Git LFS; store packages contain their files",
+		".gitattributes assigns a filter; a checkout must not depend on local filters",
+		"Extensions/RTK.ts and extensions/rtk.ts differ only in case",
+	]);
+});
+
+function lockfile(packages, overrides = {}) {
+	return JSON.stringify({
+		name: "volt-rtk",
+		version: "0.2.0",
+		lockfileVersion: 3,
+		requires: true,
+		packages: { "": { name: "volt-rtk", version: "0.2.0", dependencies: { leftpad: "1.0.0" } }, ...packages },
+		...overrides,
+	});
+}
+
+const lockedLeftpad = {
+	"node_modules/leftpad": {
+		version: "1.0.0",
+		resolved: "https://registry.npmjs.org/leftpad/-/leftpad-1.0.0.tgz",
+		integrity: "sha512-abc",
+	},
+};
+
+test("dependencies must be locked to registry tarballs with integrity", () => {
+	const packageJson = { name: "volt-rtk", version: "0.2.0", volt: manifest, dependencies: { leftpad: "1.0.0" } };
+	const locked = writePackage(packageJson, { "extensions/rtk.ts": "", "package-lock.json": lockfile(lockedLeftpad) });
+	assert.deepEqual(checkPackage(entry(), locked), []);
+
+	const unlocked = writePackage(packageJson, { "extensions/rtk.ts": "" });
+	assert.deepEqual(checkPackage(entry(), unlocked), [
+		"package.json has dependencies but no package-lock.json; lock them at the pinned commit",
+	]);
+
+	const stale = writePackage(
+		{ ...packageJson, dependencies: { leftpad: "2.0.0" } },
+		{ "extensions/rtk.ts": "", "package-lock.json": lockfile(lockedLeftpad, { lockfileVersion: 2 }) },
+	);
+	assert.deepEqual(checkPackage(entry(), stale), [
+		"package-lock.json must be lockfileVersion 3",
+		"package-lock.json does not lock package.json's dependencies; refresh it",
+	]);
+
+	const offRegistry = writePackage(packageJson, {
+		"extensions/rtk.ts": "",
+		"package-lock.json": lockfile({
+			"node_modules/leftpad": { version: "1.0.0", resolved: "git+https://example.com/leftpad.git#abc" },
+			"node_modules/other": { version: "1.0.0", resolved: "https://registry.npmjs.org/other/-/other-1.0.0.tgz" },
+		}),
+	});
+	assert.deepEqual(checkPackage(entry(), offRegistry), [
+		"package-lock.json node_modules/leftpad does not resolve from https://registry.npmjs.org/",
+		"package-lock.json node_modules/other has no sha512 integrity",
 	]);
 });
 

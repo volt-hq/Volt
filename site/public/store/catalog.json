@@ -15,7 +15,7 @@
 				"commit": "ebdd3167752cc733928eb1b4506ddca60a02a718",
 				"reviewer": "hansjm10",
 				"date": "2026-10-05",
-				"notes": "package.json only on top of 6330542c0c21 (#656): manifest id rtk with permission exec (the extension runs the rtk binary through volt.exec) and version 0.2.0. Extension code unchanged."
+				"notes": "package.json only on top of 6330542c0c21 (#656): manifest id rtk with permission exec (the extension runs the rtk binary through volt.exec and rewrites every bash command) and version 0.2.0. Extension code unchanged. Reviewed in #664."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -32,18 +32,19 @@
 			"name": "Terminal-Bench Harbor",
 			"description": "Runs Volt on Terminal-Bench through Harbor.",
 			"version": "0.4.0",
-			"source": "git:https://github.com/volt-hq/Volt@5c72af2cdea51af524add85f71f3259d5d319996",
+			"source": "git:https://github.com/volt-hq/Volt@889b94eabc1a6152e131719ae264809a36bda283",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/terminal-bench-harbor",
 			"permissions": [
 				"exec",
 				"network",
-				"fs-write"
+				"fs-write",
+				"secrets"
 			],
 			"review": {
-				"commit": "5c72af2cdea51af524add85f71f3259d5d319996",
+				"commit": "889b94eabc1a6152e131719ae264809a36bda283",
 				"reviewer": "hansjm10",
 				"date": "2026-10-05",
-				"notes": "package.json only on top of fc9fa6cb3d9f (#657): manifest id terminal-bench-harbor with permissions exec, network, fs-write (runs harbor, which fetches tasks and writes job output) and version 0.4.0. Extension and Harbor wrapper code unchanged."
+				"notes": "package.json only on top of fc9fa6cb3d9f (#657): manifest id terminal-bench-harbor with permissions exec, network, fs-write, secrets (runs harbor through volt.exec; /tbench forwards ~/.volt/agent/auth.json and the agent directory into each Harbor environment) and version 0.4.0. Extension and Harbor wrapper code unchanged. Reviewed in #665."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -72,7 +73,7 @@
 				"commit": "d08a2434efea3bd8bcee1d55a42da5ff26bd5556",
 				"reviewer": "hansjm10",
 				"date": "2026-10-05",
-				"notes": "package.json and the lockfile root version only on top of 51fb02493895 (#653): manifest id azure-devops with permissions network, fs-write, secrets (Azure DevOps API calls, /ado-config save writes .volt/azure-devops.json, PAT and bearer tokens from the environment) and version 0.2.0. Extension code and dependencies unchanged."
+				"notes": "package.json and the lockfile root version only on top of 51fb02493895 (#653): manifest id azure-devops with permissions network, fs-write, secrets (Azure DevOps API calls, /ado-config save writes .volt/azure-devops.json, PAT and bearer tokens from the environment) and version 0.2.0. Extension code and dependencies unchanged. Reviewed in #666."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -90,17 +91,18 @@
 			"name": "Review Loop",
 			"description": "Runs isolated review/fix loops for a branch until findings are resolved.",
 			"version": "0.2.0",
-			"source": "git:https://github.com/volt-hq/Volt@e036331d232effb16fb47bb365256e32fd0ee2a6",
+			"source": "git:https://github.com/volt-hq/Volt@eda3e8b6d75a057c5b12916beb48f1900a30965d",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/review-loop",
 			"permissions": [
 				"exec",
+				"network",
 				"fs-write"
 			],
 			"review": {
-				"commit": "e036331d232effb16fb47bb365256e32fd0ee2a6",
+				"commit": "eda3e8b6d75a057c5b12916beb48f1900a30965d",
 				"reviewer": "hansjm10",
 				"date": "2026-10-05",
-				"notes": "package.json only on top of bae7a055a905 (#655): manifest id review-loop with permissions exec, fs-write (runs git and child volt processes and commits fixes) and version 0.2.0. Extension code unchanged."
+				"notes": "package.json only on top of bae7a055a905 (#655): manifest id review-loop with permissions exec, network, fs-write (runs git and child volt processes that call model providers with the user's auth, and commits fixes) and version 0.2.0. Extension code unchanged. Reviewed in #667."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -118,17 +120,18 @@
 			"name": "Build iOS Apps",
 			"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
 			"version": "0.2.0",
-			"source": "git:https://github.com/volt-hq/Volt@031ec5186d0720113ab6740332e38f11c275a92b",
+			"source": "git:https://github.com/volt-hq/Volt@867326b8424d5acac92f894928932f58c4b27641",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/build-ios-apps",
 			"permissions": [
 				"exec",
+				"network",
 				"fs-write"
 			],
 			"review": {
-				"commit": "031ec5186d0720113ab6740332e38f11c275a92b",
+				"commit": "867326b8424d5acac92f894928932f58c4b27641",
 				"reviewer": "hansjm10",
 				"date": "2026-10-05",
-				"notes": "package.json and the lockfile root version only on top of 65c877f0fd0f (#654): manifest id build-ios-apps with permissions exec, fs-write (spawns xcodebuildmcp, which builds and writes Xcode artifacts) and version 0.2.0. Extension code, skills, and dependencies unchanged."
+				"notes": "package.json and the lockfile root version only on top of 65c877f0fd0f (#654): manifest id build-ios-apps with permissions exec, network, fs-write (spawns xcodebuildmcp with the full environment; it builds and writes Xcode artifacts and sends Sentry telemetry unless XCODEBUILDMCP_SENTRY_DISABLED is set) and version 0.2.0. Extension code, skills, and dependencies unchanged. Reviewed in #668."
 			},
 			"author": "OpenAI",
 			"license": "MIT",
