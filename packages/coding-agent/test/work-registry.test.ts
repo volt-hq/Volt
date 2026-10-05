@@ -600,8 +600,12 @@ describe("work registry", () => {
 		);
 		expect(record.title).toBe("Custom title");
 		await registry.waitForIdle();
+		// The kind's own text follows the line naming its work.
 		expect(conversation.queue.steer).toEqual([
-			expect.objectContaining({ customType: "work_notice", content: "The whole report\nline two" }),
+			expect.objectContaining({
+				customType: "work_notice",
+				content: `Custom title (ext:test/run ${record.workId}) completed.\nThe whole report\nline two`,
+			}),
 		]);
 		// Blank text falls back to the title and summary.
 		const blank = await registry.start("ext:test/run", null, async () => ({
@@ -628,20 +632,52 @@ describe("work registry", () => {
 		expect(registry.requires("missing")).toEqual([]);
 	});
 
-	it("tells which running work stopping the run cancels", async () => {
+	it("stops with the run only work whose kind keeps nothing from remote clients", async () => {
 		const { registry } = await setup();
 		registry.register(kind());
 		registry.register(kind({ kind: "ext:test/kept", cancelOnAbort: false }));
-		const cancels = held();
-		const keeps = held();
-		const first = await registry.start("ext:test/run", null, cancels.execute);
-		const second = await registry.start("ext:test/kept", null, keeps.execute);
-		expect(registry.cancelsWithRun(first.workId)).toBe(true);
-		expect(registry.cancelsWithRun(second.workId)).toBe(false);
-		cancels.release();
-		keeps.release();
+		registry.register(kind({ kind: "ext:test/guarded", requires: ["host.manage.v1"] }));
+		registry.register(kind({ kind: "ext:test/local", remote: { cancel: false, resume: true } }));
+		const runs = [held(), held(), held(), held()];
+		const records = await Promise.all(
+			["ext:test/run", "ext:test/kept", "ext:test/guarded", "ext:test/local"].map((name, index) =>
+				registry.start(name, null, runs[index]!.execute),
+			),
+		);
+		expect(records.map((record) => registry.cancelsWithRun(record.workId))).toEqual([true, false, false, false]);
+		await registry.cancelAll("cancelled");
+		expect(records.map((record) => registry.get(record.workId)?.outcome)).toEqual([
+			"cancelled",
+			undefined,
+			undefined,
+			undefined,
+		]);
+		for (const run of runs) run.release();
 		await registry.waitForIdle();
-		expect(registry.cancelsWithRun(first.workId)).toBe(false);
+		expect(registry.cancelsWithRun(records[1]!.workId)).toBe(false);
+	});
+
+	it("fails work whose executor throws a value that has no message, without leaving it running", async () => {
+		const { registry } = await setup();
+		registry.register(kind());
+		const unprintable = {
+			toString() {
+				throw new Error("no text");
+			},
+		};
+		const thrown = [Object.create(null), unprintable];
+		const records = await Promise.all(
+			thrown.map((value) =>
+				registry.start("ext:test/run", null, async () => {
+					throw value;
+				}),
+			),
+		);
+		await registry.waitForIdle();
+		for (const record of records) {
+			expect(registry.get(record.workId)).toMatchObject({ outcome: "failed", error: "Unknown error" });
+		}
+		expect(registry.running()).toEqual([]);
 	});
 });
 

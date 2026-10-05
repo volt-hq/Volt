@@ -395,7 +395,12 @@ export interface WorkKindDeclaration {
 	readonly cancelOnAbort?: false;
 	/** Most items of the kind running at once in the conversation: 1 by default, at most 8. */
 	readonly maxActive?: number;
-	/** Remote capabilities a paired device needs, beyond the intent's or query's own, to cancel the kind's work or read its output. */
+	/**
+	 * Remote capabilities a paired device needs, beyond the intent's or query's
+	 * own, to cancel the kind's work or read its output. A kind that requires
+	 * any keeps its work running when the conversation's run stops, since a
+	 * device without them may stop the run.
+	 */
 	readonly requires?: readonly RemoteCapability[];
 }
 
@@ -425,9 +430,9 @@ export interface WorkRunResult {
 	readonly result?: Omit<WorkResult, "child">;
 	readonly error?: string;
 	/**
-	 * The notice text the model sees, instead of the title and summary, when a
-	 * `message` or `wake` kind completes or fails. Paired devices see the title
-	 * and summary.
+	 * The notice text (at most 20,000 characters) the model sees after the
+	 * line naming the work, instead of the summary, when a `message` or `wake`
+	 * kind completes or fails. Paired devices see the title and summary.
 	 */
 	readonly notice?: string;
 }

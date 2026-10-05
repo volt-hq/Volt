@@ -84,7 +84,12 @@ describe("extension work kinds", () => {
 		]);
 		await harness.session.prompt("what did the sweep find?");
 		await harness.session.waitForIdle();
-		expect(requests).toEqual([["Sweep report: 2 stale files", "what did the sweep find?"]]);
+		expect(requests).toEqual([
+			[
+				`Sweep the repo (ext:inline-1/sweep ${record?.workId}) completed.\nSweep report: 2 stale files`,
+				"what did the sweep find?",
+			],
+		]);
 	});
 
 	it("starts only the owning extension's kinds, and registers none for an extension whose id another owns", async () => {

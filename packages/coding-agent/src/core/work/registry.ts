@@ -80,8 +80,8 @@ export const WORK_CLOSE_GRACE_MS = 2_000;
  */
 export const WORK_NOTICES_MAX_QUEUED = 16;
 
-/** Longest own text of a notice, in characters: the bound of a result's output. */
-export const WORK_NOTICE_TEXT_MAX_CHARS = WORK_OUTPUT_MAX_UTF8_BYTES;
+/** Longest own text of a notice, in characters, after the line that names its work. */
+export const WORK_NOTICE_TEXT_MAX_CHARS = 20_000;
 
 /**
  * The executors running in this process, by conversation and work id, until
@@ -107,7 +107,8 @@ export interface WorkExecution {
 	/**
 	 * `false`: the result already reached its reader, such as a tool waiting
 	 * for it, so the finish queues no notice. `{text}`: the notice's own text,
-	 * at most {@link WORK_NOTICE_TEXT_MAX_CHARS}, instead of the title and summary.
+	 * at most {@link WORK_NOTICE_TEXT_MAX_CHARS}, after the line that names
+	 * the work, instead of the summary.
 	 */
 	readonly deliver?: false | { readonly text: string };
 }
@@ -147,9 +148,14 @@ export interface WorkKindDefinition {
 	readonly delivery: WorkDelivery;
 	/** Whether a client may cancel the kind's work. */
 	readonly cancellable: boolean;
-	/** `false`: aborting the conversation's run leaves the kind's work running. */
+	/** `false`: aborting the conversation's run leaves the kind's work running, as `requires` and `remote.cancel: false` do. */
 	readonly cancelOnAbort?: false;
-	/** Remote capabilities a client needs, beyond the intent's or query's own, to cancel, resume, open, or read the output of the kind's work. */
+	/**
+	 * Remote capabilities a client needs, beyond the intent's or query's own,
+	 * to cancel, resume, open, or read the output of the kind's work. A kind
+	 * that requires any never cancels with the run, which a remote client
+	 * without them may stop.
+	 */
 	readonly requires?: readonly RemoteCapability[];
 	/**
 	 * Whether a paired remote device may cancel or resume the kind's work at
@@ -318,12 +324,28 @@ class OutputTail {
 const RESULT_NOT_RECORDED = "The work's result could not be recorded";
 
 /** Whether stopping the conversation's run cancels a kind's running work. */
+/**
+ * Whether stopping the conversation's run cancels a kind's running work. A
+ * stop can come from a remote client, so a kind that keeps its work from
+ * some remote clients (`requires`, `remote.cancel`) never cancels with it.
+ */
 function cancelsWithRun(definition: WorkKindDefinition): boolean {
-	return definition.cancellable && definition.cancelOnAbort !== false;
+	return (
+		definition.cancellable &&
+		definition.cancelOnAbort !== false &&
+		(definition.requires?.length ?? 0) === 0 &&
+		definition.remote?.cancel !== false
+	);
 }
 
+/** The message of what an executor threw; never throws, whatever it threw. */
 function errorMessage(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
+	try {
+		const message = error instanceof Error ? error.message : String(error);
+		return typeof message === "string" ? message : "Unknown error";
+	} catch {
+		return "Unknown error";
+	}
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -998,11 +1020,17 @@ export class WorkRegistry {
 			known?.deliver !== false && !active.fenced && this.deliveries.delivers(active.turnId) && this.noticeFits();
 		const notice = isRecord(known?.deliver) && typeof known.deliver.text === "string" ? known.deliver.text : "";
 		const text = workText(notice, WORK_NOTICE_TEXT_MAX_CHARS);
+		const record = this.get(active.workId);
+		// A kind's own text follows the line naming its work, so no notice passes for another work's.
+		const own =
+			record && text.trim().length > 0
+				? `${record.title} (${record.kind} ${record.workId}) ${outcome === "failed" ? "failed" : "completed"}.\n${text}`
+				: undefined;
 		return {
 			outcome,
 			...(Object.keys(result).length === 0 ? {} : { result }),
 			...(typeof error === "string" ? { error: workText(error) } : {}),
-			...(!delivers ? { deliver: false as const } : text.trim().length > 0 ? { deliver: { text } } : {}),
+			...(!delivers ? { deliver: false as const } : own === undefined ? {} : { deliver: { text: own } }),
 		};
 	}
 

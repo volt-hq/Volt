@@ -177,7 +177,11 @@ describe("extension work kinds", () => {
 			output: { text: "found 2\n", truncated: false },
 			data: { findings: 2 },
 		});
-		expect(conversation.queue.steer).toEqual([expect.objectContaining({ content: "Swarm report: 2 findings" })]);
+		expect(conversation.queue.steer).toEqual([
+			expect.objectContaining({
+				content: `Swarm (ext:swarm-review/run ${workId}) completed.\nSwarm report: 2 findings`,
+			}),
+		]);
 	});
 
 	it("sanitizes the progress live clients see", async () => {

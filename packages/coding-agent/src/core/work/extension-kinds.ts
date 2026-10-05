@@ -120,7 +120,9 @@ export function validateWorkKind(name: unknown, kind: unknown = {}): WorkKindDec
 	) {
 		throw new TypeError(`Work kind ${name}: maxActive must be an integer from 1 to ${EXTENSION_KIND_MAX_ACTIVE}`);
 	}
-	if (!Array.isArray(requires) || !requires.every(isCapability)) {
+	// Read once: what is checked is what is kept.
+	const capabilities: unknown[] | undefined = Array.isArray(requires) ? [...requires] : undefined;
+	if (!capabilities?.every(isCapability)) {
 		throw new TypeError(`Work kind ${name}: requires must list remote capabilities`);
 	}
 	return Object.freeze({
@@ -128,7 +130,7 @@ export function validateWorkKind(name: unknown, kind: unknown = {}): WorkKindDec
 		cancellable,
 		...(cancelOnAbort === false ? { cancelOnAbort } : {}),
 		maxActive,
-		requires: Object.freeze([...new Set(requires)]),
+		requires: Object.freeze([...new Set(capabilities.filter(isCapability))]),
 	});
 }
 
@@ -278,9 +280,12 @@ export class ExtensionKinds {
 
 	/** Remove every kind, interrupting the work they run. Resolves once that work finished. */
 	clear(): Promise<void> {
-		const removals = [...this.kinds.values()].flatMap((owned) => [...owned.values()].map((kind) => kind.remove()));
+		const removed = [...this.kinds.values()];
+		// Emptied first: an abort listener that registers a kind registers it anew.
 		this.kinds = new Map();
-		return Promise.all(removals).then(() => undefined);
+		return Promise.all(removed.flatMap((owned) => [...owned.values()].map((kind) => kind.remove()))).then(
+			() => undefined,
+		);
 	}
 
 	/**
