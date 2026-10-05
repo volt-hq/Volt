@@ -438,7 +438,8 @@ function createExtensionAPI(
 		runtime.assertActive();
 		extension.lifetime.assertActive();
 	};
-	// Registrations throw once the instance stopped too: a disabled extension contributes nothing more.
+	// Registrations and changes throw once the instance stopped too: a disabled extension contributes and
+	// steers nothing more, while what it runs (its tool calls) finishes.
 	const assertRunning = (): void => {
 		runtime.assertActive();
 		extension.lifetime.assertRunning();
@@ -450,7 +451,7 @@ function createExtensionAPI(
 		},
 
 		updateSettings(values: Readonly<Record<string, unknown>>, options?: { readonly scope?: ExtensionSettingsScope }) {
-			assertActive();
+			assertRunning();
 			return runtime.settings.update(extension, values, options?.scope ?? "global");
 		},
 
@@ -581,22 +582,22 @@ function createExtensionAPI(
 
 		// Action methods - delegate to shared runtime
 		sendMessage(message, options): void {
-			assertActive();
+			assertRunning();
 			runtime.sendMessage(message, options);
 		},
 
 		sendUserMessage(content, options): void {
-			assertActive();
+			assertRunning();
 			runtime.sendUserMessage(content, options);
 		},
 
 		appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): Promise<void> {
-			assertActive();
+			assertRunning();
 			return runtime.appendEntry(customType, data);
 		},
 
 		setSessionName(name: string): Promise<void> {
-			assertActive();
+			assertRunning();
 			return runtime.setSessionName(name);
 		},
 
@@ -606,7 +607,7 @@ function createExtensionAPI(
 		},
 
 		setLabel(entryId: string, label: string | undefined): Promise<void> {
-			assertActive();
+			assertRunning();
 			return runtime.setLabel(entryId, label);
 		},
 
@@ -634,7 +635,7 @@ function createExtensionAPI(
 		},
 
 		setActiveTools(toolNames: string[]): void {
-			assertActive();
+			assertRunning();
 			runtime.setActiveTools(toolNames);
 		},
 
@@ -644,7 +645,7 @@ function createExtensionAPI(
 		},
 
 		setModel(model) {
-			assertActive();
+			assertRunning();
 			return runtime.setModel(model);
 		},
 
@@ -654,7 +655,7 @@ function createExtensionAPI(
 		},
 
 		setThinkingLevel(level) {
-			assertActive();
+			assertRunning();
 			runtime.setThinkingLevel(level);
 		},
 
@@ -674,7 +675,7 @@ function createExtensionAPI(
 
 		events: {
 			emit(channel, data) {
-				assertActive();
+				assertRunning();
 				eventBus.emit(channel, data);
 			},
 			on(channel, handler) {
@@ -892,6 +893,7 @@ function createExtension(candidate: Candidate): Extension {
 		completionProviders: new Map(),
 		workKinds: new Map(),
 		providers: new Set(),
+		clientRegistrations: new Set(),
 		lifetime: new ExtensionLifetime(),
 	};
 }

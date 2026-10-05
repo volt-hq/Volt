@@ -38,7 +38,7 @@
  *
  * A kind's remote policy (`requires`, `remote`) is copied into `work_started`,
  * so what a remote client may do with work stays known after its kind is
- * removed.
+ * removed; while the kind is registered, its current policy applies too.
  */
 
 import { randomUUID } from "node:crypto";
@@ -666,7 +666,10 @@ export class WorkRegistry {
 	 */
 	remoteAllows(record: WorkRecord, operation: "cancel" | "resume"): boolean {
 		const definition = this.kinds.get(record.kind);
-		return definition !== undefined && ((record.remote ?? definition.remote)?.[operation] ?? true);
+		// Both what the work recorded and what its kind says now must allow it.
+		return (
+			definition !== undefined && (record.remote?.[operation] ?? true) && (definition.remote?.[operation] ?? true)
+		);
 	}
 
 	/**
@@ -832,10 +835,13 @@ export class WorkRegistry {
 	/**
 	 * The remote capabilities, beyond an intent's or query's own, a client
 	 * needs to act on `workId`: what its kind required when the work started,
-	 * as `work_started` records it, so it holds after the kind is removed.
+	 * as `work_started` records it (so it holds after the kind is removed),
+	 * and what the kind requires now.
 	 */
 	requires(workId: string): readonly RemoteCapability[] {
-		return this.get(workId)?.requires ?? [];
+		const record = this.get(workId);
+		if (!record) return [];
+		return [...new Set([...(record.requires ?? []), ...(this.kinds.get(record.kind)?.requires ?? [])])];
 	}
 
 	/** The output of `workId`, or undefined for unknown work. */

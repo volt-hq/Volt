@@ -648,6 +648,11 @@ describe("work registry", () => {
 		// A kind this host does not run allows a remote device nothing.
 		expect(registry.remoteAllows(registry.get(extension.workId)!, "resume")).toBe(false);
 		expect(registry.requires("missing")).toEqual([]);
+		// Registered again with more requirements, its kind's current policy applies too.
+		registry.register(kind({ requires: ["workspace.manage.v1"], remote: { cancel: true, resume: false } }));
+		expect(registry.requires(extension.workId)).toEqual(["host.manage.v1", "workspace.manage.v1"]);
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "cancel")).toBe(false);
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "resume")).toBe(false);
 	});
 
 	it("cancels a removed kind's open work, cancellable or not: executors get the grace period, then the work ends cancelled", async () => {

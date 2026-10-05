@@ -91,6 +91,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			completionProviders: new Map(),
 			workKinds: new Map(),
 			providers: new Set(),
+			clientRegistrations: new Set(),
 			lifetime: new ExtensionLifetime(),
 		};
 	}
@@ -270,6 +271,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			completionProviders: new Map(),
 			workKinds: new Map(),
 			providers: new Set(),
+			clientRegistrations: new Set(),
 			lifetime: new ExtensionLifetime(),
 		};
 
@@ -328,6 +330,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			completionProviders: new Map(),
 			workKinds: new Map(),
 			providers: new Set(),
+			clientRegistrations: new Set(),
 			lifetime: new ExtensionLifetime(),
 		};
 
@@ -368,6 +371,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			completionProviders: new Map(),
 			workKinds: new Map(),
 			providers: new Set(),
+			clientRegistrations: new Set(),
 			lifetime: new ExtensionLifetime(),
 		};
 

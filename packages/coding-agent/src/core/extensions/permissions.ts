@@ -408,6 +408,23 @@ function covers(granted: readonly ExtensionPermission[], wanted: readonly Extens
 	return wanted.every((permission) => granted.includes(permission));
 }
 
+/** How `subject`'s permissions stand against `acknowledged`, what the user acknowledged for its id. */
+export function reviewPermissions(
+	subject: PermissionSubject,
+	acknowledged: PermissionAcknowledgment | undefined,
+): PermissionReview {
+	if (subject.permissions.length === 0) return { status: "acknowledged" };
+	if (acknowledged?.fingerprint === subject.fingerprint && covers(acknowledged.permissions, subject.permissions)) {
+		return { status: "acknowledged" };
+	}
+	const samePackage =
+		acknowledged !== undefined &&
+		fingerprintIdentity(acknowledged.fingerprint) === fingerprintIdentity(subject.fingerprint);
+	if (samePackage && covers(acknowledged.permissions, subject.permissions)) return { status: "carried" };
+	const granted = samePackage ? acknowledged.permissions : [];
+	return { status: "ask", added: subject.permissions.filter((permission) => !granted.includes(permission)) };
+}
+
 /** The user's permission acknowledgments, in `<agentDir>/extension-permissions.json`. */
 export class ExtensionPermissionStore {
 	private readonly path: string;
@@ -480,19 +497,15 @@ export class ExtensionPermissionStore {
 		return this.withLock(() => this.read().get(id));
 	}
 
+	/** Every acknowledgment, by manifest id, read once. */
+	all(): ReadonlyMap<string, PermissionAcknowledgment> {
+		return this.withLock(() => this.read());
+	}
+
 	/** How `subject`'s permissions stand against what the user acknowledged. */
 	review(subject: PermissionSubject): PermissionReview {
 		if (subject.permissions.length === 0) return { status: "acknowledged" };
-		const acknowledged = this.get(subject.id);
-		if (acknowledged?.fingerprint === subject.fingerprint && covers(acknowledged.permissions, subject.permissions)) {
-			return { status: "acknowledged" };
-		}
-		const samePackage =
-			acknowledged !== undefined &&
-			fingerprintIdentity(acknowledged.fingerprint) === fingerprintIdentity(subject.fingerprint);
-		if (samePackage && covers(acknowledged.permissions, subject.permissions)) return { status: "carried" };
-		const granted = samePackage ? acknowledged.permissions : [];
-		return { status: "ask", added: subject.permissions.filter((permission) => !granted.includes(permission)) };
+		return reviewPermissions(subject, this.get(subject.id));
 	}
 
 	/** Whether the user acknowledged `subject`'s permissions for its fingerprint. */

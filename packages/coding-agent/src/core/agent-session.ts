@@ -659,6 +659,7 @@ export class AgentSession {
 				modelSettings: this._modelSettings,
 				resourceLoader: this._resourceLoader,
 				cwd: this._cwd,
+				agentDir: this._agentDir,
 				lifetimeSignal: this._lifetimeAbort.signal,
 				liveState: this.liveState,
 				conversation: () => this._conversation,

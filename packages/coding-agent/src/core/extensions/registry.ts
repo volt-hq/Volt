@@ -47,7 +47,12 @@ import {
 import type { SourceScope } from "../source-info.ts";
 import { stripTerminalControls } from "../ui/ansi-tokens.ts";
 import type { ExtensionManifest } from "./manifest.ts";
-import { type ExtensionPermissionStore, permissionSubject } from "./permissions.ts";
+import {
+	type ExtensionPermissionStore,
+	type PermissionAcknowledgment,
+	permissionSubject,
+	reviewPermissions,
+} from "./permissions.ts";
 import type { ExtensionRunner } from "./runner.ts";
 import type { Extension, ExtensionDeclaration, ExtensionError, LoadExtensionsResult } from "./types.ts";
 
@@ -60,6 +65,11 @@ export interface ExtensionRegistryHost {
 	runner(): ExtensionRunner;
 	/** Whether settings enable the extension `id`. */
 	enabled(id: string): boolean;
+	/**
+	 * Whether the user acknowledged what `extension` declares it does
+	 * (permissions bound to its fingerprint): enabling one at runtime needs it.
+	 */
+	acknowledged(extension: DeclaredExtensionInfo): boolean;
 	/** Whether the conversation's extensions are bound: an extension enabled now hears `activate` and `session_start`. */
 	bound(): boolean;
 	/**
@@ -219,6 +229,11 @@ export class ExtensionRegistry {
 		return state === "deactivating" || state === "disabled" || state === "failed";
 	}
 
+	/** The running instance of the extension `id`, if it runs. */
+	instance(id: string): Extension | undefined {
+		return this.records.get(id)?.instance;
+	}
+
 	/** What the extension `id` declares, whether or not it runs; undefined for an id the conversation has none of. */
 	get(id: string): DeclaredExtensionInfo | undefined {
 		const record = this.records.get(id);
@@ -236,18 +251,23 @@ export class ExtensionRegistry {
 
 	/** Every extension of the conversation as the `extensions` query lists it. */
 	summaries(permissions: ExtensionPermissionStore): ExtensionSummary[] {
+		let acknowledgments: ReadonlyMap<string, PermissionAcknowledgment> | undefined;
+		try {
+			acknowledgments = permissions.all();
+		} catch {
+			// An unreadable acknowledgment file acknowledges nothing.
+			acknowledgments = undefined;
+		}
 		return [...this.records.keys()].flatMap((id) => {
 			const info = this.get(id);
 			const record = this.records.get(id);
 			if (!info || !record) return [];
 			const { manifest } = info;
-			let acknowledged: boolean;
-			try {
-				acknowledged = permissions.isAcknowledged(permissionSubject(info));
-			} catch {
-				// An unreadable acknowledgment file acknowledges nothing.
-				acknowledged = (manifest.permissions ?? []).length === 0;
-			}
+			const subject = permissionSubject(info);
+			const acknowledged =
+				acknowledgments === undefined
+					? subject.permissions.length === 0
+					: reviewPermissions(subject, acknowledgments.get(id)).status === "acknowledged";
 			const version = summaryText(info.version, 256).replace(/\s+/g, " ").trim();
 			const summary: ExtensionSummary = {
 				id,
@@ -378,11 +398,15 @@ export class ExtensionRegistry {
 		}
 	}
 
+	/**
+	 * Queue `change` against the records it finds when it runs: a change
+	 * queued while a reload replaced the generation applies to the new one,
+	 * since it reads the records and settings as they are then.
+	 */
 	private enqueue(change: (generation: number) => Promise<void>): Promise<void> {
-		const generation = this.generation;
 		return this.exclusive(async () => {
-			if (this.closed || generation !== this.generation) return;
-			await change(generation);
+			if (this.closed) return;
+			await change(this.generation);
 		});
 	}
 
@@ -398,6 +422,14 @@ export class ExtensionRegistry {
 		if (!declaration) {
 			record.state = "failed";
 			record.error = "It was loaded by its host and cannot run again until the extensions reload";
+			this.host.statesChanged();
+			return;
+		}
+		// Enabling at runtime runs only what the user acknowledged: settings name an id, not the code it runs.
+		const info = this.get(record.id);
+		if (info && !this.host.acknowledged(info)) {
+			record.state = "failed";
+			record.error = "Its permissions are not acknowledged; enable it from a client that can acknowledge them";
 			this.host.statesChanged();
 			return;
 		}
@@ -458,7 +490,7 @@ export class ExtensionRegistry {
 			try {
 				await work;
 				await this.host.turnBoundary();
-				// A tool call that ignores its abort does not keep the instance from retiring.
+				// Once the turn ended, a tool call of it still running gets the stop bound before the instance retires.
 				await bounded(runner.toolCallsSettled(record.id), EXTENSION_STOP_TIMEOUT_MS);
 			} finally {
 				instance.lifetime.retire(`Extension ${record.id} was disabled`);

@@ -39,6 +39,7 @@ import {
 	type SessionStartEvent,
 	type ShutdownHandler,
 } from "../extensions/index.ts";
+import { ExtensionPermissionStore, permissionSubject } from "../extensions/permissions.ts";
 import { ExtensionRegistry, type ExtensionRegistryHost } from "../extensions/registry.ts";
 import {
 	type DiscoveredResourcePath,
@@ -131,6 +132,8 @@ export interface SessionExtensionBindingHost {
 	readonly resourceLoader: ResourceLoader;
 	/** The session's working directory. */
 	readonly cwd: string;
+	/** The user's agent directory, where permission acknowledgments are stored. */
+	readonly agentDir: string;
 	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	readonly lifetimeSignal: AbortSignal;
 	/** The conversation's live state, where the data-only UI calls go. */
@@ -349,6 +352,14 @@ export class SessionExtensionBinding {
 		return {
 			runner: () => this.extensionRunner,
 			enabled: (id) => this.host.settingsManager.getExtensionEnabled(id),
+			acknowledged: (extension) => {
+				try {
+					return new ExtensionPermissionStore(this.host.agentDir).isAcknowledged(permissionSubject(extension));
+				} catch {
+					// An unreadable acknowledgment file acknowledges nothing.
+					return (extension.manifest.permissions ?? []).length === 0;
+				}
+			},
 			bound: () => this.started,
 			changed: () => {
 				const runner = this.extensionRunner;
@@ -385,17 +396,57 @@ export class SessionExtensionBinding {
 		for (const [request, owner] of this.extensionRequests) if (owner === id) request.abort();
 		this.releaseTerminalUI(id);
 		this.host.extensionServices().servicesManager.retire(id);
-		if (extension.providers.size > 0) {
-			for (const name of extension.providers) {
+		this.retireProviders(extension);
+	}
+
+	/**
+	 * Unregister the providers the stopped `extension` registered (one another
+	 * running extension registered too stays), and undo what it registered on
+	 * the AI client directly.
+	 */
+	private retireProviders(extension: Extension): void {
+		const names = [...extension.providers];
+		const client = [...extension.clientRegistrations];
+		extension.providers.clear();
+		extension.clientRegistrations.clear();
+		if (names.length === 0 && client.length === 0) return;
+		const registry = this.host.modelRegistry;
+		const others = this.extensionRunner.getExtensions().filter((other) => other !== extension);
+		const report = (error: unknown): void =>
+			this.extensionRunner.emitError({
+				extensionId: extension.id,
+				event: "unregister_provider",
+				error: error instanceof Error ? error.message : String(error),
+			});
+		for (const name of names) {
+			if (others.some((other) => other.providers.has(name))) continue;
+			try {
+				registry.unregisterProvider(name);
+			} catch (error) {
+				report(error);
+			}
+		}
+		if (client.length > 0) {
+			for (const registration of client) {
+				const separator = registration.indexOf(":");
+				const kind = separator === -1 ? registration : registration.slice(0, separator);
+				const key = registration.slice(separator + 1);
 				try {
-					this.host.modelRegistry.unregisterProvider(name);
+					if (kind === "api") registry.client.unregisterProvider(key);
+					else if (kind === "images") registry.client.unregisterImagesProvider(key);
+					else if (kind === "oauth") registry.client.unregisterOAuthProvider(key);
 				} catch (error) {
-					this.extensionRunner.emitError({ extensionId: id, event: "unregister_provider", error: String(error) });
+					report(error);
 				}
 			}
-			extension.providers.clear();
-			this.refreshModelAfterProviderChange();
+			// The built-in providers and models, and the running extensions' providers, come back.
+			try {
+				registry.refresh();
+			} catch (error) {
+				report(error);
+			}
 		}
+		this.refreshModelAfterProviderChange();
 	}
 
 	/** Undo what the extension `id` set on the terminal client: its input listeners, components, widgets, and slots. */
@@ -847,11 +898,16 @@ export class SessionExtensionBinding {
 			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
 			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
 			getEditorText: () => this.editorText(owner),
-			addAutocompleteProvider: (factory: Parameters<UI["addAutocompleteProvider"]>[0]) =>
-				// A stopped extension's provider steps aside the next time the client builds its providers.
+			addAutocompleteProvider: (factory: Parameters<UI["addAutocompleteProvider"]>[0]) => {
+				// A stopped instance's provider steps aside each time the client builds its providers, even once
+				// its id runs again.
+				const lifetime = owner === undefined ? undefined : this.registry.instance(owner)?.lifetime;
 				ui()?.addAutocompleteProvider((current) =>
-					owner !== undefined && this.registry.stopped(owner) ? current : factory(current),
-				),
+					owner !== undefined && (this.registry.stopped(owner) || lifetime?.stopped === true)
+						? current
+						: factory(current),
+				);
+			},
 			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) =>
 				setSlot("editorComponent", (target) => target.setEditorComponent(...args)),
 			getEditorComponent: () => ui()?.getEditorComponent(),
@@ -1216,8 +1272,10 @@ export class SessionExtensionBinding {
 			),
 		) as ReplacedSessionContext;
 		if (owner === undefined) {
-			registerReplacedSessionContext(context, (id) =>
-				this.extensionRunner.getExtension(id) ? this.createReplacedSessionContext(id) : undefined,
+			registerReplacedSessionContext(context, ({ id, fingerprint }) =>
+				fingerprint !== undefined && this.extensionRunner.getExtension(id)?.fingerprint === fingerprint
+					? this.createReplacedSessionContext(id)
+					: undefined,
 			);
 		}
 		context.sendMessage = (message, options) => {

@@ -254,7 +254,7 @@ describe("extension runtime toggle", () => {
 		const offered: string[][] = [];
 		const harness = await setup([
 			{
-				manifest: { id: "slow", displayName: "Slow" },
+				manifest: { id: "slow", displayName: "Slow", permissions: ["providers"] },
 				factory: (volt) => {
 					volt.registerTool({
 						name: "slow_tool",
@@ -270,10 +270,19 @@ describe("extension runtime toggle", () => {
 							seen.push(ctx.cwd);
 							setStatus("late", "shown after disable");
 							ctx.ui.setPanel("late", { node: { type: "text", text: "late" } });
-							try {
-								volt.registerCommand("late-cmd", { handler: async () => {} });
-							} catch (error) {
-								seen.push(error instanceof Error ? error.message : String(error));
+							for (const late of [
+								() => volt.registerCommand("late-cmd", { handler: async () => {} }),
+								() => volt.sendUserMessage("a message from a disabled extension"),
+								() =>
+									ctx.modelRegistry.registerProvider("late-provider", {
+										baseUrl: "https://late.example.test",
+									}),
+							]) {
+								try {
+									late();
+								} catch (error) {
+									seen.push(error instanceof Error ? error.message : String(error));
+								}
 							}
 							return { content: [{ type: "text", text: "slow done" }], details: undefined };
 						},
@@ -304,7 +313,12 @@ describe("extension runtime toggle", () => {
 		release.resolve();
 		await prompt;
 		await session.extensionRegistry.settled();
-		expect(seen).toEqual([conversation.cwd, "Extension slow was disabled"]);
+		expect(seen).toEqual([
+			conversation.cwd,
+			"Extension slow was disabled",
+			"Extension slow was disabled",
+			"Extension slow was disabled",
+		]);
 		expect(conversation.liveState.entries().filter(([key]) => key.includes("/slow/"))).toEqual([]);
 		expect(offered[0]).toContain("slow_tool");
 		expect(offered[1]).not.toContain("slow_tool");
@@ -417,6 +431,55 @@ describe("extension runtime toggle", () => {
 		});
 		expect(registry.get("privileged")?.state).toBe("active");
 		expect(asked).toHaveLength(2);
+	});
+
+	it("unregisters the providers an extension registered through its context, keeping the others'", async () => {
+		const harness = await setup([
+			{
+				manifest: { id: "provider-ext", displayName: "Provider", permissions: ["providers"] },
+				factory: (volt) => {
+					volt.on("session_start", (_event, ctx) => {
+						ctx.modelRegistry.registerProvider("ext-provider", {
+							baseUrl: "https://ext.example.test",
+							apiKey: "ext-key",
+							api: "openai-completions",
+							models: [
+								{
+									id: "ext-model",
+									name: "Ext model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 1000,
+									maxTokens: 100,
+								},
+							],
+						});
+						ctx.modelRegistry.client.registerOAuthProvider({
+							id: "ext-oauth",
+							name: "Ext OAuth",
+							login: async () => ({ access: "a", refresh: "r", expires: 0 }),
+							refreshToken: async (credentials) => credentials,
+							getApiKey: () => "k",
+						});
+					});
+				},
+			},
+		]);
+		const { conversation, context } = await open(harness, "tui");
+		const registry = conversation.session.modelRegistry;
+		expect(registry.find("ext-provider", "ext-model")).toBeDefined();
+		expect(registry.client.getOAuthProvider("ext-oauth")).toBeDefined();
+		await intentRegistry.invoke(context(), "set_extension_enabled", {
+			id: "provider-ext",
+			enabled: false,
+			scope: "global",
+		});
+		await conversation.session.extensionRegistry.settled();
+		expect(registry.find("ext-provider", "ext-model")).toBeUndefined();
+		expect(registry.client.getOAuthProvider("ext-oauth")).toBeUndefined();
+		// The recording extension's provider stays.
+		expect(registry.find(harness.faux.getModel().provider, harness.faux.getModel().id)).toBeDefined();
 	});
 
 	it("stores project choices only for a trusted project, and knows only the conversation's extensions", async () => {

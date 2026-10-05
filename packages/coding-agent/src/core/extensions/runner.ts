@@ -205,18 +205,27 @@ function withOwnedSession<O extends SessionChangeOptions>(
 	return { ...options, withSession: (ctx: ReplacedSessionContext) => withSession(ownedSessionContext(ctx, holder)) };
 }
 
-/** How a replaced session's context is had as one extension's own: by its manifest id, while it runs there. */
-const replacedSessionOwners = new WeakMap<object, (owner: string) => ReplacedSessionContext | undefined>();
+/** An extension a replaced session's context may be had as: its manifest id and where its code came from. */
+export interface ReplacedSessionOwner {
+	readonly id: string;
+	readonly fingerprint: string | undefined;
+}
+
+/** How a replaced session's context is had as one extension's own, while the same extension runs there. */
+const replacedSessionOwners = new WeakMap<
+	object,
+	(owner: ReplacedSessionOwner) => ReplacedSessionContext | undefined
+>();
 
 /**
  * Register how `ctx`, a replaced session's context that belongs to no
  * extension, is had as one extension's own: `forOwner` returns the context of
- * the extension with that manifest id in the new session, or undefined when it
- * does not run there.
+ * that extension in the new session, or undefined when it does not run there
+ * (an extension with the same id from other code does not count).
  */
 export function registerReplacedSessionContext(
 	ctx: ReplacedSessionContext,
-	forOwner: (owner: string) => ReplacedSessionContext | undefined,
+	forOwner: (owner: ReplacedSessionOwner) => ReplacedSessionContext | undefined,
 ): void {
 	replacedSessionOwners.set(ctx, forOwner);
 }
@@ -229,7 +238,9 @@ export function registerReplacedSessionContext(
  * session changes it starts.
  */
 function ownedSessionContext(given: ReplacedSessionContext, holder: PermissionHolder): ReplacedSessionContext {
-	const ctx = replacedSessionOwners.get(given)?.(holder.id) ?? given;
+	const fingerprint =
+		"fingerprint" in holder && typeof holder.fingerprint === "string" ? holder.fingerprint : undefined;
+	const ctx = replacedSessionOwners.get(given)?.({ id: holder.id, fingerprint }) ?? given;
 	const owned = Object.defineProperties({}, Object.getOwnPropertyDescriptors(ctx)) as ReplacedSessionContext;
 	let checked: { readonly source: ModelRegistry; readonly registry: ModelRegistry } | undefined;
 	Object.defineProperty(owned, "modelRegistry", {
@@ -391,6 +402,84 @@ const noOpUIContext: ExtensionUIContext = {
 export type ExtensionUIFactory = (owner: string | undefined) => ExtensionUIContext;
 
 const noOpUIFactory: ExtensionUIFactory = () => noOpUIContext;
+
+/** Calls on an AI client that register something, and the key each records: undone when the extension stops. */
+const CLIENT_REGISTRATIONS: Readonly<Record<string, (args: readonly unknown[]) => string | undefined>> = {
+	registerProvider: (args) => keyed("api", (args[0] as { api?: unknown } | undefined)?.api),
+	registerImagesProvider: (args) => keyed("images", (args[0] as { api?: unknown } | undefined)?.api),
+	registerOAuthProvider: (args) => keyed("oauth", (args[0] as { id?: unknown } | undefined)?.id),
+	setModels: () => "models",
+};
+
+function keyed(kind: string, key: unknown): string | undefined {
+	return typeof key === "string" ? `${kind}:${key}` : undefined;
+}
+
+/**
+ * `target` with each member `wrap` replaces, read through `get` and through
+ * property descriptors alike.
+ */
+function wrapMembers<T extends object>(target: T, wrap: (key: string, value: unknown) => unknown): T {
+	return new Proxy(target, {
+		get: (object, key) => {
+			const value: unknown = Reflect.get(object, key);
+			return typeof key === "string" ? wrap(key, value) : value;
+		},
+		getOwnPropertyDescriptor: (object, key) => {
+			const descriptor: PropertyDescriptor | undefined = Reflect.getOwnPropertyDescriptor(object, key);
+			if (descriptor !== undefined && "value" in descriptor && typeof key === "string") {
+				descriptor.value = wrap(key, descriptor.value);
+			}
+			return descriptor;
+		},
+	});
+}
+
+/**
+ * `registry` as `extension` holds it, recording the providers it registers by
+ * name and what it registers on the AI client directly, so they are undone
+ * when it stops. A stopped instance registers nothing more.
+ */
+function recordingProviders(registry: ModelRegistry, extension: Extension): ModelRegistry {
+	let client: { readonly source: object; readonly recording: object } | undefined;
+	const recordingClient = (source: object): object => {
+		if (client?.source !== source) {
+			client = {
+				source,
+				recording: wrapMembers(source, (member, method) => {
+					const record = CLIENT_REGISTRATIONS[member];
+					if (record === undefined || typeof method !== "function") return method;
+					return (...args: unknown[]) => {
+						extension.lifetime.assertRunning();
+						const result: unknown = Reflect.apply(method, source, args);
+						const registration = record(args);
+						if (registration !== undefined) extension.clientRegistrations.add(registration);
+						return result;
+					};
+				}),
+			};
+		}
+		return client.recording;
+	};
+	return wrapMembers(registry, (key, value) => {
+		if (key === "registerProvider" && typeof value === "function") {
+			return (name: string, ...rest: unknown[]) => {
+				extension.lifetime.assertRunning();
+				const result: unknown = Reflect.apply(value, registry, [name, ...rest]);
+				extension.providers.add(name);
+				return result;
+			};
+		}
+		if (key === "unregisterProvider" && typeof value === "function") {
+			return (name: string) => {
+				const result: unknown = Reflect.apply(value, registry, [name]);
+				extension.providers.delete(name);
+				return result;
+			};
+		}
+		return key === "client" && typeof value === "object" && value !== null ? recordingClient(value) : value;
+	});
+}
 
 /** An event one extension hears alone: its activation and deactivation, and its own start or stop at runtime. */
 export type ExtensionLifecycleEvent = ActivateEvent | DeactivateEvent | SessionStartEvent | SessionShutdownEvent;
@@ -1034,13 +1123,16 @@ export class ExtensionRunner {
 	}
 
 	/** The model registry an extension's context shows: credentials need `secrets`, provider registration `providers`. */
-	private modelRegistryFor(owner: string | undefined, lifetime: ExtensionLifetime | undefined): ModelRegistry {
+	private modelRegistryFor(owner: string | undefined, instance: Extension | undefined): ModelRegistry {
+		const lifetime = instance?.lifetime;
 		const guarded = this.guardContextObject(this.modelRegistry, lifetime);
 		if (owner === undefined) return guarded;
-		if (lifetime === undefined) return permissionCheckedModelRegistry(guarded, this.permissionHolder(owner));
+		if (instance === undefined || lifetime === undefined) {
+			return permissionCheckedModelRegistry(guarded, this.permissionHolder(owner));
+		}
 		let registry = this.ownerModelRegistries.get(lifetime);
 		if (!registry) {
-			registry = permissionCheckedModelRegistry(guarded, this.permissionHolder(owner));
+			registry = recordingProviders(permissionCheckedModelRegistry(guarded, instance), instance);
 			this.ownerModelRegistries.set(lifetime, registry);
 		}
 		return registry;
@@ -1110,11 +1202,17 @@ export class ExtensionRunner {
 	 */
 	createContext(owner?: string, services = false): ExtensionContext {
 		// The instance the context belongs to now: a context of a retired instance throws, even once its id runs again.
-		const lifetime = owner === undefined ? undefined : this.instances.get(owner)?.lifetime;
+		const instance = owner === undefined ? undefined : this.instances.get(owner);
+		const lifetime = instance?.lifetime;
 		const runner = this;
 		const assertActive = (): void => {
 			runner.assertActive();
 			lifetime?.assertActive();
+		};
+		// What steers the conversation throws once the instance stopped, while its tool calls finish.
+		const assertRunning = (): void => {
+			runner.assertActive();
+			lifetime?.assertRunning();
 		};
 		const getModel = this.getModel;
 		const servicesContext = owner && services ? this.servicesManager?.getContext(owner) : undefined;
@@ -1145,7 +1243,7 @@ export class ExtensionRunner {
 			},
 			get modelRegistry() {
 				assertActive();
-				return runner.modelRegistryFor(owner, lifetime);
+				return runner.modelRegistryFor(owner, instance);
 			},
 			get model() {
 				assertActive();
@@ -1164,7 +1262,7 @@ export class ExtensionRunner {
 				return runner.getSignalFn();
 			},
 			abort: () => {
-				assertActive();
+				assertRunning();
 				runner.abortFn();
 			},
 			hasPendingMessages: () => {
@@ -1172,7 +1270,7 @@ export class ExtensionRunner {
 				return runner.hasPendingMessagesFn();
 			},
 			shutdown: () => {
-				assertActive();
+				assertRunning();
 				runner.shutdownHandler();
 			},
 			getContextUsage: () => {
@@ -1180,7 +1278,7 @@ export class ExtensionRunner {
 				return runner.getContextUsageFn();
 			},
 			compact: (options) => {
-				assertActive();
+				assertRunning();
 				runner.compactFn(options);
 			},
 			getSystemPrompt: () => {
@@ -1188,7 +1286,7 @@ export class ExtensionRunner {
 				return runner.getSystemPromptFn();
 			},
 			startWork: (kind, options, run) => {
-				assertActive();
+				assertRunning();
 				return runner.startWorkFn(owner, kind, options, run);
 			},
 		};
@@ -1216,6 +1314,10 @@ export class ExtensionRunner {
 			this.assertActive();
 			lifetime?.assertActive();
 		};
+		const assertRunning = (): void => {
+			this.assertActive();
+			lifetime?.assertRunning();
+		};
 		Object.defineProperty(context, "signal", {
 			get: () => {
 				assertActive();
@@ -1237,23 +1339,23 @@ export class ExtensionRunner {
 		const own = <O extends SessionChangeOptions>(options: O | undefined): O | undefined =>
 			holder === undefined ? options : withOwnedSession(options, holder);
 		context.newSession = (options) => {
-			assertActive();
+			assertRunning();
 			return this.newSessionHandler(own(options));
 		};
 		context.fork = (entryId, options) => {
-			assertActive();
+			assertRunning();
 			return this.forkHandler(entryId, own(options));
 		};
 		context.navigateTree = (targetId, options) => {
-			assertActive();
+			assertRunning();
 			return this.navigateTreeHandler(targetId, options);
 		};
 		context.switchSession = (sessionRef, options) => {
-			assertActive();
+			assertRunning();
 			return this.switchSessionHandler(sessionRef, own(options));
 		};
 		context.reload = () => {
-			assertActive();
+			assertRunning();
 			return this.reloadHandler();
 		};
 		return context;

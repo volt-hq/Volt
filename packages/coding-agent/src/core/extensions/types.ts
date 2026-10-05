@@ -2161,18 +2161,23 @@ export class ExtensionLifetime {
 		return this.message !== undefined;
 	}
 
+	/** Whether the instance stopped or retired. */
+	get stopped(): boolean {
+		return this.stoppedMessage !== undefined || this.message !== undefined;
+	}
+
 	/** Throws once the instance is retired. */
 	assertActive(): void {
 		if (this.message !== undefined) throw new Error(this.message);
 	}
 
-	/** Throws once the instance stopped or retired: it may register nothing more. */
+	/** Throws once the instance stopped or retired: it may register or change nothing more. */
 	assertRunning(): void {
 		this.assertActive();
 		if (this.stoppedMessage !== undefined) throw new Error(this.stoppedMessage);
 	}
 
-	/** Stop the instance: registering anything throws `message` from now on. Later calls do nothing. */
+	/** Stop the instance: registering or changing anything throws `message` from now on. Later calls do nothing. */
 	stop(message: string): void {
 		this.stoppedMessage ??= message;
 	}
@@ -2236,6 +2241,11 @@ export interface Extension {
 	workKinds: Map<string, WorkKindDeclaration>;
 	/** The model providers the extension registered, by name: they are unregistered when it stops. */
 	providers: Set<string>;
+	/**
+	 * What the extension registered on its AI client directly (`api:<api>`,
+	 * `images:<api>`, `oauth:<id>`, `models`): undone when it stops.
+	 */
+	clientRegistrations: Set<string>;
 	/** The instance's lifetime: retired when the extension is disabled, reloaded, or fails to load. */
 	readonly lifetime: ExtensionLifetime;
 }

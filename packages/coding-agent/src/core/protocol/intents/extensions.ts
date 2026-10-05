@@ -11,7 +11,9 @@
  * (an `approval` host request); a paired remote device is refused instead,
  * so permissions are acknowledged only on the host. Permissions acknowledged
  * for an earlier revision of the same package that adds none are carried, as
- * an update carries them.
+ * an update carries them. Settings name an id, not the code it runs, so each
+ * conversation runs an extension enabled at runtime only once its own
+ * declaration is acknowledged (core/extensions/registry.ts).
  */
 
 import { ExtensionPermissionStore, permissionRequestLines, permissionSubject } from "../../extensions/permissions.ts";
@@ -100,7 +102,13 @@ export const setExtensionEnabledIntent = defineIntent({
 		if (input.scope === "project" && !settingsManager.isProjectTrusted()) {
 			throw new IntentRejectedError("not_allowed", "Project settings are stored only for a trusted project");
 		}
-		if (input.enabled) await acknowledgePermissions(ctx, extension);
+		if (input.enabled) {
+			await acknowledgePermissions(ctx, extension);
+			// What was acknowledged must be what runs: a reload meanwhile may have declared other code under the id.
+			if (registry.get(input.id)?.fingerprint !== extension.fingerprint) {
+				throw new IntentRejectedError("conflict", `Extension "${input.id}" changed while it was being enabled`);
+			}
+		}
 		ctx.assertCurrent?.();
 		try {
 			settingsManager.setExtensionEnabled(input.id, input.scope, input.enabled);
