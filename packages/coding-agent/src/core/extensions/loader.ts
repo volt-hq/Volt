@@ -33,18 +33,21 @@ import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planni
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
 import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
-import type {
-	Extension,
-	ExtensionAPI,
-	ExtensionFactory,
-	ExtensionRuntime,
-	LoadExtensionsResult,
-	MessageRenderer,
-	ProviderConfig,
-	RegisteredCommand,
-	ToolDefinition,
-	WorkKindDeclaration,
+import {
+	EXTENSION_EVENT_NAMES,
+	type Extension,
+	type ExtensionAPI,
+	type ExtensionFactory,
+	type ExtensionRuntime,
+	type LoadExtensionsResult,
+	type MessageRenderer,
+	type ProviderConfig,
+	type RegisteredCommand,
+	type ToolDefinition,
+	type WorkKindDeclaration,
 } from "./types.ts";
+
+const EXTENSION_EVENTS: ReadonlySet<string> = new Set(EXTENSION_EVENT_NAMES);
 
 /** Host module instances served to every extension instead of per-extension copies. */
 const VIRTUAL_MODULES: Record<string, unknown> = {
@@ -220,6 +223,9 @@ function createExtensionAPI(
 	const api = {
 		// Registration methods - write to extension
 		on(event: string, handler: ExtensionHandlerFn) {
+			if (!EXTENSION_EVENTS.has(event)) {
+				throw new Error(`Extension '${extension.path}' subscribes to unknown event '${event}'`);
+			}
 			return extension.handlers.register(event, handler, runtime.assertActive);
 		},
 
