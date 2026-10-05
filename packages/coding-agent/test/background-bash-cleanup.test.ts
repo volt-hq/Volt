@@ -34,7 +34,7 @@ describe("background native Bash cleanup", () => {
 			const barrier = holdTeardownCompletion();
 			const { jobs, work, close } = await createTestJobRuntime();
 			const tool = wrapToolDefinition(
-				withBackgroundJobs(createBashToolDefinition(process.cwd()), { jobs, start: (job) => jobs.start(job) }),
+				withBackgroundJobs(createBashToolDefinition(process.cwd()), { start: (job) => jobs.start(job) }),
 			);
 			try {
 				const result = await tool.execute("bash-cleanup", {

@@ -6,7 +6,15 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
 import { presentEdit } from "../src/core/tools/presenters.ts";
+import { HOST_UI_POLICY, type PresenterSet } from "../src/core/ui/presentation.ts";
 import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
+
+/** The edit tool's presenter for every call. */
+const editPresenters: PresenterSet = {
+	generation: 0,
+	tool: () => ({ present: presentEdit, policy: HOST_UI_POLICY }),
+	message: () => undefined,
+};
 
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -106,7 +114,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new PresentedToolComponent(
 			"edit",
 			{ path: filePath, edits },
-			{ present: presentEdit, policy: { owner: "host" } },
+			() => editPresenters,
 			tui,
 			process.cwd(),
 		);
@@ -173,7 +181,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new PresentedToolComponent(
 			"edit",
 			{ path: filePath, edits },
-			{ present: presentEdit, policy: { owner: "host" } },
+			() => editPresenters,
 			tui,
 			process.cwd(),
 		);
@@ -203,7 +211,7 @@ describe("edit tool TUI rendering", () => {
 		const component = new PresentedToolComponent(
 			"edit",
 			{ path: "missing-edit.txt", edits: [{ oldText: "does not exist", newText: "replacement" }] },
-			{ present: presentEdit, policy: { owner: "host" } },
+			() => editPresenters,
 			tui,
 			process.cwd(),
 		);

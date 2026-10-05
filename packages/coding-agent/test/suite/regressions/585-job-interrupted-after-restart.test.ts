@@ -120,7 +120,7 @@ describe("#585 background job interrupted after a restart", () => {
 		const card = new PresentedToolComponent(
 			"bash",
 			{ command: "npm test", background: true },
-			second.session.presenters.tool("bash"),
+			() => second.session.presenters,
 			{ requestRender: () => {} } as unknown as TUI,
 			second.tempDir,
 			{

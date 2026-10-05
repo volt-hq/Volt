@@ -1,10 +1,9 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
-import { UserInputDialog } from "../../modes/interactive/components/user-input-dialog.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import type { AgentToolResult, ToolDefinition } from "../extensions/types.ts";
-import type { UserInputRequest, UserInputResponse } from "../user-input.ts";
+import type { UserInputPrompt, UserInputRequest, UserInputResponse } from "../user-input.ts";
+import { presentRequestUserInput } from "./query-presenters.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const requestUserInputSchema = Type.Object(
@@ -87,10 +86,14 @@ function resultFor(
 	};
 }
 
-export function createRequestUserInputToolDefinition(): ToolDefinition<
-	typeof requestUserInputSchema,
-	RequestUserInputToolDetails
-> {
+export interface RequestUserInputToolOptions {
+	/** Ask the questions in the client that shows them; undefined when no client can. */
+	ask?: (request: UserInputRequest, signal?: AbortSignal) => ReturnType<UserInputPrompt> | undefined;
+}
+
+export function createRequestUserInputToolDefinition(
+	options?: RequestUserInputToolOptions,
+): ToolDefinition<typeof requestUserInputSchema, RequestUserInputToolDetails> {
 	return {
 		name: "request_user_input",
 		label: "ask user",
@@ -105,6 +108,7 @@ export function createRequestUserInputToolDefinition(): ToolDefinition<
 			"A skipped or unavailable answer is not consent. Do not repeat an optional question; proceed within existing authorization using a stated reasonable assumption. If explicit input is required before safe progress, ask one concise plain-text question and stop instead. Never use request_user_input to obtain permission, approve a plan, escalate privileges, or collect secrets.",
 		],
 		parameters: requestUserInputSchema,
+		present: presentRequestUserInput,
 		// Prevent two dialogs (or a mutating sibling tool) from racing for input.
 		executionMode: "sequential",
 		async execute(_toolCallId, input, signal, _onUpdate, ctx) {
@@ -135,68 +139,20 @@ export function createRequestUserInputToolDefinition(): ToolDefinition<
 					throw new Error("Option labels must be unique within each question.");
 				}
 			}
-			if (ctx?.mode !== "tui" || !ctx.hasUI) {
-				return resultFor(request, { status: "unavailable", answers: {} });
-			}
-			let removeAbortListener: (() => void) | undefined;
-			try {
-				const response = await ctx.ui.custom<UserInputResponse>((tui, theme, keybindings, done) => {
-					const abort = () => done({ status: "cancelled", answers: {} });
-					signal?.addEventListener("abort", abort, { once: true });
-					removeAbortListener = () => signal?.removeEventListener("abort", abort);
-					const dialog = new UserInputDialog(tui, theme, keybindings, request, done);
-					// The UI factory may be deferred. Never mount an abandoned request.
-					if (signal?.aborted) abort();
-					return dialog;
-				});
-				signal?.throwIfAborted();
-				// A turn disposition applies after the entire tool batch. Abort as well
-				// so Escape cannot allow a later sibling tool to execute.
-				if (response.status === "cancelled") ctx.abort();
-				return resultFor(request, response);
-			} finally {
-				removeAbortListener?.();
-			}
-		},
-		renderCall(args, theme) {
-			const headers = Array.isArray(args?.questions)
-				? args.questions
-						.flatMap((question) => (typeof question?.header === "string" ? [questionText(question.header)] : []))
-						.join(" · ")
-				: "";
-			return new Text(
-				theme.fg("toolTitle", theme.bold("ask user")) + (headers ? theme.fg("muted", ` · ${headers}`) : ""),
-				0,
-				0,
-			);
-		},
-		renderResult(result, options, theme, context) {
-			const details = result.details;
-			if (context.isError || !details) {
-				return new Text(
-					result.content
-						.filter((part) => part.type === "text")
-						.map((part) => part.text)
-						.join("\n"),
-					0,
-					0,
-				);
-			}
-			if (details.status === "cancelled") return new Text(theme.fg("muted", "Cancelled · turn stopped"), 0, 0);
-			if (details.status === "unavailable")
-				return new Text(theme.fg("muted", "Question UI unavailable · no answers"), 0, 0);
-			const lines = details.questions.flatMap((question) => {
-				const answers = details.answers[question.id]?.answers ?? [];
-				return [
-					...(options.expanded ? [theme.fg("muted", questionText(question.question))] : []),
-					`${theme.fg("accent", questionText(question.header))}: ${answers.length ? answers.map(questionText).join(" · ") : theme.fg("muted", "Skipped · no answer")}`,
-				];
-			});
-			return new Text(lines.join("\n"), 0, 0);
+			const asked = ctx?.mode === "tui" && ctx.hasUI ? options?.ask?.(request, signal) : undefined;
+			if (asked === undefined) return resultFor(request, { status: "unavailable", answers: {} });
+			const response = await asked;
+			signal?.throwIfAborted();
+			// A turn disposition applies after the entire tool batch. Abort as well
+			// so Escape cannot allow a later sibling tool to execute.
+			if (response.status === "cancelled") ctx?.abort();
+			return resultFor(request, response);
 		},
 	};
 }
 
-export function createRequestUserInputTool(): AgentTool<typeof requestUserInputSchema, RequestUserInputToolDetails> {
-	return wrapToolDefinition(createRequestUserInputToolDefinition());
+export function createRequestUserInputTool(
+	options?: RequestUserInputToolOptions,
+): AgentTool<typeof requestUserInputSchema, RequestUserInputToolDetails> {
+	return wrapToolDefinition(createRequestUserInputToolDefinition(options));
 }

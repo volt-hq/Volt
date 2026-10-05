@@ -3,9 +3,11 @@
  * presentation, the `UiNode` data its tool presents, inside chrome the client
  * owns: the state badge, elapsed time (when the presentation `showsDuration`),
  * collapsed or expanded content, the actions, the result's images, and the
- * work the call started (a background job), live. Collapsed, the card shows
- * the summary; expanded, the body, or the summary when there is no body. A
- * hidden presentation renders nothing.
+ * work the call started (a background job), live. Work the presentation binds
+ * an `open_work` or `cancel_work` action to is the presentation's to show,
+ * and the card does not list it again. Collapsed, the card shows the summary;
+ * expanded, the body, or the summary when there is no body. A hidden
+ * presentation renders nothing.
  */
 
 import {
@@ -14,6 +16,7 @@ import {
 	UI_NODE_TERMINAL_MAX_LINES,
 	type UiImageNode,
 	type UiNode,
+	type UiNodeAction,
 	type UiNodeStyledText,
 	type UiNodeToken,
 } from "@hansjm10/volt-protocol";
@@ -145,6 +148,36 @@ function workNodes(work: ToolCardWork, expanded: boolean): UiNode[] {
 	];
 }
 
+/** The work ids a presentation's `open_work` and `cancel_work` actions name, in any of its trees. */
+function boundWorkIds(presentation: ToolPresentation): Set<string> {
+	const ids = new Set<string>();
+	const visitActions = (actions: readonly UiNodeAction[] | undefined): void => {
+		for (const action of actions ?? []) {
+			const workId = action.intent.input?.workId;
+			if (
+				(action.intent.type === "open_work" || action.intent.type === "cancel_work") &&
+				typeof workId === "string"
+			) {
+				ids.add(workId);
+			}
+		}
+	};
+	const visit = (nodes: readonly UiNode[] | undefined): void => {
+		for (const node of nodes ?? []) {
+			if (node.type === "actions") visitActions(node.actions);
+			else if (node.type === "list") visit(node.items);
+			else if (node.type === "card") {
+				visitActions(node.actions);
+				for (const section of node.sections ?? []) visit(section.children);
+			}
+		}
+	};
+	visitActions(presentation.actions);
+	visit(presentation.summary);
+	visit(presentation.body);
+	return ids;
+}
+
 /** One tool call: its presentation in the client's chrome. */
 export class ToolCard implements Component {
 	private props: ToolCardProps;
@@ -197,7 +230,8 @@ export class ToolCard implements Component {
 		images.forEach((image, index) => {
 			extras.push({ type: "image", key: `image:${index}`, mimeType: image.mimeType, data: image.data });
 		});
-		for (const item of work) extras.push(...workNodes(item, expanded === true));
+		const presented = boundWorkIds(presentation);
+		for (const item of work) if (!presented.has(item.workId)) extras.push(...workNodes(item, expanded === true));
 		this.extras.update(extras);
 	}
 

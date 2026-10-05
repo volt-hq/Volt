@@ -1,17 +1,19 @@
 /**
  * The presenter set of a session (RFC §4.3, §8.3): the presenters of the
- * tools it registers and of its extensions' custom message types. A tool's
- * own `present()` presents its calls; a call of a tool the session does not
- * register (a built-in excluded here, a disabled extension's tool) presents
- * with the built-in presenter of that name if there is one, else
- * generically; a registered tool with its own TUI renderers and no
- * presenter presents generically. Extension presenters bind only the
- * extension's own actions. `generation` moves when the registered tools
- * change, and the projection cache keys on it.
+ * tools it registers and of the custom message types the host and its
+ * extensions present. A tool's own `present()` presents its calls; any other
+ * call (of a registered tool without a presenter, of a built-in excluded
+ * here, of a disabled extension's tool) presents with the built-in presenter
+ * of that name if there is one, else generically. The host's own message
+ * types present with the host's presenters; extensions cannot register
+ * presenters for them. Extension presenters bind only the extension's own
+ * actions. `generation` moves when the registered tools change, and the
+ * projection cache keys on it.
  */
 
 import { PresentationCache } from "../protocol/projection/presentation.ts";
 import { BUILTIN_TOOL_PRESENTERS } from "../tools/presenters.ts";
+import { BUILTIN_MESSAGE_PRESENTERS, HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { UiActionPolicy } from "../ui/normalize.ts";
 import {
 	HOST_UI_POLICY,
@@ -25,8 +27,6 @@ import {
 /** A registered tool as presenting sees it. */
 export interface PresentedTool {
 	readonly present?: ToolPresenter;
-	/** The tool brings its own TUI renderers (`renderCall`/`renderResult`). */
-	readonly rendersItself: boolean;
 	/** The manifest id of the extension that registered it, if one did. */
 	readonly extensionId?: string;
 }
@@ -61,18 +61,19 @@ export class SessionPresenters implements PresenterSet {
 
 	tool(toolName: string): ResolvedToolPresenter | undefined {
 		const tool = this.host.tool(toolName);
-		if (tool?.present !== undefined) {
-			return {
-				present: tool.present,
-				policy: tool.extensionId === undefined ? HOST_UI_POLICY : this.extensionPolicy(tool.extensionId),
-			};
-		}
-		if (tool?.rendersItself) return undefined;
+		const policy = tool?.extensionId === undefined ? HOST_UI_POLICY : this.extensionPolicy(tool.extensionId);
+		if (tool?.present !== undefined) return { present: tool.present, policy };
+		// An extension's tool of a built-in's name presents as the built-in, binding only what the extension may:
+		// its results are the extension's, so the actions they name are too.
 		const builtin = BUILTIN_TOOL_PRESENTERS.get(toolName);
-		return builtin === undefined ? undefined : { present: builtin, policy: HOST_UI_POLICY };
+		return builtin === undefined ? undefined : { present: builtin, policy };
 	}
 
 	message(customType: string): ResolvedMessagePresenter | undefined {
+		const builtin = BUILTIN_MESSAGE_PRESENTERS.get(customType);
+		if (builtin !== undefined) return { present: builtin, policy: HOST_UI_POLICY };
+		// The host's own message types are never an extension's to present.
+		if (HOST_CUSTOM_MESSAGE_TYPES.has(customType)) return undefined;
 		const found = this.host.message(customType);
 		return found === undefined
 			? undefined

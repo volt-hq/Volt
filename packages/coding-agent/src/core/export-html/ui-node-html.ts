@@ -14,6 +14,7 @@ import type {
 	UiNodeToken,
 	UiTreeItem,
 } from "@hansjm10/volt-protocol";
+import { formatDuration } from "../tools/render-utils.ts";
 
 const TOKENS: ReadonlySet<string> = new Set(["text", "muted", "accent", "success", "warning", "error", "info"]);
 const IMAGE_MIME_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
@@ -95,10 +96,13 @@ export function uiNodeHtml(node: UiNode): string {
 				return `<div class="ui-progress${tokenClass(node.token)}">${label}${percent}%</div>`;
 			}
 			return `<div class="ui-steps">${node.title === undefined ? "" : `<div class="ui-text">${styledTextHtml(node.title)}</div>`}${node.steps
-				.map(
-					(step) =>
-						`<div class="ui-step ui-step-${escapeHtml(step.status)}">[${escapeHtml(step.status)}] ${styledTextHtml(step.label)}${step.detail === undefined ? "" : ` <span class="ui-token-muted">${styledTextHtml(step.detail)}</span>`}</div>`,
-				)
+				.map((step) => {
+					const duration =
+						step.startedAt !== undefined && step.endedAt !== undefined && step.endedAt >= step.startedAt
+							? ` <span class="ui-token-muted">${escapeHtml(formatDuration(step.endedAt - step.startedAt))}</span>`
+							: "";
+					return `<div class="ui-step ui-step-${escapeHtml(step.status)}">[${escapeHtml(step.status)}] ${styledTextHtml(step.label)}${step.detail === undefined ? "" : ` <span class="ui-token-muted">${styledTextHtml(step.detail)}</span>`}${duration}</div>`;
+				})
 				.join("")}</div>`;
 		case "form":
 			return `<div class="ui-form">${node.title === undefined ? "" : `<div class="ui-text">${styledTextHtml(node.title)}</div>`}${node.fields
@@ -169,11 +173,18 @@ export function uiNodesHtml(nodes: readonly UiNode[]): string {
 	return nodes.map(uiNodeHtml).join("");
 }
 
-/** A presented tool call as export HTML: its title, and its collapsed and expanded content. */
+/** A presentation as export HTML: its title, its collapsed and expanded content, and its title as plain text. */
 export interface PresentedHtml {
 	readonly title: string;
 	readonly collapsed: string;
 	readonly expanded: string;
+	/** The title as one line of plain text, for the session tree. Not HTML: the template escapes it. */
+	readonly text: string;
+}
+
+/** Styled text as one line of plain text. */
+function plainLine(text: UiNodeStyledText): string {
+	return (typeof text === "string" ? text : text.map((span) => span.text).join("")).replace(/\s+/g, " ").trim();
 }
 
 /** A tool presentation as export HTML; hidden calls export nothing. */
@@ -185,7 +196,12 @@ export function toolPresentationHtml(presentation: ToolPresentation): PresentedH
 		presentation.activity === undefined
 			? ""
 			: ` <span class="ui-token-muted">${styledTextHtml(presentation.activity)}</span>`;
-	return { title: `${styledTextHtml(presentation.title)}${activity}`, collapsed: summary, expanded: body };
+	return {
+		title: `${styledTextHtml(presentation.title)}${activity}`,
+		collapsed: summary,
+		expanded: body,
+		text: plainLine(presentation.title),
+	};
 }
 
 /** A message presentation as export HTML. */
@@ -195,5 +211,6 @@ export function messagePresentationHtml(presentation: MessagePresentation): Pres
 		title: presentation.title === undefined ? "" : styledTextHtml(presentation.title),
 		collapsed: presentation.summary === undefined ? body : uiNodesHtml(presentation.summary),
 		expanded: body,
+		text: presentation.title === undefined ? "" : plainLine(presentation.title),
 	};
 }

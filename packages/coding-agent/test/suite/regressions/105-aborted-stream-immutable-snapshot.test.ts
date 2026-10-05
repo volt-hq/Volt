@@ -1,11 +1,11 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import type { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 
-type ToolResult = Parameters<ToolExecutionComponent["updateResult"]>[0];
-type PendingTool = Pick<ToolExecutionComponent, "updateResult">;
+type ToolResult = Parameters<PresentedToolComponent["updateResult"]>[0];
+type PendingTool = Pick<PresentedToolComponent, "updateResult">;
 
 type HandleEventThis = {
 	isInitialized: boolean;

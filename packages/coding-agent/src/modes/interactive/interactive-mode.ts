@@ -202,7 +202,6 @@ import { BranchSummaryMessageComponent } from "./components/branch-summary-messa
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
-import { CustomMessageComponent } from "./components/custom-message.ts";
 import { DaemonLeaseWaitComponent } from "./components/daemon-lease-wait.ts";
 import { DaxnutsComponent } from "./components/daxnuts.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
@@ -281,20 +280,19 @@ import { StartupHeaderComponent } from "./components/logo.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { PresentedMessageComponent } from "./components/presented-message.ts";
-import { PresentedToolComponent, type ToolRow } from "./components/presented-tool.ts";
+import { PresentedToolComponent } from "./components/presented-tool.ts";
 import { type ReviewToolSelectorOption, ReviewToolsSelectorComponent } from "./components/review-tools-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
-import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
-import { UserInputDialog } from "./components/user-input-dialog.ts";
+import { promptUserInput, UserInputDialog } from "./components/user-input-dialog.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WorkInspector } from "./components/work-inspector.ts";
-import { queuedWorkNoticeLine, WorkNoticeComponent, workOutcomeLine } from "./components/work-notice.ts";
+import { queuedWorkNoticeLine, workOutcomeLine } from "./components/work-notice.ts";
 import { WorkStatus } from "./components/work-status.ts";
 import { createUiNodeView } from "./ui-node/registry.ts";
 import { TuiWorkSource } from "./work-source.ts";
@@ -625,9 +623,13 @@ export class InteractiveMode {
 	private streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, ToolRow>();
-	/** Launch cards outlive settlement only while their bounded current-runtime records remain accessible. */
-	private liveBackgroundJobTools = new Map<string, { component: ToolRow; settled?: boolean }>();
+	private pendingTools = new Map<string, PresentedToolComponent>();
+	/**
+	 * Rows of running tool calls, and of calls that launched a background job: they show the work their call
+	 * started live. A launch card outlives settlement only while its bounded current-runtime record remains
+	 * accessible; a row whose call started no job leaves once the call ended.
+	 */
+	private liveBackgroundJobTools = new Map<string, { component: PresentedToolComponent; settled?: boolean }>();
 	private unsubscribeBackgroundJobs: (() => void) | undefined;
 	private jobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
 	private workInspector: WorkInspector | undefined;
@@ -2012,6 +2014,8 @@ export class InteractiveMode {
 	private createExtensionSurface(): NonNullable<HostClient["surface"]> {
 		return {
 			ui: this.createExtensionTerminalUI(),
+			userInput: (request, signal) =>
+				promptUserInput((factory, options) => this.showExtensionCustom(factory, options), request, signal),
 			abortHandler: () => {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
@@ -2621,38 +2625,23 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Get a registered tool definition by name (for custom rendering).
+	 * The transcript row of a tool call, drawn from its presentation with the
+	 * session's presenters. `live` calls tick their elapsed time.
 	 */
-	private getRegisteredToolDefinition(toolName: string) {
-		return this.session.getToolDefinition(toolName);
-	}
-
-	/**
-	 * The transcript row of a tool call: drawn from its presentation when its
-	 * tool presents itself, else by the tool's own renderers. `live` calls tick
-	 * their elapsed time.
-	 */
-	private createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): ToolRow {
-		const presenter = this.session.presenters.tool(toolName);
-		const images = {
-			showImages: this.settingsManager.getShowImages(),
-			imageWidthCells: this.settingsManager.getImageWidthCells(),
-		};
-		if (presenter !== undefined) {
-			return new PresentedToolComponent(toolName, args, presenter, this.ui, this.sessionManager.getCwd(), {
-				...images,
-				liveProgress: live,
-				work: () => this.toolCallWork(toolCallId),
-			});
-		}
-		return new ToolExecutionComponent(
+	private createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): PresentedToolComponent {
+		const session = this.session;
+		return new PresentedToolComponent(
 			toolName,
-			toolCallId,
 			args,
-			{ ...images, ...(live ? { liveProgress: true } : {}) },
-			this.getRegisteredToolDefinition(toolName),
+			() => session.presenters,
 			this.ui,
 			this.sessionManager.getCwd(),
+			{
+				showImages: this.settingsManager.getShowImages(),
+				imageWidthCells: this.settingsManager.getImageWidthCells(),
+				liveProgress: live,
+				work: () => this.toolCallWork(toolCallId),
+			},
 		);
 	}
 
@@ -4369,17 +4358,30 @@ export class InteractiveMode {
 		const unsubscribeEvents = session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
-		// An extension enabled or disabled while the session runs brings or takes its commands and shortcuts.
+		// An extension enabled or disabled while the session runs brings or takes its commands, shortcuts,
+		// and presenters: the transcript presents again, so a disabled extension's presenters draw nothing.
 		const unsubscribeExtensions = session.subscribeReloads(() => {
 			if (this.session !== session) return;
 			this.setupAutocompleteProvider();
 			this.setupExtensionShortcuts(session.extensionRunner);
+			this.refreshPresentations(this.chatContainer);
 			this.ui.requestRender();
 		});
 		this.unsubscribe = () => {
 			unsubscribeEvents();
 			unsubscribeExtensions();
 		};
+	}
+
+	/** Present the tool calls and custom messages under `container` again with the session's current presenters. */
+	private refreshPresentations(container: Container): void {
+		for (const child of container.children) {
+			if (child instanceof PresentedToolComponent || child instanceof PresentedMessageComponent) {
+				child.refreshPresentation();
+			} else if (child instanceof Container) {
+				this.refreshPresentations(child);
+			}
+		}
 	}
 
 	/**
@@ -4645,9 +4647,8 @@ export class InteractiveMode {
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
 				}
-				if (event.toolName === "bash" || event.toolName === "subagent" || event.toolName === "jobs") {
-					this.liveBackgroundJobTools.set(event.toolCallId, { component });
-				}
+				// Any call can start work, which its row shows live.
+				this.liveBackgroundJobTools.set(event.toolCallId, { component });
 				component.markExecutionStarted();
 				this.ui.requestRender();
 				break;
@@ -4667,12 +4668,8 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
-					if (event.toolName === "jobs") {
-						// Returned inspection snapshots do not follow worker updates.
-						this.liveBackgroundJobTools.delete(event.toolCallId);
-					} else if (this.liveBackgroundJobTools.has(event.toolCallId)) {
-						this.jobsRenderCoalescer?.update(undefined);
-					}
+					// The row keeps following a job its call launched; any other row leaves the live set.
+					if (this.liveBackgroundJobTools.has(event.toolCallId)) this.jobsRenderCoalescer?.update(undefined);
 					this.ui.requestRender();
 				}
 				break;
@@ -4909,30 +4906,26 @@ export class InteractiveMode {
 				break;
 			}
 			case "custom": {
-				if (message.display && message.customType === WORK_NOTICE_CUSTOM_TYPE) {
-					this.chatContainer.addChild(new WorkNoticeComponent(message, this.getMarkdownThemeWithSettings()));
-					// A notice in the transcript left the queue.
-					this.updatePendingMessagesDisplay();
-				} else if (message.display) {
-					const presentation = presentCustomMessage(
-						this.session.presenters.message(message.customType),
-						{
-							customType: message.customType,
-							content: message.content,
-							...(message.details === undefined ? {} : { details: message.details }),
-						},
-						PRESENTATION_MAX_SERIALIZED_BYTES,
+				if (message.display) {
+					const session = this.session;
+					const component = new PresentedMessageComponent(
+						message,
+						() =>
+							presentCustomMessage(
+								session.presenters.message(message.customType),
+								{
+									customType: message.customType,
+									content: message.content,
+									...(message.details === undefined ? {} : { details: message.details }),
+								},
+								PRESENTATION_MAX_SERIALIZED_BYTES,
+							),
+						this.getMarkdownThemeWithSettings(),
 					);
-					const component =
-						presentation === undefined
-							? new CustomMessageComponent(
-									message,
-									this.session.extensionRunner.getMessageRenderer(message.customType),
-									this.getMarkdownThemeWithSettings(),
-								)
-							: new PresentedMessageComponent(message.customType, presentation);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
+					// A notice in the transcript left the queue.
+					if (message.customType === WORK_NOTICE_CUSTOM_TYPE) this.updatePendingMessagesDisplay();
 				}
 				break;
 			}
@@ -5020,7 +5013,7 @@ export class InteractiveMode {
 		for (const toolCallId of liveBackgroundJobTools.keys()) this.pendingTools.delete(toolCallId);
 		this.disposePendingTools();
 		this.liveBackgroundJobTools.clear();
-		const renderedPendingTools = new Map<string, ToolRow>();
+		const renderedPendingTools = new Map<string, PresentedToolComponent>();
 
 		if (options.updateFooter) {
 			this.footer.invalidate();
@@ -6488,7 +6481,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof PresentedToolComponent) {
+							if (child instanceof PresentedToolComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -6496,7 +6489,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent || child instanceof PresentedToolComponent) {
+							if (child instanceof PresentedToolComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
@@ -9959,7 +9952,7 @@ export class InteractiveMode {
 
 		let streaming: AssistantMessageComponent | undefined;
 		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
-		const pending = new Map<string, ToolRow>();
+		const pending = new Map<string, PresentedToolComponent>();
 
 		const forDisplay = options.transformAssistantMessage ?? ((message: AssistantMessage) => message);
 

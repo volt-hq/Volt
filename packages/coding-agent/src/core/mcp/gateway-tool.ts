@@ -1,9 +1,7 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
-import type { Theme } from "../theme/runtime.ts";
-import { invalidArgText, str } from "../tools/render-utils.ts";
+import { presentMcp } from "../tools/query-presenters.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import type { McpManager } from "./manager.ts";
 import type { McpGatewayExecutionContext, McpGatewayInput } from "./types.ts";
@@ -71,24 +69,6 @@ export interface McpGatewayToolOptions {
 	isRestrictedTrustedRead?: () => boolean;
 }
 
-function formatCall(args: McpGatewayInput | undefined, theme: Theme): string {
-	const action = args?.action;
-	if (action === "call") {
-		const server = str(args?.server);
-		const tool = str(args?.tool);
-		const target = server === null || tool === null ? invalidArgText(theme) : `${server || "..."}.${tool || "..."}`;
-		return `${theme.fg("toolTitle", theme.bold("mcp"))} ${theme.fg("accent", target)}`;
-	}
-	if (action === "search") {
-		const query = str(args?.query);
-		return `${theme.fg("toolTitle", theme.bold("mcp search"))} ${query === null ? invalidArgText(theme) : theme.fg("accent", query || "...")}`;
-	}
-	if (action === "describe") {
-		return `${theme.fg("toolTitle", theme.bold("mcp describe"))} ${theme.fg("accent", `${args?.server ?? "..."}.${args?.tool ?? "..."}`)}`;
-	}
-	return `${theme.fg("toolTitle", theme.bold("mcp"))} ${theme.fg("accent", action ?? "...")}`;
-}
-
 function isFailedGatewayCall(result: unknown): boolean {
 	return (
 		typeof result === "object" &&
@@ -97,20 +77,6 @@ function isFailedGatewayCall(result: unknown): boolean {
 		result.action === "call" &&
 		(("isError" in result && result.isError === true) || ("status" in result && result.status === "failed"))
 	);
-}
-
-function formatResult(result: unknown, expanded: boolean, theme: Theme): string {
-	const text = JSON.stringify(result, null, 2) ?? "null";
-	if (expanded) {
-		return `\n${theme.fg("toolOutput", text)}`;
-	}
-	const lines = text.split("\n");
-	const displayLines = lines.slice(0, 18);
-	const suffix =
-		lines.length > displayLines.length
-			? theme.fg("muted", `\n... (${lines.length - displayLines.length} more lines)`)
-			: "";
-	return `\n${theme.fg("toolOutput", displayLines.join("\n"))}${suffix}`;
 }
 
 function createExecutionContext(
@@ -142,6 +108,7 @@ export function createMcpToolDefinition(
 			"For cached structured tool output, use read_cache with a JSON Pointer and optional array offset/limit to retrieve only needed fields or rows; follow nextOffset for rows.",
 		],
 		parameters: mcpGatewaySchema,
+		present: presentMcp,
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 			if (signal?.aborted) {
@@ -173,16 +140,6 @@ export function createMcpToolDefinition(
 				details: { result: formatted.result },
 				...(isFailedGatewayCall(result) ? { isError: true } : {}),
 			};
-		},
-		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatCall(args as McpGatewayInput, theme));
-			return text;
-		},
-		renderResult(result, renderOptions, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatResult(result.details?.result, renderOptions.expanded, theme));
-			return text;
 		},
 	};
 }

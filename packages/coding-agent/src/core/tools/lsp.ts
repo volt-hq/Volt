@@ -9,7 +9,6 @@
 
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { StringEnum } from "@hansjm10/volt-ai";
-import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { isManagedLspObservation, recordManagedLspOutcome } from "../lsp/managed-observation.ts";
@@ -21,9 +20,8 @@ import {
 	lspResult,
 	lspSucceeded,
 } from "../lsp/outcome.ts";
-import type { Theme } from "../theme/runtime.ts";
 import { resolveToCwd } from "./path-utils.ts";
-import { renderToolPath, str } from "./render-utils.ts";
+import { presentLsp } from "./query-presenters.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 export const LSP_ACTIONS = [
@@ -129,29 +127,6 @@ export interface LspToolOptions {
 	provider?: LspNavigationProvider;
 }
 
-function formatLspCall(args: Partial<LspToolInput> | undefined, theme: Theme, cwd: string): string {
-	const action = str(args?.action) ?? "";
-	const path = str(args?.path);
-	const line = typeof args?.line === "number" ? `:${args.line}` : "";
-	const symbol = str(args?.symbol);
-	let text = `${theme.fg("toolTitle", theme.bold("lsp"))} ${theme.fg("muted", action)}`;
-	if (path) {
-		text += ` ${renderToolPath(path, theme, cwd)}${theme.fg("muted", line)}`;
-	}
-	if (symbol) {
-		text += ` ${theme.fg("toolOutput", symbol)}`;
-	}
-	const newName = str(args?.newName);
-	if (newName) {
-		text += ` ${theme.fg("muted", "->")} ${theme.fg("toolOutput", newName)}`;
-	}
-	const title = str(args?.title);
-	if (title) {
-		text += ` ${theme.fg("muted", `"${title}"`)}`;
-	}
-	return text;
-}
-
 export function createLspToolDefinition(
 	cwd: string,
 	options?: LspToolOptions,
@@ -169,6 +144,7 @@ export function createLspToolDefinition(
 			"Use supported lsp rename/fix for safe project refactoring in Build mode. Diagnostics marked unverified/stale/unknown are not proof of a clean build.",
 		],
 		parameters: lspSchema,
+		present: presentLsp,
 		async execute(_toolCallId, input: LspToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const startedAt = performance.now();
 			const finish = (result: LspResult) => {
@@ -269,35 +245,6 @@ export function createLspToolDefinition(
 				result = lspResult("cancelled", "LSP operation aborted", { reason: "aborted" });
 			}
 			return finish(result);
-		},
-		renderResult(result, options, theme, context) {
-			const evidence = result.details?.lsp;
-			const output = result.content
-				.filter((part) => part.type === "text")
-				.map((part) => part.text)
-				.join("\n");
-			const lines = output.split("\n");
-			const shown = options.expanded ? lines : lines.slice(0, 10);
-			const uncertainty =
-				evidence && evidence.freshness !== "fresh" && evidence.source !== "none"
-					? `Diagnostics: ${evidence.freshness} (${evidence.source})\n`
-					: "";
-			const color = context.isError ? "error" : uncertainty ? "warning" : "toolOutput";
-			const component = context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
-			component.setText(
-				theme.fg(
-					color,
-					uncertainty +
-						shown.join("\n") +
-						(shown.length < lines.length ? `\n... (${lines.length - shown.length} more lines)` : ""),
-				),
-			);
-			return component;
-		},
-		renderCall(args, theme, context) {
-			const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			component.setText(formatLspCall(args as Partial<LspToolInput> | undefined, theme, context.cwd));
-			return component;
 		},
 	};
 }
