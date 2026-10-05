@@ -40,11 +40,9 @@ import {
 	diffUiTree,
 	LIVE_PATCHABLE_KINDS,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
-	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer, type IrohRemoteSanitizerOptions } from "../remote/iroh/sanitizer.ts";
-import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { fitPresentation } from "../ui/presentation.ts";
 import { presentationChange } from "../ui/presentation-state.ts";
 import { redactedWorkPhase } from "../work/phase.ts";
@@ -57,7 +55,6 @@ import {
 	liveCommitOf,
 } from "./live-fold.ts";
 import { withoutImages } from "./projection/presentation.ts";
-import { projectSubagentDetails } from "./projection/tool-view.ts";
 
 type LiveFrame = Extract<HostFrame, { type: "live" }>;
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
@@ -456,7 +453,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	const redactTool = (item: ToolItem): ToolItem => {
 		const { presentation: _presentation, patch: _patch, ...rest } = item;
 		const redacted = sanitize(rest);
-		const subagent = item.toolName === "subagent" || item.toolName === SUBAGENT_REGISTRY_TOOL_NAME;
 		const partial = redacted.partial;
 		return {
 			...redacted,
@@ -476,13 +472,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 							content: partial.content.flatMap((block) =>
 								block.type === "text" ? [{ ...block, text: tailScalars(block.text, options.textScalars) }] : [],
 							),
-							...(partial.details === undefined
-								? {}
-								: {
-										details: subagent
-											? projectSubagentDetails(isRecord(partial.details) ? partial.details : undefined)
-											: boundStrings(partial.details, RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES),
-									}),
 						},
 					}),
 		};

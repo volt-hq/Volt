@@ -8,7 +8,6 @@ import type { ClientWorkItem, WorkNoticeDetails } from "@hansjm10/volt-protocol"
 import { getKeybindings, setKeybindings, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { CustomMessage } from "../src/core/messages.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import {
 	conversationLines,
@@ -19,12 +18,7 @@ import {
 	type WorkOutputTail,
 	type WorkSource,
 } from "../src/modes/interactive/components/work-inspector.ts";
-import {
-	queuedWorkNoticeLine,
-	WorkNoticeComponent,
-	workNoticeOwnText,
-	workOutcomeLine,
-} from "../src/modes/interactive/components/work-notice.ts";
+import { queuedWorkNoticeLine, workOutcomeLine } from "../src/modes/interactive/components/work-notice.ts";
 import { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -438,44 +432,6 @@ describe("work notices", () => {
 		outcome: "completed",
 		summary: "2 findings",
 	};
-
-	function notice(content: string, noticeDetails: unknown = details): CustomMessage {
-		return {
-			role: "custom",
-			customType: "work_notice",
-			content,
-			display: true,
-			details: noticeDetails as CustomMessage["details"],
-			timestamp: Date.now(),
-		} as CustomMessage;
-	}
-
-	it("keeps the host's own notice literal, and renders a kind's own text as Markdown", () => {
-		const heading = "Swarm **review** (ext:swarm-review/run ext-1) completed.";
-		const plain = text(new WorkNoticeComponent(notice(`${heading}\n2 findings`)));
-		expect(plain).toContain("Swarm **review** (ext:swarm-review/run ext-1) completed.");
-		expect(plain).toContain("2 findings");
-		expect(workNoticeOwnText(`${heading}\n2 findings`, details)).toBeUndefined();
-
-		const own = `${heading}\n## Findings\n- **High:** token leak`;
-		expect(workNoticeOwnText(own, details)).toBe("## Findings\n- **High:** token leak");
-		const rendered = text(new WorkNoticeComponent(notice(own)));
-		// The heading names the work as data; the kind's text is Markdown.
-		expect(rendered).toContain("Swarm **review** (ext:swarm-review/run ext-1) completed.");
-		expect(rendered).toContain("High: token leak");
-		expect(rendered).not.toContain("**High:**");
-		expect(rendered).not.toContain("## Findings");
-
-		// The kind's text loses terminal controls before it renders.
-		const escaped = new WorkNoticeComponent(notice(`${heading}\nReport \x1b[31mred\x1b[0m done \x07`));
-		expect(escaped.render(80).lines.join("\n")).not.toMatch(/\x1b\[31m|\x07/);
-		expect(text(escaped)).toContain("Report red done");
-
-		// A notice whose text does not start with its heading stays literal.
-		const forged = text(new WorkNoticeComponent(notice("**not** the heading")));
-		expect(forged).toContain("**not** the heading");
-		expect(text(new WorkNoticeComponent(notice("**literal**", undefined)))).toContain("**literal**");
-	});
 
 	it("names queued notices and the end of work that delivers none in one line", () => {
 		expect(stripAnsi(queuedWorkNoticeLine(details))).toBe("Notice for the next turn: Swarm **review** completed");

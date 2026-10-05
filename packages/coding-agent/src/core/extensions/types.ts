@@ -1767,7 +1767,8 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	 * Register how custom messages of `customType` look, as `UiNode` data every
 	 * client renders: pure, synchronous, and stateless. A message the
 	 * presenter throws for, and one of a type without a presenter, shows its
-	 * text.
+	 * text. Throws for the host's own message types (such as `work_notice` and
+	 * `review`), which only the host presents.
 	 */
 	registerMessagePresenter<T = JsonValue>(customType: string, present: MessagePresenter<T>): void;
 

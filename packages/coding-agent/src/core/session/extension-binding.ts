@@ -68,6 +68,7 @@ import {
 	setExtensionStatus,
 	setExtensionTitle,
 } from "../ui/extension-ui.ts";
+import type { UserInputPrompt, UserInputRequest, UserInputResponse } from "../user-input.ts";
 import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
@@ -216,6 +217,8 @@ export interface ExtensionClient {
 	readonly shutdownHandler?: ShutdownHandler;
 	/** Receives every extension error. */
 	readonly onError?: ExtensionErrorListener;
+	/** Asks the user the request_user_input tool's questions in the client's terminal. */
+	readonly userInput?: UserInputPrompt;
 }
 
 /** The terminal-only UI a client shows once at a time; the extension that set it last undoes it when it stops. */
@@ -498,6 +501,14 @@ export class SessionExtensionBinding {
 	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
 	get uiContext(): ExtensionUIContext | undefined {
 		return this.uiClient() ? this.uiFor(undefined) : undefined;
+	}
+
+	/**
+	 * Ask the user `request`'s questions in the client terminal-only calls go
+	 * to; undefined when that client cannot ask them.
+	 */
+	askUserInput(request: UserInputRequest, signal?: AbortSignal): Promise<UserInputResponse> | undefined {
+		return this.uiClient()?.userInput?.(request, signal);
 	}
 
 	/** The mode the first attached client fixed. */

@@ -18,11 +18,11 @@ import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import type { PlanningState, PlanPhase, PlanState } from "../../src/core/planning.ts";
 import { getEditorTheme, initTheme, theme } from "../../src/core/theme/runtime.ts";
-import { createPlanningToolDefinitions, type PlanningToolController } from "../../src/core/tools/planning.ts";
+import { BUILTIN_PRESENTERS } from "../../src/core/tools/presenters.ts";
 import { PlanInspectorComponent } from "../../src/modes/interactive/components/plan-inspector.ts";
 import { PlanDetailsComponent, PlanStatusComponent } from "../../src/modes/interactive/components/plan-status.ts";
+import { PresentedToolComponent } from "../../src/modes/interactive/components/presented-tool.ts";
 import { ResponsivePlanLayoutComponent } from "../../src/modes/interactive/components/responsive-plan-layout.ts";
-import { ToolExecutionComponent } from "../../src/modes/interactive/components/tool-execution.ts";
 
 class FixtureFooter implements Component {
 	invalidate(): void {
@@ -152,17 +152,8 @@ inspector = new PlanInspectorComponent({
 	requestRender: () => tui.requestRender(),
 });
 const status = new PlanStatusComponent(planning);
-const controller: PlanningToolController = {
-	getPlanningState: () => planning,
-	updatePlan: async () => plan,
-	submitPlan: async () => plan,
-	updatePlanProgress: async () => plan,
-	requestReplan: async () => planning,
-};
-const updatePlanDefinition = createPlanningToolDefinitions(controller)[0];
-const tool = new ToolExecutionComponent(
+const tool = new PresentedToolComponent(
 	"update_plan",
-	"fixture-update-plan",
 	{
 		title: plan.title,
 		summary: plan.summary,
@@ -174,8 +165,7 @@ const tool = new ToolExecutionComponent(
 				: {}),
 		})),
 	},
-	{},
-	updatePlanDefinition,
+	() => BUILTIN_PRESENTERS,
 	tui,
 	process.cwd(),
 );

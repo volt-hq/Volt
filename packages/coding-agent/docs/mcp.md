@@ -1003,7 +1003,7 @@ Likely files:
 - `packages/coding-agent/src/core/mcp/gateway-tool.ts`
 - `packages/coding-agent/src/core/tools/index.ts`
 - `packages/coding-agent/src/core/agent-session.ts`
-- `packages/coding-agent/src/modes/interactive/components/tool-execution.ts`
+- `packages/coding-agent/src/core/tools/query-presenters.ts`
 
 ### 5. Risk metadata, audit, output store
 

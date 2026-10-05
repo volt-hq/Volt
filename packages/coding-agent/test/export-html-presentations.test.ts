@@ -12,6 +12,7 @@ import { presentSessionEntries } from "../src/core/export-html/index.ts";
 import { styledTextHtml, toolPresentationHtml, uiNodeHtml } from "../src/core/export-html/ui-node-html.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { BUILTIN_PRESENTERS } from "../src/core/tools/presenters.ts";
+import { HOST_UI_POLICY } from "../src/core/ui/presentation.ts";
 
 const XSS = `<script>alert("x")</script><img src=x onerror='y'>`;
 
@@ -106,6 +107,86 @@ describe("presentations in the HTML export", () => {
 		expect(presented?.title).toContain("&lt;script&gt;");
 		expect(presented?.expanded).toContain("&lt;script&gt;");
 		expect(presented?.expanded).toContain("second line");
-		expect(JSON.stringify(presented)).not.toContain("<script>");
+		const { text, ...html } = presented ?? { text: "" };
+		expect(JSON.stringify(html)).not.toContain("<script>");
+		// The session tree names the call by its title, as plain text the template escapes.
+		expect(text).toBe(`$ echo '${XSS}'`);
+	});
+
+	it("exports every tool call: one without a presenter generically, one its presentation hides as nothing", async () => {
+		const session = SessionManager.inMemory("/workspace");
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "toolCall", id: "custom", name: "custom_tool", arguments: { note: XSS } },
+				{ type: "toolCall", id: "quiet", name: "quiet_tool", arguments: {} },
+			],
+			api: "faux",
+			provider: "faux",
+			model: "faux",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		};
+		await session.logWriter.appendMessage(assistant);
+		await session.logWriter.appendMessage({
+			role: "toolResult",
+			toolCallId: "custom",
+			toolName: "custom_tool",
+			content: [{ type: "text", text: "custom output" }],
+			isError: false,
+			timestamp: 2,
+		});
+		const presenters = {
+			generation: 0,
+			tool: (name: string) =>
+				name === "quiet_tool"
+					? { present: () => ({ title: "quiet", hidden: true }), policy: HOST_UI_POLICY }
+					: BUILTIN_PRESENTERS.tool(name),
+			message: BUILTIN_PRESENTERS.message,
+		};
+		const { presentedTools } = presentSessionEntries(session.getEntries(), presenters, "/workspace");
+		expect(presentedTools?.custom?.title).toContain("custom_tool");
+		expect(presentedTools?.custom?.expanded).toContain("custom output");
+		expect(presentedTools?.custom?.expanded).toContain("&lt;script&gt;");
+		expect(presentedTools?.quiet).toBeNull();
+	});
+
+	it("exports the host's work notices and reviews as their presentations", async () => {
+		const session = SessionManager.inMemory("/workspace");
+		const notice = await session.logWriter.appendCustomMessageEntry(
+			"work_notice",
+			"Build (job job_1) completed.\n## Done\n- **ok**",
+			true,
+			{ workId: "job_1", kind: "job", title: "Build", outcome: "completed" },
+		);
+		const review = await session.logWriter.appendCustomMessageEntry("review", "Full review", true, {
+			summary: "Compact review",
+		});
+		const { presentedMessages } = presentSessionEntries(session.getEntries(), BUILTIN_PRESENTERS, "/workspace");
+		expect(presentedMessages?.[notice]?.expanded).toContain("Build (job job_1) completed.");
+		expect(presentedMessages?.[notice]?.expanded).toContain('class="ui-markdown"');
+		expect(presentedMessages?.[review]?.collapsed).toContain("Compact review");
+		expect(presentedMessages?.[review]?.expanded).toContain("Full review");
+	});
+
+	it("exports how long each timed step ran", () => {
+		const html = uiNodeHtml({
+			type: "progress",
+			kind: "steps",
+			steps: [
+				{ label: "first", status: "done", startedAt: 1_000, endedAt: 3_500 },
+				{ label: "second", status: "active", startedAt: 1_000 },
+			],
+		});
+		expect(html).toContain('[done] first <span class="ui-token-muted">2.5s</span>');
+		expect(html).toContain("[active] second</div>");
 	});
 });

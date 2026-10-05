@@ -145,12 +145,12 @@ describe("background jobs on the protocol", () => {
 		};
 
 		const result = project(resultId);
-		expect(result.view).toMatchObject({
-			args: { background: true },
-			details: { job: { workId: job.id, status: "running" } },
-			summary: `Background job ${job.id}: running (snapshot)`,
-		});
-		expect(JSON.stringify(result.view?.details)).not.toContain("/repo/test");
+		// The call presents as the job card it started: the job's id and state when it started.
+		expect(result.view).toMatchObject({ role: "tool", toolName: "bash", text: "$ do work (completed)" });
+		const card = JSON.stringify(result.view?.presentation);
+		expect(card).toContain(job.id);
+		expect(card).toContain("Started");
+		expect(card).not.toContain("/repo/test");
 		expect(project(noticeId).view).toMatchObject({
 			role: "system",
 			text: `/workspace/test (job ${job.id}) completed.`,

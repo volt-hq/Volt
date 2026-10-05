@@ -31,7 +31,6 @@
 			"assistantContentMaxUtf8Bytes": 262144,
 			"assistantSnapshotMaxBytes": 393216,
 			"toolArgsMaxSerializedBytes": 12288,
-			"toolDetailsMaxSerializedBytes": 20480,
 			"textMaxScalars": 12000
 		},
 		"jsonl": {
@@ -10278,9 +10277,6 @@
 							}
 						]
 					}
-				},
-				"details": {
-					"x-volt-opaque": "tool-specific JSON details, until tools present UiNode data (Phase 5)"
 				}
 			},
 			"additionalProperties": false
@@ -20041,24 +20037,6 @@
 						"failed"
 					]
 				},
-				"summary": {
-					"type": "string"
-				},
-				"path": {
-					"type": "string"
-				},
-				"args": {
-					"$ref": "#/$defs/ExtensionIntentInput"
-				},
-				"details": {
-					"$ref": "#/$defs/ExtensionIntentInput"
-				},
-				"output": {
-					"type": "string"
-				},
-				"outputTruncated": {
-					"type": "boolean"
-				},
 				"parts": {
 					"type": "array",
 					"items": {
@@ -20067,12 +20045,6 @@
 				},
 				"stopReason": {
 					"$ref": "#/$defs/RpcStopReason"
-				},
-				"diffPreview": {
-					"type": "string"
-				},
-				"patchPreview": {
-					"type": "string"
 				},
 				"presentation": {
 					"anyOf": [

@@ -6,6 +6,7 @@ import type { ExtensionUIContext } from "../../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { initTheme, theme } from "../../src/core/theme/runtime.ts";
 import type { UserInputResponse } from "../../src/core/user-input.ts";
+import { promptUserInput } from "../../src/modes/interactive/components/user-input-dialog.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -54,6 +55,8 @@ describe("native structured questions", () => {
 			id: "tui",
 			mode: "tui",
 			ui: { ...harness.session.extensionRunner.getUIContext(), custom },
+			// As the TUI's surface asks: in a dialog its terminal mounts.
+			userInput: (asked, signal) => promptUserInput(custom, asked, signal),
 		});
 		await attachment.ready;
 		return attachment.detach;

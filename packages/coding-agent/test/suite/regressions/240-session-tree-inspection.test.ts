@@ -265,12 +265,8 @@ test("tool results resolve reused tool-call ids within each branch", async () =>
 	];
 	for (const [entryId, path, onActiveBranch] of expected) {
 		expect(active.has(entryId)).toBe(onActiveBranch);
-		expect(viewOf(byId.get(entryId))).toMatchObject({
-			role: "tool",
-			path,
-			args: { path },
-			summary: `Read ${path} (completed)`,
-		});
+		// Each result presents with the call of its own branch.
+		expect(viewOf(byId.get(entryId))).toMatchObject({ role: "tool", text: `read ${path} (completed)` });
 	}
 
 	// A page holding only the result still resolves its call from the log.
@@ -281,11 +277,7 @@ test("tool results resolve reused tool-call ids within each branch", async () =>
 	expect(resultPage.entries).toEqual([
 		expect.objectContaining({
 			id: branchBResultId,
-			view: expect.objectContaining({
-				path: "branch-b.txt",
-				args: { path: "branch-b.txt" },
-				summary: "Read branch-b.txt (completed)",
-			}),
+			view: expect.objectContaining({ text: "read branch-b.txt (completed)" }),
 		}),
 	]);
 });

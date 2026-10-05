@@ -23,7 +23,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { emptyLiveFold, foldLiveFrame, type LiveFoldState } from "../../src/core/protocol/live-fold.ts";
 import { type ProfileLimits, remoteProfile } from "../../src/core/protocol/profiles.ts";
-import { projectSubagentDetails } from "../../src/core/protocol/projection/tool-view.ts";
 import type { ProtocolConnection } from "../../src/core/protocol/server/connection.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";
 import type { IrohBiStreamLike } from "../../src/core/protocol/transport/iroh-transport.ts";
@@ -406,10 +405,7 @@ describe("remote profile bounds", () => {
 				op: "update",
 				toolCallId: "t-1",
 				toolName: "read",
-				partial: {
-					content: [{ type: "text", text: `${"o".repeat(5_000)}END` }],
-					details: { log: "d".repeat(50_000) },
-				},
+				partial: { content: [{ type: "text", text: `${"o".repeat(5_000)}END` }] },
 			},
 		]);
 		live.set("ext_status/ci/big", { kind: "ext_status", extension: "ci", text: "s".repeat(200_000) });
@@ -433,8 +429,7 @@ describe("remote profile bounds", () => {
 		expect(jsonBytes(start.args)).toBeLessThanOrEqual(12 * 1024);
 		const update = items.find((item) => item.type === "tool" && item.op === "update");
 		if (update?.type !== "tool" || !update.partial) throw new Error("Expected the tool update");
-		expect(update.partial.content).toEqual([{ type: "text", text: `${"o".repeat(97)}END` }]);
-		expect(jsonBytes(update.partial.details)).toBeLessThanOrEqual(20 * 1024);
+		expect(update.partial).toEqual({ content: [{ type: "text", text: `${"o".repeat(97)}END` }] });
 
 		const status = items.find((item) => item.type === "set" && item.key === "ext_status/ci/big");
 		if (status?.type !== "set" || status.value.kind !== "ext_status") throw new Error("Expected the status");
@@ -516,38 +511,6 @@ describe("remote profile bounds", () => {
 		}
 		expect([...fold.values]).toEqual([...conversation.liveState.snapshot().values]);
 		expect(fold.values.get("ext_status/ci/final")).toEqual({ kind: "ext_status", extension: "ci", text: "final" });
-	});
-
-	it("projects subagent tool details within their array and node budgets, never reading past them", () => {
-		const wide = (label: string): Array<Record<string, unknown>> => {
-			const value = Array.from({ length: 64 }, (_, index) => ({
-				subagentId: `${label}-${index}`,
-				status: "running",
-			}));
-			value.length = 10_000;
-			Object.defineProperty(value, 64, {
-				get: () => {
-					throw new Error(`${label} omitted tail was traversed`);
-				},
-			});
-			return value;
-		};
-		const tasks: Array<Record<string, unknown>> = [];
-		tasks.length = 1;
-		Object.defineProperty(tasks, 0, {
-			get: () => {
-				throw new Error("global subagent node budget was exceeded");
-			},
-		});
-
-		const projected = projectSubagentDetails({
-			childSessions: wide("session"),
-			children: wide("child"),
-			tasks,
-		});
-		expect(projected?.childSessions).toHaveLength(64);
-		expect(projected?.children).toHaveLength(64);
-		expect(projected).not.toHaveProperty("tasks");
 	});
 
 	it("leaves the conversation when the phone ends its stream, while a host write is still held", async () => {

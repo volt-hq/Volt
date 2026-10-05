@@ -14,8 +14,8 @@ import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
 import { PRESENTATION_MAX_SERIALIZED_BYTES, type ToolPresentation } from "@hansjm10/volt-protocol";
 import { type Component, createRenderFrame, getCapabilities, type RenderFrame, type TUI } from "@hansjm10/volt-tui";
 import {
+	type PresenterSet,
 	presentToolCall,
-	type ResolvedToolPresenter,
 	type ToolPresentInput,
 	type ToolPresentResult,
 } from "../../../core/ui/presentation.ts";
@@ -23,25 +23,6 @@ import { convertToPng } from "../../../utils/image-convert.ts";
 import type { UiIntentSink } from "../ui-node/intents.ts";
 import { ToolCard, type ToolCardImage, type ToolCardState, type ToolCardWork } from "../ui-node/tool-card.ts";
 import { StreamingRenderCoalescer } from "./streaming-render-coalescer.ts";
-
-/** What a tool row in the transcript does, whichever way it draws its call. */
-export interface ToolRow extends Component {
-	updateArgs(args: unknown): void;
-	markExecutionStarted(): void;
-	setArgsComplete(): void;
-	updateResult(
-		result: {
-			content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-			details?: unknown;
-			isError: boolean;
-		},
-		isPartial?: boolean,
-	): void;
-	setExpanded(expanded: boolean): void;
-	setShowImages(show: boolean): void;
-	setImageWidthCells(width: number): void;
-	dispose(): void;
-}
 
 export interface PresentedToolOptions {
 	readonly showImages?: boolean;
@@ -71,10 +52,15 @@ function resultContent(content: ReadonlyArray<{ type: string; text?: string; dat
 	});
 }
 
-/** One tool call drawn from its presentation. */
-export class PresentedToolComponent implements ToolRow {
+/**
+ * One tool call drawn from its presentation. The call presents with the
+ * presenters `presenters()` returns when it presents: after extensions are
+ * enabled or disabled, `refreshPresentation()` presents it again, so a
+ * disabled extension's presenter no longer draws it.
+ */
+export class PresentedToolComponent implements Component {
 	private readonly toolName: string;
-	private readonly presenter: ResolvedToolPresenter | undefined;
+	private readonly presenters: () => PresenterSet;
 	private readonly ui: TUI;
 	private readonly cwd: string;
 	private readonly options: PresentedToolOptions;
@@ -102,14 +88,14 @@ export class PresentedToolComponent implements ToolRow {
 	constructor(
 		toolName: string,
 		args: unknown,
-		presenter: ResolvedToolPresenter | undefined,
+		presenters: () => PresenterSet,
 		ui: TUI,
 		cwd: string,
 		options: PresentedToolOptions = {},
 	) {
 		this.toolName = toolName;
 		this.args = isRecord(args) ? args : {};
-		this.presenter = presenter;
+		this.presenters = presenters;
 		this.ui = ui;
 		this.cwd = cwd;
 		this.options = options;
@@ -190,7 +176,14 @@ export class PresentedToolComponent implements ToolRow {
 		this.replaceCard();
 	}
 
-	/** Present again and re-read the call's work: its job changed. */
+	/** Present the call again with the presenters there are now: extensions were enabled or disabled. */
+	refreshPresentation(): void {
+		if (this.disposed) return;
+		this.present();
+		this.sync();
+	}
+
+	/** Re-read the call's work: its job changed. */
 	invalidate(): void {
 		this.card.invalidate();
 		this.sync();
@@ -229,7 +222,12 @@ export class PresentedToolComponent implements ToolRow {
 			...(this.result === undefined ? {} : { result: this.result }),
 			cwd: this.cwd,
 		};
-		this.presentation = presentToolCall(this.presenter, this.toolName, input, PRESENTATION_MAX_SERIALIZED_BYTES);
+		this.presentation = presentToolCall(
+			this.presenters().tool(this.toolName),
+			this.toolName,
+			input,
+			PRESENTATION_MAX_SERIALIZED_BYTES,
+		);
 	}
 
 	private createCard(): ToolCard {

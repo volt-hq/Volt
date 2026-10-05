@@ -92,7 +92,6 @@ export class SessionJobs {
 	 */
 	wrapNativeTool(name: JobToolName, definition: ToolDef): ToolDef {
 		const wrapped = withBackgroundJobs(definition, {
-			jobs: this.runtime,
 			start: async (job) => {
 				this.host.admissionGate.assertOpen();
 				if (!this.host.isToolGranted("jobs") || !this.host.isToolGranted(job.tool)) {

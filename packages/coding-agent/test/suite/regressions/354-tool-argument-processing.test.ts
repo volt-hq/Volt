@@ -1,15 +1,30 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { Text, type TUI } from "@hansjm10/volt-tui";
-import { Type } from "typebox";
+import type { TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { ToolDefinition } from "../../../src/core/extensions/types.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { createEditTool } from "../../../src/core/tools/edit.ts";
+import { HOST_UI_POLICY, type ToolPresenter } from "../../../src/core/ui/presentation.ts";
+import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { STREAMING_RENDER_INTERVAL_MS } from "../../../src/modes/interactive/components/streaming-render-coalescer.ts";
-import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { createHarness } from "../harness.ts";
+
+/** A tool row presenting with `present`. */
+function row(present: ToolPresenter): PresentedToolComponent {
+	const presenters = {
+		generation: 0,
+		tool: () => ({ present, policy: HOST_UI_POLICY }),
+		message: () => undefined,
+	};
+	return new PresentedToolComponent(
+		"preview",
+		{},
+		() => presenters,
+		{ requestRender: () => {} } as unknown as TUI,
+		process.cwd(),
+	);
+}
 
 beforeAll(() => initTheme("dark"));
 afterEach(() => vi.useRealTimers());
@@ -46,40 +61,24 @@ describe("tool argument processing (#354)", () => {
 		}
 	});
 
-	it("bounds preview renders per tool and flushes the latest arguments at completion", () => {
+	it("bounds preview presentations per tool and flushes the latest arguments at completion", () => {
 		vi.useFakeTimers();
-		const rendered: unknown[] = [];
-		const definition: ToolDefinition = {
-			name: "preview",
-			label: "preview",
-			description: "preview",
-			parameters: Type.Object({ text: Type.String() }),
-			execute: async () => ({ content: [], details: {} }),
-			renderCall: (args) => {
-				rendered.push(args);
-				return new Text("preview", 0, 0);
-			},
-		};
-		const component = new ToolExecutionComponent(
-			"preview",
-			"call-1",
-			{},
-			{},
-			definition,
-			{ requestRender: () => {} } as unknown as TUI,
-			process.cwd(),
-		);
+		const presented: unknown[] = [];
+		const component = row((input) => {
+			presented.push(input.args);
+			return { title: "preview" };
+		});
 		try {
 			for (let index = 0; index < 1000; index++) component.updateArgs({ text: String(index) });
-			expect(rendered).toEqual([{}, { text: "0" }]);
+			expect(presented).toEqual([{}, { text: "0" }]);
 			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS);
-			expect(rendered.at(-1)).toEqual({ text: "999" });
+			expect(presented.at(-1)).toEqual({ text: "999" });
 			component.updateArgs({ text: "final" });
 			component.setArgsComplete();
-			expect(rendered.at(-1)).toEqual({ text: "final" });
-			const count = rendered.length;
+			expect(presented.at(-1)).toEqual({ text: "final" });
+			const count = presented.length;
 			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
-			expect(rendered).toHaveLength(count);
+			expect(presented).toHaveLength(count);
 			expect(vi.getTimerCount()).toBe(0);
 		} finally {
 			component.dispose();
@@ -88,32 +87,16 @@ describe("tool argument processing (#354)", () => {
 
 	it("cancels queued previews on disposal and shows failures immediately", () => {
 		vi.useFakeTimers();
-		const renderCall = vi.fn(() => new Text("preview", 0, 0));
-		const definition: ToolDefinition = {
-			name: "preview",
-			label: "preview",
-			description: "preview",
-			parameters: Type.Object({}),
-			execute: async () => ({ content: [], details: {} }),
-			renderCall,
-		};
-		const component = new ToolExecutionComponent(
-			"preview",
-			"call-1",
-			{},
-			{},
-			definition,
-			{ requestRender: () => {} } as unknown as TUI,
-			process.cwd(),
-		);
+		const present = vi.fn<ToolPresenter>(() => ({ title: "preview" }));
+		const component = row(present);
 		component.updateArgs({ step: 1 });
 		component.updateArgs({ step: 2 });
 		component.updateResult({ content: [{ type: "text", text: "Stopped" }], isError: true });
 		expect(component.render(80).lines.join("\n")).toContain("[failure]");
 		component.dispose();
-		const count = renderCall.mock.calls.length;
+		const count = present.mock.calls.length;
 		vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
-		expect(renderCall).toHaveBeenCalledTimes(count);
+		expect(present).toHaveBeenCalledTimes(count);
 		expect(vi.getTimerCount()).toBe(0);
 	});
 });

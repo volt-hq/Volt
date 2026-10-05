@@ -14,79 +14,48 @@ import type { UiNode, UiNodeStyledText, UiNodeToken } from "@hansjm10/volt-proto
 import * as Diff from "diff";
 import { getReadmePath } from "../../config.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
-import { getLanguageFromPath } from "../theme/runtime.ts";
+import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import type { UiStyledLine } from "../ui/ansi-tokens.ts";
-import {
-	HOST_UI_POLICY,
-	outputLines,
-	type PresenterSet,
-	resultText,
-	type ToolPresenter,
-	type ToolPresentInput,
-} from "../ui/presentation.ts";
+import { BUILTIN_MESSAGE_PRESENTERS } from "../ui/message-presenters.ts";
+import { HOST_UI_POLICY, outputLines, type PresenterSet, resultText, type ToolPresenter } from "../ui/presentation.ts";
 import { resolveToCwd } from "./path-utils.ts";
+import { presentPlanning } from "./planning-presenters.ts";
+import {
+	type Args,
+	activityOf,
+	codeLines,
+	codeNode,
+	errorNode,
+	isFailed,
+	isRecord,
+	moreLines,
+	oneLine,
+	plainText,
+	stringArg,
+	TITLE_TEXT_MAX_CHARS,
+	textNode,
+	titleOf,
+} from "./present-utils.ts";
+import {
+	presentFind,
+	presentGrep,
+	presentInspect,
+	presentLs,
+	presentLsp,
+	presentMcp,
+	presentRequestUserInput,
+	presentWebFetch,
+	presentWebSearch,
+} from "./query-presenters.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize } from "./truncate.ts";
-
-type Args = Record<string, unknown>;
+import { presentJobs, presentSubagent, presentSubagentRegistry } from "./work-presenters.ts";
 
 /** Lines bash shows collapsed: the newest output. */
 const BASH_SUMMARY_LINES = 5;
 /** Lines read and write show collapsed: the start of the file. */
 const FILE_SUMMARY_LINES = 10;
-/** Longest one-line command a title shows whole; a longer one is also shown in full below. */
-const TITLE_COMMAND_MAX_CHARS = 120;
 /** The bash tool's own bound on a requested timeout, in seconds. */
 const MAX_TIMEOUT_SECONDS = 3600;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function stringArg(args: Args, ...keys: string[]): string | undefined {
-	for (const key of keys) {
-		const value = args[key];
-		if (typeof value === "string") return value;
-	}
-	return undefined;
-}
-
-function oneLine(text: string, max = TITLE_COMMAND_MAX_CHARS): string {
-	const line = text.replace(/\s+/g, " ").trim();
-	return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
-}
-
-function plainText(line: UiStyledLine): string {
-	return typeof line === "string" ? line : line.map((span) => span.text).join("");
-}
-
-/** A tool's name and target as a title: the name bold, the target accented. */
-function titleOf(name: string, target: string | undefined, suffix?: UiNodeStyledText): UiNodeStyledText {
-	const spans: Exclude<UiNodeStyledText, string> = [{ text: name, bold: true }];
-	spans.push(target === undefined ? { text: " …", token: "muted" } : { text: ` ${target}`, token: "accent" });
-	if (suffix !== undefined) spans.push(...(typeof suffix === "string" ? [{ text: suffix }] : suffix));
-	return spans;
-}
-
-function textNode(key: string, text: UiNodeStyledText, token?: UiNodeToken): UiNode {
-	return { type: "text", key, text, ...(token === undefined ? {} : { token }) };
-}
-
-/** The error a failed call reported, as one node. */
-function errorNode(input: ToolPresentInput): UiNode[] {
-	const text = resultText(input.result).trim();
-	return text ? [textNode("error", text, "error")] : [];
-}
-
-/** What a file tool is doing: generating its arguments, waiting to run, or running; nothing once done. */
-function activityOf(input: ToolPresentInput, generating: string, running: string): string | undefined {
-	if (input.state === "running") return running;
-	if (input.state === "pending") return input.argsComplete ? "Waiting to run" : generating;
-	return undefined;
-}
-
-function isFailed(input: ToolPresentInput): boolean {
-	return input.state === "done" && input.result?.isError === true;
-}
 
 // ============================================================================
 // bash
@@ -162,7 +131,7 @@ export const presentBash: ToolPresenter = (input) => {
 		...(timeout === undefined ? [] : [{ text: ` (timeout ${timeout}s)`, token: "muted" as const }]),
 	];
 	const commandNode: UiNode[] =
-		command !== undefined && (command.includes("\n") || command.trim().length > TITLE_COMMAND_MAX_CHARS)
+		command !== undefined && (command.includes("\n") || command.trim().length > TITLE_TEXT_MAX_CHARS)
 			? [{ type: "code", key: "command", language: "bash", code: command }]
 			: [];
 	const result = input.result;
@@ -259,23 +228,6 @@ function lineRange(args: Args): string {
 	if (offset === undefined && limit === undefined) return "";
 	const start = offset ?? 1;
 	return `:${start}${limit === undefined ? "" : `-${start + limit - 1}`}`;
-}
-
-/** Text as code lines: tabs as spaces, carriage returns dropped, no trailing blank lines. */
-function codeLines(text: string): string[] {
-	const lines = text.replace(/\r/g, "").replace(/\t/g, "   ").split("\n");
-	while (lines.length > 0 && lines.at(-1) === "") lines.pop();
-	return lines;
-}
-
-function codeNode(key: string, lines: readonly string[], path: string | undefined): UiNode {
-	const language = path === undefined ? undefined : getLanguageFromPath(path);
-	return { type: "code", key, ...(language === undefined ? {} : { language }), code: lines.join("\n") };
-}
-
-/** "N more lines" under a collapsed file. */
-function moreLines(shown: number, total: number, suffix = ""): UiNode[] {
-	return total > shown ? [textNode("more", `… ${total - shown} more lines${suffix}`, "muted")] : [];
 }
 
 function readTruncation(details: unknown): UiNode[] {
@@ -546,8 +498,10 @@ function jobOf(details: unknown): { id: string; tool: string; status: string } |
 /**
  * The presenter of a tool the background decorator wraps: a call without
  * `background: true` presents as the tool does; one with it keeps the tool's
- * title and shows the job it started as a card. The job's progress is the
- * work item's, which clients show with the call.
+ * title and shows the job it started as a card, or how it failed to start. A
+ * background call the tool answered itself, without a job, presents as the
+ * tool does. The job's progress is the work item's, which clients show with
+ * the call.
  */
 export function presentBackground(inner: ToolPresenter): ToolPresenter {
 	return (input) => {
@@ -559,6 +513,8 @@ export function presentBackground(inner: ToolPresenter): ToolPresenter {
 			return { title, activity: input.state === "running" ? "Starting background job" : "Preparing background job" };
 		}
 		const job = jobOf(input.result?.details);
+		// A call the tool answered without starting a job (a subagent spawn's confirmation preflight) presents as the tool does.
+		if (!job && input.result?.isError !== true) return inner({ ...input, args });
 		if (!job || input.result?.isError) {
 			const output = resultText(input.result).trim();
 			const failure = [
@@ -606,14 +562,33 @@ export const BUILTIN_TOOL_PRESENTERS: ReadonlyMap<string, ToolPresenter> = new M
 	["read", presentRead],
 	["write", presentWrite],
 	["edit", presentEdit],
+	["grep", presentGrep],
+	["find", presentFind],
+	["ls", presentLs],
+	["lsp", presentLsp],
+	["inspect", presentInspect],
+	["web_search", presentWebSearch],
+	["web_fetch", presentWebFetch],
+	["mcp", presentMcp],
+	["request_user_input", presentRequestUserInput],
+	["jobs", presentJobs],
+	["subagent", presentBackground(presentSubagent)],
+	[SUBAGENT_REGISTRY_TOOL_NAME, presentSubagentRegistry],
+	["update_plan", presentPlanning("update_plan")],
+	["submit_plan", presentPlanning("submit_plan")],
+	["update_plan_progress", presentPlanning("update_plan_progress")],
+	["request_replan", presentPlanning("request_replan")],
 ]);
 
-/** The presenters of a log read without a runtime: the built-in tools'. */
+/** The presenters of a log read without a runtime: the built-in tools' and the host's message types'. */
 export const BUILTIN_PRESENTERS: PresenterSet = Object.freeze({
 	generation: 0,
 	tool: (toolName: string) => {
 		const present = BUILTIN_TOOL_PRESENTERS.get(toolName);
 		return present === undefined ? undefined : { present, policy: HOST_UI_POLICY };
 	},
-	message: () => undefined,
+	message: (customType: string) => {
+		const present = BUILTIN_MESSAGE_PRESENTERS.get(customType);
+		return present === undefined ? undefined : { present, policy: HOST_UI_POLICY };
+	},
 });

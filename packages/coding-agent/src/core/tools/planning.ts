@@ -1,19 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { type Component, createRenderFrame, type RenderFrame, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
-import { type Static, Type } from "typebox";
-import { keyText } from "../../modes/interactive/components/keybinding-hints.ts";
-import {
-	appendWrappedPlanLine,
-	getPlanProgress,
-	planPhaseLabel,
-	renderPlanContentLines,
-} from "../../modes/interactive/components/plan-content.ts";
-import type {
-	AgentToolResult,
-	ToolDefinition,
-	ToolRenderContext,
-	ToolRenderResultOptions,
-} from "../extensions/types.ts";
+import { Type } from "typebox";
+import type { ToolDefinition } from "../extensions/types.ts";
 import {
 	derivePlanStepStatus,
 	type PlanningState,
@@ -22,8 +9,7 @@ import {
 	type PlanStepStatus,
 	type PlanSubstep,
 } from "../planning.ts";
-import type { Theme } from "../theme/runtime.ts";
-import { getTextOutput } from "./render-utils.ts";
+import { presentPlanning } from "./planning-presenters.ts";
 
 const planSubstepInputSchema = Type.Object(
 	{
@@ -157,206 +143,6 @@ function stateResultText(state: PlanningState): string {
 	});
 }
 
-class PlanningToolResultComponent implements Component {
-	private result: AgentToolResult<PlanningState>;
-	private expanded: boolean;
-	private currentTheme: Theme;
-	private isError: boolean;
-	private showImages: boolean;
-	private includePlanContext: boolean;
-
-	constructor(
-		result: AgentToolResult<PlanningState>,
-		expanded: boolean,
-		currentTheme: Theme,
-		isError: boolean,
-		showImages: boolean,
-		includePlanContext: boolean,
-	) {
-		this.result = result;
-		this.expanded = expanded;
-		this.currentTheme = currentTheme;
-		this.isError = isError;
-		this.showImages = showImages;
-		this.includePlanContext = includePlanContext;
-	}
-
-	setState(
-		result: AgentToolResult<PlanningState>,
-		expanded: boolean,
-		currentTheme: Theme,
-		isError: boolean,
-		showImages: boolean,
-		includePlanContext: boolean,
-	): void {
-		this.result = result;
-		this.expanded = expanded;
-		this.currentTheme = currentTheme;
-		this.isError = isError;
-		this.showImages = showImages;
-		this.includePlanContext = includePlanContext;
-	}
-
-	render(width: number): RenderFrame {
-		if (width <= 0) return createRenderFrame([]);
-		if (this.isError) {
-			const output = getTextOutput(this.result, this.showImages) || "Planning tool failed";
-			const lines: string[] = [];
-			appendWrappedPlanLine(lines, "", this.currentTheme.fg("error", output), width);
-			return createRenderFrame(lines);
-		}
-
-		if (!this.expanded && !this.includePlanContext) return createRenderFrame([]);
-
-		const planning = this.result.details;
-		if (!planning?.plan) {
-			return createRenderFrame([truncateToWidth(this.currentTheme.fg("muted", "No active plan"), width, "")]);
-		}
-
-		const plan = planning.plan;
-		const progress = getPlanProgress(plan);
-		const phaseColor =
-			plan.phase === "ready"
-				? "warning"
-				: plan.phase === "completed"
-					? "success"
-					: plan.phase === "draft"
-						? "muted"
-						: "accent";
-		const status = `${this.currentTheme.bold(this.currentTheme.fg(phaseColor, planPhaseLabel(plan)))}${this.currentTheme.fg(
-			"dim",
-			this.expanded
-				? ` · revision ${plan.revision}`
-				: ` · revision ${plan.revision} · ${progress.completed}/${progress.total} complete`,
-		)}`;
-		const lines: string[] = [];
-		const expandKey = keyText("app.tools.expand");
-		const expandHint = expandKey ? this.currentTheme.fg("dim", ` · ${expandKey} details`) : "";
-		appendWrappedPlanLine(lines, "", this.expanded ? status : `${status}${expandHint}`, width);
-		if (this.expanded) {
-			if (this.includePlanContext) lines.push("");
-			lines.push(
-				...renderPlanContentLines(plan, width, this.currentTheme, {
-					includeTitle: this.includePlanContext,
-					includeSummary: this.includePlanContext,
-					includeChecklistHeader: true,
-				}),
-			);
-		}
-		return createRenderFrame(lines);
-	}
-
-	invalidate(): void {
-		// Theme and state are refreshed through setState when the tool row invalidates.
-	}
-}
-
-type PlanningResultContext = Pick<ToolRenderContext<unknown, unknown>, "isError" | "lastComponent" | "showImages">;
-
-function renderPlanningResult(
-	result: AgentToolResult<PlanningState>,
-	options: ToolRenderResultOptions,
-	currentTheme: Theme,
-	context: PlanningResultContext,
-	includePlanContext = true,
-): Component {
-	const component =
-		context.lastComponent instanceof PlanningToolResultComponent
-			? context.lastComponent
-			: new PlanningToolResultComponent(
-					result,
-					options.expanded,
-					currentTheme,
-					context.isError,
-					context.showImages,
-					includePlanContext,
-				);
-	component.setState(result, options.expanded, currentTheme, context.isError, context.showImages, includePlanContext);
-	return component;
-}
-
-class PlanningToolCallComponent implements Component {
-	private label: string;
-	private detail: string | undefined;
-	private expanded: boolean;
-	private currentTheme: Theme;
-
-	constructor(label: string, detail: string | undefined, expanded: boolean, currentTheme: Theme) {
-		this.label = label;
-		this.detail = detail;
-		this.expanded = expanded;
-		this.currentTheme = currentTheme;
-	}
-
-	setState(label: string, detail: string | undefined, expanded: boolean, currentTheme: Theme): void {
-		this.label = label;
-		this.detail = detail;
-		this.expanded = expanded;
-		this.currentTheme = currentTheme;
-	}
-
-	render(width: number): RenderFrame {
-		if (width <= 0) return createRenderFrame([]);
-		const label = this.currentTheme.fg("toolTitle", this.currentTheme.bold(this.label));
-		if (!this.detail) return createRenderFrame([truncateToWidth(label, width, "")]);
-		const inline = `${label}${this.currentTheme.fg("muted", ` · ${this.detail}`)}`;
-		if (!this.expanded || visibleWidth(inline) + " [success]".length <= width) {
-			return createRenderFrame([truncateToWidth(inline, width)]);
-		}
-		const lines = [truncateToWidth(label, width, "")];
-		appendWrappedPlanLine(lines, "  ", this.currentTheme.fg("muted", this.detail), width);
-		return createRenderFrame(lines);
-	}
-
-	invalidate(): void {
-		// Theme and state are refreshed through setState when the tool row invalidates.
-	}
-}
-
-function renderPlanningCall(
-	label: string,
-	detail: string | undefined,
-	expanded: boolean,
-	currentTheme: Theme,
-	lastComponent: Component | undefined,
-): Component {
-	const component =
-		lastComponent instanceof PlanningToolCallComponent
-			? lastComponent
-			: new PlanningToolCallComponent(label, detail, expanded, currentTheme);
-	component.setState(label, detail, expanded, currentTheme);
-	return component;
-}
-
-function updatePlanCallDetail(args: Partial<Static<typeof updatePlanSchema>> | undefined): string | undefined {
-	if (!Array.isArray(args?.steps)) return undefined;
-	const outcomeCount = args.steps.length;
-	const taskCount = args.steps.reduce(
-		(count, step) => count + (Array.isArray(step?.substeps) ? step.substeps.length : 1),
-		0,
-	);
-	const hasSubsteps = args.steps.some((step) => Array.isArray(step?.substeps));
-	return hasSubsteps
-		? `${outcomeCount} ${outcomeCount === 1 ? "outcome" : "outcomes"} · ${taskCount} ${taskCount === 1 ? "task" : "tasks"}`
-		: `${outcomeCount} ${outcomeCount === 1 ? "step" : "steps"}`;
-}
-
-function progressCallDetail(args: Partial<Static<typeof updatePlanProgressSchema>> | undefined): string | undefined {
-	if (!Array.isArray(args?.updates)) return undefined;
-	const counts = { pending: 0, in_progress: 0, completed: 0 };
-	for (const update of args.updates) {
-		if (update?.status === "pending" || update?.status === "in_progress" || update?.status === "completed") {
-			counts[update.status] += 1;
-		}
-	}
-	const labels = [
-		counts.completed > 0 ? `${counts.completed} completed` : undefined,
-		counts.in_progress > 0 ? `${counts.in_progress} in progress` : undefined,
-		counts.pending > 0 ? `${counts.pending} pending` : undefined,
-	].filter((value): value is string => value !== undefined);
-	return labels.join(" · ") || `${args.updates.length} ${args.updates.length === 1 ? "update" : "updates"}`;
-}
-
 export function createPlanningToolDefinitions(
 	controller: PlanningToolController,
 ): [
@@ -373,18 +159,7 @@ export function createPlanningToolDefinitions(
 				"Create or replace the current working draft after an initial orientation. The title, summary, and checklist form a handoff artifact that may be executed in a fresh session without the planning transcript. Keep them compact and decision-focused, explicitly name referenced reviews and findings only when they affect implementation, and revise them whenever material evidence changes the context, scope, approach, ordering, or verification. Use the fewest independently verifiable outcomes that preserve clear scope, add one level of executable substeps where useful, and allow large tasks as many items as required. Preserve canonical ids only for unchanged outcomes and substeps. Approved execution scope cannot be changed with this tool.",
 			promptSnippet: "Create or refine the self-contained working plan as research changes understanding",
 			parameters: updatePlanSchema,
-			renderCall(args, currentTheme, context) {
-				return renderPlanningCall(
-					"update plan",
-					updatePlanCallDetail(args as Partial<Static<typeof updatePlanSchema>> | undefined),
-					context.expanded,
-					currentTheme,
-					context.lastComponent,
-				);
-			},
-			renderResult(result, options, currentTheme, context) {
-				return renderPlanningResult(result, options, currentTheme, context, false);
-			},
+			present: presentPlanning("update_plan"),
 			async execute(_toolCallId, input) {
 				await controller.updatePlan({
 					...input,
@@ -416,17 +191,7 @@ export function createPlanningToolDefinitions(
 				"Finalize and submit a researched, decision-complete, scannable handoff artifact for user approval. Resolve discoverable facts, remove investigation-only steps, resolved questions, research chronology, and exhaustive inventories, and retain only findings and assumptions that affect implementation. Use independently verifiable outcomes with one level of executable substeps where useful; large tasks may use as many items as required. The submitted title, summary, and checklist must be sufficient for execution without the planning transcript. Provide the exact canonical plan id and revision plus a non-empty title and summary. This ends the planning run.",
 			promptSnippet: "Submit a self-contained, decision-complete plan for user approval",
 			parameters: submitPlanSchema,
-			renderCall(args, currentTheme, context) {
-				const title = typeof args?.title === "string" ? args.title.trim() : "";
-				return renderPlanningCall(
-					"submit plan",
-					title || undefined,
-					context.expanded,
-					currentTheme,
-					context.lastComponent,
-				);
-			},
-			renderResult: renderPlanningResult,
+			present: presentPlanning("submit_plan"),
 			async execute(_toolCallId, input) {
 				await controller.submitPlan({
 					planId: input.planId,
@@ -450,18 +215,7 @@ export function createPlanningToolDefinitions(
 				"Update only status and execution evidence for existing approved executable leaf ids. Mark work in_progress when starting it and completed once its required outcome and verification are supported by evidence, before moving to unrelated work; do not wait until the end. Batch related transitions or leaves genuinely completed together, not mechanical updates after every tool call. Group outcome status is derived from its substeps. The approved title, summary, outcome and substep text, order, hierarchy, and scope are immutable.",
 			promptSnippet: "Keep approved plan progress current as work starts and verified outcomes finish",
 			parameters: updatePlanProgressSchema,
-			renderCall(args, currentTheme, context) {
-				return renderPlanningCall(
-					"update plan progress",
-					progressCallDetail(args as Partial<Static<typeof updatePlanProgressSchema>> | undefined),
-					context.expanded,
-					currentTheme,
-					context.lastComponent,
-				);
-			},
-			renderResult(result, options, currentTheme, context) {
-				return renderPlanningResult(result, options, currentTheme, context, false);
-			},
+			present: presentPlanning("update_plan_progress"),
 			async execute(_toolCallId, input) {
 				const plan = await controller.updatePlanProgress({
 					planId: input.planId,
@@ -488,17 +242,7 @@ export function createPlanningToolDefinitions(
 				"Pause approved execution when implementation evidence requires a structural plan change. This returns the plan to draft, ends the execution run, and requires new user approval.",
 			promptSnippet: "Pause execution and request approval for a revised plan",
 			parameters: requestReplanSchema,
-			renderCall(args, currentTheme, context) {
-				const reason = typeof args?.reason === "string" ? args.reason.trim() : "";
-				return renderPlanningCall(
-					"request replan",
-					reason || undefined,
-					context.expanded,
-					currentTheme,
-					context.lastComponent,
-				);
-			},
-			renderResult: renderPlanningResult,
+			present: presentPlanning("request_replan"),
 			async execute(_toolCallId, input) {
 				await controller.requestReplan({
 					planId: input.planId,
