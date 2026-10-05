@@ -147,10 +147,7 @@ type EntryBody = ConversationLogEntryDraft extends infer T
 
 /** Core types a host may append directly; the rest have intents. */
 const HOST_APPENDABLE_CORE_TYPES: ReadonlyMap<string, LogEntryType> = new Map(
-	(["custom", "custom_message", "message", "subagent_spawn"] as const).map((type) => [
-		type,
-		CORE_LOG_ENTRY_TYPES[type],
-	]),
+	(["custom", "custom_message", "message"] as const).map((type) => [type, CORE_LOG_ENTRY_TYPES[type]]),
 );
 
 /** Core types `prepareDelivery` may commit with a delivery: the host-appendable ones and a planning snapshot. */
@@ -2329,8 +2326,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 
 	/**
 	 * Append host entries in one batch: registered product types, or core
-	 * `custom`, `custom_message`, `message`, `subagent_spawn`. Work entries are
-	 * rejected; `work` writes them.
+	 * `custom`, `custom_message`, or `message`. Work entries are rejected;
+	 * `work` writes them.
 	 */
 	async append(entries: readonly ConversationEntryInput[]): Promise<readonly ConversationLogEntry[]> {
 		this.assertActive();

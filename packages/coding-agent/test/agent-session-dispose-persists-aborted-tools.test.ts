@@ -89,7 +89,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		}
 	});
 
-	it("attaches child sessions from durable spawn edges to a dangling subagent call", async () => {
+	it("attaches child sessions from the call's subagent work to a dangling subagent call", async () => {
 		let toolStarted = false;
 		const harness = await createHarness({
 			responses: [
@@ -128,21 +128,29 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 				expect(hasPersistedToolCall).toBe(true);
 			});
 
-			// The real subagent tool records these at the publish commit point.
-			await harness.session.sessionWriter.appendSubagentSpawn({
-				toolCallId: "tc-subagent-1",
-				subagentId: "sa_one",
-				agent: "researcher",
-				childSessionId: "child-session-1",
-				requestKey: "rk-1",
+			// The real subagent tool starts each child as subagent work of the call.
+			const work = harness.session.work;
+			work.register({
+				kind: "subagent",
+				delivery: "none",
+				cancellable: true,
+				maxActive: 4,
+				title: () => "researcher",
 			});
-			await harness.session.sessionWriter.appendSubagentSpawn({
-				toolCallId: "tc-subagent-1",
-				subagentId: "sa_two",
-				agent: "researcher",
-				childSessionId: "child-session-2",
-				requestKey: "rk-1",
-			});
+			const runsUntilClosed = async (ctx: { signal: AbortSignal }) => {
+				await new Promise<void>((resolve) => ctx.signal.addEventListener("abort", () => resolve(), { once: true }));
+				return { outcome: "cancelled" as const };
+			};
+			for (const [workId, conversation] of [
+				["sa_one", "child-session-1"],
+				["sa_two", "child-session-2"],
+			] as const) {
+				await work.start("subagent", { agent: "researcher", task: workId }, runsUntilClosed, {
+					workId,
+					toolCallId: "tc-subagent-1",
+					child: { conversation },
+				});
+			}
 
 			harness.session.dispose();
 			await Promise.all([harness.session.waitForClosed(), promptPromise]);
@@ -156,21 +164,21 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 				isError: true,
 				details: {
 					mode: "parallel",
-					status: "aborted",
+					status: "cancelled",
 					childSessions: [
 						{
 							index: 0,
 							subagentId: "sa_one",
 							sessionId: "child-session-1",
 							agent: { name: "researcher" },
-							status: "aborted",
+							status: "cancelled",
 						},
 						{
 							index: 1,
 							subagentId: "sa_two",
 							sessionId: "child-session-2",
 							agent: { name: "researcher" },
-							status: "aborted",
+							status: "cancelled",
 						},
 					],
 				},

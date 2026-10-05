@@ -65,19 +65,6 @@ const PAYLOADS: { [K in CoreLogEntryTypeName]: Record<string, unknown> } = {
 	label: { targetId: "e1", label: "bookmark" },
 	session_info: { name: "Refactor" },
 	leaf: { targetId: null },
-	subagent_spawn: {
-		toolCallId: "call-1",
-		subagentId: "sa-1",
-		agent: "researcher",
-		childSessionId: "child-session",
-		childSessionRef: {
-			sessionDirectory: "/sessions/child",
-			storeId: "store",
-			sessionId: "child-session",
-			sessionGeneration: "generation",
-		},
-		requestKey: "request-1",
-	},
 	forked_from: { sessionId: "source-session", entryId: "e42" },
 	work_started: {
 		workId: "sa_1",
@@ -149,7 +136,6 @@ describe("log entry envelope", () => {
 			"client_input_queued",
 			"client_input_state",
 			"leaf",
-			"subagent_spawn",
 			"forked_from",
 			"work_started",
 			"work_checkpoint",

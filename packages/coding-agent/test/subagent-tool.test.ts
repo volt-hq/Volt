@@ -208,7 +208,7 @@ function createSubagentResult(options: {
 	}) as AgentMessage;
 	const status =
 		options.status ??
-		(options.stopReason === "error" ? "failed" : options.stopReason === "aborted" ? "aborted" : "completed");
+		(options.stopReason === "error" ? "failed" : options.stopReason === "aborted" ? "cancelled" : "completed");
 	const error = options.error ?? (status === "failed" ? options.errorMessage : undefined);
 	return {
 		id: options.id,
@@ -1094,14 +1094,14 @@ describe("subagent tool", () => {
 		expect(textFromResult(result)).toBe("(no output)");
 		expect(result.details).toMatchObject({
 			mode: "single",
-			status: "aborted",
+			status: "cancelled",
 			subagentId: runningHandle.id,
 			output: { text: "(no output)" },
-			childSessions: [{ status: "aborted" }],
+			childSessions: [{ status: "cancelled" }],
 		});
 		expect(result.details.error).toBeUndefined();
 		const activity = manager.listActivities().find((candidate) => candidate.id === runningHandle.id);
-		expect(activity).toMatchObject({ status: "aborted", abortRequested: true });
+		expect(activity).toMatchObject({ status: "cancelled", abortRequested: true });
 		expect(activity?.error).toBeUndefined();
 		expect(childAgentEnds.at(-1)?.messages.at(-1)).toMatchObject({
 			role: "assistant",
@@ -1109,7 +1109,7 @@ describe("subagent tool", () => {
 			error: { message: "overloaded_error" },
 		});
 		const registryRecord = manager.listDelegations().find((candidate) => candidate.id === runningHandle.id);
-		expect(registryRecord).toMatchObject({ status: "aborted" });
+		expect(registryRecord).toMatchObject({ status: "cancelled" });
 		expect(registryRecord?.error).toBeUndefined();
 	});
 
@@ -1417,7 +1417,7 @@ describe("subagent tool", () => {
 		expect(lastUpdate.details).toMatchObject({
 			mode: "parallel",
 			status: "completed",
-			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+			summary: { total: 2, completed: 2, failed: 0, cancelled: 0 },
 		});
 		expect(lastUpdate.details.tasks?.map((task) => task.agent.name)).toEqual(["first", "second"]);
 		expect(lastUpdate.details.childSessions?.map((child) => child.status)).toEqual(["completed", "completed"]);
@@ -1508,7 +1508,7 @@ describe("subagent tool", () => {
 		expect(lastUpdate.details).toMatchObject({
 			mode: "chain",
 			status: "completed",
-			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+			summary: { total: 2, completed: 2, failed: 0, cancelled: 0 },
 			childSessions: [
 				{ subagentId: "sa_first", sessionId: "session_first", status: "completed" },
 				{ subagentId: "sa_second", sessionId: "session_second", status: "completed" },
@@ -1685,7 +1685,7 @@ describe("subagent tool", () => {
 				details: {
 					mode: "list",
 					status: "completed",
-					summary: { total: 4, completed: 0, failed: 0, aborted: 0, running: 4 },
+					summary: { total: 4, completed: 0, failed: 0, cancelled: 0, running: 4 },
 				},
 			},
 			isError: false,
@@ -1791,7 +1791,7 @@ describe("subagent tool", () => {
 		expect(result.details).toMatchObject({
 			mode: "parallel",
 			status: "completed",
-			summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+			summary: { total: 2, completed: 2, failed: 0, cancelled: 0 },
 			childSessions: [
 				{ index: 0, subagentId: "sa_scout", sessionId: "session_scout", status: "completed" },
 				{ index: 1, subagentId: "sa_planner", sessionId: "session_planner", status: "completed" },
@@ -1939,7 +1939,7 @@ describe("subagent tool", () => {
 		expect(result.details).toMatchObject({
 			mode: "parallel",
 			status: "partial",
-			summary: { total: 2, completed: 1, failed: 1, aborted: 0 },
+			summary: { total: 2, completed: 1, failed: 1, cancelled: 0 },
 			tasks: [{ status: "completed" }, { status: "failed", error: { message: "child failed" } }],
 		});
 	});
@@ -2309,7 +2309,7 @@ describe("subagent tool", () => {
 		expect(result.details).toMatchObject({
 			mode: "chain",
 			status: "completed",
-			summary: { total: 3, completed: 3, failed: 0, aborted: 0 },
+			summary: { total: 3, completed: 3, failed: 0, cancelled: 0 },
 			childSessions: [
 				{ index: 0, subagentId: "sa_first", sessionId: "session_first", status: "completed" },
 				{ index: 1, subagentId: "sa_second", sessionId: "session_second", status: "completed" },
@@ -2583,7 +2583,7 @@ describe("subagent tool", () => {
 		expect(result.details).toMatchObject({
 			mode: "list",
 			status: "completed",
-			summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1 },
+			summary: { total: 2, completed: 1, failed: 0, cancelled: 0, running: 1 },
 		});
 	});
 

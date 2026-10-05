@@ -4,7 +4,12 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@hansjm10/volt-ai";
 import { AssistantMessageSchema } from "@hansjm10/volt-ai/schemas";
-import { LOG_ENTRY_ENVELOPE_KEYS, LOG_ENTRY_ID_MAX_CHARS, type LogEntryType } from "@hansjm10/volt-protocol/entries";
+import {
+	LOG_ENTRY_ENVELOPE_KEYS,
+	LOG_ENTRY_ID_MAX_CHARS,
+	type LogEntryType,
+	type WorkStartedEntryPayload,
+} from "@hansjm10/volt-protocol/entries";
 import { RpcGitContextSchema } from "@hansjm10/volt-protocol/git-context";
 import {
 	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
@@ -359,6 +364,11 @@ function validateWorkEntry(entry: Record<string, unknown>, type: WorkEntryPayloa
 	if (!Check(SESSION_ENTRY_TYPES[type].payload, payload)) fail("$", `invalid ${type} payload`);
 	const bounds = workPayloadBoundsError({ type, payload } as WorkEntryPayload);
 	if (bounds !== undefined) fail("$", bounds);
+	// A child's locator names the conversation the work runs in.
+	const child = type === "work_started" ? (payload as WorkStartedEntryPayload).child : undefined;
+	if (child?.ref !== undefined && child.ref.sessionId !== child.conversation) {
+		fail("$.child.ref.sessionId", "must match child.conversation");
+	}
 }
 
 function baseKeys(mode: "admission" | "persisted"): string[] {
@@ -484,19 +494,6 @@ function parseSessionEntry(
 			break;
 		case "leaf":
 			if (entry.targetId !== null) idValue(entry.targetId, "$.targetId");
-			break;
-		case "subagent_spawn":
-			idValue(entry.toolCallId, "$.toolCallId");
-			idValue(entry.subagentId, "$.subagentId");
-			nonEmptyString(entry.agent, "$.agent");
-			assertValidSessionIdValue(entry.childSessionId, "$.childSessionId");
-			idValue(entry.requestKey, "$.requestKey");
-			if (entry.childSessionRef !== undefined) {
-				validateSessionReference(entry.childSessionRef, "$.childSessionRef");
-				if ((entry.childSessionRef as SessionReference).sessionId !== entry.childSessionId) {
-					fail("$.childSessionRef.sessionId", "must match childSessionId");
-				}
-			}
 			break;
 		case "forked_from":
 			// Lineage is the first entry of its log: a root at ordinal 1.

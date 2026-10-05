@@ -50,7 +50,6 @@ const HIDDEN_BY_TRANSCRIPT: ReadonlySet<string> = new Set([
 	"client_input_queued",
 	"client_input_state",
 	"leaf",
-	"subagent_spawn",
 	"forked_from",
 	"session_start_git_context",
 	"pr_review_binding",

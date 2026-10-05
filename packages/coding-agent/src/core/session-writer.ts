@@ -46,22 +46,10 @@ import type {
 	SessionInfoEntry,
 	SessionManager,
 	SessionMessageEntry,
-	SessionReference,
 	SessionStartGitContextEntry,
 	SessionWrite,
-	SubagentSpawnEntry,
 	ThinkingLevelChangeEntry,
 } from "./session-manager.ts";
-
-/** A durable spawn edge's fields, as `appendSubagentSpawn` takes them. */
-export interface SubagentSpawnInput {
-	toolCallId: string;
-	subagentId: string;
-	agent: string;
-	childSessionId: string;
-	childSessionRef?: SessionReference;
-	requestKey: string;
-}
 
 /**
  * The writes of one session, before or while it is live. Each resolves after
@@ -94,11 +82,6 @@ export interface SessionWriter {
 	appendSessionInfo(name: string): Promise<void>;
 	/** Set, or with an empty or missing label clear, the label of a conversation entry. */
 	appendLabelChange(targetId: string, label: string | undefined): Promise<void>;
-	/**
-	 * Record the durable spawn edge of a subagent child whose first prompt was
-	 * accepted. Host metadata: it never moves the leaf. Resolves with its entry id.
-	 */
-	appendSubagentSpawn(spawn: SubagentSpawnInput): Promise<string>;
 	/**
 	 * Record the first completed Git observation of a session this manager
 	 * created. Resolves `false` when the session already has one or was not
@@ -200,19 +183,6 @@ function labelEntry(targetId: string, label: string | undefined): LabelEntry {
 		...pendingEnvelope(),
 		targetId,
 		...(label === undefined ? {} : { label }),
-	});
-}
-
-function subagentSpawnEntry(spawn: SubagentSpawnInput): SubagentSpawnEntry {
-	return admitEntry<SubagentSpawnEntry>({
-		type: "subagent_spawn",
-		...pendingEnvelope(),
-		toolCallId: spawn.toolCallId,
-		subagentId: spawn.subagentId,
-		agent: spawn.agent,
-		childSessionId: spawn.childSessionId,
-		...(spawn.childSessionRef !== undefined ? { childSessionRef: spawn.childSessionRef } : {}),
-		requestKey: spawn.requestKey,
 	});
 }
 
@@ -360,11 +330,6 @@ export class LogWriter implements SessionWriter {
 		await this.lane.commit((write) => write.label(entry));
 	}
 
-	async appendSubagentSpawn(spawn: SubagentSpawnInput): Promise<string> {
-		const entry = subagentSpawnEntry(spawn);
-		return this.lane.commit((write) => write.place(entry));
-	}
-
 	async recordStartingGitContext(gitContext: RpcGitContext | null): Promise<boolean> {
 		const entry = startingGitContextEntry(gitContext);
 		return this.lane.commit((write) => {
@@ -464,7 +429,7 @@ export class LogWriter implements SessionWriter {
 
 /** The conversation intents a live session's writer commits through. */
 export interface ConversationWriteIntents {
-	/** Append host entries in one batch: a product type, or a core `custom`, `custom_message`, `message`, or `subagent_spawn`. */
+	/** Append host entries in one batch: a product type, or a core `custom`, `custom_message`, or `message`. */
 	append(
 		entries: readonly { readonly type: string; readonly payload: unknown }[],
 	): Promise<readonly { readonly id: string }[]>;
@@ -550,10 +515,6 @@ export class ConversationSessionWriter implements SessionWriter {
 		const entry = labelEntry(targetId, label);
 		if (!this.sessionManager.getEntry(entry.targetId)) throw new Error(`Entry ${entry.targetId} not found`);
 		await this.intents.setLabel(entry.targetId, entry.label);
-	}
-
-	async appendSubagentSpawn(spawn: SubagentSpawnInput): Promise<string> {
-		return this.append(subagentSpawnEntry(spawn));
 	}
 
 	async recordStartingGitContext(gitContext: RpcGitContext | null): Promise<boolean> {

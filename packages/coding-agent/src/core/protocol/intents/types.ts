@@ -78,11 +78,11 @@ export interface IntentReviewOptions {
 	readonly parentRunId?: string;
 }
 
+/** Subagents of the conversation, on hosts that let clients start them. */
 export interface IntentSubagentServices {
 	list(): RpcListSubagentsResponse;
-	start(agent: string, prompt: string): Promise<{ readonly subagentId: string; readonly sessionId: string }>;
-	abort(subagentId: string): Promise<void>;
-	dispose(subagentId: string): Promise<void>;
+	/** Start a subagent as work of the conversation: its work id (the subagent id) and its child conversation. */
+	start(agent: string, prompt: string): Promise<{ readonly workId: string; readonly conversation: string }>;
 }
 
 /** Host keep-awake: the status a client sees never names the host mechanism. */

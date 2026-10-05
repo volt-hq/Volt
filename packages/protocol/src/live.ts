@@ -14,8 +14,7 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`, `subagent/<subagentId>`. A value's `kind` is its key's
- * family. `subagent` is an interim value until work items replace it
+ * `work/<workId>`. A value's `kind` is its key's family.
  * (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
@@ -30,7 +29,7 @@ import {
 	ToolCallSchema,
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
-import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
+import { LogEntryIdSchema } from "./entries.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
@@ -253,19 +252,6 @@ export const LiveWorkValueSchema = Type.Object(
 	closed,
 );
 
-/** A subagent child conversation's run status (interim until work items). Subscribe to `conversation` for its log. */
-export const LiveSubagentValueSchema = Type.Object(
-	{
-		kind: Type.Literal("subagent"),
-		subagentId: Type.String(),
-		conversation: LogSessionIdSchema,
-		agent: Type.Optional(Type.String()),
-		status: stringEnum(["running", "completed", "failed", "aborted"]),
-		error: Type.Optional(Type.String()),
-	},
-	closed,
-);
-
 /** Every live value, keyed by kind. */
 export const LIVE_VALUE_SCHEMAS = {
 	phase: LivePhaseValueSchema,
@@ -278,7 +264,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
-	subagent: LiveSubagentValueSchema,
 } as const;
 
 export type LiveValueKind = keyof typeof LIVE_VALUE_SCHEMAS;
@@ -294,7 +279,6 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionWidgetValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
-	LiveSubagentValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
 
@@ -314,7 +298,6 @@ export const LIVE_KEYED_KINDS = [
 	"ext_status",
 	"ext_widget",
 	"work",
-	"subagent",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Longest id in a keyed live key, in characters. */

@@ -291,7 +291,7 @@ A public entry's parent is always a public entry. A host entry's `parentId` is t
 | `client_input_receipt` | host | Client input reservation |
 | `client_input_queued` | host | Queued delivery of a client input |
 | `client_input_state` | host | Client input state change |
-| `subagent_spawn` | host | Durable subagent spawn edge |
+| `work_started`, `work_checkpoint`, `work_finished` | host | Long-running work: a background job or a subagent (whose `child` names its conversation) |
 | `forked_from` | host | Lineage of a forked, cloned, or imported session; always the first entry |
 | `session_start_git_context` | host | First Git observation (coding-agent product type) |
 | `pr_review_binding` | host | PR checkout a review session is bound to (coding-agent product type) |
@@ -481,10 +481,6 @@ States:
 
 When a session opens, accepted inputs with a queued delivery are replayed in admission order. A `started` input with no completing message or terminal state is ambiguous: it may or may not have reached the model, so it is never replayed and later input waits behind it until it is settled (`client_input_outcome_ambiguous`).
 
-### SubagentSpawnEntry (host-only)
-
-The durable edge to a subagent child session started by a `subagent` tool call. It records `toolCallId`, `subagentId`, `agent`, `childSessionId`, the child's `childSessionRef` when it is persisted, and the `requestKey` of the spawn request. The edge is settled once the tool call has a persisted result produced by the tool itself.
-
 ### ForkedFromEntry (host-only)
 
 The first entry of a session created by fork, clone, or import, at ordinal 1 with `parentId: null`. `sessionId` is the source session, and `entryId` is the source entry the copied branch ends at, or `null` when the copied branch is empty (a fork before the first message, or an import of a snapshot with no active leaf).
@@ -665,7 +661,7 @@ Tree reads return public entries only.
 - `getSessionRef()` - Current persisted reference, or `undefined` in memory.
 - `isPersisted()` - Whether the session uses SQLite persistence.
 - `getForkedFrom()` - The source session and entry of a forked, cloned, or imported session, or `undefined`.
-- `getStartingGitContext()`, `getPrReviewBinding()`, `getSubagentSpawnEntries()`, `getSessionEntrySummary()`
+- `getStartingGitContext()`, `getPrReviewBinding()`, `getSessionEntrySummary()`
 
 ### Writing
 
@@ -674,6 +670,6 @@ Tree reads return public entries only.
 - `appendMessage(message)`, `appendCustomEntry(customType, data?)`, `appendCustomMessageEntry(customType, content, display, details?)` - Resolve with the entry ID.
 - `appendModelChange(provider, modelId)`, `appendThinkingLevelChange(level)`, `appendFastModeChange(enabled)`, `appendPlanningState(planning)`
 - `appendSessionInfo(name)`, `appendLabelChange(targetId, label)` - An empty or missing label clears it.
-- `appendSubagentSpawn(spawn)`, `recordStartingGitContext(gitContext)`, `recordPrReviewBinding(placement)`
+- `recordStartingGitContext(gitContext)`, `recordPrReviewBinding(placement)`
 
 `LogWriter` also moves the leaf and compacts before a session opens: `appendCompaction(...)`, `branch(entryId)`, `resetLeaf()`, and `branchWithSummary(entryId, summary, details?, fromHook?)`. A live session does these through `session.compact()` and `session.navigateTree()`.

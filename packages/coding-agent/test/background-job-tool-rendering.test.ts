@@ -79,7 +79,7 @@ describe("background subagent tool rows", () => {
 				details: {
 					mode: "list",
 					status: "completed",
-					summary: { total: 0, completed: 0, failed: 0, aborted: 0, running: 0 },
+					summary: { total: 0, completed: 0, failed: 0, cancelled: 0, running: 0 },
 				} satisfies SubagentToolDetails,
 				isError: false,
 			});

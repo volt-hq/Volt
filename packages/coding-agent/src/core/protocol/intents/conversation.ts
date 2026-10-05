@@ -1,7 +1,6 @@
 /**
  * Conversation intents: input, run control, the conversation's own settings
- * (entries on its branch), agent mode and plans, structural moves, and
- * subagents.
+ * (entries on its branch), agent mode and plans, and structural moves.
  */
 
 import type { Api, Model } from "@hansjm10/volt-ai";
@@ -537,51 +536,4 @@ export const exportHtmlIntent = defineIntent({
 		return { path: await targetOf(ctx).session.exportToHtml(input.outputPath) };
 	},
 	accept: (result) => ({ result }),
-});
-
-// ============================================================================
-// Subagents
-// ============================================================================
-
-function subagentsOf(ctx: IntentContext) {
-	const subagents = ctx.services.subagents;
-	if (!subagents) throw new IntentRejectedError("unavailable", "Subagents are not available in this host");
-	return subagents;
-}
-
-export const subagentStartIntent = defineIntent({
-	name: "subagent_start",
-	label: "Start subagent",
-	category: "advanced",
-	scope: "conversation",
-	fence: "none",
-	remote: "unsafe",
-	requires: control,
-	whileBusy: "run",
-	run: (ctx, input) => subagentsOf(ctx).start(input.agent, input.prompt),
-	accept: (result) => ({ result: { subagentId: result.subagentId, conversation: result.sessionId } }),
-});
-
-export const subagentAbortIntent = defineIntent({
-	name: "subagent_abort",
-	label: "Abort subagent",
-	category: "advanced",
-	scope: "conversation",
-	fence: "none",
-	remote: "unsafe",
-	requires: control,
-	whileBusy: "run",
-	run: (ctx, input) => subagentsOf(ctx).abort(input.subagentId),
-});
-
-export const subagentDisposeIntent = defineIntent({
-	name: "subagent_dispose",
-	label: "Dispose subagent",
-	category: "advanced",
-	scope: "conversation",
-	fence: "none",
-	remote: "unsafe",
-	requires: control,
-	whileBusy: "run",
-	run: (ctx, input) => subagentsOf(ctx).dispose(input.subagentId),
 });

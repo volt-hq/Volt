@@ -158,7 +158,7 @@ async function expectReplayMatches(manager: SessionManager, clientMessageIds: re
 		expect(reopened.getStartingGitContext()).toEqual(manager.getStartingGitContext());
 		expect(reopened.getConversationState().context).toEqual(manager.getConversationState().context);
 		expect(reopened.getTree()).toEqual(manager.getTree());
-		expect(reopened.getSubagentSpawnEntries()).toEqual(manager.getSubagentSpawnEntries());
+		expect(reopened.getConversationState().work).toEqual(manager.getConversationState().work);
 		for (const clientMessageId of clientMessageIds) {
 			expect(reopened.getClientInput(clientMessageId)).toEqual(manager.getClientInput(clientMessageId));
 		}
@@ -204,13 +204,21 @@ async function applyStatefulOperation(
 			}
 			break;
 		case "subagent":
-			await manager.logWriter.appendSubagentSpawn({
-				toolCallId: `call-${index}`,
-				subagentId: `sa_${operation.suffix}`,
-				agent: "researcher",
-				childSessionId: `child-${index}`,
-				requestKey: `request-${index}`,
-			});
+			// Subagent work: host records that never move the leaf.
+			await seedSession(manager, (seed) =>
+				seed.hostRecord("work_started", {
+					workId: `sa_${operation.suffix}_${index}`,
+					kind: "subagent",
+					title: "researcher",
+					input: { agent: "researcher", task: operation.suffix },
+					cancellable: true,
+					delivery: "none",
+					resume: true,
+					state: "running",
+					toolCallId: `call-${index}`,
+					child: { conversation: `child-${index}` },
+				}),
+			);
 			break;
 		case "compaction": {
 			const branch = manager.getBranch();

@@ -409,8 +409,11 @@ describe("RPC mode on a caller-provided transport", () => {
 		void pair.client.write(HELLO);
 		await vi.waitFor(() => expect(attach).toHaveBeenCalledOnce());
 
+		const dispose = vi.spyOn(conversation.session, "dispose");
 		await pair.client.close();
-		await vi.waitFor(() => expect(conversation.closed).toBe(true));
+		// session_start finishes once closing the conversation fenced its session.
+		await vi.waitFor(() => expect(dispose).toHaveBeenCalled());
+		expect(conversation.closed).toBe(true);
 		gate.resolve();
 		await expect(mode).resolves.toBeUndefined();
 		// The bind ended with its conversation: nothing starts after the mode ended.

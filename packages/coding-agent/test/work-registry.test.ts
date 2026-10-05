@@ -537,3 +537,109 @@ describe("work registry", () => {
 		expect(checkpoints).toHaveLength(1);
 	});
 });
+
+describe("kind policies: stops, remote devices, and resume preparation", () => {
+	/** Suspended `subagent` work in a next runtime whose kind resumes through `resume`. */
+	async function suspended(resume: WorkKindDefinition["resume"]) {
+		const first = await setup();
+		first.registry.register(kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) }));
+		const record = await first.registry.start("subagent", null, held().execute);
+		await first.registry.cancelAll("closed");
+		const second = await nextRuntime(first);
+		second.registry.register(kind({ kind: "subagent", resume }));
+		return { ...second, workId: record.workId };
+	}
+
+	it("a stop cancels running work, except of kinds that opt out", async () => {
+		const { registry } = await setup();
+		registry.register(kind());
+		registry.register(kind({ kind: "subagent", cancelOnAbort: false }));
+		const job = held();
+		const child = held();
+		const jobRecord = await registry.start("ext:test/run", null, job.execute);
+		const childRecord = await registry.start("subagent", null, child.execute);
+		await registry.cancelAll("cancelled");
+		expect(registry.get(jobRecord.workId)?.outcome).toBe("cancelled");
+		expect(registry.get(childRecord.workId)?.outcome).toBeUndefined();
+		expect(registry.running().map((record) => record.workId)).toEqual([childRecord.workId]);
+		await registry.cancel(childRecord.workId);
+		await registry.waitForIdle();
+		expect(registry.get(childRecord.workId)?.outcome).toBe("cancelled");
+	});
+
+	it("allows a remote device what a kind's policy allows, and nothing for a kind this host lacks", async () => {
+		const { registry } = await setup();
+		registry.register(kind());
+		registry.register(kind({ kind: "subagent", remote: { cancel: false, resume: false } }));
+		const job = await registry.start("ext:test/run", null, held().execute);
+		const child = await registry.start("subagent", null, held().execute);
+		expect(registry.remoteAllows(job, "cancel")).toBe(true);
+		expect(registry.remoteAllows(child, "cancel")).toBe(false);
+		expect(registry.remoteAllows(child, "resume")).toBe(false);
+		expect(registry.remoteAllows({ ...job, kind: "ext:other/run" }, "cancel")).toBe(false);
+		await registry.cancelAll("closed");
+	});
+
+	it("prepares a resume before the running checkpoint, and a failed preparation leaves the work suspended", async () => {
+		let fail = true;
+		const runtime = await suspended(async () => {
+			if (fail) throw new Error("its log is locked");
+			return async () => ({ outcome: "completed" });
+		});
+		const before = workEntries(await entriesOf(runtime.log)).length;
+		await expect(runtime.registry.resume(runtime.workId)).rejects.toMatchObject({
+			code: "unavailable",
+			message: expect.stringContaining("its log is locked"),
+		});
+		// No checkpoint claimed it ran; it is suspended again and may be resumed.
+		expect(workEntries(await entriesOf(runtime.log))).toHaveLength(before);
+		expect(runtime.registry.running()).toEqual([]);
+		expect(runtime.registry.get(runtime.workId)?.outcome).toBeUndefined();
+		fail = false;
+		await runtime.registry.resume(runtime.workId);
+		await runtime.registry.waitForIdle();
+		expect(runtime.registry.get(runtime.workId)?.outcome).toBe("completed");
+	});
+
+	it("a cancel during the preparation ends the work, and the prepared executor runs stopped to release it", async () => {
+		const prepared = Promise.withResolvers<void>();
+		const released = vi.fn();
+		const runtime = await suspended(async () => {
+			await prepared.promise;
+			return async (ctx) => {
+				if (ctx.signal.aborted) released();
+				return { outcome: "cancelled" };
+			};
+		});
+		const resuming = runtime.registry.resume(runtime.workId);
+		await vi.waitFor(() => expect(runtime.registry.running()).toHaveLength(1));
+		await runtime.registry.cancel(runtime.workId);
+		prepared.resolve();
+		await resuming;
+		await runtime.registry.waitForIdle();
+		expect(released).toHaveBeenCalledOnce();
+		expect(runtime.registry.get(runtime.workId)?.outcome).toBe("cancelled");
+		const types = workEntries(await entriesOf(runtime.log)).map((entry) => entry.payload);
+		// The work went from suspended to cancelling, never back to running.
+		expect(types.slice(-2)).toEqual([
+			{ workId: runtime.workId, state: "cancelling" },
+			{ workId: runtime.workId, outcome: "cancelled" },
+		]);
+	});
+
+	it("a close during the preparation leaves resumable work suspended", async () => {
+		const prepared = Promise.withResolvers<void>();
+		const runtime = await suspended(async () => {
+			await prepared.promise;
+			return async () => ({ outcome: "cancelled" });
+		});
+		const resuming = runtime.registry.resume(runtime.workId);
+		await vi.waitFor(() => expect(runtime.registry.running()).toHaveLength(1));
+		const closing = runtime.registry.cancelAll("closed");
+		prepared.resolve();
+		await resuming;
+		await closing;
+		expect(runtime.registry.get(runtime.workId)?.outcome).toBeUndefined();
+		expect(runtime.registry.running()).toEqual([]);
+	});
+});

@@ -406,11 +406,11 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	read_job: queries("work_output"),
 	cancel_job: intents("cancel_work"),
 	list_subagents: queries("subagent_definitions"),
-	subagent_start: intents("subagent_start"),
-	subagent_abort: intents("subagent_abort"),
+	subagent_start: intents("start_subagent"),
+	subagent_abort: intents("cancel_work"),
 	subagent_get_state: removed("subscribe to the child conversation"),
 	subagent_get_transcript: removed("subscribe to the child conversation"),
-	subagent_dispose: intents("subagent_dispose"),
+	subagent_dispose: removed("cancel_work: a subagent's conversation closes with its work"),
 	set_model: removed("set_model and set_default_model (checked per persistDefault below)"),
 	cycle_model: removed("models.cycleScope and set_model"),
 	get_available_models: queries("models"),
@@ -474,7 +474,11 @@ const MERGED_ALIASES: Readonly<Record<string, string>> = { switch_session: "swit
  * command cannot carry: a remote `set_auto_compaction` must name the model and
  * settings profile it targets, as the UI action always did.
  */
-const GUARDED_INTENTS: ReadonlySet<string> = new Set(["set_auto_compaction"]);
+const GUARDED_INTENTS: ReadonlySet<string> = new Set([
+	"set_auto_compaction",
+	// `cancel_work` is remote-safe, but the subagent kind refuses a remote cancel (rpc-subagents.test.ts).
+	"subagent_abort",
+]);
 
 // ============================================================================
 // Registry decisions
@@ -807,7 +811,6 @@ describe("work intents and queries keep the authorization of the paths they repl
 	const REPLACED: ReadonlyArray<{ readonly work: Mapping; readonly replaced: Mapping }> = [
 		{ work: intents("resume_work"), replaced: intents("cancel_work") },
 		{ work: intents("open_work"), replaced: intents("review_open_session") },
-		{ work: intents("start_subagent"), replaced: intents("subagent_start") },
 	];
 
 	it("requires the same capabilities and remote safety, deciding every grant alike", async () => {

@@ -8,6 +8,7 @@ import {
 	SessionManager,
 } from "../../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../../session-manager-owner.ts";
+import { seedSession } from "../../utilities/seed-log.ts";
 
 const SESSION_ID_MAX_CHARACTERS = 512;
 const SNAPSHOT_TIMESTAMP = "2026-09-03T12:00:00.000Z";
@@ -227,16 +228,21 @@ describe("PR #329 canonical entry admission contract", () => {
 		const overlongId = "c".repeat(SESSION_ID_MAX_CHARACTERS + 1);
 
 		const admissionError = await captureAsyncError(() =>
-			manager.logWriter.appendSubagentSpawn({
-				toolCallId: "call-overlong",
-				subagentId: "sa_overlong",
-				agent: "researcher",
-				childSessionId: overlongId,
-				childSessionRef: { ...ref, sessionId: overlongId },
-				requestKey: "request-overlong",
-			}),
+			seedSession(manager, (seed) =>
+				seed.hostRecord("work_started", {
+					workId: "sa_overlong",
+					kind: "subagent",
+					title: "researcher",
+					input: { agent: "researcher" },
+					cancellable: true,
+					delivery: "none",
+					resume: true,
+					state: "running",
+					child: { conversation: overlongId, ref: { ...ref, sessionId: overlongId } },
+				}),
+			),
 		);
-		const spawnsAfterRejection = manager.getSubagentSpawnEntries();
+		const workAfterRejection = manager.getConversationState().work.size;
 		await manager.logWriter.appendSessionInfo("after rejected spawn");
 		const nextId = manager.getLeafId()!;
 		const reopened = await SessionManager.openReadOnly(ref);
@@ -244,14 +250,14 @@ describe("PR #329 canonical entry admission contract", () => {
 
 		expect({
 			admissionRejected: admissionError instanceof Error,
-			spawnCountAfterRejection: spawnsAfterRejection.length,
+			workAfterRejection,
 			nextEntry: nextEntry && { ordinal: nextEntry.ordinal, parentId: nextEntry.parentId },
-			persistedSpawnCount: reopened.getSubagentSpawnEntries().length,
+			persistedWork: reopened.getConversationState().work.size,
 		}).toEqual({
 			admissionRejected: true,
-			spawnCountAfterRejection: 0,
+			workAfterRejection: 0,
 			nextEntry: { ordinal: 2, parentId: parentEntryId },
-			persistedSpawnCount: 0,
+			persistedWork: 0,
 		});
 	});
 

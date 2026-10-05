@@ -181,7 +181,6 @@ export const PROJECTED_ENTRY_TYPES = {
 	label: projectedEntryType("label", core.label.payload),
 	session_info: projectedEntryType("session_info", core.session_info.payload),
 	leaf: projectedEntryType("leaf", core.leaf.payload),
-	subagent_spawn: projectedEntryType("subagent_spawn", core.subagent_spawn.payload),
 	forked_from: projectedEntryType("forked_from", core.forked_from.payload),
 	work_started: projectedEntryType("work_started", core.work_started.payload),
 	work_checkpoint: projectedEntryType("work_checkpoint", core.work_checkpoint.payload),

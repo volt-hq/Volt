@@ -234,8 +234,8 @@ export interface ConversationPreparedDelivery {
 	readonly messages: readonly AgentMessage[];
 	/**
 	 * Entries committed in the delivery's batch before its messages: registered
-	 * product types, or core `custom`, `custom_message`, `message`,
-	 * `subagent_spawn`, or `planning_state_change`.
+	 * product types, or core `custom`, `custom_message`, `message`, or
+	 * `planning_state_change`.
 	 */
 	readonly entries?: readonly ConversationEntryInput[];
 }
@@ -472,8 +472,8 @@ export interface ConversationNavigationResult {
 
 /**
  * An entry the host appends: a registered product type, or a core `custom`,
- * `custom_message`, `message`, or `subagent_spawn`. Work entries are written
- * only through `Conversation.work`.
+ * `custom_message`, or `message`. Work entries are written only through
+ * `Conversation.work`.
  */
 export interface ConversationEntryInput {
 	readonly type: string;

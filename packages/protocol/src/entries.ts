@@ -386,25 +386,6 @@ export const SessionReferenceSchema = Type.Object(
 );
 
 /**
- * Durable spawn edge for one subagent child started by a `subagent` tool
- * call. Settled once the tool call has a persisted result produced by the
- * tool itself.
- */
-export const SubagentSpawnEntryPayloadSchema = Type.Object(
-	{
-		toolCallId: LogEntryIdSchema,
-		subagentId: LogEntryIdSchema,
-		agent: nonEmptyString,
-		childSessionId: LogSessionIdSchema,
-		/** Absent for in-memory children. */
-		childSessionRef: Type.Optional(SessionReferenceSchema),
-		/** Dedup key of the originating spawn request. */
-		requestKey: LogEntryIdSchema,
-	},
-	closed,
-);
-
-/**
  * First entry of a log created by fork, clone, or import: the source log and
  * the entry the copied branch path ends at, or `null` when the copied branch
  * is empty (a fork before the first message). The copied path follows it, so
@@ -550,7 +531,6 @@ export const CORE_LOG_ENTRY_TYPES = {
 	label: defineLogEntryType("label", "public", LabelEntryPayloadSchema),
 	session_info: defineLogEntryType("session_info", "public", SessionInfoEntryPayloadSchema),
 	leaf: defineLogEntryType("leaf", "host", LeafEntryPayloadSchema),
-	subagent_spawn: defineLogEntryType("subagent_spawn", "host", SubagentSpawnEntryPayloadSchema),
 	forked_from: defineLogEntryType("forked_from", "host", ForkedFromEntryPayloadSchema),
 	work_started: defineLogEntryType("work_started", "host", WorkStartedEntryPayloadSchema),
 	work_checkpoint: defineLogEntryType("work_checkpoint", "host", WorkCheckpointEntryPayloadSchema),
@@ -583,7 +563,6 @@ export type CustomMessageEntryPayload = Static<typeof CustomMessageEntryPayloadS
 export type LabelEntryPayload = Static<typeof LabelEntryPayloadSchema>;
 export type SessionInfoEntryPayload = Static<typeof SessionInfoEntryPayloadSchema>;
 export type LeafEntryPayload = Static<typeof LeafEntryPayloadSchema>;
-export type SubagentSpawnEntryPayload = Static<typeof SubagentSpawnEntryPayloadSchema>;
 export type ForkedFromEntryPayload = Static<typeof ForkedFromEntryPayloadSchema>;
 export type WorkChild = Static<typeof WorkChildSchema>;
 export type WorkResultChild = Static<typeof WorkResultChildSchema>;
