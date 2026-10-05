@@ -14,7 +14,7 @@ The interface has four main areas:
 - **Editor** - where you type; border color indicates the current thinking level
 - **Footer** - working directory, session name, token/cache usage, prompt-cache expiry, cost, context usage, current model, and active Fast mode
 
-The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
+The editor can be replaced temporarily by built-in UI such as `/settings` or by an extension's dialogs and forms.
 
 When the provider documents how long it retains the prompt cache, the footer counts down to expiry (`cache 4m`). `cache expired`, or `cache cold` after a model switch, means your next message resends the whole conversation without cache hits, which costs more tokens than usual. Providers that publish no retention window show no countdown. Where the provider supports it, Volt keeps the cache warm while work runs and for 15 minutes after it finishes, shown as `cache warm 12m` (see [prompt-cache keepalive](settings.md#prompt-cache)). After a response has sat idle for a minute, the transcript records how long the work took and when it finished, for example `Worked for 3m 12s · done 3:42 PM`.
 
@@ -59,6 +59,8 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files |
+| `/extensions` | Show extensions, enable or disable them, and edit their settings |
+| `/store` | Search, inspect, install, remove, and update store packages |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/remote` | Manage daemon status, pairing, devices, workspaces, leases, and headless policy |
 | `/changelog` | Display version history |
@@ -187,7 +189,7 @@ Completed, incomplete, failed, and cancelled runs plus explicit finding outcomes
 
 Recoverable tool-attempt failures are omitted from both compact and expanded review reports; they remain in diagnostic records. Failures that prevent completion or materially limit the review still surface as failed-stage messages, coverage gaps, or unresolved concerns.
 
-New review messages in the TUI show a compact result, active findings, and validation limits. Use the configured `app.tools.expand` action (Ctrl+O by default) to expand the full public report, including retained coverage and finding evidence. This is the same global expansion action used for tool output; it does not rerun the review or start inference. Extension message renderers keep their existing precedence.
+New review messages in the TUI show a compact result, active findings, and validation limits. Use the configured `app.tools.expand` action (Ctrl+O by default) to expand the full public report, including retained coverage and finding evidence. This is the same global expansion action used for tool output; it does not rerun the review or start inference.
 
 A complete review is not a claim that tests passed. Volt reports static-only validation when the host confirms that the review used only its immutable inspection and report tools. Otherwise, the report states that runtime validation is not established. Private PR model-limit text remains private; expanded reports retain the public limitation counts. Selected-finding sessions distinguish their selection from the full run. Original conclusions remain labelled as historical when finding statuses change.
 
@@ -524,7 +526,7 @@ volt --no-extensions -e ./my-extension.ts
 | `-h`, `--help` | Show help |
 | `-v`, `--version` | Show version |
 
-In `regular` mode, Volt renders in the main terminal buffer and leaves scrolling to native terminal scrollback. In `fullscreen` mode, the transcript scrolls inside the terminal viewport while queued messages, working status, extension widgets, Plan status, editor, and footer remain fixed at the bottom. Mouse and trackpad input scroll the region under the pointer; keyboard viewport actions target the transcript.
+In `regular` mode, Volt renders in the main terminal buffer and leaves scrolling to native terminal scrollback. In `fullscreen` mode, the transcript scrolls inside the terminal viewport while queued messages, working status, extension panels, Plan status, editor, and footer remain fixed at the bottom. Mouse and trackpad input scroll the region under the pointer; keyboard viewport actions target the transcript.
 
 Inline images work in fullscreen terminals that support Kitty, including Kitty and Ghostty, and in Windows Terminal 1.22+ through negotiated Sixel. Volt enables Sixel only when Windows Terminal reports support, converts supported non-PNG tool images before rendering, and re-encodes visible image regions while scrolling. Because Sixel cannot delete individual placements, image changes and movement repaint the full viewport; text-only updates remain differential. Sixel is disabled under tmux and GNU screen. In iTerm2, fullscreen images render as text placeholders because its protocol cannot delete or crop placements during application-owned scrolling; regular mode continues to render them normally. See [Terminal setup](terminal-setup.md) for terminal-specific behavior.
 

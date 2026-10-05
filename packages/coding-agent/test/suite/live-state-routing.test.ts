@@ -1,45 +1,23 @@
 /**
- * The extensions' data-only UI calls write the conversation's live state,
- * which every attached client sees; the terminal-only calls go to the client
- * with a terminal.
+ * The extensions' UI calls write the conversation's live state, which every
+ * attached client sees; theme calls go to the client with themes.
  */
 
 import type { HostRequestKind } from "@hansjm10/volt-protocol";
-import { createRenderFrame } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
-import type { ExtensionTerminalUI } from "../../src/core/session/extension-binding.ts";
-import { theme } from "../../src/core/theme/runtime.ts";
+import type { ExtensionClientThemes } from "../../src/core/session/extension-binding.ts";
 import { connectTestClient } from "../utilities/host-client.ts";
 import { createLiveRecorder, type LiveRecorder, SESSION_FED_LIVE_KEYS } from "../utilities/live-recorder.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "./extension-runtime.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];
 
-function createTerminal() {
-	const setWidget = vi.fn();
-	const setWorkingMessage = vi.fn();
-	const ui: ExtensionTerminalUI = {
-		onTerminalInput: vi.fn(() => () => {}),
-		setWorkingMessage,
-		setWorkingVisible: vi.fn(),
-		setWorkingIndicator: vi.fn(),
-		setHiddenThinkingLabel: vi.fn(),
-		setWidget,
-		setFooter: vi.fn(),
-		setHeader: vi.fn(),
-		custom: vi.fn(async () => undefined as never),
-		addAutocompleteProvider: vi.fn(),
-		setEditorComponent: vi.fn(),
-		getEditorComponent: vi.fn(() => undefined),
-		theme,
-		getAllThemes: vi.fn(() => []),
-		getTheme: vi.fn(() => undefined),
+function createThemes(): ExtensionClientThemes {
+	return {
+		getAllThemes: vi.fn(() => [{ name: "light", path: undefined }]),
 		setTheme: vi.fn(() => ({ success: true })),
-		getToolsExpanded: vi.fn(() => false),
-		setToolsExpanded: vi.fn(),
 	};
-	return { ui, setWidget, setWorkingMessage };
 }
 
 /** Answer the client's oldest pending request once one arrives. */
@@ -64,7 +42,7 @@ describe("the extensions' UI through the live state", () => {
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	it("writes data-only calls to the live state and sends terminal-only calls to the terminal", async () => {
+	it("writes UI calls to the live state and sends theme calls to the client with themes", async () => {
 		let ui: ExtensionUIContext | undefined;
 		const fixture = await createExtensionRuntime(
 			(volt) => {
@@ -76,20 +54,17 @@ describe("the extensions' UI through the live state", () => {
 		);
 		cleanups.push(() => fixture.dispose());
 		const live = createLiveRecorder(DIALOGS);
-		const terminal = createTerminal();
-		await connectTestClient(fixture.host, fixture.conversation, { id: "tui", live, surface: { ui: terminal.ui } });
+		const themes = createThemes();
+		await connectTestClient(fixture.host, fixture.conversation, { id: "tui", live, surface: { themes } });
 		if (!ui) throw new Error("session_start did not run");
 
-		const component = () => ({ render: () => createRenderFrame([]), invalidate: () => {} });
 		ui.setStatus("build", "building");
-		ui.setWidget("lines", ["one", "two"], { placement: "belowEditor" });
-		ui.setWidget("component", component);
+		ui.setPanel("lines", { placement: "belowEditor", node: { type: "text", text: "one\ntwo" } });
 		ui.setTitle("volt: building");
 		ui.notify("careful", "warning");
 		ui.setEditorText("draft");
 		ui.setStatus("build", undefined);
-		ui.setWidget("lines", undefined);
-		ui.setWorkingMessage("thinking");
+		ui.setPanel("lines", undefined);
 		ui.pasteToEditor("pasted\u001b[201~\r");
 
 		const extension = "test-extension";
@@ -112,12 +87,9 @@ describe("the extensions' UI through the live state", () => {
 			// Pasted text never carries terminal controls into the editor.
 			{ type: "directive", directive: "insert_editor_text", text: "pasted" },
 		]);
-		// The component widget and the removal of the string widget reach the terminal.
-		expect(terminal.setWidget.mock.calls).toEqual([
-			["component", component, undefined],
-			["lines", undefined, undefined],
-		]);
-		expect(terminal.setWorkingMessage).toHaveBeenCalledWith("thinking");
+		expect(ui.getAllThemes()).toEqual([{ name: "light", path: undefined }]);
+		expect(ui.setTheme("light")).toEqual({ success: true });
+		expect(themes.setTheme).toHaveBeenCalledWith("light");
 		expect(() => ui?.setStatus("", "empty key")).toThrow(TypeError);
 	});
 

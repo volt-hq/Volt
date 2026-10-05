@@ -3,7 +3,6 @@ import { type Component, type Container, Text, type TUI, type TuiMode } from "@h
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
@@ -37,7 +36,6 @@ type TestAccess = {
 	showSessionExtensions(session: AgentSession): void;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
-	showExtensionCustom: ExtensionUIContext["custom"];
 };
 
 const request = {
@@ -288,22 +286,5 @@ describe.each(["regular", "fullscreen"] as const)("native questions in %s Intera
 		expect(terminal.getViewport().join("\n")).toContain("Beginning of this question.");
 		terminal.sendInput("\x13");
 		await running;
-	});
-
-	it("keeps non-native custom components in dedicated views", async () => {
-		const { access, terminal } = await fixture(tuiMode);
-		const dedicated = new Text("Dedicated extension", 0, 0);
-		let close = () => {};
-		const showing = access.showExtensionCustom<void>((_ui, _theme, _keys, done) => {
-			close = done;
-			return dedicated;
-		});
-		await terminal.waitForRender();
-		expect(access.ui.getFocusedComponent()).toBe(dedicated);
-		expect(terminal.getViewport().join("\n")).toContain("Dedicated extension");
-		expect(terminal.getViewport().join("\n")).not.toContain("context");
-		close();
-		await showing;
-		expect(access.activeView).toBe(access.conversationView);
 	});
 });

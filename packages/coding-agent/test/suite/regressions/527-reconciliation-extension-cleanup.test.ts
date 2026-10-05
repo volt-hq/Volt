@@ -9,7 +9,6 @@ import {
 import { createEventBus } from "../../../src/core/event-bus.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { LiveClient } from "../../../src/core/host/live-state.ts";
-import type { ExtensionTerminalUI } from "../../../src/core/session/extension-binding.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type {
 	ExtensionAPI,
@@ -34,7 +33,6 @@ describe("regression #527: extension cleanup when a session ends", () => {
 	async function createRuntimeForTest(
 		extend?: (volt: ExtensionAPI, instance: number) => void,
 		otherExtensions: ExtensionFactory[] = [],
-		uiOverrides?: Partial<ExtensionTerminalUI>,
 		live?: LiveClient,
 	) {
 		const harness = await createHarness();
@@ -98,14 +96,11 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		});
 		cleanups.push(() => host.dispose().catch(() => undefined));
 		const shutdown = vi.fn();
-		// The extensions are not bound yet: their UI context is the inert default the overrides replace.
-		const ui = uiOverrides ? { ...conversation.session.extensionRunner.getUIContext(), ...uiOverrides } : undefined;
 		// The host attaches the client's surface on every conversation it joins.
 		const runtime: TestClient = await connectTestClient(host, conversation, {
 			id: "client",
 			...(live === undefined ? {} : { live }),
 			surface: {
-				...(ui ? { ui } : {}),
 				shutdownHandler: shutdown,
 				onError: (error) => errors.push(error),
 				commandContextActions: {
@@ -310,7 +305,6 @@ describe("regression #527: extension cleanup when a session ends", () => {
 	it("revokes captured UI objects and methods after replacement without losing the draft", async () => {
 		let draft = "initial draft";
 		const notify = vi.fn();
-		const unsubscribe = vi.fn();
 		const contexts: ExtensionUIContext[] = [];
 		let capturedNotify: ExtensionUIContext["notify"];
 		let capturedInput: ExtensionUIContext["input"];
@@ -339,22 +333,14 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		};
 		({ runtime } = await createRuntimeForTest(
 			(volt, instance) => {
-				let removeListener: () => void;
 				volt.on("session_start", (_event, ctx) => {
 					contexts.push(ctx.ui);
 					if (instance !== 1) return;
 					capturedNotify = ctx.ui.notify;
 					capturedInput = ctx.ui.input;
-					removeListener = ctx.ui.onTerminalInput(() => undefined);
-				});
-				volt.on("session_shutdown", () => {
-					if (instance === 1) removeListener();
 				});
 			},
 			[],
-			{
-				onTerminalInput: () => unsubscribe,
-			},
 			live,
 		));
 		contexts[0].setEditorText("unsent draft");
@@ -363,7 +349,6 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		capturedNotify!("active notification");
 		await expect(capturedInput!("active dialog")).resolves.toBe("answer");
 		await runtime?.newSession();
-		expect(unsubscribe).toHaveBeenCalledOnce();
 		expect(() => contexts[0].setEditorText("late callback overwrote draft")).toThrow(/stale/);
 		expect(() => capturedNotify!("late notification")).toThrow(/stale/);
 		await expect(Promise.resolve().then(() => capturedInput!("late dialog"))).rejects.toThrow(/stale/);

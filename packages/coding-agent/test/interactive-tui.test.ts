@@ -99,10 +99,6 @@ describe("createInteractiveTui", () => {
 			sessionRenderSuspension: undefined as RenderSuspensionLease | undefined,
 			options: { tuiMode: "regular" as TuiMode },
 			onRightClickPaste: () => undefined,
-			extensionTerminalInputSubscriptions: new Set<{
-				handler: (data: string) => { consume?: boolean } | undefined;
-				unsubscribe: () => void;
-			}>(),
 		});
 		stableUi = createInteractiveTuiReference(() => context.renderer);
 		context.ui = stableUi;
@@ -114,11 +110,6 @@ describe("createInteractiveTui", () => {
 		renderer.start();
 		await terminal.waitForRender();
 		invalidatedModes.length = 0;
-		const terminalInput = vi.fn((_data: string) => ({ consume: true }));
-		context.extensionTerminalInputSubscriptions.add({
-			handler: terminalInput,
-			unsubscribe: stableUi.addInputListener(terminalInput),
-		});
 		context.sessionRenderSuspension = stableUi.suspendRendering();
 		expect(prototype.switchTuiMode.call(context, "fullscreen", false)).toBe(true);
 		await terminal.waitForRender();
@@ -135,9 +126,6 @@ describe("createInteractiveTui", () => {
 		context.sessionRenderSuspension = undefined;
 		await terminal.waitForRender();
 		expect(context.renderer.getRenderMetrics().frames).toBeGreaterThan(0);
-		terminal.sendInput("x");
-		await terminal.waitForRender();
-		expect(terminalInput).toHaveBeenCalledWith("x");
 
 		prototype.stopInteractiveTui.call(context, "resume-hint");
 		expect([terminal.startCount, terminal.stopCount]).toEqual([2, 2]);

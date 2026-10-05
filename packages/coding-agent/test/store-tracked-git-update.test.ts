@@ -23,6 +23,8 @@ const inspectorMock = vi.hoisted(() => ({
 	inspectStorePackage: vi.fn(
 		async (options: { source: string }): Promise<StorePackageInspection> => ({
 			source: options.source,
+			// Catalog entries declare an extension: an update reads its manifest before installing it.
+			volt: { manifest: { id: "rtk", displayName: "RTK Output Compression", entry: "extensions/rtk.ts" } },
 			discoveredResources: {
 				extensions: [],
 				skills: [],

@@ -130,7 +130,7 @@ The interface from top to bottom:
 - **Plan inspector** - At 129x24 and larger, plans ready for review or already executing open a persistent 48–72-column right pane while working drafts stay in a compact status above the editor
 - **Footer** - Full-width working directory, session name, total token/cache usage (`↑` input, `↓` output, `R` cache read, `W` cache write, `CH` latest cache hit rate), cost, context usage, current model, active Fast mode
 
-The editor can be temporarily replaced by other UI, like built-in `/settings` or custom UI from extensions (e.g., a Q&A tool that lets the user answer model questions in a structured format). [Extensions](#extensions) can also replace the editor, add widgets above/below it, a status line, custom footer, or overlays.
+The editor can be temporarily replaced by other UI, like built-in `/settings` or an extension's dialogs and forms (e.g., a questionnaire tool that lets the user answer model questions in a structured form). [Extensions](#extensions) can also add status items to the footer, panels above or below the editor, and their own look for tool calls and messages.
 
 ### Editor
 
@@ -188,6 +188,8 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/export [file]` | Export session to HTML file |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 | `/reload` | Reload keybindings, extensions, skills, prompts, and context files (themes hot-reload automatically) |
+| `/extensions` | Show extensions, enable or disable them, and edit their settings |
+| `/store` | Search, inspect, install, remove, and update store packages |
 | `/hotkeys` | Show all keyboard shortcuts |
 | `/remote` | Manage daemon status, phone pairing, devices, workspaces, leases, and policy |
 | `/changelog` | Display version history |
@@ -392,9 +394,11 @@ Place in `~/.volt/agent/skills/`, `~/.agents/skills/`, `.volt/skills/`, or `.age
 
 ### Extensions
 
-TypeScript modules that extend volt with custom tools, commands, keyboard shortcuts, event handlers, and UI components.
+TypeScript modules that extend volt with custom tools, commands, keyboard shortcuts, event handlers, and UI that every client renders: the TUI, RPC clients, and the phone app.
 
 ```typescript
+export const manifest = defineManifest({ id: "deploy", displayName: "Deploy" });
+
 export default function (volt: ExtensionAPI) {
   volt.registerTool({ name: "deploy", ... });
   volt.registerCommand("stats", { ... });
@@ -409,12 +413,11 @@ The default export can also be `async`. volt waits for async extension factories
 - Specialized orchestration alongside native subagents and Plan mode
 - Custom compaction and summarization
 - Permission gates and path protection
-- Custom editors and UI components
-- Status lines, headers, footers
+- Dialogs, forms, status items, and panels
+- Custom presentation of tool calls and messages
 - Git checkpointing and auto-commit
 - SSH and sandbox execution
 - Custom integrations alongside native MCP support
-- Make volt look like Claude Code
 - ...anything you can dream up
 
 Place in `~/.volt/agent/extensions/`, `.volt/extensions/`, or a [volt package](#volt-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).

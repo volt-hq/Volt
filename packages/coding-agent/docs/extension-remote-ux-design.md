@@ -1,5 +1,7 @@
 # Remote-friendly extensions
 
+> **Superseded.** The [architecture rewrite](architecture-rewrite-design.md) (§8, Data-Only Extensions) replaced this proposal. Like it, extensions describe UI as data (`UiNode`) that every client renders, but the rewrite removes terminal components from the extension API instead of keeping them as an optional TUI-only enhancement: the TUI renders the same data as every other client. This document is a historical record.
+
 - Status: Proposal. Nothing here is implemented.
 - Date: 2026-09-30
 - Audience: Volt maintainers, extension API implementers, and volt-app maintainers.

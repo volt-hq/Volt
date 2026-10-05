@@ -306,7 +306,7 @@ describe("background tool interface", () => {
 	it("preserves foreground execution and returns a background handle without native result details", async () => {
 		const { jobs } = await runtime();
 		const finish = deferred();
-		const definition: ToolDefinition<typeof schema, { marker: string }, object> = {
+		const definition: ToolDefinition<typeof schema, { marker: string }> = {
 			name: "bash",
 			label: "bash",
 			description: "Test Bash",

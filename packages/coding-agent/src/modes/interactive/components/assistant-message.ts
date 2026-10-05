@@ -21,7 +21,6 @@ export class AssistantMessageComponent extends Container {
 	private contentContainer: Container;
 	private hideThinkingBlock: boolean;
 	private markdownTheme: MarkdownTheme;
-	private hiddenThinkingLabel: string;
 	private lastMessage?: AssistantMessage;
 	private contentDirty = false;
 	private hasToolCalls = false;
@@ -30,13 +29,11 @@ export class AssistantMessageComponent extends Container {
 		message?: AssistantMessage,
 		hideThinkingBlock = false,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
-		hiddenThinkingLabel = "Thinking...",
 	) {
 		super();
 
 		this.hideThinkingBlock = hideThinkingBlock;
 		this.markdownTheme = markdownTheme;
-		this.hiddenThinkingLabel = hiddenThinkingLabel;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -55,12 +52,6 @@ export class AssistantMessageComponent extends Container {
 	setHideThinkingBlock(hide: boolean): void {
 		if (this.hideThinkingBlock === hide) return;
 		this.hideThinkingBlock = hide;
-		this.contentDirty = true;
-	}
-
-	setHiddenThinkingLabel(label: string): void {
-		if (this.hiddenThinkingLabel === label) return;
-		this.hiddenThinkingLabel = label;
 		this.contentDirty = true;
 	}
 
@@ -113,11 +104,7 @@ export class AssistantMessageComponent extends Container {
 				const thinkingLabel = theme.italic(theme.fg("accent", "[thinking]"));
 				if (this.hideThinkingBlock) {
 					this.contentContainer.addChild(
-						new Text(
-							`${thinkingLabel} ${theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel))}`,
-							1,
-							0,
-						),
+						new Text(`${thinkingLabel} ${theme.italic(theme.fg("thinkingText", "Thinking..."))}`, 1, 0),
 					);
 					if (hasVisibleContentAfter) {
 						this.contentContainer.addChild(new Spacer(1));

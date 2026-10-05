@@ -22,7 +22,7 @@ import { stripFrontmatter } from "../../utils/frontmatter.ts";
 import type { AgentSessionEvent, PromptOptions } from "../agent-session.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "../auth-guidance.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
-import { type ExtensionRunner, ExtensionUIDismissedError, type RegisteredIntent } from "../extensions/index.ts";
+import type { ExtensionRunner, RegisteredIntent } from "../extensions/index.ts";
 import type { CustomMessage, CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { expandPromptTemplate } from "../prompt-templates.ts";
@@ -601,8 +601,6 @@ export class SessionPrompting {
 			}
 			return true;
 		} catch (err) {
-			// Volt tore the handler's custom UI down (session replacement, reload, or the session ending).
-			if (err instanceof ExtensionUIDismissedError) return true;
 			// Emit error via extension runner
 			this.host.extensionRunner().emitError({
 				extensionId: command.extensionId,

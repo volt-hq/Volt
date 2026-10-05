@@ -1,6 +1,9 @@
 import { createInterface } from "node:readline";
+import type { ExtensionPermission } from "@hansjm10/volt-protocol";
+import { sanitizeText } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir } from "../config.ts";
+import { type PackagePermissions, readPackagePermissions } from "../core/extensions/permissions.ts";
 import type { ExtensionDefinition } from "../core/extensions/types.ts";
 import type { PackageInstallScriptPolicy } from "../core/package-manager.ts";
 import { DefaultPackageManager } from "../core/package-manager.ts";
@@ -11,7 +14,10 @@ import {
 	parseProjectTrustOverride,
 	reportProjectTrustWarnings,
 	reportSettingsErrors,
+	reviewInstalledPermissions,
 } from "../package-manager-cli.ts";
+import { parseGitUrl } from "../utils/git.ts";
+import { resolvePath } from "../utils/paths.ts";
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
@@ -19,7 +25,7 @@ import {
 	type StoreCatalog,
 	searchCatalogPackages,
 } from "./catalog.ts";
-import { inspectStorePackage } from "./inspector.ts";
+import { inspectStorePackage, type StorePackageInspection } from "./inspector.ts";
 import {
 	buildStoreInstallPlan,
 	type StoreInstallPlan,
@@ -35,7 +41,12 @@ import {
 	renderStoreShow,
 } from "./render.ts";
 import { resolveStoreSource } from "./resolver.ts";
-import { chooseStoreRemoveTarget, chooseStoreUpdateTarget, storeTargetMatchesUpdateSource } from "./targets.ts";
+import {
+	chooseStoreRemoveTarget,
+	chooseStoreUpdateTarget,
+	type StoreScopeTarget,
+	storeTargetMatchesUpdateSource,
+} from "./targets.ts";
 
 type StoreCommand = "search" | "show" | "install" | "remove" | "update";
 
@@ -365,6 +376,82 @@ async function confirmMutation(options: { yes: boolean; action: string }): Promi
 	return confirmed;
 }
 
+/** What the package installed for `target` declares, read from its package.json; undefined when that cannot be read. */
+function installedPermissions(
+	packageManager: DefaultPackageManager,
+	target: StoreScopeTarget,
+): PackagePermissions | undefined {
+	const root = packageManager.getInstalledPath(target.source, target.scope);
+	if (root === undefined) return undefined;
+	try {
+		return readPackagePermissions(root, target.source);
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Why an update without a terminal keeps `target` at its installed pin: the
+ * new pin's manifest (read before installing, from the inspection) cannot be
+ * read, or declares permissions the installed pin does not. Undefined when
+ * the update may go ahead; its permissions are then reviewed once installed.
+ */
+function nonInteractiveUpdateRefusal(
+	packageManager: DefaultPackageManager,
+	target: StoreScopeTarget,
+	inspection: StorePackageInspection,
+	input: string,
+): string | undefined {
+	const manifest = inspection.volt?.manifest;
+	if (manifest === undefined) return "its extension manifest at the new pin could not be read";
+	const installed = installedPermissions(packageManager, target);
+	const kept: readonly ExtensionPermission[] = installed?.id === manifest.id ? installed.permissions : [];
+	const added = (manifest.permissions ?? []).filter((permission) => !kept.includes(permission));
+	return added.length === 0
+		? undefined
+		: `the new pin adds permissions (${added.join(", ")}); run "${APP_NAME} store update ${input}" in a terminal to review them`;
+}
+
+/**
+ * Review the permissions of every configured package an update touched:
+ * the package `source` names (matched as the update matched it), or all;
+ * project ones only with `local`. A package whose permissions were declined
+ * or could not be reviewed fails the command.
+ */
+async function reviewUpdatedPermissions(
+	packageManager: DefaultPackageManager,
+	agentDir: string,
+	options: { readonly source?: string; readonly local: boolean },
+): Promise<void> {
+	for (const pkg of packageManager.listConfiguredPackages()) {
+		if (options.local && pkg.scope !== "project") continue;
+		const source = options.source;
+		if (
+			source !== undefined &&
+			packageManager.getPackageIdentity(pkg.source, pkg.scope) !==
+				packageManager.getPackageIdentity(source, pkg.scope)
+		) {
+			continue;
+		}
+		const status = await reviewInstalledPermissions(
+			packageManager,
+			agentDir,
+			pkg.source,
+			pkg.scope,
+			"Declining leaves it installed with its permissions unacknowledged.",
+			`${APP_NAME} store update ${pkg.source}`,
+		);
+		if (status === "declined" || status === "failed") {
+			console.error(
+				chalk.yellow(
+					`${formatStoreSourceSummary(pkg.source)} asks for permissions you did not acknowledge; remove it with "${APP_NAME} store remove ${pkg.source}"`,
+				),
+			);
+			process.exitCode = 1;
+		}
+	}
+}
+
 async function runSearch(options: StoreCommandOptions, agentDir: string): Promise<boolean> {
 	const catalog = await loadCatalog(agentDir, { required: true });
 	if (!catalog) {
@@ -466,6 +553,23 @@ async function runInstall(
 		return true;
 	}
 
+	const permissions = await reviewInstalledPermissions(
+		packageManager,
+		agentDir,
+		// A local package is found where it was installed from: the source's path from here.
+		plan.resolved.kind === "local" ? resolvePath(plan.source, cwd, { trim: true }) : plan.source,
+		scope,
+		"Declining removes the package.",
+		`${APP_NAME} store install ${input}`,
+	);
+	if (permissions === "declined" || permissions === "failed") {
+		await packageManager.removeAndPersist(plan.source, { local: options.local });
+		await settingsManager.flush();
+		console.error(chalk.red(`Removed ${formatStoreInstallPlanTarget(plan)}: its permissions were not acknowledged`));
+		process.exitCode = 1;
+		return true;
+	}
+
 	console.log(chalk.green(`Installed ${formatStoreInstallPlanTarget(plan)}`));
 	return true;
 }
@@ -544,6 +648,7 @@ async function runUpdate(
 			return true;
 		}
 		await packageManager.update(undefined, options.local ? { local: true, scripts: "never" } : { scripts: "never" });
+		await reviewUpdatedPermissions(packageManager, agentDir, { local: options.local });
 		console.log(chalk.green("Updated packages"));
 		return true;
 	}
@@ -561,6 +666,7 @@ async function runUpdate(
 			return true;
 		}
 		await packageManager.update(input, options.local ? { local: true, scripts: "never" } : { scripts: "never" });
+		await reviewUpdatedPermissions(packageManager, agentDir, { source: input, local: options.local });
 		console.log(chalk.green(`Updated ${formatStoreSourceSummary(input)}`));
 		return true;
 	}
@@ -585,9 +691,14 @@ async function runUpdate(
 		if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 			return true;
 		}
-		await packageManager.update(target.actionSource ?? target.source, {
+		const updateSource = target.actionSource ?? target.source;
+		await packageManager.update(updateSource, {
 			local: target.scope === "project",
 			scripts: "never",
+		});
+		await reviewUpdatedPermissions(packageManager, agentDir, {
+			source: updateSource,
+			local: target.scope === "project",
 		});
 		console.log(chalk.green(`Updated ${formatStoreSourceSummary(target.source)}`));
 		return true;
@@ -605,13 +716,22 @@ async function runUpdate(
 		scriptPolicy: "never",
 	});
 	console.log(renderStoreInstallPlan(plan));
+	const currentLabel = formatStoreSourceSummary(target.source);
+	// Without a terminal to ask, an update that would need new permissions keeps the reviewed pin installed.
+	const refusal =
+		getCommandAppMode() === "interactive"
+			? undefined
+			: nonInteractiveUpdateRefusal(packageManager, target, inspection, input);
+	if (refusal !== undefined) {
+		console.error(chalk.yellow(`Kept ${currentLabel}: ${refusal}`));
+		process.exitCode = 1;
+		return true;
+	}
 	if (!(await confirmMutation({ yes: options.yes, action: "update" }))) {
 		return true;
 	}
-	await packageManager.installAndPersist(plan.source, {
-		local: target.scope === "project",
-		scripts: "never",
-	});
+	const local = target.scope === "project";
+	await packageManager.installAndPersist(plan.source, { local, scripts: "never" });
 	await settingsManager.flush();
 	const settingsErrors = settingsManager.drainErrors();
 	if (settingsErrors.length > 0) {
@@ -625,9 +745,37 @@ async function runUpdate(
 		process.exitCode = 1;
 		return true;
 	}
-	console.log(
-		chalk.green(`Updated ${formatStoreSourceSummary(target.source)} to ${formatStoreInstallPlanTarget(plan)}`),
+	const permissions = await reviewInstalledPermissions(
+		packageManager,
+		agentDir,
+		plan.source,
+		target.scope,
+		`Declining keeps ${currentLabel}.`,
+		`${APP_NAME} store update ${input}`,
 	);
+	if (permissions === "declined" || permissions === "failed") {
+		process.exitCode = 1;
+		// Back to the installed pin: the update's permissions were not acknowledged.
+		try {
+			await packageManager.installAndPersist(target.source, { local, scripts: "never" });
+			await settingsManager.flush();
+		} catch (error: unknown) {
+			// The declined pin must not stay installed: without the previous one, the package goes.
+			const message = sanitizeText(error instanceof Error ? error.message : String(error));
+			console.error(chalk.red(`Could not reinstall ${currentLabel}: ${message}`));
+			await packageManager.removeAndPersist(plan.source, { local });
+			await settingsManager.flush();
+			console.error(chalk.red(`Removed ${currentLabel}: the update's permissions were not acknowledged`));
+			return true;
+		}
+		console.error(chalk.red(`Kept ${currentLabel}: the update's permissions were not acknowledged`));
+		// A source without a commit pin reinstalls at its newest revision, which has its own permissions.
+		if (!/^[0-9a-f]{40}$/i.test(parseGitUrl(target.source)?.ref ?? "")) {
+			await reviewUpdatedPermissions(packageManager, agentDir, { source: target.source, local });
+		}
+		return true;
+	}
+	console.log(chalk.green(`Updated ${currentLabel} to ${formatStoreInstallPlanTarget(plan)}`));
 	return true;
 }
 

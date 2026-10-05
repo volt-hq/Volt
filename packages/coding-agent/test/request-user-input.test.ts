@@ -2,7 +2,7 @@ import { type ToolCall, validateToolArguments } from "@hansjm10/volt-ai";
 import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import type { TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { ExtensionContext, ExtensionUIContext } from "../src/core/extensions/types.ts";
+import type { ExtensionContext } from "../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import {
 	authorizeToolOperation,
@@ -19,7 +19,7 @@ import {
 } from "../src/core/tools/request-user-input.ts";
 import { HOST_UI_POLICY, presentToolCall } from "../src/core/ui/presentation.ts";
 import type { UserInputRequest, UserInputResponse } from "../src/core/user-input.ts";
-import { promptUserInput } from "../src/modes/interactive/components/user-input-dialog.ts";
+import { type MountUserInputDialog, promptUserInput } from "../src/modes/interactive/components/user-input-dialog.ts";
 
 const request: RequestUserInputToolInput = {
 	questions: [
@@ -151,14 +151,14 @@ describe("request_user_input", () => {
 		const controller = new AbortController();
 		const remove = vi.spyOn(controller.signal, "removeEventListener");
 		let closeResult: unknown;
-		const custom: ExtensionUIContext["custom"] = <T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) =>
-			new Promise<T>((resolve) => {
-				void factory(tui, theme, new KeybindingsManager(), (result) => {
+		const mount: MountUserInputDialog = (create) =>
+			new Promise((resolve) => {
+				create(tui, theme, new KeybindingsManager(), (result) => {
 					closeResult = result;
-					resolve(result as T);
+					resolve(result);
 				});
 			});
-		const pending = tool((asked, signal) => promptUserInput(custom, asked, signal)).execute(
+		const pending = tool((asked, signal) => promptUserInput(mount, asked, signal)).execute(
 			"q1",
 			request,
 			controller.signal,
@@ -175,17 +175,17 @@ describe("request_user_input", () => {
 		const controller = new AbortController();
 		let show: (() => void) | undefined;
 		let response: unknown;
-		const custom: ExtensionUIContext["custom"] = <T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) =>
-			new Promise<T>((resolve) => {
+		const mount: MountUserInputDialog = (create) =>
+			new Promise((resolve) => {
 				show = () => {
-					void factory(tui, theme, new KeybindingsManager(), (result) => {
+					create(tui, theme, new KeybindingsManager(), (result) => {
 						response = result;
-						resolve(result as T);
+						resolve(result);
 					});
 				};
 			});
 		const pending = promptUserInput(
-			custom,
+			mount,
 			{ questions: request.questions.map((question) => ({ ...question })) },
 			controller.signal,
 		);

@@ -2,11 +2,13 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { Component, TUI } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
-import type { ExtensionUIContext } from "../../src/core/extensions/types.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { initTheme, theme } from "../../src/core/theme/runtime.ts";
 import type { UserInputResponse } from "../../src/core/user-input.ts";
-import { promptUserInput } from "../../src/modes/interactive/components/user-input-dialog.ts";
+import {
+	type MountUserInputDialog,
+	promptUserInput,
+} from "../../src/modes/interactive/components/user-input-dialog.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -47,16 +49,12 @@ describe("native structured questions", () => {
 		return harness;
 	}
 
-	async function bind(
-		harness: Harness,
-		custom: ExtensionUIContext["custom"] = async <T>() => answered as T,
-	): Promise<() => void> {
+	async function bind(harness: Harness, mount: MountUserInputDialog = async () => answered): Promise<() => void> {
 		const attachment = harness.session.attachExtensionClient({
 			id: "tui",
 			mode: "tui",
-			ui: { ...harness.session.extensionRunner.getUIContext(), custom },
 			// As the TUI's surface asks: in a dialog its terminal mounts.
-			userInput: (asked, signal) => promptUserInput(custom, asked, signal),
+			userInput: (asked, signal) => promptUserInput(mount, asked, signal),
 		});
 		await attachment.ready;
 		return attachment.detach;
@@ -125,12 +123,9 @@ describe("native structured questions", () => {
 		const ready = Promise.withResolvers<Component>();
 		await bind(
 			h,
-			<T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) =>
-				new Promise<T>((resolve, reject) => {
-					Promise.resolve(factory(tui, theme, new KeybindingsManager(), (result) => resolve(result as T))).then(
-						ready.resolve,
-						reject,
-					);
+			(create) =>
+				new Promise((resolve) => {
+					ready.resolve(create(tui, theme, new KeybindingsManager(), resolve));
 				}),
 		);
 		let nextContext = "";
@@ -228,14 +223,13 @@ describe("native structured questions", () => {
 		let closed = false;
 		await bind(
 			h,
-			<T>(factory: Parameters<ExtensionUIContext["custom"]>[0]) =>
-				new Promise<T>((resolve, reject) => {
-					Promise.resolve(
-						factory(tui, theme, new KeybindingsManager(), (result) => {
-							closed = true;
-							resolve(result as T);
-						}),
-					).then(() => ready.resolve(), reject);
+			(create) =>
+				new Promise((resolve) => {
+					create(tui, theme, new KeybindingsManager(), (result) => {
+						closed = true;
+						resolve(result);
+					});
+					ready.resolve();
 				}),
 		);
 		h.setResponses([fauxAssistantMessage(fauxToolCall("request_user_input", request), { stopReason: "toolUse" })]);

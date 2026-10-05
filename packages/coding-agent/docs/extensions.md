@@ -9,11 +9,10 @@ Extensions are TypeScript modules that extend volt's behavior. They can subscrib
 **Key capabilities:**
 - **Custom tools** - Register tools the LLM can call via `volt.registerTool()`
 - **Event interception** - Block or modify tool calls, inject context, customize compaction
-- **User interaction** - Prompt users via `ctx.ui` (select, confirm, input, notify)
-- **Custom UI components** - Full TUI components with keyboard input via `ctx.ui.custom()` for complex interactions
-- **Custom commands** - Register commands like `/mycommand` via `volt.registerCommand()`
+- **User interaction** - Ask users via `ctx.ui` dialogs and forms (select, confirm, input, form, dialog) and notify them
+- **UI as data** - Status items, panels, and tool, message, and work presentation as `UiNode` data that every client renders: the TUI, RPC clients, and paired phones
+- **Custom commands** - Register commands like `/mycommand` via `volt.registerCommand()`, intents via `volt.registerIntent()`, and key shortcuts for them
 - **Session persistence** - Store state that survives restarts via `volt.appendEntry()`
-- **Custom rendering** - Control how tool calls/results and messages appear in TUI
 
 **Example use cases:**
 - Permission gates (confirm before `rm -rf`, `sudo`, etc.)
@@ -21,7 +20,7 @@ Extensions are TypeScript modules that extend volt's behavior. They can subscrib
 - Path protection (block writes to `.env`, `node_modules/`)
 - Custom compaction (summarize conversation your way)
 - Conversation summaries (see `summarize.ts` example)
-- Interactive tools (questions, wizards, custom dialogs)
+- Interactive tools (questions, wizards, forms)
 - Stateful tools (todo lists, connection pools)
 - External integrations (file watchers, webhooks, CI triggers)
 
@@ -40,18 +39,34 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [JSON Data Boundary](#json-data-boundary)
 - [Events](#events)
   - [Lifecycle Overview](#lifecycle-overview)
+  - [Startup Events](#startup-events)
   - [Resource Events](#resource-events)
   - [Session Events](#session-events)
   - [Agent Events](#agent-events)
   - [Model Events](#model-events)
   - [Tool Events](#tool-events)
+  - [User Bash Events](#user-bash-events)
+  - [Input Events](#input-events)
 - [ExtensionContext](#extensioncontext)
 - [ExtensionCommandContext](#extensioncommandcontext)
 - [ExtensionAPI Methods](#extensionapi-methods)
   - [Background work](#voltregisterworkkindname-kind)
+- [Managed context preparation](#managed-context-preparation)
 - [State Management](#state-management)
 - [Custom Tools](#custom-tools)
-- [Custom UI](#custom-ui)
+  - [Tool Presentation](#tool-presentation)
+- [UI as Data](#ui-as-data)
+  - [Clients](#clients)
+  - [Styled Text](#styled-text)
+  - [Notifications](#notifications)
+  - [Dialogs and Forms](#dialogs-and-forms)
+  - [Status Items](#status-items)
+  - [Panels](#panels)
+  - [Actions](#actions)
+  - [Title, Editor Text, and Themes](#title-editor-text-and-themes)
+  - [Intents, Shortcuts, and Completions](#intents-shortcuts-and-completions)
+  - [Message Presentation](#message-presentation)
+  - [Work Detail](#work-detail)
 - [Error Handling](#error-handling)
 - [Mode Behavior](#mode-behavior)
 - [Examples Reference](#examples-reference)
@@ -171,14 +186,15 @@ export default function (volt: ExtensionAPI) {
     // ctx.ui for user interaction
     const ok = await ctx.ui.confirm("Title", "Are you sure?");
     ctx.ui.notify("Done!", "info");
-    ctx.ui.setStatus("my-ext", "Processing...");  // Footer status
-    ctx.ui.setWidget("my-ext", ["Line 1", "Line 2"]);  // Widget above editor (default)
+    ctx.ui.setStatus("my-ext", "Processing...");  // Status item (the TUI's footer)
+    ctx.ui.setPanel("my-ext", { node: { type: "text", text: "Line 1\nLine 2" } });  // Panel above the editor
   });
 
-  // Register tools, commands, shortcuts, flags
+  // Register tools, commands, intents, shortcuts, flags
   volt.registerTool({ ... });
   volt.registerCommand("name", { ... });
-  volt.registerShortcut("ctrl+x", { ... });
+  const intent = volt.registerIntent("name", { ... });
+  volt.registerShortcut("ctrl+shift+x", { intent });
   volt.registerFlag("my-flag", { ... });
 }
 ```
@@ -243,7 +259,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 ### Permissions
 
-`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `/store install`) or updated, and when an extension is enabled, and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks, and an extension whose permissions you have not acknowledged still runs at startup: acknowledgment gates enabling it while a session runs, not starting with it.
+`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `volt store install`, `/store install`) or updated (`volt update`, `volt store update`; see [Volt Store](packages.md#volt-store)), and when an extension is enabled, and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks, and an extension whose permissions you have not acknowledged still runs at startup: acknowledgment gates enabling it while a session runs, not starting with it.
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
@@ -260,7 +276,7 @@ Permissions are advisory: extensions run in your process and can reach Node's ow
 `extensions.<id>.enabled` in global or (trusted) project settings decides whether an extension runs; it does by default. A disabled extension's factory never runs: a package's entry is not imported until it is enabled, and a single file is evaluated only to read its manifest. Toggle one with `/extensions` (pick it, then Enable or Disable), `/extensions enable <id>`, `/extensions disable <id>`, or the `set_extension_enabled` intent ([rpc.md](rpc.md)); every open conversation follows at once, without `/reload`.
 
 - **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have. A session runs an extension enabled meanwhile (by another client, conversation, or a settings edit) only once its permissions are acknowledged; until then it is listed as failed.
-- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or renderer of it runs again. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, terminal UI, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
+- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
 - Skills, prompts, and themes an extension adds through `resources_discover` change on the next `/reload`.
 
 `/store install` and `/store remove` pick up an installed or removed extension the same way; `/reload` reloads every extension (`deactivate` and `activate` with `reason: "reload"`).
@@ -828,7 +844,7 @@ volt.on("model_select", async (event, ctx) => {
 });
 ```
 
-Use this to update UI elements (status bars, footers) or perform model-specific initialization when the active model changes.
+Use this to update UI (status items, panels) or perform model-specific initialization when the active model changes.
 
 #### thinking_level_select
 
@@ -1056,15 +1072,15 @@ All handlers receive `ctx: ExtensionContext`.
 
 ### ctx.ui
 
-UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
+`ctx.ui` asks dialogs and forms and shows notifications, status items, panels, the title, and editor text, as data every client renders. See [UI as Data](#ui-as-data).
 
 ### ctx.mode
 
-Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"tui"` in the desktop TUI (also for phones relayed through it), `"rpc"` for stdio RPC, daemon-hosted conversations, and subagents, and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Use `ctx.mode === "tui"` to guard terminal-only features such as `custom()`, component factories, terminal input, and direct TUI rendering.
+Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"tui"` in the desktop TUI (also for phones relayed through it), `"rpc"` for stdio RPC, daemon-hosted conversations, and subagents, and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Extension UI is data every client renders, so UI calls need no mode check.
 
 ### ctx.hasUI
 
-`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) that work in both TUI and RPC modes. In RPC mode, some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extensions-in-rpc-mode)).
+`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), which resolve to their defaults without UI. Fire-and-forget methods (`notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`) need no guard: without a client that shows UI, nothing sees them (see [rpc.md](rpc.md#extensions-in-rpc-mode)).
 
 ### ctx.cwd
 
@@ -1550,9 +1566,10 @@ volt.registerTool({
     };
   },
 
-  // Optional: Custom rendering
-  renderCall(args, theme, context) { ... },
-  renderResult(result, options, theme, context) { ... },
+  // Optional: how a call looks on every client
+  present({ args, state }) {
+    return { title: `my_tool ${args.action ?? ""}`, ...(state === "done" ? {} : { activity: "Working…" }) };
+  },
 });
 ```
 
@@ -1694,18 +1711,14 @@ volt.registerCommand("stats", {
 });
 ```
 
-Optional: add argument auto-completion for `/command ...`:
+Optional: add argument auto-completion for `/command ...`. `getArgumentCompletions` returns items `{ value, label, description? }`, or `null` for none, and may be async:
 
 ```typescript
-import type { AutocompleteItem } from "@hansjm10/volt-tui";
-
 volt.registerCommand("deploy", {
   description: "Deploy to an environment",
-  getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
-    const envs = ["dev", "staging", "prod"];
-    const items = envs.map((e) => ({ value: e, label: e }));
-    const filtered = items.filter((i) => i.value.startsWith(prefix));
-    return filtered.length > 0 ? filtered : null;
+  getArgumentCompletions: (prefix) => {
+    const envs = ["dev", "staging", "prod"].filter((env) => env.startsWith(prefix));
+    return envs.length > 0 ? envs.map((env) => ({ value: env, label: env })) : null;
   },
   handler: async (args, ctx) => {
     ctx.ui.notify(`Deploying: ${args}`, "info");
@@ -1719,12 +1732,12 @@ The intent is a presentation layer over the command handler:
 
 - Clients invoke the intent by name; they should not synthesize `/<command>` when the intent is listed. Invoking it sends the command's slash text as a prompt.
 - The command still runs in the host and may finish without starting an agent turn.
-- `ctx.ui` dialogs reach clients as host requests on the protocol's live lane (see [Clients](#clients)). Terminal-only APIs such as `ctx.ui.custom()` do nothing in RPC mode.
+- `ctx.ui` dialogs reach clients as host requests on the protocol's live lane (see [Clients](#clients)).
 - Descriptors expose only bounded labels and source scope/origin metadata. They do not expose extension source paths or raw `sourceInfo`.
 - Paired remote clients see only commands registered with `remoteSafe: true`.
 - Project-local extension commands appear only after the same project-trust/resource-loading path that exposes them locally.
 
-There is no `volt.registerAction()` API. Use `volt.registerCommand()` for user-invokable extension actions; extension-defined intents with their own input schema and presentation are not available yet.
+For an operation with typed input that UI actions, forms, and shortcuts invoke, register an intent with [`volt.registerIntent()`](#voltregisterintentname-options).
 
 ### volt.getCommands()
 
@@ -1793,6 +1806,7 @@ The declaration (all optional):
 | `cancelOnAbort` | (cancels) | `false` keeps the work running when the conversation's run stops (Escape, the `abort` intent). |
 | `maxActive` | `1` | Most items of the kind open at once, at most 8. |
 | `requires` | `[]` | Remote capabilities a paired device needs, beyond the intent's own, to cancel the work or read its output. A kind that requires any keeps its work running when the run stops. |
+| `detail` | (none) | A presenter of the `UiNode` data every client shows with a running item; see [Work Detail](#work-detail). |
 
 `run` receives only the work's context: `workId`, `signal` (aborted when the work is cancelled, the extensions reload, or the conversation closes), `progress(progress)` for live progress, `checkpoint(progress)` for a phase that is also recorded in the log (at most every 10 seconds), and `output(text)` (the newest 50 KB are kept). Progress is `{ text?, value?, max?, steps? }`, with steps `{ key, label, status }` and status `pending`, `active`, `done`, `failed`, or `skipped`; text is shown without control sequences.
 
@@ -1802,9 +1816,9 @@ In the TUI, open work shows in the footer's work line and in `/work` (Alt+J), wh
 
 Reloading the extensions removes their kinds: `/reload` is refused while work runs, and work still running when the kinds are removed (for example, started by a `session_shutdown` handler) ends `interrupted`; whatever its `run` reports or returns afterwards is ignored. Extension work does not survive a restart: work open when the conversation reopens ends `interrupted`.
 
-### volt.registerMessageRenderer(customType, renderer)
+### volt.registerMessagePresenter(customType, present)
 
-No longer draws anything: custom messages render from the presentation `volt.registerMessagePresenter` returns, or as their text. Removed in a later release.
+Register how custom messages of `customType` look on every client: a pure, synchronous function from the message to `UiNode` data. See [Message Presentation](#message-presentation).
 
 ### volt.registerIntent(name, options)
 
@@ -2144,7 +2158,7 @@ export default function (volt: ExtensionAPI) {
 
 ## Custom Tools
 
-Register tools the LLM can call via `volt.registerTool()`. Tools appear in the system prompt and can have custom rendering.
+Register tools the LLM can call via `volt.registerTool()`. Tools appear in the system prompt, and their [`present()`](#tool-presentation) says how their calls look.
 
 Use `promptSnippet` for a short one-line entry in the `Available tools` section in the default system prompt. If omitted, custom tools are left out of that section.
 
@@ -2189,7 +2203,6 @@ async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 ```typescript
 import { Type } from "typebox";
 import { StringEnum } from "@hansjm10/volt-ai";
-import { Text } from "@hansjm10/volt-tui";
 
 volt.registerTool({
   name: "my_tool",
@@ -2230,16 +2243,15 @@ volt.registerTool({
     // Return result
     return {
       content: [{ type: "text", text: "Done" }],  // Sent to LLM
-      details: { data: result },                   // For rendering & state
+      details: { data: result },                   // For presentation & state
       // Optional: stop after this tool batch when every finalized tool result
       // in the batch also requests the stop disposition.
       disposition: "stop",
     };
   },
 
-  // Optional: Custom rendering
-  renderCall(args, theme, context) { ... },
-  renderResult(result, options, theme, context) { ... },
+  // Optional: how a call looks on every client (see Tool Presentation)
+  present({ args, state, result }) { ... },
 });
 ```
 
@@ -2329,11 +2341,11 @@ volt --no-builtin-tools -e ./my-extension.ts
 
 See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.ts) for a complete example that overrides `read` with logging and access control.
 
-**Rendering:** Built-in renderer inheritance is resolved per slot. Execution override and rendering override are independent. If your override omits `renderCall`, the built-in `renderCall` is used. If your override omits `renderResult`, the built-in `renderResult` is used. If your override omits both, the built-in renderer is used automatically (syntax highlighting, diffs, etc.). This lets you wrap built-in tools for logging or access control without reimplementing the UI.
+**Presentation:** An override without `present()` presents with the built-in tool's presenter (diffs, highlighted code, terminal output), so you can wrap a built-in tool for logging or access control without reimplementing how it looks. Define `present()` on the override to change it; see [tool-presentation.ts](../examples/extensions/tool-presentation.ts).
 
 **Prompt metadata:** `promptSnippet` and `promptGuidelines` are not inherited from the built-in tool. If your override should keep those prompt instructions, define them on the override explicitly.
 
-**Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
+**Your implementation must match the exact result shape**, including the `details` type. The built-in presenters and session logic depend on these shapes for presentation and state tracking.
 
 Built-in tool implementations:
 - [read.ts](../src/core/tools/read.ts) - `ReadToolDetails`
@@ -2463,157 +2475,130 @@ export default function (volt: ExtensionAPI) {
 }
 ```
 
-### Custom Rendering
+### Tool Presentation
 
-> `renderCall`, `renderResult`, `renderShell`, and `rendersDuration` no longer draw anything: every tool call renders from its tool's `present()` presentation, the same `UiNode` data on every client, and a tool without `present()` shows as a generic card. These hooks are removed in a later release; the rest of this section describes them as they were.
-
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API.
-
-By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, the tool row uses fallback rendering for that slot.
-
-Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
+How a tool call looks is data: the tool's `present(input)` returns a `ToolPresentation`, which every client (the TUI, RPC clients, paired phones, and the HTML export) renders the same way. The host runs it; clients never run extension code.
 
 ```typescript
+import { StringEnum } from "@hansjm10/volt-ai";
+import type { UiNode, UiNodeStyledText } from "@hansjm10/volt-protocol";
+import { Type } from "typebox";
+
 volt.registerTool({
-  name: "my_tool",
-  label: "My Tool",
-  description: "Custom shell example",
-  parameters: Type.Object({}),
-  renderShell: "self",
-  async execute() {
-    return { content: [{ type: "text", text: "ok" }] };
+  name: "deploy",
+  label: "Deploy",
+  description: "Deploy a service",
+  parameters: Type.Object({ service: Type.String(), env: StringEnum(["staging", "prod"] as const) }),
+  async execute(toolCallId, params, signal, onUpdate, ctx) {
+    // ...
+    return { content: [{ type: "text", text: "Deployed" }], details: {} };
   },
-  renderCall(args, theme, context) {
-    return new Text(theme.fg("accent", "my custom shell"), 0, 0);
+
+  present({ args, state, result }) {
+    const title: UiNodeStyledText = [
+      { text: "deploy ", bold: true },
+      { text: args.service ?? "…", token: "accent" },
+      ...(args.env ? [{ text: ` to ${args.env}`, token: "muted" as const }] : []),
+    ];
+    if (state !== "done" || !result) return { title, activity: "Deploying…", showsDuration: true };
+    const status: UiNode = result.isError
+      ? { type: "text", key: "status", text: "Failed", token: "error" }
+      : { type: "text", key: "status", text: "Deployed", token: "success" };
+    const log = result.content.flatMap((part) => (part.type === "text" ? part.text.split("\n") : []));
+    return {
+      title,
+      summary: [status],
+      body: [status, { type: "terminal", key: "log", lines: log }],
+      showsDuration: true,
+    };
   },
 });
 ```
 
-`renderCall` and `renderResult` each receive a `context` object with:
-- `args` - the current tool call arguments
-- `state` - shared row-local state across `renderCall` and `renderResult`
-- `lastComponent` - the previously returned component for that slot, if any
-- `invalidate()` - request a rerender of this tool row
-- `toolCallId`, `cwd`, `executionStarted`, `argsComplete`, `isPartial`, `expanded`, `showImages`, `isError`
+`present` receives a `ToolPresentInput`:
 
-Use `context.state` for cross-slot shared state. Keep slot-local caches on the returned component instance when you want to reuse and mutate the same component across renders.
+| Field | Meaning |
+|---|---|
+| `args` | The arguments parsed so far. While `argsComplete` is `false` they may be incomplete or of the wrong type: check what you read. |
+| `argsComplete` | Whether the model finished streaming the arguments. |
+| `state` | `pending` (the arguments still stream), `running`, or `done`. |
+| `result` | `{ content, details?, isError, partial }`: the final result, or while the tool runs the latest partial result it reported through `onUpdate` (`partial: true`). |
+| `cwd` | The conversation's working directory, for showing paths relative to it. |
 
-#### renderCall
+It returns a `ToolPresentation`:
 
-Renders the tool call or header:
+| Field | Meaning |
+|---|---|
+| `title` | One line of [styled text](#styled-text) naming the call, such as `$ npm test`. |
+| `activity` | Styled text saying what the call does while it runs. |
+| `summary` | `UiNode[]` shown while the call is collapsed. |
+| `body` | `UiNode[]` shown while it is expanded; clients show `summary` when there is no body. |
+| `actions` | [Actions](#actions) shown with the call. |
+| `hidden` | Clients do not show the call. |
+| `showsDuration` | Clients show the call's elapsed time. |
 
-```typescript
-import { Text } from "@hansjm10/volt-tui";
+- **Pure, synchronous, and stateless.** The same input gives the same presentation. The host presents a call when it starts, at most every 100 ms while partial results arrive, and when it ends, and presents calls in the log again whenever it shows them to a client; it never stores presentations. It passes the presenter a copy of the input, and refuses a returned promise.
+- **Fallbacks.** A tool without `present()` presents with the built-in presenter of its name, if it has one (an override of `read` keeps `read`'s look), else with the generic presentation: the tool's name, its arguments as JSON, and its output. A presenter that throws or returns invalid data gets the generic presentation too, and so do the calls of a disabled extension's tool.
+- **Chrome.** Clients draw the rest: the call's state, its elapsed time, collapsing and expanding (Ctrl+O, `app.tools.expand`, in the TUI), the result's images, and the work the call started.
+- **Normalized and bounded.** The host converts ANSI styling to tokens, checks the data against the [`UiNode` schema](ui-nodes.md), and drops actions the extension may not bind. A presentation holds at most 64 KB of JSON for local clients and 16 KB for paired devices: the oldest lines of terminal nodes and the ends of code and diff nodes are cut first, and a presentation that still does not fit is replaced by the generic one (for a paired device, the tool's name).
+- **Keyed updates.** While a call runs, clients receive patches of its `summary` and `body`, and a terminal node that only gained lines is sent as the new lines. Give nodes stable `key`s so updates stay small.
 
-renderCall(args, theme, context) {
-  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-  let content = theme.fg("toolTitle", theme.bold("my_tool "));
-  content += theme.fg("muted", args.action);
-  if (args.text) {
-    content += " " + theme.fg("dim", `"${args.text}"`);
-  }
-  text.setText(content);
-  return text;
-}
-```
+`present` is typed by the tool: `ToolPresentInput<Static<TParams>, TDetails>`. [tool-presentation.ts](../examples/extensions/tool-presentation.ts) gives the built-in `read`, `bash`, `edit`, and `write` tools compact presenters; [todo.ts](../examples/extensions/todo.ts) and [questionnaire.ts](../examples/extensions/questionnaire.ts) present their own tools.
 
-#### renderResult
+## UI as Data
 
-Renders the tool result or output:
+Extension UI is data: [styled text](#styled-text) and [`UiNode`](ui-nodes.md) trees. The host checks and normalizes it, holds it per conversation, and sends it to every client, which renders it with its own components: the TUI with terminal components, RPC clients and paired phones from the protocol's live lane and projected entries, and the HTML export as HTML. No extension code runs in a client. [UI Nodes](ui-nodes.md) is the reference for node types, styled text, actions, patches, and limits.
 
-```typescript
-renderResult(result, { expanded, isPartial }, theme, context) {
-  if (isPartial) {
-    return new Text(theme.fg("warning", "Processing..."), 0, 0);
-  }
-
-  if (result.details?.error) {
-    return new Text(theme.fg("error", `Error: ${result.details.error}`), 0, 0);
-  }
-
-  let text = theme.fg("success", "✓ Done");
-  if (expanded && result.details?.items) {
-    for (const item of result.details.items) {
-      text += "\n  " + theme.fg("dim", item);
-    }
-  }
-  return new Text(text, 0, 0);
-}
-```
-
-If a slot intentionally has no visible content, return an empty `Component` such as an empty `Container`.
-
-#### Keybinding Hints
-
-Use `keyHint()` to display keybinding hints that respect the active keybinding configuration:
-
-```typescript
-import { keyHint } from "@hansjm10/volt-coding-agent";
-
-renderResult(result, { expanded }, theme, context) {
-  let text = theme.fg("success", "✓ Done");
-  if (!expanded) {
-    text += ` (${keyHint("app.tools.expand", "to expand")})`;
-  }
-  return new Text(text, 0, 0);
-}
-```
-
-Available functions:
-- `keyHint(keybinding, description)` - Formats a configured keybinding id such as `"app.tools.expand"` or `"tui.select.confirm"`
-- `keyText(keybinding)` - Returns the raw configured key text for a keybinding id
-- `rawKeyHint(key, description)` - Format a raw key string
-
-Use namespaced keybinding ids:
-- Coding-agent ids use the `app.*` namespace, for example `app.tools.expand`, `app.editor.external`, `app.session.rename`
-- Shared TUI ids use the `tui.*` namespace, for example `tui.select.confirm`, `tui.select.cancel`, `tui.input.tab`
-
-For the exhaustive list of keybinding ids and defaults, see [keybindings.md](keybindings.md). `keybindings.json` uses those same namespaced ids.
-
-Custom editors and `ctx.ui.custom()` components receive `keybindings: KeybindingsManager` as an injected argument. They should use that injected manager directly instead of calling `getKeybindings()` or `setKeybindings()`.
-
-#### Best Practices
-
-- Use `Text` with padding `(0, 0)`. The default Box handles padding.
-- Use `\n` for multi-line content.
-- Handle `isPartial` for streaming progress.
-- Support `expanded` for detail on demand.
-- Keep default view compact.
-- Read `context.args` in `renderResult` instead of copying args into `context.state`.
-- Use `context.state` only for data that must be shared across call and result slots.
-- Reuse `context.lastComponent` when the same component instance can be updated in place.
-- Use `renderShell: "self"` only when the default boxed shell gets in the way. In self-shell mode the tool is responsible for its own framing, padding, and background.
-
-#### Fallback
-
-If a slot renderer is not defined or throws:
-- `renderCall`: Shows the tool name
-- `renderResult`: Shows raw text from `content`
-
-## Custom UI
-
-Extensions can interact with users via `ctx.ui` methods and customize how messages/tools render.
-
-**For custom components, see [tui.md](tui.md)** which has copy-paste patterns for:
-- Selection dialogs (SelectList)
-- Async operations with cancel (BorderedLoader)
-- Settings toggles (SettingsList)
-- Status indicators (setStatus)
-- Working message, visibility, and indicator during streaming (`setWorkingMessage`, `setWorkingVisible`, `setWorkingIndicator`)
-- Widgets above/below editor (setWidget)
-- Autocomplete providers layered on top of built-in slash/path completion (addAutocompleteProvider)
-- Custom footers (setFooter)
+| Contribution | API | Clients receive (see [rpc.md](rpc.md#live-lane)) |
+|---|---|---|
+| Notifications | `ctx.ui.notify(text, level?)` | a `notice` |
+| Dialogs and forms | `ctx.ui.select`, `confirm`, `input`, `editor`, `dialog`, `form` | a host request |
+| Status items | `ctx.ui.setStatus(key, text)` | `ext_status/<id>/<key>` |
+| Panels | `ctx.ui.setPanel(name, panel)` | `ext_panel/<id>/<name>` |
+| Window title | `ctx.ui.setTitle(title)` | `ext_title` |
+| Editor text | `ctx.ui.setEditorText`, `pasteToEditor`, `getEditorText` | `directive` items and an `editor_text` host request |
+| Tool presentation | a tool's [`present()`](#tool-presentation) | a tool call's `presentation` |
+| Message presentation | [`volt.registerMessagePresenter()`](#message-presentation) | a custom message's `presentation` |
+| Work detail | a work kind's [`detail`](#work-detail) | `work/<workId>` `detail` |
+| Intents, shortcuts, and completions | [`volt.registerIntent()`](#voltregisterintentname-options), [`registerShortcut()`](#voltregistershortcutshortcut-options), [`registerCompletionProvider()`](#voltregistercompletionprovidername-provider) | intent descriptors, keybindings, `editor_completions` |
 
 ### Clients
 
 A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
-- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, string-array `setWidget`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). The terminal-only members (`custom()`, component widgets, header, footer, editor components, terminal input, working indicators) go to the most recently attached client with a terminal.
+- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` and `setTheme()` reach the most recently attached client with a terminal.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 - A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, and its extensions start when the phone reconnects; for a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects. `withSession` does not run for a phone, so the result reports `seeded: false`.
 
-### Dialogs
+How each client renders the data:
+
+- **TUI**: terminal components in the active theme's colors, in both screen modes. Status items show in the footer; panels above or below the editor, and `sidebar` panels in fullscreen mode's sidebar (above the editor in regular mode); dialogs and forms in place of the editor; tool calls as cards and custom messages under their label. A panel shows at most 12 rows, its title included, and a terminal node in a panel its newest 12 lines. The TUI hosts the conversation, so it presents tool calls itself with the same presenters.
+- **RPC, JSON, and SDK clients** receive the data as live-lane items and in projected entries ([rpc.md](rpc.md#extension-ui)); [rpc-extension-ui.ts](../examples/rpc-extension-ui.ts) renders it as plain lines.
+- **Paired phones** render the same `UiNode` data. On the remote profile a presentation holds at most 16 KB, without image data, host paths are redacted from every frame, and a live work value holds at most 8 KB (its detail goes first). A phone invokes an extension's command, intent, or completion provider only when the extension opted it in (`remoteSafe: true` or `remote: true`) and the device's grant allows it.
+- **HTML export** (`/export`) renders presentations as HTML.
+
+### Styled Text
+
+Text an extension shows (notifications, status items, titles of presentations and panels, and most text in nodes) is styled text: a string, or an array of spans `{ text, token?, bold?, italic?, underline?, code? }`. The type is `UiNodeStyledText` from `@hansjm10/volt-protocol`. Tokens are semantic, and each client maps them to its theme: `text`, `muted`, `accent`, `success`, `warning`, `error`, and `info`.
+
+```typescript
+ctx.ui.notify([{ text: "Deployed", token: "success", bold: true }, { text: " in 3s", token: "muted" }]);
+```
+
+Clients never receive ANSI. The host converts ANSI styling in a string to tokens: red is `error`, green `success`, yellow `warning`, blue and cyan `info`, magenta `accent`, and bright black and dim `muted`; bold, italic, and underline stay. It removes every other escape sequence and control character (tab and line feed excepted), so `"\x1b[32mok\x1b[0m"` arrives as `[{ text: "ok", token: "success" }]`.
+
+### Notifications
+
+```typescript
+ctx.ui.notify("Done!");             // "info" by default
+ctx.ui.notify("Disk almost full", "warning");
+ctx.ui.notify([{ text: "Build failed", token: "error" }], "error");
+```
+
+A notification holds at most 16 KB of JSON; longer plain text is cut. It leaves no state: a client that attaches later does not see it.
+
+### Dialogs and Forms
 
 ```typescript
 // Select from options
@@ -2628,12 +2613,8 @@ const name = await ctx.ui.input("Name:", "placeholder");
 // Multi-line editor
 const text = await ctx.ui.editor("Edit:", "prefilled text");
 
-// Notification (non-blocking); text with ANSI styling becomes semantic tokens
-ctx.ui.notify("Done!", "info");  // "info" | "warning" | "error"
-ctx.ui.notify([{ text: "Done", token: "success", bold: true }, { text: " in 3s" }]);
-
 // A dialog of UI data: resolves with the id of the action chosen, or undefined
-const choice = await ctx.ui.dialog({
+const action = await ctx.ui.dialog({
   title: "Deploy to production?",
   body: [{ type: "markdown", markdown: "This deploys **main**." }],
   actions: [
@@ -2647,16 +2628,22 @@ const values = await ctx.ui.form({
   title: "Release",
   fields: [
     { kind: "string", id: "tag", label: "Tag", required: true, pattern: "v[0-9]+" },
+    { kind: "enum", id: "channel", label: "Channel", options: [{ value: "beta" }, { value: "stable" }], value: "beta" },
+    { kind: "integer", id: "retries", label: "Retries", min: 0, max: 5, value: 1 },
     { kind: "boolean", id: "notes", label: "Write notes" },
   ],
 });
 ```
 
-A dialog's body is [`UiNode` data](rpc.md#extension-ui); its actions and forms send only the extension's own intents and commands (see panels below). A form's string patterns must be safe to test (no nested repetition or backreferences).
+- A dialog has a one-line title, a `body` of `UiNode` data, and 1 to 8 buttons `{ id, label, token?, destructive? }`; choosing one answers with its id. Actions and forms inside the body follow the [action rules](#actions).
+- A form's fields are `string` (`placeholder`, `required`, `minLength`, `maxLength`, `pattern`, `multiline`), `boolean`, `enum` (`options` of `{ value, label?, description? }`), and `integer` (`min`, `max`), each with an `id`, a `label`, an optional `description`, and an optional initial `value`. Every client validates the answer against the fields; fields left empty are absent from the values. A `pattern` must be safe to test (no backreferences, lookarounds, or nested repetition).
+- Without an answer (dismissed, timed out, or asked while no client can answer), `select()`, `input()`, `editor()`, `dialog()`, and `form()` resolve `undefined`, and `confirm()` resolves `false`.
+
+See [questionnaire.ts](../examples/extensions/questionnaire.ts) for a form a tool asks, and [summarize.ts](../examples/extensions/summarize.ts) for a dialog.
 
 #### Timed Dialogs with Countdown
 
-Dialogs support a `timeout` option that auto-dismisses with a live countdown display:
+Dialogs other than `editor()` take a `timeout` option that dismisses them with a live countdown:
 
 ```typescript
 // Dialog shows "Title (5s)" → "Title (4s)" → ... → auto-dismisses at 0
@@ -2673,14 +2660,9 @@ if (confirmed) {
 }
 ```
 
-**Return values on timeout:**
-- `select()` returns `undefined`
-- `confirm()` returns `false`
-- `input()` returns `undefined`
-
 #### Host Dismissal
 
-Volt dismisses pending dialogs when it tears down extension UI: when the extensions reload (including `/reload`), and when the conversation closes, also because a write could not be confirmed as saved. A dialog asked while no attached client can answer it is dismissed at once. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
+Volt dismisses pending dialogs when it tears down extension UI: when the extensions reload (including `/reload`), when the extension is disabled, and when the conversation closes, also because a write could not be confirmed as saved. A dialog asked while no attached client can answer it is dismissed at once. Dismissed dialogs return the same values as a cancel.
 
 #### Manual Dismissal with AbortSignal
 
@@ -2709,354 +2691,154 @@ if (confirmed) {
 
 See [examples/extensions/timed-confirm.ts](../examples/extensions/timed-confirm.ts) for complete examples.
 
-### Panels, Status, and Footer
+### Status Items
 
 ```typescript
-// Status in footer (persistent until cleared): styled text, at most 1 KB; 32 per extension
 ctx.ui.setStatus("my-ext", "Processing...");
 ctx.ui.setStatus("my-ext", [{ text: "3 ", token: "accent" }, { text: "jobs" }]);
 ctx.ui.setStatus("my-ext", undefined);  // Clear
+```
 
-// A panel of UI data above or below the editor, or in fullscreen's sidebar (above the editor elsewhere)
+A status item persists until the extension clears it, stops, or reloads. Its key is 1 to 128 characters, its text at most 1 KB of JSON, and an extension sets at most 32. The TUI shows status items in the footer. See [status-line.ts](../examples/extensions/status-line.ts).
+
+### Panels
+
+A panel is one named `UiNode` the extension shows beside the conversation:
+
+```typescript
 ctx.ui.setPanel("build", {
   title: "Build",
   placement: "belowEditor",  // "aboveEditor" (default) | "belowEditor" | "sidebar"
   node: { type: "terminal", key: "log", lines: ["compiling...", "done"] },
 });
 ctx.ui.setPanel("build", undefined);  // Remove
+```
 
-// Working loader (shown during streaming)
-ctx.ui.setWorkingMessage("Thinking deeply...");
-ctx.ui.setWorkingMessage();  // Restore default
-ctx.ui.setWorkingVisible(false);  // Hide the built-in working loader row entirely
-ctx.ui.setWorkingVisible(true);   // Show the built-in working loader row
+An interactive panel binds actions to the extension's intents:
 
-// Working indicator (shown during streaming)
-ctx.ui.setWorkingIndicator({ frames: [ctx.ui.theme.fg("accent", "●")] });  // Static dot
-ctx.ui.setWorkingIndicator({
-  frames: [
-    ctx.ui.theme.fg("dim", "·"),
-    ctx.ui.theme.fg("muted", "•"),
-    ctx.ui.theme.fg("accent", "●"),
-    ctx.ui.theme.fg("muted", "•"),
-  ],
-  intervalMs: 120,
+```typescript
+const rerun = volt.registerIntent("rerun", {
+  label: "Rerun CI",
+  handler: async (_input, ctx) => {
+    ctx.ui.notify("Rerunning CI");
+  },
 });
-ctx.ui.setWorkingIndicator({ frames: [] });  // Hide indicator
-ctx.ui.setWorkingIndicator();  // Restore default spinner
 
-// Widget above editor (default)
-ctx.ui.setWidget("my-widget", ["Line 1", "Line 2"]);
-// Widget below editor
-ctx.ui.setWidget("my-widget", ["Line 1", "Line 2"], { placement: "belowEditor" });
-ctx.ui.setWidget("my-widget", (tui, theme) => new Text(theme.fg("accent", "Custom"), 0, 0));
-ctx.ui.setWidget("my-widget", undefined);  // Clear
+ctx.ui.setPanel("ci", {
+  node: {
+    type: "card",
+    key: "ci",
+    title: "CI for main",
+    badges: [{ label: "passing", token: "success" }],
+    sections: [{
+      key: "jobs",
+      children: [{
+        type: "table",
+        key: "jobs",
+        columns: [{ header: "Job" }, { header: "Status" }],
+        rows: [{ key: "build", cells: ["build", [{ text: "ok", token: "success" }]] }],
+      }],
+    }],
+    actions: [{ id: "rerun", label: "Rerun", intent: { type: rerun } }],
+  },
+});
+```
 
-// Custom footer (replaces built-in footer entirely)
-ctx.ui.setFooter((tui, theme) => ({
-  render(width) { return [theme.fg("dim", "Custom footer")]; },
-  invalidate() {},
-}));
-ctx.ui.setFooter(undefined);  // Restore built-in footer
+- **Placement** is a hint: clients without a sidebar show `sidebar` panels above the editor.
+- **Limits**: a panel name is 1 to 128 characters, its node at most 32 KB of JSON, and an extension shows at most 16 panels. Data that is invalid or too large throws.
+- **Updates**: calling `setPanel` again with a changed node sends clients a patch of the node they hold, so give children stable `key`s. A panel whose node the [action rules](#actions) leave empty is removed.
 
-// Terminal title
+See [widget-placement.ts](../examples/extensions/widget-placement.ts) for each placement, and [todo.ts](../examples/extensions/todo.ts) for a panel a command toggles.
+
+### Actions
+
+Actions `{ id, label, token?, disabled?, destructive?, intent: { type, input? } }` in panels, dialog bodies, presentations, and work detail send their intent when pressed. A `form` node sends its `submit` intent with the field values merged over its `input`, keyed by field id. The host checks the input like any other intent's. An extension's UI may send only:
+
+- its own commands, `extension.command.<id>.<command>`;
+- its own intents, `extension.intent.<id>.<name>`, which [`volt.registerIntent()`](#voltregisterintentname-options) returns;
+- `open_work` and `cancel_work` with an `input.workId` of work its own kinds run.
+
+The host leaves out every other action, and a form whose `submit` it may not send, before any client sees them; in panels and dialogs it also reports an extension error.
+
+### Title, Editor Text, and Themes
+
+```typescript
+// Window title: one line, at most 256 characters
 ctx.ui.setTitle("volt - my-project");
 
-// Editor text
+// Replace the editor text of every interactive client
 ctx.ui.setEditorText("Prefill text");
-const current = await ctx.ui.getEditorText();  // undefined when the client has no editor or does not answer within 2s
 
-// Paste into the editors (triggers paste handling, including collapse for large content)
+// Paste at the cursor (large content collapses as a paste does)
 ctx.ui.pasteToEditor("pasted content");
 
-// Stack custom autocomplete behavior on top of the built-in provider
-ctx.ui.addAutocompleteProvider((current) => ({
-  triggerCharacters: ["#"],
-  async getSuggestions(lines, line, col, options) {
-    const beforeCursor = (lines[line] ?? "").slice(0, col);
-    const match = beforeCursor.match(/(?:^|[ \t])#([^\s#]*)$/);
-    if (!match) {
-      return current.getSuggestions(lines, line, col, options);
-    }
+// The editor text of the client the call runs for; undefined when it has no editor or does not answer within 2 s
+const current = await ctx.ui.getEditorText();
 
-    return {
-      prefix: `#${match[1] ?? ""}`,
-      items: [{ value: "#2983", label: "#2983", description: "Extension API for autocomplete" }],
-    };
-  },
-  applyCompletion(lines, line, col, item, prefix) {
-    return current.applyCompletion(lines, line, col, item, prefix);
-  },
-  shouldTriggerFileCompletion(lines, line, col) {
-    return current.shouldTriggerFileCompletion?.(lines, line, col) ?? true;
-  },
-}));
-
-// Tool output expansion
-const wasExpanded = ctx.ui.getToolsExpanded();
-ctx.ui.setToolsExpanded(true);
-ctx.ui.setToolsExpanded(wasExpanded);
-
-// Custom editor (vim mode, emacs mode, etc.)
-ctx.ui.setEditorComponent((tui, theme, keybindings) => new VimEditor(tui, theme, keybindings));
-const currentEditor = ctx.ui.getEditorComponent();
-ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-  new WrappedEditor(tui, theme, keybindings, currentEditor?.(tui, theme, keybindings))
-);
-ctx.ui.setEditorComponent(undefined);  // Restore default editor
-
-// Theme management (see themes.md for creating themes)
+// Themes of the most recently attached client with a terminal (see themes.md)
 const themes = ctx.ui.getAllThemes();  // [{ name: "dark", path: "/..." | undefined }, ...]
-const lightTheme = ctx.ui.getTheme("light");  // Load without switching
-const result = ctx.ui.setTheme("light");  // Switch by name
+const result = ctx.ui.setTheme("light");  // switches the theme and saves it as the user's theme
 if (!result.success) {
   ctx.ui.notify(`Failed: ${result.error}`, "error");
 }
-ctx.ui.setTheme(lightTheme!);  // Or switch by Theme object
-ctx.ui.theme.fg("accent", "styled text");  // Access current theme
 ```
 
-Custom working-indicator frames are rendered verbatim. If you want colors, add them to the frame strings yourself, for example with `ctx.ui.theme.fg(...)`.
+`getEditorText()` sends an `editor_text` host request to the client whose request is running (outside any client's request, the conversation's first client), which answers without asking the user. `setTheme()` fails without a terminal client. See [qna.ts](../examples/extensions/qna.ts) and [mac-system-theme.ts](../examples/extensions/mac-system-theme.ts).
 
-A panel's node is one [`UiNode`](rpc.md#extension-ui) of at most 32 KB of JSON, and an extension shows at most 16 panels. The host converts ANSI styling in its text to semantic tokens and checks it before any client sees it; data that is invalid or too large throws. Its actions and forms may send only the extension's own intents (`extension.intent.<id>.*`) and commands (`extension.command.<id>.*`), and `open_work` or `cancel_work` for its own work: other actions are left out and reported as an extension error, and a panel left empty is removed. Calling `setPanel` again with a changed node sends clients a patch of the node they hold. A string-array `setWidget(key, lines)` shows the panel `key` as one text node.
+### Intents, Shortcuts, and Completions
 
-### Autocomplete Providers
+Interaction an extension offers beyond its commands is data too:
 
-Use `ctx.ui.addAutocompleteProvider()` to stack custom autocomplete logic on top of the built-in slash-command and path provider. Set `triggerCharacters` for custom natural triggers such as `$`.
+- **Intents** ([`volt.registerIntent()`](#voltregisterintentname-options)) are operations with a checked input schema that every client invokes by name: from panel and presentation actions, forms, shortcuts, or protocol frames. They are local-only unless registered `remote: true`.
+- **Shortcuts** ([`volt.registerShortcut()`](#voltregistershortcutshortcut-options)) map a key to one of the extension's intents or commands. The TUI adds the key to its keybinding table under the intent's name, so users rebind it in `keybindings.json`.
+- **Completion providers** ([`volt.registerCompletionProvider()`](#voltregistercompletionprovidername-provider)) return editor completions for tokens that start with their trigger; every client asks with the `editor_completions` query. They are local-only unless registered `remote: true`.
 
-Typical pattern:
+See [preset.ts](../examples/extensions/preset.ts) for an intent with a shortcut and [github-issue-autocomplete.ts](../examples/extensions/github-issue-autocomplete.ts) for a completion provider.
 
-- inspect the text before the cursor
-- return your own suggestions when your extension-specific syntax matches
-- otherwise delegate to `current.getSuggestions(...)`
-- delegate `applyCompletion(...)` unless you need custom insertion behavior
+### Message Presentation
 
-```typescript
-volt.on("session_start", (_event, ctx) => {
-  ctx.ui.addAutocompleteProvider((current) => ({
-    triggerCharacters: ["#"],
-    async getSuggestions(lines, cursorLine, cursorCol, options) {
-      const line = lines[cursorLine] ?? "";
-      const beforeCursor = line.slice(0, cursorCol);
-      const match = beforeCursor.match(/(?:^|[ \t])#([^\s#]*)$/);
-      if (!match) {
-        return current.getSuggestions(lines, cursorLine, cursorCol, options);
-      }
-
-      return {
-        prefix: `#${match[1] ?? ""}`,
-        items: [
-          { value: "#2983", label: "#2983", description: "Extension API for registering custom @ autocomplete providers" },
-          { value: "#2753", label: "#2753", description: "Reload stale resource settings" },
-        ],
-      };
-    },
-
-    applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
-      return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
-    },
-
-    shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
-      return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
-    },
-  }));
-});
-```
-
-See [github-issue-autocomplete.ts](../examples/extensions/github-issue-autocomplete.ts) for a complete example that preloads the latest open GitHub issues with `gh issue list` and filters them locally for fast `#...` completion. It requires GitHub CLI (`gh`) and a GitHub repository checkout.
-
-### Custom Components
-
-For complex UI, use `ctx.ui.custom()`. This temporarily replaces the editor with your component until `done()` is called:
+`volt.registerMessagePresenter(customType, present)` decides how the custom messages of a type, sent with [`volt.sendMessage()`](#voltsendmessagemessage-options), look on every client:
 
 ```typescript
-import { Text, Component } from "@hansjm10/volt-tui";
-
-const result = await ctx.ui.custom<boolean>((tui, theme, keybindings, done) => {
-  const text = new Text("Press Enter to confirm, Escape to cancel", 1, 1);
-
-  text.onKey = (key) => {
-    if (key === "return") done(true);
-    if (key === "escape") done(false);
-    return true;
+volt.registerMessagePresenter<{ level: string }>("status-update", (message) => {
+  const token = message.details?.level === "error" ? "error" : "success";
+  const text = typeof message.content === "string" ? message.content : "";
+  return {
+    title: [{ text: "[status]", token, bold: true }],
+    summary: [{ type: "text", key: "text", text }],
+    body: [
+      { type: "text", key: "text", text },
+      { type: "code", key: "details", language: "json", code: JSON.stringify(message.details ?? {}, null, 2) },
+    ],
   };
-
-  return text;
 });
 
-if (result) {
-  // User pressed Enter
-}
+volt.sendMessage({ customType: "status-update", content: "Deployed", display: true, details: { level: "info" } });
 ```
 
-The callback receives:
-- `tui` - TUI instance (for screen dimensions, focus management)
-- `theme` - Current theme for styling
-- `keybindings` - App keybinding manager (for checking shortcuts)
-- `done(value)` - Call to close component and return value
+The presenter receives `{ customType, content, details? }` and returns `{ title?, summary?, body }`: clients show `summary` while the message is collapsed and `body` while it is expanded. The rules of [tool presentation](#tool-presentation) apply: the presenter is pure, synchronous, and stateless, and what it returns is normalized and bounded on the host. A message of a type without a presenter, or one its presenter throws for, shows its text. The host's own message types (`work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, and `volt-plan-execution`) are not an extension's: `registerMessagePresenter()` throws for them, and `volt.sendMessage()` refuses them. See [message-presenter.ts](../examples/extensions/message-presenter.ts).
 
-If volt removes the component before `done()` is called (see [Host Dismissal](#host-dismissal)), it disposes the component and `custom()` rejects with `ExtensionUIDismissedError`. A command handler that lets this error propagate ends quietly, without an extension error. Catch it when you need to clean up:
+### Work Detail
+
+A work kind may declare `detail`, a presenter of the UI data every client shows with each running item of the kind (in the TUI, in `/work` and under the tool call that started it):
 
 ```typescript
-import { ExtensionUIDismissedError } from "@hansjm10/volt-coding-agent";
-
-try {
-  const result = await ctx.ui.custom<boolean>((tui, theme, keybindings, done) => new MyComponent(done));
-} catch (error) {
-  if (!(error instanceof ExtensionUIDismissedError)) throw error;
-  // The UI was torn down; undo any partial work here.
-}
-```
-
-See [tui.md](tui.md) for the full component API.
-
-#### Overlay Mode (Experimental)
-
-Pass `{ overlay: true }` to render the component as a floating modal on top of existing content, without clearing the screen:
-
-```typescript
-const result = await ctx.ui.custom<string | null>(
-  (tui, theme, keybindings, done) => new MyOverlayComponent({ onClose: done }),
-  { overlay: true }
-);
-```
-
-For advanced positioning (anchors, margins, percentages, responsive visibility), pass `overlayOptions`. Use `onHandle` to control focus or visibility programmatically:
-
-```typescript
-const result = await ctx.ui.custom<string | null>(
-  (tui, theme, keybindings, done) => new MyOverlayComponent({ onClose: done }),
-  {
-    overlay: true,
-    overlayOptions: { anchor: "top-right", width: "50%", margin: 2 },
-    onHandle: (handle) => {
-      handle.focus(); // focus this overlay and bring it to the visual front
-      // handle.unfocus({ target: editorComponent }); // release input to a specific component
-      // handle.setHidden(true/false); // toggle visibility
-      // handle.hide(); // permanently remove
-    }
-  }
-);
-```
-
-A focused visible overlay can reclaim input after temporary non-overlay custom UI closes. If you intentionally want another component to keep input while the overlay stays visible, call `handle.unfocus({ target })`. Passing `{ target: null }` releases the overlay without focusing another component.
-
-See [tui.md](tui.md) for the full `OverlayOptions` and `OverlayHandle` API.
-
-### Custom Editor
-
-Replace the main input editor with a custom implementation (vim mode, emacs mode, etc.):
-
-```typescript
-import { CustomEditor, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
-import { matchesKey } from "@hansjm10/volt-tui";
-
-class VimEditor extends CustomEditor {
-  private mode: "normal" | "insert" = "insert";
-
-  handleInput(data: string): void {
-    if (matchesKey(data, "escape") && this.mode === "insert") {
-      this.mode = "normal";
-      return;
-    }
-    if (this.mode === "normal" && data === "i") {
-      this.mode = "insert";
-      return;
-    }
-    super.handleInput(data);  // App keybindings + text editing
-  }
-}
-
-export default function (volt: ExtensionAPI) {
-  volt.on("session_start", (_event, ctx) => {
-    ctx.ui.setEditorComponent((_tui, theme, keybindings) =>
-      new VimEditor(theme, keybindings)
-    );
-  });
-}
-```
-
-**Key points:**
-- Extend `CustomEditor` (not base `Editor`) to get app keybindings (escape to abort, ctrl+d, model switching)
-- Call `super.handleInput(data)` for keys you don't handle
-- Factory receives `theme` and `keybindings` from the app
-- Use `ctx.ui.getEditorComponent()` before `setEditorComponent()` to wrap the previously configured custom editor
-- Pass `undefined` to restore default: `ctx.ui.setEditorComponent(undefined)`
-
-To compose with another extension that already replaced the editor, capture the previous factory before setting yours:
-
-```typescript
-const previous = ctx.ui.getEditorComponent();
-ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-  new MyEditor(tui, theme, keybindings, { base: previous?.(tui, theme, keybindings) })
-);
-```
-
-See [tui.md](tui.md) Pattern 7 for a complete example with mode indicator.
-
-### Message Rendering
-
-Register a custom renderer for messages with your `customType`:
-
-```typescript
-import { Text } from "@hansjm10/volt-tui";
-
-volt.registerMessageRenderer("my-extension", (message, options, theme) => {
-  const { expanded } = options;
-  let text = theme.fg("accent", `[${message.customType}] `);
-  text += message.content;
-
-  if (expanded && message.details) {
-    text += "\n" + theme.fg("dim", JSON.stringify(message.details, null, 2));
-  }
-
-  return new Text(text, 0, 0);
+volt.registerWorkKind("scan", {
+  delivery: "message",
+  detail: (work) => ({
+    type: "card",
+    key: "scan",
+    title: work.title,
+    sections: [{
+      key: "output",
+      children: [{ type: "terminal", key: "log", lines: work.output.text.split("\n").slice(-5) }],
+    }],
+    actions: [{ id: "stop", label: "Stop", destructive: true, intent: { type: "cancel_work", input: { workId: work.workId } } }],
+  }),
 });
 ```
 
-Messages are sent via `volt.sendMessage()`:
-
-```typescript
-volt.sendMessage({
-  customType: "my-extension",  // Matches registerMessageRenderer
-  content: "Status update",
-  display: true,               // Show in TUI
-  details: { ... },            // Available in renderer
-});
-```
-
-### Theme Colors
-
-All render functions receive a `theme` object. See [themes.md](themes.md) for creating custom themes and the full color palette.
-
-```typescript
-// Foreground colors
-theme.fg("toolTitle", text)   // Tool names
-theme.fg("accent", text)      // Highlights
-theme.fg("success", text)     // Success (green)
-theme.fg("error", text)       // Errors (red)
-theme.fg("warning", text)     // Warnings (yellow)
-theme.fg("muted", text)       // Secondary text
-theme.fg("dim", text)         // Tertiary text
-
-// Text styles
-theme.bold(text)
-theme.italic(text)
-theme.strikethrough(text)
-```
-
-For syntax highlighting in custom tool renderers:
-
-```typescript
-import { highlightCode, getLanguageFromPath } from "@hansjm10/volt-coding-agent";
-
-// Highlight code with explicit language
-const highlighted = highlightCode("const x = 1;", "typescript", theme);
-
-// Auto-detect language from file path
-const lang = getLanguageFromPath("/path/to/file.rs");  // "rust"
-const highlighted = highlightCode(code, lang, theme);
-```
+`detail` receives `{ workId, title, input, state, progress?, output: { text, truncated, bytes } }`, where `state` is `running` or `cancelling` and `output.text` is the newest output, and returns one `UiNode`, or `undefined` for none. The host presents it again when the item's progress or output changes (at most every 100 ms) and sends clients a patch of the node they hold. Like a tool presenter it is pure, synchronous, and stateless, and [its actions](#actions) may send only what the extension's UI may; an item it throws for shows its progress only. A detail holds at most 7 KB of JSON. Every client sees it, so a kind that `requires` remote capabilities is presented without its input (`null`) and output text (empty).
 
 ## Error Handling
 
@@ -3070,12 +2852,12 @@ const highlighted = highlightCode(code, lang, theme);
 
 | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
 |------|------------|-------------|-------|
-| Interactive | `"tui"` | `true` | Full TUI with terminal rendering |
-| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs as host requests, notifications and status on the protocol's live lane; `custom()` returns `undefined`. See [rpc.md](rpc.md#extensions-in-rpc-mode) |
-| JSON (`--mode json`) | `"json"` | `false` | Event stream to stdout; UI methods are no-ops |
+| Interactive | `"tui"` | `true` | The TUI renders extension UI with terminal components |
+| RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs as host requests; notifications, status items, panels, and title on the protocol's live lane. See [rpc.md](rpc.md#extensions-in-rpc-mode) |
+| JSON (`--mode json`) | `"json"` | `false` | Protocol frames to stdout, extension status and notices included; dialogs resolve to their defaults |
 | Print (`-p`) | `"print"` | `false` | Extensions run but can't prompt |
 
-Use `ctx.mode === "tui"` before TUI-specific features (`custom()`, component factories, terminal input). Use `ctx.hasUI` before dialog and notification methods that work in both TUI and RPC modes.
+Use `ctx.hasUI` before dialog methods: without UI they resolve to their defaults. Every other UI call is data and needs no mode check.
 
 ## Examples Reference
 
@@ -3085,17 +2867,18 @@ All examples in [examples/extensions/](../examples/extensions/).
 |---------|-------------|----------|
 | **Tools** |||
 | `hello.ts` | Minimal tool registration | `registerTool` |
-| `question.ts` | Tool with user interaction | `registerTool`, `ui.select` |
-| `questionnaire.ts` | Multi-step wizard tool | `registerTool`, `ui.custom` |
-| `todo.ts` | Stateful tool with persistence | `registerTool`, `appendEntry`, `renderResult`, session events |
+| `questionnaire.ts` | Tool that asks one or more questions in a form | `registerTool`, `ui.form`, `present` |
+| `todo.ts` | Stateful tool with persistence and a `/todos` panel | `registerTool`, `present`, `setPanel`, session events |
 | `dynamic-tools.ts` | Register tools after startup and during commands | `registerTool`, `session_start`, `registerCommand` |
 | `structured-output.ts` | Final structured-output tool with `disposition: "stop"` | `registerTool`, tool dispositions |
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
+| `tool-presentation.ts` | Compact presentation for the built-in read, bash, edit, and write tools | `registerTool`, `present` |
 | **Commands** |||
-| `summarize.ts` | Conversation summary command | `registerCommand`, `ui.custom` |
-| `handoff.ts` | Cross-provider model handoff | `registerCommand`, `ui.editor`, `ui.custom` |
-| `qna.ts` | Q&A with custom UI | `registerCommand`, `ui.custom`, `setEditorText` |
+| `commands.ts` | List the session's slash commands | `registerCommand`, `getArgumentCompletions`, `getCommands` |
+| `summarize.ts` | Conversation summary command | `registerCommand`, `ui.dialog` |
+| `handoff.ts` | Cross-provider model handoff | `registerCommand`, `ui.editor` |
+| `qna.ts` | Extract questions into the editor | `registerCommand`, `setEditorText` |
 | `send-user-message.ts` | Inject user messages | `registerCommand`, `sendUserMessage` |
 | `reload-runtime.ts` | Reload command and LLM tool handoff | `registerCommand`, `ctx.reload()`, `sendUserMessage` |
 | `shutdown-command.ts` | Graceful shutdown command | `registerCommand`, `shutdown()` |
@@ -3117,37 +2900,36 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
 | `trigger-compact.ts` | Trigger compaction manually | `compact()` |
 | `git-checkpoint.ts` | Git stash on turns | `on("turn_start")`, `on("session_before_fork")`, `exec` |
-| `git-merge-and-resolve.ts` | Fetch, merge, and resolve conflicts | `on("agent_end")`, `exec`, `sendUserMessage` |
 | `auto-commit-on-exit.ts` | Commit on shutdown | `on("session_shutdown")`, `exec` |
-| **UI Components** |||
-| `status-line.ts` | Footer status indicator | `setStatus`, session events |
-| `working-indicator.ts` | Customize the streaming working indicator | `setWorkingIndicator`, `registerCommand` |
-| `github-issue-autocomplete.ts` | Add `#1234` issue completions on top of built-in autocomplete by preloading recent open issues from `gh issue list` | `addAutocompleteProvider`, `on("session_start")`, `exec` |
-| `custom-footer.ts` | Replace footer entirely | `registerCommand`, `setFooter` |
-| `custom-header.ts` | Replace startup header | `on("session_start")`, `setHeader` |
-| `modal-editor.ts` | Vim-style modal editor | `setEditorComponent`, `CustomEditor` |
-| `widget-placement.ts` | Widget above/below editor | `setWidget` |
-| `notify.ts` | Simple notifications | `ui.notify` |
+| **UI as Data** |||
+| `status-line.ts` | Turn progress as a status item styled with tokens | `setStatus`, session events |
+| `widget-placement.ts` | Panels above and below the editor and in the sidebar | `setPanel` |
+| `github-issue-autocomplete.ts` | `#1234` issue completions from recent open issues (`gh issue list`) | `registerCompletionProvider`, `on("session_start")`, `exec` |
+| `rpc-demo.ts` | Every dialog, form, panel, status, and editor-text call, for an RPC client | `ui.select`, `ui.form`, `ui.dialog`, `setPanel`, `getEditorText` |
+| `notify.ts` | Desktop notification when the agent finishes | `on("agent_end")` |
+| `titlebar-spinner.ts` | Spinner in the terminal title while the agent works | `setTitle` |
 | `timed-confirm.ts` | Dialogs with timeout | `ui.confirm` with timeout/signal |
-| `mac-system-theme.ts` | Auto-switch theme | `setTheme`, `exec` |
-| **Complex Extensions** |||
-| `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerShortcut`, `registerFlag`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
-| `tools.ts` | Toggle tools on/off UI | `registerCommand`, `setActiveTools`, `SettingsList`, session events |
+| `mac-system-theme.ts` | Auto-switch theme | `setTheme` |
+| **Settings & Complex Extensions** |||
+| `settings.ts` | Typed settings declared in the manifest | `defineManifest` settings, `settings_changed`, `updateSettings` |
+| `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerIntent`, `registerShortcut`, `registerFlag`, `ui.form`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
+| `tools.ts` | Enable and disable tools from a form | `registerCommand`, `ui.form`, `setActiveTools`, session events |
 | **Remote & Sandbox** |||
 | `ssh.ts` | SSH remote execution | `registerFlag`, `on("user_bash")`, `on("before_agent_start")`, tool operations |
-| `interactive-shell.ts` | Persistent shell session | `on("user_bash")` |
 | `sandbox/` | Sandboxed tool execution | Tool operations |
 | `gondolin/` | Route built-in tools and `!` commands into a Gondolin micro-VM | Tool operations, built-in tool overrides, `on("user_bash")` |
 | **Providers** |||
 | `custom-provider-anthropic/` | Custom Anthropic proxy | `registerProvider` |
 | `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |
 | **Messages & Communication** |||
-| `message-renderer.ts` | Custom message rendering | `registerMessageRenderer`, `sendMessage` |
+| `message-presenter.ts` | Custom message presentation | `registerMessagePresenter`, `sendMessage` |
 | `event-bus.ts` | Inter-extension events | `volt.events` |
 | **Session Metadata** |||
 | `session-name.ts` | Name sessions for selector | `setSessionName`, `getSessionName` |
 | `bookmark.ts` | Bookmark entries for /tree | `setLabel` |
 | **Misc** |||
-| `inline-bash.ts` | Inline bash in tool calls | `on("tool_call")` |
+| `inline-bash.ts` | Expand `!{command}` in prompts | `on("input")` |
 | `bash-spawn-hook.ts` | Adjust bash command, cwd, and env before execution | `createBashTool`, `spawnHook` |
+| `context-preparation.ts` | Opt-in skill and source excerpts through managed services | `on("request_boundary")`, `ctx.services` |
+| `dynamic-resources/` | Skills, prompts, and themes from `resources_discover` | `on("resources_discover")` |
 | `with-deps/` | Extension with npm dependencies | Package structure with `package.json` |

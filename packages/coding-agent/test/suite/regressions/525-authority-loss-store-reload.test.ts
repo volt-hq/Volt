@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
-import { type Component, createRenderFrame, type TUI } from "@hansjm10/volt-tui";
+import type { Component, TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
@@ -14,12 +14,11 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../../src/core/host/targets.ts";
-import type { ExtensionTerminalUI } from "../../../src/core/session/extension-binding.ts";
 import type { HostActionRequest } from "../../../src/core/session/host-actions.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { WorkContext, WorkExecution } from "../../../src/core/work/registry.ts";
-import { type ExtensionAPI, type ExtensionFactory, ExtensionUIDismissedError } from "../../../src/index.ts";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -40,7 +39,6 @@ type InteractiveAccess = {
 	activeView: View;
 	extensionSelector?: { handleInput(data: string): void };
 	isInitialized: boolean;
-	createExtensionTerminalUI(): ExtensionTerminalUI;
 	showExtensionSelector(title: string, options: string[]): Promise<string | undefined>;
 	showExtensionConfirm(title: string, message: string): Promise<boolean>;
 	showExtensionInput(title: string): Promise<string | undefined>;
@@ -174,9 +172,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 		return terminal.getViewport().join("\n");
 	}
 
-	function extensionFooterEntries(terminal: VirtualTerminal): number {
-		const match = /extension footer: (\d+) entries/.exec(viewport(terminal));
-		if (!match) throw new Error("extension footer is not rendered");
+	function extensionStatusEntries(terminal: VirtualTerminal): number {
+		const match = /extension status: (\d+) entries/.exec(viewport(terminal));
+		if (!match) throw new Error("extension status is not rendered");
 		return Number(match[1]);
 	}
 
@@ -261,22 +259,22 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(unhandledRejections).toEqual([]);
 	});
 
-	it("ends the interactive session, rendering an extension footer that reads the lost session until it exits", async () => {
-		const extensionFooter = (volt: ExtensionAPI) => {
-			volt.on("session_start", (_event, ctx) => {
-				ctx.ui.setFooter(() => ({
-					invalidate() {},
-					// Like examples/extensions/custom-footer.ts: reads the session on every frame.
-					render: () => createRenderFrame([`extension footer: ${ctx.sessionManager.getBranch().length} entries`]),
-				}));
-			});
+	it("ends the interactive session, showing an extension status that reads the lost session until it exits", async () => {
+		const extensionStatus = (volt: ExtensionAPI) => {
+			// Reads the session whenever a run ends, and shows what it read as a status item.
+			const show = (ctx: ExtensionContext) =>
+				ctx.ui.setStatus("entries", `extension status: ${ctx.sessionManager.getBranch().length} entries`);
+			volt.on("session_start", (_event, ctx) => show(ctx));
+			volt.on("agent_end", (_event, ctx) => show(ctx));
 		};
-		const opened = await openConversationForTest(["tui reply"], { extensionFactory: extensionFooter });
+		const opened = await openConversationForTest(["tui reply"], { extensionFactory: extensionStatus });
 		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
 
 		await opened.conversation.session.prompt("tui prompt");
-		await terminal.waitForRender();
-		expect(extensionFooterEntries(terminal)).toBeGreaterThan(0);
+		await vi.waitFor(async () => {
+			await terminal.waitForRender();
+			expect(extensionStatusEntries(terminal)).toBeGreaterThan(0);
+		});
 
 		const staleSession = opened.conversation.session;
 		await loseConversationLock(staleSession.sessionManager);
@@ -358,57 +356,47 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(exit).not.toHaveBeenCalled();
 	});
 
-	it("settles every pending TUI dialog and component when extension UI is reset", async () => {
+	it("settles every pending TUI dialog and question when extension UI is reset", async () => {
 		const { access, terminal } = await startInteractiveMode(await openConversationForTest([]));
-		const ui = access.createExtensionTerminalUI();
-		const settled = <T>(promise: Promise<T>) =>
-			promise.then(
-				(value) => ({ status: "fulfilled" as const, value }),
-				(reason: unknown) => ({ status: "rejected" as const, reason }),
-			);
-		const customComponent = (label: string) => ({
-			invalidate() {},
-			render: () => createRenderFrame([label]),
-			dispose: vi.fn(),
-		});
 		access.editor.setText("draft");
 
-		// One dialog of each kind, stacked in opening order.
+		// One dialog of each kind, stacked in opening order, and a request_user_input question.
 		const select = access.showExtensionSelector("Select dialog", ["a", "b"]);
 		const input = access.showExtensionInput("Input dialog");
 		const editor = access.showExtensionEditor("Editor dialog", "prefill");
-		const inline = customComponent("inline custom");
-		const inlineResult = settled(ui.custom<string>(() => inline));
-		const overlay = customComponent("overlay custom");
-		const overlayResult = settled(ui.custom<string>(() => overlay, { overlay: true }));
-		const lateComponent = customComponent("late custom");
-		const lateFactory = Promise.withResolvers<typeof lateComponent>();
-		const lateResult = settled(ui.custom<string>(() => lateFactory.promise, { overlay: true }));
+		const userInput = access.client.surface?.userInput;
+		if (!userInput) throw new Error("The TUI asks no questions");
+		const question = userInput({
+			questions: [
+				{
+					id: "target",
+					header: "Target",
+					question: "Question dialog?",
+					options: [
+						{ label: "Staging", description: "The staging target." },
+						{ label: "Production", description: "The production target." },
+					],
+				},
+			],
+		}).then(
+			(value) => ({ status: "fulfilled" as const, value }),
+			(reason: unknown) => ({ status: "rejected" as const, reason }),
+		);
 		await terminal.waitForRender();
-		expect(access.ui.hasOverlay()).toBe(true);
-		expect(viewport(terminal)).toContain("overlay custom");
+		expect(viewport(terminal)).toContain("Question dialog?");
 
 		access.resetExtensionUI();
 
 		await expect(select).resolves.toBeUndefined();
 		await expect(input).resolves.toBeUndefined();
 		await expect(editor).resolves.toBeUndefined();
-		for (const result of [await inlineResult, await overlayResult, await lateResult]) {
-			expect(result.status).toBe("rejected");
-			expect(result.status === "rejected" && result.reason).toBeInstanceOf(ExtensionUIDismissedError);
-		}
-		expect(inline.dispose).toHaveBeenCalledTimes(1);
-		expect(overlay.dispose).toHaveBeenCalledTimes(1);
-		// A factory that resolves after dismissal is disposed and never mounted.
-		lateFactory.resolve(lateComponent);
-		await vi.waitFor(() => expect(lateComponent.dispose).toHaveBeenCalledTimes(1));
+		expect((await question).status).toBe("rejected");
 		await terminal.waitForRender();
-		expect(access.ui.hasOverlay()).toBe(false);
 		expect(access.activeView).toBe(access.conversationView);
 		expect(access.ui.getFocusedComponent()).toBe(access.editor);
 		expect(access.editor.getText()).toBe("draft");
 		const screen = viewport(terminal);
-		for (const label of ["Select dialog", "Input dialog", "Editor dialog", "inline custom", "overlay custom"]) {
+		for (const label of ["Select dialog", "Input dialog", "Editor dialog", "Question dialog?"]) {
 			expect(screen).not.toContain(label);
 		}
 
