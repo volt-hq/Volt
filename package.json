@@ -24,7 +24,8 @@
 		"permissions": [
 			"exec",
 			"network",
-			"fs-write"
+			"fs-write",
+			"secrets"
 		]
 	}
 }
