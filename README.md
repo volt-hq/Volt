@@ -17,7 +17,7 @@ From the Volt store:
 Or install the package source directly:
 
 ```bash
-volt install git:https://github.com/hansjm10/Volt@store/build-ios-apps
+volt install git:https://github.com/volt-hq/Volt@store/build-ios-apps
 ```
 
 ## Skills
