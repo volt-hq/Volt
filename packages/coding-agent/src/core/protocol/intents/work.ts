@@ -16,6 +16,7 @@ import {
 	type IntentContext,
 	IntentRejectedError,
 	type IntentView,
+	missingCapability,
 } from "./types.ts";
 
 const control = ["conversation.control.v1"] as const;
@@ -34,14 +35,40 @@ const WORK_REJECTIONS: Readonly<Record<WorkErrorCode, RejectionCode>> = {
 	closed: "ended",
 };
 
-/** Run a work operation, answering a refusal with its protocol code. */
-async function workOperation<T>(ctx: IntentContext, operation: (work: WorkRegistry) => Promise<T>): Promise<T> {
+/** A refused work operation as its protocol rejection; other errors as they are. */
+function workRejection(error: unknown): unknown {
+	return error instanceof WorkError ? new IntentRejectedError(WORK_REJECTIONS[error.code], error.message) : error;
+}
+
+/**
+ * Run a work operation on `workId`, answering a refusal with its protocol
+ * code. A remote client needs the capabilities the work's kind requires too,
+ * and to cancel or resume it (`remote`), the kind's leave.
+ */
+async function workOperation<T>(
+	ctx: IntentContext,
+	workId: string,
+	operation: (work: WorkRegistry) => Promise<T>,
+	remote?: "cancel" | "resume",
+): Promise<T> {
 	ctx.assertCurrent?.();
+	const work = targetOf(ctx).conversation.work;
+	const missing =
+		ctx.profile.name === "local" ? undefined : missingCapability(ctx.profile.grant, work.requires(workId));
+	if (missing !== undefined) {
+		throw new IntentRejectedError("not_allowed", `Remote capability required: ${missing}`, {
+			requiredCapability: missing,
+		});
+	}
+	const record = remote === undefined ? undefined : work.get(workId);
+	if (record && remote !== undefined) {
+		const availability = remoteAvailability(ctx, work, record, remote);
+		if (!availability.enabled) throw new IntentRejectedError("not_allowed", availability.reason);
+	}
 	try {
-		return await operation(targetOf(ctx).conversation.work);
+		return await operation(work);
 	} catch (error) {
-		if (error instanceof WorkError) throw new IntentRejectedError(WORK_REJECTIONS[error.code], error.message);
-		throw error;
+		throw workRejection(error);
 	}
 }
 
@@ -59,15 +86,6 @@ function remoteAvailability(
 				reason: `A remote client cannot ${operation} ${record.kind} work`,
 			}
 		: INTENT_ENABLED;
-}
-
-/** Recheck `remoteAvailability` when the intent runs: the record is read again. */
-function assertRemoteAllows(ctx: IntentContext, workId: string, operation: "cancel" | "resume"): void {
-	const work = targetOf(ctx).conversation.work;
-	const record = work.get(workId);
-	if (!record) return;
-	const availability = remoteAvailability(ctx, work, record, operation);
-	if (!availability.enabled) throw new IntentRejectedError("not_allowed", availability.reason);
 }
 
 /** Whether the conversation holds `workId` as open work; the intent's own checks follow. */
@@ -102,8 +120,7 @@ export const cancelWorkIntent = defineIntent({
 		return remoteAvailability(view, work, record, "cancel");
 	},
 	async run(ctx, input) {
-		assertRemoteAllows(ctx, input.workId, "cancel");
-		await workOperation(ctx, (work) => work.cancel(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.cancel(input.workId), "cancel");
 	},
 });
 
@@ -119,7 +136,7 @@ export const openWorkIntent = defineIntent({
 	whileBusy: "run",
 	run(ctx, input) {
 		const { host, client } = targetOf(ctx);
-		return workOperation(ctx, (work) =>
+		return workOperation(ctx, input.workId, (work) =>
 			work.open(input.workId, {
 				host,
 				client,
@@ -153,8 +170,7 @@ export const resumeWorkIntent = defineIntent({
 		return record ? remoteAvailability(view, work, record, "resume") : INTENT_ENABLED;
 	},
 	async run(ctx, input) {
-		assertRemoteAllows(ctx, input.workId, "resume");
-		await workOperation(ctx, (work) => work.resume(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.resume(input.workId), "resume");
 	},
 });
 
@@ -170,8 +186,13 @@ export const startSubagentIntent = defineIntent({
 	async run(ctx, input) {
 		const subagents = ctx.services.subagents;
 		if (!subagents) throw new IntentRejectedError("unavailable", "Subagents are not available in this host");
+		ctx.assertCurrent?.();
 		// The subagent is work of the conversation: cancel_work stops it, and closing the conversation suspends it.
-		return await workOperation(ctx, () => subagents.start(input.agent, input.prompt));
+		try {
+			return await subagents.start(input.agent, input.prompt);
+		} catch (error) {
+			throw workRejection(error);
+		}
 	},
 	accept: (result) => ({ result }),
 });

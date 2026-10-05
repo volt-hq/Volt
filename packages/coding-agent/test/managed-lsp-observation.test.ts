@@ -14,6 +14,7 @@ import { lspResult } from "../src/core/lsp/outcome.ts";
 import * as workspaceEdit from "../src/core/lsp/workspace-edit-applier.ts";
 import { createLspTool, type LspNavigationProvider, type LspToolInput } from "../src/core/tools/lsp.ts";
 import * as subprocess from "../src/utils/child-process.ts";
+import { type Approver, testHostActions } from "./host-action-doubles.ts";
 
 const fake = fileURLToPath(new URL("./fixtures/fake-lsp-server.mjs", import.meta.url));
 const roots: string[] = [];
@@ -323,7 +324,7 @@ describe("managed lifecycle and read-only policy", () => {
 		vi.stubEnv("VOLT_OFFLINE", "0");
 		const consent = deferred<{ decision: "denied" }>();
 		const prompted = deferred<void>();
-		const requestAction = vi.fn(() => {
+		const requestAction = vi.fn<Approver>(() => {
 			prompted.resolve();
 			return consent.promise;
 		});
@@ -331,7 +332,7 @@ describe("managed lifecycle and read-only policy", () => {
 		const manager = new LspManager({
 			cwd: root,
 			config: resolveLspConfig({ idleShutdownMs: 0 }),
-			hostInteraction: { requestAction },
+			hostActions: testHostActions(requestAction).actions,
 			installRunner,
 		});
 		managers.push(manager);

@@ -27,6 +27,7 @@ import {
 } from "../../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, type SubagentResult } from "../../../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../../../src/core/tools/subagent.ts";
+import { attachApprover } from "../../host-action-doubles.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
 
@@ -644,19 +645,17 @@ describe("Regression #341: persisted review discussion policy", () => {
 	it("offers normal missing-server installation from a discussion LSP read", async () => {
 		const { childRef, root } = await fixture();
 		const provider = await harness({ settings: { lsp: { enabled: true }, compaction: { enabled: false } } });
-		const requestAction = vi.fn(async () => ({ decision: "denied" as const }));
 		const path = join(root, "evidence.py");
 		writeFileSync(path, "value = 1\n");
-		const session = await sdk(provider, childRef, root, { hostInteraction: { requestAction }, tools: ["lsp"] });
+		const session = await sdk(provider, childRef, root, { tools: ["lsp"] });
+		const approvals = attachApprover(session.liveState, () => ({ decision: "denied" }));
 		vi.stubEnv("PATH", root);
 		try {
 			await session.state.tools
 				.find((tool) => tool.name === "lsp")!
 				.execute("child-read", { action: "diagnostics", path });
-			expect(requestAction).toHaveBeenCalledWith(
-				expect.objectContaining({ action: "lsp.install_server" }),
-				expect.anything(),
-			);
+			expect(approvals.requests).toEqual([expect.objectContaining({ action: "lsp.install_server" })]);
+			expect(session.work.list()).toEqual([expect.objectContaining({ kind: "host_action", outcome: "cancelled" })]);
 		} finally {
 			vi.unstubAllEnvs();
 		}

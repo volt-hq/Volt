@@ -3,10 +3,10 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HostActionUpdate, HostInteraction } from "../src/core/host-interaction.ts";
 import { type ResolvedLspConfig, resolveLspConfig } from "../src/core/lsp/config.ts";
 import { type LspInstallRunner, LspManager } from "../src/core/lsp/manager.ts";
 import { LspServerPool } from "../src/core/lsp/server-pool.ts";
+import { type TestHostActions, testHostActions } from "./host-action-doubles.ts";
 
 const FAKE_SERVER = join(__dirname, "fixtures", "fake-lsp-server.mjs");
 const roots: string[] = [];
@@ -256,16 +256,14 @@ describe("shared install prompts and breaker", () => {
 		chmodSync(path, 0o755);
 	}
 
-	function host(decision: "approved" | "denied" | "unavailable") {
-		const updates: HostActionUpdate[] = [];
-		const requestAction = vi.fn<HostInteraction["requestAction"]>(async () => ({ decision }));
-		const interaction: HostInteraction = {
-			requestAction,
-			updateAction: (update) => {
-				updates.push(update);
-			},
-		};
-		return { interaction, requestAction, updates };
+	/** A view's conversation: a client approves or denies its actions, or (`unavailable`) none can. */
+	function host(decision: "approved" | "denied" | "unavailable"): TestHostActions {
+		return testHostActions(decision === "unavailable" ? null : () => ({ decision }));
+	}
+
+	/** How each action of `actions` ended, once it ran: its last open state and outcome. */
+	function ran(actions: TestHostActions): string[][] {
+		return actions.finished.map((record) => [record.state, record.outcome ?? "open"]);
 	}
 
 	function rustFixture() {
@@ -282,11 +280,11 @@ describe("shared install prompts and breaker", () => {
 		});
 		const pool = new LspServerPool();
 		const config = resolveLspConfig({ idleShutdownMs: 0 });
-		const view = (interaction: HostInteraction): LspManager => {
+		const view = (actions: TestHostActions): LspManager => {
 			const manager = new LspManager({
 				cwd: root,
 				config,
-				hostInteraction: interaction,
+				hostActions: actions.actions,
 				server: pool.acquire({ projectCwd: root, config, installRunner }),
 			});
 			views.push(manager);
@@ -300,46 +298,49 @@ describe("shared install prompts and breaker", () => {
 		const { path, installRunner, view } = rustFixture();
 		const subagent = host("unavailable");
 		const parent = host("approved");
-		const child = view(subagent.interaction);
-		const main = view(parent.interaction);
+		const child = view(subagent);
+		const main = view(parent);
 
 		expect(await child.hover(path, "symbol")).toMatchObject({ outcome: "unavailable" });
-		expect(subagent.requestAction).toHaveBeenCalledTimes(1);
+		// Nobody could approve it there: nothing was asked or recorded.
+		expect(subagent.requests).toEqual([]);
+		expect(subagent.records()).toEqual([]);
 		expect(installRunner).not.toHaveBeenCalled();
 
 		expect(await main.hover(path, "symbol")).toMatchObject({ outcome: "success" });
-		expect(parent.requestAction).toHaveBeenCalledTimes(1);
+		expect(parent.requests).toHaveLength(1);
 		expect(installRunner).toHaveBeenCalledTimes(1);
-		expect(parent.updates.map((update) => update.status)).toEqual(["running", "completed"]);
-		expect(subagent.updates).toEqual([]);
+		await vi.waitFor(() => expect(ran(parent)).toEqual([["running", "completed"]]));
+		expect(subagent.records()).toEqual([]);
 		expect(await child.hover(path, "symbol")).toMatchObject({ outcome: "success" });
 	});
 
 	it("offers the install once to a prompt-capable view after other views opened the breaker", async () => {
 		const { path, installRunner, view, rust } = rustFixture();
 		const subagent = host("unavailable");
-		const child = view(subagent.interaction);
+		const child = view(subagent);
 		for (let attempt = 0; attempt < 3; attempt++) await child.hover(path, "symbol");
 		expect(rust(child)?.breaker).toBe("open");
 
 		const parent = host("approved");
-		const main = view(parent.interaction);
+		const main = view(parent);
 		expect(await main.hover(path, "symbol")).toMatchObject({ outcome: "success" });
-		expect(parent.requestAction).toHaveBeenCalledTimes(1);
+		expect(parent.requests).toHaveLength(1);
 		expect(installRunner).toHaveBeenCalledTimes(1);
 		expect(rust(main)).toMatchObject({ state: "ready", breaker: "closed" });
 	});
 
 	it("does not repeat a declined install offer past the breaker", async () => {
 		const { path, installRunner, view } = rustFixture();
-		const child = view(host("unavailable").interaction);
+		const child = view(host("unavailable"));
 		for (let attempt = 0; attempt < 3; attempt++) await child.hover(path, "symbol");
 
 		const parent = host("denied");
-		const main = view(parent.interaction);
+		const main = view(parent);
 		expect(await main.hover(path, "symbol")).toMatchObject({ outcome: "unavailable" });
 		expect(await main.hover(path, "symbol")).toMatchObject({ reason: "breaker-open" });
-		expect(parent.requestAction).toHaveBeenCalledTimes(1);
+		expect(parent.requests).toHaveLength(1);
+		expect(parent.records().map((record) => record.outcome)).toEqual(["cancelled"]);
 		expect(installRunner).not.toHaveBeenCalled();
 	});
 
@@ -353,8 +354,8 @@ describe("shared install prompts and breaker", () => {
 		});
 		const initiator = host("approved");
 		const joiner = host("approved");
-		const first = view(initiator.interaction);
-		const second = view(joiner.interaction);
+		const first = view(initiator);
+		const second = view(joiner);
 
 		const initiating = first.hover(path, "symbol");
 		await expect.poll(() => installRunner.mock.calls.length).toBe(1);
@@ -366,8 +367,8 @@ describe("shared install prompts and breaker", () => {
 
 		gate.resolve();
 		expect(await initiating).toMatchObject({ outcome: "success" });
-		expect(joiner.requestAction).not.toHaveBeenCalled();
-		expect(joiner.updates).toEqual([]);
-		expect(initiator.updates.map((update) => update.status)).toEqual(["running", "completed"]);
+		expect(joiner.requests).toEqual([]);
+		expect(joiner.records()).toEqual([]);
+		await vi.waitFor(() => expect(ran(initiator)).toEqual([["running", "completed"]]));
 	});
 });

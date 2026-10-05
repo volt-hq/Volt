@@ -22,7 +22,6 @@ export const IROH_REMOTE_NOTIFICATION_KINDS = [
 	"conversation_completed",
 	"plan_ready",
 	"review_completed",
-	"action_completed",
 	"host_notice",
 ] as const;
 
@@ -60,7 +59,7 @@ export const IrohRemotePushNotificationSchema = Type.Union([
 	Type.Object(
 		{
 			...notificationProperties,
-			kind: stringEnum(["conversation_completed", "action_completed", "host_notice"]),
+			kind: stringEnum(["conversation_completed", "host_notice"]),
 		},
 		{ additionalProperties: false },
 	),

@@ -105,16 +105,6 @@ export {
 	openStoredSessionById,
 } from "./host/session-intents.ts";
 export type { ConversationTarget, HostClient } from "./host/targets.ts";
-export type {
-	HostActionDecision,
-	HostActionDecisionKind,
-	HostActionMetadata,
-	HostActionMetadataValue,
-	HostActionRequest,
-	HostActionStatus,
-	HostActionUpdate,
-	HostInteraction,
-} from "./host-interaction.ts";
 export * from "./mcp/index.ts";
 export type { CustomMessage, CustomMessageInput } from "./messages.ts";
 export {
@@ -138,6 +128,7 @@ export {
 	serializeJsonLine,
 } from "./protocol/transport/index.ts";
 export * from "./remote/iroh/index.ts";
+export type { HostActionOutcome, HostActionRequest, HostActions } from "./session/host-actions.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
 export {
 	createBuiltInSubagentDefinitions,
