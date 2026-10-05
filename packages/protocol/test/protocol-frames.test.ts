@@ -172,10 +172,19 @@ describe("host frames", () => {
 	});
 
 	it("name live values by family", () => {
-		for (const key of ["phase", "intents", "work/w1", "subagent/sub-1", "ext_widget/a/b"]) {
+		for (const key of ["phase", "intents", "work/w1", "ext_widget/a/b"]) {
 			expect(Check(LiveKeySchema, key), key).toBe(true);
 		}
-		for (const key of ["", "phase/", "workflow", "workflow/w1", "jobs", "unknown/x", "ext_status/\u0007"]) {
+		for (const key of [
+			"",
+			"phase/",
+			"workflow",
+			"workflow/w1",
+			"jobs",
+			"subagent/sub-1",
+			"unknown/x",
+			"ext_status/\u0007",
+		]) {
 			expect(Check(LiveKeySchema, key), key).toBe(false);
 		}
 	});

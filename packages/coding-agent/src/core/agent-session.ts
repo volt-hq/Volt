@@ -623,7 +623,6 @@ export class AgentSession {
 				extensions: () => this._extensions,
 				extensionServices: () => this._extensionServices,
 				jobs: () => this._jobs,
-				sessionWriter: () => this._sessionWriter,
 				isDisposed: () => this._disposed,
 				assertActive: () => this._assertActive(),
 				model: () => this.model,
@@ -728,6 +727,12 @@ export class AgentSession {
 		this._work.register(this._jobs.runtime.kind());
 		this._work.register(reviewWorkKind(() => this.sessionManager));
 		this._work.register(HOST_ACTION_WORK_KIND);
+		// The children of the session's subagent manager are its `subagent` work.
+		const subagentKind = config.subagentToolManager?.workKind?.({
+			work: () => this._work,
+			allowedTools: () => this._tools.subagentAllowedTools(),
+		});
+		if (subagentKind) this._work.register(subagentKind);
 		this._events = new SessionEvents({
 			gitContextProvider: this.gitContextProvider,
 			toolProgressDiagnostics: this._toolProgressDiagnostics,

@@ -15,7 +15,8 @@
  * stay on the host. Every frame is redacted at the connection's send (see
  * remote-redaction.ts). Intents and queries are the remote-safe ones within
  * the device's grant, intents act only on the conversation the stream is
- * bound to, and its subagent children are observe-only. Snapshots carry a
+ * bound to, and the subagent children its log links by subagent work are
+ * observe-only. Snapshots carry a
  * bounded tail of the active branch (older entries are paged with
  * `history`), and a resume further back than the replay bound is answered
  * with a snapshot instead.
@@ -97,10 +98,12 @@ export interface Profile {
 	readonly intents: IntentProfile;
 	/**
 	 * Whether a connection on this profile may target the conversation `id`
-	 * with intents and subscriptions. A remote connection also reads the
-	 * subagent children of its bound conversation, observe-only.
+	 * with intents and subscriptions. `linkedFrom` names the conversation
+	 * whose log links `id` as a subagent child by subagent work (directly or
+	 * through linked children): a remote connection reads the children its
+	 * bound conversation links, observe-only, and no other conversation.
 	 */
-	conversations(id: string): boolean;
+	conversations(id: string, linkedFrom?: string): boolean;
 	/** The conversation a remote connection is bound to; none for local connections and workspace streams. */
 	readonly bound?: string;
 }
@@ -122,7 +125,6 @@ const LOCAL_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"label",
 	"session_info",
 	"leaf",
-	"subagent_spawn",
 	"forked_from",
 	"work_started",
 	"work_checkpoint",
@@ -173,7 +175,6 @@ const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"label",
 	"session_info",
 	"leaf",
-	"subagent_spawn",
 	"forked_from",
 	"work_started",
 	"work_checkpoint",
@@ -281,7 +282,7 @@ export function remoteProfile(options: RemoteProfileOptions): Profile {
 		hostRequests: (accepts: readonly HostRequestKind[]) =>
 			new Set(accepts.filter((kind) => granted.has(hostRequestCapability(kind)))),
 		intents: { name: "remote" as const, grant: options.grant },
-		conversations: (id: string) => bound !== undefined && id === bound,
+		conversations: (id: string, linkedFrom?: string) => bound !== undefined && (id === bound || linkedFrom === bound),
 		...(bound === undefined ? {} : { bound }),
 	});
 }

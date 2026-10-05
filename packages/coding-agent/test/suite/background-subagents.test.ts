@@ -281,7 +281,9 @@ describe("native background subagents", () => {
 				expect(child.hasRunningWork).toBe(false);
 				expect(context.session.hasRunningWork).toBe(false);
 				expect(context.scopes[0]?.snapshot().activeDescendants).toBe(0);
-				expect(context.manager.listDelegations()[0]?.status).toBe(operation === "abort" ? "aborted" : "completed");
+				expect(context.manager.listDelegations()[0]?.status).toBe(
+					operation === "abort" ? "cancelled" : "completed",
+				);
 				expect(getMessageText(await subagent.execute("released", params))).toMatch(/"confirm": "/);
 				expect(context.children[0]?.faux.state.callCount).toBe(operation === "complete" ? 4 : 2);
 				// Retention remains intentional after every delegated resource settles.
@@ -728,7 +730,67 @@ describe("native background subagents", () => {
 			expect(await jobs.execute("read", { action: "read", id: job.id })).toMatchObject({
 				details: { job: { status: "cancelled" } },
 			});
-			await vi.waitFor(() => expect(context.manager.listDelegations()[0]?.status).toBe("aborted"));
+			await vi.waitFor(() => expect(context.manager.listDelegations()[0]?.status).toBe("cancelled"));
+			// The child was work of the conversation, started by the call: it ended with the job.
+			await vi.waitFor(() =>
+				expect(context.session.work.list().filter((record) => record.kind === "subagent")).toMatchObject([
+					{ toolCallId: "start", outcome: "cancelled", child: { conversation: expect.any(String) } },
+				]),
+			);
+		} finally {
+			await context.cleanup();
+		}
+	});
+
+	it("records a delegated child as subagent work of the conversation, with its report", async () => {
+		const context = await setup();
+		try {
+			context.finish.resolve();
+			const result = await startSubagent(context, { agent: "general", task: "summarize the findings" });
+			expect(getMessageText(result)).toBe("child report");
+			const [delegation] = context.manager.listDelegations();
+			await vi.waitFor(() =>
+				expect(context.session.work.get(delegation!.id)).toMatchObject({
+					kind: "subagent",
+					title: "general: summarize the findings",
+					toolCallId: "start",
+					delivery: "none",
+					resume: true,
+					cancellable: true,
+					input: { agent: "general", task: "summarize the findings" },
+					child: { conversation: context.runtimes[0]!.sessionId },
+					outcome: "completed",
+					result: { output: { text: "child report", truncated: false } },
+				}),
+			);
+			// A subagent delivers nothing: the tool returned its report.
+			expect(context.session.work.output(delegation!.id)).toMatchObject({ text: "child report", final: true });
+		} finally {
+			await context.cleanup();
+		}
+	});
+
+	it("leaves a subagent started as conversation work running through a stop, until its work is cancelled", async () => {
+		const context = await setup();
+		try {
+			const started = await context.manager.startWork("general", "independent task");
+			await vi.waitFor(() => expect(context.signals).toHaveLength(1));
+			expect(context.session.work.get(started.workId)).toMatchObject({
+				kind: "subagent",
+				state: "running",
+				child: { conversation: started.conversation },
+			});
+			expect(context.session.work.get(started.workId)?.toolCallId).toBeUndefined();
+			await context.session.abort();
+			// A stop of the conversation leaves subagents alone.
+			expect(context.signals[0]!.aborted).toBe(false);
+			expect(context.session.work.running().map((record) => record.workId)).toEqual([started.workId]);
+			await context.session.work.cancel(started.workId);
+			await vi.waitFor(() => expect(context.session.work.get(started.workId)?.outcome).toBe("cancelled"));
+			expect(context.signals[0]!.aborted).toBe(true);
+			// Its child conversation closes once its work ends.
+			await vi.waitFor(() => expect(context.runtimes[0]!.conversation.closed).toBe(true));
+			expect(context.session.work.running()).toEqual([]);
 		} finally {
 			await context.cleanup();
 		}

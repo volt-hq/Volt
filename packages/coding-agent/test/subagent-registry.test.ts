@@ -1,5 +1,4 @@
 import { describe, expect, it } from "vitest";
-import type { SessionReference } from "../src/core/session-manager.ts";
 import { SubagentRegistry } from "../src/core/subagents/registry.ts";
 
 function registerRunning(
@@ -47,7 +46,14 @@ describe("SubagentRegistry", () => {
 		const preflight = registry.prepareSpawnConfirmation("large-request");
 		expect(preflight.records).toHaveLength(50);
 		expect(preflight.total).toBe(600);
-		expect(preflight.statusCounts).toEqual({ running: 600, completed: 0, failed: 0, aborted: 0 });
+		expect(preflight.statusCounts).toEqual({
+			running: 600,
+			suspended: 0,
+			completed: 0,
+			failed: 0,
+			cancelled: 0,
+			interrupted: 0,
+		});
 	});
 
 	it("keeps the first task and bounds long prompts", () => {
@@ -232,9 +238,9 @@ describe("SubagentRegistry", () => {
 		registerRunning(registry, "sa_target");
 
 		const following = registry.follow(undefined, "sa_target");
-		registry.complete("sa_target", "aborted");
+		registry.complete("sa_target", "cancelled");
 
-		await expect(following).resolves.toMatchObject({ status: "aborted" });
+		await expect(following).resolves.toMatchObject({ status: "cancelled" });
 	});
 
 	it("evicts oldest terminal records over the cap but never running ones", () => {
@@ -269,75 +275,80 @@ describe("SubagentRegistry", () => {
 	});
 });
 
-describe("SubagentRegistry hydrate and claimResume", () => {
-	function hydrateAborted(
-		registry: SubagentRegistry,
-		id: string,
-		childSessionRef: SessionReference = {
-			sessionDirectory: "/tmp/sessions",
-			storeId: "store-1",
-			sessionGeneration: "generation-test",
-			sessionId: "child-1",
-		},
-	): void {
-		registry.hydrate({
-			id,
-			agent: { name: "researcher" },
-			path: ["researcher"],
-			status: "aborted",
-			error: "Interrupted before completion",
-			childSessionRef,
-			startedAt: 1,
-			finishedAt: 2,
-		});
-	}
-
-	it("claims only hydrated aborted records with a known transcript", () => {
+describe("SubagentRegistry hydrated work", () => {
+	it("hydrates finished and suspended runs as terminal records, keeping their recorded times", async () => {
 		const registry = new SubagentRegistry();
 		registry.hydrate({
 			id: "sa_done",
 			agent: { name: "researcher" },
 			path: ["researcher"],
+			task: "finished work",
 			status: "completed",
 			output: "report",
 			startedAt: 1,
 			finishedAt: 2,
 		});
-		hydrateAborted(registry, "sa_stuck");
-		registerRunning(registry, "sa_live");
-
-		expect(registry.claimResume("sa_done")).toBeUndefined();
-		expect(registry.claimResume("sa_live")).toBeUndefined();
-		expect(registry.claimResume("sa_missing")).toBeUndefined();
-		const claim = registry.claimResume("sa_stuck");
-		expect(claim).toMatchObject({
-			agentName: "researcher",
-			childSessionRef: { sessionId: "child-1", storeId: "store-1" },
+		registry.hydrate({
+			id: "sa_suspended",
+			agent: { name: "researcher" },
+			path: ["researcher"],
+			status: "suspended",
+			startedAt: 3,
 		});
-		// Claimed: gone from the registry until re-registered or rolled back.
-		expect(registry.get("sa_stuck")).toBeUndefined();
-		expect(registry.claimResume("sa_stuck")).toBeUndefined();
+		registry.hydrate({ id: "sa_done", agent: { name: "other" }, path: ["other"], status: "failed", startedAt: 9 });
+
+		expect(registry.get("sa_done")).toMatchObject({ status: "completed", startedAt: 1, finishedAt: 2 });
+		await expect(registry.follow(undefined, "sa_done")).resolves.toMatchObject({ output: "report" });
+		// A suspended run answers at once instead of being waited on.
+		await expect(registry.follow(undefined, "sa_suspended")).resolves.toMatchObject({ status: "suspended" });
+		expect(registry.prepareSpawnConfirmation("request").statusCounts).toMatchObject({
+			completed: 1,
+			suspended: 1,
+			running: 0,
+		});
 	});
 
-	it("rollback restores the record and is idempotent", () => {
+	it("reads a suspended run's work again until it finishes", () => {
 		const registry = new SubagentRegistry();
-		hydrateAborted(registry, "sa_stuck");
-		const claim = registry.claimResume("sa_stuck");
-		claim?.rollback();
-		expect(registry.get("sa_stuck")).toMatchObject({ status: "aborted", hydrated: true });
-		claim?.rollback();
-		expect(registry.list().filter((record) => record.id === "sa_stuck")).toHaveLength(1);
+		let outcome: "cancelled" | undefined;
+		registry.hydrate({
+			id: "sa_suspended",
+			agent: { name: "researcher" },
+			path: ["researcher"],
+			status: "suspended",
+			startedAt: 1,
+			source: () =>
+				({
+					workId: "sa_suspended",
+					...(outcome === undefined ? {} : { outcome, error: "Cancelled by the user" }),
+				}) as never,
+		});
+		expect(registry.get("sa_suspended")?.status).toBe("suspended");
+		outcome = "cancelled";
+		expect(registry.list()[0]).toMatchObject({ status: "cancelled", error: "Cancelled by the user" });
 	});
 
-	it("rollback is a no-op once the resumed run re-registered the id", () => {
+	it("runs a resumed record again under its id, so a follow waits for it", async () => {
 		const registry = new SubagentRegistry();
-		hydrateAborted(registry, "sa_stuck");
-		const claim = registry.claimResume("sa_stuck");
-		registerRunning(registry, "sa_stuck");
-		claim?.rollback();
-		const record = registry.get("sa_stuck");
-		expect(record).toMatchObject({ status: "running" });
-		expect(record?.hydrated).toBeUndefined();
+		registry.hydrate({
+			id: "sa_resume",
+			agent: { name: "researcher" },
+			path: ["researcher"],
+			task: "original task",
+			status: "suspended",
+			startedAt: 1,
+		});
+		registry.resumed({ id: "sa_resume", agent: { name: "researcher" }, path: ["researcher"] });
+		expect(registry.get("sa_resume")).toMatchObject({ status: "running", task: "original task" });
+		// Resuming a running record leaves it as it is.
+		registry.resumed({ id: "sa_resume", agent: { name: "other" }, path: ["other"] });
+		expect(registry.list().filter((record) => record.id === "sa_resume")).toHaveLength(1);
+		const following = registry.follow(undefined, "sa_resume");
+		registry.complete("sa_resume", "completed", { output: "resumed report" });
+		await expect(following).resolves.toMatchObject({ status: "completed", output: "resumed report" });
+		// An unknown id registers as a new run.
+		registry.resumed({ id: "sa_new", agent: { name: "researcher" }, path: ["researcher"], task: "new" });
+		expect(registry.get("sa_new")).toMatchObject({ status: "running", task: "new" });
 	});
 
 	it("register throws on a live duplicate id", () => {

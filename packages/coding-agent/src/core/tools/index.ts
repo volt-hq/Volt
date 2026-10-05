@@ -128,8 +128,6 @@ export {
 	type SubagentToolMode,
 	type SubagentToolOptions,
 	type SubagentToolOutputDetails,
-	type SubagentToolOverallStatus,
-	type SubagentToolStatus,
 	type SubagentToolTaskDetails,
 	type SubagentToolTaskInput,
 	type SubagentToolUsageDetails,

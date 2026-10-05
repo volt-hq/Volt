@@ -502,15 +502,21 @@ export function buildDrafts(
 				break;
 			}
 			case "spawn":
+				// A subagent started: host work that never moves the leaf.
 				append({
-					type: "subagent_spawn",
+					type: "work_started",
 					visibility: "host",
 					payload: {
+						workId: `sa-${ordinal()}`,
+						kind: "subagent",
+						title: "worker",
+						input: { agent: "worker" },
+						cancellable: true,
+						delivery: "none",
+						resume: true,
+						state: "running",
 						toolCallId: `call-${ordinal()}`,
-						subagentId: `sub-${ordinal()}`,
-						agent: "worker",
-						childSessionId: `child-${ordinal()}`,
-						requestKey: `request-${ordinal()}`,
+						child: { conversation: `child-${ordinal()}` },
 					},
 				});
 				break;

@@ -1016,7 +1016,7 @@ describe("SubagentManager", () => {
 		});
 	});
 
-	it("records an explicitly aborted retry candidate as aborted after settlement", async () => {
+	it("records an explicitly aborted retry candidate as cancelled after settlement", async () => {
 		const retryStarted = createDeferred();
 		const agentEnds: SubagentEndEvent[] = [];
 		const { manager } = await createTestManager({
@@ -1052,7 +1052,7 @@ describe("SubagentManager", () => {
 		await handle.abort();
 		const result = await completion;
 
-		expect(result).toMatchObject({ status: "aborted" });
+		expect(result).toMatchObject({ status: "cancelled" });
 		expect(result.error).toBeUndefined();
 		expect(result.event.willRetry).toBe(false);
 		expect(result.event.messages.at(-1)).toMatchObject({
@@ -1062,16 +1062,16 @@ describe("SubagentManager", () => {
 		});
 
 		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
-		expect(activity).toMatchObject({ id: handle.id, status: "aborted", abortRequested: true });
+		expect(activity).toMatchObject({ id: handle.id, status: "cancelled", abortRequested: true });
 		expect(activity?.error).toBeUndefined();
 
 		const registryRecord = manager.listDelegations().find((candidate) => candidate.id === handle.id);
-		expect(registryRecord).toMatchObject({ id: handle.id, status: "aborted" });
+		expect(registryRecord).toMatchObject({ id: handle.id, status: "cancelled" });
 		expect(registryRecord?.error).toBeUndefined();
-		await expect(manager.followDelegation(handle.id)).resolves.toMatchObject({ id: handle.id, status: "aborted" });
+		await expect(manager.followDelegation(handle.id)).resolves.toMatchObject({ id: handle.id, status: "cancelled" });
 	});
 
-	it("records a delegation-scope-aborted retry candidate as aborted after settlement", async () => {
+	it("records a delegation-scope-aborted retry candidate as cancelled after settlement", async () => {
 		const retryStarted = createDeferred();
 		const externalAbort = new AbortController();
 		const scope = new SubagentDelegationScope({ signal: externalAbort.signal });
@@ -1106,7 +1106,7 @@ describe("SubagentManager", () => {
 		const result = await completion;
 
 		expect(scope.signal.aborted).toBe(true);
-		expect(result).toMatchObject({ status: "aborted" });
+		expect(result).toMatchObject({ status: "cancelled" });
 		expect(result.error).toBeUndefined();
 		expect(result.event.willRetry).toBe(false);
 		expect(result.event.messages.at(-1)).toMatchObject({
@@ -1116,14 +1116,14 @@ describe("SubagentManager", () => {
 		});
 
 		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
-		expect(activity).toMatchObject({ id: handle.id, status: "aborted", abortRequested: true });
+		expect(activity).toMatchObject({ id: handle.id, status: "cancelled", abortRequested: true });
 		expect(activity?.error).toBeUndefined();
 
 		const registryRecord = manager.listDelegations().find((candidate) => candidate.id === handle.id);
-		expect(registryRecord).toMatchObject({ id: handle.id, status: "aborted" });
+		expect(registryRecord).toMatchObject({ id: handle.id, status: "cancelled" });
 		expect(registryRecord?.error).toBeUndefined();
 		const followed = await manager.followDelegation(handle.id);
-		expect(followed).toMatchObject({ id: handle.id, status: "aborted" });
+		expect(followed).toMatchObject({ id: handle.id, status: "cancelled" });
 		expect(followed.error).toBeUndefined();
 	});
 
@@ -1914,7 +1914,7 @@ describe("SubagentManager", () => {
 		expect(scope.signal.aborted).toBe(false);
 		expect(scope.snapshot()).toMatchObject({ turnsUsed: 4, activeDescendants: 0, aborted: false });
 		expect(manager.listActivities()).toEqual([
-			expect.objectContaining({ id: handle.id, status: "aborted", abortRequested: true }),
+			expect.objectContaining({ id: handle.id, status: "cancelled", abortRequested: true }),
 		]);
 	});
 
@@ -2587,7 +2587,7 @@ describe("SubagentManager", () => {
 		await childRuntime.conversation.session.waitForIdle();
 
 		expect(manager.listDelegations()).toEqual([
-			expect.objectContaining({ agent: { name: "researcher", source: "user" }, status: "aborted" }),
+			expect.objectContaining({ agent: { name: "researcher", source: "user" }, status: "cancelled" }),
 		]);
 		expect(childRuntime.conversation.session.messages.at(-1)).toMatchObject({
 			role: "assistant",
