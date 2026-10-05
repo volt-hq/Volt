@@ -550,27 +550,32 @@ export default function(volt) {
 			expect(runner.getCommand("cmd-b:shared-cmd")?.description).toBe("Second command");
 		});
 
-		it("leaves out a command whose alias another extension's command took", async () => {
+		it("refuses a command name that would take another extension's alias", async () => {
 			const cmdCode = (id: string, name: string) => `
 				export const manifest = { id: "${id}", displayName: "${id}" };
 				export default function(volt) {
 					volt.registerCommand("${name}", { handler: async () => {} });
 				}
 			`;
-			fs.writeFileSync(path.join(extensionsDir, "a.ts"), cmdCode("a", "go"));
-			fs.writeFileSync(path.join(extensionsDir, "b.ts"), cmdCode("b", "b:go"));
-			fs.writeFileSync(path.join(extensionsDir, "c.ts"), cmdCode("b-c", "go"));
-			fs.writeFileSync(path.join(extensionsDir, "d.ts"), cmdCode("b", "unused"));
+			fs.writeFileSync(path.join(extensionsDir, "a.ts"), cmdCode("squatter", "go"));
+			fs.writeFileSync(path.join(extensionsDir, "b.ts"), cmdCode("squatter-2", "victim:go"));
+			fs.writeFileSync(path.join(extensionsDir, "c.ts"), cmdCode("victim", "go"));
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([
+				{
+					path: path.join(extensionsDir, "b.ts"),
+					error: expect.stringContaining('Invalid extension command name "victim:go"'),
+				},
+			]);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
 			const commands = runner.getRegisteredCommands();
 
 			expect(commands.map((command) => [command.extensionId, command.invocationName])).toEqual([
-				["a", "go"],
-				["b", "b:go"],
-				["b-c", "b-c:go"],
+				["squatter", "go"],
+				["victim", "victim:go"],
 			]);
+			expect(runner.getCommand("victim:go")?.extensionId).toBe("victim");
 		});
 	});
 

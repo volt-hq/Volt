@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
+import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
 import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -343,7 +344,7 @@ export class ExtensionRunner {
 	private servicesManager: ExtensionServicesManager | undefined;
 	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
 
-	/** @throws when two extensions share a manifest id: ownership is by id. */
+	/** @throws when an extension's id is not a manifest id or two extensions share one: ownership is by id. */
 	constructor(
 		extensions: Extension[],
 		runtime: ExtensionRuntime,
@@ -351,8 +352,10 @@ export class ExtensionRunner {
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
 	) {
+		const idPattern = new RegExp(EXTENSION_ID_PATTERN);
 		const ids = new Set<string>();
 		for (const extension of extensions) {
+			if (!idPattern.test(extension.id)) throw new Error(`Invalid extension id ${JSON.stringify(extension.id)}`);
 			if (ids.has(extension.id)) throw new Error(`Two extensions have the id ${JSON.stringify(extension.id)}`);
 			ids.add(extension.id);
 		}
@@ -713,7 +716,8 @@ export class ExtensionRunner {
 	/**
 	 * Every extension's commands in load order, with their slash names. The
 	 * first command with a name takes it; a later one is `/<extension id>:<name>`,
-	 * with a diagnostic, and one whose alias is taken too is left out.
+	 * with a diagnostic. Registered names have no `:`, so no command takes an
+	 * alias; the check that one is taken only guards against that.
 	 */
 	private resolveRegisteredCommands(): { commands: ResolvedCommand[]; diagnostics: ResourceDiagnostic[] } {
 		const commands: ResolvedCommand[] = [];

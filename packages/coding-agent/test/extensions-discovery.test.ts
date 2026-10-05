@@ -50,14 +50,22 @@ export default function(volt) {
 		]);
 	});
 
-	it.each(["/deploy", "deploy/now", "deploy now", "deploy\tnow", "", "deploy.now", "-deploy", "a".repeat(65)])(
-		"rejects invalid slash-command registration name %j",
-		(name) => {
-			expect(() => validateExtensionCommandName(name)).toThrow("Invalid extension command name");
-		},
-	);
+	it.each([
+		"/deploy",
+		"deploy/now",
+		"deploy now",
+		"deploy\tnow",
+		"",
+		"deploy.now",
+		"-deploy",
+		"a".repeat(65),
+		"other:deploy",
+		"skill:debugger",
+	])("rejects invalid slash-command registration name %j", (name) => {
+		expect(() => validateExtensionCommandName(name)).toThrow("Invalid extension command name");
+	});
 
-	it.each(["deploy", "Deploy_2", "review:fix", "a".repeat(64)])("accepts command name %j", (name) => {
+	it.each(["deploy", "Deploy_2", "review-fix", "a".repeat(64)])("accepts command name %j", (name) => {
 		expect(() => validateExtensionCommandName(name)).not.toThrow();
 	});
 

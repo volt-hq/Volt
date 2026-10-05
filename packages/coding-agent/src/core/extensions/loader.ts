@@ -163,13 +163,17 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-/** An extension command's name, the last part of its intent `extension.command.<id>.<name>`. */
-const EXTENSION_COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$/;
+/**
+ * An extension command's name, the last part of its intent
+ * `extension.command.<id>.<name>`. It has no `:`, which only the host's
+ * `<id>:<name>` aliases and `skill:` commands contain.
+ */
+const EXTENSION_COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 export function validateExtensionCommandName(name: string): void {
 	if (typeof name !== "string" || !EXTENSION_COMMAND_NAME_PATTERN.test(name)) {
 		throw new Error(
-			`Invalid extension command name ${JSON.stringify(name)}: use a letter or digit, then at most 63 letters, digits, "_", ":", and "-"`,
+			`Invalid extension command name ${JSON.stringify(name)}: use a letter or digit, then at most 63 letters, digits, "_", and "-"`,
 		);
 	}
 }
@@ -767,7 +771,8 @@ function discoverExtensionsInDir(dir: string): string[] {
 /**
  * Discover and load extensions from standard locations: the project's
  * (scope `project`), the user's (scope `user`), then `configuredPaths`
- * (scope `temporary`).
+ * (scope `temporary`). It does not check project trust: the caller decides
+ * whether `cwd`'s extensions may run. Volt's own resource loading checks it.
  */
 export async function discoverAndLoadExtensions(
 	configuredPaths: string[],

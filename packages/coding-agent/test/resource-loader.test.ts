@@ -850,6 +850,42 @@ export default function() {
 			expect(globalState[factoryRunsKey]).toEqual(["user"]);
 		});
 
+		it("loads the project's copy of a package both scopes configure when trust resolves", async () => {
+			const writePackage = (root: string, label: string) => {
+				mkdirSync(root, { recursive: true });
+				writeFileSync(
+					join(root, "package.json"),
+					JSON.stringify({
+						name: "dupe-pkg",
+						version: "1.0.0",
+						volt: { id: "guard", displayName: "Guard", entry: "index.js" },
+					}),
+				);
+				writeFileSync(
+					join(root, "index.js"),
+					`module.exports = function (volt) {
+	volt.registerProvider("guard-ai", { baseUrl: "http://${label}.localhost", apiKey: "k", api: "openai-completions", models: [] });
+};`,
+				);
+			};
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(join(cwd, ".volt"), { recursive: true });
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:dupe-pkg"] }));
+			writeFileSync(join(cwd, ".volt", "settings.json"), JSON.stringify({ packages: ["npm:dupe-pkg"] }));
+			writePackage(join(agentDir, "npm", "node_modules", "dupe-pkg"), "user");
+			const projectCopy = join(cwd, ".volt", "npm", "node_modules", "dupe-pkg");
+			writePackage(projectCopy, "project");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload({ resolveProjectTrust: async () => true });
+
+			const { extensions, errors, runtime } = loader.getExtensions();
+			expect(extensions.map((extension) => [extension.id, extension.path])).toEqual([["guard", projectCopy]]);
+			expect(errors).toEqual([]);
+			// The user copy loaded before trust resolved; the project copy's registration of the same provider comes last.
+			expect(runtime.pendingProviderRegistrations.at(-1)?.config.baseUrl).toBe("http://project.localhost");
+		});
+
 		it("keeps the earlier of two project extensions with the same id", async () => {
 			const projectExtDir = join(cwd, ".volt", "extensions");
 			mkdirSync(projectExtDir, { recursive: true });

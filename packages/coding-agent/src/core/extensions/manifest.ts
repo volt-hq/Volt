@@ -176,10 +176,8 @@ export function readPackageManifest(root: string): PackageExtension | undefined 
 	if (field === undefined || !isRecord(field.volt)) {
 		throw new ExtensionManifestError(`The "volt" field of package.json must be an object`);
 	}
-	const declared: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(field.volt)) {
-		if (!PACKAGE_RESOURCE_KEYS.has(key)) declared[key] = value;
-	}
+	// Own data properties only, so a `__proto__` key is a field the schema refuses.
+	const declared = Object.fromEntries(Object.entries(field.volt).filter(([key]) => !PACKAGE_RESOURCE_KEYS.has(key)));
 	if (declared.extensions !== undefined) {
 		throw new ExtensionManifestError(
 			`"volt.extensions" is replaced by the manifest: declare the package's one extension with "id", "displayName", and "entry"`,

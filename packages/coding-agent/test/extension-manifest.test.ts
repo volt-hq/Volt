@@ -178,6 +178,18 @@ describe("extension manifests", () => {
 			expect(() => readPackageManifest(root)).toThrow('"volt.extensions" is replaced by the manifest');
 		});
 
+		it("treats a __proto__ key as an unrecognized field", () => {
+			const root = join(tempDir, "proto");
+			mkdirSync(root);
+			writeFileSync(
+				join(root, "package.json"),
+				'{"name":"proto","volt":{"__proto__":{"polluted":true},"id":"proto","displayName":"P","entry":"index.ts"}}',
+			);
+			writeFileSync(join(root, "index.ts"), "");
+			expect(() => readPackageManifest(root)).toThrow('"__proto__" is not a recognized field');
+			expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+		});
+
 		it("refuses a field that is not an object", () => {
 			const root = writePackage("array", ["index.ts"]);
 			expect(declaresPackageExtension(root)).toBe(true);
@@ -323,6 +335,26 @@ describe("extension manifests", () => {
 			expect(result.errors).toEqual([
 				{ path, error: `Extension id "taken" is already used by <inline>; ${path} is not loaded` },
 			]);
+		});
+
+		it("refuses a runner over an extension whose id is not a manifest id", async () => {
+			const runtime = createExtensionRuntime();
+			const extension = await loadExtensionFromFactory(
+				testExtension("fine", () => {}),
+				tempDir,
+				createEventBus(),
+				runtime,
+			);
+			expect(
+				() =>
+					new ExtensionRunner(
+						[{ ...extension, id: "<runtime>" }],
+						runtime,
+						tempDir,
+						SessionManager.inMemory(),
+						ModelRegistry.inMemory(AuthStorage.inMemory()),
+					),
+			).toThrow('Invalid extension id "<runtime>"');
 		});
 
 		it("refuses a runner over two extensions with one id", async () => {

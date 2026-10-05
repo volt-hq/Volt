@@ -1573,7 +1573,7 @@ Labels persist in the session and survive restarts. Use them to mark important p
 
 ### volt.registerCommand(name, options)
 
-Register a command. `name` is the slash-command token without the leading `/`: a letter or digit, then at most 63 letters, digits, `_`, `:`, and `-`. Invalid names are rejected while the extension loads. For example, use `deploy`, not `/deploy` or `deploy now`.
+Register a command. `name` is the slash-command token without the leading `/`: a letter or digit, then at most 63 letters, digits, `_`, and `-`. Invalid names are rejected while the extension loads. For example, use `deploy`, not `/deploy` or `deploy now`.
 
 Clients invoke the command as the intent `extension.command.<id>.<name>`, where `<id>` is the extension's manifest id. When an extension loaded earlier registered the same name, the command is `/<id>:<name>` instead, and volt reports the conflict.
 

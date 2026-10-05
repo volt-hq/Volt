@@ -1435,7 +1435,7 @@ export interface ExtensionAPI {
 
 	/**
 	 * Register a slash command: `name` is a letter or digit, then at most 63
-	 * letters, digits, `_`, `:`, and `-`. Clients invoke it as the intent
+	 * letters, digits, `_`, and `-`. Clients invoke it as the intent
 	 * `extension.command.<manifest id>.<name>`. When an earlier extension took
 	 * the name, the command is `/<manifest id>:<name>`.
 	 */

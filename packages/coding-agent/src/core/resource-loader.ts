@@ -561,9 +561,15 @@ export class DefaultResourceLoader implements ResourceLoader {
 			return extensionsResult;
 		}
 
+		const finalPaths = new Set(extensionSources.map((source) => this.resolveExtensionLoadPath(source.path)));
+		const inlineExtensions = preTrustExtensions.extensions.filter((extension) =>
+			extension.path.startsWith("<inline:"),
+		);
+		// A preloaded extension the final set no longer names (its package or path is now the
+		// project's copy) is dropped, and its id is free for that copy.
 		const preloadedByPath = new Map(
 			preTrustExtensions.extensions
-				.filter((extension) => !extension.path.startsWith("<inline:"))
+				.filter((extension) => !extension.path.startsWith("<inline:") && finalPaths.has(extension.resolvedPath))
 				.map((extension) => [extension.resolvedPath, extension]),
 		);
 		const failedPreloadPaths = new Set(
@@ -573,26 +579,29 @@ export class DefaultResourceLoader implements ResourceLoader {
 			const resolvedPath = this.resolveExtensionLoadPath(source.path);
 			return !preloadedByPath.has(resolvedPath) && !failedPreloadPaths.has(resolvedPath);
 		});
-		// The preloaded extensions are the user's and temporary ones: a project extension never takes their ids.
+		// The kept preloaded extensions are the user's and temporary ones: a project extension never takes their ids.
 		const remainingExtensions = await loadExtensions(
 			remainingSources,
 			this.cwd,
 			this.eventBus,
 			preTrustExtensions.runtime,
-			preTrustExtensions.extensions,
+			[...preloadedByPath.values(), ...inlineExtensions],
 		);
 		const loadedByPath = new Map(preloadedByPath);
 		for (const extension of remainingExtensions.extensions) {
 			loadedByPath.set(extension.resolvedPath, extension);
 		}
 
-		const inlineExtensions = preTrustExtensions.extensions.filter((extension) =>
-			extension.path.startsWith("<inline:"),
-		);
 		const orderedExtensions = extensionSources
 			.map((source) => loadedByPath.get(this.resolveExtensionLoadPath(source.path)))
 			.filter((extension): extension is Extension => extension !== undefined);
 		orderedExtensions.push(...inlineExtensions);
+		// Providers a dropped preloaded extension queued go with it.
+		const loadedIds = new Set(orderedExtensions.map((extension) => extension.id));
+		const runtime = preTrustExtensions.runtime;
+		runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((registration) =>
+			loadedIds.has(registration.extensionId),
+		);
 
 		const extensionsResult: LoadExtensionsResult = {
 			extensions: orderedExtensions,
