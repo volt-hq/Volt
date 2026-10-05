@@ -2,12 +2,12 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
-import type { ImageContent, TextContent } from "@earendil-works/volt-ai";
+import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
 import type {
 	AgentToolResult,
 	ExtensionAPI,
 	ToolDefinition,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 import type { TSchema } from "typebox";
 
 const MCP_PROTOCOL_VERSION = "2025-06-18";

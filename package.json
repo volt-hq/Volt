@@ -37,21 +37,5 @@
 	},
 	"dependencies": {
 		"xcodebuildmcp": "2.6.2"
-	},
-	"peerDependencies": {
-		"@earendil-works/volt-ai": "*",
-		"@earendil-works/volt-coding-agent": "*",
-		"typebox": "*"
-	},
-	"peerDependenciesMeta": {
-		"@earendil-works/volt-ai": {
-			"optional": true
-		},
-		"@earendil-works/volt-coding-agent": {
-			"optional": true
-		},
-		"typebox": {
-			"optional": true
-		}
 	}
 }
