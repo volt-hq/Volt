@@ -1,6 +1,6 @@
 {
 	"name": "volt-terminal-bench-harbor",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"description": "Run Volt on Terminal-Bench through Harbor.",
 	"type": "module",
 	"keywords": [
@@ -21,6 +21,34 @@
 		"displayName": "Terminal-Bench Harbor",
 		"description": "Runs Volt on Terminal-Bench through Harbor.",
 		"entry": "extensions/terminal-bench-harbor.ts",
+		"settings": {
+			"type": "object",
+			"properties": {
+				"model": {
+					"type": "string",
+					"title": "Model",
+					"description": "provider/model /tbench benchmarks by default. Unset: the session's model, else openai-codex/gpt-5.5.",
+					"maxLength": 200,
+					"pattern": "[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9._:@/+-]+"
+				},
+				"taskLimit": {
+					"type": "integer",
+					"title": "Task limit (-l)",
+					"description": "Harbor tasks per run by default.",
+					"minimum": 1,
+					"maximum": 10000,
+					"default": 1
+				},
+				"concurrentTrials": {
+					"type": "integer",
+					"title": "Concurrent trials (-n)",
+					"description": "Harbor trials that run at once by default.",
+					"minimum": 1,
+					"maximum": 64,
+					"default": 1
+				}
+			}
+		},
 		"permissions": [
 			"exec",
 			"network",

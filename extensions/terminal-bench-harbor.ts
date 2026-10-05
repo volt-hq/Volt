@@ -3,6 +3,10 @@
  *
  * Provides /tbench helpers and ships the Harbor agent wrapper in
  * volt_tbench_harbor/agent.py.
+ *
+ * Settings (`/extensions`, or `extensions.terminal-bench-harbor.settings` in
+ * settings.json) hold the defaults /tbench runs with: the model, the task
+ * limit (-l), and the concurrent trials (-n).
  */
 
 import fs from "node:fs";
@@ -13,8 +17,14 @@ import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@hansjm1
 const DATASET = "terminal-bench/terminal-bench-2-1";
 const AGENT_IMPORT_PATH = "volt_tbench_harbor.agent:VoltAgent";
 const DEFAULT_MODEL = "openai-codex/gpt-5.5";
-const DEFAULT_TASK_LIMIT = "1";
-const DEFAULT_CONCURRENT_TRIALS = "1";
+
+/** The settings the manifest declares (package.json `volt.settings`), with their defaults applied. */
+type TbenchSettings = {
+	readonly model?: string;
+	readonly taskLimit: number;
+	readonly concurrentTrials: number;
+};
+type TbenchApi = ExtensionAPI<TbenchSettings>;
 
 type CheckStatus = "ok" | "missing" | "error";
 type RunOptionName = "taskLimit" | "concurrentTrials";
@@ -49,8 +59,9 @@ function getPackageRoot(): string {
 	return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
+/** A PowerShell single-quoted string: PowerShell also reads the typographic quotes U+2018 to U+201B as single quotes. */
 function quotePowerShell(value: string): string {
-	return `'${value.replace(/'/g, "''")}'`;
+	return `'${value.replace(/['\u2018-\u201B]/g, "$&$&")}'`;
 }
 
 function quotePosix(value: string): string {
@@ -102,19 +113,19 @@ function unique(values: string[]): string[] {
 	return result;
 }
 
-function getDefaultModel(ctx: ExtensionCommandContext): string {
-	return ctx.model ? formatModelName(ctx.model) : DEFAULT_MODEL;
+function getDefaultModel(volt: TbenchApi, ctx: ExtensionCommandContext): string {
+	return volt.settings.model ?? (ctx.model ? formatModelName(ctx.model) : DEFAULT_MODEL);
 }
 
-function getModelOptions(ctx: ExtensionCommandContext): string[] {
+function getModelOptions(volt: TbenchApi, ctx: ExtensionCommandContext): string[] {
 	const availableModels = ctx.modelRegistry
 		.getAvailable()
 		.map(formatModelName)
 		.sort((left, right) => left.localeCompare(right));
 	if (availableModels.length === 0) {
-		return unique([getDefaultModel(ctx), DEFAULT_MODEL]);
+		return unique([getDefaultModel(volt, ctx), DEFAULT_MODEL]);
 	}
-	const preferredModels = unique([getDefaultModel(ctx), DEFAULT_MODEL]).filter((model) =>
+	const preferredModels = unique([getDefaultModel(volt, ctx), DEFAULT_MODEL]).filter((model) =>
 		availableModels.includes(model),
 	);
 	return unique([...preferredModels, ...availableModels]);
@@ -184,46 +195,79 @@ function validatePositiveInteger(value: string, label: string, ctx: ExtensionCom
 	return undefined;
 }
 
-async function promptPositiveInteger(
+/** Ask for the run's model, task limit, and concurrent trials in one form, starting from the settings. */
+async function promptRunConfig(volt: TbenchApi, ctx: ExtensionCommandContext): Promise<RunConfig | undefined> {
+	const models = getModelOptions(volt, ctx);
+	const defaultModel = getDefaultModel(volt, ctx);
+	const values = await ctx.ui.form({
+		title: "Terminal-Bench run",
+		fields: [
+			{
+				kind: "enum",
+				id: "model",
+				label: "Model",
+				options: models.map((model) => ({ value: model })),
+				...(models.includes(defaultModel) ? { value: defaultModel } : {}),
+				required: true,
+			},
+			{
+				kind: "integer",
+				id: "taskLimit",
+				label: "Task limit (-l)",
+				min: 1,
+				max: 10000,
+				value: volt.settings.taskLimit,
+				required: true,
+			},
+			{
+				kind: "integer",
+				id: "concurrentTrials",
+				label: "Concurrent trials (-n)",
+				min: 1,
+				max: 64,
+				value: volt.settings.concurrentTrials,
+				required: true,
+			},
+			{ kind: "boolean", id: "remember", label: "Remember as defaults", value: false },
+		],
+	});
+	if (values === undefined) return undefined;
+	const { model, taskLimit, concurrentTrials } = values;
+	if (typeof model !== "string" || typeof taskLimit !== "number" || typeof concurrentTrials !== "number") {
+		return undefined;
+	}
+	if (values.remember === true) {
+		try {
+			await volt.updateSettings({ model, taskLimit, concurrentTrials });
+		} catch (error) {
+			ctx.ui.notify(`Could not save the defaults: ${error instanceof Error ? error.message : String(error)}`, "warning");
+		}
+	}
+	return { model, taskLimit: String(taskLimit), concurrentTrials: String(concurrentTrials), extraArgs: [] };
+}
+
+async function getRunConfig(
+	volt: TbenchApi,
+	args: string[],
 	ctx: ExtensionCommandContext,
-	title: string,
-	defaultValue: string,
-	label: string,
-): Promise<string | undefined> {
-	const value = await ctx.ui.input(title, defaultValue);
-	if (value === undefined) return undefined;
-	return validatePositiveInteger(value.trim() || defaultValue, label, ctx);
-}
-
-async function promptRunConfig(ctx: ExtensionCommandContext): Promise<RunConfig | undefined> {
-	const model = await ctx.ui.select("Terminal-Bench model", getModelOptions(ctx));
-	if (model === undefined) return undefined;
-	const taskLimit = await promptPositiveInteger(ctx, "Terminal-Bench task limit (-l)", DEFAULT_TASK_LIMIT, "-l");
-	if (taskLimit === undefined) return undefined;
-	const concurrentTrials = await promptPositiveInteger(
-		ctx,
-		"Terminal-Bench concurrent trials (-n)",
-		DEFAULT_CONCURRENT_TRIALS,
-		"-n",
-	);
-	if (concurrentTrials === undefined) return undefined;
-	return { model, taskLimit, concurrentTrials, extraArgs: [] };
-}
-
-async function getRunConfig(args: string[], ctx: ExtensionCommandContext): Promise<RunConfig | undefined> {
+): Promise<RunConfig | undefined> {
 	if (args.length === 0 && ctx.hasUI) {
-		return promptRunConfig(ctx);
+		return promptRunConfig(volt, ctx);
 	}
 
 	const parsed = parseRunArgs(args);
-	const model = (parsed.model ?? getDefaultModel(ctx)).trim();
+	const model = (parsed.model ?? getDefaultModel(volt, ctx)).trim();
 	if (!model) {
 		ctx.ui.notify("Model is required.", "warning");
 		return undefined;
 	}
-	const taskLimit = validatePositiveInteger(parsed.taskLimit ?? DEFAULT_TASK_LIMIT, "-l", ctx);
+	const taskLimit = validatePositiveInteger(parsed.taskLimit ?? String(volt.settings.taskLimit), "-l", ctx);
 	if (taskLimit === undefined) return undefined;
-	const concurrentTrials = validatePositiveInteger(parsed.concurrentTrials ?? DEFAULT_CONCURRENT_TRIALS, "-n", ctx);
+	const concurrentTrials = validatePositiveInteger(
+		parsed.concurrentTrials ?? String(volt.settings.concurrentTrials),
+		"-n",
+		ctx,
+	);
 	if (concurrentTrials === undefined) return undefined;
 	return { model, taskLimit, concurrentTrials, extraArgs: parsed.extraArgs };
 }
@@ -290,7 +334,7 @@ function renderCommand(projectRoot: string, model: string, taskLimit: string, co
 	return [`PowerShell:\n${powershell}`, `sh:\n${posix}`].join("\n\n");
 }
 
-async function checkCommand(volt: ExtensionAPI, name: string, command: string, args: string[]): Promise<CheckResult> {
+async function checkCommand(volt: TbenchApi, name: string, command: string, args: string[]): Promise<CheckResult> {
 	try {
 		const result = await volt.exec(command, args, { timeout: 10_000 });
 		const output = [result.stdout.trim(), result.stderr.trim()].filter(Boolean).join(" ");
@@ -311,12 +355,12 @@ function formatChecks(checks: CheckResult[]): string {
 }
 
 async function runTbenchCommand(
-	volt: ExtensionAPI,
+	volt: TbenchApi,
 	ctx: ExtensionCommandContext,
 	args: string[],
 	timeout: number,
 ): Promise<void> {
-	ctx.ui.setStatus("tbench", ctx.ui.theme.fg("accent", "tbench: running"));
+	ctx.ui.setStatus("tbench", [{ text: "tbench: running", token: "accent" }]);
 	try {
 		const result = await volt.exec("harbor", args, {
 			cwd: getPackageRoot(),
@@ -330,7 +374,7 @@ async function runTbenchCommand(
 	}
 }
 
-export default function terminalBenchHarbor(volt: ExtensionAPI) {
+export default function terminalBenchHarbor(volt: TbenchApi) {
 	volt.registerCommand("tbench", {
 		description: "Terminal-Bench Harbor helpers for Volt",
 		handler: async (rawArgs, ctx) => {
@@ -347,7 +391,7 @@ export default function terminalBenchHarbor(volt: ExtensionAPI) {
 			}
 
 			if (action === "command") {
-				const config = await getRunConfig(rest, ctx);
+				const config = await getRunConfig(volt, rest, ctx);
 				if (config === undefined) return;
 				ctx.ui.notify(renderCommand(ctx.cwd, config.model, config.taskLimit, config.concurrentTrials), "info");
 				return;
@@ -383,7 +427,7 @@ export default function terminalBenchHarbor(volt: ExtensionAPI) {
 			}
 
 			if (action === "smoke") {
-				const config = await getRunConfig(rest, ctx);
+				const config = await getRunConfig(volt, rest, ctx);
 				if (config === undefined) return;
 				await runTbenchCommand(
 					volt,
