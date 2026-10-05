@@ -25,7 +25,7 @@ The function remains publicly invokable because an unattached iOS app must reach
 - `POST /v1/push-targets/status`: credential-authenticated cache validation; returns `{ status:"active", expiresAtEpochSeconds }`, or `401`/`404`/`410` when the cached credential must be replaced.
 - `POST /v1/notifications`: desktop delivery with a current managed-relay host JWT in `Authorization: Bearer …` and `{ pushTargetId, pushTargetAuthToken, eventId, hostNodeId, kind, title, body, workspaceName?, planId?, workId?, workKind?, data }`.
 
-Notification delivery accepts `conversation_completed`, `plan_ready`, `work_finished`, `action_completed`, and `host_notice`. `plan_ready` requires `planId`; `work_finished` requires `workId` and `workKind` (a built-in work kind or `ext:<extension>/<kind>`); the navigation fields are mutually exclusive and forbidden on other kinds. Top-level and `data` values must agree. The bounded FCM data shape is forwarded unchanged:
+Notification delivery accepts `conversation_completed`, `plan_ready`, `work_finished`, and `host_notice`. `plan_ready` requires `planId`; `work_finished` requires `workId` and `workKind` (a built-in work kind or `ext:<extension>/<kind>`); the navigation fields are mutually exclusive and forbidden on other kinds. Top-level and `data` values must agree. The bounded FCM data shape is forwarded unchanged:
 
 ```json
 {

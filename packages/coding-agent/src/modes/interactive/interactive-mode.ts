@@ -3046,7 +3046,7 @@ export class InteractiveMode {
 			},
 			notify: (level, message) => this.showExtensionNotify(message, level),
 			setEditorText: (text) => this.editor.setText(text),
-			showHostAction: (progress) => this.showHostActionProgress(progress),
+			showWork: (workId, value) => this.showHostActionProgress(workId, value),
 		});
 	}
 
@@ -3099,15 +3099,25 @@ export class InteractiveMode {
 		}
 	}
 
-	private showHostActionProgress(progress: Extract<LiveValue, { kind: "host_action" }>): void {
-		if (progress.status === "running") {
-			this.showStatus(progress.message ?? "Running host action...");
-		} else if (progress.status === "completed") {
-			this.showStatus(progress.message ?? "Host action completed");
-		} else if (progress.status === "failed") {
-			this.showWarning(progress.message ?? "Host action failed");
-		} else if (progress.status === "cancelled") {
-			this.showStatus(progress.message ?? "Host action cancelled");
+	/**
+	 * A host action's progress while it runs, then how it ended, as status
+	 * lines. An action that never ran (denied, dismissed) shows nothing; other
+	 * work has its own views.
+	 */
+	private showHostActionProgress(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void {
+		const record = this.session.work.get(workId);
+		if (record?.kind !== "host_action") return;
+		if (value) {
+			if (value.progress?.text) this.showStatus(value.progress.text);
+			return;
+		}
+		if (record.progress === undefined) return;
+		if (record.outcome === "completed") {
+			this.showStatus(record.result?.summary ?? `${record.title} completed`);
+		} else if (record.outcome === "failed") {
+			this.showWarning(record.error ?? `${record.title} failed`);
+		} else if (record.outcome === "cancelled") {
+			this.showStatus(record.result?.summary ?? "Host action cancelled");
 		}
 	}
 

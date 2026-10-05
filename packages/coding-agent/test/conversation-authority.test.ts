@@ -50,24 +50,28 @@ describe("host requests across branch cuts and moves", () => {
 		await client.promptAndWait("first", { timeoutMs: 10_000 });
 		await client.promptAndWait("second", { timeoutMs: 10_000 });
 
-		/** An extension dialog and an approval in `asker`, as the client sees them. */
+		/** An extension dialog and a host action's approval in `asker`, as the client sees them. */
 		const startControls = async (asker: HostedConversation, suffix: string) => {
 			const confirm = asker.liveState.request({ kind: "confirm", title: `Confirm ${suffix}`, message: "Proceed?" });
-			const approval = asker.liveState.hostInteraction.requestAction({
-				id: `host-${suffix}`,
-				action: "test.action",
-				title: `Host ${suffix}`,
-			});
-			const confirmId = asker.liveState
-				.pendingRequests()
-				.find(
-					(pending) => pending.request.kind === "confirm" && pending.request.title === `Confirm ${suffix}`,
-				)?.requestId;
-			if (confirmId === undefined) throw new Error("Missing the confirm request");
-			await vi.waitFor(() =>
-				expect(shownRequests(client)).toEqual(expect.arrayContaining([confirmId, `host-${suffix}`])),
+			const approval = asker.session.hostActions.run(
+				{ action: "test.action", title: `Host ${suffix}` },
+				async () => ({
+					outcome: "completed",
+				}),
 			);
-			return { confirmId, confirm, approval };
+			const pendingId = (kind: string, title: string) =>
+				asker.liveState
+					.pendingRequests()
+					.find(
+						(pending) =>
+							pending.request.kind === kind && "title" in pending.request && pending.request.title === title,
+					)?.requestId;
+			const confirmId = pendingId("confirm", `Confirm ${suffix}`);
+			if (confirmId === undefined) throw new Error("Missing the confirm request");
+			await vi.waitFor(() => expect(pendingId("approval", `Host ${suffix}`)).toBeDefined());
+			const approvalId = pendingId("approval", `Host ${suffix}`)!;
+			await vi.waitFor(() => expect(shownRequests(client)).toEqual(expect.arrayContaining([confirmId, approvalId])));
+			return { confirmId, confirm, approvalId, approval };
 		};
 
 		// A branch switch commits entries; it never drops a pending dialog or approval (RFC §6.1).
@@ -77,11 +81,11 @@ describe("host requests across branch cuts and moves", () => {
 		await conversation.session.navigateTree(firstAnswer.id);
 		const switched = conversation.session.conversationGenerationRevision;
 		await vi.waitFor(() => expect(client.state.ordinal).toBeGreaterThanOrEqual(switched));
-		expect(shownRequests(client)).toEqual(expect.arrayContaining([branch.confirmId, "host-branch"]));
+		expect(shownRequests(client)).toEqual(expect.arrayContaining([branch.confirmId, branch.approvalId]));
 		client.answer(branch.confirmId, { confirmed: true });
-		client.answer("host-branch", { decision: "approved" });
+		client.answer(branch.approvalId, { decision: "approved" });
 		await expect(branch.confirm).resolves.toMatchObject({ status: "answered", response: { confirmed: true } });
-		await expect(branch.approval).resolves.toEqual({ decision: "approved" });
+		await expect(branch.approval).resolves.toEqual({ status: "ran", execution: { outcome: "completed" } });
 
 		// The client moves to another conversation, as its structural intents do. The requests
 		// stay with the conversation that asked them, which stays open.
@@ -93,17 +97,17 @@ describe("host requests across branch cuts and moves", () => {
 		expect(shownRequests(client)).toEqual([]);
 		// Its answers now go to the conversation it is on, which asked nothing.
 		client.answer(moved.confirmId, { confirmed: true });
-		client.answer("host-move", { decision: "approved" });
+		client.answer(moved.approvalId, { decision: "approved" });
 		await answersHandled("after-move");
 		expect(conversation.closed).toBe(false);
 		expect(conversation.liveState.pendingRequests().map((pending) => pending.requestId)).toEqual([
 			moved.confirmId,
-			"host-move",
+			moved.approvalId,
 		]);
 
-		// They end when their conversation closes.
+		// They end when their conversation closes; the action never ran.
 		await harness.host.close(conversation);
 		await expect(moved.confirm).resolves.toEqual({ status: "cancelled", reason: "closed" });
-		await expect(moved.approval).resolves.toMatchObject({ decision: "dismissed" });
+		await expect(moved.approval).resolves.toMatchObject({ status: "declined" });
 	});
 });

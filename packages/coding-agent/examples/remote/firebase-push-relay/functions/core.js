@@ -22,7 +22,6 @@ const NOTIFICATION_KINDS = new Set([
 	"conversation_completed",
 	"plan_ready",
 	"work_finished",
-	"action_completed",
 	"host_notice",
 ]);
 /** A built-in work kind, or an extension's `ext:<extension>/<kind>`. */

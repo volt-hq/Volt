@@ -14,10 +14,11 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../../src/core/host/targets.ts";
-import type { HostActionRequest } from "../../../src/core/host-interaction.ts";
 import type { ExtensionTerminalUI } from "../../../src/core/session/extension-binding.ts";
+import type { HostActionRequest } from "../../../src/core/session/host-actions.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
+import type { WorkContext, WorkExecution } from "../../../src/core/work/registry.ts";
 import { type ExtensionAPI, type ExtensionFactory, ExtensionUIDismissedError } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
@@ -417,30 +418,44 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const opened = await openConversationForTest([]);
 		const { access, terminal } = await startInteractiveMode(opened);
 		const liveState = opened.conversation.liveState;
-		const interaction = liveState.hostInteraction;
-		const request: HostActionRequest = { id: "host-action", action: "test.action", title: "Host action" };
+		const actions = opened.conversation.session.hostActions;
+		const request: HostActionRequest = { action: "test.action", title: "Host action" };
+		let runs = 0;
+		const install = async (ctx: WorkContext): Promise<WorkExecution> => {
+			runs++;
+			ctx.checkpoint({ text: "Installing the test tool" });
+			await new Promise((resolve) => setTimeout(resolve, 150));
+			return { outcome: "completed", result: { summary: "Test tool installed" } };
+		};
 
 		// An extension UI reset leaves the live state's approval showing: it is the conversation's.
-		const kept = interaction.requestAction({ ...request, commandPreview: "npm install" });
-		await terminal.waitForRender();
-		expect(viewport(terminal)).toContain("Command: npm install");
+		const kept = actions.run({ ...request, commandPreview: "npm install" }, install);
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Command: npm install"));
 		access.resetExtensionUI();
 		expect(access.extensionSelector).toBeDefined();
 		access.extensionSelector?.handleInput("\n");
-		await expect(kept).resolves.toEqual({ decision: "approved" });
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Installing the test tool"));
+		await expect(kept).resolves.toMatchObject({ status: "ran", execution: { outcome: "completed" } });
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Test tool installed"));
 		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
 
-		// Escape denies; the requester's abort closes the dialog without an answer.
-		const denied = interaction.requestAction(request);
+		// Escape denies; the requester's abort closes the dialog without an answer. Neither runs.
+		const denied = actions.run(request, install);
 		await vi.waitFor(() => expect(access.extensionSelector).toBeDefined());
 		access.extensionSelector?.handleInput("\x1b");
-		await expect(denied).resolves.toEqual({ decision: "denied" });
+		await expect(denied).resolves.toEqual({ status: "declined" });
 		const controller = new AbortController();
-		const aborted = interaction.requestAction(request, { signal: controller.signal });
+		const aborted = actions.run(request, install, { signal: controller.signal });
 		await vi.waitFor(() => expect(access.extensionSelector).toBeDefined());
 		controller.abort();
-		await expect(aborted).resolves.toEqual({ decision: "dismissed", message: "Host action cancelled" });
+		await expect(aborted).resolves.toEqual({ status: "declined", message: "Host action cancelled" });
 		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
+		expect(runs).toBe(1);
+		expect(opened.conversation.work.list().map((record) => record.outcome)).toEqual([
+			"completed",
+			"cancelled",
+			"cancelled",
+		]);
 
 		// Dialogs show oldest first; another client's answer closes the one that shows.
 		const phone = createLiveRecorder(["confirm", "select"]);

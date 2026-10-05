@@ -9012,7 +9012,6 @@
 							"type": "string",
 							"enum": [
 								"conversation_completed",
-								"action_completed",
 								"host_notice"
 							]
 						}
@@ -9614,7 +9613,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|subagent)/[^\\u0000-\\u001f\\u007f]{1,256})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LiveToolPartial": {
@@ -9694,9 +9693,6 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.subagent"
-				},
-				{
-					"$ref": "#/$defs/LiveValue.host_action"
 				}
 			]
 		},
@@ -9777,46 +9773,6 @@
 					"anyOf": [
 						{
 							"$ref": "#/$defs/RpcGitContext"
-						},
-						{
-							"type": "null"
-						}
-					]
-				}
-			},
-			"additionalProperties": false
-		},
-		"LiveValue.host_action": {
-			"type": "object",
-			"required": [
-				"kind",
-				"action",
-				"status"
-			],
-			"properties": {
-				"kind": {
-					"type": "string",
-					"const": "host_action"
-				},
-				"action": {
-					"type": "string"
-				},
-				"status": {
-					"type": "string",
-					"enum": [
-						"running",
-						"completed",
-						"failed",
-						"cancelled"
-					]
-				},
-				"message": {
-					"type": "string"
-				},
-				"exitCode": {
-					"anyOf": [
-						{
-							"type": "integer"
 						},
 						{
 							"type": "null"

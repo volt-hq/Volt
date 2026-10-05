@@ -16,7 +16,6 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import type { ExtensionServicesLimits } from "./extensions/services-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
-import type { HostInteraction } from "./host-interaction.ts";
 import { accountInference, type InferenceAccounting } from "./inference-accounting.ts";
 import type { LspServerPool } from "./lsp/server-pool.ts";
 import { McpAuditLogger } from "./mcp/audit.ts";
@@ -169,8 +168,6 @@ export interface CreateAgentSessionOptions {
 	settingsManager?: SettingsManager;
 	/** Session start event metadata for extension runtime startup. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Answers host-initiated actions (approvals). Default: they wait in the session's live state for an attached client. */
-	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
 	/**
@@ -729,7 +726,6 @@ async function createAgentSessionWithTrackedResources(
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
-		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
 		lspServerPool: options.lspServerPool,
 		mcpManager,

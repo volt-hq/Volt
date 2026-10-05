@@ -129,11 +129,10 @@ Keyed values (`value.kind` is the key's family):
 | `git` | `{gitContext}`: path-free Git metadata of the working tree, or `null`. |
 | `prompt_cache` | `{promptCache}`: the current model's prompt-cache retention, or `null`. |
 | `intents` | `{availability: [{name, enabled, reason?, state?}]}`: the intents whose availability and state follow the conversation (`set_fast_mode`, `set_agent_mode`, `set_auto_compaction`, `set_compaction_threshold`). |
-| `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs, such as a background job, set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
+| `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs, such as a background job or an approved host action, set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
 | `workflow/<id>` | `{event, activeTools}`: a detached review workflow's latest event and running tools; cleared after its end. |
 | `subagent/<id>` | `{subagentId, conversation, agent?, status, error?}`: a subagent this client started. Subscribe to `conversation` for its log. |
 | `host_request/<id>` | `{requestId, request}`: a pending host request (below). |
-| `host_action/<id>` | `{action, status, message?, exitCode?}`: an approved host action's progress, shown to clients that accept `approval`. |
 | `ext_status/<key>`, `ext_widget/<key>`, `ext_title` | Extension status lines, string widgets (`{lines, placement}`), and the window title. |
 
 ## Intents
@@ -244,10 +243,10 @@ Dialogs, forms, approvals, and MCP sign-ins the host asks are keyed live values 
 | `input` | `title, placeholder?, timeoutMs?` | `{value}` |
 | `editor` | `title, prefill?` | `{value}` |
 | `form` | `title, fields, timeoutMs?` | `{values}` |
-| `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …` | `{decision: approved|denied|dismissed, message?}` |
+| `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …`: a host action, such as an LSP server install; `requestId` is its `host_action` work id | `{decision: approved|denied|dismissed, message?}` |
 | `mcp_auth` | `server, flow, authorizationUrl?, userCode?, …` | completes through the `mcp.auth_*` intents |
 
-Every kind may be answered `{cancelled: true}`. The first valid answer wins; the request is cleared and later answers are ignored. A request outlives the clients that saw it: a client that subscribes later, or resubscribes, finds it in its live reset. It ends when answered, when its timeout expires (the host then resolves the default), or when its conversation closes.
+Every kind may be answered `{cancelled: true}`. The first valid answer wins; the request is cleared and later answers are ignored. A host action is `host_action` work awaiting approval: `approved` runs it; any other answer, its timeout, or `cancel_work` finishes it `cancelled` without running, and one still awaiting approval when its conversation closes or its host stops ends `interrupted` (on the next open, after a crash). On the remote profile, approving or cancelling a host action, or reading its output with `work_output`, needs `host.manage.v1`. A request outlives the clients that saw it: a client that subscribes later, or resubscribes, finds it in its live reset. It ends when answered, when its timeout expires (the host then resolves the default), or when its conversation closes.
 
 ## Extensions in RPC mode
 

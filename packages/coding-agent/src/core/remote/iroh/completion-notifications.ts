@@ -24,12 +24,7 @@ import {
 	sanitizeIrohRemotePushNotificationIntent,
 } from "./push.ts";
 
-export type IrohRemoteNotificationKind =
-	| "conversation_completed"
-	| "plan_ready"
-	| "work_finished"
-	| "action_completed"
-	| "host_notice";
+export type IrohRemoteNotificationKind = "conversation_completed" | "plan_ready" | "work_finished" | "host_notice";
 
 type RunTerminalOutcome = "completed" | "failed" | "aborted";
 
