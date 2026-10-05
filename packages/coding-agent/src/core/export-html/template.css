@@ -588,6 +588,28 @@
     .diff-removed { color: var(--toolDiffRemoved); }
     .diff-context { color: var(--toolDiffContext); }
 
+    /* Presentations (UiNode data the host rendered) */
+    .ui-token-text { color: var(--text); }
+    .ui-token-muted { color: var(--muted); }
+    .ui-token-accent { color: var(--accent); }
+    .ui-token-success { color: var(--success); }
+    .ui-token-warning { color: var(--warning); }
+    .ui-token-error { color: var(--error); }
+    .ui-token-info { color: var(--accent); }
+    .ui-presented .ui-text,
+    .ui-presented .ui-markdown,
+    .ui-presented .ui-terminal > div { white-space: pre-wrap; }
+    .ui-presented .ui-code { margin: 0; white-space: pre-wrap; color: var(--text); }
+    .ui-presented .ui-diff-path { color: var(--accent); }
+    .ui-presented .ui-card { border-left: 2px solid var(--borderAccent); padding-left: var(--line-height); }
+    .ui-presented .ui-card-title { font-weight: bold; }
+    .ui-presented .ui-badge { color: var(--dim); }
+    .ui-presented .ui-key-value dt { color: var(--muted); }
+    .ui-presented .ui-key-value dd { margin: 0 0 0 var(--line-height); }
+    .ui-presented .ui-table { border-collapse: collapse; }
+    .ui-presented .ui-table th,
+    .ui-presented .ui-table td { padding: 0 var(--line-height) 0 0; text-align: left; }
+
     /* Model change */
     .model-change {
       padding: 0 var(--line-height);

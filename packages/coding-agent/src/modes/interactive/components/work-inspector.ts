@@ -2,7 +2,8 @@
  * The work inspector (RFC §7.3, §10): every work item of the conversation in
  * one list, whatever its kind. An item's detail shows its state, progress,
  * kind detail (`UiNode`), result summary or error, and its output's newest
- * text, read with `work_output`; the actions are the ones its kind allows:
+ * text, read with `work_output` again whenever its live value changes; the
+ * actions are the ones its kind allows:
  * cancel, resume suspended work, and open the conversation it runs in or
  * produced. A conversation the work runs in opens as a read-only view.
  * Inspecting never starts inference or stops work by itself.
@@ -293,10 +294,9 @@ export class WorkInspector implements Component {
 		this.selectedId = options.workId;
 		if (options.workId !== undefined) this.mode = "detail";
 		this.unsubscribe = source.subscribe(() => this.refresh());
-		// Running work's timing ticks, and output its kind keeps itself is read again.
+		// Running work's timing ticks.
 		this.timer = setInterval(() => {
 			if (this.disposed || !this.source.items().some((view) => view.item.outcome === undefined)) return;
-			this.syncOutput(true);
 			this.options.requestRender();
 		}, 1000);
 		this.timer.unref?.();
@@ -491,19 +491,19 @@ export class WorkInspector implements Component {
 	}
 
 	/**
-	 * Read the selected item's output again when it may have changed: more
-	 * output, or a finish. `poll` reads open work's output in any case: a kind
-	 * that keeps its output itself reports no output change.
+	 * Read the selected item's output again when it may have changed: its live
+	 * value changed (output, or the progress its kind reports with it), or it
+	 * finished.
 	 */
-	private syncOutput(poll = false): void {
+	private syncOutput(): void {
 		if (this.mode === "list" || this.selectedId === undefined) return;
 		const view = this.selected();
 		if (!view) return;
 		const workId = view.item.workId;
-		const key = `${view.live?.output?.bytes ?? -1}:${view.item.outcome ?? view.item.state}`;
+		const { detail: _detail, ...live } = view.live ?? { kind: "work", workId };
+		const key = `${JSON.stringify(live)}:${view.item.outcome ?? view.item.state}`;
 		if (this.outputFetch?.workId === workId && this.outputFetch.key === key) return;
-		const current = this.output?.workId === workId && this.output.key === key;
-		if (current && !(poll && view.item.outcome === undefined)) return;
+		if (this.output?.workId === workId && this.output.key === key) return;
 		const fetch = { workId, key };
 		this.outputFetch = fetch;
 		void this.source.output(workId).then(

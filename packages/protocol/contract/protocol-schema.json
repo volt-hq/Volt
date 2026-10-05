@@ -20073,6 +20073,16 @@
 				},
 				"patchPreview": {
 					"type": "string"
+				},
+				"presentation": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/ToolPresentation"
+						},
+						{
+							"$ref": "#/$defs/MessagePresentation"
+						}
+					]
 				}
 			},
 			"additionalProperties": false

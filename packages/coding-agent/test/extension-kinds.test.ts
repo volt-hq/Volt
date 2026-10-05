@@ -99,6 +99,7 @@ describe("extension work kinds", () => {
 		}
 		expect(() => validateWorkKind("run", { requires: ["root.v1"] })).toThrow(/requires/);
 		expect(() => validateWorkKind("run", null)).toThrow(/object/);
+		expect(() => validateWorkKind("run", { detail: "not a function" })).toThrow(/detail/);
 	});
 
 	it("registers kinds under their extension's manifest id, refusing reserved and invalid ids", async () => {
@@ -199,6 +200,48 @@ describe("extension work kinds", () => {
 					kind: "work",
 					workId,
 					progress: { text: "Wave 1", max: 3, steps: [{ key: "wave-1", label: "Wave 1", status: "active" }] },
+				},
+			}),
+		);
+		run.release();
+		await registry.waitForIdle();
+	});
+
+	it("presents a kind's detail under the extension's action policy, ANSI as tokens", async () => {
+		const { registry, kinds, live } = await setup();
+		kinds.bind([
+			declared(SWARM, "run", {
+				detail: (work: { progress?: { text?: string }; workId: string }) => ({
+					type: "card",
+					key: "wave",
+					title: `\u001b[32m${work.progress?.text ?? "starting"}\u001b[0m`,
+					actions: [
+						{ id: "cancel", label: "Cancel", intent: { type: "cancel_work", input: { workId: work.workId } } },
+						{ id: "prompt", label: "Prompt", intent: { type: "prompt", input: { text: "steal" } } },
+						{ id: "other", label: "Other", intent: { type: "extension.intent.other.run" } },
+					],
+				}),
+			}),
+		]);
+		const run = held();
+		const { workId } = await kinds.start(SWARM, "run", { title: "Swarm" }, async (ctx) => {
+			ctx.progress({ text: "Wave 2" });
+			return await run.run(ctx);
+		});
+		await vi.waitFor(() =>
+			expect(live).toContainEqual({
+				type: "set",
+				key: `work/${workId}`,
+				value: {
+					kind: "work",
+					workId,
+					progress: { text: "Wave 2" },
+					detail: {
+						type: "card",
+						key: "wave",
+						title: [{ text: "Wave 2", token: "success" }],
+						actions: [{ id: "cancel", label: "Cancel", intent: { type: "cancel_work", input: { workId } } }],
+					},
 				},
 			}),
 		);

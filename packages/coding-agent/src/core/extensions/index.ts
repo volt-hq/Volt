@@ -4,6 +4,16 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.ts";
 export type { SourceInfo } from "../source-info.ts";
+export type {
+	MessagePresenter,
+	MessagePresentInput,
+	ToolPresenter,
+	ToolPresentInput,
+	ToolPresentResult,
+	ToolPresentState,
+	WorkDetailInput,
+	WorkDetailPresenter,
+} from "../ui/presentation.ts";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,

@@ -4,6 +4,7 @@ import { createRenderFrame, Text, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { type Static, type TObject, type TProperties, Type } from "typebox";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
+import type { ToolPresenter } from "../ui/presentation.ts";
 import { withBackgroundCleanup } from "./background-cleanup.ts";
 import {
 	findJob,
@@ -17,6 +18,7 @@ import {
 	jobText,
 	renderJobCard,
 } from "./jobs.ts";
+import { presentBackground } from "./presenters.ts";
 
 const backgroundParameter = Type.Optional(
 	Type.Boolean({
@@ -59,8 +61,78 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 		...definition.parameters,
 		properties: { ...definition.parameters.properties, background: backgroundParameter },
 	} as BackgroundParameters<T>;
+	/** The job card of the TUI's own renderers, for a wrapped tool that renders itself (subagent). */
+	const terminalRenderers: Pick<
+		ToolDefinition<BackgroundParameters<T>, unknown, TState>,
+		"renderCall" | "renderResult"
+	> = {
+		renderCall(args, theme, context) {
+			const input = args as Record<string, unknown>;
+			if (input.background === true) {
+				return new JobView((width) => {
+					if (!context.isPartial) return createRenderFrame([]);
+					return createRenderFrame(
+						wrapTextWithAnsi(
+							`${theme.bold(theme.fg("toolTitle", "Background job"))} · ${context.executionStarted ? "Starting" : "Preparing"}\n${jobText(labelOf(input) ?? "Subagent batch")}`,
+							width,
+						),
+					);
+				});
+			}
+			return definition.renderCall
+				? definition.renderCall(args as OriginalArgs, theme, context as ToolRenderContext<TState, OriginalArgs>)
+				: new Text(theme.bold(theme.fg("toolTitle", definition.label)), 0, 0);
+		},
+		renderResult(result, renderOptions, theme, context) {
+			const job = jobOfDetails(result.details);
+			if (job) {
+				// A replayed card stays as captured while its job runs; once the job finished it shows the
+				// recorded outcome, after a restart too.
+				const found = findJob(options.jobs, job.id);
+				const finished = found !== undefined && found.status !== "running" && found.status !== "cancelling";
+				const current = context.executionStarted || finished ? found : undefined;
+				const cache = !current || (current.status !== "running" && current.status !== "cancelling");
+				const label = labelOf(context.args as Record<string, unknown>);
+				return new JobView((width) => {
+					const live = cache ? current : findJob(options.jobs, job.id);
+					return renderJobCard(live ?? job, width, theme, {
+						expanded: renderOptions.expanded,
+						captured: !live,
+						...(label === undefined ? {} : { label }),
+					});
+				}, cache);
+			}
+			if ((context.args as Record<string, unknown>).background === true && context.isError) {
+				const output = result.content
+					.filter((part) => part.type === "text")
+					.map((part) => part.text)
+					.join("\n");
+				return new JobView((width) =>
+					createRenderFrame(
+						wrapTextWithAnsi(theme.fg("error", `Background job failed to start\n${jobText(output)}`), width),
+					),
+				);
+			}
+			return definition.renderResult
+				? definition.renderResult(
+						result as AgentToolResult<TDetails>,
+						renderOptions,
+						theme,
+						context as ToolRenderContext<TState, OriginalArgs>,
+					)
+				: new Text(
+						result.content
+							.filter((part) => part.type === "text")
+							.map((part) => part.text)
+							.join("\n"),
+						0,
+						0,
+					);
+		},
+	};
+	const { present: _present, renderCall: _renderCall, renderResult: _renderResult, ...base } = definition;
 	return {
-		...definition,
+		...base,
 		parameters,
 		description: `${definition.description} Set background: true to return a job ID and continue independent work; use jobs to read, wait, or cancel. Subagent confirmation preflight still returns directly. Background jobs are cancelled on session abort; a job running when the runtime stops ends interrupted.`,
 		promptGuidelines: [
@@ -136,68 +208,7 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 			});
 			return jobResult(job);
 		},
-		renderCall(args, theme, context) {
-			const input = args as Record<string, unknown>;
-			if (input.background === true) {
-				return new JobView((width) => {
-					if (!context.isPartial) return createRenderFrame([]);
-					return createRenderFrame(
-						wrapTextWithAnsi(
-							`${theme.bold(theme.fg("toolTitle", "Background job"))} · ${context.executionStarted ? "Starting" : "Preparing"}\n${jobText(labelOf(input) ?? "Subagent batch")}`,
-							width,
-						),
-					);
-				});
-			}
-			return definition.renderCall
-				? definition.renderCall(args as OriginalArgs, theme, context as ToolRenderContext<TState, OriginalArgs>)
-				: new Text(theme.bold(theme.fg("toolTitle", definition.label)), 0, 0);
-		},
-		renderResult(result, renderOptions, theme, context) {
-			const job = jobOfDetails(result.details);
-			if (job) {
-				// A replayed card stays as captured while its job runs; once the job finished it shows the
-				// recorded outcome, after a restart too.
-				const found = findJob(options.jobs, job.id);
-				const finished = found !== undefined && found.status !== "running" && found.status !== "cancelling";
-				const current = context.executionStarted || finished ? found : undefined;
-				const cache = !current || (current.status !== "running" && current.status !== "cancelling");
-				const label = labelOf(context.args as Record<string, unknown>);
-				return new JobView((width) => {
-					const live = cache ? current : findJob(options.jobs, job.id);
-					return renderJobCard(live ?? job, width, theme, {
-						expanded: renderOptions.expanded,
-						captured: !live,
-						...(label === undefined ? {} : { label }),
-					});
-				}, cache);
-			}
-			if ((context.args as Record<string, unknown>).background === true && context.isError) {
-				const output = result.content
-					.filter((part) => part.type === "text")
-					.map((part) => part.text)
-					.join("\n");
-				return new JobView((width) =>
-					createRenderFrame(
-						wrapTextWithAnsi(theme.fg("error", `Background job failed to start\n${jobText(output)}`), width),
-					),
-				);
-			}
-			return definition.renderResult
-				? definition.renderResult(
-						result as AgentToolResult<TDetails>,
-						renderOptions,
-						theme,
-						context as ToolRenderContext<TState, OriginalArgs>,
-					)
-				: new Text(
-						result.content
-							.filter((part) => part.type === "text")
-							.map((part) => part.text)
-							.join("\n"),
-						0,
-						0,
-					);
-		},
+		...(definition.present === undefined ? {} : { present: presentBackground(definition.present as ToolPresenter) }),
+		...(definition.renderCall === undefined && definition.renderResult === undefined ? {} : terminalRenderers),
 	};
 }

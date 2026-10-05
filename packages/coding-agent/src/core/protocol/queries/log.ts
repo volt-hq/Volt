@@ -10,7 +10,7 @@ import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { targetOf } from "../intents/conversation.ts";
 import type { IntentContext } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
-import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
+import { conversationProjectionSource, projectEntry } from "../projection/entries.ts";
 import { transcriptWorkNoticeText } from "../projection/transcript.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
 
@@ -76,8 +76,9 @@ export const historyQuery = defineQuery({
 	requires: observe,
 	async run(ctx, params) {
 		const profile = subscriberOf(ctx, "history");
-		const sessionManager = targetOf(ctx).conversation.session.sessionManager;
-		const source = sessionProjectionSource(sessionManager);
+		const session = targetOf(ctx).conversation.session;
+		const sessionManager = session.sessionManager;
+		const source = conversationProjectionSource(session);
 		const before = Math.min(params.before, sessionManager.getOrdinal() + 1);
 		const newestFirst: ProjectedEntry[] = [];
 		let earlier = false;

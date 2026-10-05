@@ -5,7 +5,9 @@
  * running tools, and the MCP server calls they make. Each value is set when
  * it changes; streaming items are published as the session emits them and
  * leave the live state when the entry that commits them is applied (an MCP
- * call, which no entry commits, when it ends).
+ * call, which no entry commits, when it ends). A running call carries its
+ * presentation, which changes at most every 100 ms as patches of the one the
+ * live state holds (presentation-state.ts).
  */
 
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
@@ -14,6 +16,7 @@ import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
 import type { LiveToolPartial } from "../protocol/live-fold.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
+import { ToolPresentationState } from "../ui/presentation-state.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 
@@ -153,6 +156,30 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			// A stream event that does not fit the live lane is dropped; the committed entry follows.
 		}
 	};
+	const presentations = new ToolPresentationState({
+		presenters: () => session.presenters,
+		cwd: () => session.sessionManager.getCwd(),
+		held: (toolCallId) => live.snapshot().tools.get(toolCallId)?.presentation,
+		update: (toolCallId, toolName, change) => {
+			if (!live.snapshot().tools.has(toolCallId)) return;
+			stream([{ type: "tool", op: "update", toolCallId, toolName, ...change }]);
+		},
+	});
+	/** End a call: its end item carries what its final result changed of its presentation. */
+	const endTool = (
+		toolCallId: string,
+		toolName: string,
+		result: { content: LiveToolPartial["content"]; details?: unknown },
+		isError: boolean,
+	): void => {
+		const held = live.snapshot().tools.get(toolCallId);
+		if (!held) {
+			presentations.drop(toolCallId);
+			return;
+		}
+		const change = presentations.end(toolCallId, toolName, held.args, { ...result, isError });
+		stream([{ type: "tool", op: "end", toolCallId, toolName, isError, ...change }]);
+	};
 
 	const onEvent = (event: AgentSessionEvent): void => {
 		switch (event.type) {
@@ -169,37 +196,32 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				// The committed entry usually ended the stream already.
 				if (event.message.role === "assistant" && live.snapshot().assistant) stream([{ type: "assistant_end" }]);
 				return;
-			case "tool_execution_start":
+			case "tool_execution_start": {
+				const args = isRecord(event.args) ? event.args : undefined;
 				stream([
 					{
 						type: "tool",
 						op: "start",
 						toolCallId: event.toolCallId,
 						toolName: event.toolName,
-						...(isRecord(event.args) ? { args: event.args } : {}),
+						...(args === undefined ? {} : { args }),
+						presentation: presentations.start(event.toolCallId, event.toolName, args ?? {}),
 					},
 				]);
 				return;
+			}
 			case "tool_execution_update": {
 				const partial = toolPartial(event.partialResult);
 				if (partial) {
 					stream([
 						{ type: "tool", op: "update", toolCallId: event.toolCallId, toolName: event.toolName, partial },
 					]);
+					presentations.update(event.toolCallId, partial);
 				}
 				return;
 			}
 			case "tool_execution_end":
-				if (!live.snapshot().tools.has(event.toolCallId)) return;
-				stream([
-					{
-						type: "tool",
-						op: "end",
-						toolCallId: event.toolCallId,
-						toolName: event.toolName,
-						isError: event.isError,
-					},
-				]);
+				endTool(event.toolCallId, event.toolName, toolPartial(event.result) ?? { content: [] }, event.isError);
 				return;
 			case "agent_start":
 			case "agent_end":
@@ -215,48 +237,40 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				updateIntents();
 				updateUsage();
 				return;
-			case "mcp_call_start":
+			case "mcp_call_start": {
+				const toolCallId = mcpCallId(event.call.id);
+				const args = { server: event.call.server, tool: event.call.tool };
 				stream([
 					{
 						type: "tool",
 						op: "start",
-						toolCallId: mcpCallId(event.call.id),
+						toolCallId,
 						toolName: "mcp",
-						args: { server: event.call.server, tool: event.call.tool },
-					},
-				]);
-				return;
-			case "mcp_call_update": {
-				if (!live.snapshot().tools.has(mcpCallId(event.call.id))) return;
-				const { progress, total, message } = event.progress;
-				stream([
-					{
-						type: "tool",
-						op: "update",
-						toolCallId: mcpCallId(event.call.id),
-						toolName: "mcp",
-						partial: {
-							content: message === undefined ? [] : [{ type: "text", text: message }],
-							details: { progress, ...(total === undefined ? {} : { total }) },
-						},
+						args,
+						presentation: presentations.start(toolCallId, "mcp", args),
 					},
 				]);
 				return;
 			}
-			case "mcp_call_end": {
+			case "mcp_call_update": {
 				const toolCallId = mcpCallId(event.call.id);
 				if (!live.snapshot().tools.has(toolCallId)) return;
-				stream([
-					{
-						type: "tool",
-						op: "end",
-						toolCallId,
-						toolName: "mcp",
-						isError: event.call.status !== "completed",
-					},
-				]);
+				const { progress, total, message } = event.progress;
+				const partial: LiveToolPartial = {
+					content: message === undefined ? [] : [{ type: "text", text: message }],
+					details: { progress, ...(total === undefined ? {} : { total }) },
+				};
+				stream([{ type: "tool", op: "update", toolCallId, toolName: "mcp", partial }]);
+				presentations.update(toolCallId, partial);
+				return;
+			}
+			case "mcp_call_end": {
+				const toolCallId = mcpCallId(event.call.id);
+				const ended = live.snapshot().tools.get(toolCallId);
+				endTool(toolCallId, "mcp", { content: ended?.partial?.content ?? [] }, event.call.status !== "completed");
+				presentations.drop(toolCallId);
 				// No result entry commits a nested MCP call: it leaves the streaming state once it ended.
-				live.commit({ role: "tool", toolCallId });
+				if (ended) live.commit({ role: "tool", toolCallId });
 				return;
 			}
 			case "git_context_changed":
@@ -280,7 +294,10 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		if (entry.type === "message") {
 			const message = entry.message;
 			if (message.role === "assistant") live.commit({ role: "assistant" });
-			else if (message.role === "toolResult") live.commit({ role: "tool", toolCallId: message.toolCallId });
+			else if (message.role === "toolResult") {
+				presentations.drop(message.toolCallId);
+				live.commit({ role: "tool", toolCallId: message.toolCallId });
+			}
 			updateUsage();
 		} else if (entry.type === "compaction") {
 			updateUsage();
@@ -310,6 +327,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		close() {
 			if (closed) return;
 			closed = true;
+			presentations.close();
 			for (const unsubscribe of unsubscribers.splice(0).reverse()) {
 				try {
 					unsubscribe();

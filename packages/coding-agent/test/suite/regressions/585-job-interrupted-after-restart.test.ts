@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
-import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
@@ -115,19 +115,24 @@ describe("#585 background job interrupted after a restart", () => {
 			(message) => message.role === "toolResult" && message.toolName === "bash",
 		);
 		if (launch?.role !== "toolResult") throw new Error("Expected the launch result");
-		const card = new ToolExecutionComponent(
+		// The card presents the result as recorded; the work the call started shows its own outcome under it.
+		const record = second.session.work.list().find((item) => item.toolCallId === launch.toolCallId);
+		const card = new PresentedToolComponent(
 			"bash",
-			launch.toolCallId,
 			{ command: "npm test", background: true },
-			{},
-			second.session.getToolDefinition("bash"),
+			second.session.presenters.tool("bash"),
 			{ requestRender: () => {} } as unknown as TUI,
 			second.tempDir,
+			{
+				work: () =>
+					record ? [{ workId: record.workId, title: record.title, status: record.outcome ?? record.state }] : [],
+			},
 		);
 		card.updateResult({ content: launch.content, details: launch.details, isError: false });
 		const replayed = stripAnsi(card.render(100).lines.join("\n"));
 		card.dispose();
-		expect(replayed).toContain("Bash · background · Interrupted");
+		expect(replayed).toContain("Background job");
+		expect(replayed).toContain("Interrupted · npm test");
 		expect(replayed).not.toContain("at capture");
 
 		// The model reads the outcome by id after the restart.

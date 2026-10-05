@@ -31,7 +31,7 @@ import type { LiveUpdate } from "../../host/live-state.ts";
 import type { SessionManager } from "../../session-manager.ts";
 import { plainNoticeText } from "../../ui/extension-ui.ts";
 import type { Profile } from "../profiles.ts";
-import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
+import { conversationProjectionSource, projectEntry, sessionProjectionSource } from "../projection/entries.ts";
 import type { ProjectionSource } from "../projection/transcript.ts";
 
 /** Where a subscription writes its frames, in order. */
@@ -73,16 +73,22 @@ export function projectLog(
 	afterOrdinal: number,
 	throughOrdinal: number,
 ): ProjectedEntry[] {
-	return projectEntries(conversation.session.sessionManager, profile, afterOrdinal, throughOrdinal);
+	return projectEntries(
+		conversation.session.sessionManager,
+		conversationProjectionSource(conversation.session),
+		profile,
+		afterOrdinal,
+		throughOrdinal,
+	);
 }
 
 function projectEntries(
 	sessionManager: SessionManager,
+	source: ProjectionSource,
 	profile: Profile,
 	afterOrdinal: number,
 	throughOrdinal: number,
 ): ProjectedEntry[] {
-	const source = sessionProjectionSource(sessionManager);
 	const projected: ProjectedEntry[] = [];
 	for (const entry of sessionManager.committedEntriesAfter(afterOrdinal, throughOrdinal - afterOrdinal)) {
 		const entryFrame = projectEntry(entry, source, profile);
@@ -91,9 +97,18 @@ function projectEntries(
 	return projected;
 }
 
-/** A snapshot of a log at `ordinal` for `profile`: the fold of its projection, with at most the profile's tail of entries. */
-export function logSnapshot(sessionManager: SessionManager, profile: Profile, ordinal: number): ClientSnapshot {
-	const projected = projectEntries(sessionManager, profile, 0, ordinal);
+/**
+ * A snapshot of a log at `ordinal` for `profile`: the fold of its projection,
+ * with at most the profile's tail of entries. A log read without its runtime
+ * presents with the built-in presenters.
+ */
+export function logSnapshot(
+	sessionManager: SessionManager,
+	profile: Profile,
+	ordinal: number,
+	source: ProjectionSource = sessionProjectionSource(sessionManager),
+): ClientSnapshot {
+	const projected = projectEntries(sessionManager, source, profile, 0, ordinal);
 	const state = clientFold(projected);
 	const tail = profile.limits.snapshotTail;
 	return projected.length <= tail
@@ -150,7 +165,7 @@ export class Subscription {
 		this.options = options;
 		this.id = options.subscriptionId;
 		this.conversation = options.conversation;
-		this.source = sessionProjectionSource(options.conversation.session.sessionManager);
+		this.source = conversationProjectionSource(options.conversation.session);
 	}
 
 	get isEnded(): boolean {
@@ -293,7 +308,7 @@ export class Subscription {
 			subscriptionId: this.id,
 			conversation: this.conversation.id,
 			ordinal,
-			state: logSnapshot(this.conversation.session.sessionManager, this.options.profile, ordinal),
+			state: logSnapshot(this.conversation.session.sessionManager, this.options.profile, ordinal, this.source),
 		});
 		this.cursor = ordinal;
 	}

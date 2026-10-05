@@ -13,7 +13,9 @@ import {
 	type HostFrame,
 	type LiveItem,
 	PANEL_MAX_SERIALIZED_BYTES,
+	PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES,
 	REMOTE_CAPABILITIES,
+	type ToolPresentation,
 	UI_NODE_LINE_MAX_CHARS,
 } from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
@@ -21,6 +23,8 @@ import { emptyLiveFold, foldLiveFrame } from "../src/core/protocol/live-fold.ts"
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
 import { normalizeUiNode } from "../src/core/ui/normalize.ts";
+import { serializedBytes } from "../src/core/ui/presentation.ts";
+import { presentationChange } from "../src/core/ui/presentation-state.ts";
 
 const workspacePath = resolve("/Users/jordan/secret-project");
 const hostFile = `${workspacePath}${sep}notes.md`;
@@ -493,5 +497,189 @@ describe("remote redaction of patched panels", () => {
 		redactor.redact(live(2, [append(["two"])]));
 		const reset = redactor.redact(live(1, [{ type: "set", key, value: panel(["one", "two"]) }], true));
 		expect(reset?.type === "live" && reset.items).toEqual([{ type: "set", key, value: panel(["one", "two"]) }]);
+	});
+});
+
+describe("remote redaction of tool presentations", () => {
+	const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+	const presentation = (lines: string[]): ToolPresentation => ({
+		title: [{ text: "$ " }, { text: `cat ${hostFile}` }],
+		summary: [{ type: "terminal", key: "tail", lines: lines.slice(-2) }],
+		body: [{ type: "terminal", key: "output", lines }],
+		showsDuration: true,
+	});
+	const live = (seq: number, items: LiveItem[], reset = false): HostFrame => ({
+		type: "live",
+		subscriptionId: "s1",
+		basedOn: 1,
+		seq,
+		...(reset ? { reset: true } : {}),
+		items,
+	});
+	/** The tool items the client receives, and what its live fold holds for the call. */
+	function client() {
+		const redactor = redactorFor(workspacePath);
+		const sent: HostFrame[] = [];
+		let fold = emptyLiveFold();
+		return {
+			send(frame: HostFrame): void {
+				const redacted = redactor.redact(frame);
+				if (!redacted) return;
+				sent.push(redacted);
+				if (redacted.type === "live") fold = foldLiveFrame(fold, redacted);
+			},
+			holds: () => fold.tools.get("call")?.presentation,
+			wire: () => JSON.stringify(sent),
+			tools: () =>
+				sent.flatMap((frame) => (frame.type === "live" ? frame.items.filter((item) => item.type === "tool") : [])),
+		};
+	}
+
+	it("redacts paths in presentations and patches, and sends output as patches of the redacted presentation", () => {
+		const remote = client();
+		const first = presentation([`open ${hostFile}`]);
+		const next = presentation([`open ${hostFile}`, `saved ${hostFile}`, "done"]);
+		const change = presentationChange(first, next);
+		if (!change || !("patch" in change)) throw new Error("Expected a patch");
+		remote.send(
+			live(1, [{ type: "tool", op: "start", toolCallId: "call", toolName: "bash", presentation: first }], true),
+		);
+		remote.send(live(2, [{ type: "tool", op: "update", toolCallId: "call", toolName: "bash", patch: change.patch }]));
+		expect(remote.wire()).not.toContain(workspacePath);
+		const [, update] = remote.tools();
+		expect(update).toMatchObject({
+			type: "tool",
+			op: "update",
+			patch: { body: [{ op: "append_lines", path: ["output"] }] },
+		});
+		// A path styling split across spans is redacted whole, its spans joined.
+		expect(remote.holds()).toEqual({
+			...presentation(["open /workspace/notes.md", "saved /workspace/notes.md", "done"]),
+			title: "$ cat /workspace/notes.md",
+		});
+	});
+
+	it("sends image nodes as their description, never their data", () => {
+		const remote = client();
+		const withImage: ToolPresentation = {
+			title: "read",
+			body: [{ type: "image", key: "img", mimeType: "image/png", data: PNG, alt: "pixel" }],
+		};
+		remote.send(
+			live(1, [{ type: "tool", op: "start", toolCallId: "call", toolName: "read", presentation: withImage }], true),
+		);
+		expect(remote.wire()).not.toContain(PNG);
+		expect(remote.holds()?.body).toEqual([{ type: "text", key: "img", text: "[Image: pixel]", token: "muted" }]);
+	});
+
+	it("keeps presentations within the remote bound, and sends one that cannot fit as its tool's name", () => {
+		const remote = client();
+		const lines = Array.from({ length: 1_500 }, (_, index) => `${index} ${"x".repeat(40)}`);
+		remote.send(
+			live(
+				1,
+				[{ type: "tool", op: "start", toolCallId: "call", toolName: "bash", presentation: presentation(lines) }],
+				true,
+			),
+		);
+		const held = remote.holds();
+		expect(serializedBytes(held)).toBeLessThanOrEqual(PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES);
+		const output = held?.body?.find((node) => node.key === "output");
+		expect(output?.type === "terminal" ? output.lines.at(-1) : undefined).toBe(lines.at(-1));
+		const unfit: ToolPresentation = {
+			title: "big",
+			body: [{ type: "markdown", key: "m", markdown: "y".repeat(40_000) }],
+		};
+		remote.send(live(2, [{ type: "tool", op: "update", toolCallId: "call", toolName: "bash", presentation: unfit }]));
+		expect(remote.holds()).toEqual({ title: "bash" });
+	});
+
+	it("sends a whole presentation again after a reset and after the call's streaming state was discarded", () => {
+		const remote = client();
+		const first = presentation(["one"]);
+		const next = presentation(["one", "two"]);
+		const change = presentationChange(first, next);
+		if (!change || !("patch" in change)) throw new Error("Expected a patch");
+		remote.send(
+			live(1, [{ type: "tool", op: "start", toolCallId: "call", toolName: "bash", presentation: first }], true),
+		);
+		// The host repeats what streams with a new basedOn: the client discarded the call, so it gets it whole.
+		remote.send({
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 2,
+			seq: 2,
+			items: [
+				{ type: "tool", op: "start", toolCallId: "call", toolName: "bash", presentation: first },
+				{ type: "tool", op: "update", toolCallId: "call", toolName: "bash", patch: change.patch },
+			],
+		});
+		const tools = remote.tools();
+		expect(tools[1]).toMatchObject({ op: "start", presentation: expect.any(Object) });
+		expect(remote.holds()).toEqual({ ...next, title: "$ cat /workspace/notes.md" });
+	});
+
+	it("keeps the client's presentation in step when a frame cannot carry part of a call's changes", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 3_000 },
+		}).redactor();
+		let fold = emptyLiveFold();
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted?.type === "live") fold = foldLiveFrame(fold, redacted);
+		};
+		const small = (lines: string[]): ToolPresentation => ({
+			title: "t",
+			body: [{ type: "terminal", key: "o", lines }],
+		});
+		const big = small(["x".repeat(4_000)]);
+		const step = (from: ToolPresentation, to: ToolPresentation) => {
+			const change = presentationChange(from, to);
+			if (!change) throw new Error("Expected a change");
+			return change;
+		};
+		const tool = (op: "start" | "update", change: object): LiveItem =>
+			({ type: "tool", op, toolCallId: "call", toolName: "bash", ...change }) as LiveItem;
+		send(live(1, [tool("start", { presentation: small(["a"]) })], true));
+		// Too large for the frame, then a whole presentation, then a patch of it.
+		send(
+			live(2, [
+				tool("update", { presentation: big }),
+				tool("update", { presentation: small(["b"]) }),
+				tool("update", step(small(["b"]), small(["b", "c"]))),
+			]),
+		);
+		expect(fold.tools.get("call")?.presentation).toEqual(small(["b", "c"]));
+		send(live(3, [tool("update", step(small(["b", "c"]), small(["b", "c", "d"])))]));
+		expect(fold.tools.get("call")?.presentation).toEqual(small(["b", "c", "d"]));
+	});
+
+	it("sends a whole presentation with every start, even of a call id it saw before", () => {
+		const remote = client();
+		remote.send(
+			live(
+				1,
+				[{ type: "tool", op: "start", toolCallId: "call", toolName: "bash", presentation: presentation(["one"]) }],
+				true,
+			),
+		);
+		remote.send(
+			live(2, [
+				{
+					type: "tool",
+					op: "start",
+					toolCallId: "call",
+					toolName: "bash",
+					presentation: presentation(["one", "two"]),
+				},
+			]),
+		);
+		const starts = remote.tools().filter((item) => item.type === "tool" && item.op === "start");
+		expect(
+			starts.every((item) => item.type === "tool" && item.presentation !== undefined && item.patch === undefined),
+		).toBe(true);
+		expect(remote.holds()?.body).toEqual([{ type: "terminal", key: "output", lines: ["one", "two"] }]);
 	});
 });

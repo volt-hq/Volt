@@ -78,6 +78,7 @@ import { SessionLifecycle } from "./session/lifecycle.ts";
 import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
 import { type NavigateTreeOptions, type NavigateTreeResult, SessionNavigation } from "./session/navigation.ts";
 import { SessionPlanning } from "./session/planning.ts";
+import { SessionPresenters } from "./session/presenters.ts";
 import { SessionPromptCache } from "./session/prompt-cache.ts";
 import { SessionPrompting } from "./session/prompting.ts";
 import { SessionProviderStream } from "./session/provider-stream.ts";
@@ -463,6 +464,26 @@ export class AgentSession {
 	private readonly _hostActions = new SessionHostActions({ liveState: this.liveState, work: () => this._work });
 	/** The work kinds the extensions declare, registered while their runner generation is current. */
 	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
+	/**
+	 * How this session's tool calls and custom messages look (RFC §8.3): the
+	 * presenters of its registered tools, the built-in ones, and its
+	 * extensions' message presenters, which projections and live tool items
+	 * present with.
+	 */
+	readonly presenters: SessionPresenters = new SessionPresenters({
+		tool: (name) => {
+			const entry = this._tools.registeredEntry(name);
+			if (!entry) return undefined;
+			const { definition, extensionId } = entry;
+			return {
+				...(definition.present === undefined ? {} : { present: definition.present }),
+				rendersItself: definition.renderCall !== undefined || definition.renderResult !== undefined,
+				...(extensionId === undefined ? {} : { extensionId }),
+			};
+		},
+		message: (customType) => this._extensions?.runner?.getMessagePresenter(customType),
+		ownsWork: (extensionId, workId) => this._extensionKinds.owns(extensionId, workId),
+	});
 
 	// Extension system
 	private _extensionServices!: SessionExtensionServices;
@@ -504,6 +525,8 @@ export class AgentSession {
 
 	private constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
+		// Extensions reloaded or toggled: their tool and message presenters may have changed.
+		this._reloadListeners.add(() => this.presenters.invalidate());
 		this._streamFn = config.streamFn;
 		this._diagnostics = new BackgroundJobDiagnostics({
 			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
@@ -609,6 +632,7 @@ export class AgentSession {
 			activeTools: () => this._conversation.activeTools,
 			state: () => this.state,
 			getToolDefinition: (name) => this.getToolDefinition(name),
+			presenters: () => this.presenters,
 			emit: (event) => this._events.emit(event),
 		});
 		this._lifecycle = this._createLifecycle();
@@ -636,6 +660,7 @@ export class AgentSession {
 				operationGrantProfile: () => this._planning.operationGrantProfile(),
 				isReviewDiscussion: () => this.isReviewDiscussion,
 				emit: (event) => this._events.emit(event),
+				presentersChanged: () => this.presenters.invalidate(),
 			},
 			{
 				customTools: config.customTools,

@@ -153,6 +153,7 @@ describe("protocol transcript view", () => {
 				args: { path: "/Users/jordan/project/src/secret.ts" },
 				output: "secret file contents".repeat(100),
 				outputTruncated: false,
+				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 			{ role: "system", text: "summary ".repeat(500), truncated: false },
 			{
@@ -176,6 +177,7 @@ describe("protocol transcript view", () => {
 				outputTruncated: false,
 				diffPreview: expect.stringMatching(/^diff x+\n\[truncated\]$/),
 				patchPreview: expect.stringMatching(/^patch y+\n\[truncated\]$/),
+				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 			{
 				role: "tool",
@@ -187,9 +189,15 @@ describe("protocol transcript view", () => {
 				args: { command: "cat /Users/jordan/project/src/secret.ts" },
 				output: "PRIVATE KEY",
 				outputTruncated: false,
+				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 		]);
 		expect(JSON.stringify(items)).not.toContain("image-bytes");
+		// Tool items present as their tools do.
+		expect(JSON.stringify(items[2]?.presentation)).toContain("read");
+		expect(JSON.stringify(items[2]?.presentation)).toContain("secret file contents");
+		expect(items[5]?.presentation).toMatchObject({ summary: [{ type: "text", key: "counts" }, { type: "diff" }] });
+		expect(JSON.stringify(items[6]?.presentation)).toContain("$ ");
 
 		// Diff and patch previews are full-fidelity only.
 		const remote = transcript(
@@ -199,6 +207,8 @@ describe("protocol transcript view", () => {
 		expect(remote[5]).toMatchObject({ role: "tool", toolName: "edit" });
 		expect(remote[5]).not.toHaveProperty("diffPreview");
 		expect(remote[5]).not.toHaveProperty("patchPreview");
+		// Presentations present the redacted entry: no host path reaches the remote profile.
+		expect(JSON.stringify(remote.map((item) => item.presentation))).not.toContain("/Users/jordan");
 	});
 
 	test("preserves assistant Markdown text parts verbatim across multiple text content parts", async () => {

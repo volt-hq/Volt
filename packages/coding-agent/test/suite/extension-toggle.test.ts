@@ -26,6 +26,8 @@ import {
 	intentRegistry,
 	LOCAL_INTENT_PROFILE,
 } from "../../src/core/protocol/intents/index.ts";
+import { localProfile } from "../../src/core/protocol/profiles.ts";
+import { conversationProjectionSource, projectEntry } from "../../src/core/protocol/projection/entries.ts";
 import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { createHostHarness, type HostHarness } from "./host-harness.ts";
 
@@ -245,6 +247,99 @@ describe("extension runtime toggle", () => {
 		expect(second?.events).toContain("bus");
 		// The first instance stays retired.
 		expect(() => first?.ctx?.cwd).toThrow(/disabled/);
+	});
+
+	it("presents with an extension's presenters only while it runs: disabled, its calls present generically", async () => {
+		const present = vi.fn(() => ({ title: "presented by the extension" }));
+		const presentMessage = vi.fn(() => ({ body: [{ type: "text" as const, text: "presented note" }] }));
+		const harness = await setup([
+			{
+				manifest: { id: "presenting", displayName: "Presenting" },
+				factory: (volt) => {
+					volt.registerTool({
+						name: "presented_tool",
+						label: "Presented tool",
+						description: "Answers ok",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "ok" }], details: undefined }),
+						present,
+					});
+					volt.registerMessagePresenter("presented-note", presentMessage);
+				},
+			},
+		]);
+		const { conversation, context } = await open(harness, "tui");
+		const session = conversation.session;
+		const writer = session.sessionWriter;
+		const model = session.model;
+		if (!model) throw new Error("Expected a model");
+		await writer.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call-1", name: "presented_tool", arguments: {} }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		});
+		await writer.appendMessage({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "presented_tool",
+			content: [{ type: "text", text: "ok" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		await writer.appendCustomMessageEntry("presented-note", "plain note", true, undefined);
+		const views = () =>
+			session.sessionManager
+				.getEntries()
+				.flatMap((entry) => {
+					const committed = session.sessionManager.getCommittedEntry(entry.id);
+					const projected = committed
+						? projectEntry(committed, conversationProjectionSource(session), localProfile)
+						: undefined;
+					return projected && "view" in projected && projected.view ? [projected.view] : [];
+				})
+				.filter((view) => view.role === "tool" || view.text === "plain note");
+		expect(views().map((view) => view.presentation)).toEqual([
+			{ title: "presented by the extension" },
+			{ body: [{ type: "text", text: "presented note" }] },
+		]);
+		const generation = session.presenters.generation;
+
+		await intentRegistry.invoke(context(), "set_extension_enabled", {
+			id: "presenting",
+			enabled: false,
+			scope: "global",
+		});
+		await session.extensionRegistry.settled();
+		expect(session.presenters.generation).toBeGreaterThan(generation);
+		present.mockClear();
+		presentMessage.mockClear();
+		// The disabled extension's code no longer runs: its call is generic, its message is text.
+		expect(views().map((view) => view.presentation)).toEqual([
+			expect.objectContaining({ title: "presented_tool" }),
+			undefined,
+		]);
+		expect(present).not.toHaveBeenCalled();
+		expect(presentMessage).not.toHaveBeenCalled();
+
+		await intentRegistry.invoke(context(), "set_extension_enabled", {
+			id: "presenting",
+			enabled: true,
+			scope: "global",
+		});
+		await session.extensionRegistry.settled();
+		expect(views()[0]?.presentation).toEqual({ title: "presented by the extension" });
 	});
 
 	it("offers an extension's tools until the turn boundary and waits for its running tool call", async () => {

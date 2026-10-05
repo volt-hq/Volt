@@ -22,6 +22,7 @@ import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
+import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
 import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
 import {
@@ -999,6 +1000,17 @@ export class ExtensionRunner {
 			}
 		}
 		return false;
+	}
+
+	/** The presenter of custom messages of `customType`, and the extension that registered it: the first in load order. */
+	getMessagePresenter(
+		customType: string,
+	): { readonly present: MessagePresenter; readonly extensionId: string } | undefined {
+		for (const ext of this.extensions) {
+			const present = ext.messagePresenters.get(customType);
+			if (present) return { present, extensionId: ext.id };
+		}
+		return undefined;
 	}
 
 	getMessageRenderer(customType: string): MessageRenderer | undefined {

@@ -11,6 +11,9 @@ import { feedLiveState } from "../../src/core/host/live-feed.ts";
 import type { LiveUpdate } from "../../src/core/host/live-state.ts";
 import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../src/core/protocol/intents/index.ts";
 import { liveIntentAvailability } from "../../src/core/protocol/intents/state.ts";
+import { emptyLiveFold, foldLiveItems } from "../../src/core/protocol/live-fold.ts";
+import { localProfile } from "../../src/core/protocol/profiles.ts";
+import { conversationProjectionSource, projectEntry } from "../../src/core/protocol/projection/entries.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
 
 describe("live feed", () => {
@@ -121,5 +124,38 @@ describe("live feed", () => {
 		// Nothing commits a nested call: it leaves the streaming state when it ends.
 		expect(harness.session.liveState.snapshot().tools.has("mcp_call:c1")).toBe(false);
 		feed.close();
+	});
+
+	it("presents a running call, patches its output as it streams, and ends where the committed view does", async () => {
+		const { harness, items } = await feedHarness({ initialActiveToolNames: ["bash"] });
+		const command = "for i in 1 2 3 4 5 6 7 8 9 10; do echo line$i; sleep 0.12; done";
+		harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("bash", { command })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("run it");
+		await harness.session.waitForIdle();
+		const tools = items().filter((item): item is Extract<LiveItem, { type: "tool" }> => item.type === "tool");
+		const start = tools.find((item) => item.op === "start");
+		expect(start?.presentation?.title).toEqual([{ text: "$ ", bold: true }, { text: command }]);
+		// Output streamed as appended lines of the presentation the client holds.
+		const appends = tools
+			.flatMap((item) => [...(item.patch?.summary ?? []), ...(item.patch?.body ?? [])])
+			.filter((op) => op.op === "append_lines");
+		expect(appends.length).toBeGreaterThan(0);
+		let fold = emptyLiveFold();
+		for (const item of tools) fold = foldLiveItems(fold, [item]);
+		const live = fold.tools.values().next().value?.presentation;
+		const result = harness.sessionManager
+			.getEntries()
+			.find((entry) => entry.type === "message" && entry.message.role === "toolResult");
+		const committed = result
+			? projectEntry(
+					harness.sessionManager.getCommittedEntry(result.id)!,
+					conversationProjectionSource(harness.session),
+					localProfile,
+				)
+			: undefined;
+		expect(committed && "view" in committed ? committed.view?.presentation : undefined).toEqual(live);
 	});
 });

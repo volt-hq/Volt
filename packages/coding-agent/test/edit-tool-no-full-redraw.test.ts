@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { Container, type Terminal, Text, TuiMainScreen } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { computeEditsDiff, type Edit } from "../src/core/tools/edit-diff.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { presentEdit } from "../src/core/tools/presenters.ts";
+import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
 
 class FakeTerminal implements Terminal {
 	columns = 80;
@@ -103,12 +103,10 @@ describe("edit tool TUI rendering", () => {
 			root.addChild(new Text(`history ${i}`, 0, 0));
 		}
 
-		const component = new ToolExecutionComponent(
+		const component = new PresentedToolComponent(
 			"edit",
-			"tool-call-1",
 			{ path: filePath, edits },
-			{},
-			createEditToolDefinition(process.cwd()),
+			{ present: presentEdit, policy: { owner: "host" } },
 			tui,
 			process.cwd(),
 		);
@@ -152,7 +150,7 @@ describe("edit tool TUI rendering", () => {
 		expect(settledRender).not.toContain("Successfully replaced");
 	});
 
-	it("reconstructs the boxed preview from a settled result without argsComplete", async () => {
+	it("reconstructs the diff from a settled result without argsComplete", async () => {
 		const dir = await mkdtemp(join(tmpdir(), "volt-edit-replay-"));
 		tempDirs.push(dir);
 		const filePath = join(dir, "replay-edit.txt");
@@ -172,12 +170,10 @@ describe("edit tool TUI rendering", () => {
 
 		const terminal = new FakeTerminal();
 		const tui = new TuiMainScreen(terminal);
-		const component = new ToolExecutionComponent(
+		const component = new PresentedToolComponent(
 			"edit",
-			"tool-call-replay",
 			{ path: filePath, edits },
-			{},
-			createEditToolDefinition(process.cwd()),
+			{ present: presentEdit, policy: { owner: "host" } },
 			tui,
 			process.cwd(),
 		);
@@ -201,38 +197,30 @@ describe("edit tool TUI rendering", () => {
 		expect(rendered).toContain("line 150 changed");
 	});
 
-	it("shows a preflight error without rendering a diff when the edits do not apply", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "volt-edit-preflight-"));
-		tempDirs.push(dir);
-		const filePath = join(dir, "missing-edit.txt");
-		await writeFile(filePath, "line 0\nline 1\n", "utf8");
-
+	it("shows the error of edits that do not apply without a diff", async () => {
 		const terminal = new FakeTerminal();
 		const tui = new TuiMainScreen(terminal);
-		const component = new ToolExecutionComponent(
+		const component = new PresentedToolComponent(
 			"edit",
-			"tool-call-2",
-			{ path: filePath, edits: [{ oldText: "does not exist", newText: "replacement" }] },
-			{},
-			createEditToolDefinition(process.cwd()),
+			{ path: "missing-edit.txt", edits: [{ oldText: "does not exist", newText: "replacement" }] },
+			{ present: presentEdit, policy: { owner: "host" } },
 			tui,
 			process.cwd(),
 		);
 		tui.addChild(component);
 		tui.start();
-		await waitForRender();
-
 		component.setArgsComplete();
-		tui.requestRender();
-		await waitForRender();
-		await waitForRender();
-
-		const rendered = await waitForRenderedText(
-			() => component.render(80).lines.join("\n"),
-			"Could not find",
-			() => tui.requestRender(true),
+		// Before it runs, the call previews its replacement; the presenter reads no file.
+		expect(component.render(80).lines.join("\n")).toContain("replacement");
+		component.updateResult(
+			{
+				content: [{ type: "text", text: "Could not find the exact text in missing-edit.txt." }],
+				isError: true,
+			},
+			false,
 		);
-		expect(rendered).not.toContain("+1 ");
-		expect(rendered).not.toContain("-1 ");
+		const rendered = component.render(80).lines.join("\n");
+		expect(rendered).toContain("Could not find");
+		expect(rendered).not.toContain("replacement");
 	});
 });

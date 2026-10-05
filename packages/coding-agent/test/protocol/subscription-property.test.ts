@@ -41,6 +41,7 @@ import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/p
 import { projectLog, Subscription } from "../../src/core/protocol/server/subscription.ts";
 import { type CommittedSessionEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { type LogSeed, seedSession } from "../utilities/seed-log.ts";
+import { builtinSessionPresenters } from "../utilities/test-presenters.ts";
 
 const HIDDEN_BY_TRANSCRIPT: ReadonlySet<string> = new Set([
 	"custom",
@@ -245,7 +246,11 @@ function createHost(): Host {
 		get id() {
 			return manager.getSessionId();
 		},
-		session: { sessionManager: manager, gitContextProvider: { retainObservation: () => () => {} } },
+		session: {
+			sessionManager: manager,
+			presenters: builtinSessionPresenters(),
+			gitContextProvider: { retainObservation: () => () => {} },
+		},
 		liveState: live,
 		closed: false,
 	} as unknown as HostedConversation;

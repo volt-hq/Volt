@@ -290,6 +290,84 @@ describe("work registry", () => {
 		expect(live.at(-1)).toEqual({ type: "clear", key });
 	});
 
+	it("presents a kind's detail from the item and sends a changed detail as a patch", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const { registry, live } = await setup();
+		registry.register(
+			kind({
+				detail: (work) => {
+					if (work.progress?.text === "throw") throw new Error("broken presenter");
+					return {
+						type: "terminal",
+						key: "log",
+						title: `${work.title} (${work.state})`,
+						lines: work.output.text.split("\n").filter(Boolean),
+					};
+				},
+			}),
+		);
+		const run = held();
+		let ctx: Parameters<WorkExecutor>[0] | undefined;
+		const record = await registry.start("ext:test/run", { job: 1 }, async (context) => {
+			ctx = context;
+			return await run.execute(context);
+		});
+		await vi.waitFor(() => expect(ctx).toBeDefined());
+		const key = `work/${record.workId}`;
+		const ofKey = () => live.filter((item) => (item.type === "set" || item.type === "patch") && item.key === key);
+		expect(ofKey().at(-1)).toMatchObject({
+			type: "set",
+			value: { detail: { type: "terminal", title: 'Run {"job":1} (running)', lines: [] } },
+		});
+		ctx?.outputSnapshot({ text: "one\n", truncated: false, bytes: 4 });
+		await vi.advanceTimersByTimeAsync(100);
+		// Its output bytes changed too: the whole value.
+		expect(ofKey().at(-1)).toMatchObject({
+			type: "set",
+			value: { output: { bytes: 4 }, detail: { lines: ["one"] } },
+		});
+		// The same bytes reported again with new text change the detail alone: a patch.
+		ctx?.outputSnapshot({ text: "one\ntwo\n", truncated: false, bytes: 4 });
+		await vi.advanceTimersByTimeAsync(100);
+		expect(ofKey().at(-1)).toEqual({
+			type: "patch",
+			key,
+			ops: [{ op: "append_lines", path: ["log"], lines: ["two"] }],
+		});
+		// A presenter that throws leaves the detail out.
+		ctx?.progress({ text: "throw" });
+		await vi.advanceTimersByTimeAsync(100);
+		expect((ofKey().at(-1) as { value?: { detail?: unknown } }).value?.detail).toBeUndefined();
+		run.release();
+		await registry.waitForIdle();
+	});
+
+	it("presents a gated kind's detail without its input and output text", async () => {
+		const { registry } = await setup();
+		const seen: unknown[] = [];
+		registry.register(
+			kind({
+				requires: ["host.manage.v1"],
+				detail: (work) => {
+					seen.push({ input: work.input, output: work.output.text });
+					return undefined;
+				},
+			}),
+		);
+		const run = held();
+		let ctx: Parameters<WorkExecutor>[0] | undefined;
+		await registry.start("ext:test/run", { secret: "token" }, async (context) => {
+			ctx = context;
+			return await run.execute(context);
+		});
+		await vi.waitFor(() => expect(ctx).toBeDefined());
+		ctx?.output("private output");
+		await vi.waitFor(() => expect(seen.length).toBeGreaterThan(1));
+		expect(seen.every((each) => JSON.stringify(each) === JSON.stringify({ input: null, output: "" }))).toBe(true);
+		run.release();
+		await registry.waitForIdle();
+	});
+
 	it("closing interrupts running work, leaves resumable work open, and a next runtime resumes it", async () => {
 		const first = await setup();
 		const resumable = kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) });
@@ -380,10 +458,10 @@ describe("work registry", () => {
 		});
 	});
 
-	it("reads the output of running work, and the output a kind keeps itself", async () => {
+	it("reads the output of running work, appended or reported as a snapshot", async () => {
 		const { registry } = await setup();
 		registry.register(kind());
-		registry.register(kind({ kind: "ext:test/own", output: () => ({ text: "kept by the kind", truncated: true }) }));
+		registry.register(kind({ kind: "ext:test/own" }));
 		const run = held();
 		let ctx: Parameters<WorkExecutor>[0] | undefined;
 		const record = await registry.start("ext:test/run", null, async (context) => {
@@ -395,7 +473,14 @@ describe("work registry", () => {
 		ctx?.output("partial");
 		expect(registry.output(record.workId)).toEqual({ text: "partial", truncated: false, final: false });
 		const own = held();
-		const kept = await registry.start("ext:test/own", null, own.execute);
+		let ownCtx: Parameters<WorkExecutor>[0] | undefined;
+		const kept = await registry.start("ext:test/own", null, async (context) => {
+			ownCtx = context;
+			return await own.execute(context);
+		});
+		await vi.waitFor(() => expect(ownCtx).toBeDefined());
+		ownCtx?.outputSnapshot({ text: "first tail", truncated: false, bytes: 10 });
+		ownCtx?.outputSnapshot({ text: "kept by the kind", truncated: true, bytes: 900 });
 		expect(registry.output(kept.workId)).toEqual({ text: "kept by the kind", truncated: true, final: false });
 		expect(registry.output("missing")).toBeUndefined();
 		run.release();

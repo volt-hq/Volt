@@ -5,10 +5,12 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@hansjm10/volt-
 import { Container, Text, type TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import type { SessionPresenters } from "../../../../src/core/session/presenters.ts";
 import { initTheme } from "../../../../src/core/theme/runtime.ts";
-import type { ToolExecutionComponent } from "../../../../src/modes/interactive/components/tool-execution.ts";
+import type { ToolRow } from "../../../../src/modes/interactive/components/presented-tool.ts";
 import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../../src/utils/ansi.ts";
+import { builtinSessionPresenters } from "../../../utilities/test-presenters.ts";
 
 const TOOL_CALL_ID = "tool-4167";
 const TOOL_NAME = "slow_tool";
@@ -29,8 +31,8 @@ const EMPTY_USAGE: Usage = {
 };
 
 type RenderSessionContextThis = {
-	pendingTools: Map<string, ToolExecutionComponent>;
-	liveBackgroundJobTools: Map<string, { component: ToolExecutionComponent; jobId?: string }>;
+	pendingTools: Map<string, ToolRow>;
+	liveBackgroundJobTools: Map<string, { component: ToolRow; jobId?: string }>;
 	disposePendingTools(): void;
 	chatContainer: Container;
 	footer: { invalidate(): void };
@@ -40,13 +42,16 @@ type RenderSessionContextThis = {
 		getImageWidthCells(): number;
 	};
 	sessionManager: { getCwd(): string };
-	session: { retryAttempt: number };
+	session: { retryAttempt: number; presenters: SessionPresenters };
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
 	getRegisteredToolDefinition(toolName: string): undefined;
+	createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): ToolRow;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
+
+type CreateToolRow = RenderSessionContextThis["createToolRow"];
 
 type RenderSessionContext = (
 	this: RenderSessionContextThis,
@@ -59,7 +64,7 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	return {
-		pendingTools: new Map<string, ToolExecutionComponent>(),
+		pendingTools: new Map<string, ToolRow>(),
 		liveBackgroundJobTools: new Map(),
 		disposePendingTools() {
 			for (const component of this.pendingTools.values()) {
@@ -75,11 +80,17 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 			getImageWidthCells: () => 60,
 		},
 		sessionManager: { getCwd: () => process.cwd() },
-		session: { retryAttempt: 0 },
+		session: { retryAttempt: 0, presenters: builtinSessionPresenters() },
 		toolOutputExpanded: false,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
 		getRegisteredToolDefinition: (_toolName: string) => undefined,
+		createToolRow(...args) {
+			return (InteractiveMode.prototype as unknown as { createToolRow: CreateToolRow }).createToolRow.apply(
+				this,
+				args,
+			);
+		},
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
 		},

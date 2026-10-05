@@ -28,6 +28,8 @@ import {
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	type HostRequestKind,
 	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
+	PRESENTATION_MAX_SERIALIZED_BYTES,
+	PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES,
 	type RemoteCapability,
 	type RemoteGrant,
 } from "@hansjm10/volt-protocol";
@@ -55,6 +57,8 @@ export interface ProfileLimits {
 	readonly frameBytes: number;
 	/** Most Unicode scalars of text one transcript view carries. */
 	readonly textScalars: number;
+	/** Largest tool or message presentation, as serialized JSON in UTF-8 bytes; a larger one is fitted or generic. */
+	readonly presentationBytes: number;
 	/** Most subscriptions one connection holds at once. */
 	readonly subscriptions: number;
 	/**
@@ -148,6 +152,7 @@ export const localProfile: Profile = Object.freeze({
 		assistantSnapshotBytes: UNBOUNDED,
 		frameBytes: UNBOUNDED,
 		textScalars: 16_000,
+		presentationBytes: PRESENTATION_MAX_SERIALIZED_BYTES,
 		subscriptions: 1_024,
 		readBurst: UNBOUNDED,
 		readRefillMs: 0,
@@ -239,6 +244,7 @@ export const REMOTE_PROFILE_LIMITS: ProfileLimits = Object.freeze({
 	assistantSnapshotBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
 	frameBytes: DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	textScalars: IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
+	presentationBytes: PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES,
 	subscriptions: 16,
 	readBurst: 16,
 	readRefillMs: 2_000,
@@ -275,6 +281,7 @@ export function remoteProfile(options: RemoteProfileOptions): Profile {
 				frameBytes: limits.frameBytes,
 				textScalars: limits.textScalars,
 				assistantSnapshotBytes: limits.assistantSnapshotBytes,
+				presentationBytes: limits.presentationBytes,
 			}),
 		source: <T>(value: T): T => sanitizer.sanitizeValue(value) as T,
 		sourceCut: (text: string): string => sanitizer.sanitizeCutText(text),

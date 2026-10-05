@@ -38,6 +38,7 @@ import type {
 	ExtensionManifest,
 	ExtensionSettingsScope,
 	RemoteCapability,
+	ToolPresentation,
 	UiNode,
 	UiNodeFormField,
 	UiNodeStyledText,
@@ -100,6 +101,7 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 
+import type { MessagePresenter, ToolPresentInput, WorkDetailPresenter } from "../ui/presentation.ts";
 import type { ExtensionHandlerRegistry, PolicyRegistration } from "./policy-registration.ts";
 import type { ExtensionSettingsRuntime, ExtensionSettingValue } from "./settings.ts";
 
@@ -492,6 +494,16 @@ export interface WorkKindDeclaration {
 	 * device without them may stop the run.
 	 */
 	readonly requires?: readonly RemoteCapability[];
+	/**
+	 * The kind's detail: UI data every client shows with a running item,
+	 * presented from the item's title, input, progress, and output. Pure,
+	 * synchronous, and stateless; its actions may send only the extension's own
+	 * intents and commands, and `open_work`/`cancel_work` for its own work. An
+	 * item it throws for, or returns nothing for, shows its progress only.
+	 * Every client sees the detail: a kind that `requires` capabilities is
+	 * presented without its input and output text.
+	 */
+	readonly detail?: WorkDetailPresenter;
 }
 
 /** Work to start: its one-line title, and the input the log keeps (JSON, at most 16 KB; `null` by default). */
@@ -701,6 +713,16 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
 		ctx: ExtensionContext,
 	): Promise<AgentToolResult<TDetails>>;
+
+	/**
+	 * How a call of the tool looks, as `UiNode` data every client renders
+	 * (RFC §8.3): pure, synchronous, and stateless. The host presents running
+	 * calls and calls in the log with it; a call of a tool without a presenter,
+	 * or one it throws for, gets the generic presentation. Actions may send
+	 * only the extension's own intents and commands, and
+	 * `open_work`/`cancel_work` for its own work.
+	 */
+	present?: (input: ToolPresentInput<Static<TParams>, TDetails>) => ToolPresentation;
 
 	/** Custom rendering for tool call display */
 	renderCall?: (args: Static<TParams>, theme: Theme, context: ToolRenderContext<TState, Static<TParams>>) => Component;
@@ -1741,6 +1763,14 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = JsonValue>(customType: string, renderer: MessageRenderer<T>): void;
 
+	/**
+	 * Register how custom messages of `customType` look, as `UiNode` data every
+	 * client renders: pure, synchronous, and stateless. A message the
+	 * presenter throws for, and one of a type without a presenter, shows its
+	 * text.
+	 */
+	registerMessagePresenter<T = JsonValue>(customType: string, present: MessagePresenter<T>): void;
+
 	// =========================================================================
 	// Actions
 	// =========================================================================
@@ -2230,6 +2260,8 @@ export interface Extension {
 	readonly handlers: ExtensionHandlerRegistry;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
+	/** The message presenters the extension registered, by custom type. */
+	messagePresenters: Map<string, MessagePresenter>;
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

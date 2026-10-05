@@ -25,9 +25,12 @@ import {
 } from "@hansjm10/volt-protocol";
 import { toLogEntry } from "../../conversation-log/entry-codec.ts";
 import type { CommittedSessionEntry, SessionManager } from "../../session-manager.ts";
+import { BUILTIN_PRESENTERS } from "../../tools/presenters.ts";
+import type { PresenterSet } from "../../ui/presentation.ts";
 import { redactedWorkPhase } from "../../work/phase.ts";
 import { workText } from "../../work/registry.ts";
 import type { Profile } from "../profiles.ts";
+import type { PresentationCache } from "./presentation.ts";
 import { type ProjectionSource, projectTranscriptItem } from "./transcript.ts";
 
 export type { ProjectionSource } from "./transcript.ts";
@@ -88,9 +91,31 @@ function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, p
 	} satisfies WorkFinishedEntryPayload;
 }
 
-/** The projection source over a session manager's committed log. */
-export function sessionProjectionSource(sessionManager: SessionManager): ProjectionSource {
-	return { entry: (id) => sessionManager.getCommittedEntry(id) };
+/**
+ * The projection source over a session manager's committed log: its entries,
+ * the presenters its tool calls and custom messages present with (the
+ * built-in tools' for a log read without a runtime), and the cache of their
+ * presentations.
+ */
+export function sessionProjectionSource(
+	sessionManager: SessionManager,
+	presenters: PresenterSet = BUILTIN_PRESENTERS,
+	cache?: PresentationCache,
+): ProjectionSource {
+	return {
+		entry: (id) => sessionManager.getCommittedEntry(id),
+		presenters,
+		cwd: sessionManager.getCwd(),
+		...(cache === undefined ? {} : { cache }),
+	};
+}
+
+/** The projection source of a session: its log, its presenters, and their cache. */
+export function conversationProjectionSource(session: {
+	readonly sessionManager: SessionManager;
+	readonly presenters: PresenterSet & { readonly cache: PresentationCache };
+}): ProjectionSource {
+	return sessionProjectionSource(session.sessionManager, session.presenters, session.presenters.cache);
 }
 
 /**

@@ -24,6 +24,7 @@ import {
 	type ExtensionSummary,
 	type HostRequest,
 	type HostResponse,
+	PRESENTATION_MAX_SERIALIZED_BYTES,
 	type UiNodeStyledText,
 	WORK_NOTICE_CUSTOM_TYPE,
 } from "@hansjm10/volt-protocol";
@@ -150,6 +151,7 @@ import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
+import { presentCustomMessage } from "../../core/ui/presentation.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
 	type IntegratedConversationSessionSelection,
@@ -242,6 +244,7 @@ import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
 import { createRegistryIntentSink } from "./ui-node/intents.ts";
 import { UiPanels } from "./ui-node/panels.ts";
 import { TUI_SEMANTIC_THEME } from "./ui-node/semantic-theme.ts";
+import type { ToolCardWork } from "./ui-node/tool-card.ts";
 
 function isAsciiOnlyTerminal(): boolean {
 	const termProgram = process.env.TERM_PROGRAM ?? "";
@@ -277,6 +280,8 @@ import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { StartupHeaderComponent } from "./components/logo.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
+import { PresentedMessageComponent } from "./components/presented-message.ts";
+import { PresentedToolComponent, type ToolRow } from "./components/presented-tool.ts";
 import { type ReviewToolSelectorOption, ReviewToolsSelectorComponent } from "./components/review-tools-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
@@ -620,9 +625,9 @@ export class InteractiveMode {
 	private streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined = undefined;
 
 	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, ToolExecutionComponent>();
+	private pendingTools = new Map<string, ToolRow>();
 	/** Launch cards outlive settlement only while their bounded current-runtime records remain accessible. */
-	private liveBackgroundJobTools = new Map<string, { component: ToolExecutionComponent; settled?: boolean }>();
+	private liveBackgroundJobTools = new Map<string, { component: ToolRow; settled?: boolean }>();
 	private unsubscribeBackgroundJobs: (() => void) | undefined;
 	private jobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
 	private workInspector: WorkInspector | undefined;
@@ -2623,6 +2628,64 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * The transcript row of a tool call: drawn from its presentation when its
+	 * tool presents itself, else by the tool's own renderers. `live` calls tick
+	 * their elapsed time.
+	 */
+	private createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): ToolRow {
+		const presenter = this.session.presenters.tool(toolName);
+		const images = {
+			showImages: this.settingsManager.getShowImages(),
+			imageWidthCells: this.settingsManager.getImageWidthCells(),
+		};
+		if (presenter !== undefined) {
+			return new PresentedToolComponent(toolName, args, presenter, this.ui, this.sessionManager.getCwd(), {
+				...images,
+				liveProgress: live,
+				work: () => this.toolCallWork(toolCallId),
+			});
+		}
+		return new ToolExecutionComponent(
+			toolName,
+			toolCallId,
+			args,
+			{ ...images, ...(live ? { liveProgress: true } : {}) },
+			this.getRegisteredToolDefinition(toolName),
+			this.ui,
+			this.sessionManager.getCwd(),
+		);
+	}
+
+	/**
+	 * The work a tool call started, as the TUI's work source holds it: a
+	 * background job, live, with its newest output, which the TUI reads from
+	 * the conversation it hosts in process.
+	 */
+	private toolCallWork(toolCallId: string): ToolCardWork[] {
+		const now = Date.now();
+		return this.workSource.itemsOfToolCall(toolCallId).map((view) => {
+			const { item, live } = view;
+			const text =
+				item.outcome === undefined
+					? (live?.progress?.text ?? item.progress?.text)
+					: (item.error ?? item.result?.summary);
+			const detail = live?.detail ?? item.detail;
+			const output = this.conversation.work.output(item.workId)?.text;
+			return {
+				workId: item.workId,
+				title: item.title,
+				status: item.outcome ?? (view.suspended ? "suspended" : item.state),
+				...(view.startedAt === undefined
+					? {}
+					: { elapsedMs: Math.max(0, (view.finishedAt ?? now) - view.startedAt) }),
+				...(text === undefined ? {} : { text }),
+				...(detail === undefined ? {} : { detail }),
+				...(output ? { output } : {}),
+			};
+		});
+	}
+
+	/**
 	 * Bind the extensions' shortcuts: each key invokes its extension's intent
 	 * through the intent registry, as this client.
 	 */
@@ -3239,6 +3302,8 @@ export class InteractiveMode {
 		this.unsubscribeWorkSource = this.workSource.subscribe(() => {
 			this.workStatus.invalidate();
 			this.updatePendingMessagesDisplay();
+			// Tool calls show the work they started live.
+			this.jobsRenderCoalescer?.update(undefined);
 			this.ui.requestRender();
 		});
 	}
@@ -4511,19 +4576,7 @@ export class InteractiveMode {
 						for (const content of this.streamingMessage.content) {
 							if (content.type === "toolCall") {
 								if (!this.pendingTools.has(content.id)) {
-									const component = new ToolExecutionComponent(
-										content.name,
-										content.id,
-										content.arguments,
-										{
-											liveProgress: true,
-											showImages: this.settingsManager.getShowImages(),
-											imageWidthCells: this.settingsManager.getImageWidthCells(),
-										},
-										this.getRegisteredToolDefinition(content.name),
-										this.ui,
-										this.sessionManager.getCwd(),
-									);
+									const component = this.createToolRow(content.name, content.id, content.arguments, true);
 									component.setExpanded(this.toolOutputExpanded);
 									this.chatContainer.addChild(component);
 									this.pendingTools.set(content.id, component);
@@ -4587,19 +4640,7 @@ export class InteractiveMode {
 			case "tool_execution_start": {
 				let component = this.pendingTools.get(event.toolCallId);
 				if (!component) {
-					component = new ToolExecutionComponent(
-						event.toolName,
-						event.toolCallId,
-						event.args,
-						{
-							liveProgress: true,
-							showImages: this.settingsManager.getShowImages(),
-							imageWidthCells: this.settingsManager.getImageWidthCells(),
-						},
-						this.getRegisteredToolDefinition(event.toolName),
-						this.ui,
-						this.sessionManager.getCwd(),
-					);
+					component = this.createToolRow(event.toolName, event.toolCallId, event.args, true);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
@@ -4873,8 +4914,23 @@ export class InteractiveMode {
 					// A notice in the transcript left the queue.
 					this.updatePendingMessagesDisplay();
 				} else if (message.display) {
-					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
+					const presentation = presentCustomMessage(
+						this.session.presenters.message(message.customType),
+						{
+							customType: message.customType,
+							content: message.content,
+							...(message.details === undefined ? {} : { details: message.details }),
+						},
+						PRESENTATION_MAX_SERIALIZED_BYTES,
+					);
+					const component =
+						presentation === undefined
+							? new CustomMessageComponent(
+									message,
+									this.session.extensionRunner.getMessageRenderer(message.customType),
+									this.getMarkdownThemeWithSettings(),
+								)
+							: new PresentedMessageComponent(message.customType, presentation);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -4964,7 +5020,7 @@ export class InteractiveMode {
 		for (const toolCallId of liveBackgroundJobTools.keys()) this.pendingTools.delete(toolCallId);
 		this.disposePendingTools();
 		this.liveBackgroundJobTools.clear();
-		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+		const renderedPendingTools = new Map<string, ToolRow>();
 
 		if (options.updateFooter) {
 			this.footer.invalidate();
@@ -4982,19 +5038,7 @@ export class InteractiveMode {
 						// Other rows use replay options rather than live progress.
 						const liveCard = liveBackgroundJobTools.get(content.id);
 						const component =
-							liveCard?.component ??
-							new ToolExecutionComponent(
-								content.name,
-								content.id,
-								content.arguments,
-								{
-									showImages: this.settingsManager.getShowImages(),
-									imageWidthCells: this.settingsManager.getImageWidthCells(),
-								},
-								this.getRegisteredToolDefinition(content.name),
-								this.ui,
-								this.sessionManager.getCwd(),
-							);
+							liveCard?.component ?? this.createToolRow(content.name, content.id, content.arguments, false);
 						if (liveCard) {
 							this.liveBackgroundJobTools.set(content.id, liveCard);
 							liveBackgroundJobTools.delete(content.id);
@@ -6444,7 +6488,7 @@ export class InteractiveMode {
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof PresentedToolComponent) {
 								child.setShowImages(enabled);
 							}
 						}
@@ -6452,7 +6496,7 @@ export class InteractiveMode {
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
 						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
+							if (child instanceof ToolExecutionComponent || child instanceof PresentedToolComponent) {
 								child.setImageWidthCells(width);
 							}
 						}
@@ -9915,12 +9959,7 @@ export class InteractiveMode {
 
 		let streaming: AssistantMessageComponent | undefined;
 		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
-		const pending = new Map<string, ToolExecutionComponent>();
-		const toolOptions = () => ({
-			liveProgress: true,
-			showImages: this.settingsManager.getShowImages(),
-			imageWidthCells: this.settingsManager.getImageWidthCells(),
-		});
+		const pending = new Map<string, ToolRow>();
 
 		const forDisplay = options.transformAssistantMessage ?? ((message: AssistantMessage) => message);
 
@@ -9932,15 +9971,7 @@ export class InteractiveMode {
 					existing.updateArgs(part.arguments);
 					continue;
 				}
-				const component = new ToolExecutionComponent(
-					part.name,
-					part.id,
-					part.arguments,
-					toolOptions(),
-					this.getRegisteredToolDefinition(part.name),
-					this.ui,
-					this.sessionManager.getCwd(),
-				);
+				const component = this.createToolRow(part.name, part.id, part.arguments, true);
 				component.setExpanded(this.toolOutputExpanded);
 				group.addChild(component);
 				pending.set(part.id, component);
@@ -9991,15 +10022,7 @@ export class InteractiveMode {
 				case "tool_execution_start": {
 					let component = pending.get(event.toolCallId);
 					if (!component) {
-						component = new ToolExecutionComponent(
-							event.toolName,
-							event.toolCallId,
-							event.args,
-							toolOptions(),
-							this.getRegisteredToolDefinition(event.toolName),
-							this.ui,
-							this.sessionManager.getCwd(),
-						);
+						component = this.createToolRow(event.toolName, event.toolCallId, event.args, true);
 						component.setExpanded(this.toolOutputExpanded);
 						group.addChild(component);
 						pending.set(event.toolCallId, component);

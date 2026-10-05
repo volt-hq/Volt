@@ -35,6 +35,7 @@ import {
 	LogMessageSchema,
 } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
+import { MessagePresentationSchema, ToolPresentationSchema } from "./presentation.ts";
 import { RpcClientMessageIdSchema } from "./primitives.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -62,6 +63,15 @@ export const TranscriptAssistantPartSchema = Type.Union([
  * Text is bounded per entry by the profile; `truncated` says the full text is
  * available through the `content` query. Tool items carry the tool call's
  * arguments from the fold and, on the local profile, diff and patch previews.
+ *
+ * `presentation` is how the entry looks as `UiNode` data, computed from the
+ * presenters the host has registered when the entry is projected (RFC §4.3):
+ * every tool item has a `ToolPresentation` (the generic one for a tool
+ * without a presenter); a custom message whose type has a message presenter
+ * has a `MessagePresentation`. It is bounded by the profile. On the remote
+ * profile it is presented from the redacted entry and shows what its
+ * presenter shows of the call (a written file, an edit's diff), without image
+ * data; the generic presentation shows only the arguments the view carries.
  */
 export const TranscriptItemSchema = Type.Object(
 	{
@@ -85,6 +95,8 @@ export const TranscriptItemSchema = Type.Object(
 		stopReason: Type.Optional(StopReasonSchema),
 		diffPreview: Type.Optional(Type.String()),
 		patchPreview: Type.Optional(Type.String()),
+		/** A tool item's `ToolPresentation`, or a presented custom message's `MessagePresentation`. */
+		presentation: Type.Optional(Type.Union([ToolPresentationSchema, MessagePresentationSchema])),
 	},
 	closed,
 );

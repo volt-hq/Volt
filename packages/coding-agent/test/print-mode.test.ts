@@ -5,9 +5,11 @@ import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../src/core/host/live-state.ts";
 import { writeRawStdout } from "../src/core/output-guard.ts";
+import type { SessionPresenters } from "../src/core/session/presenters.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+import { builtinSessionPresenters } from "./utilities/test-presenters.ts";
 
 vi.mock("../src/core/output-guard.ts", async (importOriginal) => ({
 	...(await importOriginal<Record<string, unknown>>()),
@@ -30,6 +32,7 @@ type FakeSession = {
 	sessionId: string;
 	sessionManager: SessionManager;
 	liveState: LiveState;
+	presenters: SessionPresenters;
 	gitContextProvider: { retainObservation(): () => void };
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AssistantMessage[] };
@@ -92,6 +95,7 @@ function createHost(assistantMessage: AssistantMessage): FakeHost {
 		sessionId: "print-session",
 		sessionManager,
 		liveState: new LiveState({ head: () => sessionManager.getOrdinal() }),
+		presenters: builtinSessionPresenters(),
 		gitContextProvider: { retainObservation: () => () => {} },
 		waitForIdle: vi.fn(async () => undefined),
 		state,
