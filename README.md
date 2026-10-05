@@ -58,7 +58,7 @@ Then use `/tbench` inside Volt:
 /tbench smoke
 ```
 
-`/tbench command` and `/tbench smoke` prompt for a model from Volt's available model list, the Harbor task limit (`-l` / `--n-tasks`), and concurrent trials (`-n` / `--n-concurrent`). To skip prompts for scripting or repeat runs, pass the values explicitly:
+`/tbench command` and `/tbench smoke` show a form with a model from Volt's available model list, the Harbor task limit (`-l` / `--n-tasks`), and concurrent trials (`-n` / `--n-concurrent`), starting from the package settings; check "Remember as defaults" to store the values in them. To skip the form for scripting or repeat runs, pass the values explicitly (values you leave out come from the settings):
 
 ```text
 /tbench smoke openai-codex/gpt-5.5 -l 10 -n 2
@@ -66,6 +66,16 @@ Then use `/tbench` inside Volt:
 ```
 
 The TUI helper writes jobs under the current Volt workspace and passes that workspace's `.volt` directory when it exists.
+
+### Settings
+
+Edit the defaults from `/extensions` (or `volt config`), or in `settings.json` under `extensions.terminal-bench-harbor.settings`:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `model` | the session's model, else `openai-codex/gpt-5.5` | `provider/model` to benchmark |
+| `taskLimit` | `1` | Harbor tasks per run (`-l`), 1 to 10000 |
+| `concurrentTrials` | `1` | Harbor trials that run at once (`-n`), 1 to 64 |
 
 You can also run Harbor directly from this package root:
 
