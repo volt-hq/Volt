@@ -594,7 +594,7 @@ export class SessionExtensionBinding {
 			setTitle: (title) => setExtensionTitle(this.uiHost, owned("setTitle"), title),
 			custom: (factory, options) => ui()?.custom(factory, options) ?? Promise.resolve(undefined as never),
 			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
-			setEditorText: (text) => live().setEditorText(text),
+			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
 			getEditorText: () => this.editorText(),
 			addAutocompleteProvider: (...args: Parameters<UI["addAutocompleteProvider"]>) =>
 				ui()?.addAutocompleteProvider(...args),

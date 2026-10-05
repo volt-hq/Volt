@@ -28,6 +28,7 @@ import { formatSchemaBoundError, formatSchemaError } from "../schema-errors.ts";
 import {
 	completeDynamicIntentArguments,
 	type DynamicIntent,
+	describedInputSchema,
 	dynamicIntentPromptText,
 	type ExtensionIntent,
 	findDynamicIntent,
@@ -199,8 +200,8 @@ export class IntentRegistry {
 				name: intent.name,
 				source: intent.source,
 				sourceLabel: intent.sourceLabel,
-				// The registered schema as JSON: what a client fills a form from.
-				input: JSON.parse(JSON.stringify(intent.registered.input)) as Record<string, unknown>,
+				// The registered schema, what a client fills a form from, its descriptive text redacted.
+				input: describedInputSchema(intent.registered.input),
 				enabled: true,
 			};
 		}

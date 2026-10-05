@@ -486,17 +486,39 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		}
 	};
 
+	/**
+	 * `value` with each string the host cut (ending in "…") losing the start of
+	 * a root the cut left, as UI data the host normalized ends a cut.
+	 * Identifiers are never cut.
+	 */
+	const cutAware = <T>(value: T): T => {
+		const visit = (entry: unknown, key: string | undefined): unknown => {
+			if (typeof entry === "string") {
+				return entry.endsWith("…") && (key === undefined || !PRESERVED_KEYS.has(key))
+					? sanitizer.sanitizeCutText(entry)
+					: entry;
+			}
+			if (Array.isArray(entry)) return entry.map((item) => visit(item, key));
+			if (!isRecord(entry)) return entry;
+			return Object.fromEntries(Object.entries(entry).map(([name, item]) => [name, visit(item, name)]));
+		};
+		return visit(value, undefined) as T;
+	};
+
+	/** Redaction of UI data and other values: roots replaced, and roots a cut split dropped. */
+	const sanitizeUi = <T>(value: T): T => cutAware(sanitize(value));
+
 	const redactValue = (value: LiveValue): LiveValue | undefined => {
 		// Work progress the host cut loses a root's start the cut left; the value keeps the host's bound for it.
 		if (value.kind === "work") {
 			return redactedWorkPhase(
 				value,
-				sanitize,
+				sanitizeUi,
 				(text) => sanitizer.sanitizeCutText(text),
 				WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 			);
 		}
-		const redacted = sanitize(value);
+		const redacted = sanitizeUi(value);
 		if (redacted.kind === "host_request" && value.kind === "host_request") {
 			rememberOptions(value.requestId, value.request, redacted.request);
 			return redacted;
@@ -556,6 +578,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "patch":
 				return redactPatch(view, item.key);
 			case "notice":
+				return sent([sanitizeUi(item)]);
 			case "directive":
 				return sent([sanitize(item)]);
 		}
@@ -575,6 +598,13 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const kept: LiveItem[] = [];
 		sent.forEach((each, index) => {
 			const key = each.held?.key;
+			// A later clear still withdraws what the client holds: afterwards it holds nothing.
+			if (key !== undefined && diverged.has(key) && each.item.type === "clear" && fitting.has(index)) {
+				diverged.delete(key);
+				view.held.delete(key);
+				kept.push(each.item);
+				return;
+			}
 			if (key !== undefined && (diverged.has(key) || !fitting.has(index))) {
 				if (!diverged.has(key)) {
 					diverged.add(key);

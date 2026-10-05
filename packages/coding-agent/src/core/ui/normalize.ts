@@ -129,11 +129,14 @@ function assertSize(value: unknown, maxBytes: number): void {
 // Conversion: text fields of untrusted JSON, before validation
 // ============================================================================
 
-/** At most `max` UTF-16 units, without splitting a surrogate pair. */
+/**
+ * At most `max` UTF-16 units, without splitting a surrogate pair; cut text
+ * ends in "…", so a remote profile's redaction drops a root the cut split.
+ */
 function cutChars(text: string, max: number): string {
 	if (text.length <= max) return text;
-	const end = /[\ud800-\udbff]/.test(text.charAt(max - 1)) ? max - 1 : max;
-	return text.slice(0, end);
+	const end = /[\ud800-\udbff]/.test(text.charAt(max - 2)) ? max - 2 : max - 1;
+	return `${text.slice(0, end)}…`;
 }
 
 function styled(value: unknown): unknown {

@@ -217,6 +217,28 @@ describe("LiveState requests asked of one client", () => {
 		});
 		expect(other.items()).toEqual([]);
 
+		// Answered at once by the client it was asked of, while the request is still being delivered:
+		// the clients delivered after the answer never see it.
+		const answering: LiveClient = {
+			acceptsHostRequest: (kind) => kind === "editor_text",
+			apply: (update) => {
+				for (const item of update.items) {
+					if (item.type === "set" && item.value.kind === "host_request") {
+						live.answer(item.value.requestId, { value: "now" }, "answering");
+					}
+				}
+			},
+		};
+		live.attach("answering", answering);
+		const after = createLiveRecorder(["editor_text"]);
+		live.attach("after", after);
+		await expect(live.request({ kind: "editor_text" }, { client: "answering" })).resolves.toMatchObject({
+			status: "answered",
+			response: { value: "now" },
+		});
+		expect(after.items()).toEqual([]);
+		expect(other.items()).toEqual([]);
+
 		// A client that takes no such request is not asked, and nobody else is either.
 		await expect(live.request({ kind: "editor_text" }, { client: "nobody" })).resolves.toEqual({
 			status: "cancelled",

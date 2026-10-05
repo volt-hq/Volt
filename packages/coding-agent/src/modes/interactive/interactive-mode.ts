@@ -140,6 +140,7 @@ import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
+import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
 	type IntegratedConversationSessionSelection,
@@ -3088,7 +3089,8 @@ export class InteractiveMode {
 			},
 			notify: (level, message) => this.showExtensionNotice(level, message),
 			setEditorText: (text) => this.editor.setText(text),
-			insertEditorText: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
+			// Pasted as one bracketed paste: text that ended the paste could type keys into the editor.
+			insertEditorText: (text) => this.editor.handleInput(`\x1b[200~${stripTerminalControls(text)}\x1b[201~`),
 			editorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			showWork: (workId, value) => {
 				this.workSource.setLive(workId, value);
@@ -3693,7 +3695,7 @@ export class InteractiveMode {
 	 * Show an extension error in the UI.
 	 */
 	private showExtensionError(extensionId: string, error: string, stack?: string): void {
-		const errorMsg = `Extension "${extensionId}" error: ${error}`;
+		const errorMsg = `Extension "${extensionId}" error: ${stripTerminalControls(error)}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
 		this.chatContainer.addChild(errorText);
 		if (stack) {

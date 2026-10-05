@@ -29,6 +29,7 @@ import {
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import type { LiveUpdate } from "../../host/live-state.ts";
 import type { SessionManager } from "../../session-manager.ts";
+import { plainNoticeText } from "../../ui/extension-ui.ts";
 import type { Profile } from "../profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
 import type { ProjectionSource } from "../projection/transcript.ts";
@@ -199,13 +200,19 @@ export class Subscription {
 		}
 	}
 
-	/** A transient notice on the live lane; it changes no streaming scope. */
+	/**
+	 * A transient notice on the live lane; it changes no streaming scope. Its
+	 * text, such as an extension's error, reaches the client without terminal
+	 * controls and bounded.
+	 */
 	notice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		if (!this.options.live || this.ended) return;
 		this.receive({
 			reset: false,
 			basedOn: this.basedOn,
-			items: [{ type: "notice", level, message, ...(source === undefined ? {} : { source }) }],
+			items: [
+				{ type: "notice", level, message: plainNoticeText(message), ...(source === undefined ? {} : { source }) },
+			],
 		});
 	}
 

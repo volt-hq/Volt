@@ -29,6 +29,7 @@ import { createJiti } from "jiti/static";
 import * as _bundledTypebox from "typebox";
 import { type TObject, Type } from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
+import { Compile } from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBundledCli, isStandaloneBinary } from "../../config.ts";
 // NOTE: This import works because loader.ts exports are NOT re-exported from index.ts,
@@ -38,6 +39,7 @@ import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
+import { isSafeFormPattern } from "../host/live-state.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo, type SourceScope } from "../source-info.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
@@ -194,7 +196,73 @@ const COMPLETION_TRIGGER_MAX_CHARS = 8;
 /** Longest intent label, in characters. */
 const INTENT_LABEL_MAX_CHARS = 80;
 /** Largest intent input schema, in characters of JSON: clients read it from the intent's descriptor. */
-const INTENT_INPUT_SCHEMA_MAX_CHARS = 16 * 1024;
+const INTENT_INPUT_SCHEMA_MAX_CHARS = 4 * 1024;
+
+/** `value`, with every object and array in it frozen. */
+function deepFreeze<T>(value: T): T {
+	if (typeof value === "object" && value !== null) {
+		for (const entry of Object.values(value)) deepFreeze(entry);
+		Object.freeze(value);
+	}
+	return value;
+}
+
+/**
+ * Refuse schema keywords that test client input with patterns which may
+ * backtrack without bound: every `pattern` must be safe to test (as a form
+ * field's is), and `patternProperties` is not supported.
+ */
+function checkSchemaPatterns(name: string, value: unknown): void {
+	if (Array.isArray(value)) {
+		for (const entry of value) checkSchemaPatterns(name, entry);
+		return;
+	}
+	if (!isRecord(value)) return;
+	for (const [key, entry] of Object.entries(value)) {
+		if (key === "patternProperties") {
+			throw new TypeError(`Intent ${name}: input schemas do not support patternProperties`);
+		}
+		if (key === "pattern" && typeof entry === "string" && !isSafeFormPattern(entry)) {
+			throw new TypeError(
+				`Intent ${name}: input pattern ${JSON.stringify(entry)} must not repeat a repeating group or use backreferences`,
+			);
+		}
+		checkSchemaPatterns(name, entry);
+	}
+}
+
+/**
+ * An intent's input schema, checked and owned: a JSON object schema of at most
+ * {@link INTENT_INPUT_SCHEMA_MAX_CHARS}, with safe patterns, that compiles;
+ * copied and frozen, so what the descriptor shows is what checks input.
+ */
+function intentInputSchema(name: string, input: unknown): TObject {
+	if (!isRecord(input) || input.type !== "object") {
+		throw new TypeError(`Intent ${name}: input must be a TypeBox object schema`);
+	}
+	let json: string | undefined;
+	try {
+		json = JSON.stringify(input);
+	} catch {
+		json = undefined;
+	}
+	if (json === undefined) throw new TypeError(`Intent ${name}: input schema must be JSON`);
+	if (json.length > INTENT_INPUT_SCHEMA_MAX_CHARS) {
+		throw new TypeError(
+			`Intent ${name}: input schema is larger than ${INTENT_INPUT_SCHEMA_MAX_CHARS} characters of JSON`,
+		);
+	}
+	const schema = JSON.parse(json) as TObject;
+	checkSchemaPatterns(name, schema);
+	try {
+		Compile(schema);
+	} catch (error) {
+		throw new TypeError(
+			`Intent ${name}: input schema does not compile: ${error instanceof Error ? error.message : error}`,
+		);
+	}
+	return deepFreeze(schema);
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,17 +288,7 @@ function validateIntent(extensionId: string, name: string, options: unknown): Re
 	if (description !== undefined && typeof description !== "string") {
 		throw new TypeError(`Intent ${name}: description must be a string`);
 	}
-	if (input !== undefined && (!isRecord(input) || input.type !== "object")) {
-		throw new TypeError(`Intent ${name}: input must be a TypeBox object schema`);
-	}
-	if (
-		input !== undefined &&
-		(JSON.stringify(input)?.length ?? Number.POSITIVE_INFINITY) > INTENT_INPUT_SCHEMA_MAX_CHARS
-	) {
-		throw new TypeError(
-			`Intent ${name}: input schema is larger than ${INTENT_INPUT_SCHEMA_MAX_CHARS} characters of JSON`,
-		);
-	}
+	const schema = input === undefined ? undefined : intentInputSchema(name, input);
 	if (typeof remote !== "boolean") throw new TypeError(`Intent ${name}: remote must be a boolean`);
 	const capabilities: unknown[] | undefined = Array.isArray(requires) ? [...requires] : undefined;
 	if (!capabilities?.every((capability) => typeof capability === "string" && CAPABILITIES.has(capability))) {
@@ -242,7 +300,7 @@ function validateIntent(extensionId: string, name: string, options: unknown): Re
 		intent: `extension.intent.${extensionId}.${name}`,
 		label,
 		...(description === undefined ? {} : { description }),
-		input: (input as TObject | undefined) ?? Type.Object({}, { additionalProperties: false }),
+		input: schema ?? Type.Object({}, { additionalProperties: false }),
 		remote,
 		requires: Object.freeze([...new Set(capabilities as RemoteCapability[])]),
 		handler: handler as RegisteredIntent["handler"],

@@ -50,8 +50,8 @@ export const EXTENSION_STATUS_MAX = 32;
 export const EXTENSION_PANELS_MAX = 16;
 /** Largest notification, as serialized JSON in UTF-8 bytes. */
 export const NOTICE_MAX_SERIALIZED_BYTES = 16 * 1024;
-/** Longest plain notification text kept, in characters; longer text is cut. */
-const NOTICE_MAX_CHARS = 8 * 1024;
+/** Longest plain notification text kept, in UTF-16 units; longer text is cut. Within the bound in any script. */
+const NOTICE_MAX_CHARS = 4 * 1024;
 /** Largest panel or dialog title, as serialized JSON in UTF-8 bytes. */
 const TITLE_MAX_SERIALIZED_BYTES = 1024;
 /** Longest dialog or form title, in characters. */
@@ -197,6 +197,12 @@ export function setExtensionTitle(host: ExtensionUiHost, extensionId: string, ti
 		extension: extensionId,
 		title: plainLine(title, EXTENSION_TITLE_MAX_CHARS, "A title"),
 	});
+}
+
+/** Plain notice text, such as an error's: terminal controls removed, long text cut. */
+export function plainNoticeText(message: string): string {
+	const text = stripTerminalControls(message);
+	return text.length > NOTICE_MAX_CHARS ? `${text.slice(0, NOTICE_MAX_CHARS)}…` : text;
 }
 
 /** A notification as a notice carries it: ANSI styling as tokens, long plain text cut. */

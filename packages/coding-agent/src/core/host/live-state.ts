@@ -708,6 +708,12 @@ export class LiveState {
 		readonly seq: number;
 		readonly basedOn: number;
 		readonly items: readonly LiveItem[];
+		/**
+		 * The gates of the host requests the batch sets, as they were when it was
+		 * published: a request answered while the batch is delivered keeps its
+		 * gate for the clients delivered after the answer.
+		 */
+		readonly gates: ReadonlyMap<string, RequestGate>;
 	}> = [];
 	private nextSeq = 0;
 	private delivering = false;
@@ -973,14 +979,24 @@ export class LiveState {
 			basedOn !== this.publishedBasedOn && isLiveStreaming(this.fold) ? liveStreamingItems(this.fold) : [];
 		this.publishedBasedOn = basedOn;
 		this.fold = foldLiveItems({ ...this.fold, basedOn }, items);
-		this.outbox.push({ seq: this.nextSeq++, basedOn, items: resync.length === 0 ? items : [...resync, ...items] });
+		const gates = new Map<string, RequestGate>();
+		for (const item of items) {
+			const gate = item.type === "set" ? this.gateOf(item.value) : undefined;
+			if (gate !== undefined && item.type === "set") gates.set(item.key, gate);
+		}
+		this.outbox.push({
+			seq: this.nextSeq++,
+			basedOn,
+			items: resync.length === 0 ? items : [...resync, ...items],
+			gates,
+		});
 		if (this.delivering) return;
 		this.delivering = true;
 		try {
 			for (let batch = this.outbox.shift(); batch !== undefined; batch = this.outbox.shift()) {
 				for (const attached of [...this.clients.values()]) {
 					if (batch.seq < attached.since || this.clients.get(attached.id) !== attached) continue;
-					const visible = this.visible(attached, batch.items);
+					const visible = this.visible(attached, batch.items, batch.gates);
 					if (visible.length > 0) {
 						this.deliver(attached, { reset: false, basedOn: batch.basedOn, items: visible });
 					}
@@ -1006,15 +1022,25 @@ export class LiveState {
 		return { kind: value.request.kind, client: this.pending.get(value.requestId)?.client };
 	}
 
-	/** The part of `items` `attached` may see: host requests only of the kinds it accepts, asked of it. */
-	private visible(attached: AttachedClient, items: readonly LiveItem[]): LiveItem[] {
+	/**
+	 * The part of `items` `attached` may see: host requests only of the kinds it
+	 * accepts, asked of it, by the gates they had when published.
+	 */
+	private visible(
+		attached: AttachedClient,
+		items: readonly LiveItem[],
+		gates: ReadonlyMap<string, RequestGate>,
+	): LiveItem[] {
 		const visible: LiveItem[] = [];
 		for (const item of items) {
 			if (item.type === "set") {
-				const gate = this.gateOf(item.value);
-				if (gate === undefined) {
+				if (item.value.kind !== "host_request") {
 					visible.push(item);
-				} else if (mayShow(attached, gate)) {
+					continue;
+				}
+				// A request without a gate is shown to no one.
+				const gate = gates.get(item.key);
+				if (gate !== undefined && mayShow(attached, gate)) {
 					attached.shown.add(item.key);
 					visible.push(item);
 				}

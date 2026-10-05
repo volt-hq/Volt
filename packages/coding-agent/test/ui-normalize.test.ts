@@ -204,7 +204,7 @@ describe("normalizeUiNode", () => {
 		if (node?.type !== "terminal") throw new Error("expected a terminal node");
 		expect(node.lines).toHaveLength(UI_NODE_TERMINAL_MAX_LINES);
 		expect(node.omittedLines).toBe(2 + 7);
-		expect(node.lines.at(-1)).toBe("x".repeat(UI_NODE_LINE_MAX_CHARS));
+		expect(node.lines.at(-1)).toBe(`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 1)}…`);
 		expect(node.lines.at(-2)).toBe(`line ${UI_NODE_TERMINAL_MAX_LINES + 3}`);
 
 		const short = normalizeUiNode({ type: "terminal", lines: ["\x1b[31ma\nb", [{ text: "c\x1b[1m\nd" }]] }, HOST);

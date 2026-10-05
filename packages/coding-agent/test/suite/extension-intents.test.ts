@@ -6,7 +6,7 @@
  * `editor_completions` query asks the completion providers within its bounds.
  */
 
-import { EDITOR_COMPLETION_TEXT_MAX_CHARS, type RemoteCapability } from "@hansjm10/volt-protocol";
+import { EDITOR_COMPLETION_TEXT_MAX_CHARS, type HostFrame, type RemoteCapability } from "@hansjm10/volt-protocol";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionError } from "../../src/core/extensions/index.ts";
@@ -16,7 +16,10 @@ import {
 	intentRegistry,
 	LOCAL_INTENT_PROFILE,
 } from "../../src/core/protocol/intents/index.ts";
+import { localProfile, type Profile, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
+import { serveConnection } from "../../src/core/protocol/server/connection.ts";
+import { createLoopbackRpcTransportPair } from "../../src/core/protocol/transport/index.ts";
 import { connectTestClient, type TestClient } from "../utilities/host-client.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "./extension-runtime.ts";
 
@@ -58,14 +61,18 @@ describe("extension intents", () => {
 	it("runs a registered intent with checked input in the extension's own context", async () => {
 		const runs: Array<{ input: unknown; ctx: ExtensionCommandContext }> = [];
 		let name = "";
+		const input = Type.Object(
+			{
+				target: Type.String({ description: "A target such as /home/ada/deploys/prod" }),
+				dryRun: Type.Optional(Type.Boolean()),
+			},
+			{ additionalProperties: false },
+		);
 		const { fixture, client, errors, context } = await setup((volt) => {
 			name = volt.registerIntent("deploy", {
 				label: "Deploy",
 				description: "Ship the build",
-				input: Type.Object(
-					{ target: Type.String(), dryRun: Type.Optional(Type.Boolean()) },
-					{ additionalProperties: false },
-				),
+				input,
 				handler: async (input, ctx) => {
 					runs.push({ input, ctx });
 					ctx.ui.setStatus("deploy", `deploying ${input.target}`);
@@ -83,6 +90,11 @@ describe("extension intents", () => {
 
 		await intentRegistry.invokeFrame(context(), name, { target: "prod" });
 		expect(runs.map((run) => run.input)).toEqual([{ target: "prod" }]);
+		// The registered schema is the extension's copy: changing the original afterwards changes nothing.
+		(input.properties as Record<string, unknown>).extra = Type.String();
+		await expect(intentRegistry.invokeFrame(context(), name, { target: "prod", extra: "x" })).rejects.toMatchObject({
+			code: "invalid_input",
+		});
 		expect(fixture.conversation.liveState.get(`ext_status/${EXTENSION}/deploy`)).toMatchObject({
 			text: "deploying prod",
 		});
@@ -117,6 +129,11 @@ describe("extension intents", () => {
 			requires: ["conversation.control.v1"],
 			input: { type: "object", required: ["target"] },
 			enabled: true,
+		});
+		// Its descriptive text reaches clients with host paths redacted.
+		expect(JSON.stringify(descriptor?.input)).not.toContain("/home/ada");
+		expect(descriptor?.input).toMatchObject({
+			properties: { target: { description: "A target such as [redacted path]" } },
 		});
 	});
 
@@ -164,6 +181,87 @@ describe("extension intents", () => {
 		expect(names).toEqual([intent("phone"), intent("admin")]);
 	});
 
+	it("admits extension intent frames on the wire, unfenced, on the local and remote profiles", async () => {
+		const ran: unknown[] = [];
+		const { fixture, client } = await setup((volt) => {
+			volt.registerIntent("phone", {
+				label: "Phone",
+				remote: true,
+				input: Type.Object({ count: Type.Integer() }),
+				handler: (input) => void ran.push(input),
+			});
+			volt.registerIntent("local", { label: "Local", handler: () => void ran.push("local") });
+		});
+		track(fixture, client);
+		const intent = (name: string) => `extension.intent.${EXTENSION}.${name}`;
+		const connect = async (profile: Profile) => {
+			const pair = createLoopbackRpcTransportPair();
+			const connection = serveConnection(pair.server, profile, {
+				host: fixture.host,
+				conversation: fixture.conversation,
+			});
+			const frames: HostFrame[] = [];
+			pair.client.onValue?.((value) => {
+				frames.push(value as HostFrame);
+			});
+			cleanups.push(async () => {
+				await pair.client.close();
+				await connection.closed.catch(() => undefined);
+			});
+			void pair.client.write({
+				type: "hello",
+				protocol: 1,
+				client: { name: "test", version: "1" },
+				accepts: { hostRequests: [] },
+			});
+			await connection.ready;
+			const send = async (frame: Record<string, unknown>): Promise<HostFrame> => {
+				void pair.client.write(frame);
+				let outcome: HostFrame | undefined;
+				await vi.waitFor(() => {
+					outcome = frames.find(
+						(candidate) =>
+							(candidate.type === "accepted" || candidate.type === "rejected" || candidate.type === "fatal") &&
+							(candidate.type === "fatal" || candidate.intentId === frame.intentId),
+					);
+					expect(outcome).toBeDefined();
+				});
+				return outcome!;
+			};
+			return send;
+		};
+
+		const local = await connect(localProfile);
+		await expect(local({ type: intent("phone"), intentId: "l1", input: { count: 2 } })).resolves.toMatchObject({
+			type: "accepted",
+		});
+		await expect(local({ type: intent("phone"), intentId: "l2", input: { count: "2" } })).resolves.toMatchObject({
+			type: "rejected",
+			reason: { code: "invalid_input" },
+		});
+
+		const remote = await connect(
+			remoteProfile({
+				grant: {
+					schemaVersion: 1,
+					revision: 1,
+					capabilities: ["conversation.observe.v1", "conversation.control.v1"],
+				},
+				redaction: { workspacePath: fixture.conversation.cwd },
+				bound: fixture.conversation.id,
+			}),
+		);
+		// No expectedOrdinal: extension intents are not fenced to the branch.
+		await expect(remote({ type: intent("phone"), intentId: "r1", input: { count: 3 } })).resolves.toMatchObject({
+			type: "accepted",
+		});
+		await expect(remote({ type: intent("local"), intentId: "r2" })).resolves.toMatchObject({
+			type: "rejected",
+			reason: { code: "not_allowed" },
+		});
+		expect(ran).toEqual([{ count: 2 }, { count: 3 }]);
+	});
+
 	it("checks intent, shortcut, and completion provider registrations", async () => {
 		const failures: string[] = [];
 		const attempt = (run: () => unknown): void => {
@@ -179,6 +277,27 @@ describe("extension intents", () => {
 			attempt(() => volt.registerIntent("ok", { label: "x", input: Type.String() as never, handler: () => {} }));
 			attempt(() =>
 				volt.registerIntent("ok", { label: "x", requires: ["root.v1" as RemoteCapability], handler: () => {} }),
+			);
+			attempt(() =>
+				volt.registerIntent("ok", {
+					label: "x",
+					input: Type.Object({ s: Type.String({ pattern: "(a+)+$" }) }),
+					handler: () => {},
+				}),
+			);
+			attempt(() =>
+				volt.registerIntent("ok", {
+					label: "x",
+					input: { type: "object", properties: {}, patternProperties: { "^x": {} } } as never,
+					handler: () => {},
+				}),
+			);
+			attempt(() =>
+				volt.registerIntent("ok", {
+					label: "x",
+					input: Type.Object({ s: Type.String({ description: "d".repeat(5_000) }) }),
+					handler: () => {},
+				}),
 			);
 			const own = volt.registerIntent("ok", { label: "Ok", handler: () => {} });
 			attempt(() => volt.registerIntent("ok", { label: "Ok", handler: () => {} }));
@@ -198,6 +317,9 @@ describe("extension intents", () => {
 			expect.stringContaining("label must be"),
 			expect.stringContaining("TypeBox object schema"),
 			expect.stringContaining("remote capabilities"),
+			expect.stringContaining("must not repeat a repeating group"),
+			expect.stringContaining("patternProperties"),
+			expect.stringContaining("larger than"),
 			"Intent ok is already registered",
 			expect.stringContaining("only its own intents and commands"),
 			expect.stringContaining("only its own intents and commands"),

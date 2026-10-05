@@ -9,11 +9,18 @@
 
 import { resolve, sep } from "node:path";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
-import { type HostFrame, type LiveItem, REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
+import {
+	type HostFrame,
+	type LiveItem,
+	PANEL_MAX_SERIALIZED_BYTES,
+	REMOTE_CAPABILITIES,
+	UI_NODE_LINE_MAX_CHARS,
+} from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
 import { emptyLiveFold, foldLiveFrame } from "../src/core/protocol/live-fold.ts";
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
+import { normalizeUiNode } from "../src/core/ui/normalize.ts";
 
 const workspacePath = resolve("/Users/jordan/secret-project");
 const hostFile = `${workspacePath}${sep}notes.md`;
@@ -396,6 +403,44 @@ describe("remote redaction of patched panels", () => {
 		expect(holds()).toEqual(panel(["end"]));
 		const last = sent.at(-1);
 		expect(last?.type === "live" && last.items.map((item) => item.type)).toEqual(["patch"]);
+	});
+
+	it("withdraws a panel the host cleared after a patch the frame could not carry", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 2_000 },
+		}).redactor();
+		let fold = emptyLiveFold();
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted?.type === "live") fold = foldLiveFrame(fold, redacted);
+		};
+		send(live(1, [{ type: "set", key, value: panel(["token=abc"]) }], true));
+		send(live(2, [append(["x".repeat(3_000)]), { type: "clear", key }]));
+		expect(fold.values.has(key)).toBe(false);
+	});
+
+	it("drops the start of a root a host cut left at the end of a line", () => {
+		const redactor = redactorFor(workspacePath);
+		// A line the host normalized: cut inside the root, ending in "…".
+		const node = normalizeUiNode(
+			{ type: "terminal", key: "out", lines: [`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 12)}${hostFile}`] },
+			{ policy: { owner: "host" }, maxBytes: PANEL_MAX_SERIALIZED_BYTES },
+		);
+		if (node?.type !== "terminal") throw new Error("Expected a terminal node");
+		const line = node.lines[0];
+		expect(typeof line === "string" && line.endsWith("…")).toBe(true);
+		expect(workspacePath.startsWith(String(line).slice(UI_NODE_LINE_MAX_CHARS - 12, -1))).toBe(true);
+		const value = { ...panel([]), node };
+		const sent = JSON.stringify([
+			redactor.redact(live(1, [{ type: "set", key, value }], true)),
+			redactor.redact(
+				live(2, [{ type: "notice", level: "info", message: `${"y".repeat(20)}${workspacePath.slice(0, 9)}…` }]),
+			),
+		]);
+		expect(sent).not.toContain(workspacePath.slice(0, 9));
+		expect(sent).toContain(`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 12)}…`);
 	});
 
 	it("never replays a value from before its patches on a reset", () => {

@@ -117,6 +117,47 @@ function createExtensionIntent(registered: RegisteredIntent): ExtensionIntent {
 	};
 }
 
+/** Schema keywords whose text an intent descriptor shows a client, path-like text redacted. */
+const DESCRIPTIVE_SCHEMA_KEYWORDS: ReadonlySet<string> = new Set([
+	"title",
+	"description",
+	"$comment",
+	"default",
+	"examples",
+]);
+
+/** `value` with path-like text in its strings redacted. */
+function redactStrings(value: unknown): unknown {
+	if (typeof value === "string") return redactPathLikeText(value);
+	if (Array.isArray(value)) return value.map(redactStrings);
+	if (typeof value !== "object" || value === null) return value;
+	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactStrings(entry)]));
+}
+
+/**
+ * An extension intent's input schema as its descriptor carries it: a copy
+ * whose descriptive text (titles, descriptions, comments, defaults, and
+ * examples) has path-like text redacted.
+ */
+export function describedInputSchema(schema: unknown): Record<string, unknown> {
+	const describe = (value: unknown): unknown => {
+		if (Array.isArray(value)) return value.map(describe);
+		if (typeof value !== "object" || value === null) return value;
+		return Object.fromEntries(
+			Object.entries(value).map(([key, entry]) => [
+				key,
+				DESCRIPTIVE_SCHEMA_KEYWORDS.has(key)
+					? redactStrings(entry)
+					: // Property names are field names, not keywords: each value is a schema.
+						key === "properties" && typeof entry === "object" && entry !== null && !Array.isArray(entry)
+						? Object.fromEntries(Object.entries(entry).map(([field, schema]) => [field, describe(schema)]))
+						: describe(entry),
+			]),
+		);
+	};
+	return describe(schema) as Record<string, unknown>;
+}
+
 /** The prompt a dynamic intent sends for its raw argument text. */
 export function dynamicIntentPromptText(intent: DynamicIntent, rawArguments: string): string {
 	return rawArguments.length > 0 ? `/${intent.promptName} ${rawArguments}` : `/${intent.promptName}`;
