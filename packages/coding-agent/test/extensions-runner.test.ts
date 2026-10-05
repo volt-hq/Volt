@@ -743,6 +743,12 @@ export default function(volt) {
 						if (!error) throw new Error("An empty type must be refused");
 						try { volt.registerMessagePresenter("other", "not a function"); error = undefined; } catch (caught) { error = caught; }
 						if (!error) throw new Error("A presenter must be a function");
+						// The host's own message types are the host's to present.
+						for (const host of ["work_notice", "review", "subagent_recovery", "volt-plan-execution"]) {
+							error = undefined;
+							try { volt.registerMessagePresenter(host, () => ({ body: [] })); } catch (caught) { error = caught; }
+							if (!String(error).includes("host's")) throw new Error("A host message type must be refused: " + host);
+						}
 					}
 				`,
 				);
@@ -756,6 +762,8 @@ export default function(volt) {
 				body: [{ type: "text", text: "a-presenter" }],
 			});
 			expect(runner.getMessagePresenter("other")).toBeUndefined();
+			expect(runner.getMessagePresenter("work_notice")).toBeUndefined();
+			expect(runner.getMessagePresenter("review")).toBeUndefined();
 		});
 	});
 

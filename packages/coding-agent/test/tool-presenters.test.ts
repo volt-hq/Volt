@@ -91,6 +91,25 @@ function present(presenter: ToolPresenter, value: ToolPresentInput): ToolPresent
 }
 
 describe("bash presenter", () => {
+	it("starts live with an empty partial result before output arrives", async () => {
+		const updates: unknown[] = [];
+		const operations: BashOperations = {
+			exec: async () => {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				return { exitCode: 0 };
+			},
+		};
+		const running = createBashToolDefinition(cwd, { operations }).execute(
+			"tool-bash-1",
+			{ command: "sleep 10" },
+			undefined,
+			(update) => updates.push(update),
+			{} as never,
+		);
+		expect(updates).toEqual([{ content: [] }]);
+		await running;
+	});
+
 	it("titles the call with its command and the timeout in force", () => {
 		const presented = present(presentBash, input({ command: "npm test", timeout: 99_999 }, "running"));
 		expect(title(presented)).toBe("$ npm test (timeout 3600s)");
@@ -454,9 +473,33 @@ describe("presenting calls", () => {
 	});
 
 	it("presents calls of a log read without a runtime with the built-in presenters", () => {
-		expect(BUILTIN_PRESENTERS.tool("bash")).toBeDefined();
-		expect(BUILTIN_PRESENTERS.tool("read")).toBeDefined();
-		expect(BUILTIN_PRESENTERS.tool("grep")).toBeUndefined();
+		for (const tool of [
+			"bash",
+			"read",
+			"write",
+			"edit",
+			"grep",
+			"find",
+			"ls",
+			"lsp",
+			"inspect",
+			"web_search",
+			"web_fetch",
+			"mcp",
+			"request_user_input",
+			"jobs",
+			"subagent",
+			"subagent_registry",
+			"update_plan",
+			"submit_plan",
+			"update_plan_progress",
+			"request_replan",
+		]) {
+			expect(BUILTIN_PRESENTERS.tool(tool), tool).toBeDefined();
+		}
+		expect(BUILTIN_PRESENTERS.tool("image_gen")).toBeUndefined();
+		expect(BUILTIN_PRESENTERS.message("work_notice")).toBeDefined();
+		expect(BUILTIN_PRESENTERS.message("review")).toBeDefined();
 		expect(BUILTIN_PRESENTERS.message("anything")).toBeUndefined();
 	});
 

@@ -1025,6 +1025,7 @@ describe("Iroh remote transcript views", () => {
 			role: "assistant",
 			text: "Review findings",
 			truncated: false,
+			presentation: { body: [{ type: "markdown", key: "text", markdown: "Review findings" }] },
 		});
 	});
 
@@ -1118,51 +1119,36 @@ describe("Iroh remote transcript views", () => {
 			const entry = await entryOf(phone, id);
 			return "view" in entry ? entry.view : undefined;
 		};
-		expect(await view(bashId)).toMatchObject({
+		// Tool items present the redacted calls: clients render the presentation.
+		const bash = await view(bashId);
+		expect(bash).toMatchObject({
 			role: "tool",
 			toolName: "bash",
 			status: "completed",
-			summary: "Ran command: pwd && cat /workspace/src/index.ts (completed)",
-			args: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
-			output: "private output",
-			outputTruncated: false,
+			text: "$ pwd && cat /workspace/src/index.ts (timeout 5s) (completed)",
 		});
-		expect(await view(readId)).toMatchObject({
+		expect(JSON.stringify(bash?.presentation)).toContain("pwd && cat /workspace/src/index.ts");
+		const read = await view(readId);
+		expect(read).toMatchObject({
 			role: "tool",
 			toolName: "read",
 			status: "completed",
-			path: "/workspace/src/index.ts",
-			args: { path: "/workspace/src/index.ts", offset: 3 },
-			output: "private file contents",
-			outputTruncated: false,
+			text: "read /workspace/src/index.ts:3 (completed)",
 		});
-		expect(await view(registryId)).toMatchObject({
+		const registry = await view(registryId);
+		expect(registry).toMatchObject({
 			role: "tool",
 			toolName: "subagent_registry",
 			status: "completed",
-			args: { list: true, cursor: 50 },
-			details: {
-				mode: "list",
-				status: "completed",
-				summary: { total: 120, returned: 50, nextCursor: 20 },
-			},
-			output: "bounded registry page",
-			outputTruncated: false,
 		});
-		expect(await view(followId)).toMatchObject({
+		expect(JSON.stringify(registry?.presentation)).toContain("bounded registry page");
+		const follow = await view(followId);
+		expect(follow).toMatchObject({
 			role: "tool",
 			toolName: "subagent_registry",
 			status: "completed",
-			args: { follow: "sa_existing" },
-			details: {
-				mode: "follow",
-				status: "completed",
-				subagentId: "sa_existing",
-				agent: { name: "researcher", source: "built-in" },
-			},
-			output: "existing result",
-			outputTruncated: false,
 		});
+		expect(JSON.stringify(follow?.presentation)).toContain("researcher");
 		expect(JSON.stringify(phone.frames)).not.toContain(conversation.cwd);
 	});
 

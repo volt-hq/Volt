@@ -477,7 +477,6 @@ export class AgentSession {
 			const { definition, extensionId } = entry;
 			return {
 				...(definition.present === undefined ? {} : { present: definition.present }),
-				rendersItself: definition.renderCall !== undefined || definition.renderResult !== undefined,
 				...(extensionId === undefined ? {} : { extensionId }),
 			};
 		},
@@ -631,7 +630,6 @@ export class AgentSession {
 			messages: () => this.messages,
 			activeTools: () => this._conversation.activeTools,
 			state: () => this.state,
-			getToolDefinition: (name) => this.getToolDefinition(name),
 			presenters: () => this.presenters,
 			emit: (event) => this._events.emit(event),
 		});

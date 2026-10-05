@@ -35,7 +35,7 @@ import { type Static, Type } from "typebox";
 import { LogEntryIdSchema } from "./entries.ts";
 import { ExtensionIdSchema, RESERVED_EXTENSION_IDS } from "./extensions.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
-import { opaque, stringEnum } from "./helpers.ts";
+import { stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
 import { ToolPresentationPatchSchema, ToolPresentationSchema } from "./presentation.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
@@ -443,12 +443,9 @@ export const LiveAssistantDeltaItemSchema = Type.Object(
 /** The streaming assistant message finished; the entry that commits it follows. */
 export const LiveAssistantEndItemSchema = Type.Object({ type: Type.Literal("assistant_end") }, closed);
 
-/** A partial tool result. */
+/** A partial tool result's content; how the call looks is its presentation. */
 export const LiveToolPartialSchema = Type.Object(
-	{
-		content: Type.Array(Type.Union([TextContentSchema, ImageContentSchema])),
-		details: Type.Optional(opaque<unknown>("tool-specific JSON details, until tools present UiNode data (Phase 5)")),
-	},
+	{ content: Type.Array(Type.Union([TextContentSchema, ImageContentSchema])) },
 	closed,
 );
 

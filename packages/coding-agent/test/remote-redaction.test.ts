@@ -535,6 +535,41 @@ describe("remote redaction of tool presentations", () => {
 		};
 	}
 
+	it("drops the start of a root a presenter cut short before more text, in a title and in step details", () => {
+		const remote = client();
+		// As the grep presenter titles a long glob, and the subagent presenter details a step with its error.
+		const cut = `${workspacePath.slice(0, 14)}…`;
+		const presented: ToolPresentation = {
+			title: [
+				{ text: "grep", bold: true },
+				{ text: " /x/", token: "accent" },
+				{ text: " in ." },
+				{ text: ` (${cut})` },
+			],
+			summary: [
+				{
+					type: "progress",
+					kind: "steps",
+					key: "children",
+					steps: [
+						{
+							key: "a",
+							label: "general",
+							status: "failed",
+							detail: [{ text: `failed · ${cut} · retry`, token: "error" }],
+						},
+					],
+				},
+			],
+		};
+		remote.send(
+			live(1, [{ type: "tool", op: "start", toolCallId: "call", toolName: "grep", presentation: presented }], true),
+		);
+		expect(remote.wire()).not.toContain(workspacePath.slice(0, 14));
+		expect(JSON.stringify(remote.holds())).toContain("grep /x/ in . (…)");
+		expect(JSON.stringify(remote.holds())).toContain("failed · … · retry");
+	});
+
 	it("redacts paths in presentations and patches, and sends output as patches of the redacted presentation", () => {
 		const remote = client();
 		const first = presentation([`open ${hostFile}`]);

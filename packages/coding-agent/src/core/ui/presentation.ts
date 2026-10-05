@@ -475,10 +475,12 @@ export function genericToolPresentation(toolName: string, input: ToolPresentInpu
 				: [{ type: "terminal", key: "output", lines: shown }];
 	const summaryLines =
 		input.state === "done" ? lines.slice(0, GENERIC_SUMMARY_LINES) : lines.slice(-GENERIC_SUMMARY_LINES);
+	// Output the summary shows whole, without arguments, needs no body.
+	const fits = args.length === 0 && summaryLines.length === lines.length;
 	const presentation: ToolPresentation = {
 		title,
 		...(summaryLines.length === 0 ? {} : { summary: output(summaryLines) }),
-		...(args.length + lines.length === 0 ? {} : { body: [...args, ...output(lines)] }),
+		...(fits ? {} : { body: [...args, ...output(lines)] }),
 	};
 	// Normalized as a presenter's would be: lines within their bound, the whole within `maxBytes`.
 	try {

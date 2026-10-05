@@ -1,13 +1,10 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import { VERSION } from "../../config.ts";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import type { Theme } from "../theme/runtime.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
+import { presentWebSearch } from "./query-presenters.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 import { cleanProviderContent, FALLBACK_MAX_LINES, parseProviderContent } from "./web-search-extract.ts";
@@ -117,11 +114,6 @@ interface JsonFetchOptions {
 	signal?: AbortSignal;
 	timeoutMs: number;
 }
-
-type RenderableWebSearchResult = {
-	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-	details?: WebSearchToolDetails;
-};
 
 function isTruthyEnvFlag(value: string | undefined): boolean {
 	if (!value) return false;
@@ -701,62 +693,6 @@ function createOutput(
 	return { text, details };
 }
 
-function formatWebSearchCall(
-	args: { query?: string; limit?: number; domains?: string[]; recencyDays?: number } | undefined,
-	theme: Theme,
-): string {
-	const query = str(args?.query);
-	const invalidArg = invalidArgText(theme);
-	let text =
-		theme.fg("toolTitle", theme.bold("web_search")) +
-		" " +
-		(query === null ? invalidArg : theme.fg("accent", query || "..."));
-	if (Array.isArray(args?.domains) && args.domains.length > 0) {
-		text += theme.fg("toolOutput", ` (${args.domains.join(", ")})`);
-	}
-	if (typeof args?.recencyDays === "number") {
-		text += theme.fg("toolOutput", ` ${formatRecency(args.recencyDays)}`);
-	}
-	if (typeof args?.limit === "number") {
-		text += theme.fg("toolOutput", ` limit ${args.limit}`);
-	}
-	return text;
-}
-
-function formatWebSearchResult(
-	result: RenderableWebSearchResult,
-	options: ToolRenderResultOptions,
-	theme: Theme,
-	showImages: boolean,
-): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 16;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-		}
-	}
-
-	const resultLimit = result.details?.resultLimitReached;
-	const truncation = result.details?.truncation;
-	if (resultLimit || truncation?.truncated) {
-		const warnings: string[] = [];
-		if (resultLimit) warnings.push(`${resultLimit} results limit`);
-		if (truncation?.truncated) {
-			const limit =
-				truncation.truncatedBy === "lines" ? `${truncation.maxLines} lines` : formatSize(truncation.maxBytes);
-			warnings.push(`${limit} limit`);
-		}
-		text += `\n${theme.fg("warning", `[Truncated: ${warnings.join(", ")}]`)}`;
-	}
-	return text;
-}
-
 export function createWebSearchToolDefinition(
 	_cwd: string,
 	options?: WebSearchToolOptions,
@@ -773,6 +709,7 @@ export function createWebSearchToolDefinition(
 			"After using web_search, cite relevant URLs in your response when the answer depends on search results.",
 		],
 		parameters: webSearchSchema,
+		present: presentWebSearch,
 		async execute(_toolCallId, params: WebSearchToolInput, signal?: AbortSignal) {
 			if (signal?.aborted) {
 				throw new Error("Operation aborted");
@@ -798,16 +735,6 @@ export function createWebSearchToolDefinition(
 				content: [{ type: "text", text }],
 				details,
 			};
-		},
-		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatWebSearchCall(args, theme));
-			return text;
-		},
-		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatWebSearchResult(result as RenderableWebSearchResult, options, theme, context.showImages));
-			return text;
 		},
 	};
 }

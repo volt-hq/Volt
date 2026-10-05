@@ -8,7 +8,6 @@ import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
-import { createRequestUserInputToolDefinition } from "../src/core/tools/request-user-input.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import { UserInputDialog } from "../src/modes/interactive/components/user-input-dialog.ts";
@@ -64,6 +63,13 @@ const request = {
 	],
 };
 const fixtures: Array<{ mode: InteractiveMode; harness: Harness }> = [];
+
+/** The session's request_user_input tool, which asks through the client that shows a terminal. */
+function sessionTool(harness: Harness) {
+	const definition = harness.session.getToolDefinition("request_user_input");
+	if (!definition) throw new Error("request_user_input is not registered");
+	return definition;
+}
 
 afterEach(async () => {
 	for (const { mode, harness } of fixtures.splice(0)) {
@@ -231,7 +237,7 @@ describe.each(["regular", "fullscreen"] as const)("native questions in %s Intera
 		const priorFocus = access.ui.getFocusedComponent();
 		// A new user prompt deliberately returns ready plans to draft. Invoke the
 		// native tool directly here to exercise a question beside a still-ready plan.
-		const running = createRequestUserInputToolDefinition().execute(
+		const running = sessionTool(harness).execute(
 			"question-with-plan",
 			request,
 			undefined,
@@ -260,7 +266,7 @@ describe.each(["regular", "fullscreen"] as const)("native questions in %s Intera
 		const longRequest = structuredClone(request);
 		longRequest.questions[0].question = `Beginning of this question. ${"Consider the workspace constraints before selecting an option. ".repeat(7)}`;
 		longRequest.questions[0].options[0].description = "Explain this tradeoff in detail. ".repeat(8);
-		const running = createRequestUserInputToolDefinition().execute(
+		const running = sessionTool(harness).execute(
 			"long-question",
 			longRequest,
 			undefined,

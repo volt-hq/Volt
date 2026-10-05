@@ -48,7 +48,7 @@ function transcript(session: SessionManager, profile: Profile = localProfile): T
 }
 
 describe("protocol transcript view", () => {
-	test("projects UI-ready transcript views with bounded tool output and no image data", async () => {
+	test("projects UI-ready transcript views with presented tool calls and no image data", async () => {
 		const session = SessionManager.inMemory("/Users/jordan/project");
 		await seedSession(session, (seed) =>
 			seed.clientInput(
@@ -143,16 +143,11 @@ describe("protocol transcript view", () => {
 			},
 			{
 				role: "tool",
-				text: "Read /Users/jordan/project/src/secret.ts (completed)",
+				text: "read /Users/jordan/project/src/secret.ts (completed)",
 				truncated: false,
 				toolCallId: "read-call",
 				toolName: "read",
 				status: "completed",
-				summary: "Read /Users/jordan/project/src/secret.ts (completed)",
-				path: "/Users/jordan/project/src/secret.ts",
-				args: { path: "/Users/jordan/project/src/secret.ts" },
-				output: "secret file contents".repeat(100),
-				outputTruncated: false,
 				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 			{ role: "system", text: "summary ".repeat(500), truncated: false },
@@ -165,30 +160,19 @@ describe("protocol transcript view", () => {
 			},
 			{
 				role: "tool",
-				text: "Edited src/secret.ts (completed)",
+				text: "edit src/secret.ts (completed)",
 				truncated: false,
 				toolCallId: "edit-call",
 				toolName: "edit",
 				status: "completed",
-				summary: "Edited src/secret.ts (completed)",
-				path: "src/secret.ts",
-				args: { path: "src/secret.ts" },
-				output: "Successfully replaced 1 block in src/secret.ts.",
-				outputTruncated: false,
-				diffPreview: expect.stringMatching(/^diff x+\n\[truncated\]$/),
-				patchPreview: expect.stringMatching(/^patch y+\n\[truncated\]$/),
 				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 			{
 				role: "tool",
-				text: "Ran command: cat /Users/jordan/project/src/secret.ts; exit 0",
+				text: "$ cat /Users/jordan/project/src/secret.ts (completed)",
 				truncated: false,
 				toolName: "bash",
 				status: "completed",
-				summary: "Ran command: cat /Users/jordan/project/src/secret.ts; exit 0",
-				args: { command: "cat /Users/jordan/project/src/secret.ts" },
-				output: "PRIVATE KEY",
-				outputTruncated: false,
 				presentation: expect.objectContaining({ title: expect.any(Array) }),
 			},
 		]);
@@ -199,14 +183,26 @@ describe("protocol transcript view", () => {
 		expect(items[5]?.presentation).toMatchObject({ summary: [{ type: "text", key: "counts" }, { type: "diff" }] });
 		expect(JSON.stringify(items[6]?.presentation)).toContain("$ ");
 
-		// Diff and patch previews are full-fidelity only.
+		// Tool items carry no per-tool fields: clients render the presentation.
+		const toolFields = new Set([
+			"role",
+			"text",
+			"truncated",
+			"toolCallId",
+			"toolName",
+			"status",
+			"imageCount",
+			"presentation",
+		]);
+		for (const item of items.filter((each) => each.role === "tool")) {
+			expect(Object.keys(item).filter((key) => !toolFields.has(key))).toEqual([]);
+		}
 		const remote = transcript(
 			session,
 			remoteProfile({ grant: OBSERVE_GRANT, redaction: { workspacePath: "/Users/jordan/project" } }),
 		);
 		expect(remote[5]).toMatchObject({ role: "tool", toolName: "edit" });
-		expect(remote[5]).not.toHaveProperty("diffPreview");
-		expect(remote[5]).not.toHaveProperty("patchPreview");
+		expect(remote[2]?.text).not.toContain("/Users/jordan");
 		// Presentations present the redacted entry: no host path reaches the remote profile.
 		expect(JSON.stringify(remote.map((item) => item.presentation))).not.toContain("/Users/jordan");
 	});
@@ -316,39 +312,15 @@ describe("protocol transcript view", () => {
 			toolCallId: "subagent-call",
 			toolName: "subagent",
 			status: "completed",
-			summary: "subagent completed",
-			args: { agent: "general", task: "Review the implementation" },
-			details: {
-				mode: "single",
-				status: "completed",
-				subagentId: "sa_child",
-				sessionId: "child-session",
-				agent: { name: "general", source: "built-in" },
-				summary: { total: 1, completed: 1, failed: 0, cancelled: 0, running: 0 },
-				childSessions: [
-					{
-						index: 0,
-						subagentId: "sa_child",
-						sessionId: "child-session",
-						agent: { name: "general", source: "built-in" },
-						status: "completed",
-					},
-				],
-				output: {
-					bytes: 1_513,
-					truncated: false,
-					maxBytes: 50_000,
-				},
-			},
-			output: "model-visible child output",
-			outputTruncated: false,
 		});
-		expect(toolItem?.args).toEqual({ agent: "general", task: "Review the implementation" });
-		const output = (toolItem?.details?.output as { text?: unknown } | undefined)?.text;
-		expect(output).toEqual(expect.stringContaining("Child answer"));
-		expect(output).toEqual(expect.stringContaining("[truncated]"));
-		// The consumed one-time confirm token is omitted, matching the daemon
-		// and iroh projections.
+		// The child presents as a card that opens its work.
+		const presented = JSON.stringify(toolItem?.presentation);
+		expect(presented).toContain("general");
+		expect(presented).toContain("Review the implementation");
+		expect(presented).toContain("Child answer");
+		expect(presented).toContain('"open_work"');
+		expect(presented).toContain('"workId":"sa_child"');
+		// The consumed one-time confirm token is never presented.
 		expect(JSON.stringify(items)).not.toContain("confirmation-token");
 	});
 
@@ -390,15 +362,9 @@ describe("protocol transcript view", () => {
 		} as Parameters<typeof session.logWriter.appendMessage>[0]);
 
 		const toolItem = transcript(session).find((item) => item.role === "tool");
-		expect(toolItem).toMatchObject({
-			toolName: "subagent_registry",
-			args: { list: true, cursor: 50 },
-			details: {
-				mode: "list",
-				status: "completed",
-				summary: { total: 120, returned: 50, nextCursor: 20 },
-			},
-		});
+		expect(toolItem).toMatchObject({ toolName: "subagent_registry", status: "completed" });
+		expect(toolItem?.text).toContain("Subagent registry");
+		expect(JSON.stringify(toolItem?.presentation)).toContain("page output");
 	});
 
 	test("projects standard subagent registry follow arguments", async () => {
@@ -432,16 +398,11 @@ describe("protocol transcript view", () => {
 		} as Parameters<typeof session.logWriter.appendMessage>[0]);
 
 		const toolItem = transcript(session).find((item) => item.role === "tool");
-		expect(toolItem).toMatchObject({
-			toolName: "subagent_registry",
-			args: { follow: "sa_existing" },
-			details: {
-				mode: "follow",
-				status: "completed",
-				subagentId: "sa_existing",
-				agent: { name: "researcher", source: "built-in" },
-			},
-		});
+		expect(toolItem).toMatchObject({ toolName: "subagent_registry", status: "completed" });
+		// A followed run presents as its child.
+		const presented = JSON.stringify(toolItem?.presentation);
+		expect(presented).toContain("researcher");
+		expect(presented).toContain('"workId":"sa_existing"');
 	});
 
 	test("projects nested subagent delegation trees with live fields and a bounded depth", async () => {
@@ -500,27 +461,21 @@ describe("protocol transcript view", () => {
 		if (!toolItem) {
 			throw new Error("expected subagent tool item");
 		}
-		expect(toolItem.args).toEqual({ tasks: [{ agent: "researcher", task: "dig" }] });
-		const tasks = (toolItem.details as { tasks?: Array<Record<string, unknown>> }).tasks;
-		expect(tasks?.[0]).toMatchObject({
-			subagentId: "sa_task",
-			status: "running",
-			task: "dig",
-			startedAt: 1_000,
-			durationMs: 2_500,
-			toolCalls: 4,
-			tokens: 1_234,
-			currentActivity: "read docs/spec.md",
+		// The running child is a timed step, and its card names what it does and the delegation under it.
+		expect(toolItem.presentation).toMatchObject({
+			summary: expect.arrayContaining([
+				expect.objectContaining({
+					type: "progress",
+					kind: "steps",
+					steps: [expect.objectContaining({ status: "active", startedAt: 1_000, endedAt: 3_500 })],
+				}),
+			]),
 		});
-		// tasks nest at depth 0; children recurse up to the depth limit of 5.
-		let node = tasks?.[0] as { children?: Array<Record<string, unknown>> } | undefined;
-		const seen: string[] = [];
-		while (node?.children?.[0]) {
-			node = node.children[0] as { children?: Array<Record<string, unknown>> };
-			seen.push(String((node as { subagentId?: unknown }).subagentId));
-		}
-		expect(seen).toEqual(["sa_depth_2", "sa_depth_3", "sa_depth_4", "sa_depth_5"]);
-		expect(JSON.stringify(items)).not.toContain("sa_depth_6");
+		const presented = JSON.stringify(toolItem.presentation);
+		expect(presented).toContain("read docs/spec.md");
+		for (const depth of [2, 3, 4, 5]) expect(presented).toContain(`agent-${depth}`);
+		// The nested tree is bounded in depth.
+		expect(presented).not.toContain("agent-7");
 	});
 
 	test("projects displayed review seed messages so remote clients can continue from findings", async () => {
@@ -542,6 +497,10 @@ describe("protocol transcript view", () => {
 			role: "assistant",
 			text: "Automated review result\n\nFindings:\n1. Fix the bug",
 			truncated: false,
+			// The host presents its own review messages, on every profile.
+			presentation: {
+				body: [{ type: "markdown", key: "text", markdown: "Automated review result\n\nFindings:\n1. Fix the bug" }],
+			},
 		};
 		const remote = transcript(
 			session,
@@ -627,13 +586,10 @@ describe("protocol transcript view", () => {
 		const items = transcript(session);
 		const toolItems = items.filter((item) => item.role === "tool");
 
-		expect(toolItems[0]).toMatchObject({
-			role: "tool",
-			toolName: "read",
-			output: "Read image file [image/png]",
-			imageCount: 1,
-		});
-		expect(toolItems[1]).toMatchObject({ role: "tool", toolName: "read", output: "plain text" });
+		expect(toolItems[0]).toMatchObject({ role: "tool", toolName: "read", imageCount: 1 });
+		expect(JSON.stringify(toolItems[0]?.presentation)).toContain("Read image file [image/png]");
+		expect(toolItems[1]).toMatchObject({ role: "tool", toolName: "read" });
+		expect(JSON.stringify(toolItems[1]?.presentation)).toContain("plain text");
 		expect(toolItems[1]).not.toHaveProperty("imageCount");
 		expect(JSON.stringify(items)).not.toContain("aW1hZ2U=");
 	});

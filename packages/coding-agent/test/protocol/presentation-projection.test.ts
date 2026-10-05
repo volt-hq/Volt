@@ -63,16 +63,12 @@ async function call(toolName: string, args: JsonObject, text: string) {
 
 interface Registered {
 	present?: ToolPresenter;
-	rendersItself?: boolean;
 	extensionId?: string;
 }
 
 function presenters(tools: Record<string, Registered>, messages: Record<string, MessagePresenter> = {}) {
 	return new SessionPresenters({
-		tool: (name) => {
-			const tool = tools[name];
-			return tool === undefined ? undefined : { ...tool, rendersItself: tool.rendersItself === true };
-		},
+		tool: (name) => tools[name],
 		message: (type) => (messages[type] ? { present: messages[type], extensionId: "demo" } : undefined),
 		ownsWork: () => false,
 	});
@@ -125,11 +121,19 @@ describe("presentations of projected entries", () => {
 		expect(JSON.stringify(generic)).toContain("result text");
 	});
 
-	test("presents a built-in tool's call as the built-in does, unless a registered tool of its name renders itself", async () => {
+	test("presents a built-in tool's call as the built-in does, unless a registered tool of its name presents itself", async () => {
 		const { session, id } = await call("read", { path: "src/a.ts" }, "const a = 1;");
 		expect(JSON.stringify(view(session, id, presenters({}))?.presentation)).toContain("src/a.ts");
-		const override = view(session, id, presenters({ read: { rendersItself: true, extensionId: "demo" } }));
-		expect(override?.presentation).toMatchObject({ title: "read" });
+		// An extension's override of the tool without a presenter of its own presents as the built-in.
+		const override = view(session, id, presenters({ read: { extensionId: "demo" } }));
+		expect(JSON.stringify(override?.presentation)).toContain("src/a.ts");
+		expect(override?.presentation).not.toMatchObject({ title: "read" });
+		const own = view(
+			session,
+			id,
+			presenters({ read: { present: () => ({ title: "custom read" }), extensionId: "demo" } }),
+		);
+		expect(own?.presentation).toMatchObject({ title: "custom read" });
 	});
 
 	test("caches a presentation per entry until the presenters change", async () => {

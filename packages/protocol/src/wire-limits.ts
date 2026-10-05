@@ -77,8 +77,6 @@ export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UT
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES = 384 * 1024;
 /** Serialized bytes of a tool call's arguments on the remote profile. */
 export const RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES = 12 * 1024;
-/** Serialized bytes of a tool's partial-result details on the remote profile. */
-export const RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES = 20 * 1024;
 /**
  * Scalar cap on one remote transcript item's text and on one `content` chunk.
  * Clients page a truncated entry's text in chunks of this size.

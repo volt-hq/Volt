@@ -1804,7 +1804,7 @@ Reloading the extensions removes their kinds: `/reload` is refused while work ru
 
 ### volt.registerMessageRenderer(customType, renderer)
 
-Register a custom TUI renderer for messages with your `customType`. See [Custom UI](#custom-ui).
+No longer draws anything: custom messages render from the presentation `volt.registerMessagePresenter` returns, or as their text. Removed in a later release.
 
 ### volt.registerIntent(name, options)
 
@@ -2465,9 +2465,11 @@ export default function (volt: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](../src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
+> `renderCall`, `renderResult`, `renderShell`, and `rendersDuration` no longer draw anything: every tool call renders from its tool's `present()` presentation, the same `UiNode` data on every client, and a tool without `present()` shows as a generic card. These hooks are removed in a later release; the rest of this section describes them as they were.
 
-By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API.
+
+By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, the tool row uses fallback rendering for that slot.
 
 Set `renderShell: "self"` when the tool should render its own shell instead of using the default `Box`. This is useful for tools that need complete control over framing or background behavior, for example large previews that must stay visually stable after the tool settles.
 

@@ -333,7 +333,7 @@ describe("PR #329 remote SQLite locator privacy", () => {
 		const details = { output: [{ nested: { locator, ...parentLocator, publicPayload } }] };
 		const redactor = remoteRedactor();
 
-		// A tool's progress, streamed live.
+		// A running tool's arguments, streamed live (a tool's details no longer travel: it presents them).
 		const live = redactor.redact({
 			type: "live",
 			subscriptionId: "s1",
@@ -342,49 +342,28 @@ describe("PR #329 remote SQLite locator privacy", () => {
 			items: [
 				{
 					type: "tool",
+					op: "start",
+					toolCallId: "nested-locator-output",
+					toolName: "read",
+					args: details,
+				},
+				{
+					type: "tool",
 					op: "update",
 					toolCallId: "nested-locator-output",
 					toolName: "read",
-					partial: { content: [{ type: "text", text: "completed" }], details },
+					partial: { content: [{ type: "text", text: "completed" }] },
 				},
 			],
-		});
-		// The tool's result, committed.
-		const entry = redactor.redact({
-			type: "entry",
-			subscriptionId: "s1",
-			entry: {
-				ordinal: 2,
-				id: "result-entry-329",
-				parentId: null,
-				type: "message",
-				timestamp: "2026-01-01T00:00:00.000Z",
-				view: {
-					role: "tool",
-					text: "completed",
-					truncated: false,
-					toolCallId: "nested-locator-output",
-					toolName: "read",
-					details,
-				},
-			},
 		});
 
 		expect(live).toMatchObject({
 			items: [
-				{
-					partial: {
-						content: [{ type: "text", text: "completed" }],
-						details: { output: [{ nested: { publicPayload } }] },
-					},
-				},
+				{ args: { output: [{ nested: { publicPayload } }] } },
+				{ partial: { content: [{ type: "text", text: "completed" }] } },
 			],
 		});
-		expect(entry).toMatchObject({
-			type: "entry",
-			entry: { view: { text: "completed", details: { output: [{ nested: { publicPayload } }] } } },
-		});
-		for (const frame of [live, entry]) {
+		for (const frame of [live]) {
 			const wire = JSON.stringify(frame);
 			for (const forbidden of [
 				"sessionDirectory",

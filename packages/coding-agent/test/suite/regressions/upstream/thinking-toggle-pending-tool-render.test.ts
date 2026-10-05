@@ -7,7 +7,7 @@ import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
 import type { SessionPresenters } from "../../../../src/core/session/presenters.ts";
 import { initTheme } from "../../../../src/core/theme/runtime.ts";
-import type { ToolRow } from "../../../../src/modes/interactive/components/presented-tool.ts";
+import type { PresentedToolComponent } from "../../../../src/modes/interactive/components/presented-tool.ts";
 import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../../src/utils/ansi.ts";
 import { builtinSessionPresenters } from "../../../utilities/test-presenters.ts";
@@ -31,8 +31,8 @@ const EMPTY_USAGE: Usage = {
 };
 
 type RenderSessionContextThis = {
-	pendingTools: Map<string, ToolRow>;
-	liveBackgroundJobTools: Map<string, { component: ToolRow; jobId?: string }>;
+	pendingTools: Map<string, PresentedToolComponent>;
+	liveBackgroundJobTools: Map<string, { component: PresentedToolComponent; jobId?: string }>;
 	disposePendingTools(): void;
 	chatContainer: Container;
 	footer: { invalidate(): void };
@@ -46,8 +46,8 @@ type RenderSessionContextThis = {
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
-	getRegisteredToolDefinition(toolName: string): undefined;
-	createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): ToolRow;
+	toolCallWork(toolCallId: string): [];
+	createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): PresentedToolComponent;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
 
@@ -64,7 +64,7 @@ type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) =>
 function createFakeInteractiveModeThis(): RenderSessionContextThis {
 	const chatContainer = new Container();
 	return {
-		pendingTools: new Map<string, ToolRow>(),
+		pendingTools: new Map<string, PresentedToolComponent>(),
 		liveBackgroundJobTools: new Map(),
 		disposePendingTools() {
 			for (const component of this.pendingTools.values()) {
@@ -84,7 +84,7 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		toolOutputExpanded: false,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
-		getRegisteredToolDefinition: (_toolName: string) => undefined,
+		toolCallWork: () => [],
 		createToolRow(...args) {
 			return (InteractiveMode.prototype as unknown as { createToolRow: CreateToolRow }).createToolRow.apply(
 				this,

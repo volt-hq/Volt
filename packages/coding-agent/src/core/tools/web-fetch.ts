@@ -1,16 +1,13 @@
 import { lookup } from "node:dns/promises";
 import { isIP, type LookupFunction } from "node:net";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { Text } from "@hansjm10/volt-tui";
 import { Parser } from "htmlparser2";
 import { type Static, Type } from "typebox";
 import { Agent, fetch as undiciFetch } from "undici";
 import { VERSION } from "../../config.ts";
-import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
-import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
-import type { Theme } from "../theme/runtime.ts";
-import { getTextOutput, invalidArgText, str } from "./render-utils.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
+import { presentWebFetch } from "./query-presenters.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
@@ -113,11 +110,6 @@ export interface WebFetchToolOptions {
 	 */
 	urlPolicy?: WebFetchUrlPolicy;
 }
-
-type RenderableWebFetchResult = {
-	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
-	details?: WebFetchToolDetails;
-};
 
 function isTruthyEnvFlag(value: string | undefined): boolean {
 	if (!value) return false;
@@ -985,49 +977,6 @@ function createOutput(
 	return { text, details };
 }
 
-function formatWebFetchCall(args: { url?: string; maxBytes?: number } | undefined, theme: Theme): string {
-	const url = str(args?.url);
-	const invalidArg = invalidArgText(theme);
-	return (
-		theme.fg("toolTitle", theme.bold("web_fetch")) +
-		" " +
-		(url === null ? invalidArg : theme.fg("accent", url || "..."))
-	);
-}
-
-function formatWebFetchResult(
-	result: RenderableWebFetchResult,
-	options: ToolRenderResultOptions,
-	theme: Theme,
-	showImages: boolean,
-): string {
-	const output = getTextOutput(result, showImages).trim();
-	let text = "";
-	if (output) {
-		const lines = output.split("\n");
-		const maxLines = options.expanded ? lines.length : 16;
-		const displayLines = lines.slice(0, maxLines);
-		const remaining = lines.length - maxLines;
-		text += `\n${displayLines.map((line) => theme.fg("toolOutput", line)).join("\n")}`;
-		if (remaining > 0) {
-			text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("app.tools.expand", "to expand")}${theme.fg("muted", ")")}`;
-		}
-	}
-	if (result.details?.truncation?.truncated) {
-		const truncation = result.details.truncation;
-		const limit =
-			truncation.truncatedBy === "lines" ? `${truncation.maxLines} lines` : formatSize(truncation.maxBytes);
-		text += `\n${theme.fg("warning", `[Truncated: ${limit} limit]`)}`;
-	}
-	if (result.details?.downloadTruncation) {
-		text += `\n${theme.fg(
-			"warning",
-			`[Download truncated: ${formatSize(result.details.downloadTruncation.maxBytes)} limit]`,
-		)}`;
-	}
-	return text;
-}
-
 export function createWebFetchToolDefinition(
 	_cwd: string,
 	options?: WebFetchToolOptions,
@@ -1046,6 +995,7 @@ export function createWebFetchToolDefinition(
 			"Raise maxBytes only when the default output is truncated and the rest of the page is needed.",
 		],
 		parameters: webFetchSchema,
+		present: presentWebFetch,
 		async execute(_toolCallId, params: WebFetchToolInput, signal?: AbortSignal) {
 			if (signal?.aborted) {
 				throw new Error("Operation aborted");
@@ -1066,16 +1016,6 @@ export function createWebFetchToolDefinition(
 			}
 			const { text, details } = createOutput(request, response);
 			return { content: [{ type: "text", text }], details };
-		},
-		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatWebFetchCall(args, theme));
-			return text;
-		},
-		renderResult(result, options, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(formatWebFetchResult(result as RenderableWebFetchResult, options, theme, context.showImages));
-			return text;
 		},
 	};
 }

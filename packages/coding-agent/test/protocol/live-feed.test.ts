@@ -112,8 +112,10 @@ describe("live feed", () => {
 		expect(harness.session.liveState.snapshot().tools.get("mcp_call:c1")).toMatchObject({
 			toolName: "mcp",
 			args: { server: "docs", tool: "search" },
-			partial: { content: [{ type: "text", text: "page 1" }], details: { progress: 1, total: 3 } },
+			partial: { content: [{ type: "text", text: "page 1" }] },
 		});
+		// How the call progresses is its presentation's to show; the live item carries no details.
+		expect(harness.session.liveState.snapshot().tools.get("mcp_call:c1")?.partial).not.toHaveProperty("details");
 		emit({ type: "mcp_call_end", call: { ...call, status: "failed", durationMs: 5 } });
 		expect(
 			items()

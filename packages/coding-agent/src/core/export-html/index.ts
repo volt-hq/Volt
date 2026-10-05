@@ -15,35 +15,9 @@ import { BUILTIN_PRESENTERS } from "../tools/presenters.ts";
 import { type PresenterSet, presentCustomMessage, presentToolCall } from "../ui/presentation.ts";
 import { messagePresentationHtml, type PresentedHtml, toolPresentationHtml } from "./ui-node-html.ts";
 
-/**
- * Interface for rendering custom tools to HTML.
- * Used by agent-session to pre-render extension tool output.
- */
-export interface ToolHtmlRenderer {
-	/** Render a tool call to HTML. Returns undefined if tool has no custom renderer. */
-	renderCall(toolCallId: string, toolName: string, args: unknown): string | undefined;
-	/** Render a tool result to HTML. Returns collapsed/expanded or undefined if tool has no custom renderer. */
-	renderResult(
-		toolCallId: string,
-		toolName: string,
-		result: Array<{ type: string; text?: string; data?: string; mimeType?: string }>,
-		details: unknown,
-		isError: boolean,
-	): { collapsed?: string; expanded?: string } | undefined;
-}
-
-/** Pre-rendered HTML for a custom tool call and result */
-interface RenderedToolHtml {
-	callHtml?: string;
-	resultHtmlCollapsed?: string;
-	resultHtmlExpanded?: string;
-}
-
 export interface ExportOptions {
 	outputPath?: string;
 	themeName?: string;
-	/** Optional tool renderer for custom tools */
-	toolRenderer?: ToolHtmlRenderer;
 	/** The presenters tool calls and custom messages export with; the built-in tools' by default. */
 	presenters?: PresenterSet;
 }
@@ -142,10 +116,8 @@ interface SessionData {
 	leafId: string | null;
 	systemPrompt?: string;
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
-	/** Pre-rendered HTML for custom tool calls/results, keyed by tool call ID */
-	renderedTools?: Record<string, RenderedToolHtml>;
-	/** The presentations of tool calls whose tools present themselves, as HTML, by tool call id. */
-	presentedTools?: Record<string, PresentedHtml>;
+	/** The presentations of the tool calls, as HTML, by tool call id; `null` for a call its presentation hides. */
+	presentedTools?: Record<string, PresentedHtml | null>;
 	/** The presentations of custom messages whose types have presenters, as HTML, by entry id. */
 	presentedMessages?: Record<string, PresentedHtml>;
 }
@@ -187,13 +159,11 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 		.replace("{{HIGHLIGHT_JS}}", hljsJs);
 }
 
-/** Tools rendered directly by the HTML template (not pre-rendered via TUI→ANSI→HTML pipeline) */
-const TEMPLATE_RENDERED_TOOLS = new Set(["ls"]);
-
 /**
  * The presentations of the tool calls and custom messages of `entries`, as
- * HTML: calls whose tools present themselves, and custom messages whose types
- * have presenters. A call presents with its result, or as pending.
+ * HTML: every tool call (with its tool's presenter, or generically), and the
+ * custom messages whose types have presenters. A call presents with its
+ * result, or as pending.
  */
 export function presentSessionEntries(
 	entries: readonly SessionEntry[],
@@ -206,7 +176,7 @@ export function presentSessionEntries(
 			results.set(entry.message.toolCallId, entry.message);
 		}
 	}
-	const presentedTools: Record<string, PresentedHtml> = {};
+	const presentedTools: Record<string, PresentedHtml | null> = {};
 	const presentedMessages: Record<string, PresentedHtml> = {};
 	for (const entry of entries) {
 		if (entry.type === "custom_message" && entry.display) {
@@ -226,11 +196,9 @@ export function presentSessionEntries(
 		for (const block of entry.message.content) {
 			if (block.type !== "toolCall") continue;
 			const call: ToolCall = block;
-			const presenter = presenters.tool(call.name);
-			if (presenter === undefined) continue;
 			const result = results.get(call.id);
 			const presentation = presentToolCall(
-				presenter,
+				presenters.tool(call.name),
 				call.name,
 				{
 					args: call.arguments,
@@ -250,66 +218,13 @@ export function presentSessionEntries(
 				},
 				PRESENTATION_MAX_SERIALIZED_BYTES,
 			);
-			const html = toolPresentationHtml(presentation);
-			if (html) presentedTools[call.id] = html;
+			presentedTools[call.id] = toolPresentationHtml(presentation) ?? null;
 		}
 	}
 	return {
 		...(Object.keys(presentedTools).length === 0 ? {} : { presentedTools }),
 		...(Object.keys(presentedMessages).length === 0 ? {} : { presentedMessages }),
 	};
-}
-
-/**
- * Pre-render custom tools to HTML using their TUI renderers.
- */
-function preRenderCustomTools(
-	entries: SessionEntry[],
-	toolRenderer: ToolHtmlRenderer,
-): Record<string, RenderedToolHtml> {
-	const renderedTools: Record<string, RenderedToolHtml> = {};
-
-	for (const entry of entries) {
-		if (entry.type !== "message") continue;
-		const msg = entry.message;
-
-		// Find tool calls in assistant messages
-		if (msg.role === "assistant" && Array.isArray(msg.content)) {
-			for (const block of msg.content) {
-				if (block.type === "toolCall" && !TEMPLATE_RENDERED_TOOLS.has(block.name)) {
-					const callHtml = toolRenderer.renderCall(block.id, block.name, block.arguments);
-					if (callHtml) {
-						renderedTools[block.id] = { callHtml };
-					}
-				}
-			}
-		}
-
-		// Find tool results
-		if (msg.role === "toolResult" && msg.toolCallId) {
-			const toolName = msg.toolName || "";
-			// Only render if we have a pre-rendered call OR it's not template-rendered
-			const existing = renderedTools[msg.toolCallId];
-			if (existing || !TEMPLATE_RENDERED_TOOLS.has(toolName)) {
-				const rendered = toolRenderer.renderResult(
-					msg.toolCallId,
-					toolName,
-					msg.content,
-					msg.details,
-					msg.isError || false,
-				);
-				if (rendered) {
-					renderedTools[msg.toolCallId] = {
-						...existing,
-						resultHtmlCollapsed: rendered.collapsed,
-						resultHtmlExpanded: rendered.expanded,
-					};
-				}
-			}
-		}
-	}
-
-	return renderedTools;
 }
 
 /**
@@ -330,23 +245,12 @@ export async function exportSessionToHtml(
 
 	const entries = sm.getEntries();
 
-	// Pre-render custom tools if a tool renderer is provided
-	let renderedTools: Record<string, RenderedToolHtml> | undefined;
-	if (opts.toolRenderer) {
-		renderedTools = preRenderCustomTools(entries, opts.toolRenderer);
-		// Only include if we actually rendered something
-		if (Object.keys(renderedTools).length === 0) {
-			renderedTools = undefined;
-		}
-	}
-
 	const sessionData: SessionData = {
 		header: sm.getHeader(),
 		entries,
 		leafId: sm.getLeafId(),
 		systemPrompt: state?.systemPrompt,
 		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
-		renderedTools,
 		...presentSessionEntries(entries, opts.presenters ?? BUILTIN_PRESENTERS, sm.getCwd()),
 	};
 

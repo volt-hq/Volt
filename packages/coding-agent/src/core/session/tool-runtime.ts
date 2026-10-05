@@ -813,6 +813,7 @@ export class SessionToolRuntime {
 					]),
 				)
 			: createAllToolDefinitions(this.host.cwd, {
+					requestUserInput: { ask: (request, signal) => this.host.extensions().askUserInput(request, signal) },
 					jobs: { jobs: this.host.jobs().runtime },
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },

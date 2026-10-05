@@ -25,11 +25,11 @@ import {
 import type { SessionManager } from "../src/core/session-manager.ts";
 import type { SessionWriter } from "../src/core/session-writer.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "./utilities/remote-phone.ts";
+import { presentedMessage } from "./utilities/test-presenters.ts";
 
 function parsedReview(): ParsedReview {
 	return {
@@ -615,7 +615,7 @@ describe("durable review intents over protocol frames", () => {
 				{ summary: seed.details.summary },
 				new Date(0).toISOString(),
 			);
-			const view = new CustomMessageComponent(message);
+			const view = presentedMessage(message);
 			expect(view.render(100).lines.map(stripAnsi).join("\n")).toContain("0 active P0-P2 findings");
 			view.setExpanded(true);
 			const expanded = view.render(100).lines.map(stripAnsi).join("\n");

@@ -291,7 +291,7 @@ describe("background tool interface", () => {
 	it("collects a real native Bash process through the background interface", async () => {
 		const { jobs } = await runtime();
 		const tool = wrapToolDefinition(
-			withBackgroundJobs(createBashToolDefinition(process.cwd()), { jobs, start: (job) => jobs.start(job) }),
+			withBackgroundJobs(createBashToolDefinition(process.cwd()), { start: (job) => jobs.start(job) }),
 		);
 		const job = summary(
 			await tool.execute("shell-smoke", { command: "printf 'background smoke\\n'", background: true }),
@@ -317,7 +317,7 @@ describe("background tool interface", () => {
 				return { content: [{ type: "text", text: "done" }], details: { marker: "done" } };
 			},
 		};
-		const tool = wrapToolDefinition(withBackgroundJobs(definition, { jobs, start: (job) => jobs.start(job) }));
+		const tool = wrapToolDefinition(withBackgroundJobs(definition, { start: (job) => jobs.start(job) }));
 		const result = await tool.execute("call", { command: "work", background: true });
 		const job = summary(result);
 		expect(job.status).toBe("running");
@@ -341,9 +341,7 @@ describe("background tool interface", () => {
 				details: { status: params.confirm ? "failed" : "running" },
 			}),
 		};
-		const tool = wrapToolDefinition(
-			withBackgroundJobs(definition, { jobs, start: (job) => jobs.start(job), finalize }),
-		);
+		const tool = wrapToolDefinition(withBackgroundJobs(definition, { start: (job) => jobs.start(job), finalize }));
 		expect(await tool.execute("preflight", { agent: "general", background: true })).toMatchObject({
 			content: [{ text: "confirm token" }],
 		});

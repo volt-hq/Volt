@@ -1,32 +1,58 @@
 import { join } from "node:path";
-import { resetCapabilitiesCache, setCapabilities, type TUI, visibleWidth } from "@hansjm10/volt-tui";
+import type { JsonValue } from "@hansjm10/volt-ai";
+import type { MessagePresentation } from "@hansjm10/volt-protocol";
+import { resetCapabilitiesCache, setCapabilities, setCellDimensions, type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import type { CustomMessage } from "../src/core/messages.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { presentBackground, presentBash, presentRead, presentWrite } from "../src/core/tools/presenters.ts";
-import type { ToolPresenter } from "../src/core/ui/presentation.ts";
+import { HOST_UI_POLICY, type PresenterSet, type ToolPresenter } from "../src/core/ui/presentation.ts";
 import { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
 import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
+import { STREAMING_RENDER_INTERVAL_MS } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
 import type { ToolCardWork } from "../src/modes/interactive/ui-node/tool-card.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import * as imageConvert from "../src/utils/image-convert.ts";
 
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/** A presenter set holding `present` for every tool, or none. */
+function presenters(present: ToolPresenter | undefined): PresenterSet {
+	return {
+		generation: 0,
+		tool: () => (present === undefined ? undefined : { present, policy: HOST_UI_POLICY }),
+		message: () => undefined,
+	};
+}
 
 function row(
 	toolName: string,
 	args: Record<string, unknown>,
-	present: ToolPresenter,
+	present: ToolPresenter | undefined,
 	options: ConstructorParameters<typeof PresentedToolComponent>[5] = {},
 ) {
 	const requestRender = vi.fn();
+	const set = presenters(present);
 	const component = new PresentedToolComponent(
 		toolName,
 		args,
-		{ present, policy: { owner: "host" } },
+		() => set,
 		{ requestRender } as unknown as TUI,
 		process.cwd(),
 		options,
 	);
 	return { component, requestRender };
+}
+
+function customMessage(customType: string, content: string, details?: JsonValue): CustomMessage<JsonValue> {
+	return {
+		role: "custom",
+		customType,
+		content,
+		display: true,
+		...(details === undefined ? {} : { details }),
+		timestamp: 0,
+	};
 }
 
 function text(component: PresentedToolComponent, width = 80): string {
@@ -172,11 +198,11 @@ describe("presented tool rows", () => {
 	});
 
 	it("draws a presented custom message: its summary collapsed, its body expanded", () => {
-		const message = new PresentedMessageComponent("deploy-note", {
+		const message = new PresentedMessageComponent(customMessage("deploy-note", "deployed"), () => ({
 			title: "Deploy finished",
 			summary: [{ type: "text", text: "3 services" }],
 			body: [{ type: "keyValue", items: [{ label: "api", value: "ok" }] }],
-		});
+		}));
 		const collapsed = message.render(60).lines.map(stripAnsi).join("\n");
 		expect(collapsed).toContain("Deploy finished");
 		expect(collapsed).toContain("3 services");
@@ -185,7 +211,234 @@ describe("presented tool rows", () => {
 		const expanded = message.render(60).lines.map(stripAnsi).join("\n");
 		expect(expanded).toContain("api: ok");
 		expect(expanded).not.toContain("3 services");
-		const untitled = new PresentedMessageComponent("deploy-note", { body: [{ type: "text", text: "body" }] });
+		const untitled = new PresentedMessageComponent(customMessage("deploy-note", "deployed"), () => ({
+			body: [{ type: "text", text: "body" }],
+		}));
 		expect(untitled.render(60).lines.map(stripAnsi).join("\n")).toContain("deploy-note");
+	});
+
+	it("draws a custom message without a presentation as its label and Markdown text", () => {
+		const message = new PresentedMessageComponent(customMessage("note", "**Bold** text"), () => undefined);
+		const rendered = message.render(60).lines.map(stripAnsi).join("\n");
+		expect(rendered).toContain("note");
+		expect(rendered).toContain("Bold text");
+		expect(rendered).not.toContain("**Bold**");
+	});
+
+	it("presents again with the presenters there are now: a disabled extension's presenter no longer draws", () => {
+		let enabled = true;
+		const extension: ToolPresenter = () => ({
+			title: "deploy (extension)",
+			summary: [{ type: "text", text: "ext" }],
+		});
+		const set: PresenterSet = {
+			generation: 0,
+			tool: () => (enabled ? { present: extension, policy: HOST_UI_POLICY } : undefined),
+			message: () => undefined,
+		};
+		const component = new PresentedToolComponent(
+			"deploy",
+			{ target: "prod" },
+			() => set,
+			{ requestRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+		component.updateResult({ content: [{ type: "text", text: "shipped" }], isError: false });
+		expect(text(component)).toContain("deploy (extension)");
+		enabled = false;
+		// Re-renders keep the presentation; refreshing presents it again.
+		expect(text(component)).toContain("deploy (extension)");
+		component.refreshPresentation();
+		const generic = text(component);
+		expect(generic).not.toContain("deploy (extension)");
+		expect(generic).toContain("shipped");
+		component.dispose();
+
+		let presentation: MessagePresentation | undefined = { body: [{ type: "text", text: "styled by ext" }] };
+		const message = new PresentedMessageComponent(customMessage("deploy-note", "plain text"), () => presentation);
+		expect(message.render(60).lines.map(stripAnsi).join("\n")).toContain("styled by ext");
+		presentation = undefined;
+		message.refreshPresentation();
+		const plain = message.render(60).lines.map(stripAnsi).join("\n");
+		expect(plain).toContain("plain text");
+		expect(plain).not.toContain("styled by ext");
+	});
+
+	it("does not list again the work its presentation shows with an action", () => {
+		const present: ToolPresenter = () => ({
+			title: "Subagents",
+			summary: [
+				{
+					type: "card",
+					key: "child",
+					title: "worker",
+					actions: [{ id: "open", label: "Open", intent: { type: "open_work", input: { workId: "sa_1" } } }],
+				},
+			],
+		});
+		const work: ToolCardWork[] = [
+			{ workId: "sa_1", title: "child task", status: "running" },
+			{ workId: "job_2", title: "other job", status: "running" },
+		];
+		const { component } = row("subagent", {}, present, { work: () => work });
+		component.updateResult({ content: [], isError: false });
+		const rendered = text(component);
+		expect(rendered).not.toContain("child task");
+		expect(rendered).toContain("Running · other job");
+		component.dispose();
+	});
+
+	it("shows how long each timed step ran, and how long an active one runs so far", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10_000);
+		const present: ToolPresenter = () => ({
+			title: "steps",
+			summary: [
+				{
+					type: "progress",
+					kind: "steps",
+					steps: [
+						{ label: "first", status: "done", startedAt: 1_000, endedAt: 3_500 },
+						{ label: "second", status: "active", detail: "busy", startedAt: 8_000 },
+						{ label: "third", status: "pending" },
+					],
+				},
+			],
+		});
+		const { component } = row("steps", {}, present);
+		component.updateResult({ content: [], isError: false }, true);
+		let rendered = text(component);
+		expect(rendered).toContain("first  2.5s");
+		expect(rendered).toContain("second  busy · 2.0s");
+		vi.setSystemTime(13_000);
+		rendered = text(component);
+		expect(rendered).toContain("second  busy · 5.0s");
+		component.dispose();
+	});
+
+	it("hides a call whose presentation is hidden", () => {
+		const { component } = row("quiet", {}, () => ({ title: "quiet", hidden: true }));
+		expect(component.render(120).lines).toEqual([]);
+		component.updateResult({ content: [], isError: false });
+		expect(component.render(120).lines).toEqual([]);
+		component.dispose();
+	});
+
+	it("presents a call without a presenter generically: its output collapsed to ten lines", () => {
+		const { component } = row("custom_tool", {}, undefined);
+		component.updateResult({
+			content: [{ type: "text", text: Array.from({ length: 30 }, (_, i) => `line-${i + 1}`).join("\n") }],
+			isError: false,
+		});
+		const collapsed = text(component, 120);
+		expect(collapsed).toContain("line-10");
+		expect(collapsed).not.toContain("line-11");
+		expect(collapsed).toContain("to expand");
+		component.setExpanded(true);
+		const expanded = text(component, 120);
+		expect(expanded).toContain("line-11");
+		expect(expanded).toContain("line-30");
+
+		const short = row("custom_tool", {}, undefined).component;
+		short.updateResult({ content: [{ type: "text", text: "short-1\nshort-2" }], isError: false });
+		expect(text(short, 120)).toContain("short-2");
+		expect(text(short, 120)).not.toContain("to expand");
+		component.dispose();
+		short.dispose();
+	});
+
+	it("hides a sub-second duration once the call ended", () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(1_000);
+		const { component } = row("bash", { command: "true" }, presentBash, { liveProgress: true });
+		component.markExecutionStarted();
+		vi.setSystemTime(1_400);
+		component.updateResult({ content: [], isError: false });
+		expect(text(component)).toContain("$ true [success]");
+		expect(text(component)).not.toContain("0.4s");
+		component.dispose();
+	});
+
+	it("presents streaming arguments at most once per interval and the latest at completion", () => {
+		vi.useFakeTimers();
+		const seen: unknown[] = [];
+		const present: ToolPresenter = (input) => {
+			seen.push(input.args);
+			return { title: "preview" };
+		};
+		const { component } = row("preview", {}, present);
+		try {
+			for (let index = 0; index < 1000; index++) component.updateArgs({ text: String(index) });
+			expect(seen).toEqual([{}, { text: "0" }]);
+			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS);
+			expect(seen.at(-1)).toEqual({ text: "999" });
+			component.updateArgs({ text: "final" });
+			component.setArgsComplete();
+			expect(seen.at(-1)).toEqual({ text: "final" });
+			const count = seen.length;
+			vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
+			expect(seen).toHaveLength(count);
+			expect(vi.getTimerCount()).toBe(0);
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("drops a queued presentation on disposal and shows a failure at once", () => {
+		vi.useFakeTimers();
+		const present = vi.fn<ToolPresenter>(() => ({ title: "preview" }));
+		const { component } = row("preview", {}, present);
+		component.updateArgs({ step: 1 });
+		component.updateArgs({ step: 2 });
+		component.updateResult({ content: [{ type: "text", text: "Stopped" }], isError: true });
+		expect(text(component)).toContain("[failure]");
+		component.dispose();
+		const count = present.mock.calls.length;
+		vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
+		expect(present).toHaveBeenCalledTimes(count);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it("converts a non-PNG result image before Sixel shows it", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		try {
+			const { component, requestRender } = row("custom_tool", {}, undefined);
+			component.updateResult({
+				content: [
+					{ type: "image", mimeType: "image/gif", data: "R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==" },
+				],
+				isError: false,
+			});
+			expect(component.render(120).lines.join("\n")).not.toContain("\x1bP0;1;0q");
+			requestRender.mockClear();
+			await vi.waitFor(() => expect(component.render(120).lines.join("\n")).toContain("\x1bP0;1;0q"));
+			expect(requestRender).toHaveBeenCalled();
+			component.dispose();
+		} finally {
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
+	it("does not apply or render-request a conversion after disposal", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		const conversion = Promise.withResolvers<{ data: string; mimeType: string } | null>();
+		vi.spyOn(imageConvert, "convertToPng").mockReturnValue(conversion.promise);
+		try {
+			const { component, requestRender } = row("custom_tool", {}, undefined);
+			component.updateResult({
+				content: [{ type: "image", mimeType: "image/gif", data: "R0lGODlhAQABAIAAAAAAAP8=" }],
+				isError: false,
+			});
+			requestRender.mockClear();
+			component.dispose();
+			conversion.resolve({ data: PNG, mimeType: "image/png" });
+			await conversion.promise;
+			await Promise.resolve();
+			expect(requestRender).not.toHaveBeenCalled();
+			expect(component.render(80).lines).toEqual([]);
+		} finally {
+			vi.restoreAllMocks();
+		}
 	});
 });
