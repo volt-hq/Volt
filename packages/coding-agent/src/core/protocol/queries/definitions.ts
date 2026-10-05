@@ -13,7 +13,6 @@ import { mcpManagerOf, workspaceService } from "../intents/host.ts";
 import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
-import { projectRpcBackgroundJob } from "../projection/background-jobs.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 
@@ -205,25 +204,6 @@ export const subagentDefinitionsQuery = defineQuery({
 		const subagents = ctx.services.subagents;
 		if (!subagents) throw new QueryRejectedError("unavailable", "Subagents are not available in this host");
 		return subagents.list();
-	},
-});
-
-export const jobOutputQuery = defineQuery({
-	name: "job_output",
-	scope: "conversation",
-	remote: "safe",
-	requires: observe,
-	async run(ctx, params) {
-		ctx.assertCurrent?.();
-		const job = targetOf(ctx).session.backgroundJobs.get(params.jobId);
-		return {
-			job: {
-				...projectRpcBackgroundJob(job),
-				output: stripVTControlCharacters(job.output)
-					.replace(/\r\n?/g, "\n")
-					.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
-			},
-		};
 	},
 });
 
@@ -541,7 +521,6 @@ export const BUILTIN_QUERIES = {
 	host_status: hostStatusQuery,
 	web_search_status: webSearchStatusQuery,
 	subagent_definitions: subagentDefinitionsQuery,
-	job_output: jobOutputQuery,
 	work_output: workOutputQuery,
 	agent_options: agentOptionsQuery,
 	session_contexts: sessionContextsQuery,

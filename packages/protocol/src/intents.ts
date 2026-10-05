@@ -24,7 +24,6 @@
 import type { JsonValue } from "@hansjm10/volt-ai";
 import { type Static, type TObject, type TSchema, type TString, type TUnion, Type } from "typebox";
 import { RpcAgentOptionsModelSelectionSchema } from "./agent-options.ts";
-import { RpcBackgroundJobSummarySchema } from "./background-jobs.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcMcpAuthResponseSchema, RpcMcpServerResponseSchema } from "./mcp.ts";
@@ -218,11 +217,7 @@ export const INTENT_SCHEMAS = {
 		output: Type.Object({ path: Type.String({ minLength: 1 }) }, closed),
 	},
 
-	// Background jobs and subagents
-	cancel_job: {
-		input: Type.Object({ jobId: RpcConversationIdentifierSchema }, closed),
-		output: Type.Object({ job: RpcBackgroundJobSummarySchema }, closed),
-	},
+	// Subagents
 	subagent_start: {
 		input: Type.Object({ agent: Type.String(), prompt: Type.String() }, closed),
 		output: Type.Object({ subagentId: Type.String(), conversation: LogSessionIdSchema }, closed),

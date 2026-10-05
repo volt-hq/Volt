@@ -24,13 +24,12 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "@hansjm10/volt-agent-core";
-import { AdmissionGate, Conversation, type ConversationLog, type ConversationWork } from "@hansjm10/volt-agent-core";
+import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { BackgroundJobDiagnostics } from "./background-job-diagnostics.ts";
-import { BackgroundJobManager, type BackgroundJobSource } from "./background-jobs.ts";
 import type { BashResult } from "./bash-executor.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import type { CompactionResult } from "./compaction/index.ts";
@@ -60,7 +59,6 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { SessionBackgroundContinuation } from "./session/background-continuation.ts";
 import { SessionBash } from "./session/bash.ts";
 import { SessionClientInputs } from "./session/client-inputs.ts";
 import { SessionCompaction } from "./session/compaction.ts";
@@ -71,12 +69,14 @@ import {
 	SessionExtensionBinding,
 } from "./session/extension-binding.ts";
 import { SessionExtensionServices } from "./session/extension-services.ts";
+import { SessionJobs } from "./session/jobs.ts";
 import { SessionLifecycle } from "./session/lifecycle.ts";
 import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
 import { type NavigateTreeOptions, type NavigateTreeResult, SessionNavigation } from "./session/navigation.ts";
 import { SessionPlanning } from "./session/planning.ts";
 import { SessionPromptCache } from "./session/prompt-cache.ts";
 import { SessionPrompting } from "./session/prompting.ts";
+import { SessionProviderStream } from "./session/provider-stream.ts";
 import { SessionRetry } from "./session/retry-policy.ts";
 import { exportSessionToJsonl, SessionInfo } from "./session/session-info.ts";
 import { SessionToolRuntime } from "./session/tool-runtime.ts";
@@ -93,7 +93,9 @@ import type { SettingsManager } from "./settings-manager.ts";
 import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import type { BashOperations } from "./tools/bash.ts";
 import type { SubagentToolManager } from "./tools/index.ts";
+import type { JobSource } from "./tools/jobs.ts";
 import type { PlanStepInput } from "./tools/planning.ts";
+import { WorkRegistry } from "./work/registry.ts";
 
 // ============================================================================
 // Skill Block Parsing
@@ -396,7 +398,8 @@ export class AgentSession {
 	private _sessionWriter!: SessionWriter;
 	private readonly _streamFn: StreamFn;
 	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
-	private readonly _backgroundDiagnostics: BackgroundJobDiagnostics;
+	private readonly _diagnostics: BackgroundJobDiagnostics;
+	private readonly _providerStream: SessionProviderStream;
 	private readonly _promptCache: SessionPromptCache;
 	private readonly _modelSettings: ModelSettings;
 	private readonly _retry: SessionRetry;
@@ -406,7 +409,7 @@ export class AgentSession {
 	private readonly _tools: SessionToolRuntime;
 	private readonly _extensions: SessionExtensionBinding;
 	private readonly _turnPolicy: SessionTurnPolicy;
-	private readonly _background: SessionBackgroundContinuation;
+	private readonly _jobs: SessionJobs;
 	private readonly _events: SessionEvents;
 	private readonly _clientInputs: SessionClientInputs;
 	private readonly _prompting: SessionPrompting;
@@ -435,19 +438,22 @@ export class AgentSession {
 	/** Whether the in-flight stop starts retained queued input once it settles; joined stops can only decline. */
 	private _abortQueueDelivery: { requested: boolean } | undefined;
 
-	// Background work outlives individual model turns, but never this session.
-	private readonly _backgroundJobs = new BackgroundJobManager({
-		admissionGate: this._admissionGate,
-		isToolAllowed: (name) =>
-			!this._disposed &&
-			this._planning.current.mode !== "plan" &&
-			this._tools.isToolActive(name) &&
-			this._tools.isTrustedBuiltin(name),
-		getGeneration: () => this._generation(),
-		getRunIdentity: () => this._events.activeAgentRun,
-		recordDiagnostic: (event) => this._background.recordDiagnostic(event),
+	/**
+	 * The conversation's work (RFC §7): its kinds, the executors of the work
+	 * this runtime runs, and the cancel, resume, and open paths every client
+	 * shares. Work outlives individual turns; closing the session stops it.
+	 */
+	private readonly _work: WorkRegistry = new WorkRegistry({
+		conversationId: () => this.sessionId,
+		work: () => this._conversation.work,
+		state: () => this.sessionManager.getConversationState(),
+		live: () => this.liveState,
+		turnId: () => this._turnId,
+		runningChanged: () => {
+			this._activityChanged();
+			this._jobs.runtime.changed();
+		},
 	});
-	private _unsubscribeBackgroundJobs?: () => void;
 
 	// Extension system
 	private _extensionServices!: SessionExtensionServices;
@@ -490,7 +496,7 @@ export class AgentSession {
 	private constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
 		this._streamFn = config.streamFn;
-		this._backgroundDiagnostics = new BackgroundJobDiagnostics({
+		this._diagnostics = new BackgroundJobDiagnostics({
 			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
 			sessionId: () => this.sessionId,
 			parentSessionId: () => this.sessionManager.getHeader()?.parentSession?.sessionId,
@@ -519,7 +525,7 @@ export class AgentSession {
 		this._modelRegistry = config.modelRegistry;
 		this._planning = new SessionPlanning({
 			sessionManager: this.sessionManager,
-			backgroundJobs: this._backgroundJobs,
+			hasRunningJobs: () => this._jobs.runtime.hasRunning,
 			conversation: () => this._conversation,
 			sessionWriter: () => this._sessionWriter,
 			tools: () => this._tools,
@@ -557,7 +563,7 @@ export class AgentSession {
 			cacheRetention: () => this._modelSettings.streamOptions.cacheRetention,
 			// The phase the session last observed counts too: an operation that already ended still has
 			// its start to report, so keepalive sees both edges in order.
-			hasInFlightWork: () => this._events.phaseOperation !== null || this.isBusy || this.hasBackgroundJobs,
+			hasInFlightWork: () => this._events.phaseOperation !== null || this.isBusy || this.hasRunningWork,
 			isDisposed: () => this._disposed,
 			emit: (event) => this._events.emit(event),
 		});
@@ -603,7 +609,6 @@ export class AgentSession {
 				settingsManager: this.settingsManager,
 				modelRegistry: this._modelRegistry,
 				resourceLoader: this._resourceLoader,
-				backgroundJobs: this._backgroundJobs,
 				cwd: this._cwd,
 				agentDir: this._agentDir,
 				lostSignal: this._lostAbort.signal,
@@ -612,7 +617,7 @@ export class AgentSession {
 				conversation: () => this._conversation,
 				extensions: () => this._extensions,
 				extensionServices: () => this._extensionServices,
-				background: () => this._background,
+				jobs: () => this._jobs,
 				sessionWriter: () => this._sessionWriter,
 				isDisposed: () => this._disposed,
 				assertActive: () => this._assertActive(),
@@ -652,14 +657,11 @@ export class AgentSession {
 				conversation: () => this._conversation,
 				tools: () => this._tools,
 				extensionServices: () => this._extensionServices,
-				background: () => this._background,
+				jobs: () => this._jobs,
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),
 				hasActiveWork: () =>
-					this._turnActive ||
-					this.isBashRunning ||
-					this.hasActiveSessionMutation ||
-					this._backgroundJobs.hasActive,
+					this._turnActive || this.isBashRunning || this.hasActiveSessionMutation || this.hasRunningWork,
 				extensionCommandRunning: () => this._prompting.extensionCommandRunning,
 				sendCustomMessage: (message, options, allowDuringPromptTransaction) =>
 					this._prompting.sendCustomMessage(message, options, allowDuringPromptTransaction),
@@ -677,7 +679,7 @@ export class AgentSession {
 			extensionRunner: () => this.extensionRunner,
 			extensionServices: () => this._extensionServices,
 			tools: () => this._tools,
-			background: () => this._background,
+			jobs: () => this._jobs,
 			isDisposed: () => this._disposed,
 			isLost: () => this._lostError !== undefined,
 			assertActive: () => this._assertActive(),
@@ -693,42 +695,45 @@ export class AgentSession {
 			prepareDelivery: (delivery) => this._planning.prepareDelivery(delivery),
 			compactionDecision: (cause, check) => this._compaction.decision(cause, check),
 		});
-		this._background = new SessionBackgroundContinuation({
-			jobs: this._backgroundJobs,
-			admissionGate: this._admissionGate,
-			diagnostics: this._backgroundDiagnostics,
+		this._providerStream = new SessionProviderStream({
+			diagnostics: this._diagnostics,
 			toolProgressDiagnostics: this._toolProgressDiagnostics,
 			providerStream: (model, context, options) => this._streamFn(model, context, options),
+			conversation: () => this._conversation,
+			activeRun: () => this._events.activeAgentRun,
+			isCompacting: () => this._compaction.activeCompaction !== undefined,
+		});
+		this._jobs = new SessionJobs({
+			admissionGate: this._admissionGate,
+			work: () => this._work,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
 			turnPolicy: () => this._turnPolicy,
 			assertActive: () => this._assertActive(),
 			isDisposed: () => this._disposed,
-			isLost: () => this._lostError !== undefined,
-			activeRun: () => this._events.activeAgentRun,
-			isCompacting: () => this._compaction.activeCompaction !== undefined,
 			generation: () => this._generation(),
-			hasForegroundWork: () =>
-				this.isBusy ||
-				this._turnActive ||
-				this._admittedPromptWork.size > 0 ||
-				this._admittedAncillaryWork.size > 0 ||
-				this._clientInputs.replayPending ||
-				this._conversation.queue.prompt.length > 0,
 			hasSessionOperationBarrier: () => this._hasSessionOperationBarrier,
 			isToolExecutionPending: (toolCallId) => this._events.pendingToolExecutions.has(toolCallId),
-			trackPromptWork: (work) => this._trackAdmittedPromptWork(work),
+			isToolGranted: (name) =>
+				!this._disposed &&
+				this._planning.current.mode !== "plan" &&
+				this._tools.isToolActive(name) &&
+				this._tools.isTrustedBuiltin(name),
+			recordDiagnostic: (event) => this._providerStream.recordDiagnostic(event),
 		});
+		this._work.register(this._jobs.runtime.kind());
 		this._events = new SessionEvents({
 			gitContextProvider: this.gitContextProvider,
 			toolProgressDiagnostics: this._toolProgressDiagnostics,
-			backgroundDiagnostics: this._backgroundDiagnostics,
-			backgroundJobs: this._backgroundJobs,
+			diagnostics: this._diagnostics,
 			retry: this._retry,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
 			extensionServices: () => this._extensionServices,
-			background: () => this._background,
+			providerStream: () => this._providerStream,
+			jobs: () => this._jobs,
+			work: () => this._work,
+			turnId: () => this._turnId,
 			promptCache: () => this._promptCache,
 			turnPolicy: () => this._turnPolicy,
 			bash: () => this._bash,
@@ -771,7 +776,6 @@ export class AgentSession {
 			tools: () => this._tools,
 			bash: () => this._bash,
 			lifecycle: () => this._lifecycle,
-			background: () => this._background,
 			clientInputs: () => this._clientInputs,
 			events: () => this._events,
 			sessionWriter: () => this._sessionWriter,
@@ -797,7 +801,6 @@ export class AgentSession {
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
 			extensions: () => this._extensions,
-			background: () => this._background,
 			planning: () => this._planning,
 			isDisposed: () => this._disposed,
 			assertNotDisposed: () => this._assertNotDisposed(),
@@ -817,11 +820,10 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settingsManager: this.settingsManager,
 			modelSettings: this._modelSettings,
-			backgroundJobs: this._backgroundJobs,
+			hasRunningJobs: () => this._jobs.runtime.hasRunning,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
 			extensionServices: () => this._extensionServices,
-			background: () => this._background,
 			planning: () => this._planning,
 			turnActive: () => this._turnActive,
 			isBashRunning: () => this.isBashRunning,
@@ -847,7 +849,7 @@ export class AgentSession {
 			this._conversation = await Conversation.open<AgentTool>({
 				log: this._log,
 				entryTypes: Object.values(PRODUCT_SESSION_ENTRY_TYPES),
-				stream: (model, context, options) => this._background.stream(model, context, options),
+				stream: (model, context, options) => this._providerStream.stream(model, context, options),
 				resolveModel: (provider, modelId) => this._modelSettings.findModel(provider, modelId),
 				...(config.promptCacheRefresh === undefined ? {} : { promptCacheRefresh: config.promptCacheRefresh }),
 				summarizer: {
@@ -906,6 +908,8 @@ export class AgentSession {
 			);
 			void this.gitContextProvider.refresh();
 
+			// Work a previous runtime left open ends `interrupted`, unless it can resume.
+			await this._work.reconcile();
 			this._tools.build({
 				activeToolNames: config.initialActiveToolNames,
 				includeAllExtensionTools: true,
@@ -914,15 +918,11 @@ export class AgentSession {
 			this._clientInputs.publishQueue();
 			await this._clientInputs.readmitRecovered();
 			this._clientInputs.fenceRecovered();
-			this._unsubscribeBackgroundJobs = this._backgroundJobs.subscribe(() => {
-				this._activityChanged();
-				this._background.jobsChanged();
-			});
 		} catch (error) {
 			this._disposed = true;
 			void this._extensionServices?.close();
-			void this._backgroundJobs.close();
-			void this._backgroundDiagnostics.close();
+			void this._work.cancelAll("closed").catch(() => undefined);
+			void this._diagnostics.close();
 			void this._promptCache.close();
 			const cleanupErrors: unknown[] = [];
 			const cleanup = (finalize: () => void): void => {
@@ -1001,22 +1001,26 @@ export class AgentSession {
 	}
 
 	/**
-	 * The conversation's work writes (RFC §7.1): the only way `work_*` entries
-	 * reach the log. The hosted conversation's work registry is their caller.
+	 * The conversation's work (RFC §7): its kinds, the executors of the work
+	 * this runtime runs, and the cancel, resume, and open paths every client
+	 * shares. Code running in the session (its tools, the subagent manager,
+	 * host actions) starts work through it; the host reconciles the work a
+	 * previous runtime left when it opens the conversation, and closing the
+	 * session stops every executor.
 	 */
-	get conversationWork(): ConversationWork {
-		return this._conversation.work;
+	get work(): WorkRegistry {
+		return this._work;
 	}
 
 	/** The running turn's operation id, if a turn runs: work started meanwhile belongs to it. */
-	get turnId(): string | undefined {
-		const operation = this._conversation.operation;
+	private get _turnId(): string | undefined {
+		const operation = this._conversation?.operation;
 		return operation?.kind === "turn" ? operation.id : undefined;
 	}
 
 	/**
 	 * The session lost its log. Nothing it does afterwards can be saved, so it cancels its own
-	 * work: the turn (with its retries and compaction), background jobs, bash, and the
+	 * work: the turn (with its retries and compaction), its work items, bash, and the
 	 * lifetime signal command handlers observe. In-flight command handlers and extension tools
 	 * stop being awaited, so `isBusy` clears once cooperative work settles and the runtime can
 	 * end. Cancellation is deferred to a microtask so abort listeners never reenter a failing
@@ -1031,6 +1035,8 @@ export class AgentSession {
 		if (this._disposed) return;
 		this._extensionServices.invalidate();
 		this._clientInputs.lost(error);
+		// Work persists through the lost log and cannot finish; the next open reconciles it.
+		void this._work.cancelAll("closed").catch(() => undefined);
 		queueMicrotask(() => {
 			if (this._disposed) return;
 			this._lifetimeAbort.abort(error);
@@ -1191,12 +1197,10 @@ export class AgentSession {
 			() => {
 				this._admittedAncillaryWork.delete(operation);
 				this._activityRevision++;
-				this._background.schedule();
 			},
 			() => {
 				this._admittedAncillaryWork.delete(operation);
 				this._activityRevision++;
-				this._background.schedule();
 			},
 		);
 		return operation;
@@ -1236,12 +1240,10 @@ export class AgentSession {
 			() => {
 				this._admittedPromptWork.delete(operation);
 				this._activityRevision++;
-				this._background.schedule();
 			},
 			() => {
 				this._admittedPromptWork.delete(operation);
 				this._activityRevision++;
-				this._background.schedule();
 			},
 		);
 		return operation;
@@ -1292,14 +1294,11 @@ export class AgentSession {
 				this._disposed = true;
 				this._extensionServices.invalidate();
 				this._events.endOperation();
-				this._unsubscribeBackgroundJobs?.();
-				this._unsubscribeBackgroundJobs = undefined;
 				this._promptCache.dispose();
 				this._lifetimeAbort.abort(new Error("AgentSession is disposed"));
-				this._background.cancelSchedule();
 				// Teardown never releases its hold, even if an overlapping abort finishes.
 				this._admissionGate.suspend();
-				this._background.clearRunRecords();
+				this._jobs.clearRunRecords();
 				this._events.clearStreamingState();
 				this._clientInputs.handBackQueue();
 			},
@@ -1308,7 +1307,7 @@ export class AgentSession {
 				// Pending dialogs and approvals end; nothing more reaches the clients.
 				this.liveState.close();
 			},
-			closeBackgroundJobs: () => this._backgroundJobs.close(),
+			closeWork: () => this._work.cancelAll("closed"),
 			settleLiveClientInputs: () => this._clientInputs.settleOnDisposal(),
 			stopToolServers: () => this._tools.stopServers(),
 			drainAdmittedWork: (includePromptWork) => this._drainAdmittedWork(includePromptWork),
@@ -1328,7 +1327,7 @@ export class AgentSession {
 				this._events.clearListeners();
 				this._navigation.clearListeners();
 			},
-			closeBackgroundDiagnostics: () => this._backgroundDiagnostics.close(),
+			closeDiagnostics: () => this._diagnostics.close(),
 		});
 	}
 
@@ -1436,14 +1435,14 @@ export class AgentSession {
 		return !this._disposed && this._conversation.operation?.kind === "turn";
 	}
 
-	/** Local UI access to this runtime's branch-scoped background jobs. */
-	get backgroundJobs(): BackgroundJobSource {
-		return this._backgroundJobs;
+	/** The conversation's background jobs: its `job` work, with the output of the jobs this runtime runs. */
+	get jobs(): JobSource {
+		return this._jobs.runtime;
 	}
 
-	/** Whether session-owned background jobs are running or still cancelling. */
-	get hasBackgroundJobs(): boolean {
-		return this._backgroundJobs.hasActive;
+	/** Whether this runtime runs work: open work with an executor, cancelling work included. */
+	get hasRunningWork(): boolean {
+		return this._work.running().length > 0;
 	}
 
 	/**
@@ -1460,7 +1459,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * Observe changes of what `isBusy`, `operation`, and `hasBackgroundJobs`
+	 * Observe changes of what `isBusy`, `operation`, and `hasRunningWork`
 	 * read. Listeners run synchronously; their failures are ignored.
 	 */
 	subscribeActivity(listener: () => void): () => void {
@@ -1471,7 +1470,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * An `isBusy` or `hasBackgroundJobs` input changed. Prompt-cache keepalive measures its idle
+	 * An `isBusy` or `hasRunningWork` input changed. Prompt-cache keepalive measures its idle
 	 * window from these transitions.
 	 */
 	private _activityChanged(): void {
@@ -1718,7 +1717,7 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	/** Wait for the agent and any session-level prompt work to settle, excluding background jobs. */
+	/** Wait for the agent and any session-level prompt work to settle, excluding work items. */
 	async waitForIdle(): Promise<void> {
 		await this._waitForIdle();
 	}
@@ -1735,22 +1734,14 @@ export class AgentSession {
 		await Promise.race([this._conversation.waitForNotBusy(), disposed]);
 	}
 
-	/** Join background job settlement without cancelling work or blocking foreground prompts. */
-	waitForBackgroundJobs(): Promise<void> {
-		return this._backgroundJobs.waitForIdle();
-	}
-
 	/** Wait for the conversation's operations, and by default for queued input still committing. */
 	private async _waitForIdle(includeQueueAdmissions = true): Promise<void> {
 		for (;;) {
 			if (includeQueueAdmissions) await Promise.allSettled([...this._clientInputs.queueAdmissions]);
-			await this._background.scheduledDispatch;
-			await this._background.attemptSettled;
 			await this._conversation.waitForIdle();
 			if (
 				this._conversation.operation === undefined &&
-				(!includeQueueAdmissions || this._clientInputs.queueAdmissions.size === 0) &&
-				!this._background.pending
+				(!includeQueueAdmissions || this._clientInputs.queueAdmissions.size === 0)
 			)
 				return;
 		}
@@ -1880,8 +1871,7 @@ export class AgentSession {
 		this._abortQueueDelivery = queueDelivery;
 		const releaseAdmission = this._admissionGate.suspend();
 		this._extensionServices.invalidate();
-		this._backgroundJobs.suppressContinuations();
-		this._background.cancelSchedule();
+		const turnId = this._turnId;
 		let resolveAbort!: () => void;
 		let rejectAbort!: (error: unknown) => void;
 		const drain = new Promise<void>((resolve, reject) => {
@@ -1915,7 +1905,9 @@ export class AgentSession {
 			},
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
-			() => this._backgroundJobs.cancelAll(),
+			// A stop fences the notices of the work its turn started, and cancels running work.
+			() => (turnId === undefined ? undefined : this._work.suppressDelivery(turnId)),
+			() => this._work.cancelAll("cancelled"),
 			() => this._extensionServices.drain(),
 			// Queued input committing meanwhile stays queued; the stop does not wait for it.
 			() => this._waitForIdle(false),

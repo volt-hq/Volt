@@ -1,7 +1,7 @@
 /**
  * Conversation intents: input, run control, the conversation's own settings
  * (entries on its branch), agent mode and plans, structural moves, and
- * background work.
+ * subagents.
  */
 
 import type { Api, Model } from "@hansjm10/volt-ai";
@@ -11,7 +11,6 @@ import { openFork, openNewSession, openStoredSessionById } from "../../host/sess
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
 import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
-import { projectRpcBackgroundJob } from "../projection/background-jobs.ts";
 import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
 import { defineIntent, INTENT_ENABLED, type IntentContext, IntentRejectedError, type IntentTarget } from "./types.ts";
 
@@ -141,7 +140,7 @@ export const followUpIntent = defineIntent({
 export const abortIntent = defineIntent({
 	name: "abort",
 	label: "Cancel run",
-	description: "Abort the current agent operation and all background jobs",
+	description: "Abort the current agent operation and cancel the work it runs",
 	category: "session",
 	scope: "conversation",
 	fence: "branch",
@@ -541,25 +540,8 @@ export const exportHtmlIntent = defineIntent({
 });
 
 // ============================================================================
-// Background jobs and subagents
+// Subagents
 // ============================================================================
-
-export const cancelJobIntent = defineIntent({
-	name: "cancel_job",
-	label: "Cancel job",
-	description: "Cancel one background job",
-	category: "session",
-	scope: "conversation",
-	fence: "branch",
-	remote: "safe",
-	requires: control,
-	whileBusy: "run",
-	async run(ctx, input) {
-		ctx.assertCurrent?.();
-		return { job: projectRpcBackgroundJob(targetOf(ctx).session.backgroundJobs.cancel(input.jobId)) };
-	},
-	accept: (result) => ({ result }),
-});
 
 function subagentsOf(ctx: IntentContext) {
 	const subagents = ctx.services.subagents;

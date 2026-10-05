@@ -1,24 +1,28 @@
+/**
+ * Background jobs (RFC §7.2 `job` work): native bash and subagent calls with
+ * `background: true` run as work items of the conversation. A completed or
+ * failed job queues a notice that wakes an idle conversation, unless a
+ * `jobs wait` returned its result, a `jobs read` took it first, or the turn
+ * that started it stopped on a final response, a policy, or a tool. Jobs run
+ * under their tool grant, block structural changes while they run, and are
+ * cancelled by an abort and interrupted when the session closes.
+ */
+
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { type Context, type FauxResponseStep, fauxAssistantMessage, fauxToolCall, getModel } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import { setKeybindings, TuiMainScreen } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { convertResponsesMessages } from "../../../ai/src/providers/openai-responses-shared.ts";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import {
-	BACKGROUND_JOB_NOTIFICATION_TYPE,
-	BackgroundJobManager,
-	type BackgroundJobSnapshot,
-} from "../../src/core/background-jobs.ts";
 import type { ExtensionAPI, ToolResultEvent } from "../../src/core/extensions/index.ts";
 import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
-import { backgroundJobResult } from "../../src/core/tools/background.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
-import { getBackgroundJobResultSnapshots } from "../../src/core/tools/jobs.ts";
+import { type JobSnapshot, type JobSummary, jobOfDetails } from "../../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
@@ -75,10 +79,10 @@ function controlledBash(holdAbortCleanup = false, exitCode = 0) {
 	};
 }
 
-function jobSnapshot(result: unknown): BackgroundJobSnapshot {
-	const snapshot = getBackgroundJobResultSnapshots((result as { details?: unknown }).details)[0];
-	if (!snapshot) throw new Error(`Expected background job result: ${JSON.stringify(result)}`);
-	return snapshot;
+function jobOf(result: unknown): JobSummary {
+	const job = jobOfDetails((result as { details?: unknown } | undefined)?.details);
+	if (!job) throw new Error(`Expected a background job result: ${JSON.stringify(result)}`);
+	return job;
 }
 
 function jobsTool(harness: Harness): AgentTool {
@@ -89,26 +93,33 @@ function jobsTool(harness: Harness): AgentTool {
 
 function notices(harness: Harness) {
 	return harness.session.messages.filter(
-		(message) => message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
+		(message) => message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE,
 	);
 }
 
-async function startJob(harness: Harness): Promise<BackgroundJobSnapshot> {
+/** Host inputs the conversation queued for finished work, by state. */
+function noticeInputs(harness: Harness) {
+	return [...harness.session.sessionManager.getConversationState().clientInputs.inputs.values()].filter(
+		(input) => input.origin === "host",
+	);
+}
+
+async function startJob(harness: Harness, command = "controlled work"): Promise<JobSummary> {
 	harness.setResponses([
-		fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
-			stopReason: "toolUse",
-		}),
+		fauxAssistantMessage(fauxToolCall("bash", { command, background: true }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Parent can continue independently."),
 	]);
 	await harness.session.prompt("Start independent work");
 	const result = harness.session.messages
 		.reverse()
 		.find((message) => message.role === "toolResult" && message.toolName === "bash");
-	return jobSnapshot(result);
+	return jobOf(result);
 }
 
-async function waitJob(harness: Harness, id: string): Promise<BackgroundJobSnapshot> {
-	return jobSnapshot(await jobsTool(harness).execute("host-wait", { action: "wait", ids: [id], timeoutMs: 30_000 }));
+/** The job once every executor stopped: its result is recorded by then. */
+async function settled(harness: Harness, id: string): Promise<JobSnapshot> {
+	await harness.session.work.waitForIdle();
+	return harness.session.jobs.get(id);
 }
 
 describe("AgentSession background jobs", () => {
@@ -152,24 +163,13 @@ describe("AgentSession background jobs", () => {
 		vi.spyOn(control, "showStatus");
 		return control;
 	}
+
 	async function setup(options: HarnessOptions = {}) {
 		const harness = await createHarness({
 			initialActiveToolNames: ["bash", "jobs"],
 			settings: { lsp: { enabled: false }, compaction: { enabled: false }, retry: { enabled: false } },
 			...options,
 		});
-		// Faux has no serialized payload. Exercise the real payload policy on a synthetic
-		// message payload inside its asynchronous response factory, after stream creation.
-		const setResponses = harness.setResponses;
-		harness.setResponses = (responses) =>
-			setResponses(
-				responses.map((response) => async (context, options, state, model) => {
-					const payload = { messages: structuredClone(context.messages) };
-					const replacement = (await options?.onPayload?.(payload, model)) as typeof payload | undefined;
-					const delivered = { ...context, messages: (replacement === undefined ? payload : replacement).messages };
-					return typeof response === "function" ? response(delivered, options, state, model) : response;
-				}),
-			);
 		await harness.session.setSessionName("Background jobs test");
 		harnesses.push(harness);
 		return harness;
@@ -184,30 +184,23 @@ describe("AgentSession background jobs", () => {
 		setKeybindings(new KeybindingsManager());
 	});
 
-	it("lets the parent finish while Bash lives, then automatically collects its completion", async () => {
+	it("lets the parent finish while Bash lives, then wakes the idle conversation with a notice", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
-		expect(harness.session.hasBackgroundJobs).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(false);
 		const job = await startJob(harness);
 		await backend.started.promise;
-		expect(job.status).toBe("running");
-		expect(harness.session.isStreaming).toBe(false);
+		expect(job).toMatchObject({ tool: "bash", status: "running", label: "controlled work" });
 		expect(harness.session.isBusy).toBe(false);
 		await harness.session.waitForIdle();
-		expect(harness.session.hasBackgroundJobs).toBe(true);
+		expect(harness.session.hasRunningWork).toBe(true);
 		expect(harness.session.getLastAssistantText()).toBe("Parent can continue independently.");
 		expect(backend.signal?.aborted).toBe(false);
-		backend.finish.resolve();
-		const completed = await waitJob(harness, job.id);
-		expect(completed.status).toBe("completed");
-		expect(harness.session.hasBackgroundJobs).toBe(false);
-		expect(completed.output).toContain("worker output");
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(notices(harness)).toHaveLength(0);
+		expect(harness.session.work.get(job.id)).toMatchObject({ kind: "job", toolCallId: job.toolCallId });
 
 		harness.setResponses([
 			(context) => {
-				expect(context.messages.map(getMessageText).join("\n")).toContain(`${job.id}: completed (bash)`);
+				expect(context.messages.map(getMessageText).join("\n")).toContain(`(job ${job.id}) completed.`);
 				return fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), {
 					stopReason: "toolUse",
 				});
@@ -220,697 +213,21 @@ describe("AgentSession background jobs", () => {
 				return fauxAssistantMessage("Collected the result.");
 			},
 		]);
+		backend.finish.resolve();
 		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected the result."));
 		await harness.session.waitForIdle();
+		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.jobs.get(job.id)).toMatchObject({ status: "completed" });
 		expect(notices(harness)).toHaveLength(1);
-		const { output: _output, outputTruncated: _truncated, lastOutputAt: _lastOutputAt, ...summary } = completed;
-		expect(notices(harness)[0]).toMatchObject({ details: { jobIds: [job.id], jobs: [summary] } });
+		expect(notices(harness)[0]).toMatchObject({ details: { workId: job.id, kind: "job", outcome: "completed" } });
 		expect(JSON.stringify(notices(harness)[0])).not.toContain("untrusted payload");
 		harness.setResponses([fauxAssistantMessage("Still done.")]);
 		await harness.session.prompt("Anything else?");
 		expect(notices(harness)).toHaveLength(1);
+		expect(harness.faux.state.callCount).toBe(5);
 	});
 
-	it.each([
-		["completed", "read"],
-		["completed", "wait"],
-		["failed", "read"],
-		["failed", "wait"],
-		["cancelled", "read"],
-		["cancelled", "wait"],
-	] as const)("clears a %s notice only when the model receives its terminal %s result", async (status, action) => {
-		const backend = controlledBash(true, status === "failed" ? 1 : 0);
-		const harness = await setup();
-		const job = await startJob(harness);
-		const source = harness.session.backgroundJobs;
-		harness.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("jobs", action === "wait" ? { action, ids: [job.id], timeoutMs: 0 } : { action, id: job.id }),
-				{
-					stopReason: "toolUse",
-				},
-			),
-			fauxAssistantMessage("The job is still running."),
-		]);
-		await harness.session.prompt("Inspect progress");
-		expect(source.listUncollected()).toMatchObject([{ id: job.id, status: "running" }]);
-		if (status === "cancelled") source.cancel(job.id);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		const terminal = source.get(job.id);
-		expect(terminal.status).toBe(status);
-		expect(source.listUncollected()).toMatchObject([{ id: job.id, status }]);
-
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "list" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("The job ended."),
-		]);
-		await harness.session.prompt("List jobs");
-		expect(notices(harness)).toHaveLength(1);
-		expect(source.listUncollected()).toMatchObject([{ id: job.id, status }]);
-
-		harness.setResponses([
-			fauxAssistantMessage(
-				fauxToolCall("jobs", action === "wait" ? { action, ids: [job.id] } : { action, id: job.id }),
-				{ stopReason: "toolUse" },
-			),
-			fauxAssistantMessage("Collected the result."),
-		]);
-		await harness.session.prompt("Collect this result");
-		expect(source.listUncollected()).toEqual([]);
-		expect(source.list()).toHaveLength(1);
-		expect(source.get(job.id)).toEqual(terminal);
-		expect(harness.faux.state.callCount).toBe(8);
-	});
-
-	it("acknowledges only the collected job, leaving other terminal results visible", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const first = await startJob(harness);
-		const second = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: first.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("Collected the first result."),
-		]);
-		await harness.session.prompt("Collect one job");
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: second.id }]);
-		expect(harness.session.backgroundJobs.list()).toHaveLength(2);
-	});
-
-	it("keeps a terminal read visible when policy stops before another model request", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		const unregister = harness.control.onToolResult((event) =>
-			event.toolName === "jobs" ? { disposition: "stop" } : undefined,
-		);
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-		]);
-		await harness.session.prompt("Read, then stop");
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
-		expect(harness.faux.state.callCount).toBe(3);
-		unregister();
-		harness.setResponses([fauxAssistantMessage("Now I received the result.")]);
-		await harness.session.prompt("Continue");
-		expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-	});
-
-	it("does not acknowledge an inspection removed from the model context", async () => {
-		const backend = controlledBash();
-		let hideResult = true;
-		const harness = await setup({
-			extensionFactories: [
-				(volt) => {
-					volt.on("context", (event) => ({
-						messages: event.messages.filter(
-							(message) => !hideResult || message.role !== "toolResult" || message.toolName !== "jobs",
-						),
-					}));
-				},
-			],
-		});
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("No result was included."),
-		]);
-		await harness.session.prompt("Read the result");
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
-		hideResult = false;
-		harness.setResponses([fauxAssistantMessage("The result is now included.")]);
-		await harness.session.prompt("Continue");
-		expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-	});
-
-	it.each(["error", "aborted"] as const)(
-		"acknowledges only results in the replayed context after an %s turn is dropped",
-		async (stopReason) => {
-			const backend = controlledBash();
-			let omittedJobId: string | undefined;
-			const harness = await setup({
-				extensionFactories: [
-					(volt) => {
-						volt.on("context", (event) => ({
-							messages: event.messages.map((message) =>
-								message.role === "assistant" &&
-								message.content.some(
-									(part) =>
-										part.type === "toolCall" && part.name === "jobs" && part.arguments.id === omittedJobId,
-								)
-									? { ...message, stopReason }
-									: message,
-							),
-						}));
-					},
-				],
-			});
-			const first = await startJob(harness);
-			const second = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			omittedJobId = first.id;
-			const requests: ReturnType<typeof convertResponsesMessages>[] = [];
-			// Use the real serializer with a different provider, but return a faux response.
-			const response: FauxResponseStep = async (context, options) => {
-				const model = getModel("openai", "gpt-5.4");
-				const payload = { input: convertResponsesMessages(model, context, new Set(["openai"])) };
-				await options?.onPayload?.(payload, model);
-				requests.push(payload.input);
-				return fauxAssistantMessage("Received the serialized results.");
-			};
-			harness.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: first.id }), { stopReason: "toolUse" }),
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: second.id }), { stopReason: "toolUse" }),
-				response,
-			]);
-			await harness.session.prompt("Read both terminal results");
-			const outputs = requests[0].filter((item) => item.type === "function_call_output");
-			expect(outputs).toHaveLength(3); // Two launch acknowledgements and the surviving inspection.
-			expect(
-				outputs.filter((item) => String(item.output).includes(`Background job ${first.id}: completed`)),
-			).toEqual([]);
-			expect(
-				outputs.filter((item) => String(item.output).includes(`Background job ${second.id}: completed`)),
-			).toHaveLength(1);
-			expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: first.id }]);
-			omittedJobId = undefined;
-			harness.faux.setResponses([response]);
-			await harness.session.prompt("Continue with the restored result");
-			expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-		},
-	);
-
-	it("retains a terminal result when the provider builds no payload", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		harness.faux.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("Provider completed without a payload."),
-		]);
-		await harness.session.prompt("Read the result");
-		expect(harness.session.getLastAssistantText()).toBe("Provider completed without a payload.");
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-	});
-
-	it.each(["redacted", "replacement", "missing-details", "error"] as const)(
-		"respects post-policy inspection results before acknowledging collection: %s",
-		async (change) => {
-			const backend = controlledBash();
-			const harness = await setup({
-				extensionFactories: [
-					(volt) => {
-						volt.on("tool_result", (event) => {
-							if (event.toolName !== "jobs") return;
-							if (change === "error") return { isError: true };
-							if (change === "missing-details") return { details: null };
-							if (change === "replacement") return { content: [{ type: "text", text: "Inspection withheld" }] };
-							const snapshot = { ...jobSnapshot(event), output: "[redacted]" };
-							return { content: backgroundJobResult(snapshot).content, details: { backgroundJob: snapshot } };
-						});
-					},
-				],
-			});
-			const job = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			harness.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-				fauxAssistantMessage("Received the policy result."),
-			]);
-			await harness.session.prompt("Read the result");
-			expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(change === "redacted" ? 0 : 1);
-			expect(harness.session.backgroundJobs.get(job.id).output).toContain("worker output");
-		},
-	);
-
-	it.each(["unchanged", "identical-replacement"] as const)(
-		"waits for payload policy and successful stream completion before collection: %s",
-		async (change) => {
-			const backend = controlledBash();
-			const payloadReached = deferred();
-			const releasePayload = deferred();
-			const responseReached = deferred();
-			const releaseResponse = deferred();
-			const harness = await setup({
-				extensionFactories: [
-					(volt) => {
-						volt.on("before_provider_request", async (event) => {
-							const payload = event.payload as Pick<Context, "messages">;
-							if (
-								!payload.messages.some(
-									(message) => message.role === "toolResult" && message.toolName === "jobs",
-								)
-							)
-								return;
-							payloadReached.resolve();
-							await releasePayload.promise;
-							return change === "identical-replacement" ? structuredClone(payload) : undefined;
-						});
-					},
-				],
-			});
-			const job = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			harness.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-				async (context) => {
-					expect(context.messages.some((message) => getMessageText(message).includes("worker output"))).toBe(true);
-					responseReached.resolve();
-					await releaseResponse.promise;
-					return fauxAssistantMessage("Collected the result.");
-				},
-			]);
-			const prompt = harness.session.prompt("Collect the result");
-			try {
-				await payloadReached.promise;
-				expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-				releasePayload.resolve();
-				await responseReached.promise;
-				expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-			} finally {
-				releasePayload.resolve();
-				releaseResponse.resolve();
-				await prompt;
-			}
-			expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-		},
-	);
-
-	it.each(["remove", "in-place-remove", "unrelated-change", "throw"] as const)(
-		"retains results after a changed or failed payload hook, then collects on a clean request: %s",
-		async (change) => {
-			const backend = controlledBash();
-			let transform = true;
-			const harness = await setup({
-				extensionFactories: [
-					(volt) => {
-						volt.on("before_provider_request", (event) => {
-							const payload = event.payload as Pick<Context, "messages">;
-							if (
-								!transform ||
-								!payload.messages.some(
-									(message) => message.role === "toolResult" && message.toolName === "jobs",
-								)
-							)
-								return;
-							if (change === "throw") throw new Error("Payload inspection failed");
-							if (change === "unrelated-change") return { ...payload, temperature: 0 };
-							const messages = payload.messages.filter(
-								(message) =>
-									!(message.role === "toolResult" && message.toolName === "jobs") &&
-									!(
-										message.role === "assistant" &&
-										message.content.some((part) => part.type === "toolCall" && part.name === "jobs")
-									),
-							);
-							if (change === "remove") return { ...payload, messages };
-							payload.messages = messages;
-						});
-					},
-				],
-			});
-			const job = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			harness.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [job.id] }), { stopReason: "toolUse" }),
-				(context) => {
-					const received = context.messages.some(
-						(message) => message.role === "toolResult" && message.toolName === "jobs",
-					);
-					expect(received).toBe(change === "unrelated-change" || change === "throw");
-					return fauxAssistantMessage("Received the filtered request.");
-				},
-			]);
-			await harness.session.prompt("Collect the result");
-			expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-			expect(harness.session.getLastAssistantText()).toBe("Received the filtered request.");
-			transform = false;
-			harness.setResponses([fauxAssistantMessage("Now received the native result.")]);
-			await harness.session.prompt("Continue without transforming the payload");
-			expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-			expect(harness.session.backgroundJobs.get(job.id).output).toContain("worker output");
-		},
-	);
-
-	it("does not collect when aborted while the terminal-result payload hook is pending", async () => {
-		const backend = controlledBash();
-		const payloadReached = deferred();
-		const releasePayload = deferred();
-		let hold = true;
-		const harness = await setup({
-			extensionFactories: [
-				(volt) => {
-					volt.on("before_provider_request", async (event) => {
-						const payload = event.payload as Pick<Context, "messages">;
-						if (
-							hold &&
-							payload.messages.some((message) => message.role === "toolResult" && message.toolName === "jobs")
-						) {
-							payloadReached.resolve();
-							await releasePayload.promise;
-						}
-					});
-				},
-			],
-		});
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("This response is aborted."),
-		]);
-		const prompt = harness.session.prompt("Read the result");
-		try {
-			await payloadReached.promise;
-			expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
-			const abort = harness.session.abort();
-			releasePayload.resolve();
-			await abort;
-		} finally {
-			releasePayload.resolve();
-			await prompt;
-		}
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-		hold = false;
-		harness.setResponses([fauxAssistantMessage("Now received the result.")]);
-		await harness.session.prompt("Continue");
-		expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-	});
-
-	it.each(["error", "aborted"] as const)("keeps results pending after a provider %s", async (stopReason) => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await harness.session.waitForBackgroundJobs();
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("", {
-				stopReason,
-				error: { kind: "unknown", retryable: false, message: "Controlled provider failure" },
-			}),
-		]);
-		await harness.session.prompt("Read the result");
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-		harness.setResponses([fauxAssistantMessage("Result received on retry.")]);
-		await harness.session.prompt("Retry");
-		expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
-	});
-
-	it.each(["missing-callback", "unserializable-before", "unserializable-after"] as const)(
-		"retains results when payload delivery cannot be verified: %s",
-		async (failure) => {
-			const backend = controlledBash();
-			const harness = await setup({
-				extensionFactories: [
-					(volt) => {
-						volt.on("before_provider_request", (event) => {
-							if (failure === "unserializable-after") {
-								const payload = event.payload as { self?: unknown };
-								payload.self = payload;
-							}
-						});
-					},
-				],
-			});
-			const job = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			// Deliberately bypass setup's payload-aware response factory to model opaque providers.
-			harness.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-				async (context, options, _state, model) => {
-					if (failure !== "missing-callback") {
-						const payload: { messages: Context["messages"]; self?: unknown } = { messages: context.messages };
-						if (failure === "unserializable-before") payload.self = payload;
-						await options?.onPayload?.(payload, model);
-					}
-					return fauxAssistantMessage("Opaque provider completed.");
-				},
-			]);
-			await harness.session.prompt("Read the result");
-			expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-			expect(harness.session.getLastAssistantText()).toBe("Opaque provider completed.");
-		},
-	);
-
-	it("offers a non-cancelling SDK join separate from foreground idle", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		await startJob(harness);
-		const settled = vi.fn();
-		const joining = harness.session.waitForBackgroundJobs().then(settled);
-		try {
-			await harness.session.waitForIdle();
-			expect(settled).not.toHaveBeenCalled();
-			expect(harness.session.hasBackgroundJobs).toBe(true);
-			expect(backend.signal?.aborted).toBe(false);
-		} finally {
-			backend.finish.resolve();
-		}
-		await joining;
-		expect(harness.session.hasBackgroundJobs).toBe(false);
-	});
-
-	it.each(["", "unsubmitted draft", "!keep this command draft"])(
-		"cancels an idle background job through onEscape and preserves queues and draft %j",
-		async (draft) => {
-			const backend = controlledBash();
-			const harness = await setup();
-			const control = setupInteractive(harness);
-			const job = await startJob(harness);
-			// Input queued behind a held turn claim stays queued (an idle steer would start its own turn).
-			harness.control.conversation.reserve();
-			await harness.session.steer("queued steering");
-			await harness.session.followUp("queued follow-up");
-			control.defaultEditor.setText(draft);
-			const abort = vi.spyOn(harness.session, "abort");
-
-			control.defaultEditor.onEscape!();
-
-			await vi.waitFor(() => expect(abort).toHaveBeenCalledExactlyOnceWith("keyboard_interrupt"));
-			expect((await waitJob(harness, job.id)).status).toBe("cancelled");
-			expect(backend.signal?.aborted).toBe(true);
-			expect(harness.session.hasBackgroundJobs).toBe(false);
-			expect(harness.session.pendingMessageCount).toBe(0);
-			expect(control.defaultEditor.getText()).toBe(
-				["queued steering", "queued follow-up", draft].filter(Boolean).join("\n\n"),
-			);
-			expect(harness.faux.state.callCount).toBe(2);
-		},
-	);
-
-	it("keeps Ctrl+C as editor clearing while an idle background job runs", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		await startJob(harness);
-		control.defaultEditor.setText("unsent draft");
-
-		control.defaultEditor.handleInput("\x03");
-
-		expect(control.defaultEditor.getText()).toBe("");
-		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
-	});
-
-	it.each(["onSubmit", "Enter"])("handles rejected /plan through %s without stopping jobs", async (entryPoint) => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const job = await startJob(harness);
-		const planning = harness.session.planningState;
-		const abort = vi.spyOn(harness.session, "abort");
-
-		if (entryPoint === "onSubmit") {
-			await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
-		} else {
-			const terminal = control.renderer.terminal as VirtualTerminal;
-			terminal.sendInput("/plan");
-			terminal.sendInput("\r");
-		}
-
-		await vi.waitFor(() =>
-			expect(control.showError).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/abort or wait/)),
-		);
-		expect(control.showStatus).not.toHaveBeenCalled();
-		expect(control.shutdown).not.toHaveBeenCalled();
-		expect(abort).not.toHaveBeenCalled();
-		expect(harness.session.planningState).toEqual(planning);
-		expect(harness.session.agentMode).toBe("build");
-		expect(harness.session.isBusy).toBe(false);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
-		expect(backend.signal?.aborted).toBe(false);
-		expect(control.defaultEditor.getText()).toBe("");
-		backend.finish.resolve();
-		expect((await waitJob(harness, job.id)).status).toBe("completed");
-		expect(harness.faux.state.callCount).toBe(2);
-
-		await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
-		expect(harness.session.agentMode).toBe("plan");
-		expect(control.showStatus).toHaveBeenLastCalledWith("Plan mode: agent tools are read-only");
-		await expect(control.defaultEditor.onSubmit!("/build")).resolves.toBeUndefined();
-		expect(harness.session.agentMode).toBe("build");
-		expect(control.showStatus).toHaveBeenLastCalledWith("Build mode");
-		expect(control.showError).toHaveBeenCalledTimes(1);
-	});
-
-	it.each(["/quit", "Ctrl+D"])("requires confirmation for %s after the foreground finishes", async (entryPoint) => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const terminal = control.renderer.terminal as VirtualTerminal;
-		await startJob(harness);
-		const abort = vi.spyOn(harness.session, "abort");
-		const dispose = vi.spyOn(harness.session, "dispose");
-		let now = Date.now();
-		vi.spyOn(Date, "now").mockImplementation(() => now);
-		const quit = () => {
-			if (entryPoint === "/quit") {
-				terminal.sendInput("/quit");
-				terminal.sendInput("\r");
-			} else {
-				terminal.sendInput("\x04");
-			}
-		};
-
-		expect(harness.session.isBusy).toBe(false);
-		quit();
-		expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
-		expect(control.shutdown).not.toHaveBeenCalled();
-		expect(abort).not.toHaveBeenCalled();
-		expect(dispose).not.toHaveBeenCalled();
-		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
-
-		now += 2999;
-		quit();
-		expect(control.shutdown).toHaveBeenCalledTimes(1);
-		expect(control.showWarning).toHaveBeenCalledTimes(1);
-		expect(control.showError).not.toHaveBeenCalled();
-	});
-
-	it("protects cancelling background work until cleanup settles", async () => {
-		const backend = controlledBash(true);
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const terminal = control.renderer.terminal as VirtualTerminal;
-		const job = await startJob(harness);
-		const abort = vi.spyOn(harness.session, "abort");
-		const dispose = vi.spyOn(harness.session, "dispose");
-		try {
-			expect(
-				jobSnapshot(await jobsTool(harness).execute("cancel-job", { action: "cancel", id: job.id })).status,
-			).toBe("cancelling");
-			expect(harness.session.isBusy).toBe(false);
-			expect(harness.session.hasBackgroundJobs).toBe(true);
-			terminal.sendInput("\x04");
-			expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
-			expect(control.shutdown).not.toHaveBeenCalled();
-			expect(abort).not.toHaveBeenCalled();
-			expect(dispose).not.toHaveBeenCalled();
-
-			await control.defaultEditor.onSubmit!("/quit");
-			expect(control.shutdown).toHaveBeenCalledTimes(1);
-		} finally {
-			backend.finish.resolve();
-		}
-		expect((await waitJob(harness, job.id)).status).toBe("cancelled");
-	});
-
-	it("expires a background-work quit warning at three seconds", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		await startJob(harness);
-		let now = Date.now();
-		vi.spyOn(Date, "now").mockImplementation(() => now);
-
-		await control.defaultEditor.onSubmit!("/quit");
-		now += 3000;
-		await control.defaultEditor.onSubmit!("/quit");
-		expect(control.showWarning).toHaveBeenCalledTimes(2);
-		expect(control.shutdown).not.toHaveBeenCalled();
-		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
-
-		now += 1;
-		await control.defaultEditor.onSubmit!("/quit");
-		expect(control.shutdown).toHaveBeenCalledTimes(1);
-	});
-
-	it("does not reuse a background-work quit warning after new foreground work", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const terminal = control.renderer.terminal as VirtualTerminal;
-		await startJob(harness);
-		vi.spyOn(Date, "now").mockReturnValue(Date.now());
-		terminal.sendInput("\x04");
-		expect(control.showWarning).toHaveBeenCalledTimes(1);
-
-		harness.setResponses([fauxAssistantMessage("Foreground work completed.")]);
-		await harness.session.prompt("Continue foreground work");
-		expect(harness.session.isBusy).toBe(false);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
-		expect(backend.signal?.aborted).toBe(false);
-
-		terminal.sendInput("\x04");
-		expect(control.showWarning).toHaveBeenCalledTimes(2);
-		expect(control.shutdown).not.toHaveBeenCalled();
-		expect(backend.signal?.aborted).toBe(false);
-		terminal.sendInput("\x04");
-		expect(control.shutdown).toHaveBeenCalledTimes(1);
-	});
-
-	it("interrupts foreground Bash before idle background jobs", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const job = await startJob(harness);
-		const shellStarted = deferred();
-		const shellFinished = deferred();
-		const shell = harness.session.executeBash("foreground command", undefined, {
-			operations: {
-				exec: async (_command, _cwd, { signal }) => {
-					signal?.addEventListener("abort", shellFinished.resolve, { once: true });
-					shellStarted.resolve();
-					await shellFinished.promise;
-					return { exitCode: 0 };
-				},
-			},
-		});
-		try {
-			await shellStarted.promise;
-			control.defaultEditor.onEscape!();
-			await shell;
-			expect(harness.session.isBashRunning).toBe(false);
-			expect(backend.signal?.aborted).toBe(false);
-			expect(harness.session.hasBackgroundJobs).toBe(true);
-
-			control.defaultEditor.onEscape!();
-			await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
-			expect((await waitJob(harness, job.id)).status).toBe("cancelled");
-		} finally {
-			shellFinished.resolve();
-			await shell;
-		}
-	});
-
-	it("delivers completion at the next provider boundary, never during the current response", async () => {
+	it("returns a job that finishes into an active jobs wait without queueing a notice", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
 		harness.setResponses([
@@ -918,27 +235,215 @@ describe("AgentSession background jobs", () => {
 				stopReason: "toolUse",
 			}),
 			async () => {
-				const result = harness.session.messages.find(
-					(message) => message.role === "toolResult" && message.toolName === "bash",
+				const job = jobOf(
+					harness.session.messages.find((message) => message.role === "toolResult" && message.toolName === "bash"),
 				);
-				const job = jobSnapshot(result);
+				return fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [job.id] }), {
+					stopReason: "toolUse",
+				});
+			},
+			(context) => {
+				const result = context.messages.find(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				expect(getMessageText(result)).toContain("terminal");
+				expect(getMessageText(result)).toContain("worker output");
+				return fauxAssistantMessage("Waited for the result.");
+			},
+		]);
+		const prompt = harness.session.prompt("Run and wait");
+		await backend.started.promise;
+		await vi.waitFor(() => expect(harness.session.jobs.listWaits()).toHaveLength(1));
+		backend.finish.resolve();
+		await prompt;
+		await harness.session.waitForIdle();
+		expect(harness.session.getLastAssistantText()).toBe("Waited for the result.");
+		expect(notices(harness)).toHaveLength(0);
+		expect(noticeInputs(harness)).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(3);
+	});
+
+	it("withdraws a queued notice when the model reads the finished job first", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				const job = jobOf(
+					harness.session.messages.find((message) => message.role === "toolResult" && message.toolName === "bash"),
+				);
 				backend.finish.resolve();
-				await waitJob(harness, job.id);
-				expect(notices(harness)).toHaveLength(0);
+				await settled(harness, job.id);
+				// The notice waits for this turn's next request.
+				expect(noticeInputs(harness)).toMatchObject([{ state: "accepted" }]);
 				return fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), {
 					stopReason: "toolUse",
 				});
 			},
 			(context) => {
+				expect(context.messages.map(getMessageText).join("\n")).not.toContain("(job ");
+				return fauxAssistantMessage("Read it.");
+			},
+		]);
+		await harness.session.prompt("Run and read");
+		expect(harness.session.getLastAssistantText()).toBe("Read it.");
+		expect(notices(harness)).toHaveLength(0);
+		expect(noticeInputs(harness)).toMatchObject([{ state: "withdrawn" }]);
+	});
+
+	it("delivers a notice at the next provider boundary, never during the current response", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				const job = jobOf(
+					harness.session.messages.find((message) => message.role === "toolResult" && message.toolName === "bash"),
+				);
+				backend.finish.resolve();
+				await settled(harness, job.id);
+				expect(notices(harness)).toHaveLength(0);
+				return fauxAssistantMessage(fauxToolCall("jobs", { action: "list" }), { stopReason: "toolUse" });
+			},
+			(context) => {
 				expect(notices(harness)).toHaveLength(1);
-				expect(context.messages.map(getMessageText).join("\n")).toContain("Background job completion notice");
-				return fauxAssistantMessage("Collected.");
+				expect(context.messages.map(getMessageText).join("\n")).toContain("(job ");
+				return fauxAssistantMessage("Noticed.");
 			},
 		]);
 		await harness.session.prompt("Run independent work");
 		const messages = harness.session.messages;
 		const noticeIndex = messages.findIndex((message) => message.role === "custom");
 		expect(messages[noticeIndex - 1]).toMatchObject({ role: "toolResult", toolName: "jobs" });
+	});
+
+	it("ends a wait for user steering, but not for another job's notice", async () => {
+		const backend = controlledBash();
+		const other = deferred();
+		const harness = await setup();
+		const first = await startJob(harness, "first work");
+		const exec = backend.operations.exec as ReturnType<typeof vi.fn>;
+		const original = exec.getMockImplementation()!;
+		exec.mockImplementationOnce(async (_command, _cwd, options) => {
+			options.onData(Buffer.from("other output\n"));
+			await other.promise;
+			return { exitCode: 0 };
+		});
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "second work", background: true }), {
+				stopReason: "toolUse",
+			}),
+			fauxAssistantMessage("Started the second."),
+		]);
+		await harness.session.prompt("Start more work");
+		const second = harness.session.jobs.list().find((job) => job.label === "second work")!;
+		expect(second.status).toBe("running");
+		exec.mockImplementation(original);
+
+		const waited = vi.fn();
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [first.id] }), { stopReason: "toolUse" }),
+			(context) => {
+				const result = context.messages.findLast(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				waited(getMessageText(result));
+				return fauxAssistantMessage("Handled the steering.");
+			},
+		]);
+		const prompt = harness.session.prompt("Wait for the first job");
+		await vi.waitFor(() => expect(harness.session.jobs.listWaits()).toHaveLength(1));
+		// Another job's notice queues as host steering; the wait goes on.
+		other.resolve();
+		await vi.waitFor(() => expect(noticeInputs(harness)).toMatchObject([{ state: "accepted" }]));
+		expect(harness.session.jobs.listWaits()).toHaveLength(1);
+		await harness.session.steer("Stop waiting and look at this");
+		await prompt;
+		await harness.session.waitForIdle();
+		expect(waited).toHaveBeenCalledWith(expect.stringContaining("steered"));
+		expect(harness.session.jobs.get(first.id).status).toBe("running");
+		backend.finish.resolve();
+		harness.appendResponses([fauxAssistantMessage("First done.")]);
+		await settled(harness, first.id);
+		await harness.session.waitForIdle();
+		expect(harness.session.jobs.get(first.id).status).toBe("completed");
+	});
+
+	it.each(["final_response", "stop"] as const)(
+		"fences the notices of the work a turn started when a tool result asks to %s",
+		async (disposition) => {
+			const backend = controlledBash();
+			const harness = await setup();
+			const unregister = harness.control.onToolResult((event) =>
+				event.toolName === "bash" ? { disposition } : undefined,
+			);
+			harness.setResponses([
+				fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
+					stopReason: "toolUse",
+				}),
+				fauxAssistantMessage("Final report."),
+			]);
+			await harness.session.prompt("Run and report");
+			unregister();
+			const job = harness.session.jobs.list()[0]!;
+			const calls = harness.faux.state.callCount;
+			backend.finish.resolve();
+			expect((await settled(harness, job.id)).status).toBe("completed");
+			await harness.session.waitForIdle();
+			expect(harness.faux.state.callCount).toBe(calls);
+			expect(noticeInputs(harness)).toEqual([]);
+			harness.setResponses([fauxAssistantMessage("Next user turn.")]);
+			await harness.session.prompt("Continue");
+			expect(notices(harness)).toHaveLength(0);
+		},
+	);
+
+	it("fences the notices of the work a turn started when a policy stops it", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		let stop = false;
+		const unregister = harness.session.registerTurnPolicy({
+			nextAction: () => (stop ? { type: "stop" } : undefined),
+		});
+		harness.setResponses([
+			async () => {
+				stop = true;
+				return fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
+					stopReason: "toolUse",
+				});
+			},
+		]);
+		await harness.session.prompt("Start, then stop");
+		unregister();
+		const job = harness.session.jobs.list()[0]!;
+		backend.finish.resolve();
+		expect((await settled(harness, job.id)).status).toBe("completed");
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(noticeInputs(harness)).toEqual([]);
+	});
+
+	it("offers a non-cancelling SDK join separate from foreground idle", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		await startJob(harness);
+		const joined = vi.fn();
+		const joining = harness.session.work.waitForIdle().then(joined);
+		try {
+			await harness.session.waitForIdle();
+			expect(joined).not.toHaveBeenCalled();
+			expect(harness.session.hasRunningWork).toBe(true);
+			expect(backend.signal?.aborted).toBe(false);
+		} finally {
+			harness.appendResponses([fauxAssistantMessage("Noticed.")]);
+			backend.finish.resolve();
+		}
+		await joining;
+		expect(harness.session.hasRunningWork).toBe(false);
 	});
 
 	it("runs native result hooks once at completion, preserves call policy, and supplies the job signal", async () => {
@@ -965,8 +470,10 @@ describe("AgentSession background jobs", () => {
 		expect(results).toHaveLength(0);
 		expect(calls).toEqual([{ command: "controlled work", background: true }]);
 		expect(backend.commands).toEqual(["controlled work"]);
+		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 		backend.finish.resolve();
-		expect((await waitJob(harness, job.id)).output).toBe("policy-redacted output");
+		expect((await settled(harness, job.id)).output).toBe("policy-redacted output");
+		expect(harness.session.work.get(job.id)?.result?.output?.text).toBe("policy-redacted output");
 		expect(results).toHaveLength(1);
 		expect(results[0]?.input).toEqual({ command: "controlled work" });
 		expect(resultSignal).toBeDefined();
@@ -974,6 +481,7 @@ describe("AgentSession background jobs", () => {
 		expect(results[0]?.content.map((part) => (part.type === "text" ? part.text : "")).join("")).toContain(
 			"worker output",
 		);
+		await harness.session.waitForIdle();
 	});
 
 	it("rejects noncanonical completion-hook output instead of retaining it", async () => {
@@ -988,13 +496,15 @@ describe("AgentSession background jobs", () => {
 			],
 		});
 		const job = await startJob(harness);
+		harness.appendResponses([fauxAssistantMessage("Noticed the failure.")]);
 		backend.finish.resolve();
-		const result = await waitJob(harness, job.id);
+		const result = await settled(harness, job.id);
 		expect(result.status).toBe("failed");
 		expect(result.output).toMatch(/finite|NaN|canonical/i);
+		await harness.session.waitForIdle();
 	});
 
-	it("synchronously aborts idle jobs and joins their cleanup without invoking late result hooks", async () => {
+	it("aborting cancels running jobs, joins their cleanup, and runs no late result hooks", async () => {
 		const backend = controlledBash(true);
 		const completed = vi.fn();
 		const harness = await setup({
@@ -1007,25 +517,25 @@ describe("AgentSession background jobs", () => {
 			],
 		});
 		const job = await startJob(harness);
-		let settled = false;
+		let aborted = false;
 		const abort = harness.session.abort().then(() => {
-			settled = true;
+			aborted = true;
 		});
 		try {
-			expect(backend.signal?.aborted).toBe(true);
 			await backend.aborted.promise;
-			expect(settled).toBe(false);
-			expect(harness.session.hasBackgroundJobs).toBe(true);
-			expect(
-				jobSnapshot(await jobsTool(harness).execute("read-cancelling", { action: "read", id: job.id })).status,
-			).toBe("cancelling");
+			expect(aborted).toBe(false);
+			expect(harness.session.hasRunningWork).toBe(true);
+			expect(jobOf(await jobsTool(harness).execute("read-cancelling", { action: "read", id: job.id })).status).toBe(
+				"cancelling",
+			);
 		} finally {
 			backend.finish.resolve();
 		}
 		await abort;
-		expect(harness.session.hasBackgroundJobs).toBe(false);
-		expect((await waitJob(harness, job.id)).status).toBe("cancelled");
+		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.jobs.get(job.id).status).toBe("cancelled");
 		expect(completed).not.toHaveBeenCalled();
+		expect(noticeInputs(harness)).toEqual([]);
 		expect(harness.faux.state.callCount).toBe(2);
 	});
 
@@ -1035,6 +545,7 @@ describe("AgentSession background jobs", () => {
 			const backend = controlledBash(true);
 			const harness = await setup();
 			const job = await startJob(harness);
+			await backend.started.promise;
 			const bash = harness.session.state.tools.find((tool) => tool.name === "bash")!;
 			const foregroundStarted = deferred();
 			const finishForeground = deferred();
@@ -1060,17 +571,17 @@ describe("AgentSession background jobs", () => {
 				reentrantAbort = harness.session.abort("host_action");
 			});
 			signal.addEventListener("abort", listener, { once: true });
-			const settled = vi.fn();
+			const settledAbort = vi.fn();
 			const abort = harness.session.abort("remote_request");
-			const joined = abort.then(settled);
+			const joined = abort.then(settledAbort);
 			try {
-				expect(listener).toHaveBeenCalledTimes(1);
+				await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(1));
 				expect(reentrantAbort).toBe(abort);
 				expect(harness.session.abort("keyboard_interrupt")).toBe(abort);
-				expect(backend.signal?.aborted).toBe(true);
+				await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
 				await expect(attemptedStart).rejects.toThrow("Operation admission is suspended");
-				expect(settled).not.toHaveBeenCalled();
-				expect(harness.session.hasBackgroundJobs).toBe(true);
+				expect(settledAbort).not.toHaveBeenCalled();
+				expect(harness.session.hasRunningWork).toBe(true);
 				expect(await jobsTool(harness).execute("list-during-abort", { action: "list" })).toMatchObject({
 					details: { jobs: [{ id: job.id, status: "cancelling" }] },
 				});
@@ -1079,8 +590,8 @@ describe("AgentSession background jobs", () => {
 				finishForeground.resolve();
 				await Promise.all([joined, reentrantAbort, foreground]);
 			}
-			expect(harness.session.hasBackgroundJobs).toBe(false);
-			expect((await waitJob(harness, job.id)).status).toBe("cancelled");
+			expect(harness.session.hasRunningWork).toBe(false);
+			expect(harness.session.jobs.get(job.id).status).toBe("cancelled");
 			expect(backend.operations.exec).toHaveBeenCalledTimes(1);
 			if (source === "foreground") {
 				const last = harness.session.messages.at(-1);
@@ -1090,8 +601,10 @@ describe("AgentSession background jobs", () => {
 				});
 			}
 			// The drain releases admission rather than permanently closing the runtime.
-			const next = jobSnapshot(await bash.execute("after-abort", { command: "later work", background: true }));
-			expect((await waitJob(harness, next.id)).status).toBe("completed");
+			const next = jobOf(await bash.execute("after-abort", { command: "later work", background: true }));
+			harness.appendResponses([fauxAssistantMessage("Noticed.")]);
+			expect((await settled(harness, next.id)).status).toBe("completed");
+			await harness.session.waitForIdle();
 		},
 	);
 
@@ -1107,7 +620,7 @@ describe("AgentSession background jobs", () => {
 		const abort = harness.session.abort();
 		const rejected = expect(abort).rejects.toBe(failure);
 		try {
-			expect(backend.signal?.aborted).toBe(true);
+			await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
 			expect(harness.session.abort()).toBe(abort);
 			await expect(bash.execute("during-error", { command: "must not run", background: true })).rejects.toThrow(
 				"Operation admission is suspended",
@@ -1117,16 +630,18 @@ describe("AgentSession background jobs", () => {
 			await rejected;
 			retry.mockRestore();
 		}
-		expect((await waitJob(harness, job.id)).status).toBe("cancelled");
+		expect((await settled(harness, job.id)).status).toBe("cancelled");
 		await expect(harness.session.abort()).resolves.toBeUndefined();
-		const next = jobSnapshot(await bash.execute("after-error", { command: "later work", background: true }));
-		expect((await waitJob(harness, next.id)).status).toBe("completed");
+		const next = jobOf(await bash.execute("after-error", { command: "later work", background: true }));
+		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
+		expect((await settled(harness, next.id)).status).toBe("completed");
+		await harness.session.waitForIdle();
 	});
 
-	it("synchronously closes jobs on dispose and waits for background cleanup", async () => {
+	it("interrupts running jobs when the session closes and waits for their cleanup", async () => {
 		const backend = controlledBash(true);
 		const harness = await setup();
-		await startJob(harness);
+		const job = await startJob(harness);
 		const bash = harness.session.state.tools.find((tool) => tool.name === "bash")!;
 		let closed = false;
 		harness.session.dispose();
@@ -1145,20 +660,23 @@ describe("AgentSession background jobs", () => {
 		}
 		await closing;
 		expect(backend.operations.exec).toHaveBeenCalledTimes(1);
+		const finished = harness.sessionManager.committedEntriesAfter(0).find((entry) => entry.type === "work_finished");
+		expect(finished).toMatchObject({ workId: job.id, outcome: "interrupted" });
+		harnesses.splice(harnesses.indexOf(harness), 1);
 	});
 
-	it.each(["bash", "jobs"])("cancels jobs synchronously when the %s grant is removed", async (revoked) => {
+	it.each(["bash", "jobs"])("cancels jobs when the %s grant is removed", async (revoked) => {
 		const backend = controlledBash();
 		const harness = await setup();
 		const job = await startJob(harness);
-		const controls = jobsTool(harness);
 		harness.session.setActiveToolsByName(["bash", "jobs"].filter((name) => name !== revoked));
-		expect(backend.signal?.aborted).toBe(true);
-		expect(await controls.execute("list-hidden", { action: "list" })).toMatchObject({ details: { jobs: [] } });
-		await expect(controls.execute("read-hidden", { action: "read", id: job.id })).rejects.toThrow(/inaccessible/);
-		await harness.session.abort();
+		await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
+		expect((await settled(harness, job.id)).status).toBe("cancelled");
 		harness.session.setActiveToolsByName(["bash", "jobs"]);
-		expect((await waitJob(harness, job.id)).status).toBe("cancelled");
+		expect(await jobsTool(harness).execute("list", { action: "list" })).toMatchObject({
+			details: { jobs: [{ id: job.id, status: "cancelled" }] },
+		});
+		expect(noticeInputs(harness)).toEqual([]);
 	});
 
 	it("cancels native work when an extension replaces its active tool name", async () => {
@@ -1171,7 +689,7 @@ describe("AgentSession background jobs", () => {
 				},
 			],
 		});
-		await startJob(harness);
+		const job = await startJob(harness);
 		api.registerTool({
 			name: "bash",
 			label: "replacement",
@@ -1180,8 +698,8 @@ describe("AgentSession background jobs", () => {
 			execute: async () => ({ content: [{ type: "text", text: "custom result" }] }),
 		});
 		expect(harness.session.getActiveToolNames()).toContain("bash");
-		expect(backend.signal?.aborted).toBe(true);
-		expect(await jobsTool(harness).execute("list", { action: "list" })).toMatchObject({ details: { jobs: [] } });
+		await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
+		expect((await settled(harness, job.id)).status).toBe("cancelled");
 	});
 
 	it("blocks reload, tree navigation, and Plan entry until jobs settle", async () => {
@@ -1199,19 +717,19 @@ describe("AgentSession background jobs", () => {
 		await expect(harness.session.reload()).resolves.toBeUndefined();
 	});
 
-	it("hides older jobs and undelivered notices after branch navigation", async () => {
+	it("keeps a finished job's result readable after branch navigation", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
 		const job = await startJob(harness);
+		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 		backend.finish.resolve();
-		await waitJob(harness, job.id);
+		await settled(harness, job.id);
+		await harness.session.waitForIdle();
 		const target = harness.session.getUserMessagesForForking()[0]!.entryId;
 		await harness.session.navigateTree(target);
-		expect(await jobsTool(harness).execute("list", { action: "list" })).toMatchObject({ details: { jobs: [] } });
-		await expect(jobsTool(harness).execute("read", { action: "read", id: job.id })).rejects.toThrow(/inaccessible/);
-		harness.setResponses([fauxAssistantMessage("New branch.")]);
-		await harness.session.prompt("Start a different branch");
-		expect(notices(harness)).toHaveLength(0);
+		const read = await jobsTool(harness).execute("read", { action: "read", id: job.id });
+		expect(jobOf(read).status).toBe("completed");
+		expect(getMessageText(read)).toContain("worker output");
 	});
 
 	it("keeps running jobs accessible across compaction", async () => {
@@ -1234,11 +752,11 @@ describe("AgentSession background jobs", () => {
 		await harness.session.compact();
 		expect(harness.session.conversationGenerationRevision).toBe(generation);
 		expect(backend.signal?.aborted).toBe(false);
-		expect(jobSnapshot(await jobsTool(harness).execute("read", { action: "read", id: job.id })).status).toBe(
-			"running",
-		);
+		expect(jobOf(await jobsTool(harness).execute("read", { action: "read", id: job.id })).status).toBe("running");
+		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 		backend.finish.resolve();
-		expect((await waitJob(harness, job.id)).status).toBe("completed");
+		expect((await settled(harness, job.id)).status).toBe("completed");
+		await harness.session.waitForIdle();
 	});
 
 	it("does not wrap extension or host Bash overrides", async () => {
@@ -1305,86 +823,233 @@ describe("AgentSession background jobs", () => {
 		]);
 		await blocked.session.prompt("Start work");
 		expect(backend.operations.exec).not.toHaveBeenCalled();
+		expect(harness.session.work.list()).toEqual([]);
 	});
 
-	it("acknowledges notifications only after the canonical delivery durability barrier", async () => {
-		const backend = controlledBash();
-		const harness = await setup({ log: "memory" });
-		const job = await startJob(harness);
-		backend.finish.resolve();
-		await waitJob(harness, job.id);
-		const acknowledge = vi.spyOn(BackgroundJobManager.prototype, "acknowledgeNotifications");
-		// Hold the batch that delivers the notice until the test has checked acknowledgement.
-		const hold = harness.log!.holdNext((batch) =>
-			batch.entries.some(
-				(entry) =>
-					entry.type === "custom_message" &&
-					(entry.payload as { customType?: string }).customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
-			),
-		);
-		harness.setResponses([fauxAssistantMessage("Notice received.")]);
-		const prompt = harness.session.prompt("Collect the completion");
-		try {
-			await hold.started;
-			expect(acknowledge).not.toHaveBeenCalled();
+	it.each(["", "unsubmitted draft", "!keep this command draft"])(
+		"cancels an idle background job through onEscape and preserves queues and draft %j",
+		async (draft) => {
+			const backend = controlledBash();
+			const harness = await setup();
+			const control = setupInteractive(harness);
+			const job = await startJob(harness);
+			// Input queued behind a held turn claim stays queued (an idle steer would start its own turn).
+			harness.control.conversation.reserve();
+			await harness.session.steer("queued steering");
+			await harness.session.followUp("queued follow-up");
+			control.defaultEditor.setText(draft);
+			const abort = vi.spyOn(harness.session, "abort");
+
+			control.defaultEditor.onEscape!();
+
+			await vi.waitFor(() => expect(abort).toHaveBeenCalledExactlyOnceWith("keyboard_interrupt"));
+			expect((await settled(harness, job.id)).status).toBe("cancelled");
+			expect(backend.signal?.aborted).toBe(true);
+			expect(harness.session.hasRunningWork).toBe(false);
+			expect(harness.session.pendingMessageCount).toBe(0);
+			expect(control.defaultEditor.getText()).toBe(
+				["queued steering", "queued follow-up", draft].filter(Boolean).join("\n\n"),
+			);
 			expect(harness.faux.state.callCount).toBe(2);
-		} finally {
-			hold.release();
-			await prompt;
-		}
-		expect(acknowledge).toHaveBeenCalledExactlyOnceWith([job.id]);
-	});
+		},
+	);
 
-	it("defers notices across forced final_response without authorizing another tool turn", async () => {
+	it("keeps Ctrl+C as editor clearing while an idle background job runs", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
-		const unregister = harness.control.onToolResult((event) =>
-			event.toolName === "jobs" ? { disposition: "final_response" } : undefined,
-		);
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
-				stopReason: "toolUse",
-			}),
-			async () => {
-				const result = harness.session.messages.find(
-					(message) => message.role === "toolResult" && message.toolName === "bash",
-				);
-				const job = jobSnapshot(result);
-				backend.finish.resolve();
-				await waitJob(harness, job.id);
-				return fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), {
-					stopReason: "toolUse",
-				});
-			},
-			(context) => {
-				expect(context.tools ?? []).toHaveLength(0);
-				expect(notices(harness)).toHaveLength(0);
-				return fauxAssistantMessage("Final report.");
-			},
-		]);
-		await harness.session.prompt("Run and report");
-		expect(harness.faux.state.callCount).toBe(3);
-		expect(notices(harness)).toHaveLength(0);
-		unregister();
-		harness.setResponses([fauxAssistantMessage("Next user turn.")]);
-		await harness.session.prompt("Continue");
-		expect(notices(harness)).toHaveLength(1);
+		const control = setupInteractive(harness);
+		await startJob(harness);
+		control.defaultEditor.setText("unsent draft");
+
+		control.defaultEditor.handleInput("\x03");
+
+		expect(control.defaultEditor.getText()).toBe("");
+		expect(backend.signal?.aborted).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(true);
 	});
 
-	it("retains notices when a later stop policy suppresses delivery", async () => {
+	it.each(["onSubmit", "Enter"])("handles rejected /plan through %s without stopping jobs", async (entryPoint) => {
 		const backend = controlledBash();
 		const harness = await setup();
+		const control = setupInteractive(harness);
 		const job = await startJob(harness);
+		const planning = harness.session.planningState;
+		const abort = vi.spyOn(harness.session, "abort");
+
+		if (entryPoint === "onSubmit") {
+			await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
+		} else {
+			const terminal = control.renderer.terminal as VirtualTerminal;
+			terminal.sendInput("/plan");
+			terminal.sendInput("\r");
+		}
+
+		await vi.waitFor(() =>
+			expect(control.showError).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/abort or wait/)),
+		);
+		expect(control.showStatus).not.toHaveBeenCalled();
+		expect(control.shutdown).not.toHaveBeenCalled();
+		expect(abort).not.toHaveBeenCalled();
+		expect(harness.session.planningState).toEqual(planning);
+		expect(harness.session.agentMode).toBe("build");
+		expect(harness.session.isBusy).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(true);
+		expect(backend.signal?.aborted).toBe(false);
+		expect(control.defaultEditor.getText()).toBe("");
+		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 		backend.finish.resolve();
-		await waitJob(harness, job.id);
-		const unregister = harness.session.registerTurnPolicy({ nextAction: () => ({ type: "stop" }) });
-		// The policy stops the turn before it delivers anything; the prompt is withdrawn.
-		await harness.session.prompt("Do not infer");
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(notices(harness)).toHaveLength(0);
-		unregister();
-		harness.setResponses([fauxAssistantMessage("Now collect.")]);
-		await harness.session.prompt("Collect now");
-		expect(notices(harness)).toHaveLength(1);
+		expect((await settled(harness, job.id)).status).toBe("completed");
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(3);
+
+		await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
+		expect(harness.session.agentMode).toBe("plan");
+		expect(control.showStatus).toHaveBeenLastCalledWith("Plan mode: agent tools are read-only");
+		await expect(control.defaultEditor.onSubmit!("/build")).resolves.toBeUndefined();
+		expect(harness.session.agentMode).toBe("build");
+		expect(control.showStatus).toHaveBeenLastCalledWith("Build mode");
+		expect(control.showError).toHaveBeenCalledTimes(1);
+	});
+
+	it.each(["/quit", "Ctrl+D"])("requires confirmation for %s after the foreground finishes", async (entryPoint) => {
+		const backend = controlledBash();
+		const harness = await setup();
+		const control = setupInteractive(harness);
+		const terminal = control.renderer.terminal as VirtualTerminal;
+		await startJob(harness);
+		const abort = vi.spyOn(harness.session, "abort");
+		const dispose = vi.spyOn(harness.session, "dispose");
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const quit = () => {
+			if (entryPoint === "/quit") {
+				terminal.sendInput("/quit");
+				terminal.sendInput("\r");
+			} else {
+				terminal.sendInput("\x04");
+			}
+		};
+
+		expect(harness.session.isBusy).toBe(false);
+		quit();
+		expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
+		expect(control.shutdown).not.toHaveBeenCalled();
+		expect(abort).not.toHaveBeenCalled();
+		expect(dispose).not.toHaveBeenCalled();
+		expect(backend.signal?.aborted).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(true);
+
+		now += 2999;
+		quit();
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+		expect(control.showWarning).toHaveBeenCalledTimes(1);
+		expect(control.showError).not.toHaveBeenCalled();
+	});
+
+	it("protects cancelling background work until cleanup settles", async () => {
+		const backend = controlledBash(true);
+		const harness = await setup();
+		const control = setupInteractive(harness);
+		const terminal = control.renderer.terminal as VirtualTerminal;
+		const job = await startJob(harness);
+		const abort = vi.spyOn(harness.session, "abort");
+		const dispose = vi.spyOn(harness.session, "dispose");
+		try {
+			expect(jobOf(await jobsTool(harness).execute("cancel-job", { action: "cancel", id: job.id })).status).toBe(
+				"cancelling",
+			);
+			expect(harness.session.isBusy).toBe(false);
+			expect(harness.session.hasRunningWork).toBe(true);
+			terminal.sendInput("\x04");
+			expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
+			expect(control.shutdown).not.toHaveBeenCalled();
+			expect(abort).not.toHaveBeenCalled();
+			expect(dispose).not.toHaveBeenCalled();
+
+			await control.defaultEditor.onSubmit!("/quit");
+			expect(control.shutdown).toHaveBeenCalledTimes(1);
+		} finally {
+			backend.finish.resolve();
+		}
+		expect((await settled(harness, job.id)).status).toBe("cancelled");
+	});
+
+	it("expires a background-work quit warning at three seconds", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		const control = setupInteractive(harness);
+		await startJob(harness);
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await control.defaultEditor.onSubmit!("/quit");
+		now += 3000;
+		await control.defaultEditor.onSubmit!("/quit");
+		expect(control.showWarning).toHaveBeenCalledTimes(2);
+		expect(control.shutdown).not.toHaveBeenCalled();
+		expect(backend.signal?.aborted).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(true);
+
+		now += 1;
+		await control.defaultEditor.onSubmit!("/quit");
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not reuse a background-work quit warning after new foreground work", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		const control = setupInteractive(harness);
+		const terminal = control.renderer.terminal as VirtualTerminal;
+		await startJob(harness);
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		terminal.sendInput("\x04");
+		expect(control.showWarning).toHaveBeenCalledTimes(1);
+
+		harness.setResponses([fauxAssistantMessage("Foreground work completed.")]);
+		await harness.session.prompt("Continue foreground work");
+		expect(harness.session.isBusy).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(true);
+		expect(backend.signal?.aborted).toBe(false);
+
+		terminal.sendInput("\x04");
+		expect(control.showWarning).toHaveBeenCalledTimes(2);
+		expect(control.shutdown).not.toHaveBeenCalled();
+		expect(backend.signal?.aborted).toBe(false);
+		terminal.sendInput("\x04");
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("interrupts foreground Bash before idle background jobs", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		const control = setupInteractive(harness);
+		const job = await startJob(harness);
+		const shellStarted = deferred();
+		const shellFinished = deferred();
+		const shell = harness.session.executeBash("foreground command", undefined, {
+			operations: {
+				exec: async (_command, _cwd, { signal }) => {
+					signal?.addEventListener("abort", shellFinished.resolve, { once: true });
+					shellStarted.resolve();
+					await shellFinished.promise;
+					return { exitCode: 0 };
+				},
+			},
+		});
+		try {
+			await shellStarted.promise;
+			control.defaultEditor.onEscape!();
+			await shell;
+			expect(harness.session.isBashRunning).toBe(false);
+			expect(backend.signal?.aborted).toBe(false);
+			expect(harness.session.hasRunningWork).toBe(true);
+
+			control.defaultEditor.onEscape!();
+			await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
+			expect((await settled(harness, job.id)).status).toBe("cancelled");
+		} finally {
+			shellFinished.resolve();
+			await shell;
+		}
 	});
 });

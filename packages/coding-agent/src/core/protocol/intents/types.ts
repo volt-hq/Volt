@@ -198,8 +198,6 @@ export interface IntentState {
 	readonly isBusy?: boolean;
 	readonly isStreaming: boolean;
 	readonly isCompacting: boolean;
-	/** Background work stays cancellable after the foreground run settles. */
-	readonly hasBackgroundJobs?: boolean;
 	readonly model?: Model<Api>;
 	readonly thinkingLevel?: ThinkingLevel;
 	readonly fastModeEnabled?: boolean;

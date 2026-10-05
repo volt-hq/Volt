@@ -252,61 +252,6 @@ describe("remote frame redactor", () => {
 		).toMatchObject({ items: [{ type: "set", key: "ext_status/~lint" }] });
 	});
 
-	it("bounds background job labels that path replacement lengthened", () => {
-		// A short host root grows when it becomes the remote workspace path.
-		const shortRoot = resolve("/w");
-		const redactor = redactorFor(shortRoot);
-		const label = `${"x".repeat(190)} ${shortRoot}${sep}a`;
-		expect(label.length).toBeLessThanOrEqual(200);
-		const frame: HostFrame = {
-			type: "live",
-			subscriptionId: "s1",
-			basedOn: 0,
-			seq: 1,
-			items: [
-				{
-					type: "set",
-					key: "jobs",
-					value: {
-						kind: "jobs",
-						jobs: [
-							{
-								id: "job-1",
-								toolName: "bash",
-								label,
-								status: "running",
-								startedAt: 1,
-								outputTruncated: false,
-							},
-						],
-					},
-				},
-			],
-		};
-		const redacted = redactor.redact(frame);
-		if (redacted?.type !== "live") throw new Error("Expected a live frame");
-		const item = redacted.items[0];
-		if (item?.type !== "set" || item.value.kind !== "jobs") throw new Error("Expected a jobs value");
-		const redactedLabel = item.value.jobs[0]?.label ?? "";
-		expect(redactedLabel).toBe(`${"x".repeat(190)} /workspace/a`.slice(0, 200));
-
-		// The same job in `job_output`'s result and `cancel_job`'s acceptance.
-		const job = { id: "job-1", toolName: "bash" as const, label, status: "running" as const, startedAt: 1 };
-		const result = redactor.redact({
-			type: "result",
-			queryId: "q1",
-			data: { job: { ...job, outputTruncated: false, output: "" } },
-		});
-		const accepted = redactor.redact({
-			type: "accepted",
-			intentId: "i1",
-			ordinals: [],
-			result: { job: { ...job, outputTruncated: false } },
-		});
-		expect(result).toMatchObject({ data: { job: { label: redactedLabel } } });
-		expect(accepted).toMatchObject({ result: { job: { label: redactedLabel } } });
-	});
-
 	it.skipIf(sep !== "/")("never streams the start of a root, even one with spaces and parentheses in it", () => {
 		for (const [root, deltas] of [
 			[
@@ -372,40 +317,5 @@ describe("remote frame redactor", () => {
 		);
 		expect(sent).not.toContain(workspacePath);
 		expect(sent).toContain('"toolCallId":"t1"');
-	});
-
-	it("drops the start of a root a host-cut job label ends in", () => {
-		const root = resolve("/home/alice-secret-user/work/client-project");
-		const redactor = redactorFor(root);
-		const label = `${`${"echo x && ".repeat(17)}cat ${root}${sep}src${sep}index.ts`.slice(0, 199)}…`;
-		const sent = JSON.stringify(
-			redactor.redact({
-				type: "live",
-				subscriptionId: "s1",
-				basedOn: 1,
-				seq: 1,
-				items: [
-					{
-						type: "set",
-						key: "jobs",
-						value: {
-							kind: "jobs",
-							jobs: [
-								{
-									id: "job_1",
-									toolName: "bash",
-									label,
-									status: "running",
-									startedAt: 0,
-									outputTruncated: false,
-								},
-							],
-						},
-					},
-				],
-			} as unknown as HostFrame),
-		);
-		expect(sent).not.toContain("alice-secret-user");
-		expect(sent).toContain("cat …");
 	});
 });

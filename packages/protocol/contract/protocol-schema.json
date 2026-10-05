@@ -152,7 +152,6 @@
 				"fork",
 				"clone",
 				"export_html",
-				"cancel_job",
 				"subagent_start",
 				"subagent_abort",
 				"subagent_dispose",
@@ -3361,9 +3360,6 @@
 					"$ref": "#/$defs/Frame.intent.export_html"
 				},
 				{
-					"$ref": "#/$defs/Frame.intent.cancel_job"
-				},
-				{
 					"$ref": "#/$defs/Frame.intent.subagent_start"
 				},
 				{
@@ -3612,35 +3608,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.bash"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.cancel_job": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "cancel_job"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.cancel_job"
 				}
 			},
 			"additionalProperties": false
@@ -5533,9 +5500,6 @@
 					"$ref": "#/$defs/Frame.query.subagent_definitions"
 				},
 				{
-					"$ref": "#/$defs/Frame.query.job_output"
-				},
-				{
 					"$ref": "#/$defs/Frame.query.work_output"
 				},
 				{
@@ -5779,37 +5743,6 @@
 				},
 				"params": {
 					"$ref": "#/$defs/EmptyInput"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.query.job_output": {
-			"type": "object",
-			"required": [
-				"type",
-				"queryId",
-				"query",
-				"params"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "query"
-				},
-				"queryId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"query": {
-					"type": "string",
-					"const": "job_output"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"params": {
-					"$ref": "#/$defs/QueryParams.job_output"
 				}
 			},
 			"additionalProperties": false
@@ -7366,18 +7299,6 @@
 			},
 			"additionalProperties": false
 		},
-		"IntentInput.cancel_job": {
-			"type": "object",
-			"required": [
-				"jobId"
-			],
-			"properties": {
-				"jobId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				}
-			},
-			"additionalProperties": false
-		},
 		"IntentInput.cancel_work": {
 			"type": "object",
 			"required": [
@@ -8485,18 +8406,6 @@
 		},
 		"IntentOutput.bash": {
 			"$ref": "#/$defs/RpcBashResult"
-		},
-		"IntentOutput.cancel_job": {
-			"type": "object",
-			"required": [
-				"job"
-			],
-			"properties": {
-				"job": {
-					"$ref": "#/$defs/RpcBackgroundJobSummary"
-				}
-			},
-			"additionalProperties": false
 		},
 		"IntentOutput.clone": {
 			"$ref": "#/$defs/IntentCancelled"
@@ -9746,7 +9655,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title|jobs)|(?:host_request|ext_status|ext_widget|work|workflow|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|workflow|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LiveToolPartial": {
@@ -9823,9 +9732,6 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.work"
-				},
-				{
-					"$ref": "#/$defs/LiveValue.jobs"
 				},
 				{
 					"$ref": "#/$defs/LiveValue.workflow"
@@ -10001,23 +9907,6 @@
 					"items": {
 						"$ref": "#/$defs/IntentAvailability"
 					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"LiveValue.jobs": {
-			"type": "object",
-			"required": [
-				"kind",
-				"jobs"
-			],
-			"properties": {
-				"kind": {
-					"type": "string",
-					"const": "jobs"
-				},
-				"jobs": {
-					"$ref": "#/$defs/RpcBackgroundJobs"
 				}
 			},
 			"additionalProperties": false
@@ -13164,7 +13053,6 @@
 				"host_status",
 				"web_search_status",
 				"subagent_definitions",
-				"job_output",
 				"work_output",
 				"agent_options",
 				"session_contexts",
@@ -13264,18 +13152,6 @@
 		},
 		"QueryParams.intents": {
 			"$ref": "#/$defs/EmptyInput"
-		},
-		"QueryParams.job_output": {
-			"type": "object",
-			"required": [
-				"jobId"
-			],
-			"properties": {
-				"jobId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				}
-			},
-			"additionalProperties": false
 		},
 		"QueryParams.mcp.capabilities": {
 			"$ref": "#/$defs/EmptyInput"
@@ -13746,18 +13622,6 @@
 					"items": {
 						"$ref": "#/$defs/IntentDescriptor"
 					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"QueryResult.job_output": {
-			"type": "object",
-			"required": [
-				"job"
-			],
-			"properties": {
-				"job": {
-					"$ref": "#/$defs/RpcBackgroundJobSnapshot"
 				}
 			},
 			"additionalProperties": false
@@ -15243,123 +15107,6 @@
 				}
 			},
 			"additionalProperties": false
-		},
-		"RpcBackgroundJobSnapshot": {
-			"type": "object",
-			"required": [
-				"id",
-				"toolName",
-				"label",
-				"status",
-				"startedAt",
-				"outputTruncated",
-				"output"
-			],
-			"properties": {
-				"id": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"toolName": {
-					"type": "string",
-					"enum": [
-						"bash",
-						"subagent"
-					]
-				},
-				"toolCallId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"label": {
-					"type": "string",
-					"maxLength": 200
-				},
-				"status": {
-					"type": "string",
-					"enum": [
-						"running",
-						"cancelling",
-						"completed",
-						"failed",
-						"cancelled"
-					]
-				},
-				"startedAt": {
-					"type": "number"
-				},
-				"endedAt": {
-					"type": "number"
-				},
-				"lastOutputAt": {
-					"type": "number"
-				},
-				"outputTruncated": {
-					"type": "boolean"
-				},
-				"output": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"RpcBackgroundJobSummary": {
-			"type": "object",
-			"required": [
-				"id",
-				"toolName",
-				"label",
-				"status",
-				"startedAt",
-				"outputTruncated"
-			],
-			"properties": {
-				"id": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"toolName": {
-					"type": "string",
-					"enum": [
-						"bash",
-						"subagent"
-					]
-				},
-				"toolCallId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"label": {
-					"type": "string",
-					"maxLength": 200
-				},
-				"status": {
-					"type": "string",
-					"enum": [
-						"running",
-						"cancelling",
-						"completed",
-						"failed",
-						"cancelled"
-					]
-				},
-				"startedAt": {
-					"type": "number"
-				},
-				"endedAt": {
-					"type": "number"
-				},
-				"lastOutputAt": {
-					"type": "number"
-				},
-				"outputTruncated": {
-					"type": "boolean"
-				}
-			},
-			"additionalProperties": false
-		},
-		"RpcBackgroundJobs": {
-			"type": "array",
-			"items": {
-				"$ref": "#/$defs/RpcBackgroundJobSummary"
-			},
-			"maxItems": 64
 		},
 		"RpcBashResult": {
 			"type": "object",

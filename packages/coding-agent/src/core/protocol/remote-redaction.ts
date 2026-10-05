@@ -63,9 +63,6 @@ const PRESERVED_KEYS: ReadonlySet<string> = new Set([...CLIENT_KEYS, ...HOST_KEY
 
 /** Largest value of one keyed live item, in bytes. */
 const LIVE_VALUE_MAX_BYTES = 64 * 1024;
-/** Longest background job label after path replacement. */
-const JOB_LABEL_MAX_CHARS = 200;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -193,13 +190,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	const settled = (text: string): string => {
 		const prefix = settledPrefix(text);
 		return prefix.slice(0, prefix.length - sanitizer.rootPrefixSuffix(prefix));
-	};
-
-	/** A redacted background job's label within its bound, when path replacement lengthened it. */
-	const boundJobLabel = (job: unknown): void => {
-		if (isRecord(job) && typeof job.label === "string" && job.label.length > JOB_LABEL_MAX_CHARS) {
-			job.label = job.label.slice(0, JOB_LABEL_MAX_CHARS);
-		}
 	};
 
 	/** A redacted assistant message within the snapshot budget; blocks cut short are frozen. */
@@ -438,7 +428,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			rememberOptions(value.requestId, value.request, redacted.request);
 			return redacted;
 		}
-		if (redacted.kind === "jobs") for (const job of redacted.jobs) boundJobLabel(job);
 		const bounded = boundStrings(redacted, LIVE_VALUE_MAX_BYTES) as LiveValue;
 		return jsonBytes(bounded) <= LIVE_VALUE_MAX_BYTES ? bounded : undefined;
 	};
@@ -543,8 +532,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 					return sanitize(frame);
 				case "result": {
 					const redacted = sanitize(frame);
-					// `job_output`'s job.
-					if (isRecord(redacted.data)) boundJobLabel(redacted.data.job);
 					return fits(redacted)
 						? redacted
 						: {
@@ -555,8 +542,6 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				}
 				case "accepted": {
 					const redacted = sanitize(frame);
-					// `cancel_job`'s job.
-					if (isRecord(redacted.result)) boundJobLabel(redacted.result.job);
 					if (fits(redacted)) return redacted;
 					const { result: _result, ...rest } = redacted;
 					return rest;

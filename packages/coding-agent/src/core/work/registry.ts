@@ -45,6 +45,7 @@ import {
 	EXTENSION_WORK_KIND_PATTERN,
 	type UiNode,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
+	WORK_NOTICE_CUSTOM_TYPE,
 	WORK_OUTPUT_MAX_UTF8_BYTES,
 	WORK_TEXT_MAX_CHARS,
 	WORK_TITLE_MAX_CHARS,
@@ -97,6 +98,8 @@ export interface WorkExecution {
 	readonly outcome: "completed" | "failed" | "cancelled";
 	readonly result?: WorkResult;
 	readonly error?: string;
+	/** The result already reached its reader, such as a tool waiting for it: the finish queues no notice. */
+	readonly deliver?: false;
 }
 
 /** What an executor reports through. */
@@ -151,8 +154,8 @@ export interface WorkKindDefinition {
 	 * work survives a restart suspended instead of interrupted.
 	 */
 	resume?(item: WorkRecord): WorkExecutor;
-	/** Output of running work the kind keeps itself instead of reporting it through `output`. */
-	output?(workId: string): string | undefined;
+	/** Output of running work the kind keeps itself, such as a tool's latest tail, instead of reporting it through `output`. */
+	output?(workId: string): { readonly text: string; readonly truncated: boolean } | undefined;
 }
 
 export interface WorkStartOptions {
@@ -211,6 +214,8 @@ export interface WorkRegistryHost {
 	live(): LiveState;
 	/** The turn running now: work started meanwhile belongs to it, and a stop of it fences its notices. */
 	turnId(): string | undefined;
+	/** An executor attached or detached: what `running()` returns changed. */
+	runningChanged?(): void;
 }
 
 // ============================================================================
@@ -453,9 +458,9 @@ export class WorkRegistry {
 	}
 
 	/**
-	 * Cancel open work of a cancellable kind. Running work checkpoints
-	 * `cancelling` and its executor is aborted; it finishes with whatever its
-	 * executor returns. Suspended work finishes `cancelled` at once.
+	 * Cancel open work of a cancellable kind. Running work's executor is
+	 * aborted at once and the work checkpoints `cancelling`; it finishes with
+	 * whatever its executor returns. Suspended work finishes `cancelled` at once.
 	 */
 	async cancel(workId: string): Promise<WorkRecord> {
 		this.assertOpen();
@@ -466,15 +471,17 @@ export class WorkRegistry {
 		if (active) {
 			if (!active.cancelling && !active.detached) {
 				active.cancelling = true;
+				// The executor stops at once; its finish is written after the checkpoint.
+				const checkpoint =
+					record.state === "cancelling"
+						? undefined
+						: this.write(active, () => this.host.work().checkpoint(workId, { state: "cancelling" }));
+				active.controller.abort(new Error("Work cancelled"));
 				try {
-					if (record.state !== "cancelling") {
-						await this.write(active, () => this.host.work().checkpoint(workId, { state: "cancelling" }));
-					}
+					await checkpoint;
 				} catch (error) {
 					// Work that finished meanwhile needs no cancelling.
 					if (this.get(workId)?.outcome === undefined) throw error;
-				} finally {
-					active.controller.abort(new Error("Work cancelled"));
 				}
 			}
 			return this.get(workId) ?? record;
@@ -591,7 +598,7 @@ export class WorkRegistry {
 		const own = (active?.definition ?? this.kinds.get(record.kind))?.output?.(workId);
 		return own === undefined
 			? { text: "", truncated: false, final: false }
-			: { ...outputTail(own, false), final: false };
+			: { ...outputTail(own.text, own.truncated), final: false };
 	}
 
 	/**
@@ -616,6 +623,34 @@ export class WorkRegistry {
 		);
 	}
 
+	/**
+	 * Withdraw the queued notice of finished `workId`: a reader took its
+	 * result another way. False when it queued none, or a turn already took it.
+	 */
+	async withdrawNotice(workId: string): Promise<boolean> {
+		const { inputs, queued } = this.host.state().clientInputs;
+		for (const clientMessageId of queued) {
+			const input = inputs.get(clientMessageId);
+			if (input?.origin !== "host" || input.state !== "accepted") continue;
+			const notices = input.queuedInput?.messages ?? [];
+			const names = notices.some(
+				(message) =>
+					message.role === "custom" &&
+					message.customType === WORK_NOTICE_CUSTOM_TYPE &&
+					isRecord(message.details) &&
+					message.details.workId === workId,
+			);
+			if (!names) continue;
+			try {
+				return await this.host.work().withdrawHostInput(clientMessageId);
+			} catch {
+				// A lost log is reconciled by the next open.
+				return false;
+			}
+		}
+		return false;
+	}
+
 	/** Resolves once no executor runs. */
 	async waitForIdle(): Promise<void> {
 		while (this.active.size > 0) {
@@ -625,7 +660,7 @@ export class WorkRegistry {
 
 	/**
 	 * Stop every executor. `cancelled` cancels each cancellable running item
-	 * as `cancel` does. `closed` (the conversation closes; no work starts
+	 * as `cancel` does and resolves once their executors stopped. `closed` (the conversation closes; no work starts
 	 * afterwards) aborts every executor and waits up to
 	 * {@link WORK_CLOSE_GRACE_MS}: resumable work stays open, suspended on
 	 * the next open, and other work finishes `interrupted` unless it completed
@@ -635,6 +670,7 @@ export class WorkRegistry {
 		if (reason === "cancelled") {
 			const cancellable = [...this.active.values()].filter((active) => active.definition.cancellable);
 			await Promise.allSettled(cancellable.map((active) => this.cancel(active.workId)));
+			await Promise.all(cancellable.map((active) => active.done.promise));
 			return;
 		}
 		if (this.closed) return;
@@ -734,6 +770,7 @@ export class WorkRegistry {
 		this.active.set(record.workId, active);
 		EXECUTING.add(this.executingKey(record.workId));
 		this.liveFeed.attach(record.workId);
+		this.runningChanged();
 		if (this.closed) {
 			// The conversation closed while the work started: it ends as the closing left it.
 			active.closing = true;
@@ -747,6 +784,15 @@ export class WorkRegistry {
 		if (this.active.get(active.workId) === active) this.active.delete(active.workId);
 		this.liveFeed.detach(active.workId);
 		active.done.resolve();
+		this.runningChanged();
+	}
+
+	private runningChanged(): void {
+		try {
+			this.host.runningChanged?.();
+		} catch {
+			// Observers never affect work.
+		}
 	}
 
 	/** Run `write` after the item's earlier writes. */
@@ -829,7 +875,8 @@ export class WorkRegistry {
 			active.output.received > 0 ? active.output.snapshot() : undefined,
 		);
 		const error = known ? known.error : "The work's executor returned no outcome";
-		const delivers = !active.fenced && this.deliveries.delivers(active.turnId) && this.noticeFits();
+		const delivers =
+			known?.deliver !== false && !active.fenced && this.deliveries.delivers(active.turnId) && this.noticeFits();
 		return {
 			outcome,
 			...(Object.keys(result).length === 0 ? {} : { result }),

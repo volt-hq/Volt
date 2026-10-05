@@ -30,6 +30,7 @@ import {
 	type RemoteCapability,
 	type RemoteGrant,
 } from "@hansjm10/volt-protocol";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol/work";
 import { createIrohRemoteProjectionSanitizer } from "../remote/iroh/sanitizer.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { type IntentProfile, LOCAL_INTENT_PROFILE } from "./intents/types.ts";
@@ -191,7 +192,7 @@ export function getRemoteVisibleCustomMessageRole(
 	switch (customType) {
 		case "review":
 			return "assistant";
-		case "background_job_notification":
+		case WORK_NOTICE_CUSTOM_TYPE:
 		case "subagent_recovery":
 			return "system";
 		default:

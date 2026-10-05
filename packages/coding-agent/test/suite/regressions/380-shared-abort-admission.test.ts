@@ -1,9 +1,8 @@
 import { setImmediate } from "node:timers/promises";
-import { AdmissionGate, type AgentTool } from "@hansjm10/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BackgroundJobManager } from "../../../src/core/background-jobs.ts";
 import type { ExtensionAPI } from "../../../src/core/extensions/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
@@ -41,7 +40,7 @@ async function setup(options: HarnessOptions = {}) {
 			return { exitCode: 0 };
 		}),
 	};
-	// Native entry wrappers and the job manager remain real. No shell or child runtime is started.
+	// Native entry wrappers and the jobs remain real. No shell or child runtime is started.
 	const subagentExecute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "child result" }] }));
 	const createDefinitions = nativeTools.createAllToolDefinitions;
 	vi.spyOn(nativeTools, "createAllToolDefinitions").mockImplementation((cwd, options) => ({
@@ -147,7 +146,8 @@ describe("PR #380: shared session abort admission", () => {
 			settled = true;
 		});
 		try {
-			expect(attempts).toHaveLength(1);
+			// Cancelling the job aborts its signal once the cancel is recorded.
+			await vi.waitFor(() => expect(attempts).toHaveLength(1));
 			expect(reentrantAbort).toBe(abort);
 			expect(harness.session.abort("keyboard_interrupt")).toBe(abort);
 			await expect(attempts[0]).rejects.toThrow(/admission|already processing/i);
@@ -168,7 +168,7 @@ describe("PR #380: shared session abort admission", () => {
 			finish.resolve();
 			await joined;
 		}
-		expect(harness.session.hasBackgroundJobs).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(false);
 		harness.setResponses([fauxAssistantMessage("admission reopened")]);
 		await harness.session.sendCustomMessage({ ...message, content: "allowed after abort" }, { triggerTurn: true });
 		expect(harness.session.getLastAssistantText()).toBe("admission reopened");
@@ -230,7 +230,7 @@ describe("PR #380: shared session abort admission", () => {
 			await expect(tool(harness, "bash").execute("denied", { command: "denied", background: true })).rejects.toThrow(
 				"admission is suspended",
 			);
-			expect(harness.session.hasBackgroundJobs).toBe(true);
+			expect(harness.session.hasRunningWork).toBe(true);
 		} finally {
 			finish.resolve();
 			await rejected;
@@ -362,37 +362,4 @@ describe("PR #380: shared session abort admission", () => {
 		await harness.session.prompt("fresh work");
 		expect(harness.faux.state.callCount).toBe(2);
 	});
-});
-
-describe("shared admission at background manager dispatch", () => {
-	it.each(["bash", "subagent"] as const)(
-		"rejects new %s jobs and invalidates pre-dispatch work across reopening",
-		async (toolName) => {
-			const gate = new AdmissionGate();
-			const manager = new BackgroundJobManager({
-				admissionGate: gate,
-				isToolAllowed: () => true,
-				getGeneration: () => 0,
-			});
-			const execute = vi.fn(async () => ({ content: [{ type: "text" as const, text: "done" }] }));
-			const work = { toolName, toolCallId: "test", label: "test", execute };
-			const old = manager.start(work);
-			const release = gate.suspend();
-			try {
-				expect(() => manager.start(work)).toThrow("admission is suspended");
-				expect(manager.list()).toHaveLength(1);
-				expect(manager.get(old.id).status).toBe("running");
-			} finally {
-				release();
-			}
-			await manager.waitForIdle();
-			expect(manager.get(old.id).status).toBe("cancelled");
-			expect(execute).not.toHaveBeenCalled();
-			const next = manager.start(work);
-			await manager.waitForIdle();
-			expect(manager.get(next.id).status).toBe("completed");
-			expect(execute).toHaveBeenCalledTimes(1);
-			await manager.close();
-		},
-	);
 });

@@ -73,7 +73,7 @@ describe("protocol server on the local profile", () => {
 		expect(live).toMatchObject({ seq: 1, reset: true });
 		if (live?.type !== "live") throw new Error("Expected a live frame");
 		expect(live.items.map((item) => (item.type === "set" ? item.key : item.type))).toEqual(
-			expect.arrayContaining(["phase", "intents", "usage", "git", "prompt_cache", "jobs"]),
+			expect.arrayContaining(["phase", "intents", "usage", "git", "prompt_cache"]),
 		);
 
 		raw.send({ type: "unsubscribe", subscriptionId: "s1" });

@@ -19,12 +19,10 @@ import type {
 	ConversationGenerationChange,
 	ConversationGenerationListener,
 } from "../agent-session.ts";
-import type { BackgroundJobManager } from "../background-jobs.ts";
 import { collectEntriesForBranchSummary, generateBranchSummary } from "../compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeTreeResult, TreePreparation } from "../extensions/index.ts";
 import type { BranchSummaryEntry, SessionEntry, SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import { withInferenceSpeed } from "./compaction.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { ModelSettings } from "./model-settings.ts";
@@ -49,11 +47,11 @@ export interface SessionNavigationHost {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	readonly modelSettings: ModelSettings;
-	readonly backgroundJobs: BackgroundJobManager;
+	/** Whether a background job runs. */
+	hasRunningJobs(): boolean;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
 	extensionServices(): SessionExtensionServices;
-	background(): SessionBackgroundContinuation;
 	planning(): SessionPlanning;
 	/** A turn holds the conversation, a prompt's reservation included. */
 	turnActive(): boolean;
@@ -113,7 +111,7 @@ export class SessionNavigation {
 	 * {@link AgentSession.navigateTree}.
 	 */
 	navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
-		if (this.host.turnActive() || this.host.isBashRunning() || this.host.backgroundJobs.hasActive) {
+		if (this.host.turnActive() || this.host.isBashRunning() || this.host.hasRunningJobs()) {
 			return Promise.reject(
 				new Error(
 					"Cannot navigate the session tree while an agent, bash run, or background job is active; abort or wait for it to finish",
@@ -124,7 +122,7 @@ export class SessionNavigation {
 			return Promise.reject(new Error("Cannot navigate the session tree while another session mutation is active"));
 		}
 		this.host.extensionServices().invalidate();
-		return this.navigate(targetId, options).finally(() => this.host.background().schedule());
+		return this.navigate(targetId, options);
 	}
 
 	/**
@@ -279,9 +277,7 @@ export class SessionNavigation {
 			nextLeafId: sessionManager.getLeafId(),
 		};
 		if (this.host.generation() !== previousGeneration) {
-			// Prompt authority and runtime-only research evidence belong to the abandoned branch.
-			this.host.backgroundJobs.cancelInaccessible();
-			this.host.background().discardNotifications();
+			// Runtime-only research evidence belongs to the abandoned branch.
 			this.host.planning().clearResearch();
 		}
 

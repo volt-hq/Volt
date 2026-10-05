@@ -1,7 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import type { HostFrame, LiveValue, RemoteCapability } from "@hansjm10/volt-protocol";
+import type { HostFrame, RemoteCapability } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createLoopbackClient, type LoopbackClient, type ProtocolClient } from "../../../src/client/protocol-client.ts";
+import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
 import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import { createIrohRemotePresetAccess, createIrohRemoteRpcGrant } from "../../../src/core/remote/iroh/access-grant.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
@@ -12,7 +12,11 @@ import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
-type JobsValue = Extract<LiveValue, { kind: "jobs" }>;
+/**
+ * Background jobs are work items on the wire (PR #380, Phase 4): clients see
+ * them in their fold and the live `work/<id>` value, read output with
+ * `work_output`, and cancel with `cancel_work`.
+ */
 
 function deferred() {
 	let resolve!: () => void;
@@ -122,27 +126,24 @@ async function connectPhone(target: TestHost, capabilities?: readonly RemoteCapa
 	return phone;
 }
 
-/** The jobs every live frame of `frames` set, in order. */
-function jobsValues(frames: readonly HostFrame[]): JobsValue["jobs"][] {
+/** Whether a live frame of `frames` set or cleared `work/<id>`. */
+function liveWorkItems(frames: readonly HostFrame[], workId: string) {
 	return frames.flatMap((frame) =>
 		frame.type === "live"
-			? frame.items.flatMap((item) => (item.type === "set" && item.value.kind === "jobs" ? [item.value.jobs] : []))
+			? frame.items.filter((item) => (item.type === "set" || item.type === "clear") && item.key === `work/${workId}`)
 			: [],
 	);
-}
-
-function liveJobs(client: ProtocolClient): JobsValue["jobs"] | undefined {
-	const value = client.live.values.get("jobs");
-	return value?.kind === "jobs" ? value.jobs : undefined;
 }
 
 async function startJob(harness: Harness, command = "first") {
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command, background: true }), { stopReason: "toolUse" }),
 		fauxAssistantMessage("Foreground finished."),
+		// The job's completion notice wakes the idle conversation.
+		fauxAssistantMessage("Noticed the job."),
 	]);
 	await harness.session.prompt(`Launch ${command}`);
-	return harness.session.backgroundJobs.list().find((job) => job.label === command)!;
+	return harness.session.jobs.list().find((job) => job.label === command)!;
 }
 
 afterEach(async () => {
@@ -154,33 +155,39 @@ afterEach(async () => {
 });
 
 describe("background jobs over protocol frames", () => {
-	it("shows live job metadata and reads live output after foreground settlement without consuming results or running inference", async () => {
+	it("shows a job as a work item and reads its output without consuming it or running inference", async () => {
 		const { harness, target, executions } = await setup();
 		const { client, frames } = await connect(target);
 		const job = await startJob(harness);
 		await vi.waitFor(() =>
-			expect(liveJobs(client)).toEqual([expect.objectContaining({ id: job.id, status: "running" })]),
+			expect(client.state.work.get(job.id)).toMatchObject({ kind: "job", state: "running", cancellable: true }),
 		);
+		expect(client.live.values.get(`work/${job.id}`)).toMatchObject({ kind: "work", workId: job.id });
 		await client.waitForIdle();
 		expect(client.phase).toMatchObject({ busy: false });
-		const read = await client.query("job_output", { jobId: job.id });
-		expect(read.job.output).toContain("output for first");
+		const read = await client.query("work_output", { workId: job.id });
+		expect(read).toMatchObject({ final: false });
+		expect(read.text).toContain("output for first");
 		executions.get("first")!.output("\u001b[31mnew output\u001b[0m\r\n\u0000");
 		await vi.waitFor(async () =>
-			expect((await client.query("job_output", { jobId: job.id })).job.output).toContain("new output\n"),
+			expect((await client.query("work_output", { workId: job.id })).text).toContain("new output\n"),
 		);
-		expect((await client.query("job_output", { jobId: job.id })).job.output).not.toContain("\u001b");
-		executions.get("first")!.finish();
-		await harness.session.waitForBackgroundJobs();
-		const completed = await client.query("job_output", { jobId: job.id });
-		expect(completed.job.status).toBe("completed");
-		expect(await client.query("job_output", { jobId: job.id })).toEqual(completed);
-		// Reading a job neither collects its result nor runs inference.
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
+		expect((await client.query("work_output", { workId: job.id })).text).not.toContain("\u001b");
+		// Reading output runs no inference.
 		expect(harness.faux.state.callCount).toBe(2);
-		await vi.waitFor(() => expect(liveJobs(client)).toEqual([expect.objectContaining({ status: "completed" })]));
-		// The live value is metadata only: output stays behind job_output.
-		for (const jobs of jobsValues(frames)) for (const value of jobs) expect(value).not.toHaveProperty("output");
+		executions.get("first")!.finish();
+		await harness.session.work.waitForIdle();
+		await vi.waitFor(() => expect(client.state.work.get(job.id)).toMatchObject({ outcome: "completed" }));
+		const completed = await client.query("work_output", { workId: job.id });
+		expect(completed).toMatchObject({ final: true });
+		expect(completed.text).toContain("new output");
+		expect(await client.query("work_output", { workId: job.id })).toEqual(completed);
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(3);
+		await vi.waitFor(() => expect(client.live.values.has(`work/${job.id}`)).toBe(false));
+		// The live value carries no output text, and is cleared once the job finished.
+		expect(liveWorkItems(frames, job.id).at(-1)).toMatchObject({ type: "clear" });
+		expect(JSON.stringify(liveWorkItems(frames, job.id))).not.toContain("output for first");
 	});
 
 	it("cancels only one job and reports cancelling until cleanup finishes", async () => {
@@ -188,17 +195,17 @@ describe("background jobs over protocol frames", () => {
 		const { client } = await connect(target);
 		const first = await startJob(harness);
 		const second = await startJob(harness, "second");
-		const cancelled = await client.intent("cancel_job", { jobId: first.id });
-		expect(cancelled.result?.job.status).toBe("cancelling");
+		await client.intent("cancel_work", { workId: first.id });
 		expect(executions.get("first")!.signal?.aborted).toBe(true);
 		expect(executions.get("second")!.signal?.aborted).toBe(false);
-		expect((await client.query("job_output", { jobId: first.id })).job.status).toBe("cancelling");
+		await vi.waitFor(() => expect(client.state.work.get(first.id)).toMatchObject({ state: "cancelling" }));
+		expect(client.state.work.get(first.id)?.outcome).toBeUndefined();
 		executions.get("first")!.finish();
-		await vi.waitFor(async () =>
-			expect((await client.query("job_output", { jobId: first.id })).job.status).toBe("cancelled"),
-		);
-		expect((await client.query("job_output", { jobId: second.id })).job.status).toBe("running");
-		expect((await client.intent("cancel_job", { jobId: first.id })).result?.job.status).toBe("cancelled");
+		await vi.waitFor(() => expect(client.state.work.get(first.id)).toMatchObject({ outcome: "cancelled" }));
+		expect(client.state.work.get(second.id)).toMatchObject({ state: "running" });
+		await expect(client.intent("cancel_work", { workId: first.id })).rejects.toMatchObject({
+			reason: { code: "unavailable" },
+		});
 	});
 
 	it("keeps the abort intent enabled while only jobs remain, and abort cancels them", async () => {
@@ -212,64 +219,57 @@ describe("background jobs over protocol frames", () => {
 		await vi.waitFor(() => expect(executions.get("first")!.signal?.aborted).toBe(true));
 		executions.get("first")!.finish();
 		await expect(abort).resolves.toMatchObject({ type: "accepted" });
-		await harness.session.waitForBackgroundJobs();
-		expect(harness.session.hasBackgroundJobs).toBe(false);
+		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.jobs.list()).toMatchObject([{ status: "cancelled" }]);
 	});
 
-	it.each(["jobs", "bash"])("hides and rejects jobs when the %s tool grant is removed", async (removed) => {
-		const { harness, target, executions } = await setup();
-		const { client } = await connect(target);
-		const job = await startJob(harness);
-		await vi.waitFor(() => expect(liveJobs(client)).toHaveLength(1));
-		harness.session.setActiveToolsByName(["bash", "jobs"].filter((name) => name !== removed));
-		await vi.waitFor(() => expect(liveJobs(client)).toEqual([]));
-		await expect(client.query("job_output", { jobId: job.id })).rejects.toThrow("inaccessible");
-		await expect(client.intent("cancel_job", { jobId: job.id })).rejects.toThrow("inaccessible");
-		expect(executions.get("first")!.signal?.aborted).toBe(true);
-	});
+	it.each(["jobs", "bash"])(
+		"cancels a job when the %s tool grant is removed, keeping its output readable",
+		async (removed) => {
+			const { harness, target, executions } = await setup();
+			const { client } = await connect(target);
+			const job = await startJob(harness);
+			await vi.waitFor(() => expect(client.state.work.get(job.id)).toBeDefined());
+			harness.session.setActiveToolsByName(["bash", "jobs"].filter((name) => name !== removed));
+			await vi.waitFor(() => expect(executions.get("first")!.signal?.aborted).toBe(true));
+			executions.get("first")!.finish();
+			await vi.waitFor(() => expect(client.state.work.get(job.id)).toMatchObject({ outcome: "cancelled" }));
+			expect((await client.query("work_output", { workId: job.id })).final).toBe(true);
+		},
+	);
 
-	it("serves retained jobs to every subscriber, reads with observation, and cancels only with control at the device's position", async () => {
+	it("serves jobs to every subscriber, reads with observation, and cancels only with control", async () => {
 		const { harness, target, executions } = await setup();
 		const job = await startJob(harness);
 		const { client: first } = await connect(target);
 		const observer = await connectPhone(target, ["conversation.observe.v1"]);
 		const controller = await connectPhone(target);
-		// Each subscriber's live reset carries the retained job.
-		expect(liveJobs(first)).toEqual([expect.objectContaining({ id: job.id, status: "running" })]);
+		// Each subscriber's live reset carries the running job.
+		expect(first.live.values.get(`work/${job.id}`)).toMatchObject({ kind: "work" });
 		for (const phone of [observer, controller]) {
-			expect(jobsValues(phone.frames).at(-1)).toEqual([expect.objectContaining({ id: job.id, status: "running" })]);
-			expect(await phone.query("job_output", { jobId: job.id })).toMatchObject({
+			expect(liveWorkItems(phone.frames, job.id).at(-1)).toMatchObject({ type: "set" });
+			expect(await phone.query("work_output", { workId: job.id })).toMatchObject({
 				type: "result",
-				data: { job: { id: job.id, status: "running" } },
+				data: { workId: job.id, final: false },
 			});
 		}
-		expect(await observer.intent("cancel_job", { jobId: job.id })).toMatchObject({
+		expect(await observer.intent("cancel_work", { workId: job.id })).toMatchObject({
 			type: "rejected",
 			reason: { code: "not_allowed", requiredCapability: "conversation.control.v1" },
-		});
-		// A device cancels at the position it saw: a branch-fenced intent without one is refused.
-		expect(await controller.intent("cancel_job", { jobId: job.id }, { expectedOrdinal: null })).toMatchObject({
-			type: "rejected",
-			reason: { code: "invalid_input" },
 		});
 		expect(executions.get("first")!.signal?.aborted).toBe(false);
 
 		// The job outlives the client that saw it start.
 		await first.stop();
-		expect(harness.session.hasBackgroundJobs).toBe(true);
+		expect(harness.session.hasRunningWork).toBe(true);
 		executions.get("first")!.finish();
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.work.waitForIdle();
 		for (const phone of [observer, controller]) {
-			await vi.waitFor(() =>
-				expect(jobsValues(phone.frames).at(-1)).toEqual([
-					expect.objectContaining({ id: job.id, status: "completed" }),
-				]),
-			);
-			for (const jobs of jobsValues(phone.frames))
-				for (const value of jobs) expect(value).not.toHaveProperty("output");
+			await vi.waitFor(() => expect(liveWorkItems(phone.frames, job.id).at(-1)).toMatchObject({ type: "clear" }));
 		}
+		await harness.session.waitForIdle();
 		const { client: third } = await connect(target);
-		expect(liveJobs(third)).toEqual([expect.objectContaining({ id: job.id, status: "completed" })]);
+		expect(third.state.work.get(job.id)).toMatchObject({ kind: "job", outcome: "completed" });
 	});
 
 	it("bounds multibyte output reads without putting the output into the live state", async () => {
@@ -277,31 +277,29 @@ describe("background jobs over protocol frames", () => {
 		const job = await startJob(harness);
 		const phone = await connectPhone(target);
 		executions.get("first")!.output("界".repeat(25_000));
-		// Native Bash coalesces progress before it reaches the job manager.
-		await vi.waitFor(() => expect(harness.session.backgroundJobs.get(job.id).outputTruncated).toBe(true));
-		const read = await phone.query("job_output", { jobId: job.id });
+		// Native Bash coalesces progress before it reaches the job.
+		await vi.waitFor(() => expect(harness.session.jobs.get(job.id).outputTruncated).toBe(true));
+		const read = await phone.query("work_output", { workId: job.id });
 		if (read.type !== "result") throw new Error(`Expected a result, got ${JSON.stringify(read)}`);
-		const snapshot = (read.data as { job: { output: string; outputTruncated: boolean } }).job;
-		expect(snapshot.outputTruncated).toBe(true);
-		expect(Buffer.byteLength(snapshot.output, "utf8")).toBeLessThanOrEqual(50 * 1024);
-		expect(snapshot.output).not.toContain("�");
-		await vi.waitFor(() =>
-			expect(jobsValues(phone.frames).at(-1)).toEqual([expect.objectContaining({ outputTruncated: true })]),
-		);
-		for (const jobs of jobsValues(phone.frames)) for (const value of jobs) expect(value).not.toHaveProperty("output");
+		const output = read.data as { text: string; truncated: boolean; nextOffset: number | null };
+		expect(output.truncated).toBe(true);
+		expect(Buffer.byteLength(output.text, "utf8")).toBeLessThanOrEqual(50 * 1024);
+		expect(output.text).not.toContain("�");
+		expect(JSON.stringify(liveWorkItems(phone.frames, job.id))).not.toContain("界");
 	});
 
-	it("clears job handles when the client moves to a new session rather than reconstructing them from history", async () => {
+	it("leaves the jobs behind when the client moves to a new session", async () => {
 		const { harness, target, executions } = await setup();
 		const { client } = await connect(target);
 		const job = await startJob(harness);
 		executions.get("first")!.finish();
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.work.waitForIdle();
+		await harness.session.waitForIdle();
 		const moved = await client.intent("new_session", {});
 		expect(moved.conversation).toBeDefined();
 		await vi.waitFor(() => expect(client.conversation).toBe(moved.conversation));
 		await client.caughtUp();
-		expect(liveJobs(client)).toEqual([]);
-		await expect(client.query("job_output", { jobId: job.id })).rejects.toThrow("inaccessible");
+		expect(client.state.work.size).toBe(0);
+		await expect(client.query("work_output", { workId: job.id })).rejects.toThrow("Unknown work");
 	});
 });

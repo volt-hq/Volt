@@ -37,7 +37,6 @@ import { PLAN_CHECKPOINT_CUSTOM_TYPE } from "../planning.ts";
 import { getLatestCompactionEntry, type SessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { writeToolProgressCapture } from "../tool-progress-capture.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import { checkResponseCompaction, latestCompactionTime, shouldCompactBeforeContinuing } from "./compaction-policy.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
 import type { ModelSettings } from "./model-settings.ts";
@@ -62,7 +61,6 @@ export interface SessionCompactionHost {
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
 	extensions(): SessionExtensionBinding;
-	background(): SessionBackgroundContinuation;
 	planning(): SessionPlanning;
 	isDisposed(): boolean;
 	/** Rejects once the session is disposed. */
@@ -345,7 +343,6 @@ export class SessionCompaction {
 					willRetry,
 				});
 			}
-			this.host.background().readinessChanged();
 			this.host.emit({ type: "compaction_end", reason, result, aborted: false, willRetry });
 			return;
 		}
@@ -390,22 +387,18 @@ export class SessionCompaction {
 			this.host
 				.conversation()
 				.abort(this.host.extensions().invokingMode === "rpc" ? "remote_request" : "host_action");
-		try {
-			const outcome = await this.host
-				.conversation()
-				.compact(customInstructions === undefined ? {} : { instructions: customInstructions });
-			// The compaction's events, its result included, are published before it resolves.
-			await this.host.conversation().waitForIdle();
-			const result = this.lastCompactionResult;
-			if (outcome.status !== "compacted" || !result) {
-				// A compaction the session's disposal interrupted reports the disposal.
-				this.host.assertNotDisposed();
-				throw new Error("Compaction cancelled");
-			}
-			return result;
-		} finally {
-			this.host.background().schedule();
+		const outcome = await this.host
+			.conversation()
+			.compact(customInstructions === undefined ? {} : { instructions: customInstructions });
+		// The compaction's events, its result included, are published before it resolves.
+		await this.host.conversation().waitForIdle();
+		const result = this.lastCompactionResult;
+		if (outcome.status !== "compacted" || !result) {
+			// A compaction the session's disposal interrupted reports the disposal.
+			this.host.assertNotDisposed();
+			throw new Error("Compaction cancelled");
 		}
+		return result;
 	}
 
 	/**

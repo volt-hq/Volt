@@ -5,13 +5,13 @@ import { setImmediate } from "node:timers/promises";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
-import type { BackgroundJobSnapshot } from "../../src/core/background-jobs.ts";
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { parsePersistedSessionEntry } from "../../src/core/session-entry-codec.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, SubagentManager } from "../../src/core/subagents/index.ts";
+import type { JobSummary } from "../../src/core/tools/jobs.ts";
 import { createAgentSessionTestControl } from "../agent-session-test-control.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -131,16 +131,23 @@ async function setup(withConfiguredAuth = true) {
 			const confirm = /"confirm": "([^"]+)"/.exec(getMessageText(preflight))?.[1];
 			if (!confirm) throw new Error("Expected spawn confirmation");
 			const result = await tool.execute("background-spawn", { ...params, confirm });
-			const job = (result.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
+			const job = (result.details as { job: JobSummary }).job;
 			await promptReady.promise;
 			return job.id;
 		},
+		/**
+		 * Wait for the job's result. A job that finishes into this wait queues no
+		 * notice, so no inference wakes the parent. Its result is recorded through
+		 * the parent's log, after the writes queued before it.
+		 */
 		async wait(id: string) {
-			const result = await jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
-			// These tests write the parent outside session run admission.
-			// Suppress terminal-job inference without changing the settled worker outcome.
-			session.backgroundJobs.cancel(id);
-			return result;
+			return await jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
+		},
+		/** Wait until the delegated child run settled; the job records its result after the parent writes queued before it. */
+		async childSettled() {
+			await vi.waitFor(() =>
+				expect(manager.listDelegations().every((delegation) => delegation.status !== "running")).toBe(true),
+			);
 		},
 		/** Close the parent session: its conversation drains every write already called, then closes the log. */
 		async close() {
@@ -182,6 +189,8 @@ function pauseParent(context: Context, outcome: "commit" | "rollback" | "conflic
 	const spy = vi.spyOn(context.store, "applyTransaction").mockImplementation(async (input) => {
 		if (input.sessionId !== context.parent.getSessionId()) return apply(input);
 		const types = input.payload.entries.map((entry) => parsePersistedSessionEntry(entry.entry).type);
+		// The background job's own work entries are not the parent writes under test.
+		if (types.every((type) => type.startsWith("work_"))) return apply(input);
 		writes.push(types);
 		if (!paused) {
 			paused = true;
@@ -219,21 +228,20 @@ describe("background subagent spawn persistence", () => {
 			const barrier = pauseParent(context);
 			try {
 				const jobId = await context.start();
+				const waited = context.wait(jobId);
 				const leaf = context.parent.getLeafId();
 				const observed: string[] = [];
 				const branches: unknown[] = [];
-				context.parent.subscribeEntries((entry) => observed.push(entry.type));
+				context.parent.subscribeEntries((entry) => {
+					if (!entry.type.startsWith("work_")) observed.push(entry.type);
+				});
 				context.parent.subscribeBranchChanges((change) => branches.push(change));
 				const commit = commitParent(context, kind);
 				await barrier.started.promise;
 				context.allowPrompt.resolve();
 				await context.published.promise;
 				context.finishChild.resolve();
-				expect(await context.wait(jobId)).toMatchObject({
-					details: {
-						backgroundJobWait: { reason: "terminal", results: [{ id: jobId, status: "completed" }], pending: [] },
-					},
-				});
+				await context.childSettled();
 				expect(context.manager.listDelegations()).toMatchObject([{ status: "completed" }]);
 				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
 				expect(context.parent.getLeafId()).toBe(leaf);
@@ -260,6 +268,22 @@ describe("background subagent spawn persistence", () => {
 				expect(observed).toEqual(kind === "append" ? ["message"] : []);
 				expect(branches).toEqual(kind === "navigation" ? [{ previousLeafId: leaf, nextLeafId: null }] : []);
 				expect(barrier.writes).toEqual([kind === "append" ? ["message"] : ["leaf"], ["subagent_spawn"]]);
+				// A navigation that commits before the job's result passes the result policy leaves that
+				// result stale for the new branch: the job then ends failed.
+				expect(await waited).toMatchObject({
+					details: {
+						wait: {
+							reason: "terminal",
+							results: [
+								{
+									id: jobId,
+									status: kind === "append" ? "completed" : expect.stringMatching(/^(completed|failed)$/),
+								},
+							],
+							pending: [],
+						},
+					},
+				});
 				const reopened = await SessionManager.openReadOnly(context.parent.getSessionRef()!);
 				try {
 					expect(reopened.getSubagentSpawnEntries()).toEqual(edges);
@@ -372,23 +396,27 @@ describe("background subagent spawn persistence", () => {
 			const barrier = pauseParent(context);
 			try {
 				const jobId = await context.start();
+				const waited = context.wait(jobId);
 				const commit = commitParent(context, "append");
 				await barrier.started.promise;
+				// The abort stops the job at once; the job records the cancel after the parent commit.
+				let abort: Promise<void> | undefined;
 				if (phase === "aborted-before") {
-					const abort = context.session.abort();
+					abort = context.session.abort();
 					context.allowPrompt.resolve();
-					await abort;
 				} else {
 					context.allowPrompt.resolve();
 					if (phase === "aborted-after") {
 						await context.published.promise;
-						await context.session.abort();
+						abort = context.session.abort();
 					}
 				}
-				await context.wait(jobId);
+				await context.childSettled();
 				barrier.release.resolve();
 				barrier.releaseSpawn.resolve();
 				await commit;
+				await abort;
+				await waited;
 				// Close waits for every write already called, including an edge written after the commit.
 				await context.close();
 				expect(context.parent.getSubagentSpawnEntries()).toHaveLength(phase === "aborted-after" ? 1 : 0);
@@ -414,7 +442,9 @@ describe("background subagent spawn persistence", () => {
 			context.allowPrompt.resolve();
 			await context.published.promise;
 			context.finishChild.resolve();
-			await context.wait(jobId);
+			// The job's result cannot be recorded once the log is lost; the next open interrupts it.
+			await context.childSettled();
+			expect(jobId).toBeDefined();
 			barrier.release.resolve();
 			await rejectedCommit;
 			await expect(context.parent.lost).resolves.toMatchObject({ reason: "fence_conflict" });
@@ -446,7 +476,8 @@ describe("background subagent spawn persistence", () => {
 			context.allowPrompt.resolve();
 			await context.published.promise;
 			context.finishChild.resolve();
-			await context.wait(jobId);
+			await context.childSettled();
+			expect(jobId).toBeDefined();
 			const drain = context.close();
 			barrier.release.resolve();
 			await earlier;
@@ -471,17 +502,19 @@ describe("background subagent spawn persistence", () => {
 		const barrier = pauseParent(context, "commit", true);
 		try {
 			const jobId = await context.start();
+			const waited = context.wait(jobId);
 			const ref = context.parent.getSessionRef()!;
 			const commit = commitParent(context, "append");
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
 			await context.published.promise;
 			context.finishChild.resolve();
-			await context.wait(jobId);
+			await context.childSettled();
 			barrier.release.resolve();
 			await commit;
 			await barrier.spawnStarted.promise;
 			barrier.releaseSpawn.resolve();
+			await waited;
 			// Close waits for the failed edge write; that failure is the write's own, not close's.
 			await expect(context.close()).resolves.toBeUndefined();
 			// The edge was rolled back, so the parent still matches its log and was not lost.

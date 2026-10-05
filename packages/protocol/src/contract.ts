@@ -30,11 +30,6 @@ import {
 	RpcAgentOptionsSchema,
 } from "./agent-options.ts";
 import {
-	RpcBackgroundJobSnapshotSchema,
-	RpcBackgroundJobSummarySchema,
-	RpcBackgroundJobsSchema,
-} from "./background-jobs.ts";
-import {
 	CLIENT_WORK_FINISHED_MAX,
 	ClientLabelSchema,
 	ClientModelRefSchema,
@@ -461,11 +456,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpPromptsResponse: RpcMcpPromptsResponseSchema,
 	RpcMcpPromptContentResponse: RpcMcpPromptContentResponseSchema,
 	RpcMcpRecentCallsResponse: RpcMcpRecentCallsResponseSchema,
-
-	// Session-owned background jobs
-	RpcBackgroundJobSummary: RpcBackgroundJobSummarySchema,
-	RpcBackgroundJobSnapshot: RpcBackgroundJobSnapshotSchema,
-	RpcBackgroundJobs: RpcBackgroundJobsSchema,
 
 	// Session catalog, run state, models, subagents, plans, and host status
 	RpcSessionChangePullRequest: RpcSessionChangePullRequestSchema,

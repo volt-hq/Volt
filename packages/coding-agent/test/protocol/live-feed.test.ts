@@ -31,10 +31,10 @@ describe("live feed", () => {
 		return { harness, feed, updates, items: (): LiveItem[] => updates.flatMap((update) => update.items) };
 	}
 
-	it("sets the phase, usage, Git, prompt-cache, intents, and jobs values from the start", async () => {
+	it("sets the phase, usage, Git, prompt-cache, and intents values from the start", async () => {
 		const { harness } = await feedHarness();
 		const keys = harness.session.liveState.entries().map(([key]) => key);
-		expect(keys).toEqual(expect.arrayContaining(["phase", "intents", "usage", "jobs", "git", "prompt_cache"]));
+		expect(keys).toEqual(expect.arrayContaining(["phase", "intents", "usage", "git", "prompt_cache"]));
 		expect(harness.session.liveState.get("phase")).toEqual({ kind: "phase", busy: false, operation: null });
 	});
 

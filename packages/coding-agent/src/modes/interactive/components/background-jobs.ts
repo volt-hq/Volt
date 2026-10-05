@@ -9,33 +9,35 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
-import type {
-	BackgroundJobSnapshot,
-	BackgroundJobSource,
-	BackgroundJobSummary,
-} from "../../../core/background-jobs.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import {
-	BACKGROUND_JOB_STYLES,
-	backgroundJobActivity,
-	backgroundJobCounts,
-	backgroundJobLabel,
-	backgroundJobText,
-	backgroundJobTiming,
-	findBackgroundJob,
-} from "../../../core/tools/background-render.ts";
+	findJob,
+	JOB_STATUS_STYLES,
+	type JobSnapshot,
+	type JobSource,
+	type JobSummary,
+	jobActivity,
+	jobCounts,
+	jobLabel,
+	jobText,
+	jobTiming,
+} from "../../../core/tools/jobs.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 
-/** A bounded dock, independent of model tool calls and completion-notice delivery. */
-export class BackgroundJobsStatus implements Component {
-	private readonly source: () => BackgroundJobSource;
+function isActive(job: JobSummary): boolean {
+	return job.status === "running" || job.status === "cancelling";
+}
 
-	constructor(source: () => BackgroundJobSource) {
+/** A bounded dock of the running jobs, independent of model tool calls and completion notices. */
+export class BackgroundJobsStatus implements Component {
+	private readonly source: () => JobSource;
+
+	constructor(source: () => JobSource) {
 		this.source = source;
 	}
 
 	render(width: number): RenderFrame {
-		const jobs = this.source().listUncollected();
+		const jobs = this.source().list().filter(isActive);
 		if (jobs.length === 0 || width <= 0) return createRenderFrame([]);
 		const waits = this.source().listWaits();
 		const title = `${theme.fg("accent", waits.length ? `Jobs · waiting (${waits.length === 1 ? waits[0].mode : `${waits.length} waits`})` : "Jobs")}  `;
@@ -46,22 +48,20 @@ export class BackgroundJobsStatus implements Component {
 		let showHint: boolean;
 		if (jobs.length === 1) {
 			const job = jobs[0];
-			const status = theme.fg(BACKGROUND_JOB_STYLES[job.status].color, job.status);
+			const status = theme.fg(JOB_STATUS_STYLES[job.status].color, job.status);
 			// At very small widths, keep the worker state rather than the dock title.
 			const heading = visibleWidth(title + status) <= width ? title + status : status;
-			const label = backgroundJobLabel(job);
+			const label = jobLabel(job);
 			const labelWidth = visibleWidth(label);
 			showHint = visibleWidth(heading) + 3 + Math.min(8, labelWidth) + 2 + hintWidth <= width;
 			const contentWidth = width - (showHint ? hintWidth + 2 : 0);
 			const labelSpace = contentWidth - visibleWidth(heading) - 3;
 			const minimumLabel = Math.min(20, labelWidth);
 			let suffix = "";
-			if (job.endedAt !== undefined && labelSpace >= minimumLabel + 18) {
-				suffix = `${separator}${theme.fg("dim", "awaiting review")}`;
-			}
-			const duration = `${Math.floor(Math.max(0, (job.endedAt ?? Date.now()) - job.startedAt) / 1000)}s`;
-			if (labelSpace >= minimumLabel + visibleWidth(suffix) + 3 + duration.length) {
-				suffix = `${separator}${theme.fg("dim", duration)}${suffix}`;
+			const duration =
+				job.startedAt === undefined ? "" : `${Math.floor(Math.max(0, Date.now() - job.startedAt) / 1000)}s`;
+			if (duration && labelSpace >= minimumLabel + 3 + duration.length) {
+				suffix = `${separator}${theme.fg("dim", duration)}`;
 			}
 			content = heading;
 			if (labelSpace > 0) {
@@ -69,9 +69,9 @@ export class BackgroundJobsStatus implements Component {
 			}
 			content = truncateToWidth(content, contentWidth, "");
 		} else {
-			const counts = (["running", "cancelling", "failed", "completed", "cancelled"] as const).flatMap((status) => {
+			const counts = (["running", "cancelling"] as const).flatMap((status) => {
 				const count = jobs.filter((job) => job.status === status).length;
-				return count ? [theme.fg(BACKGROUND_JOB_STYLES[status].color, `${count} ${status}`)] : [];
+				return count ? [theme.fg(JOB_STATUS_STYLES[status].color, `${count} ${status}`)] : [];
 			});
 			const heading = visibleWidth(title + counts[0]) <= width ? title : "";
 			showHint = visibleWidth(heading + counts[0]) + 2 + hintWidth <= width;
@@ -94,7 +94,7 @@ export interface BackgroundJobsInspectorOptions {
 
 /** Local UI only: inspecting and closing this view never starts inference or stops work. */
 export class BackgroundJobsInspector implements Component {
-	private readonly source: BackgroundJobSource;
+	private readonly source: JobSource;
 	private readonly options: BackgroundJobsInspectorOptions;
 	private readonly unsubscribe: () => void;
 	private readonly timer: ReturnType<typeof setInterval>;
@@ -104,20 +104,20 @@ export class BackgroundJobsInspector implements Component {
 	private confirmId?: string;
 	private follow = true;
 	/** One bounded reading snapshot; live retention can advance without moving paused text. */
-	private readingOutput?: Pick<BackgroundJobSnapshot, "output" | "outputTruncated">;
-	private lastRenderedOutput?: Pick<BackgroundJobSnapshot, "output" | "outputTruncated">;
+	private readingOutput?: Pick<JobSnapshot, "output" | "outputTruncated">;
+	private lastRenderedOutput?: Pick<JobSnapshot, "output" | "outputTruncated">;
 	private scrollTop = 0;
 	private viewportRows = 1;
 	private outputRowCount = 0;
 	private notice?: string;
 	private disposed = false;
 
-	constructor(source: BackgroundJobSource, options: BackgroundJobsInspectorOptions) {
+	constructor(source: JobSource, options: BackgroundJobsInspectorOptions) {
 		this.source = source;
 		this.options = options;
 		this.unsubscribe = source.subscribe(() => this.refresh());
 		this.timer = setInterval(() => {
-			if (source.list().some((job) => job.endedAt === undefined)) this.refresh();
+			if (source.list().some(isActive)) this.refresh();
 		}, 1000);
 		this.timer.unref();
 	}
@@ -150,13 +150,12 @@ export class BackgroundJobsInspector implements Component {
 			else if (keys.matches(data, "tui.select.confirm")) {
 				const id = this.confirmId;
 				this.confirmId = undefined;
-				try {
-					this.source.cancel(id);
-					// The live worker state already shows Cancelling until settlement.
-					this.notice = undefined;
-				} catch {
-					this.notice = "This job is no longer accessible in the current runtime and branch";
-				}
+				// The job shows Cancelling until its worker stopped.
+				this.notice = undefined;
+				void this.source.cancel(id).catch(() => {
+					this.notice = "This job can no longer be cancelled";
+					this.refresh();
+				});
 			}
 			this.refresh();
 			return;
@@ -172,7 +171,7 @@ export class BackgroundJobsInspector implements Component {
 				this.lastRenderedOutput = undefined;
 			} else this.close();
 		} else if (keys.matches(data, "app.jobs.cancel")) {
-			const job = findBackgroundJob(this.source, this.detailId ?? this.selectedId);
+			const job = findJob(this.source, this.detailId ?? this.selectedId);
 			if (job?.status === "running") this.confirmId = job.id;
 		} else if (this.detailId) {
 			if (keys.matches(data, "app.jobs.follow")) {
@@ -209,23 +208,22 @@ export class BackgroundJobsInspector implements Component {
 		const height = Math.max(1, this.options.getHeight());
 		const innerWidth = Math.max(1, width - 4);
 		const jobs = this.source.list().sort((a, b) => {
-			const priority = (job: BackgroundJobSummary) =>
-				job.endedAt === undefined ? 0 : job.status === "failed" ? 1 : 2;
+			const priority = (job: JobSummary) => (isActive(job) ? 0 : job.status === "failed" ? 1 : 2);
 			return priority(a) - priority(b);
 		});
 		if (!jobs.some((job) => job.id === this.selectedId)) this.selectedId = jobs[0]?.id;
 		const lines: string[] = [];
 		let footer: string[];
 		if (this.confirmId) {
-			const job = findBackgroundJob(this.source, this.confirmId);
+			const job = findJob(this.source, this.confirmId);
 			lines.push(
 				"",
 				...wrapTextWithAnsi(theme.fg("warning", "Cancel this job? Other jobs will continue."), innerWidth),
 			);
 			if (job) {
-				lines.push(...wrapTextWithAnsi(backgroundJobLabel(job), innerWidth));
+				lines.push(...wrapTextWithAnsi(jobLabel(job), innerWidth));
 				lines.push(...wrapTextWithAnsi(theme.fg("dim", job.id), innerWidth));
-			} else lines.push("This job is no longer accessible.");
+			} else lines.push("This job is no longer available.");
 			footer = this.hints(
 				[
 					["tui.select.confirm", "confirm cancellation"],
@@ -234,7 +232,7 @@ export class BackgroundJobsInspector implements Component {
 				innerWidth,
 			);
 		} else if (this.detailId) {
-			const job = findBackgroundJob(this.source, this.detailId);
+			const job = findJob(this.source, this.detailId);
 			footer = this.hints(
 				[
 					[["tui.select.up", "tui.select.down"], "scroll"],
@@ -246,12 +244,7 @@ export class BackgroundJobsInspector implements Component {
 				innerWidth,
 			);
 			if (!job) {
-				lines.push(
-					...wrapTextWithAnsi(
-						"This job is no longer accessible. Jobs do not survive runtime restart or branch changes.",
-						innerWidth,
-					),
-				);
+				lines.push(...wrapTextWithAnsi("This job is no longer available.", innerWidth));
 			} else {
 				const displayedOutput = this.follow ? job : (this.readingOutput ?? job);
 				this.lastRenderedOutput = {
@@ -261,12 +254,12 @@ export class BackgroundJobsInspector implements Component {
 				const footerRows = Math.min(footer.length, Math.max(1, height - 4));
 				// Reserve at least three output rows before allowing metadata to wrap.
 				const metadataRows = Math.max(1, height - footerRows - 7);
-				const labelLines = wrapTextWithAnsi(backgroundJobText(job.label), innerWidth);
+				const labelLines = wrapTextWithAnsi(jobText(job.label), innerWidth);
 				const metadata = [
 					...wrapTextWithAnsi(this.jobHeading(job), innerWidth),
 					...labelLines,
 					...wrapTextWithAnsi(theme.fg("dim", job.id), innerWidth),
-					...wrapTextWithAnsi(theme.fg("muted", backgroundJobActivity(job)), innerWidth),
+					...wrapTextWithAnsi(theme.fg("muted", jobActivity(job)), innerWidth),
 					...(displayedOutput.outputTruncated
 						? wrapTextWithAnsi(
 								theme.fg("warning", "Output truncated: latest 50 KB / 2000 lines retained"),
@@ -287,15 +280,15 @@ export class BackgroundJobsInspector implements Component {
 									: line,
 							),
 					);
-					lines.push(truncateToWidth(theme.fg("muted", backgroundJobActivity(job)), innerWidth));
+					lines.push(truncateToWidth(theme.fg("muted", jobActivity(job)), innerWidth));
 					if (displayedOutput.outputTruncated)
 						lines.push(truncateToWidth(theme.fg("warning", "Retained output truncated"), innerWidth));
 					lines.splice(metadataRows);
 				}
-				const output = backgroundJobText(displayedOutput.output).trimEnd();
+				const output = jobText(displayedOutput.output).trimEnd();
 				const outputLines = output
 					? output.split("\n").flatMap((line) => wrapTextWithAnsi(line, innerWidth))
-					: [job.endedAt === undefined ? "No output yet" : "No output was produced"];
+					: [isActive(job) ? "No output yet" : "No output was produced"];
 				this.viewportRows = Math.max(1, height - lines.length - footerRows - 4);
 				this.outputRowCount = outputLines.length;
 				const maximum = Math.max(0, outputLines.length - this.viewportRows);
@@ -313,13 +306,8 @@ export class BackgroundJobsInspector implements Component {
 				);
 			}
 		} else {
-			lines.push(
-				theme.fg(
-					"muted",
-					jobs.length ? backgroundJobCounts(jobs) : "No background jobs in this runtime and branch.",
-				),
-			);
-			const selected = findBackgroundJob(this.source, this.selectedId);
+			lines.push(theme.fg("muted", jobs.length ? jobCounts(jobs) : "No background jobs in this conversation."));
+			const selected = findJob(this.source, this.selectedId);
 			footer = this.hints(
 				[
 					[["tui.select.up", "tui.select.down"], "select"],
@@ -334,7 +322,9 @@ export class BackgroundJobsInspector implements Component {
 				this.list = new SelectList(
 					jobs.map((job) => ({
 						value: job.id,
-						label: `${BACKGROUND_JOB_STYLES[job.status].label} · ${backgroundJobTiming(job)} · ${backgroundJobLabel(job)}`,
+						label: [JOB_STATUS_STYLES[job.status].label, jobTiming(job), jobLabel(job)]
+							.filter(Boolean)
+							.join(" · "),
 					})),
 					maxVisible,
 					{
@@ -359,9 +349,9 @@ export class BackgroundJobsInspector implements Component {
 				// SelectList is text-only; the inspector intentionally accepts no image placements.
 				lines.push(...this.list.render(innerWidth).lines);
 				if (selected) {
-					lines.push("", this.jobHeading(selected), truncateToWidth(backgroundJobLabel(selected), innerWidth));
-					lines.push(theme.fg("muted", backgroundJobActivity(selected)));
-					const preview = backgroundJobText(selected.output)
+					lines.push("", this.jobHeading(selected), truncateToWidth(jobLabel(selected), innerWidth));
+					lines.push(theme.fg("muted", jobActivity(selected)));
+					const preview = jobText(selected.output)
 						.trimEnd()
 						.split("\n")
 						.filter((line) => line.trim())
@@ -394,9 +384,10 @@ export class BackgroundJobsInspector implements Component {
 		]);
 	}
 
-	private jobHeading(job: BackgroundJobSnapshot): string {
-		const style = BACKGROUND_JOB_STYLES[job.status];
-		return `${job.toolName === "bash" ? "Bash" : "Subagent"} · ${theme.fg(style.color, style.label)} · ${backgroundJobTiming(job)}`;
+	private jobHeading(job: JobSnapshot): string {
+		const style = JOB_STATUS_STYLES[job.status];
+		const timing = jobTiming(job);
+		return `${job.tool === "bash" ? "Bash" : "Subagent"} · ${theme.fg(style.color, style.label)}${timing ? ` · ${timing}` : ""}`;
 	}
 
 	private hints(items: readonly (readonly [Keybinding | readonly Keybinding[], string])[], width: number): string[] {

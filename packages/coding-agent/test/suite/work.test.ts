@@ -124,8 +124,8 @@ describe("work in hosted conversations", () => {
 		const harness = await harnessFor(["noticed"]);
 		const conversation = await harness.openStartup();
 		await harness.host.attach(harness.client("tui"), conversation);
-		conversation.work.register(kind({ kind: "job", delivery: "wake", title: () => "echo done" }));
-		const record = await conversation.work.start("job", { command: "echo done" }, async (ctx) => {
+		conversation.work.register(kind({ kind: "ext:test/wake", delivery: "wake", title: () => "echo done" }));
+		const record = await conversation.work.start("ext:test/wake", { command: "echo done" }, async (ctx) => {
 			ctx.output("done\n");
 			return { outcome: "completed", result: { summary: "echoed" } };
 		});
@@ -143,9 +143,9 @@ describe("work in hosted conversations", () => {
 		const harness = await harnessFor();
 		const first = await harness.openStartup();
 		const resumable = kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) });
-		first.work.register(kind({ kind: "job" }));
+		first.work.register(kind());
 		first.work.register(resumable);
-		const job = await first.work.start("job", null, held().execute);
+		const job = await first.work.start("ext:test/run", null, held().execute);
 		const child = await first.work.start("subagent", null, held().execute);
 		const ref = first.session.sessionRef;
 		if (!ref) throw new Error("Expected a stored session");

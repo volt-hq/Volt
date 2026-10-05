@@ -2,35 +2,38 @@ import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import type { JsonObject } from "@hansjm10/volt-ai";
 import { createRenderFrame, Text, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { type Static, type TObject, type TProperties, Type } from "typebox";
-import type { BackgroundJobManager, BackgroundJobSnapshot, BackgroundToolName } from "../background-jobs.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { ToolDefinition, ToolRenderContext } from "../extensions/types.ts";
 import { withBackgroundCleanup } from "./background-cleanup.ts";
 import {
-	BackgroundJobView,
-	backgroundJobText,
-	findBackgroundJob,
-	getBackgroundJobSnapshot,
-	renderBackgroundJobCard,
-} from "./background-render.ts";
+	findJob,
+	type JobSource,
+	type JobStart,
+	type JobSummary,
+	type JobToolName,
+	JobView,
+	jobOfDetails,
+	jobResult,
+	jobText,
+	renderJobCard,
+} from "./jobs.ts";
 
 const backgroundParameter = Type.Optional(
 	Type.Boolean({
 		description:
-			"Run this work as a session-owned background job and return a job ID. Requires the jobs tool. Omit to wait for completion.",
+			"Run this work as a background job of the conversation and return a job ID. Requires the jobs tool. Omit to wait for completion.",
 	}),
 );
 type BackgroundParameters<T extends TProperties> = TObject<T & { background: typeof backgroundParameter }>;
 
-export interface BackgroundJobDetails {
-	backgroundJob: BackgroundJobSnapshot;
-}
-
 export interface BackgroundToolOptions {
-	manager: BackgroundJobManager;
-	/** Apply the original tool's result policy before retaining its final output. */
+	/** Start a job for the call; resolves once it is recorded. */
+	start(job: JobStart): Promise<JobSummary>;
+	/** The conversation's jobs, which the call's card shows live. */
+	jobs?: JobSource;
+	/** Apply the original tool's result policy before the job keeps its final output. */
 	finalize?: (
-		toolName: BackgroundToolName,
+		toolName: JobToolName,
 		toolCallId: string,
 		input: JsonObject,
 		result: AgentToolResult<unknown>,
@@ -38,17 +41,8 @@ export interface BackgroundToolOptions {
 	) => Promise<AgentToolResult<unknown>>;
 }
 
-export function backgroundJobResult(snapshot: BackgroundJobSnapshot): AgentToolResult<BackgroundJobDetails> {
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Background job ${snapshot.id}: ${snapshot.status} (${snapshot.toolName}). Use jobs with action read, wait, or cancel and this id.\n${snapshot.outputTruncated ? "[Output truncated to the latest 50 KB or 2000 lines.]\n" : ""}${snapshot.output}`.trim(),
-			},
-		],
-		details: { backgroundJob: snapshot },
-		...(snapshot.status === "failed" || snapshot.status === "cancelled" ? { isError: true } : {}),
-	};
+function labelOf(input: Record<string, unknown>): string | undefined {
+	return typeof input.command === "string" ? input.command : typeof input.task === "string" ? input.task : undefined;
 }
 
 /** Applied only to native Bash/subagent definitions, before extension overrides. */
@@ -68,7 +62,7 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 	return {
 		...definition,
 		parameters,
-		description: `${definition.description} Set background: true to return a job ID and continue independent work; use jobs to read, wait, or cancel. Subagent confirmation preflight still returns directly. Background jobs are cancelled on session abort or shutdown and cannot survive a runtime restart.`,
+		description: `${definition.description} Set background: true to return a job ID and continue independent work; use jobs to read, wait, or cancel. Subagent confirmation preflight still returns directly. Background jobs are cancelled on session abort; a job running when the runtime stops ends interrupted.`,
 		promptGuidelines: [
 			...(definition.promptGuidelines ?? []),
 			`Use ${toolName} with background: true only for independent work. Use jobs to collect the result before relying on it or reporting success.`,
@@ -103,17 +97,11 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 					ctx,
 				)) as AgentToolResult<unknown>;
 			}
-			const label =
-				typeof input.command === "string"
-					? input.command
-					: typeof input.task === "string"
-						? input.task
-						: "Subagent batch";
-			const snapshot = options.manager.start({
-				toolName,
+			const job = await options.start({
+				tool: toolName,
 				toolCallId,
-				label,
-				execute: async (jobSignal, update) => {
+				label: labelOf(input) ?? "Subagent batch",
+				run: async (jobSignal, update) => {
 					let result: AgentToolResult<unknown>;
 					try {
 						result = (await withBackgroundCleanup(() =>
@@ -146,22 +134,16 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 					return options.finalize ? options.finalize(toolName, toolCallId, input, result, jobSignal) : result;
 				},
 			});
-			return backgroundJobResult(snapshot);
+			return jobResult(job);
 		},
 		renderCall(args, theme, context) {
 			const input = args as Record<string, unknown>;
 			if (input.background === true) {
-				return new BackgroundJobView((width) => {
+				return new JobView((width) => {
 					if (!context.isPartial) return createRenderFrame([]);
-					const label =
-						typeof input.command === "string"
-							? input.command
-							: typeof input.task === "string"
-								? input.task
-								: "Subagent batch";
 					return createRenderFrame(
 						wrapTextWithAnsi(
-							`${theme.bold(theme.fg("toolTitle", "Background job"))} · ${context.executionStarted ? "Starting" : "Preparing"}\n${backgroundJobText(label)}`,
+							`${theme.bold(theme.fg("toolTitle", "Background job"))} · ${context.executionStarted ? "Starting" : "Preparing"}\n${jobText(labelOf(input) ?? "Subagent batch")}`,
 							width,
 						),
 					);
@@ -172,23 +154,17 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 				: new Text(theme.bold(theme.fg("toolTitle", definition.label)), 0, 0);
 		},
 		renderResult(result, renderOptions, theme, context) {
-			const snapshot = getBackgroundJobSnapshot(result.details);
-			if (snapshot) {
-				const current = context.executionStarted ? findBackgroundJob(options.manager, snapshot.id) : undefined;
-				const cache = !current || current.endedAt !== undefined;
-				const input = context.args as Record<string, unknown>;
-				const label =
-					typeof input.command === "string"
-						? input.command
-						: typeof input.task === "string"
-							? input.task
-							: undefined;
-				return new BackgroundJobView((width) => {
-					const live = cache ? current : findBackgroundJob(options.manager, snapshot.id);
-					return renderBackgroundJobCard(live ?? snapshot, width, theme, {
+			const job = jobOfDetails(result.details);
+			if (job) {
+				const current = context.executionStarted ? findJob(options.jobs, job.id) : undefined;
+				const cache = !current || (current.status !== "running" && current.status !== "cancelling");
+				const label = labelOf(context.args as Record<string, unknown>);
+				return new JobView((width) => {
+					const live = cache ? current : findJob(options.jobs, job.id);
+					return renderJobCard(live ?? job, width, theme, {
 						expanded: renderOptions.expanded,
-						historical: !live,
-						label,
+						captured: !live,
+						...(label === undefined ? {} : { label }),
 					});
 				}, cache);
 			}
@@ -197,12 +173,9 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 					.filter((part) => part.type === "text")
 					.map((part) => part.text)
 					.join("\n");
-				return new BackgroundJobView((width) =>
+				return new JobView((width) =>
 					createRenderFrame(
-						wrapTextWithAnsi(
-							theme.fg("error", `Background job failed to start\n${backgroundJobText(output)}`),
-							width,
-						),
+						wrapTextWithAnsi(theme.fg("error", `Background job failed to start\n${jobText(output)}`), width),
 					),
 				);
 			}

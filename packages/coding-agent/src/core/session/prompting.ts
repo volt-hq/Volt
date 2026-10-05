@@ -28,7 +28,6 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { expandPromptTemplate } from "../prompt-templates.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { SessionWriter } from "../session-writer.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionBash } from "./bash.ts";
 import { createLocalClientInputId, type LiveClientInput, type SessionClientInputs } from "./client-inputs.ts";
 import type { SessionEvents } from "./events.ts";
@@ -52,7 +51,6 @@ export interface SessionPromptingHost {
 	tools(): SessionToolRuntime;
 	bash(): SessionBash;
 	lifecycle(): SessionLifecycle;
-	background(): SessionBackgroundContinuation;
 	clientInputs(): SessionClientInputs;
 	events(): SessionEvents;
 	sessionWriter(): SessionWriter;
@@ -465,7 +463,6 @@ export class SessionPrompting {
 			throw error;
 		}
 
-		this.host.background().explicitRunStarted();
 		// The turn's requests use the before_agent_start override as admitted.
 		if (reservation) this.turnSystemPromptOverrides.set(reservation.id, systemPromptOverride);
 		const clientMessageId = input.clientMessageId!;
@@ -769,7 +766,6 @@ export class SessionPrompting {
 				await this.host.lifecycle().maybeAppendSubagentRecoveryNotice();
 				if (this.host.isDisposed() || abortGeneration !== this.host.abortGeneration()) return;
 				this.host.assertActive();
-				this.host.background().explicitRunStarted();
 				// Queued while the claim is held, the message waits for the turn that takes the claim over.
 				admission = await conversation.queueMessages("steer", [appMessage]);
 			} finally {

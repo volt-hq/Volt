@@ -16,12 +16,8 @@ import {
 } from "@hansjm10/volt-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { theme } from "../../../core/theme/runtime.ts";
-import {
-	BackgroundJobView,
-	getBackgroundJobSnapshot,
-	renderBackgroundJobCard,
-} from "../../../core/tools/background-render.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
+import { JobView, jobOfDetails, renderJobCard } from "../../../core/tools/jobs.ts";
 import { formatDuration, getTextOutput as getRenderedTextOutput } from "../../../core/tools/render-utils.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -192,27 +188,15 @@ export class ToolExecutionComponent extends Container {
 		}
 	}
 
-	/** Identify native launch cards without treating extension renderers or inspections as duplicates. */
-	getBackgroundJobId(): string | undefined {
-		if (
-			this.hideComponent ||
-			(this.toolName !== "bash" && this.toolName !== "subagent") ||
-			!(this.resultRendererComponent instanceof BackgroundJobView)
-		)
-			return undefined;
-		const job = getBackgroundJobSnapshot(this.result?.details);
-		return job?.toolName === this.toolName && job.toolCallId === this.toolCallId ? job.id : undefined;
-	}
-
 	private getHistoricalBackgroundJob() {
 		// jobs has its own renderer, including post-hook error/content handling during replay.
 		if (this.toolDefinition || !["bash", "subagent"].includes(this.toolName)) return undefined;
-		return getBackgroundJobSnapshot(this.result?.details);
+		return jobOfDetails(this.result?.details);
 	}
 
 	private getCallRenderer(): ToolDefinition<any, any>["renderCall"] | undefined {
 		if (this.getHistoricalBackgroundJob()) {
-			return () => new BackgroundJobView(() => createRenderFrame([]));
+			return () => new JobView(() => createRenderFrame([]));
 		}
 		if (!this.builtInToolDefinition) {
 			return this.toolDefinition?.renderCall;
@@ -227,10 +211,10 @@ export class ToolExecutionComponent extends Container {
 		const historicalJob = this.getHistoricalBackgroundJob();
 		if (historicalJob) {
 			return (_result, options, theme) =>
-				new BackgroundJobView((width) =>
-					renderBackgroundJobCard(historicalJob, width, theme, {
+				new JobView((width) =>
+					renderJobCard(historicalJob, width, theme, {
 						expanded: options.expanded,
-						historical: true,
+						captured: true,
 						label:
 							typeof this.args?.command === "string"
 								? this.args.command
@@ -611,22 +595,10 @@ export class ToolExecutionComponent extends Container {
 		if (this.result.isError) {
 			return true;
 		}
-		const details = this.result.details as { mode?: unknown; backgroundJob?: unknown } | undefined;
-		const backgroundJob = details?.backgroundJob;
-		if (typeof backgroundJob === "object" && backgroundJob !== null && !Array.isArray(backgroundJob)) {
-			const job = backgroundJob as Record<string, unknown>;
-			// A background start acknowledges a job before child metadata is available.
-			if (
-				typeof job.id === "string" &&
-				job.id.startsWith("job_") &&
-				job.id.length > 4 &&
-				job.toolName === "subagent" &&
-				job.toolCallId === this.toolCallId &&
-				job.status === "running"
-			) {
-				return true;
-			}
-		}
+		const details = this.result.details as { mode?: unknown } | undefined;
+		// A background start acknowledges a job before child metadata is available.
+		const job = jobOfDetails(details);
+		if (job?.tool === "subagent" && job.toolCallId === this.toolCallId && job.status === "running") return true;
 		return details?.mode === "single" || details?.mode === "parallel" || details?.mode === "chain";
 	}
 
@@ -640,7 +612,7 @@ export class ToolExecutionComponent extends Container {
 	private withHeaderMetadata(component: Component): Component {
 		// Subagents render as conversation participants with their own explicit
 		// lifecycle state instead of as a generic tool card.
-		if (this.toolName === "subagent" || component instanceof BackgroundJobView) return component;
+		if (this.toolName === "subagent" || component instanceof JobView) return component;
 		return new ToolHeaderMetadata(component, () => this.getHeaderMetadata());
 	}
 

@@ -24,7 +24,6 @@ export function intentStateOf(session: AgentSession | undefined): IntentState {
 		isBusy: session.isBusy,
 		isStreaming: session.isStreaming,
 		isCompacting: session.isCompacting,
-		hasBackgroundJobs: session.hasBackgroundJobs,
 		model: session.model,
 		thinkingLevel: session.thinkingLevel,
 		fastModeEnabled: session.fastModeEnabled,

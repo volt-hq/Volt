@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import {
 	Container,
 	Editor,
@@ -15,16 +16,16 @@ import {
 	VStack,
 } from "@hansjm10/volt-tui";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import {
-	BACKGROUND_JOB_NOTIFICATION_TYPE,
-	type BackgroundJobSnapshot,
-	type BackgroundJobSource,
-} from "../../src/core/background-jobs.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { getEditorTheme, initTheme, theme } from "../../src/core/theme/runtime.ts";
-import { backgroundJobResult } from "../../src/core/tools/background.ts";
-import { BackgroundJobView, renderBackgroundJobCard } from "../../src/core/tools/background-render.ts";
-import { createJobsToolDefinition } from "../../src/core/tools/jobs.ts";
+import {
+	createJobsToolDefinition,
+	type JobSnapshot,
+	type JobSource,
+	JobView,
+	jobResult,
+	renderJobCard,
+} from "../../src/core/tools/jobs.ts";
 import {
 	BackgroundJobsInspector,
 	BackgroundJobsStatus,
@@ -43,10 +44,10 @@ for (const mode of ["regular", "fullscreen"] as const) {
 		for (const color of ["dark", "light"] as const) {
 			initTheme(color);
 			const now = Date.now();
-			const jobs: BackgroundJobSnapshot[] = [
+			const jobs: JobSnapshot[] = [
 				{
-					id: "job_11111111-1111-1111-1111-111111111111",
-					toolName: "bash",
+					id: "11111111-1111-1111-1111-111111111111",
+					tool: "bash",
 					toolCallId: "tests",
 					label: "node node_modules/vitest/dist/cli.js --run test/background-jobs.test.ts",
 					status: "running",
@@ -57,8 +58,8 @@ for (const mode of ["regular", "fullscreen"] as const) {
 					outputTruncated: false,
 				},
 				{
-					id: "job_22222222-2222-2222-2222-222222222222",
-					toolName: "bash",
+					id: "22222222-2222-2222-2222-222222222222",
+					tool: "bash",
 					toolCallId: "check",
 					label: "npm run check",
 					status: "failed",
@@ -69,8 +70,8 @@ for (const mode of ["regular", "fullscreen"] as const) {
 					outputTruncated: false,
 				},
 				{
-					id: "job_33333333-3333-3333-3333-333333333333",
-					toolName: "subagent",
+					id: "33333333-3333-3333-3333-333333333333",
+					tool: "subagent",
 					toolCallId: "review",
 					label: "Review cancellation and job output retention",
 					status: "running",
@@ -81,25 +82,26 @@ for (const mode of ["regular", "fullscreen"] as const) {
 			];
 			const listeners = new Set<() => void>();
 			let dockJobs = jobs;
-			const collected = new Set<string>();
-			const source: BackgroundJobSource = {
+			let inspecting = false;
+			const summaries = (list: JobSnapshot[]) =>
+				list.map(({ output: _output, outputTruncated: _truncated, lastOutputAt: _lastOutputAt, ...job }) => ({
+					...job,
+				}));
+			const source: JobSource = {
 				listWaits: () => [],
-				list: () => jobs.map(({ output: _output, outputTruncated: _truncated, ...job }) => ({ ...job })),
-				listUncollected: () =>
-					dockJobs
-						.filter((job) => job.endedAt === undefined || !collected.has(job.id))
-						.map(({ output: _output, outputTruncated: _truncated, ...job }) => ({ ...job })),
+				// The dock shows the running jobs; the inspector lists every job.
+				list: () => summaries(inspecting ? jobs : dockJobs),
 				get: (id) => {
 					const job = jobs.find((job) => job.id === id);
 					if (!job) throw new Error("Unknown fixture job");
 					return { ...job };
 				},
-				cancel: (id) => {
-					const job = jobs.find((job) => job.id === id);
-					if (!job) throw new Error("Unknown fixture job");
-					job.status = "cancelling";
+				cancel: async (id) => {
+					const index = jobs.findIndex((job) => job.id === id);
+					if (index === -1) throw new Error("Unknown fixture job");
+					jobs[index] = { ...jobs[index]!, status: "cancelling" };
 					for (const listener of listeners) listener();
-					return { ...job };
+					return summaries([jobs[index]!])[0]!;
 				},
 				subscribe: (listener) => {
 					listeners.add(listener);
@@ -112,7 +114,7 @@ for (const mode of ["regular", "fullscreen"] as const) {
 			const ui: TUI = mode === "regular" ? new TuiMainScreen(terminal) : new TuiAltScreen(terminal);
 			const transcript = new Container();
 			transcript.addChild(new Text("I started the background tests and am checking the implementation.", 1, 0));
-			transcript.addChild(new BackgroundJobView((width) => renderBackgroundJobCard(jobs[0], width, theme)));
+			transcript.addChild(new JobView((width) => renderJobCard(jobs[0], width, theme)));
 			const dock = new Container();
 			dock.addChild(new BackgroundJobsStatus(() => source));
 			const editor = new Editor(ui, getEditorTheme(), { topBorderLabel: "ASK VOLT · BUILD" });
@@ -141,20 +143,15 @@ for (const mode of ["regular", "fullscreen"] as const) {
 				captures.push(`=== ${name} · ${mode} · ${width}x24 · ${color} ===\n${terminal.getViewport().join("\n")}`);
 			};
 			await capture("Running tests and persistent job status");
-			const failedCard = new BackgroundJobView((width) => renderBackgroundJobCard(jobs[1], width, theme));
-			const notice = new CustomMessageComponent(
-				{
-					role: "custom",
-					customType: BACKGROUND_JOB_NOTIFICATION_TYPE,
-					display: true,
-					content: "Use jobs read to retrieve output.",
-					details: { jobs: [{ ...jobs[1] }] },
-					timestamp: now,
-				},
-				undefined,
-				undefined,
-				(id) => id === jobs[1].id,
-			);
+			const failedCard = new JobView((width) => renderJobCard(jobs[1], width, theme));
+			const notice = new CustomMessageComponent({
+				role: "custom",
+				customType: WORK_NOTICE_CUSTOM_TYPE,
+				display: true,
+				content: `${jobs[1].label} (job ${jobs[1].id}) failed.`,
+				details: { workId: jobs[1].id, kind: "job", title: jobs[1].label, outcome: "failed" },
+				timestamp: now,
+			});
 			const inspection = new ToolExecutionComponent(
 				"jobs",
 				"inspect-failed",
@@ -164,41 +161,34 @@ for (const mode of ["regular", "fullscreen"] as const) {
 				ui,
 				process.cwd(),
 			);
-			inspection.updateResult({ ...backgroundJobResult(jobs[1]), isError: true });
+			inspection.updateResult({ ...jobResult(jobs[1]), isError: true });
 			transcript.addChild(failedCard);
 			transcript.addChild(notice);
 			transcript.addChild(inspection);
-			await capture("One failed-job card with a compact inspection and no duplicate notice");
+			await capture("One failed-job card with its notice and a compact inspection");
 			inspection.setExpanded(true);
 			await capture("Expanded captured inspection output");
 			transcript.removeChild(failedCard);
 			transcript.removeChild(notice);
 			transcript.removeChild(inspection);
 			inspection.dispose();
-			for (const status of ["running", "cancelling", "completed", "failed", "cancelled"] as const) {
+			for (const status of ["running", "cancelling"] as const) {
 				dockJobs = [
 					{
 						...jobs[0],
 						label: "npm run check",
 						status,
 						startedAt: now - 52_000,
-						endedAt: status === "running" || status === "cancelling" ? undefined : now,
 					},
 				];
 				await capture(`Single ${status} job`);
 			}
-			collected.add(jobs[0].id);
-			await capture("Collected terminal result removes the dock row");
-			collected.clear();
-			dockJobs = [
-				jobs[0],
-				{ ...jobs[2], status: "cancelling" },
-				jobs[1],
-				{ ...jobs[0], id: "job_completed", status: "completed", endedAt: now },
-				{ ...jobs[0], id: "job_cancelled", status: "cancelled", endedAt: now },
-			];
-			await capture("Mixed uncollected statuses");
+			dockJobs = [{ ...jobs[0], status: "completed", endedAt: now }];
+			await capture("A finished job leaves the dock");
+			dockJobs = [jobs[0], { ...jobs[2], status: "cancelling" }, jobs[1]];
+			await capture("Mixed running and cancelling jobs");
 			dockJobs = jobs;
+			inspecting = true;
 			let close = () => {};
 			const inspector = new BackgroundJobsInspector(source, {
 				getHeight: () => 22,

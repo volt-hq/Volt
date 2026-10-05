@@ -381,7 +381,7 @@ describe("work registry", () => {
 	it("reads the output of running work, and the output a kind keeps itself", async () => {
 		const { registry } = await setup();
 		registry.register(kind());
-		registry.register(kind({ kind: "ext:test/own", output: () => "kept by the kind" }));
+		registry.register(kind({ kind: "ext:test/own", output: () => ({ text: "kept by the kind", truncated: true }) }));
 		const run = held();
 		let ctx: Parameters<WorkExecutor>[0] | undefined;
 		const record = await registry.start("ext:test/run", null, async (context) => {
@@ -394,7 +394,7 @@ describe("work registry", () => {
 		expect(registry.output(record.workId)).toEqual({ text: "partial", truncated: false, final: false });
 		const own = held();
 		const kept = await registry.start("ext:test/own", null, own.execute);
-		expect(registry.output(kept.workId)).toEqual({ text: "kept by the kind", truncated: false, final: false });
+		expect(registry.output(kept.workId)).toEqual({ text: "kept by the kind", truncated: true, final: false });
 		expect(registry.output("missing")).toBeUndefined();
 		run.release();
 		own.release();

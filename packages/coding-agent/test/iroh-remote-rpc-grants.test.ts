@@ -337,7 +337,7 @@ const observe = "conversation.observe.v1";
 const GRANT_CASES: readonly GrantCase[] = [
 	{ kind: "intent", name: "prompt", requires: [control] },
 	{ kind: "intent", name: "abort", requires: [control] },
-	{ kind: "intent", name: "cancel_job", requires: [control] },
+	{ kind: "intent", name: "cancel_work", requires: [control] },
 	{ kind: "intent", name: "set_agent_mode", requires: [control] },
 	{ kind: "intent", name: "plan_execute", requires: [control] },
 	{ kind: "intent", name: "plan_change", requires: [control] },
@@ -364,7 +364,7 @@ const GRANT_CASES: readonly GrantCase[] = [
 	{ kind: "query", name: "content", requires: [observe] },
 	{ kind: "query", name: "intents", requires: [observe] },
 	{ kind: "query", name: "intent_completions", requires: [observe] },
-	{ kind: "query", name: "job_output", requires: [observe] },
+	{ kind: "query", name: "work_output", requires: [observe] },
 	{ kind: "query", name: "sessions", requires: [observe] },
 	{ kind: "query", name: "worktrees", requires: [observe] },
 	{ kind: "query", name: "models", requires: ["model.select.v1"] },

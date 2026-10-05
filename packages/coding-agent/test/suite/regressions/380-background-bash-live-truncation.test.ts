@@ -2,12 +2,11 @@ import { rm } from "node:fs/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { getKeybindings, setKeybindings } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BACKGROUND_JOB_MAX_OUTPUT_BYTES } from "../../../src/core/background-jobs.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
-import { getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import { JOB_OUTPUT_MAX_BYTES } from "../../../src/core/tools/jobs.ts";
 import { DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
 import { BackgroundJobsInspector } from "../../../src/modes/interactive/components/background-jobs.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
@@ -20,12 +19,12 @@ afterEach(() => {
 });
 
 // PR #380, finding ee6f68d0-c3c6-42e0-9593-bcd70613ad35: Bash progress
-// already contains a bounded tail, so the manager must preserve its truncation metadata.
+// already contains a bounded tail, so the job must preserve its truncation metadata.
 describe("background Bash live truncation", () => {
 	it.each([
-		["over byte limit", "x".repeat(BACKGROUND_JOB_MAX_OUTPUT_BYTES + 1), true],
+		["over byte limit", "x".repeat(JOB_OUTPUT_MAX_BYTES + 1), true],
 		["over line limit", "line\n".repeat(DEFAULT_MAX_LINES + 1), true],
-		["at byte limit", "x".repeat(BACKGROUND_JOB_MAX_OUTPUT_BYTES), false],
+		["at byte limit", "x".repeat(JOB_OUTPUT_MAX_BYTES), false],
 		["at line limit", "line\n".repeat(DEFAULT_MAX_LINES), false],
 	] as const)("reports %s in live reads, waits, and the inspector", async (_label, output, truncated) => {
 		const finish = Promise.withResolvers<void>();
@@ -55,12 +54,12 @@ describe("background Bash live truncation", () => {
 				fauxAssistantMessage("Started independent work."),
 			]);
 			await harness.session.prompt("Start the background command");
-			const jobs = harness.session.backgroundJobs;
+			const jobs = harness.session.jobs;
 			expect(jobs.list()).toHaveLength(1);
 			const live = jobs.get(jobs.list()[0].id);
 			expect(live).toMatchObject({ status: "running", outputTruncated: truncated });
 			expect(live.output).not.toBe("");
-			expect(Buffer.byteLength(live.output)).toBeLessThanOrEqual(BACKGROUND_JOB_MAX_OUTPUT_BYTES);
+			expect(Buffer.byteLength(live.output)).toBeLessThanOrEqual(JOB_OUTPUT_MAX_BYTES);
 			expect(live.output.trimEnd().split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
 			if (!truncated) expect(live.output).toBe(output);
 
@@ -91,9 +90,12 @@ describe("background Bash live truncation", () => {
 				if (action === "read") {
 					expect(deliveredText).toContain(live.output.trimEnd());
 					expect(deliveredText?.includes("[Output truncated to the latest 50 KB or 2000 lines.]")).toBe(truncated);
-					expect(result).toMatchObject({ details: { backgroundJob: live } });
+					expect(result).toMatchObject({ details: { job: { id: live.id, status: "running" } } });
 				} else {
-					const wait = result?.role === "toolResult" ? getBackgroundJobWait(result.details) : undefined;
+					const wait =
+						result?.role === "toolResult"
+							? (result.details as { wait?: Record<string, unknown> }).wait
+							: undefined;
 					expect(wait).toMatchObject({ ids: [live.id], mode: "any", reason: "timeout", results: [] });
 					expect(wait?.pending).toEqual(jobs.list());
 					expect(deliveredText).toContain(`${live.id}: running (pending).`);
@@ -114,12 +116,14 @@ describe("background Bash live truncation", () => {
 			expect(inspector.render(80).lines.map(stripAnsi).join("\n").includes("Output truncated")).toBe(truncated);
 		} finally {
 			inspector?.dispose();
+			harness?.appendResponses([fauxAssistantMessage("Noticed the result.")]);
 			finish.resolve();
 			if (harness) {
 				try {
-					await harness.session.waitForBackgroundJobs();
-					for (const job of harness.session.backgroundJobs.list()) {
-						const terminal = harness.session.backgroundJobs.get(job.id);
+					await harness.session.work.waitForIdle();
+					await harness.session.waitForIdle();
+					for (const job of harness.session.jobs.list()) {
+						const terminal = harness.session.jobs.get(job.id);
 						const fullOutputPath = terminal.output.match(/Full output: (.+)\]/)?.[1];
 						if (fullOutputPath) await rm(fullOutputPath, { force: true });
 					}

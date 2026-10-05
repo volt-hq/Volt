@@ -10,7 +10,6 @@
  */
 
 export * from "./agent-options.ts";
-export * from "./background-jobs.ts";
 export * from "./client-fold.ts";
 export * from "./contract.ts";
 export * from "./daemon-control.ts";

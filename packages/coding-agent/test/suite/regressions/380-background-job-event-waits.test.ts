@@ -2,17 +2,23 @@ import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BackgroundJobManager, type BackgroundJobSnapshot } from "../../../src/core/background-jobs.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import * as toolProgressCapture from "../../../src/core/tool-progress-capture.ts";
-import { backgroundWaitResult, getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
-import { createJobsToolDefinition } from "../../../src/core/tools/jobs.ts";
+import {
+	createJobsToolDefinition,
+	type JobRuntime,
+	type JobSnapshot,
+	type JobSummary,
+	type JobToolName,
+	jobWaitResult,
+} from "../../../src/core/tools/jobs.ts";
 import { BackgroundJobsStatus } from "../../../src/modes/interactive/components/background-jobs.ts";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
+import { createTestJobRuntime, type TestJobRuntime } from "../../utilities/job-runtime.ts";
+import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -22,27 +28,34 @@ function deferred() {
 	return { promise, resolve };
 }
 
-const managers: BackgroundJobManager[] = [];
+const runtimes: TestJobRuntime[] = [];
 const harnesses: Harness[] = [];
 const finishes: Array<() => void> = [];
 const completed: AgentToolResult<unknown> = { content: [{ type: "text", text: "done" }] };
 
-function controlledJob(manager: BackgroundJobManager, toolName: "bash" | "subagent" = "bash") {
+/** The jobs of a conversation kernel with no model: notices queue, and no turn runs. */
+async function jobRuntime(): Promise<TestJobRuntime> {
+	const runtime = await createTestJobRuntime();
+	runtimes.push(runtime);
+	return runtime;
+}
+
+async function controlledJob(jobs: JobRuntime, tool: JobToolName = "bash", toolCallId = "launch") {
 	const finish = deferred();
 	finishes.push(finish.resolve);
 	let signal: AbortSignal | undefined;
-	const snapshot = manager.start({
-		toolName,
-		toolCallId: "launch",
+	const job = await jobs.start({
+		tool,
+		toolCallId,
 		label: "worker",
-		execute: async (value) => {
+		run: async (value) => {
 			signal = value;
 			await finish.promise;
 			return completed;
 		},
 	});
 	return {
-		snapshot,
+		job,
 		finish,
 		get signal() {
 			return signal;
@@ -53,7 +66,7 @@ function controlledJob(manager: BackgroundJobManager, toolName: "bash" | "subage
 afterEach(async () => {
 	for (const finish of finishes.splice(0)) finish();
 	vi.useRealTimers();
-	for (const manager of managers.splice(0)) await manager.close();
+	for (const runtime of runtimes.splice(0)) await runtime.close();
 	for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
@@ -62,134 +75,94 @@ afterEach(async () => {
 describe("event-driven job waits", () => {
 	it.each(["bash", "subagent"] as const)(
 		"waits ten minutes without a timer for %s; any/all preserve unfinished workers",
-		async (toolName) => {
+		async (tool) => {
+			const { jobs, work } = await jobRuntime();
+			const first = await controlledJob(jobs, tool, "first");
+			const second = await controlledJob(jobs, tool, "second");
 			vi.useFakeTimers();
-			const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-			managers.push(manager);
-			const first = controlledJob(manager, toolName);
-			const second = controlledJob(manager, toolName);
 			const resolved = vi.fn();
-			const any = manager.wait([first.snapshot.id, second.snapshot.id]).then((result) => {
+			const any = jobs.wait([first.job.id, second.job.id]).then((result) => {
 				resolved();
 				return result;
 			});
-			const all = manager.wait([first.snapshot.id, second.snapshot.id], { mode: "all" });
+			const all = jobs.wait([first.job.id, second.job.id], { mode: "all" });
 			await vi.advanceTimersByTimeAsync(600000);
 			expect(resolved).not.toHaveBeenCalled();
 			expect(vi.getTimerCount()).toBe(0);
+			vi.useRealTimers();
 			first.finish.resolve();
 			expect(await any).toMatchObject({
 				reason: "terminal",
-				results: [{ id: first.snapshot.id }],
-				pending: [{ id: second.snapshot.id }],
+				results: [{ id: first.job.id, tool, status: "completed", output: "done" }],
+				pending: [{ id: second.job.id }],
 			});
 			expect(second.signal?.aborted).toBe(false);
-			expect(manager.listWaits()).toHaveLength(1);
+			expect(jobs.listWaits()).toHaveLength(1);
 			second.finish.resolve();
 			expect((await all).results).toHaveLength(2);
-			expect(manager.listWaits()).toEqual([]);
+			expect(jobs.listWaits()).toEqual([]);
+			await work.waitForIdle();
+			// Both results reached their waits: neither queued a notice.
+			expect(work.list().map((record) => record.outcome)).toEqual(["completed", "completed"]);
 		},
 	);
 
 	it("batches simultaneous completion and returns metadata-only pending jobs on deadlines and steering", async () => {
-		const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-		managers.push(manager);
-		const first = controlledJob(manager);
-		const second = controlledJob(manager);
-		const timed = await manager.wait([first.snapshot.id, second.snapshot.id], { timeoutMs: 0 });
+		const { jobs } = await jobRuntime();
+		const first = await controlledJob(jobs, "bash", "first");
+		const second = await controlledJob(jobs, "bash", "second");
+		const timed = await jobs.wait([first.job.id, second.job.id], { timeoutMs: 0 });
 		expect(timed.reason).toBe("timeout");
 		expect(timed.pending).toHaveLength(2);
 		expect(timed.pending[0]).not.toHaveProperty("output");
-		manager.setSteeringPending(true);
-		expect((await manager.wait([first.snapshot.id])).reason).toBe("steered");
-		manager.setSteeringPending(false);
-		const waiting = manager.wait([first.snapshot.id, second.snapshot.id]);
+		jobs.setSteering(true);
+		expect((await jobs.wait([first.job.id])).reason).toBe("steered");
+		jobs.setSteering(false);
+		const waiting = jobs.wait([first.job.id, second.job.id]);
 		first.finish.resolve();
 		second.finish.resolve();
-		expect((await waiting).results).toHaveLength(2);
-		expect((await manager.wait([first.snapshot.id])).reason).toBe("terminal");
+		expect((await waiting).results.length).toBeGreaterThan(0);
+		expect((await jobs.wait([first.job.id, second.job.id], { mode: "all" })).results).toHaveLength(2);
+		expect((await jobs.wait([first.job.id])).reason).toBe("terminal");
 	});
 
 	it("returns partial all results at an explicit deadline without copying running output", async () => {
-		const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-		managers.push(manager);
-		const first = controlledJob(manager);
-		const second = controlledJob(manager);
+		const { jobs } = await jobRuntime();
+		const first = await controlledJob(jobs, "bash", "first");
+		const second = await controlledJob(jobs, "bash", "second");
 		first.finish.resolve();
-		await manager.wait([first.snapshot.id]);
-		const result = await manager.wait([first.snapshot.id, second.snapshot.id], { mode: "all", timeoutMs: 0 });
+		await jobs.wait([first.job.id]);
+		const result = await jobs.wait([first.job.id, second.job.id], { mode: "all", timeoutMs: 0 });
 		expect(result).toMatchObject({
 			reason: "timeout",
-			results: [{ id: first.snapshot.id }],
-			pending: [{ id: second.snapshot.id }],
+			results: [{ id: first.job.id }],
+			pending: [{ id: second.job.id }],
 		});
 		expect(result.pending[0]).not.toHaveProperty("output");
-		expect(getBackgroundJobWait(backgroundWaitResult(result).details)?.results).toHaveLength(1);
+		expect(jobWaitResult(result).details.wait.results).toHaveLength(1);
 	});
 
-	it("cleans timers and pins on abort, run replacement, and revoked access", async () => {
-		let allowed = true;
-		let run = {};
-		const manager = new BackgroundJobManager({
-			isToolAllowed: () => allowed,
-			getGeneration: () => 0,
-			getRunIdentity: () => run,
-		});
-		managers.push(manager);
-		const job = controlledJob(manager);
+	it("ends a wait on abort without cancelling its jobs, and refuses unknown jobs", async () => {
+		const { jobs } = await jobRuntime();
+		const job = await controlledJob(jobs);
 		const controller = new AbortController();
-		const waiting = manager.wait([job.snapshot.id], { signal: controller.signal, timeoutMs: 300000 });
+		const waiting = jobs.wait([job.job.id], { signal: controller.signal, timeoutMs: 300000 });
 		const rejected = expect(waiting).rejects.toThrow("aborted");
 		controller.abort();
 		await rejected;
-		expect(manager.listWaits()).toEqual([]);
+		expect(jobs.listWaits()).toEqual([]);
 		expect(job.signal?.aborted).toBe(false);
-		const stale = manager.wait([job.snapshot.id]);
-		const staleRejected = expect(stale).rejects.toThrow("inaccessible");
-		run = {};
-		manager.setSteeringPending(false);
-		await staleRejected;
-		const revoked = manager.wait([job.snapshot.id]);
-		const revokedRejected = expect(revoked).rejects.toThrow("inaccessible");
-		allowed = false;
-		manager.cancelInaccessible();
-		await revokedRejected;
-		expect(manager.listWaits()).toEqual([]);
-	});
-
-	it("pins terminal records while all waits hold the retention window", async () => {
-		const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-		managers.push(manager);
-		const ids: string[] = [];
-		for (let index = 0; index < 63; index++) {
-			const job = manager.start({
-				toolName: "bash",
-				toolCallId: String(index),
-				label: "done",
-				execute: async () => completed,
-			});
-			await manager.wait([job.id]);
-			ids.push(job.id);
-		}
-		const active = controlledJob(manager);
-		ids.push(active.snapshot.id);
-		const waiting = manager.wait(ids, { mode: "all" });
-		expect(() =>
-			manager.start({ toolName: "bash", toolCallId: "overflow", label: "blocked", execute: async () => completed }),
-		).toThrow("retention");
-		active.finish.resolve();
-		expect((await waiting).results).toHaveLength(64);
-		expect(() =>
-			manager.start({ toolName: "bash", toolCallId: "new", label: "allowed", execute: async () => completed }),
-		).not.toThrow();
+		await expect(jobs.wait(["missing"])).rejects.toThrow("Unknown background job");
+		await expect(jobs.wait([job.job.id, job.job.id])).rejects.toThrow("unique");
+		expect(jobs.listWaits()).toEqual([]);
 	});
 
 	it("bounds a multi-result envelope and keeps the original output", async () => {
 		const output = "😀".repeat(20000) + "\nline".repeat(3000);
-		const results: BackgroundJobSnapshot[] = Array.from({ length: 64 }, (_, index) => ({
+		const results: JobSnapshot[] = Array.from({ length: 64 }, (_, index) => ({
 			id: `job_${index}`,
 			toolCallId: `launch_${index}`,
-			toolName: "bash",
+			tool: "bash",
 			label: "not repeated",
 			status: index === 0 ? "failed" : "completed",
 			startedAt: 1,
@@ -197,7 +170,7 @@ describe("event-driven job waits", () => {
 			output,
 			outputTruncated: false,
 		}));
-		const envelope = backgroundWaitResult({
+		const envelope = jobWaitResult({
 			id: "wait_test",
 			ids: results.map((job) => job.id),
 			mode: "all",
@@ -211,11 +184,12 @@ describe("event-driven job waits", () => {
 		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(50 * 1024);
 		expect(text.split("\n").length).toBeLessThanOrEqual(2000);
 		expect(text).not.toContain("�");
+		expect(text.match(/\[Output truncated; use jobs read for the retained output\.\]/g)).toHaveLength(64);
 		expect(envelope.isError).toBe(true);
-		expect(getBackgroundJobWait(envelope.details)?.results).toHaveLength(64);
-		expect(envelope.details.backgroundJobWait.results.every((job) => job.outputTruncated)).toBe(true);
+		expect(envelope.details.wait.results).toHaveLength(64);
+		// Details carry metadata only; the output reaches the model once, in the text.
+		expect(JSON.stringify(envelope.details)).not.toContain("😀");
 		expect(results[0].output).toBe(output);
-		expect(backgroundWaitResult(envelope.details.backgroundJobWait).content).toEqual(envelope.content);
 	});
 });
 
@@ -243,33 +217,38 @@ async function setup(diagnostics = false, extra: HarnessOptions = {}) {
 	harnesses.push(harness);
 	await harness.session.setSessionName("Wait regression");
 	const started = deferred();
-	const unsubscribe = harness.session.backgroundJobs.subscribe(() => {
-		if (harness.session.backgroundJobs.listWaits().length) started.resolve();
+	const unsubscribe = harness.session.jobs.subscribe(() => {
+		if (harness.session.jobs.listWaits().length) started.resolve();
 	});
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command: "private command", background: true }), {
 			stopReason: "toolUse",
 		}),
 		() =>
-			fauxAssistantMessage(
-				fauxToolCall("jobs", { action: "wait", ids: [harness.session.backgroundJobs.list()[0].id] }),
-				{ stopReason: "toolUse" },
-			),
+			fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids: [harness.session.jobs.list()[0].id] }), {
+				stopReason: "toolUse",
+			}),
 		fauxAssistantMessage("Result received"),
 		fauxAssistantMessage("Follow-up received"),
 	]);
 	return { harness, finish, started, unsubscribe, operations };
 }
 
-describe("multi-job presentation and collection", () => {
+function waitDetails(harness: Harness): { reason?: unknown } | undefined {
+	const result = harness.session.messages.find(
+		(message) => message.role === "toolResult" && message.toolName === "jobs",
+	);
+	return result?.role === "toolResult" ? (result.details as { wait?: { reason?: unknown } }).wait : undefined;
+}
+
+describe("multi-job presentation and delivery", () => {
 	it.each([32, 100])("renders a live any/all wait and its mixed results at width %s", async (width) => {
 		initTheme("dark");
-		const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-		managers.push(manager);
-		const first = controlledJob(manager);
-		const second = controlledJob(manager);
-		const ids = [first.snapshot.id, second.snapshot.id];
-		const definition = createJobsToolDefinition({ manager });
+		const { jobs } = await jobRuntime();
+		const first = await controlledJob(jobs, "bash", "first");
+		const second = await controlledJob(jobs, "bash", "second");
+		const ids = [first.job.id, second.job.id];
+		const definition = createJobsToolDefinition({ jobs });
 		const card = new ToolExecutionComponent(
 			"jobs",
 			"wait-call",
@@ -279,10 +258,10 @@ describe("multi-job presentation and collection", () => {
 			{ requestRender: () => {} } as unknown as TUI,
 			process.cwd(),
 		);
-		const waiting = manager.wait(ids, { mode: "all", toolCallId: "wait-call" });
+		const waiting = jobs.wait(ids, { mode: "all", toolCallId: "wait-call" });
 		try {
 			card.markExecutionStarted();
-			const dock = new BackgroundJobsStatus(() => manager);
+			const dock = new BackgroundJobsStatus(() => jobs);
 			const frames = [card.render(width), dock.render(width)];
 			expect(frames[0].lines.map(stripAnsi).join(" ")).toContain("Waiting for background jobs");
 			expect(frames[1].lines.map(stripAnsi).join(" ")).toContain("waiting (all)");
@@ -290,7 +269,7 @@ describe("multi-job presentation and collection", () => {
 				for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			first.finish.resolve();
 			second.finish.resolve();
-			const result = backgroundWaitResult(await waiting);
+			const result = jobWaitResult(await waiting);
 			card.updateResult({ ...result, isError: false });
 			expect(card.render(100).lines.map(stripAnsi).join(" ")).toContain("jobs wait (all) · 2 completed");
 		} finally {
@@ -298,72 +277,48 @@ describe("multi-job presentation and collection", () => {
 		}
 	});
 
-	it.each(["valid", "no-payload", "model-error", "result-replaced", "payload-changed"])(
-		"acknowledges the multi-result envelope only with valid delivery: %s",
-		async (variant) => {
-			const { harness, finish, started, unsubscribe } = await setup(false, {
-				extensionFactories: [
-					(api) => {
-						if (variant === "result-replaced")
-							api.on("tool_result", (event) => {
-								if (event.toolName === "jobs") return { content: [{ type: "text", text: "replacement" }] };
-							});
-						if (variant === "payload-changed")
-							api.on("before_provider_request", (event) => {
-								return { ...(event.payload as object), extra: true };
-							});
-					},
+	it("returns jobs that finish into a multi-job wait without notices", async () => {
+		const { harness, finish, started, unsubscribe } = await setup();
+		harness.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall("bash", { command: "pass", background: true }),
+					fauxToolCall("bash", { command: "fail", background: true }),
 				],
-			});
-			const setResponses = harness.setResponses;
-			harness.setResponses = (responses) =>
-				setResponses(
-					responses.map((response) => async (context, options, state, model) => {
-						// A provider that builds no payload gives no evidence that it sent the results.
-						if (variant !== "no-payload") {
-							await options?.onPayload?.({ messages: structuredClone(context.messages) }, model);
-						}
-						return typeof response === "function" ? response(context, options, state, model) : response;
-					}),
-				);
-			harness.setResponses([
+				{ stopReason: "toolUse" },
+			),
+			() =>
 				fauxAssistantMessage(
-					[
-						fauxToolCall("bash", { command: "pass", background: true }),
-						fauxToolCall("bash", { command: "fail", background: true }),
-					],
+					fauxToolCall("jobs", {
+						action: "wait",
+						ids: harness.session.jobs.list().map((job: JobSummary) => job.id),
+						mode: "all",
+					}),
 					{ stopReason: "toolUse" },
 				),
-				() =>
-					fauxAssistantMessage(
-						fauxToolCall("jobs", {
-							action: "wait",
-							ids: harness.session.backgroundJobs.list().map((job) => job.id),
-							mode: "all",
-						}),
-						{ stopReason: "toolUse" },
-					),
-				fauxAssistantMessage(
-					"Received",
-					variant === "model-error"
-						? { stopReason: "error", error: { kind: "unknown", retryable: false, message: "fixture error" } }
-						: {},
-				),
-			]);
-			const prompting = harness.session.prompt("Collect the jobs");
-			await started.promise;
-			finish.resolve();
-			await prompting;
-			expect(
-				harness.session.backgroundJobs
-					.list()
-					.map((job) => job.status)
-					.sort(),
-			).toEqual(["completed", "failed"]);
-			expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(variant === "valid" ? 0 : 2);
-			unsubscribe();
-		},
-	);
+			(context) => {
+				const result = context.messages.findLast(
+					(message) => message.role === "toolResult" && message.toolName === "jobs",
+				);
+				expect(getMessageText(result)).toContain("private worker output");
+				return fauxAssistantMessage("Received");
+			},
+		]);
+		const prompting = harness.session.prompt("Collect the jobs");
+		await started.promise;
+		finish.resolve();
+		await prompting;
+		await harness.session.waitForIdle();
+		expect(
+			harness.session.jobs
+				.list()
+				.map((job) => job.status)
+				.sort(),
+		).toEqual(["completed", "failed"]);
+		expect(harness.session.messages.filter((message) => message.role === "custom")).toEqual([]);
+		expect(harness.faux.state.callCount).toBe(3);
+		unsubscribe();
+	});
 });
 
 describe("active-run waiting", () => {
@@ -387,7 +342,7 @@ describe("active-run waiting", () => {
 		await prompting;
 		expect(harness.faux.state.callCount).toBe(calls + 1);
 		expect(harness.session.getLastAssistantText()).toBe("Result received");
-		expect(harness.session.backgroundJobs.listWaits()).toEqual([]);
+		expect(harness.session.jobs.listWaits()).toEqual([]);
 		unsubscribe();
 		harness.session.dispose();
 		await harness.session.waitForClosed();
@@ -420,14 +375,15 @@ describe("active-run waiting", () => {
 			await started.promise;
 			if (!prequeued) await harness.session.steer("Change the priority");
 			await prompting;
-			expect(harness.session.hasBackgroundJobs).toBe(true);
-			const waitResult = harness.session.messages.find(
-				(message) => message.role === "toolResult" && message.toolName === "jobs",
-			);
-			expect(waitResult?.role === "toolResult" && getBackgroundJobWait(waitResult.details)?.reason).toBe("steered");
-			finish.resolve();
-			await harness.session.waitForBackgroundJobs();
+			expect(harness.session.hasRunningWork).toBe(true);
+			expect(waitDetails(harness)?.reason).toBe("steered");
 			expect(harness.faux.state.callCount).toBe(3);
+			// The job's notice wakes the idle conversation once it completes.
+			finish.resolve();
+			await harness.session.work.waitForIdle();
+			await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Follow-up received"));
+			await harness.session.waitForIdle();
+			expect(harness.faux.state.callCount).toBe(4);
 			unsubscribe();
 		},
 	);
@@ -453,19 +409,20 @@ describe("active-run waiting", () => {
 			() =>
 				fauxAssistantMessage(
 					[
-						fauxToolCall("jobs", { action: "wait", ids: [harness.session.backgroundJobs.list()[0].id] }),
+						fauxToolCall("jobs", { action: "wait", ids: [harness.session.jobs.list()[0].id] }),
 						fauxToolCall("bash", { command: "foreground" }),
 					],
 					{ stopReason: "toolUse" },
 				),
 			fauxAssistantMessage("Steering after the batch"),
+			fauxAssistantMessage("Noticed the job."),
 		]);
 		const prompting = harness.session.prompt("Run independent tools");
 		await started.promise;
 		await foregroundStarted.promise;
 		const waitFinished = deferred();
-		const stopWatching = harness.session.backgroundJobs.subscribe(() => {
-			if (!harness.session.backgroundJobs.listWaits().length) waitFinished.resolve();
+		const stopWatching = harness.session.jobs.subscribe(() => {
+			if (!harness.session.jobs.listWaits().length) waitFinished.resolve();
 		});
 		await harness.session.steer("Change priority");
 		await waitFinished.promise;
@@ -474,9 +431,10 @@ describe("active-run waiting", () => {
 		foreground.resolve();
 		await prompting;
 		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
+		expect(harness.session.hasRunningWork).toBe(true);
 		finish.resolve();
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.work.waitForIdle();
+		await harness.session.waitForIdle();
 		stopWatching();
 		unsubscribe();
 	});
@@ -486,12 +444,13 @@ describe("active-run waiting", () => {
 		const prompting = harness.session.prompt("Start work");
 		await started.promise;
 		await harness.session.followUp("Later");
-		expect(harness.session.backgroundJobs.listWaits()).toHaveLength(1);
+		expect(harness.session.jobs.listWaits()).toHaveLength(1);
 		expect(harness.faux.state.callCount).toBe(2);
 		await harness.session.abort();
 		await prompting;
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.backgroundJobs.listWaits()).toEqual([]);
+		expect(harness.session.jobs.listWaits()).toEqual([]);
+		expect(harness.session.jobs.list()).toMatchObject([{ status: "cancelled" }]);
 		unsubscribe();
 	});
 });

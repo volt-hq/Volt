@@ -12,7 +12,6 @@ import { extractVisibleTextContent } from "../../messages.ts";
 import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../subagents/tool-names.ts";
 import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
-import { projectRpcBackgroundJobDetails } from "./background-jobs.ts";
 import {
 	boundSummaryWithMetadata,
 	boundText,
@@ -137,6 +136,35 @@ function assistantItem(
 	};
 }
 
+const JOB_STATUSES: ReadonlySet<unknown> = new Set([
+	"running",
+	"cancelling",
+	"completed",
+	"failed",
+	"cancelled",
+	"interrupted",
+]);
+
+/**
+ * The job a background start or `jobs` result names, as recorded with the
+ * result: its work id and state then. The job itself is a work item; its
+ * output is read by id, never from the transcript.
+ */
+function projectJobDetails(
+	details: Record<string, unknown> | undefined,
+): { workId: string; status: string } | undefined {
+	const job = details !== undefined && isRecord(details.job) ? details.job : undefined;
+	if (
+		job === undefined ||
+		typeof job.id !== "string" ||
+		!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(job.id) ||
+		!JOB_STATUSES.has(job.status)
+	) {
+		return undefined;
+	}
+	return { workId: job.id, status: job.status as string };
+}
+
 function toolResultItem(
 	entry: CommittedSessionEntry,
 	message: {
@@ -155,16 +183,13 @@ function toolResultItem(
 	const status = message.isError ? "failed" : "completed";
 	const path = getToolPath(toolName, args);
 	const details = isRecord(message.details) ? message.details : undefined;
-	const background = projectRpcBackgroundJobDetails(details);
-	const summary = background
-		? boundSummaryWithMetadata(
-				`Background job ${background.backgroundJob.id}: ${background.backgroundJob.status} (snapshot)`,
-				TOOL_SUMMARY_LIMIT,
-			)
+	const job = projectJobDetails(details);
+	const summary = job
+		? boundSummaryWithMetadata(`Background job ${job.workId}: ${job.status} (snapshot)`, TOOL_SUMMARY_LIMIT)
 		: summarizeToolResult(toolName, status, args, path);
 	const projectedArgs = projectToolArgs(toolName, args);
-	const projectedDetails = background
-		? background
+	const projectedDetails = job
+		? { job }
 		: toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME
 			? projectSubagentDetails(details)
 			: undefined;

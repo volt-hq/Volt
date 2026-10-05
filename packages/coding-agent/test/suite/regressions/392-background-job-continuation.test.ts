@@ -1,10 +1,16 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BACKGROUND_JOB_NOTIFICATION_TYPE } from "../../../src/core/background-jobs.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import type { JobSummary } from "../../../src/core/tools/jobs.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness, type HarnessOptions } from "../harness.ts";
+
+// #392: a background job's completed or failed outcome resumes an idle
+// conversation without user input. Since Phase 4 the outcome is a work
+// notice the kernel queues with the job's finish; a stop of the turn that
+// started the job (policy, tool, final response) fences its notices.
 
 function deferred() {
 	let resolve!: () => void;
@@ -46,18 +52,10 @@ async function setup(extra: HarnessOptions = {}) {
 	});
 	harnesses.push(harness);
 	await harness.session.setSessionName("Job continuation regression");
-	const setResponses = harness.setResponses;
-	harness.setResponses = (responses) =>
-		setResponses(
-			responses.map((response) => async (context, options, state, model) => {
-				await options?.onPayload?.({ messages: structuredClone(context.messages) }, model);
-				return typeof response === "function" ? response(context, options, state, model) : response;
-			}),
-		);
 	return { harness, workers };
 }
 
-async function launch(harness: Harness, commands = ["work"]) {
+async function launch(harness: Harness, commands = ["work"]): Promise<JobSummary[]> {
 	harness.setResponses([
 		fauxAssistantMessage(
 			commands.map((command) => fauxToolCall("bash", { command, background: true })),
@@ -66,15 +64,15 @@ async function launch(harness: Harness, commands = ["work"]) {
 		fauxAssistantMessage("My foreground work is done."),
 	]);
 	await harness.session.prompt("Run independent work");
-	return harness.session.backgroundJobs.list();
+	return harness.session.jobs.list();
 }
 
+/** The next turn sees the notices of `ids`, without their output, and waits for their results. */
 function collect(harness: Harness, ids: string[]) {
 	harness.setResponses([
 		(context) => {
 			const text = context.messages.map(getMessageText).join("\n");
-			for (const id of ids) expect(text).toContain(id);
-			expect(text).toContain("Background job completion notice");
+			for (const id of ids) expect(text).toContain(`(job ${id})`);
 			expect(text).not.toContain("untrusted output for");
 			return fauxAssistantMessage(fauxToolCall("jobs", { action: "wait", ids, mode: "all" }), {
 				stopReason: "toolUse",
@@ -91,9 +89,19 @@ async function expectCollected(harness: Harness, calls = 4) {
 	await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
 	await harness.session.waitForIdle();
 	expect(harness.faux.state.callCount).toBe(calls);
-	expect(harness.session.backgroundJobs.listUncollected()).toEqual([]);
 	await delay(10);
 	expect(harness.faux.state.callCount).toBe(calls);
+}
+
+function notices(harness: Harness) {
+	return harness.session.messages.filter(
+		(message) => message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE,
+	);
+}
+
+async function settle(harness: Harness): Promise<void> {
+	await harness.session.work.waitForIdle();
+	await harness.session.waitForIdle();
 }
 
 afterEach(async () => {
@@ -111,8 +119,11 @@ describe("#392 background outcome continuation", () => {
 		collect(harness, [job.id]);
 		workers.get(command)!.resolve();
 		await expectCollected(harness);
-		expect(harness.session.backgroundJobs.get(job.id).status).toBe(command === "fail" ? "failed" : "completed");
+		expect(harness.session.jobs.get(job.id).status).toBe(command === "fail" ? "failed" : "completed");
 		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(notices(harness)).toMatchObject([
+			{ details: { workId: job.id, outcome: command === "fail" ? "failed" : "completed" } },
+		]);
 	});
 
 	it.each(["work", "fail"])("fences late %s outcomes and siblings after a policy stop", async (command) => {
@@ -122,28 +133,19 @@ describe("#392 background outcome continuation", () => {
 				context.completedTurn && context.completedTurn.toolResults.length === 0 ? { type: "stop" } : undefined,
 		});
 		const jobs = await launch(harness, [command, "later"]);
-		expect(harness.session.hasBackgroundJobs).toBe(true);
+		expect(harness.session.hasRunningWork).toBe(true);
 		workers.get(command)!.resolve();
-		await vi.waitFor(() =>
-			expect(
-				harness.session.backgroundJobs.get(jobs.find((job) => job.label === command)!.id).endedAt,
-			).toBeDefined(),
-		);
-		await harness.session.waitForIdle();
-		expect(harness.faux.state.callCount).toBe(2);
 		workers.get("later")!.resolve();
-		await harness.session.waitForBackgroundJobs();
-		await harness.session.waitForIdle();
+		await settle(harness);
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(2);
 		for (const job of jobs) {
-			expect(harness.session.backgroundJobs.get(job.id)).toMatchObject({
+			expect(harness.session.jobs.get(job.id)).toMatchObject({
 				status: job.label === "fail" ? "failed" : "completed",
 				output: expect.stringContaining(`untrusted output for ${job.label}`),
 			});
 		}
 		unregister();
-		// Suppression belongs to existing jobs, not the whole session or future launches.
+		// The fence belongs to the work the stopped turn started, not to future launches.
 		const allJobs = await launch(harness, ["new"]);
 		const newJob = allJobs.find((job) => job.label === "new")!;
 		collect(harness, [newJob.id]);
@@ -169,35 +171,33 @@ describe("#392 background outcome continuation", () => {
 		const launching = launch(harness, ["first", "later"]);
 		await entered.promise;
 		workers.get("first")!.resolve();
-		const first = harness.session.backgroundJobs.list().find((job) => job.label === "first")!;
-		await vi.waitFor(() => expect(harness.session.backgroundJobs.get(first.id).endedAt).toBeDefined());
+		const first = harness.session.jobs.list().find((job) => job.label === "first")!;
+		await vi.waitFor(() => expect(harness.session.jobs.get(first.id).status).toBe("completed"));
 		release.resolve();
 		await launching;
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(2);
 		workers.get("later")!.resolve();
-		await harness.session.waitForBackgroundJobs();
-		await harness.session.waitForIdle();
+		await settle(harness);
 		expect(harness.faux.state.callCount).toBe(2);
+		expect(notices(harness)).toHaveLength(0);
 	});
 
-	it("fences existing work when a policy stops before the first provider request", async () => {
+	it.each(["stop", "final_response"] as const)("fences late work after tool disposition %s", async (disposition) => {
 		const { harness, workers } = await setup();
-		await launch(harness);
-		const unregister = harness.session.registerTurnPolicy({ nextAction: () => ({ type: "stop" }) });
-		// The policy stops the turn before it delivers the prompt; the prompt is withdrawn.
-		await harness.session.prompt("A host policy forbids this request");
-		expect(harness.faux.state.callCount).toBe(2);
-		expect(getUserTexts(harness)).not.toContain("A host policy forbids this request");
+		harness.control.onToolResult((event) => (event.toolName === "jobs" ? { disposition } : undefined));
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("bash", { command: "work", background: true }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("jobs", { action: "list" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Final report."),
+		]);
+		await harness.session.prompt("Start independent work");
+		const calls = disposition === "stop" ? 2 : 3;
+		expect(harness.faux.state.callCount).toBe(calls);
 		workers.get("work")!.resolve();
-		await harness.session.waitForBackgroundJobs();
-		await harness.session.waitForIdle();
-		expect(harness.faux.state.callCount).toBe(2);
-		unregister();
-		harness.setResponses([fauxAssistantMessage("Explicitly authorized recovery.")]);
-		await harness.session.prompt("Recover explicitly");
-		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.getLastAssistantText()).toBe("Explicitly authorized recovery.");
+		await settle(harness);
+		expect(harness.faux.state.callCount).toBe(calls);
+		expect(harness.session.jobs.list()).toMatchObject([{ status: "completed" }]);
 	});
 
 	it.each(["request", "pause"] as const)("preserves wakes when a later policy replaces stop with %s", async (type) => {
@@ -228,30 +228,12 @@ describe("#392 background outcome continuation", () => {
 			fauxAssistantMessage("Authorized continuation finished."),
 		]);
 		await harness.session.prompt("Start independent work");
-		const [job] = harness.session.backgroundJobs.list();
+		const [job] = harness.session.jobs.list();
 		const calls = type === "pause" ? 2 : 3;
 		expect(harness.faux.state.callCount).toBe(calls);
 		collect(harness, [job.id]);
 		workers.get("work")!.resolve();
 		await expectCollected(harness, calls + 2);
-	});
-
-	it.each(["stop", "final_response"] as const)("fences late work after tool disposition %s", async (disposition) => {
-		const { harness, workers } = await setup();
-		harness.control.onToolResult((event) => (event.toolName === "jobs" ? { disposition } : undefined));
-		harness.setResponses([
-			fauxAssistantMessage(fauxToolCall("bash", { command: "work", background: true }), { stopReason: "toolUse" }),
-			fauxAssistantMessage(fauxToolCall("jobs", { action: "list" }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("Final report."),
-		]);
-		await harness.session.prompt("Start independent work");
-		const calls = disposition === "stop" ? 2 : 3;
-		expect(harness.faux.state.callCount).toBe(calls);
-		workers.get("work")!.resolve();
-		await harness.session.waitForBackgroundJobs();
-		await harness.session.waitForIdle();
-		expect(harness.faux.state.callCount).toBe(calls);
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
 	});
 
 	it("preserves late wakes through proactive compaction", async () => {
@@ -294,52 +276,41 @@ describe("#392 background outcome continuation", () => {
 		await expectCollected(harness, 6);
 	});
 
-	it("coalesces simultaneous outcomes into one follow-up", async () => {
+	it("delivers simultaneous outcomes to the turn they wake", async () => {
 		const { harness, workers } = await setup();
 		const jobs = await launch(harness, ["first", "second"]);
-		collect(
-			harness,
-			jobs.map((job) => job.id),
-		);
+		harness.setResponses([fauxAssistantMessage("Noticed."), fauxAssistantMessage("Noticed again.")]);
 		for (const worker of workers.values()) worker.resolve();
-		await expectCollected(harness);
-		const notices = harness.session.messages.filter(
-			(message) => message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
-		);
-		expect(notices).toHaveLength(1);
+		await settle(harness);
+		expect(
+			notices(harness)
+				.map((notice) => (notice.role === "custom" ? (notice.details as { workId: string }).workId : ""))
+				.sort(),
+		).toEqual(jobs.map((job) => job.id).sort());
+		expect(harness.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(harness.faux.state.callCount).toBeLessThanOrEqual(4);
 	});
 
-	it.each(["running", "settled"])("does not wake when the user cancels a %s job", async (phase) => {
-		const { harness, workers } = await setup();
+	it("does not wake when the user cancels a running job", async () => {
+		const { harness } = await setup();
 		const [job] = await launch(harness);
-		if (phase === "settled") {
-			workers.get("work")!.resolve();
-			await harness.session.waitForBackgroundJobs();
-		}
-		harness.session.backgroundJobs.cancel(job.id);
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.jobs.cancel(job.id);
+		await settle(harness);
 		await delay(20);
 		expect(harness.faux.state.callCount).toBe(2);
-		expect(harness.session.backgroundJobs.get(job.id).status).toBe(phase === "running" ? "cancelled" : "completed");
+		expect(harness.session.jobs.get(job.id).status).toBe("cancelled");
+		expect(notices(harness)).toHaveLength(0);
 	});
 
-	it("session stop revokes already-settled and running outcomes but not future launches", async () => {
+	it("session stop cancels running outcomes but not future launches", async () => {
 		const { harness, workers } = await setup();
 		await launch(harness, ["first", "second"]);
-		const settled = deferred();
-		const unsubscribe = harness.session.backgroundJobs.subscribe(() => {
-			if (harness.session.backgroundJobs.list().find((job) => job.label === "first")?.status === "completed")
-				settled.resolve();
-		});
-		workers.get("first")!.resolve();
-		await settled.promise;
-		unsubscribe();
 		await harness.session.abort();
 		await delay(20);
 		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.session.jobs.list().map((job) => job.status)).toEqual(["cancelled", "cancelled"]);
 		const jobs = await launch(harness, ["new"]);
 		const job = jobs.find((job) => job.label === "new")!;
-		// Earlier outcome text can appear in later context, so use a simple collection response here.
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Collected background outcome."),
@@ -365,7 +336,7 @@ describe("#392 background outcome continuation", () => {
 		const prompt = harness.session.prompt("Continue foreground work");
 		await entered.promise;
 		workers.get("work")!.resolve();
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.work.waitForIdle();
 		await delay(10);
 		expect(harness.faux.state.callCount).toBe(3);
 		collect(harness, [job.id]);
@@ -374,88 +345,18 @@ describe("#392 background outcome continuation", () => {
 		await expectCollected(harness, 5);
 	});
 
-	it("lets cancellation win while automatic delivery is awaiting an extension", async () => {
-		const entered = deferred();
-		const release = deferred();
-		finishes.push(release.resolve);
-		const { harness, workers } = await setup({
-			extensionFactories: [
-				(api) => {
-					api.on("context", async (event) => {
-						if (
-							event.messages.some(
-								(message) =>
-									message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
-							)
-						) {
-							entered.resolve();
-							await release.promise;
-						}
-					});
-				},
-			],
-		});
-		const [job] = await launch(harness);
-		workers.get("work")!.resolve();
-		await entered.promise;
-		harness.session.backgroundJobs.cancel(job.id);
-		release.resolve();
-		await harness.session.waitForIdle();
-		await delay(10);
-		expect(harness.faux.state.callCount).toBe(2);
-	});
-
 	it("cancelling one worker does not suppress a successful sibling", async () => {
 		const { harness, workers } = await setup();
 		const jobs = await launch(harness, ["cancelled", "survivor"]);
 		const cancelled = jobs.find((job) => job.label === "cancelled")!;
 		const survivor = jobs.find((job) => job.label === "survivor")!;
-		harness.session.backgroundJobs.cancel(cancelled.id);
+		await harness.session.jobs.cancel(cancelled.id);
 		collect(harness, [survivor.id]);
 		workers.get("survivor")!.resolve();
 		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(4);
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([
-			{ id: cancelled.id, status: "cancelled" },
-		]);
-	});
-
-	it("keeps a later batched sibling authorized when the original wake job is cancelled", async () => {
-		let beforeAutoStart: (() => Promise<void>) | undefined;
-		let cancelOriginal: (() => void) | undefined;
-		const { harness, workers } = await setup({
-			extensionFactories: [
-				(api) => {
-					api.on("agent_start", async () => {
-						await beforeAutoStart?.();
-					});
-					api.on("context", (event) => {
-						if (
-							event.messages.some(
-								(message) =>
-									message.role === "custom" && message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
-							)
-						)
-							cancelOriginal?.();
-					});
-				},
-			],
-		});
-		const jobs = await launch(harness, ["first", "later"]);
-		const first = jobs.find((job) => job.label === "first")!;
-		const later = jobs.find((job) => job.label === "later")!;
-		beforeAutoStart = async () => {
-			workers.get("later")!.resolve();
-			await harness.session.waitForBackgroundJobs();
-		};
-		cancelOriginal = () => harness.session.backgroundJobs.cancel(first.id);
-		collect(harness, [later.id]);
-		workers.get("first")!.resolve();
-		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
-		await harness.session.waitForIdle();
-		expect(harness.faux.state.callCount).toBe(4);
-		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: first.id }]);
+		expect(harness.session.jobs.get(cancelled.id).status).toBe("cancelled");
 	});
 
 	it("does not interrupt independent foreground work when a job is cancelled", async () => {
@@ -474,8 +375,8 @@ describe("#392 background outcome continuation", () => {
 		]);
 		const prompt = harness.session.prompt("Do independent work");
 		await entered.promise;
-		harness.session.backgroundJobs.cancel(job.id);
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.jobs.cancel(job.id);
+		await harness.session.work.waitForIdle();
 		release.resolve();
 		await prompt;
 		await delay(10);
@@ -483,15 +384,39 @@ describe("#392 background outcome continuation", () => {
 		expect(harness.session.getLastAssistantText()).toBe("Independent foreground result.");
 	});
 
-	it("disposal suppresses a scheduled completion", async () => {
+	it("keeps a notice queued when a policy stops a later turn before its first request", async () => {
 		const { harness, workers } = await setup();
 		await launch(harness);
+		const unregister = harness.session.registerTurnPolicy({ nextAction: () => ({ type: "stop" }) });
+		// The policy stops the turn before it delivers the prompt; the prompt is withdrawn.
+		await harness.session.prompt("A host policy forbids this request");
+		expect(harness.faux.state.callCount).toBe(2);
+		expect(getUserTexts(harness)).not.toContain("A host policy forbids this request");
 		workers.get("work")!.resolve();
-		await harness.session.waitForBackgroundJobs();
+		await settle(harness);
+		expect(harness.faux.state.callCount).toBe(2);
+		unregister();
+		harness.setResponses([
+			(context) => {
+				expect(context.messages.map(getMessageText).join("\n")).toContain("(job ");
+				return fauxAssistantMessage("Explicitly authorized recovery.");
+			},
+		]);
+		await harness.session.prompt("Recover explicitly");
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.session.getLastAssistantText()).toBe("Explicitly authorized recovery.");
+	});
+
+	it("disposal interrupts running work and runs no turn for it", async () => {
+		const { harness } = await setup();
+		const [job] = await launch(harness);
 		harness.session.dispose();
 		await harness.session.waitForClosed();
 		await delay(10);
 		expect(harness.faux.state.callCount).toBe(2);
+		expect(
+			harness.sessionManager.committedEntriesAfter(0).find((entry) => entry.type === "work_finished"),
+		).toMatchObject({ workId: job.id, outcome: "interrupted" });
 	});
 
 	it("resumes after a completion during manual compaction, not inside it", async () => {
@@ -519,7 +444,7 @@ describe("#392 background outcome continuation", () => {
 		const compacting = harness.session.compact();
 		await entered.promise;
 		workers.get("work")!.resolve();
-		await harness.session.waitForBackgroundJobs();
+		await harness.session.work.waitForIdle();
 		await delay(10);
 		expect(harness.faux.state.callCount).toBe(2);
 		collect(harness, [job.id]);
@@ -542,6 +467,5 @@ describe("#392 background outcome continuation", () => {
 		await harness.session.waitForIdle();
 		await delay(20);
 		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.backgroundJobs.listUncollected()).toHaveLength(1);
 	});
 });

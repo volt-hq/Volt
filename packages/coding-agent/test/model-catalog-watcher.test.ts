@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { isModelCatalogSourceWatchEvent, startModelCatalogWatcher } from "../src/core/model-catalog-watcher.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/protocol/transport/transport.ts";
@@ -228,7 +227,6 @@ describe("model catalog watcher", () => {
 	test("rpc mode tells connected clients the models changed when logins change on disk", async () => {
 		const registry = createRegistry();
 		const session = {
-			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),

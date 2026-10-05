@@ -541,7 +541,7 @@ Volt includes common coding-agent primitives in core while keeping project-speci
 
 **Task tracking stays lightweight.** Plan mode tracks approved implementation steps. For standalone task management, use a TODO file or an extension.
 
-**Shell work stays observable.** Native Bash and subagent calls support session-owned background jobs. Use `background: true`, then `jobs` to inspect, wait for, or cancel the work. Use tmux for terminals that must outlive a Volt runtime. See [Background jobs](docs/usage.md#background-jobs).
+**Shell work stays observable.** Native Bash and subagent calls support background jobs whose results the conversation keeps. Use `background: true`, then `jobs` to inspect, wait for, or cancel the work. Use tmux for terminals that must outlive a Volt runtime. See [Background jobs](docs/usage.md#background-jobs).
 
 ---
 

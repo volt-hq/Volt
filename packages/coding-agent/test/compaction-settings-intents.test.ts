@@ -9,7 +9,6 @@ import {
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { feedLiveState } from "../src/core/host/live-feed.ts";
 import { LiveState } from "../src/core/host/live-state.ts";
 import {
@@ -310,13 +309,11 @@ describe("compaction settings intents", () => {
 		const { session, settingsManager, invoke, storage } = setup({
 			profiles: { work: { compaction: { modelThresholds: { [modelRef]: 500000 } } } },
 		});
-		const backgroundJobs = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
 		const live = new LiveState();
 		// The feed reads nothing else of the session: it skips the values it cannot read.
 		const feed = feedLiveState(
 			Object.assign(session, {
 				liveState: live,
-				backgroundJobs,
 				subscribe: () => () => {},
 				subscribeActivity: () => () => {},
 				sessionManager: { ...session.sessionManager, subscribeEntries: () => () => {} },
@@ -349,7 +346,6 @@ describe("compaction settings intents", () => {
 			expect(recorder.items()).toHaveLength(after);
 		} finally {
 			feed.close();
-			await backgroundJobs.close();
 		}
 	});
 

@@ -17,7 +17,6 @@ import type {
 	ConversationPreparedDelivery,
 } from "@hansjm10/volt-agent-core";
 import type { AgentSessionEvent } from "../agent-session.ts";
-import type { BackgroundJobManager } from "../background-jobs.ts";
 import type { CustomMessage } from "../messages.ts";
 import { type OperationGrantProfile, RESEARCH_OPERATION_GRANT_PROFILE } from "../operation-authorization.ts";
 import {
@@ -45,7 +44,8 @@ import type { SessionToolRuntime } from "./tool-runtime.ts";
 
 export interface SessionPlanningHost {
 	readonly sessionManager: SessionManager;
-	readonly backgroundJobs: BackgroundJobManager;
+	/** Whether a background job runs. */
+	hasRunningJobs(): boolean;
 	conversation(): Conversation<AgentTool>;
 	sessionWriter(): SessionWriter;
 	tools(): SessionToolRuntime;
@@ -213,7 +213,7 @@ export class SessionPlanning {
 	private async commit(next: PlanningState): Promise<PlanningState> {
 		this.host.assertActive();
 		const parsed = parsePlanningState(next);
-		if (parsed.mode === "plan" && this.host.backgroundJobs.hasActive) {
+		if (parsed.mode === "plan" && this.host.hasRunningJobs()) {
 			throw new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish");
 		}
 		await this.host.sessionWriter().appendPlanningState(parsed);
