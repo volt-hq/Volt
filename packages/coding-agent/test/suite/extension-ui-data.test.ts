@@ -294,6 +294,42 @@ describe("the extensions' data UI", () => {
 		}
 	});
 
+	it("gives a withSession callback the extension's own ctx.ui in the new conversation", async () => {
+		let seeded: string | undefined;
+		const fixture = await createExtensionRuntime((volt) => {
+			volt.registerCommand("seed", {
+				handler: async (_args, ctx) => {
+					await ctx.newSession({
+						withSession: async (replaced) => {
+							replaced.ui.setStatus("seeded", "yes");
+							seeded = replaced.sessionManager.getSessionId();
+						},
+					});
+				},
+			});
+		});
+		cleanups.push(() => fixture.dispose());
+		const client = await connectTestClient(fixture.host, fixture.conversation, {
+			id: "client",
+			surface: {
+				commandContextActions: {
+					waitForIdle: async () => {},
+					newSession: (options) => client.newSession(options),
+					fork: async () => ({ cancelled: true }),
+					navigateTree: async () => ({ cancelled: true }),
+					switchSession: async () => ({ cancelled: true }),
+					reload: async () => {},
+				},
+			},
+		});
+		await client.session.prompt("/seed");
+		expect(seeded).toBe(client.conversation.id);
+		expect(client.conversation.liveState.get(`ext_status/${EXTENSION}/seeded`)).toMatchObject({
+			kind: "ext_status",
+			extension: EXTENSION,
+		});
+	});
+
 	it("pastes into the clients' editors without terminal controls", async () => {
 		const { fixture, live, ui } = await setup();
 		cleanups.push(() => fixture.dispose());

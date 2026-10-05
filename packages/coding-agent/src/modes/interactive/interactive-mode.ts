@@ -20,6 +20,8 @@ import {
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
 import {
+	type ExtensionState,
+	type ExtensionSummary,
 	type HostRequest,
 	type HostResponse,
 	type UiNodeStyledText,
@@ -363,6 +365,15 @@ const STDOUT_FLUSH_TIMEOUT_MS = 1000;
 /** How long a lease handover waits for the phones relayed into the session the TUI left to hear where to reconnect. */
 const RELAY_END_TIMEOUT_MS = 2000;
 /** Width of fullscreen's panel sidebar, in columns. */
+/** How `/extensions` shows an extension's state. */
+const EXTENSION_STATE_LABELS: Readonly<Record<ExtensionState, string>> = {
+	active: "enabled",
+	disabled: "disabled",
+	failed: "failed",
+	activating: "enabling",
+	deactivating: "disabling",
+};
+
 const PANEL_SIDEBAR_COLUMNS = 40;
 /** Narrowest terminal that shows the panel sidebar; narrower ones show sidebar panels above the editor. */
 const PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS = 100;
@@ -3601,8 +3612,10 @@ export class InteractiveMode {
 			overlay?: boolean;
 			overlayOptions?: OverlayOptions | (() => OverlayOptions);
 			onHandle?: (handle: OverlayHandle) => void;
+			signal?: AbortSignal;
 		},
 	): Promise<T> {
+		if (options?.signal?.aborted) return Promise.reject(new ExtensionUIDismissedError());
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
 		if (!isOverlay) this.dismissWorkInspector?.();
@@ -3636,6 +3649,7 @@ export class InteractiveMode {
 				if (closed) return false;
 				closed = true;
 				this.pendingExtensionDialogs.delete(dismiss);
+				options?.signal?.removeEventListener("abort", dismiss);
 				// A local jobs inspector can be stacked above an asynchronous extension dialog.
 				if (isOverlay) overlayHandle?.hide();
 				else restoreView();
@@ -3655,7 +3669,10 @@ export class InteractiveMode {
 			};
 
 			const created = factory(this.ui, theme, this.keybindings, close);
-			if (!closed) this.pendingExtensionDialogs.add(dismiss);
+			if (!closed) {
+				this.pendingExtensionDialogs.add(dismiss);
+				options?.signal?.addEventListener("abort", dismiss, { once: true });
+			}
 			Promise.resolve(created)
 				.then((c) => {
 					if (closed) {
@@ -3694,6 +3711,7 @@ export class InteractiveMode {
 					if (closed) return;
 					closed = true;
 					this.pendingExtensionDialogs.delete(dismiss);
+					options?.signal?.removeEventListener("abort", dismiss);
 					if (!isOverlay) restoreView();
 					reject(err);
 				});
@@ -4283,9 +4301,20 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(session: AgentSession): void {
-		this.unsubscribe = session.subscribe(async (event) => {
+		const unsubscribeEvents = session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
+		// An extension enabled or disabled while the session runs brings or takes its commands and shortcuts.
+		const unsubscribeExtensions = session.subscribeReloads(() => {
+			if (this.session !== session) return;
+			this.setupAutocompleteProvider();
+			this.setupExtensionShortcuts(session.extensionRunner);
+			this.ui.requestRender();
+		});
+		this.unsubscribe = () => {
+			unsubscribeEvents();
+			unsubscribeExtensions();
+		};
 	}
 
 	/**
@@ -6823,7 +6852,7 @@ export class InteractiveMode {
 				this.showStatus(`Removed ${targetLabel}: its permissions were not acknowledged`);
 				return;
 			}
-			await this.offerStoreReload(`Installed ${targetLabel}`);
+			await this.rescanAfterStoreChange(`Installed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -6974,16 +7003,39 @@ export class InteractiveMode {
 		}
 	}
 
-	/** `/extensions`: the conversation's extensions, each opening its detail and settings; `/extensions <id>` opens one. */
-	private async handleExtensionsInteractiveCommand(extensionId: string): Promise<void> {
-		if (extensionId) {
-			this.showExtensionDetail(extensionId);
+	/**
+	 * `/extensions`: the conversation's extensions with their state, each
+	 * opening its actions (enable or disable, detail and settings);
+	 * `/extensions <id>` opens one's detail; `/extensions enable|disable <id>`
+	 * toggles one.
+	 */
+	private async handleExtensionsInteractiveCommand(args: string): Promise<void> {
+		const [verb, id, ...rest] = args.split(/\s+/).filter((part) => part.length > 0);
+		if (verb === "enable" || verb === "disable") {
+			if (id === undefined || rest.length > 0) {
+				this.showWarning(`Usage: /extensions ${verb} <id>`);
+				return;
+			}
+			await this.setExtensionEnabled(id, verb === "enable");
 			return;
 		}
-		const labels = new Map<string, string>();
-		const options = this.session.resourceLoader.getExtensions().extensions.map((extension) => {
-			const label = `${extension.manifest.displayName} (${extension.id})${extension.manifest.settings ? " · settings" : ""}`;
-			labels.set(label, extension.id);
+		if (verb !== undefined) {
+			this.showExtensionDetail(args.trim());
+			return;
+		}
+		let summaries: ExtensionSummary[];
+		try {
+			summaries = (await queryRegistry.run(this.intentContext(), "extensions", {})).extensions;
+		} catch (error) {
+			this.showError(`Could not list extensions: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		const labels = new Map<string, ExtensionSummary>();
+		const options = summaries.map((summary) => {
+			const unacknowledged =
+				summary.permissions.length > 0 && !summary.permissionsAcknowledged ? " · permissions not acknowledged" : "";
+			const label = `${summary.displayName} (${summary.id}) · ${EXTENSION_STATE_LABELS[summary.state]}${summary.hasSettings ? " · settings" : ""}${unacknowledged}`;
+			labels.set(label, summary);
 			return label;
 		});
 		const packagesLabel = "Installed packages";
@@ -6995,12 +7047,54 @@ export class InteractiveMode {
 			return;
 		}
 		const selected = labels.get(selection);
-		if (selected !== undefined) this.showExtensionDetail(selected);
+		if (selected !== undefined) await this.showExtensionActions(selected);
+	}
+
+	/** What to do with one extension: enable or disable it, or open its detail and settings. */
+	private async showExtensionActions(summary: ExtensionSummary): Promise<void> {
+		const toggle = summary.enabled ? "Disable" : "Enable";
+		const detailLabel = summary.hasSettings ? "Details and settings" : "Details";
+		const selection = await this.showExtensionSelector(`${summary.displayName} (${summary.id})`, [
+			toggle,
+			detailLabel,
+			"Cancel",
+		]);
+		if (selection === toggle) await this.setExtensionEnabled(summary.id, !summary.enabled);
+		else if (selection === detailLabel) this.showExtensionDetail(summary.id);
+	}
+
+	/**
+	 * Enable or disable the extension `id` through the host's intent, in the
+	 * scope that decides it: a trusted project's when it stores the choice,
+	 * else the user's global settings. Enabling asks to acknowledge permissions
+	 * not acknowledged yet.
+	 */
+	private async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
+		const settings = this.settingsManager;
+		const scope =
+			settings.isProjectTrusted() && settings.getStoredExtensionEnabled(id, "project") !== undefined
+				? "project"
+				: "global";
+		try {
+			await intentRegistry.invoke(this.intentContext(), "set_extension_enabled", { id, enabled, scope });
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		const state = this.session.extensionRegistry.get(id)?.state;
+		if (enabled) {
+			if (state === "active") this.showStatus(`Enabled ${id}`);
+			else this.showWarning(`${id} did not start (${state ?? "unknown"}); see its error in /extensions`);
+		} else {
+			this.showStatus(
+				state === "deactivating" ? `Disabled ${id}; its tools leave once the current turn ends` : `Disabled ${id}`,
+			);
+		}
 	}
 
 	/** An extension's detail and settings form, reading and saving through the host's query and intent. */
 	private showExtensionDetail(id: string): void {
-		const extension = this.session.extensionRunner.getExtension(id);
+		const extension = this.session.extensionRegistry.get(id);
 		if (!extension) {
 			this.showWarning(`No extension "${id}" in this conversation`);
 			return;
@@ -7009,7 +7103,7 @@ export class InteractiveMode {
 			{
 				manifest: extension.manifest,
 				version: extension.version,
-				scope: extension.sourceInfo.scope,
+				scope: extension.scope,
 				fingerprint: extension.fingerprint,
 			},
 			new ExtensionPermissionStore(this.conversation.services.agentDir),
@@ -7206,7 +7300,7 @@ export class InteractiveMode {
 				this.showWarning(`No matching package found for ${targetLabel}`);
 				return;
 			}
-			await this.offerStoreReload(`Removed ${targetLabel}`);
+			await this.rescanAfterStoreChange(`Removed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -7229,6 +7323,22 @@ export class InteractiveMode {
 			this.showWarning(`Package was installed at ${installedPath}, but settings persistence failed.`);
 		}
 		return true;
+	}
+
+	/**
+	 * After an install or removal: the conversation picks up the installed or
+	 * removed extension at once, and a reload loads the package's skills,
+	 * prompts, and themes.
+	 */
+	private async rescanAfterStoreChange(message: string): Promise<void> {
+		try {
+			await this.session.rescanExtensions();
+		} catch (error) {
+			this.showWarning(
+				`Could not load extension changes: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		await this.offerStoreReload(`${message}; its extension changes apply now`);
 	}
 
 	private async offerStoreReload(message: string): Promise<void> {

@@ -427,7 +427,17 @@ Object form filters which resources to load:
 
 See [packages.md](packages.md) for package management details.
 
-### Extension settings
+### Extensions
+
+`extensions.<id>.enabled` decides whether the extension whose manifest id is `<id>` runs; it does when no scope says otherwise, and a trusted project's choice overrides the global one. Toggle it with `/extensions`, `/extensions enable <id>`, or `/extensions disable <id>`: open conversations start or stop the extension at once, without `/reload`. Enabling an extension whose permissions you have not acknowledged asks you to; paired clients with `host.manage.v1` may disable extensions, and enable only those whose permissions you acknowledged. See [extensions.md](extensions.md#enabling-and-disabling).
+
+```json
+{
+  "extensions": {
+    "rtk": { "enabled": false }
+  }
+}
+```
 
 `extensions.<id>.settings` holds the settings of the extension whose manifest id is `<id>`, checked against the settings its manifest declares. Global values apply everywhere; a trusted project's values override them. Edit them with `/extensions` (pick an extension, or `/extensions <id>`) or `volt config` (Enter on an extension row that shows "settings"); paired clients with `host.manage.v1` edit them too.
 

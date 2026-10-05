@@ -45,6 +45,7 @@ import type {
 	ToolInfo,
 } from "./extensions/index.ts";
 import type { PolicyRegistration } from "./extensions/policy-registration.ts";
+import type { ExtensionRegistry } from "./extensions/registry.ts";
 import type { ExtensionServicesLimits } from "./extensions/services-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { ClientScope } from "./host/client-scope.ts";
@@ -658,6 +659,7 @@ export class AgentSession {
 				modelSettings: this._modelSettings,
 				resourceLoader: this._resourceLoader,
 				cwd: this._cwd,
+				agentDir: this._agentDir,
 				lifetimeSignal: this._lifetimeAbort.signal,
 				liveState: this.liveState,
 				conversation: () => this._conversation,
@@ -676,6 +678,8 @@ export class AgentSession {
 				sendCustomMessage: (message, options, allowDuringPromptTransaction) =>
 					this._prompting.sendCustomMessage(message, options, allowDuringPromptTransaction),
 				trackAncillaryWork: (work) => this._trackAdmittedAncillaryWork(work),
+				turnBoundary: () => this._turnBoundary(),
+				extensionsChanged: () => this._notifyReloadListeners(),
 			},
 			{
 				extensionRunnerRef: config.extensionRunnerRef,
@@ -2127,21 +2131,71 @@ export class AgentSession {
 		// The reloaded extensions' session_start belongs to no client, whoever asked for the reload.
 		const reloaded = ClientScope.exit(() => this._trackAdmittedAncillaryWork(this._extensions.reload()));
 		void reloaded.then(
-			() => {
-				for (const listener of [...this._reloadListeners]) {
-					try {
-						listener();
-					} catch {
-						// A reload observer's failure never fails the reload.
-					}
-				}
-			},
+			() => this._notifyReloadListeners(),
 			() => undefined,
 		);
 		return reloaded;
 	}
 
-	/** Observe completed reloads: the conversation's extensions, commands, prompt templates, and skills may have changed. */
+	private _notifyReloadListeners(): void {
+		for (const listener of [...this._reloadListeners]) {
+			try {
+				listener();
+			} catch {
+				// A reload observer's failure never fails the reload.
+			}
+		}
+	}
+
+	/**
+	 * The conversation's extensions (RFC §8.2): which run, and their runtime
+	 * toggle. Settings decide which run; changing them starts or stops an
+	 * extension without a reload.
+	 */
+	get extensionRegistry(): ExtensionRegistry {
+		return this._extensions.registry;
+	}
+
+	/**
+	 * Pick up extensions installed or removed since the conversation loaded
+	 * them, without a reload: a new extension runs when settings enable it, and
+	 * a removed one stops. Its skills, prompts, and themes load on the next reload.
+	 */
+	rescanExtensions(): Promise<void> {
+		this._assertActive();
+		return ClientScope.exit(() => this._extensions.registry.rescan());
+	}
+
+	/** Resolves at the next turn boundary: at once when no turn runs, else once the running turn ends. */
+	private _turnBoundary(): Promise<void> {
+		if (!this._turnActive) return Promise.resolve();
+		return new Promise((resolve) => {
+			const signal = this._lifetimeAbort.signal;
+			const done = (): void => {
+				unsubscribeEvents();
+				unsubscribeActivity();
+				signal.removeEventListener("abort", done);
+				resolve();
+			};
+			const unsubscribeEvents = this.subscribe(
+				(event) => {
+					if (event.type === "turn_end" || event.type === "agent_end") done();
+				},
+				{ monitorGitContext: false },
+			);
+			const unsubscribeActivity = this.subscribeActivity(() => {
+				if (!this._turnActive) done();
+			});
+			if (signal.aborted) done();
+			else signal.addEventListener("abort", done, { once: true });
+		});
+	}
+
+	/**
+	 * Observe changes to the conversation's extensions and resources: a
+	 * completed reload, an extension enabled or disabled, or an extension's
+	 * state changing. Commands, intents, prompt templates, and skills may differ.
+	 */
 	subscribeReloads(listener: () => void): () => void {
 		this._reloadListeners.add(listener);
 		return () => {

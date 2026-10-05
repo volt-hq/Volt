@@ -620,18 +620,73 @@ describe("work registry", () => {
 		});
 	});
 
-	it("tells what remote clients need for work of known kinds, and refuses work of an extension kind it does not know", async () => {
-		const { registry } = await setup();
-		const remove = registry.register(kind({ requires: ["host.manage.v1"] }));
+	it("records what remote clients need for work in work_started, so it holds once the kind is removed", async () => {
+		const { registry, log } = await setup();
+		const remove = registry.register(
+			kind({ requires: ["host.manage.v1", "host.manage.v1"], remote: { cancel: false, resume: true } }),
+		);
 		registry.register(kind({ kind: "job" }));
 		const extension = await registry.start("ext:test/run", null, async () => ({ outcome: "completed" }));
 		const job = await registry.start("job", null, async () => ({ outcome: "completed" }));
 		await registry.waitForIdle();
+		expect(workEntries(await entriesOf(log)).filter((entry) => entry.type === "work_started")).toEqual([
+			{
+				type: "work_started",
+				payload: expect.objectContaining({
+					kind: "ext:test/run",
+					requires: ["host.manage.v1"],
+					remote: { cancel: false, resume: true },
+				}),
+			},
+			{ type: "work_started", payload: expect.not.objectContaining({ requires: expect.anything() }) },
+		]);
 		expect(registry.requires(extension.workId)).toEqual(["host.manage.v1"]);
 		expect(registry.requires(job.workId)).toEqual([]);
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "cancel")).toBe(false);
 		await remove();
-		expect(registry.requires(extension.workId)).toBeUndefined();
+		expect(registry.requires(extension.workId)).toEqual(["host.manage.v1"]);
+		// A kind this host does not run allows a remote device nothing.
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "resume")).toBe(false);
 		expect(registry.requires("missing")).toEqual([]);
+		// Registered again with more requirements, its kind's current policy applies too.
+		registry.register(kind({ requires: ["workspace.manage.v1"], remote: { cancel: true, resume: false } }));
+		expect(registry.requires(extension.workId)).toEqual(["host.manage.v1", "workspace.manage.v1"]);
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "cancel")).toBe(false);
+		expect(registry.remoteAllows(registry.get(extension.workId)!, "resume")).toBe(false);
+	});
+
+	it("cancels a removed kind's open work, cancellable or not: executors get the grace period, then the work ends cancelled", async () => {
+		const { registry, log } = await setup();
+		const remove = registry.register(kind({ cancellable: false }));
+		const cooperative = held();
+		const stubborn = Promise.withResolvers<WorkExecution>();
+		const first = await registry.start("ext:test/run", 1, cooperative.execute);
+		const second = await registry.start("ext:test/run", 2, () => stubborn.promise);
+		await cooperative.started;
+		vi.useFakeTimers();
+		const removed = remove({ graceMs: 10_000, error: "Extension test was disabled" });
+		// No new work of the kind starts meanwhile.
+		await expect(registry.start("ext:test/run", 3, async () => ({ outcome: "completed" }))).rejects.toMatchObject({
+			code: "unknown_kind",
+		});
+		await vi.advanceTimersByTimeAsync(10_000);
+		await removed;
+		vi.useRealTimers();
+		expect(registry.busy()).toBe(false);
+		expect(registry.get(first.workId)).toMatchObject({ outcome: "cancelled" });
+		expect(registry.get(second.workId)).toMatchObject({ outcome: "cancelled", error: "Extension test was disabled" });
+		// What the stubborn executor returns afterwards no longer counts.
+		stubborn.resolve({ outcome: "completed", result: { summary: "late" } });
+		await Promise.resolve();
+		expect(registry.get(second.workId)?.result).toBeUndefined();
+		expect(
+			workEntries(await entriesOf(log))
+				.filter((entry) => entry.type === "work_finished")
+				.map((entry) => entry.payload),
+		).toEqual([
+			expect.objectContaining({ workId: first.workId, outcome: "cancelled" }),
+			expect.objectContaining({ workId: second.workId, outcome: "cancelled" }),
+		]);
 	});
 
 	it("stops with the run only work whose kind keeps nothing from remote clients", async () => {

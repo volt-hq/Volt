@@ -22,9 +22,12 @@ import {
 	validateManifest,
 } from "../src/core/extensions/manifest.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
+import { ExtensionSettingsRuntime } from "../src/core/extensions/settings.ts";
+import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { listDynamicIntents } from "../src/core/protocol/intents/dynamic.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { isAllowedUiIntent } from "../src/core/ui/normalize.ts";
 import { testExtension } from "./utilities.ts";
 
@@ -353,6 +356,72 @@ describe("extension manifests", () => {
 			expect(result.errors).toEqual([
 				{ path, error: `Extension id "taken" is already used by <inline>; ${path} is not loaded` },
 			]);
+		});
+
+		it("declares an extension settings disable without importing its entry or running its factory", async () => {
+			const root = writePackage(
+				"off-pkg",
+				{ id: "off-pkg", displayName: "Off", entry: "index.ts" },
+				{ "index.ts": recordingModule("off-pkg") },
+			);
+			const single = join(tempDir, "off-single.ts");
+			writeFileSync(single, recordingModule("off-single", { id: "off-single", displayName: "Off single" }));
+			const on = join(tempDir, "on.ts");
+			writeFileSync(on, recordingModule("on", { id: "on", displayName: "On" }));
+			const settings = SettingsManager.inMemory({
+				extensions: { "off-pkg": { enabled: false }, "off-single": { enabled: false } },
+			});
+			const runtime = createExtensionRuntime(new ExtensionSettingsRuntime(settings));
+
+			const result = await loadExtensions([root, single, on], tempDir, undefined, runtime);
+
+			expect(result.extensions.map((extension) => extension.id)).toEqual(["on"]);
+			expect(result.errors).toEqual([]);
+			expect(
+				result.declarations?.map((declaration) => [declaration.id, declaration.version, declaration.error]),
+			).toEqual([
+				["off-pkg", "2.0.1", undefined],
+				["off-single", "local", undefined],
+				["on", "local", undefined],
+			]);
+			// A single file is evaluated for its manifest only; a package's entry is not imported.
+			expect(globalState[EVALUATED_KEY]).toEqual(["off-single:module", "on:module", "on:factory"]);
+
+			const loaded = await result.declarations?.[0]?.load();
+			expect(loaded?.id).toBe("off-pkg");
+			expect(globalState[EVALUATED_KEY]?.slice(3)).toEqual(["off-pkg:module", "off-pkg:factory"]);
+		});
+
+		it("retires an instance whose factory fails, with the providers it queued", async () => {
+			const runtime = createExtensionRuntime();
+			let captured: ExtensionAPI | undefined;
+			const result = await loadExtensions(
+				[
+					{
+						path: "<inline:1>",
+						definition: testExtension(
+							"broken",
+							(volt) => {
+								captured = volt;
+								volt.registerProvider("broken-provider", { baseUrl: "https://example.test" });
+								throw new Error("boom");
+							},
+							["providers"],
+						),
+					},
+				],
+				tempDir,
+				undefined,
+				runtime,
+			);
+
+			expect(result.extensions).toEqual([]);
+			expect(result.errors).toEqual([{ path: "<inline:1>", error: "Failed to load extension: boom" }]);
+			expect(result.declarations?.map((declaration) => [declaration.id, declaration.error])).toEqual([
+				["broken", "Failed to load extension: boom"],
+			]);
+			expect(runtime.pendingProviderRegistrations).toEqual([]);
+			expect(() => captured?.getActiveTools()).toThrow("Extension broken failed to load");
 		});
 
 		it("refuses a runner over an extension whose id is not a manifest id", async () => {

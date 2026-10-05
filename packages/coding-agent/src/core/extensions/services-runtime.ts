@@ -875,6 +875,12 @@ export class ExtensionServicesManager {
 		for (const task of this.tasks) this.cancel(task, "scope_invalidated");
 	}
 
+	/** The extension `owner` stopped (it was disabled): cancel its tasks and drop what it contributed. */
+	retire(owner: string): void {
+		for (const task of this.tasks) if (task.owner === owner) this.cancel(task, "extension_disabled");
+		this.scope?.contributions.delete(owner);
+	}
+
 	/** Joins host operations, not uncooperative arbitrary extension callbacks. */
 	async drain(): Promise<void> {
 		while (this.operations.size > 0 || this.collection) {

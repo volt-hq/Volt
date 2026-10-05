@@ -54,11 +54,7 @@ async function workOperation<T>(
 	ctx.assertCurrent?.();
 	const work = targetOf(ctx).conversation.work;
 	if (ctx.profile.name !== "local") {
-		const required = work.requires(workId);
-		if (required === undefined) {
-			throw new IntentRejectedError("not_allowed", `Work ${workId} is of a kind this host does not know`);
-		}
-		const missing = missingCapability(ctx.profile.grant, required);
+		const missing = missingCapability(ctx.profile.grant, work.requires(workId));
 		if (missing !== undefined) {
 			throw new IntentRejectedError("not_allowed", `Remote capability required: ${missing}`, {
 				requiredCapability: missing,
