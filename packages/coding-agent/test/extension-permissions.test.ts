@@ -25,6 +25,7 @@ import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionAPI } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createHarness } from "./suite/harness.ts";
 import { testExtension } from "./utilities.ts";
 
 const SHA_A = "a".repeat(40);
@@ -77,6 +78,23 @@ describe("extension permissions", () => {
 			writeFileSync(join(root, ".git", "packed-refs"), `# pack-refs\n${SHA_A} refs/heads/main\n`);
 			expect(readGitHead(root)).toBe(SHA_A);
 			writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/../../escape\n");
+			expect(readGitHead(root)).toBeUndefined();
+		});
+
+		it("names an npm package by its configured source, not the installed package.json", () => {
+			const root = writePackage("legit", "1.0.0");
+			expect(extensionFingerprint({ id: "legit", path: root, packageSource: "npm:legit@^1.0.0" })).toBe(
+				"npm:legit@1.0.0",
+			);
+			const tarball = extensionFingerprint({
+				id: "legit",
+				path: root,
+				packageSource: "npm:legit@https://example.com/legit.tgz",
+			});
+			expect(tarball).toBe("npm:legit@https://example.com/legit.tgz@1.0.0");
+			expect(fingerprintIdentity(tarball)).not.toBe("npm:legit");
+			mkdirSync(join(root, ".git"), { recursive: true });
+			writeFileSync(join(root, ".git", "HEAD"), "ref: refs/heads/..\\..\\escape\n");
 			expect(readGitHead(root)).toBeUndefined();
 		});
 
@@ -254,10 +272,63 @@ describe("extension permissions", () => {
 			);
 			expect(typeof plainRegistry.client.complete).toBe("function");
 
+			// A descriptor carries the value: it is checked like a read.
+			expect(() => Object.getOwnPropertyDescriptor(plainRegistry, "authStorage")).toThrow(
+				'needs the "secrets" permission',
+			);
+			expect(() => Object.getOwnPropertyDescriptor(plainRegistry, "client")?.value.registerProvider).toThrow(
+				'needs the "providers" permission',
+			);
+			// Provider implementations are shared objects: reaching them needs providers.
+			expect(() => plainRegistry.client.getProviders).toThrow('needs the "providers" permission');
+			expect(() => plainRegistry.client.getOAuthProvider).toThrow('needs the "providers" permission');
+			expect(() => plainRegistry.client.generateImages).toThrow('needs the "secrets" permission');
+
+			// Requests carry the provider's credentials, so they go only where the catalog says.
+			const [model] = modelRegistry.getAll();
+			expect(model).toBeDefined();
+			expect(() =>
+				plainRegistry.client.complete({ ...model!, baseUrl: "http://127.0.0.1:9/steal" }, { messages: [] }),
+			).toThrow(
+				'needs the "secrets" permission to use ctx.modelRegistry.client.complete with a model other than the catalog\'s',
+			);
+			expect(() =>
+				plainRegistry.client.streamSimple({ ...model!, id: "not-in-the-catalog" }, { messages: [] }),
+			).toThrow("with a model other than the catalog's");
+			const unaffordable = new AbortController();
+			unaffordable.abort();
+			const answer = await plainRegistry.client.complete(
+				model!,
+				{ messages: [] },
+				{ signal: unaffordable.signal, apiKey: "test" },
+			);
+			expect(answer.role).toBe("assistant");
+
 			const trustedRegistry = runner.createContext("trusted").modelRegistry;
 			expect(trustedRegistry.authStorage.list()).toEqual([]);
 			expect(typeof trustedRegistry.client.registerProvider).toBe("function");
 			expect(runner.createContext().modelRegistry.authStorage.list()).toEqual([]);
 		});
+	});
+});
+
+describe("volt.setModel", () => {
+	it("sets the catalog's model, never the caller's copy of it", async () => {
+		let api: ExtensionAPI | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					api = volt;
+				},
+			],
+		});
+		try {
+			const model = harness.getModel();
+			expect(await api!.setModel({ ...model, baseUrl: "http://127.0.0.1:9/steal" })).toBe(true);
+			expect(harness.session.model?.baseUrl).toBe(model.baseUrl);
+			expect(await api!.setModel({ ...model, id: "not-in-the-catalog" })).toBe(false);
+		} finally {
+			await harness.cleanupAsync();
+		}
 	});
 });

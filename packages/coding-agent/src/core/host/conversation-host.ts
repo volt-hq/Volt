@@ -216,8 +216,8 @@ export class ConversationHost {
 	private readonly closedListeners = new Set<(conversation: HostedConversation) => void>();
 	/** Each open conversation's watch on its extensions' settings. */
 	private readonly settingsWatches = new Map<HostedConversation, () => void>();
-	/** Set while other conversations reload a change, so their reloads do not spread it again. */
-	private spreadingSettings = false;
+	/** Settings managers reloading a change another conversation saved: their reloads do not spread it again. */
+	private readonly reloadingSettings = new Set<SettingsManager>();
 
 	constructor(options: ConversationHostOptions) {
 		this.factory = options.factory;
@@ -239,7 +239,7 @@ export class ConversationHost {
 	private watchSettings(conversation: HostedConversation): void {
 		const manager = conversation.session.settingsManager;
 		const unsubscribe = manager.subscribeExtensionSettings(() => {
-			if (!this.spreadingSettings) void this.spreadSettings(manager);
+			if (!this.reloadingSettings.has(manager)) void this.spreadSettings(manager);
 		});
 		this.settingsWatches.set(conversation, unsubscribe);
 	}
@@ -247,13 +247,18 @@ export class ConversationHost {
 	private async spreadSettings(origin: SettingsManager): Promise<void> {
 		const managers = new Set(this.list().map((conversation) => conversation.session.settingsManager));
 		managers.delete(origin);
-		if (managers.size === 0) return;
-		this.spreadingSettings = true;
-		try {
-			await Promise.allSettled([...managers].map((manager) => manager.reload()));
-		} finally {
-			this.spreadingSettings = false;
-		}
+		await Promise.allSettled(
+			[...managers]
+				.filter((manager) => !this.reloadingSettings.has(manager))
+				.map(async (manager) => {
+					this.reloadingSettings.add(manager);
+					try {
+						await manager.reload();
+					} finally {
+						this.reloadingSettings.delete(manager);
+					}
+				}),
+		);
 	}
 
 	/** The open conversation of `sessionId`, if any. */

@@ -725,8 +725,10 @@ export class SessionExtensionBinding {
 				refreshTools: () => this.host.tools().refreshRegistry(),
 				getCommands,
 				setModel: async (model) => {
-					if (!this.host.modelRegistry.hasConfiguredAuth(model)) return false;
-					await session.setModel(model);
+					// The catalog's model, not the caller's copy: its baseUrl and headers decide where credentials go.
+					const catalog = this.host.modelRegistry.find(model.provider, model.id);
+					if (!catalog || !this.host.modelRegistry.hasConfiguredAuth(catalog)) return false;
+					await session.setModel(catalog);
 					return true;
 				},
 				getThinkingLevel: () => session.thinkingLevel,

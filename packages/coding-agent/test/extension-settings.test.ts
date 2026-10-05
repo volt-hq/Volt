@@ -98,7 +98,7 @@ describe("extension settings schema", () => {
 	it("checks defaults, bounds, patterns, required names, and credential names", () => {
 		expect(
 			manifestError({ type: "object", properties: { mode: { type: "string", enum: ["a"], default: "b" } } }),
-		).toBe("settings.properties.mode.default must be one of a");
+		).toBe('settings.properties.mode.default must be one of "a"');
 		expect(
 			manifestError({ type: "object", properties: { count: { type: "integer", minimum: 5, maximum: 1 } } }),
 		).toBe("settings.properties.count.minimum is greater than its maximum");
@@ -132,6 +132,11 @@ describe("extension settings schema", () => {
 		expect(
 			manifestError({ type: "object", properties: { line: { type: "string", default: "two\nlines" } } }),
 		).toContain("must be one line");
+		expect(
+			manifestError({ type: "object", properties: { color: { type: "string", enum: ["a\u001b[31mred"] } } }),
+		).toBe(
+			"settings.properties.color.enum options must be one line of at most 256 characters without control characters",
+		);
 	});
 
 	it("bounds the declared settings and their defaults", () => {
@@ -153,10 +158,24 @@ describe("extension settings schema", () => {
 	});
 
 	it("reads credential-like names by word", () => {
-		for (const name of ["apiKey", "api_key", "githubToken", "clientSecret", "password", "PRIVATE_KEY", "accessKey"]) {
+		for (const name of [
+			"apiKey",
+			"api_key",
+			"apiKey2",
+			"githubToken",
+			"token1",
+			"accesstoken",
+			"clientSecret",
+			"password",
+			"pwd",
+			"PRIVATE_KEY",
+			"accessKey",
+			"bearer",
+			"sessionCookie",
+		]) {
 			expect(namesCredential(name), name).toBe(true);
 		}
-		for (const name of ["tokenizer", "maxTokens", "keyboard", "organization", "secretary", "keyPath"]) {
+		for (const name of ["tokenizer", "maxTokens", "keyboard", "organization", "secretary", "keyPath", "authMode"]) {
 			expect(namesCredential(name), name).toBe(false);
 		}
 	});
@@ -190,7 +209,7 @@ describe("extension setting values", () => {
 		});
 		expect(stored.values).toEqual({ organization: "acme" });
 		expect(stored.dropped).toEqual([
-			{ name: "mode", reason: "must be one of fast, careful" },
+			{ name: "mode", reason: 'must be one of "fast", "careful"' },
 			{ name: "maxLoops", reason: "must be at most 10" },
 			{ name: "unknown", reason: "is not a declared setting" },
 		]);
@@ -432,7 +451,7 @@ describe("extension settings runtime", () => {
 		await volt.updateSettings({ maxLoops: 4 });
 		expect(volt.settings.maxLoops).toBe(4);
 		await expect(volt.updateSettings({ mode: "other" as "fast" })).rejects.toThrow(
-			'"mode" must be one of fast, careful',
+			'"mode" must be one of "fast", "careful"',
 		);
 	});
 });

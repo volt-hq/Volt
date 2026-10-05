@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@hansjm10/volt-tui";
+import { Markdown, type MarkdownTheme, sanitizeText } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
@@ -632,7 +632,7 @@ async function reviewInstalledPermissions(
 	source: string,
 	scope: "user" | "project",
 	consequence: string,
-): Promise<PackagePermissionOutcome["status"]> {
+): Promise<PackagePermissionOutcome["status"] | "failed"> {
 	const root = packageManager.getInstalledPath(source, scope);
 	if (root === undefined) return "none";
 	try {
@@ -659,9 +659,10 @@ async function reviewInstalledPermissions(
 		}
 		return outcome.status;
 	} catch (error: unknown) {
-		const message = error instanceof Error ? error.message : String(error);
-		console.error(chalk.yellow(`Warning: could not review the permissions of ${source}: ${message}`));
-		return "none";
+		// The message can carry text from the package: print it inert.
+		const message = sanitizeText(error instanceof Error ? error.message : String(error));
+		console.error(chalk.yellow(`Could not review the permissions of ${source}: ${message}`));
+		return "failed";
 	}
 }
 
@@ -787,7 +788,7 @@ export async function handlePackageCommand(
 					scope,
 					"Declining removes the package.",
 				);
-				if (permissions === "declined") {
+				if (permissions === "declined" || permissions === "failed") {
 					await packageManager.removeAndPersist(source!, { local: options.local });
 					console.error(chalk.red(`Removed ${source}: its permissions were not acknowledged`));
 					process.exitCode = 1;
@@ -860,7 +861,7 @@ export async function handlePackageCommand(
 							pkg.scope,
 							"Declining leaves it installed with its permissions unacknowledged.",
 						);
-						if (permissions === "declined") {
+						if (permissions === "declined" || permissions === "failed") {
 							console.error(
 								chalk.yellow(
 									`${pkg.source} asks for permissions you did not acknowledge; remove it with "${APP_NAME} remove ${pkg.source}"`,

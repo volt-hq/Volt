@@ -34,6 +34,8 @@ import type { SettingsManager } from "../settings-manager.ts";
 
 /** Most settings one extension declares. */
 export const EXTENSION_SETTINGS_MAX_PROPERTIES = 64;
+/** Longest enum option, in characters. */
+const ENUM_OPTION_MAX_CHARS = 256;
 
 /** A setting value: a string, a boolean, or an integer. */
 export type ExtensionSettingValue = string | boolean | number;
@@ -123,25 +125,39 @@ const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
 	"password",
 	"passwd",
 	"passphrase",
+	"pwd",
 	"token",
 	"credential",
 	"credentials",
 	"apikey",
 	"privatekey",
+	"accesskey",
+	"bearer",
+	"cookie",
+	"cookies",
 ]);
-const CREDENTIAL_PAIRS: ReadonlySet<string> = new Set(["api key", "private key", "access key", "client secret"]);
+const CREDENTIAL_PAIRS: ReadonlySet<string> = new Set([
+	"api key",
+	"private key",
+	"access key",
+	"secret key",
+	"client secret",
+]);
+/** A word ending in one of these names a credential: `githubtoken`, `dbpassword`. */
+const CREDENTIAL_SUFFIX = /(?:token|password|passwd|secret|apikey|privatekey|accesskey)$/;
 
-/** Whether a setting name reads as a credential: `apiKey`, `github_token`, `clientSecret`. */
+/** Whether a setting name reads as a credential: `apiKey`, `github_token`, `clientSecret`, `password2`. */
 export function namesCredential(name: string): boolean {
 	const words = name
 		.replace(/([a-z0-9])([A-Z])/g, "$1 $2")
 		.replace(/([A-Z])([A-Z][a-z])/g, "$1 $2")
 		.split(/[\s_]+/)
-		.filter((word) => word.length > 0)
-		.map((word) => word.toLowerCase());
+		.map((word) => word.toLowerCase().replace(/\d+$/, ""))
+		.filter((word) => word.length > 0);
 	return words.some(
 		(word, index) =>
 			CREDENTIAL_WORDS.has(word) ||
+			CREDENTIAL_SUFFIX.test(word) ||
 			(index > 0 && CREDENTIAL_PAIRS.has(`${words[index - 1]} ${word}`)) ||
 			(index > 0 && CREDENTIAL_WORDS.has(`${words[index - 1]}${word}`)),
 	);
@@ -158,7 +174,9 @@ export function settingValueProblem(setting: ExtensionSetting, value: unknown): 
 			if (typeof value !== "string") return "must be a string";
 			if (!LINE.test(value)) return "must be one line without control characters";
 			if ("enum" in setting) {
-				return setting.enum.includes(value) ? undefined : `must be one of ${setting.enum.join(", ")}`;
+				return setting.enum.includes(value)
+					? undefined
+					: `must be one of ${setting.enum.map((option) => JSON.stringify(option)).join(", ")}`;
 			}
 			const length = codePoints(value);
 			if (setting.minLength !== undefined && length < setting.minLength) {
@@ -210,11 +228,19 @@ export function checkSettingsSchema(settings: ExtensionSettings): void {
 	}
 	for (const name of settings.required ?? []) {
 		if (!Object.hasOwn(settings.properties, name)) {
-			throw new ExtensionSettingsError(`settings.required names "${name}", which is not declared`);
+			throw new ExtensionSettingsError(`settings.required names ${JSON.stringify(name)}, which is not declared`);
 		}
 	}
 	for (const [name, setting] of entries) {
 		const at = `settings.properties.${name}`;
+		if (
+			"enum" in setting &&
+			setting.enum.some((option) => !LINE.test(option) || option.length > ENUM_OPTION_MAX_CHARS)
+		) {
+			throw new ExtensionSettingsError(
+				`${at}.enum options must be one line of at most ${ENUM_OPTION_MAX_CHARS} characters without control characters`,
+			);
+		}
 		if (setting.type === "string" && !("enum" in setting)) {
 			if (namesCredential(name)) {
 				throw new ExtensionSettingsError(
@@ -319,11 +345,11 @@ export function checkSettingsValues(
 	const problems: string[] = [];
 	for (const [name, value] of Object.entries(values)) {
 		if (!NAME.test(name) || !Object.hasOwn(properties, name)) {
-			problems.push(`"${name}" is not a declared setting`);
+			problems.push(`${JSON.stringify(name)} is not a declared setting`);
 			continue;
 		}
 		const problem = settingValueProblem(properties[name]!, value);
-		if (problem !== undefined) problems.push(`"${name}" ${problem}`);
+		if (problem !== undefined) problems.push(`${JSON.stringify(name)} ${problem}`);
 		else defineOwn(checked, name, value);
 	}
 	if (problems.length > 0) throw new ExtensionSettingsError(`Invalid settings: ${problems.join("; ")}`);
@@ -506,7 +532,7 @@ export class ExtensionSettingsRuntime {
 		const project = manager.isProjectTrusted() ? storedSettings(manager, owner.id, settings, "project") : undefined;
 		const dropped = [...global.dropped, ...(project?.dropped ?? [])];
 		if (dropped.length > 0) {
-			this.dropped.set(owner.id, dropped.map((entry) => `"${entry.name}" ${entry.reason}`).join("; "));
+			this.dropped.set(owner.id, dropped.map((entry) => `${JSON.stringify(entry.name)} ${entry.reason}`).join("; "));
 		}
 		const snapshot: SettingsSnapshot = {
 			revision,
@@ -578,8 +604,9 @@ export class ExtensionSettingsRuntime {
 
 /**
  * The settings `volt.settings` holds for a manifest: each declared setting's
- * value type, present when it has a default and optional otherwise. With the
- * default type parameter, any setting by name.
+ * value type, present when it has a default and optional otherwise; none for a
+ * manifest without settings. Type a factory with
+ * `ExtensionAPI<ExtensionSettingsOf<typeof manifest>>`.
  */
 export type ExtensionSettingsOf<M> = M extends { readonly settings: { readonly properties: infer P } }
 	? { readonly [K in keyof P as P[K] extends { readonly default: unknown } ? K : never]: SettingValueOf<P[K]> } & {

@@ -1593,7 +1593,7 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	// Model and Thinking Level
 	// =========================================================================
 
-	/** Set the current model. Returns false if no API key available. */
+	/** Set the current model: the catalog's model with this provider and id. Returns false if there is none or no API key is available. */
 	setModel(model: Model<any>): Promise<boolean>;
 
 	/** Get current thinking level. */

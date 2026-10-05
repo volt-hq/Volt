@@ -126,6 +126,32 @@ describe("package permission review", () => {
 		expect(promptConfirm).toHaveBeenCalledTimes(2);
 	});
 
+	it("removes a package whose permissions cannot be reviewed, printing the reason inert", async () => {
+		setTerminal(true);
+		writeFileSync(
+			join(packageDir, "package.json"),
+			JSON.stringify({
+				name: "perm-demo",
+				version: "1.0.0",
+				volt: {
+					id: "perm-demo",
+					displayName: "Permission Demo",
+					entry: "index.js",
+					permissions: ["exec"],
+					settings: { type: "object", properties: { "x\u001b[31mred": { type: "boolean" } } },
+				},
+			}),
+		);
+		writeFileSync(join(packageDir, "index.js"), "module.exports = function () {};");
+		await handlePackageCommand(["install", packageDir, "--approve"]);
+		expect(promptConfirm).not.toHaveBeenCalled();
+		expect(process.exitCode).toBe(1);
+		expect(packages()).toEqual([]);
+		const output = logs.join("\n");
+		expect(output).toContain("Could not review the permissions");
+		expect(output).not.toContain("\u001b[31m");
+	});
+
 	it("asks again on update only for a permission the package adds", async () => {
 		setTerminal(true);
 		writePackage(["exec"]);

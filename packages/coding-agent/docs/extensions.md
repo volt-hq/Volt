@@ -247,12 +247,12 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 | Permission | Allows | Enforced |
 |------------|--------|----------|
 | `exec` | `volt.exec` | Yes: `volt.exec` rejects without it |
-| `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and provider registration through `ctx.modelRegistry` | Yes |
-| `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, and `login` | Yes |
+| `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and registering or reaching provider implementations through `ctx.modelRegistry` and its `client` | Yes |
+| `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, `login`, and `client.generateImages`; without it, `ctx.modelRegistry.client` requests go only to catalog models as the catalog has them (same `baseUrl` and headers) | Yes |
 | `network` | Network access | No: declared and shown only |
 | `fs-write` | Writing files | No: declared and shown only |
 
-Permissions are advisory: extensions run in your process and can reach Node's own modules, so a missing permission only stops the volt APIs above. Install only extensions you trust.
+Permissions are advisory: extensions run in your process and can reach Node's own modules and change shared objects, so a missing permission only stops the volt APIs above. Install only extensions you trust. `volt.setModel` always sets the catalog's model with the given provider and id.
 
 ### Async factory functions
 

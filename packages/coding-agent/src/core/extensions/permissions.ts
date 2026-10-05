@@ -100,7 +100,23 @@ const AI_CLIENT_PERMISSIONS: Readonly<Record<string, ExtensionPermission>> = {
 	registerOAuthProvider: "providers",
 	unregisterOAuthProvider: "providers",
 	setModels: "providers",
+	// Provider implementations are shared objects a caller could patch to see credentials.
+	getProvider: "providers",
+	getProviders: "providers",
+	getOAuthProvider: "providers",
+	getOAuthProviders: "providers",
+	// Image models are not in the catalog requests are checked against.
+	generateImages: "secrets",
 };
+
+/** AI client requests that carry the stored credentials of their model's provider to the model's `baseUrl`. */
+const AI_CLIENT_REQUESTS: ReadonlySet<string> = new Set([
+	"stream",
+	"complete",
+	"streamSimple",
+	"completeSimple",
+	"refreshPromptCache",
+]);
 
 function checkedMembers<T extends object>(
 	target: T,
@@ -109,29 +125,86 @@ function checkedMembers<T extends object>(
 	label: string,
 	nested: (key: string, value: unknown) => unknown = (_key, value) => value,
 ): T {
+	const checkMember = (key: string | symbol): void => {
+		if (typeof key === "string" && Object.hasOwn(members, key)) check(members[key]!, `${label}.${key}`);
+	};
 	return new Proxy(target, {
 		get: (object, key) => {
-			if (typeof key === "string" && Object.hasOwn(members, key)) check(members[key]!, `${label}.${key}`);
+			checkMember(key);
 			const value = Reflect.get(object, key);
 			return typeof key === "string" ? nested(key, value) : value;
 		},
+		// A property's descriptor carries its value: it is checked like a read.
+		getOwnPropertyDescriptor: (object, key) => {
+			checkMember(key);
+			const descriptor: PropertyDescriptor | undefined = Reflect.getOwnPropertyDescriptor(object, key);
+			if (descriptor !== undefined && "value" in descriptor && typeof key === "string") {
+				descriptor.value = nested(key, descriptor.value);
+			}
+			return descriptor;
+		},
 	});
+}
+
+interface CatalogModel {
+	readonly provider: string;
+	readonly id: string;
+	readonly baseUrl?: string;
+	readonly headers?: Readonly<Record<string, string>>;
+}
+
+/**
+ * Throw unless `model` is a catalog model as the catalog has it: without
+ * `secrets`, a request may not take a provider's credentials to another
+ * `baseUrl` or with other headers.
+ */
+function requireCatalogModel(
+	holder: PermissionHolder,
+	model: unknown,
+	find: (provider: string, id: string) => CatalogModel | undefined,
+	use: string,
+): void {
+	const candidate = model as Partial<CatalogModel> | undefined;
+	const catalog =
+		typeof candidate?.provider === "string" && typeof candidate.id === "string"
+			? find(candidate.provider, candidate.id)
+			: undefined;
+	if (
+		catalog === undefined ||
+		candidate?.baseUrl !== catalog.baseUrl ||
+		JSON.stringify(candidate?.headers ?? {}) !== JSON.stringify(catalog.headers ?? {})
+	) {
+		throw new ExtensionPermissionError(holder.id, "secrets", `${use} with a model other than the catalog's`);
+	}
 }
 
 /**
  * `modelRegistry` as an extension's context shows it to `holder`: reaching
  * stored credentials needs `secrets`, and registering providers (directly or
- * through its AI client) needs `providers`.
+ * through its AI client) needs `providers`. Without `secrets`, the AI client
+ * sends requests only for catalog models as the catalog has them.
  */
 export function permissionCheckedModelRegistry<T extends object>(target: T, holder: PermissionHolder): T {
 	const check = (permission: ExtensionPermission, use: string) => requirePermission(holder, permission, use);
+	const secrets = holder.manifest.permissions?.includes("secrets") === true;
+	const find = (provider: string, id: string): CatalogModel | undefined => {
+		const lookup: unknown = Reflect.get(target, "find");
+		return typeof lookup === "function" ? (lookup(provider, id) as CatalogModel | undefined) : undefined;
+	};
+	const request = (key: string, value: unknown): unknown => {
+		if (secrets || !AI_CLIENT_REQUESTS.has(key) || typeof value !== "function") return value;
+		return (model: unknown, ...rest: unknown[]) => {
+			requireCatalogModel(holder, model, find, `ctx.modelRegistry.client.${key}`);
+			return Reflect.apply(value, undefined, [model, ...rest]);
+		};
+	};
 	let client: { readonly source: unknown; readonly checked: unknown } | undefined;
 	return checkedMembers(target, MODEL_REGISTRY_PERMISSIONS, check, "ctx.modelRegistry", (key, value) => {
 		if (key !== "client" || typeof value !== "object" || value === null) return value;
 		if (client?.source !== value) {
 			client = {
 				source: value,
-				checked: checkedMembers(value, AI_CLIENT_PERMISSIONS, check, "ctx.modelRegistry.client"),
+				checked: checkedMembers(value, AI_CLIENT_PERMISSIONS, check, "ctx.modelRegistry.client", request),
 			};
 		}
 		return client.checked;
@@ -185,7 +258,7 @@ export function readGitHead(path: string): string | undefined {
 	if (head === undefined) return undefined;
 	if (GIT_SHA.test(head)) return head;
 	const ref = head.match(/^ref:\s*(refs\/[^\s]+)$/)?.[1];
-	if (ref === undefined || ref.split("/").includes("..")) return undefined;
+	if (ref === undefined || ref.includes("\\") || ref.split("/").includes("..")) return undefined;
 	const loose = readSmallFile(join(gitDir, ref))?.trim();
 	if (loose !== undefined && GIT_SHA.test(loose)) return loose;
 	for (const line of readSmallFile(join(gitDir, "packed-refs"))?.split("\n") ?? []) {
@@ -195,15 +268,29 @@ export function readGitHead(path: string): string | undefined {
 	return undefined;
 }
 
-function packageNameAndVersion(root: string): { name: string; version: string } | undefined {
+function packageVersion(root: string): string | undefined {
 	try {
 		const pkg: unknown = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
 		if (typeof pkg !== "object" || pkg === null) return undefined;
-		const { name, version } = pkg as { name?: unknown; version?: unknown };
-		return typeof name === "string" && typeof version === "string" ? { name, version } : undefined;
+		const { version } = pkg as { version?: unknown };
+		return typeof version === "string" ? version : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * An npm source's identity, from the source as configured, never from the
+ * installed package.json: `npm:<name>` for a registry spec (a name with an
+ * optional version, range, or tag), else the whole spec (a URL, path, or
+ * alias names its own origin).
+ */
+function npmIdentity(source: string): string {
+	const spec = source.slice("npm:".length).trim();
+	const at = spec.indexOf("@", spec.startsWith("@") ? 1 : 0);
+	const name = at === -1 ? spec : spec.slice(0, at);
+	const range = at === -1 ? "" : spec.slice(at + 1);
+	return /^[\w.\-+~^<>=|* ]*$/.test(range) && !name.includes(":") ? `npm:${name}` : `npm:${spec}`;
 }
 
 function localFingerprint(path: string): string {
@@ -218,8 +305,9 @@ function localFingerprint(path: string): string {
 
 /**
  * Where an extension's code came from, and which revision:
- * `npm:<name>@<version>`, `git:<host>/<path>@<commit>`, `local:<hash of its
- * real path>`, or `sdk:<id>` for an extension a program passes to the SDK.
+ * `npm:<name>@<version>` (the name from the configured source, the version
+ * installed), `git:<host>/<path>@<commit>`, `local:<hash of its real path>`,
+ * or `sdk:<id>` for an extension a program passes to the SDK.
  * `path` is the extension's package root or module; `packageSource` the
  * package source it was installed from, when it was.
  */
@@ -232,8 +320,7 @@ export function extensionFingerprint(options: {
 	const source = options.packageSource?.trim();
 	if (source !== undefined && !isLocalPath(source)) {
 		if (source.startsWith("npm:")) {
-			const pkg = packageNameAndVersion(options.path);
-			if (pkg !== undefined) return `npm:${pkg.name}@${pkg.version}`;
+			return `${npmIdentity(source)}@${packageVersion(options.path) ?? "unknown"}`;
 		} else {
 			const git = parseGitUrl(source);
 			if (git !== null) return `git:${git.host}/${git.path}@${readGitHead(options.path) ?? git.ref ?? "unknown"}`;

@@ -50,6 +50,7 @@ import {
 	ProcessTerminal,
 	ScrollView,
 	Spacer,
+	sanitizeText,
 	setKeybindings,
 	Text,
 	TruncatedText,
@@ -6975,10 +6976,11 @@ export class InteractiveMode {
 					),
 			});
 		} catch (error: unknown) {
+			// The message can carry text from the package: show it inert, and treat it as declined.
 			this.showWarning(
-				`Could not review the package's permissions: ${error instanceof Error ? error.message : String(error)}`,
+				`Could not review the package's permissions: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
 			);
-			return true;
+			return false;
 		}
 		return outcome.status !== "declined";
 	}
