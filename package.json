@@ -1,6 +1,6 @@
 {
 	"name": "volt-rtk-extension",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Rewrite bash tool calls through RTK for token-optimized command output.",
 	"type": "module",
 	"keywords": [
@@ -14,6 +14,25 @@
 		"displayName": "RTK Output Compression",
 		"description": "Rewrites bash commands through RTK for token-optimized command output.",
 		"entry": "extensions/rtk.ts",
+		"settings": {
+			"type": "object",
+			"properties": {
+				"enabled": {
+					"type": "boolean",
+					"title": "Rewrite commands",
+					"description": "Rewrite bash commands through rtk. Off: commands run unchanged.",
+					"default": true
+				},
+				"rewriteTimeoutMs": {
+					"type": "integer",
+					"title": "Rewrite timeout (ms)",
+					"description": "How long one rtk rewrite may take; a command whose rewrite takes longer runs unchanged.",
+					"minimum": 100,
+					"maximum": 30000,
+					"default": 2000
+				}
+			}
+		},
 		"permissions": [
 			"exec"
 		]

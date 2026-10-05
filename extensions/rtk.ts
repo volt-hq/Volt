@@ -6,14 +6,23 @@
  *
  * Usage:
  *   1. Install RTK and ensure `rtk` is on PATH.
- *   2. Copy this file to ~/.volt/agent/extensions/rtk.ts or .volt/extensions/rtk.ts.
- *   3. Restart Volt or run /reload.
+ *   2. Install the package: `volt store install rtk`.
+ *
+ * Settings (`/extensions`, or `extensions.rtk.settings` in settings.json):
+ *   - enabled: rewrite commands (default true); off passes commands through unchanged
+ *   - rewriteTimeoutMs: how long one rewrite may take (default 2000)
  */
 
 import type { BashToolCallEvent, ExecResult, ExtensionAPI, ToolCallEvent } from "@hansjm10/volt-coding-agent";
 
-const REWRITE_TIMEOUT_MS = 2_000;
+const PROBE_TIMEOUT_MS = 2_000;
 const MIN_SUPPORTED_RTK_MINOR = 23;
+
+/** The settings the manifest declares (package.json `volt.settings`), with their defaults applied. */
+type RtkSettings = {
+	readonly enabled: boolean;
+	readonly rewriteTimeoutMs: number;
+};
 
 type Semver = [major: number, minor: number, patch: number];
 
@@ -39,21 +48,21 @@ function isRewriteResult(result: ExecResult): boolean {
 }
 
 async function rewriteCommand(
-	volt: ExtensionAPI,
+	volt: ExtensionAPI<RtkSettings>,
 	command: string,
 	signal: AbortSignal | undefined,
 ): Promise<string | undefined> {
 	const result = await volt.exec("rtk", ["rewrite", command], {
-		timeout: REWRITE_TIMEOUT_MS,
+		timeout: volt.settings.rewriteTimeoutMs,
 		signal,
 	});
 	if (result.killed || !isRewriteResult(result)) return undefined;
 	return result.stdout.trim() || undefined;
 }
 
-async function probeRtk(volt: ExtensionAPI): Promise<boolean> {
+async function probeRtk(volt: ExtensionAPI<RtkSettings>): Promise<boolean> {
 	try {
-		const version = await volt.exec("rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS });
+		const version = await volt.exec("rtk", ["--version"], { timeout: PROBE_TIMEOUT_MS });
 		if (version.code !== 0) {
 			console.warn("[rtk] rtk binary not found in PATH; extension disabled");
 			return false;
@@ -69,14 +78,14 @@ async function probeRtk(volt: ExtensionAPI): Promise<boolean> {
 	}
 }
 
-export default async function rtkExtension(volt: ExtensionAPI) {
+export default async function rtkExtension(volt: ExtensionAPI<RtkSettings>) {
 	const rtkAvailable = await probeRtk(volt);
 	if (!rtkAvailable) return;
 
 	volt.on("tool_call", async (event, ctx) => {
 		try {
 			if (!isBashToolCallEvent(event)) return;
-			if (process.env.RTK_DISABLED === "1") return;
+			if (!volt.settings.enabled) return;
 
 			const command = event.input.command;
 			if (typeof command !== "string" || command.trim() === "") return;
