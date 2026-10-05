@@ -22,6 +22,7 @@
 		"entry": "extensions/review-loop.ts",
 		"permissions": [
 			"exec",
+			"network",
 			"fs-write"
 		]
 	}
