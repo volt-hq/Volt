@@ -225,9 +225,10 @@ export const QUERY_SCHEMAS = {
 	/**
 	 * A work item's output as plain text without terminal control sequences:
 	 * what running work produced so far, or what its result kept. Only the
-	 * newest output is kept (`truncated` when older output was dropped). Text
-	 * comes in chunks from `offset` (in Unicode scalars); output that is still
-	 * growing may shift, so a client reads it again from 0.
+	 * newest output is kept (`truncated` when older output was dropped; a
+	 * remote client's then starts at a line). Text comes in chunks from
+	 * `offset` (in Unicode scalars); output that is still growing may shift,
+	 * so a client reads it again from 0.
 	 */
 	work_output: {
 		params: Type.Object({ workId: LogEntryIdSchema, offset: Type.Optional(Type.Integer({ minimum: 0 })) }, closed),

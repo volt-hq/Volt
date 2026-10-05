@@ -29,7 +29,6 @@ import {
 	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	type RemoteCapability,
 	type RemoteGrant,
-	WORK_NOTICE_CUSTOM_TYPE,
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer } from "../remote/iroh/sanitizer.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
@@ -85,6 +84,11 @@ export interface Profile {
 	 * part of a root behind; the frame redactor then finds nothing more.
 	 */
 	source<T>(value: T): T;
+	/**
+	 * `source` for text the host cut to a bound, ending in "…": the remote
+	 * profile also drops the start of a root the cut left behind.
+	 */
+	sourceCut(text: string): string;
 	readonly limits: ProfileLimits;
 	/** The host request kinds a client that accepts `accepts` is asked. */
 	hostRequests(accepts: readonly HostRequestKind[]): ReadonlySet<HostRequestKind>;
@@ -133,6 +137,7 @@ export const localProfile: Profile = Object.freeze({
 	includes: (entry: CommittedSessionEntry) => LOCAL_ENTRY_TYPES.has(entry.type),
 	redactor: () => IDENTITY_REDACTOR,
 	source: <T>(value: T): T => value,
+	sourceCut: (text: string): string => text,
 	limits: Object.freeze({
 		snapshotTail: UNBOUNDED,
 		maxReplay: UNBOUNDED,
@@ -152,7 +157,9 @@ export const localProfile: Profile = Object.freeze({
 /**
  * State entries a remote client folds: their payloads, redacted, reach it.
  * Work entries carry no input, child locator, output, or result data
- * (projection/entries.ts); output is read with `work_output`.
+ * (projection/entries.ts); output is read with `work_output`. Work notices
+ * stay on the host: they are model context, and the work entries show the
+ * result.
  */
 const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"client_input_receipt",
@@ -186,7 +193,6 @@ export function getRemoteVisibleCustomMessageRole(
 			return "assistant";
 		case "background_job_notification":
 		case "subagent_recovery":
-		case WORK_NOTICE_CUSTOM_TYPE:
 			return "system";
 		default:
 			return undefined;
@@ -269,6 +275,7 @@ export function remoteProfile(options: RemoteProfileOptions): Profile {
 				assistantSnapshotBytes: limits.assistantSnapshotBytes,
 			}),
 		source: <T>(value: T): T => sanitizer.sanitizeValue(value) as T,
+		sourceCut: (text: string): string => sanitizer.sanitizeCutText(text),
 		limits,
 		hostRequests: (accepts: readonly HostRequestKind[]) =>
 			new Set(accepts.filter((kind) => granted.has(hostRequestCapability(kind)))),

@@ -60,6 +60,11 @@ export interface IrohRemoteProjectionSanitizer {
 	 * show part of a root.
 	 */
 	rootPrefixSuffix(value: string): number;
+	/**
+	 * Text redaction of text the host cut to a bound, ending in "…": where the
+	 * cut fell may have left the start of a root, which is dropped too.
+	 */
+	sanitizeCutText(value: string): string;
 }
 
 interface IrohRemoteOutboundSanitizerContext {
@@ -82,6 +87,7 @@ export function createIrohRemoteProjectionSanitizer(
 		sanitizeValue: (value, preserveEntry) => sanitizeValue(value, context, undefined, preserveEntry),
 		containsRoot: (value) => containsRoot(value, context),
 		rootPrefixSuffix: (value) => rootPrefixSuffix(value, context),
+		sanitizeCutText: (value) => sanitizeCutText(value, context),
 	};
 }
 
@@ -154,6 +160,12 @@ function rootPrefixSuffix(value: string, context: IrohRemoteOutboundSanitizerCon
 	return longest;
 }
 
+function sanitizeCutText(value: string, context: IrohRemoteOutboundSanitizerContext): string {
+	if (!value.endsWith("…")) return sanitizeRemoteText(value, context);
+	const kept = value.slice(0, -1);
+	return `${sanitizeRemoteText(kept.slice(0, kept.length - rootPrefixSuffix(kept, context)), context)}…`;
+}
+
 function sanitizeValue(
 	value: unknown,
 	context: IrohRemoteOutboundSanitizerContext,
@@ -161,11 +173,8 @@ function sanitizeValue(
 	preserveEntry?: IrohRemoteSanitizerValuePreserver,
 ): unknown {
 	if (typeof value === "string") {
-		if (fieldName === "label" && value.endsWith("…")) {
-			// A label the host cut: where it was cut may have left the start of a root.
-			const kept = value.slice(0, -1);
-			return `${sanitizeRemoteText(kept.slice(0, kept.length - rootPrefixSuffix(kept, context)), context)}…`;
-		}
+		// A label the host cut: where it was cut may have left the start of a root.
+		if (fieldName === "label") return sanitizeCutText(value, context);
 		return shouldTreatAsPathField(fieldName) ? sanitizePathField(value, context) : sanitizeRemoteText(value, context);
 	}
 	if (Array.isArray(value)) {

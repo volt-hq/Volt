@@ -67,7 +67,9 @@ export const cancelWorkIntent = defineIntent({
 	available(view, input) {
 		const availability = openWorkAvailability(view, input?.workId);
 		if (!availability.enabled || input === undefined || !view.target) return availability;
-		return view.target.conversation.work.get(input.workId)?.cancellable === false
+		const { work } = view.target.conversation;
+		const record = work.get(input.workId);
+		return record && !work.cancellable(record)
 			? { enabled: false, code: "not_allowed", reason: `Work ${input.workId} cannot be cancelled` }
 			: INTENT_ENABLED;
 	},

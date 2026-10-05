@@ -19,10 +19,15 @@
  * clients through the live `work/<workId>` value (live.ts); a finished
  * item's notice follows its kind's delivery (delivery.ts).
  *
+ * Work of a kind that needs approval starts `awaiting_approval`; its
+ * executor runs once `approve` checkpoints `running`, and a cancel or close
+ * before then ends it without running.
+ *
  * Closing the conversation stops every executor: resumable work stays open,
- * suspended on the next open, and other work finishes `interrupted`. A
- * runtime that ended without closing leaves its work open for the next open
- * to reconcile.
+ * suspended on the next open, and other work finishes `interrupted`. An
+ * executor that ignores the stop is left behind; while it runs, no other
+ * executor in the process resumes its work. A runtime that ended without
+ * closing leaves its work open for the next open to reconcile.
  */
 
 import { randomUUID } from "node:crypto";
@@ -48,8 +53,11 @@ import {
 	type WorkKind,
 	type WorkProgress,
 	type WorkResult,
+	WorkResultChildSchema,
+	WorkResultSchema,
 	workPayloadBoundsError,
 } from "@hansjm10/volt-protocol";
+import { Check } from "typebox/value";
 import type { ConversationHost } from "../host/conversation-host.ts";
 import type { LiveState } from "../host/live-state.ts";
 import type { HostClient } from "../host/targets.ts";
@@ -61,6 +69,19 @@ export const WORK_CHECKPOINT_INTERVAL_MS = 10_000;
 
 /** How long closing waits for executors to stop before it finishes their work without them. */
 export const WORK_CLOSE_GRACE_MS = 2_000;
+
+/**
+ * Most notices of finished work queued at once in a conversation; past it a
+ * result is recorded without one, so notices never crowd out client input.
+ */
+export const WORK_NOTICES_MAX_QUEUED = 16;
+
+/**
+ * The executors running in this process, by conversation and work id, until
+ * they return: one closing left behind still counts, so a reopened
+ * conversation does not resume its work a second time.
+ */
+const EXECUTING = new Set<string>();
 
 /** Work ids the registry accepts: they name live keys and appear in notices. */
 const WORK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
@@ -180,10 +201,12 @@ export interface WorkOutput {
 
 /** What a registry reads and writes through. */
 export interface WorkRegistryHost {
+	/** The conversation's id. */
+	conversationId(): string;
 	/** The conversation kernel's work writes. */
 	work(): ConversationWork;
-	/** The conversation's fold, which holds the work records. */
-	state(): Pick<ConversationState, "work">;
+	/** The conversation's fold: its work records, and the queued input notices join. */
+	state(): Pick<ConversationState, "work" | "clientInputs">;
 	/** The live state the `work/<workId>` values go to. */
 	live(): LiveState;
 	/** The turn running now: work started meanwhile belongs to it, and a stop of it fences its notices. */
@@ -260,15 +283,54 @@ class OutputTail {
 	}
 }
 
+const RESULT_NOT_RECORDED = "The work's result could not be recorded";
+
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Whether an executor returned an execution: kinds may be extension code. */
 function isExecution(value: unknown): value is WorkExecution {
-	if (typeof value !== "object" || value === null) return false;
-	const outcome = (value as { readonly outcome?: unknown }).outcome;
+	if (!isRecord(value)) return false;
+	const outcome = value.outcome;
 	return outcome === "completed" || outcome === "failed" || outcome === "cancelled";
+}
+
+/** The parts of an executor's result the log can hold: well-typed, bounded, and JSON. */
+function keptResult(
+	workId: string,
+	outcome: ConversationWorkFinish["outcome"],
+	given: unknown,
+	reported: { text: string; truncated: boolean } | undefined,
+): WorkResult {
+	const result = isRecord(given) ? given : {};
+	const output = isRecord(result.output) && typeof result.output.text === "string" ? result.output : undefined;
+	const child = isRecord(result.child) ? { conversation: result.child.conversation } : undefined;
+	const kept: WorkResult = {
+		...(typeof result.summary === "string" ? { summary: workText(result.summary) } : {}),
+		...(output !== undefined
+			? { output: outputTail(output.text as string, output.truncated === true) }
+			: reported === undefined
+				? {}
+				: { output: reported }),
+		...(child !== undefined && Check(WorkResultChildSchema, child) ? { child } : {}),
+	};
+	if (!Check(WorkResultSchema, kept)) return {};
+	if (result.data === undefined) return kept;
+	const withData: WorkResult = { ...kept, data: result.data as WorkResult["data"] };
+	// Data that is not JSON or over its bound is dropped; the rest of the result stays.
+	try {
+		return workPayloadBoundsError({ type: "work_finished", payload: { workId, outcome, result: withData } }) ===
+			undefined
+			? withData
+			: kept;
+	} catch {
+		return kept;
+	}
 }
 
 // ============================================================================
@@ -296,9 +358,13 @@ interface ActiveWork {
 	closing: boolean;
 	/** Its turn was fenced: the work finishes without a notice. */
 	fenced: boolean;
+	/** Work awaiting approval: resolves true once approved, false once it is stopped first. */
+	readonly approval?: PromiseWithResolvers<boolean>;
 	/** The executor's outcome no longer counts: the work is being finished, or was left. */
 	detached: boolean;
 	lastCheckpoint: number;
+	/** The last phase written, serialized: an unchanged phase is not written again. */
+	lastPhase?: string;
 	pendingPhase?: Phase;
 	checkpointTimer?: ReturnType<typeof setTimeout>;
 }
@@ -395,7 +461,7 @@ export class WorkRegistry {
 		this.assertOpen();
 		await this.reconcile();
 		const record = this.requireOpen(workId);
-		if (!record.cancellable) throw new WorkError("not_cancellable", `Work ${workId} cannot be cancelled`);
+		if (!this.cancellable(record)) throw new WorkError("not_cancellable", `Work ${workId} cannot be cancelled`);
 		const active = this.active.get(workId);
 		if (active) {
 			if (!active.cancelling && !active.detached) {
@@ -423,6 +489,29 @@ export class WorkRegistry {
 	}
 
 	/**
+	 * Whether a client may cancel `record`: open work of a cancellable kind,
+	 * or suspended work this host cannot resume, which nothing else could end.
+	 */
+	cancellable(record: WorkRecord): boolean {
+		if (record.outcome !== undefined) return false;
+		if (record.cancellable) return true;
+		return !this.active.has(record.workId) && !this.resumable(record);
+	}
+
+	/** Let work awaiting approval run: a `running` checkpoint, then its executor. */
+	async approve(workId: string): Promise<WorkRecord> {
+		this.assertOpen();
+		const record = this.requireOpen(workId);
+		const active = this.active.get(workId);
+		if (!active?.approval || record.state !== "awaiting_approval" || active.detached || active.cancelling) {
+			throw new WorkError("unavailable", `Work ${workId} is not awaiting approval`);
+		}
+		await this.write(active, () => this.host.work().checkpoint(workId, { state: "running" }));
+		active.approval.resolve(true);
+		return this.get(workId) ?? record;
+	}
+
+	/**
 	 * Continue suspended work: open running work of a resumable kind that no
 	 * executor runs. A `running` checkpoint records that it runs again.
 	 */
@@ -430,7 +519,9 @@ export class WorkRegistry {
 		this.assertOpen();
 		await this.reconcile();
 		const record = this.requireOpen(workId);
-		if (this.active.has(workId)) throw new WorkError("running", `Work ${workId} is running`);
+		if (this.active.has(workId) || EXECUTING.has(this.executingKey(workId))) {
+			throw new WorkError("running", `Work ${workId} is running`);
+		}
 		if (!record.resume) throw new WorkError("not_resumable", `Work ${workId} cannot resume`);
 		if (record.state !== "running") throw new WorkError("not_resumable", `Work ${workId} is ${record.state}`);
 		const definition = this.kinds.get(record.kind);
@@ -454,6 +545,7 @@ export class WorkRegistry {
 			await this.write(active, () => this.host.work().checkpoint(workId, { state: "running" }));
 		} catch (error) {
 			active.detached = true;
+			EXECUTING.delete(this.executingKey(workId));
 			this.detach(active);
 			throw error;
 		}
@@ -582,6 +674,23 @@ export class WorkRegistry {
 		if (this.closed) throw new WorkError("closed", "The conversation is closed");
 	}
 
+	/** Whether this host could resume `record`: open running work of a registered kind that resumes. */
+	private resumable(record: WorkRecord): boolean {
+		return record.resume && record.state === "running" && this.kinds.get(record.kind)?.resume !== undefined;
+	}
+
+	private executingKey(workId: string): string {
+		return `${this.host.conversationId()}\u0000${workId}`;
+	}
+
+	/** Whether another notice fits the conversation's queue: notices never crowd out client input. */
+	private noticeFits(): boolean {
+		const { inputs, queued } = this.host.state().clientInputs;
+		let notices = 0;
+		for (const clientMessageId of queued) if (inputs.get(clientMessageId)?.origin === "host") notices++;
+		return notices < WORK_NOTICES_MAX_QUEUED;
+	}
+
 	private requireOpen(workId: string): WorkRecord {
 		const record = this.get(workId);
 		if (!record) throw new WorkError("unknown_work", `Unknown work ${JSON.stringify(workId)}`);
@@ -617,10 +726,13 @@ export class WorkRegistry {
 			cancelling: false,
 			closing: false,
 			fenced: false,
+			...(record.state === "awaiting_approval" ? { approval: Promise.withResolvers<boolean>() } : {}),
 			detached: false,
 			lastCheckpoint: Number.NEGATIVE_INFINITY,
 		};
+		active.controller.signal.addEventListener("abort", () => active.approval?.resolve(false), { once: true });
 		this.active.set(record.workId, active);
+		EXECUTING.add(this.executingKey(record.workId));
 		this.liveFeed.attach(record.workId);
 		if (this.closed) {
 			// The conversation closed while the work started: it ends as the closing left it.
@@ -662,22 +774,26 @@ export class WorkRegistry {
 				this.liveFeed.output(active.workId, active.output.received);
 			},
 		};
+		const key = this.executingKey(active.workId);
 		void (async () => {
 			let execution: unknown;
 			try {
-				// The executor runs after `start` resolved.
+				// The executor runs after `start` resolved, and work awaiting approval once it is approved.
 				await Promise.resolve();
-				execution = await execute(ctx);
+				execution =
+					active.approval && !(await active.approval.promise) ? { outcome: "cancelled" } : await execute(ctx);
 			} catch (error) {
 				execution = active.controller.signal.aborted
 					? { outcome: "cancelled" }
 					: { outcome: "failed", error: errorMessage(error) };
+			} finally {
+				EXECUTING.delete(key);
 			}
 			await this.settle(active, execution);
 		})();
 	}
 
-	/** The executor returned: finish the work, unless closing leaves it open or it was already left. */
+	/** The executor returned: finish the work, unless closing leaves it open or it was already left. Never rejects. */
 	private async settle(active: ActiveWork, execution: unknown): Promise<void> {
 		if (active.detached) return;
 		active.detached = true;
@@ -687,6 +803,12 @@ export class WorkRegistry {
 			if (this.get(active.workId)?.outcome !== undefined) return;
 			const finish = this.finishOf(active, execution);
 			if (finish) await this.finish(active, finish);
+		} catch {
+			// A result that could not be read still ends the work.
+			await this.host
+				.work()
+				.finish(active.workId, { outcome: "failed", error: RESULT_NOT_RECORDED, deliver: false })
+				.catch(() => undefined);
 		} finally {
 			this.detach(active);
 		}
@@ -700,33 +822,19 @@ export class WorkRegistry {
 			if (active.definition.resume !== undefined) return undefined;
 			outcome = "interrupted";
 		}
-		const given = known?.result;
-		const output =
-			given?.output !== undefined
-				? outputTail(given.output.text, given.output.truncated)
-				: active.output.received > 0
-					? active.output.snapshot()
-					: undefined;
-		const kept: WorkResult = {
-			...(given?.summary === undefined ? {} : { summary: workText(given.summary) }),
-			...(output === undefined ? {} : { output }),
-			...(given?.child === undefined ? {} : { child: given.child }),
-		};
-		const withData: WorkResult = given?.data === undefined ? kept : { ...kept, data: given.data };
-		// Data over its bound is dropped; the rest of the result stays.
-		const result =
-			workPayloadBoundsError({
-				type: "work_finished",
-				payload: { workId: active.workId, outcome, result: withData },
-			}) === undefined
-				? withData
-				: kept;
+		const result = keptResult(
+			active.workId,
+			outcome,
+			known?.result,
+			active.output.received > 0 ? active.output.snapshot() : undefined,
+		);
 		const error = known ? known.error : "The work's executor returned no outcome";
+		const delivers = !active.fenced && this.deliveries.delivers(active.turnId) && this.noticeFits();
 		return {
 			outcome,
 			...(Object.keys(result).length === 0 ? {} : { result }),
-			...(error === undefined ? {} : { error: workText(error) }),
-			...(active.fenced || !this.deliveries.delivers(active.turnId) ? { deliver: false as const } : {}),
+			...(typeof error === "string" ? { error: workText(error) } : {}),
+			...(delivers ? {} : { deliver: false as const }),
 		};
 	}
 
@@ -735,13 +843,16 @@ export class WorkRegistry {
 			const finished = await this.host.work().finish(active.workId, finish);
 			if (finished.notice) this.deliveries.queued(active.workId, active.turnId, finished.notice.clientMessageId);
 		} catch (error) {
-			if (!(error instanceof ConversationError && error.code === "invalid_argument")) return;
-			// A result the log cannot hold still ends the work.
+			const refused =
+				error instanceof ConversationError &&
+				(error.code === "invalid_argument" || error.code === "commit_rolled_back");
+			if (!refused) return;
+			// A result or notice the log refused still ends the work, without them.
 			await this.host
 				.work()
 				.finish(active.workId, {
 					outcome: finish.outcome === "completed" ? "failed" : finish.outcome,
-					error: "The work's result could not be recorded",
+					error: RESULT_NOT_RECORDED,
 					deliver: false,
 				})
 				.catch(() => undefined);
@@ -769,20 +880,29 @@ export class WorkRegistry {
 		active.pendingPhase = undefined;
 		if (!phase || active.detached) return;
 		active.lastCheckpoint = Date.now();
-		// A phase over the checkpoint bound drops its detail, then its steps.
-		const { steps: _steps, ...stepless } = phase.progress;
-		const checkpoint = [
-			{ progress: phase.progress, ...(phase.detail === undefined ? {} : { detail: phase.detail }) },
-			{ progress: phase.progress },
-			{ progress: stepless },
-		].find(
-			(candidate) =>
-				Buffer.byteLength(JSON.stringify({ workId: active.workId, ...candidate }), "utf8") <=
-				WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
-		);
-		if (!checkpoint) return;
+		// A phase over the checkpoint bound drops its detail, then its steps; one that is not JSON is dropped.
+		let checkpoint: Phase | undefined;
+		let serialized: string | undefined;
+		try {
+			const { steps: _steps, ...stepless } = phase.progress;
+			for (const candidate of [phase, { progress: phase.progress }, { progress: stepless }]) {
+				serialized = JSON.stringify(candidate);
+				if (
+					Buffer.byteLength(serialized, "utf8") + active.workId.length + 16 <=
+					WORK_CHECKPOINT_MAX_SERIALIZED_BYTES
+				) {
+					checkpoint = candidate;
+					break;
+				}
+			}
+		} catch {
+			return;
+		}
+		if (!checkpoint || serialized === active.lastPhase) return;
+		active.lastPhase = serialized;
+		const written = checkpoint;
 		// A phase the log refuses is dropped; the live value showed it.
-		void this.write(active, () => this.host.work().checkpoint(active.workId, checkpoint)).catch(() => undefined);
+		void this.write(active, () => this.host.work().checkpoint(active.workId, written)).catch(() => undefined);
 	}
 
 	private clearCheckpoint(active: ActiveWork): void {

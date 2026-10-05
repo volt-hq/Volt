@@ -17,6 +17,7 @@ import { LiveState } from "../src/core/host/live-state.ts";
 import {
 	WORK_CHECKPOINT_INTERVAL_MS,
 	WORK_CLOSE_GRACE_MS,
+	WORK_NOTICES_MAX_QUEUED,
 	type WorkExecution,
 	type WorkExecutor,
 	type WorkKindDefinition,
@@ -56,6 +57,7 @@ async function setup(log = new InMemoryConversationLog("work-registry")): Promis
 	});
 	let turnId: string | undefined;
 	const registry = new WorkRegistry({
+		conversationId: () => conversation.conversationId,
 		work: () => conversation.work,
 		state: () => conversation.state,
 		live: () => liveState,
@@ -82,7 +84,8 @@ async function entriesOf(log: InMemoryConversationLog): Promise<ConversationLogE
 async function nextRuntime(previous: Setup): Promise<Setup> {
 	const entries = await entriesOf(previous.log);
 	await previous.conversation.close();
-	const log = new InMemoryConversationLog("work-registry-next");
+	// The same conversation, opened again.
+	const log = new InMemoryConversationLog(previous.log.conversationId);
 	const drafts = entries.map(({ ordinal: _ordinal, ...draft }) => draft);
 	await log.append({ expectedOrdinal: 0, commitId: "copy", entries: drafts });
 	return await setup(log);
@@ -396,5 +399,141 @@ describe("work registry", () => {
 		run.release();
 		own.release();
 		await registry.waitForIdle();
+	});
+	it("records what it can of a malformed result, never leaving the work open", async () => {
+		const { registry } = await setup();
+		registry.register(kind({ maxActive: 8 }));
+		const circular: Record<string, unknown> = {};
+		circular.self = circular;
+		const results = [
+			{ outcome: "completed", result: { summary: 42 } },
+			{ outcome: "completed", result: { output: null, summary: "kept" } },
+			{ outcome: "completed", result: { data: 10n } },
+			{ outcome: "completed", result: { data: circular, child: { conversation: "not a session id" } } },
+			{ outcome: "failed", error: { message: "not text" } },
+		];
+		const records = await Promise.all(
+			results.map((result) => registry.start("ext:test/run", null, async () => result as unknown as WorkExecution)),
+		);
+		await registry.waitForIdle();
+		expect(records.map((record) => registry.get(record.workId)?.outcome)).toEqual([
+			"completed",
+			"completed",
+			"completed",
+			"completed",
+			"failed",
+		]);
+		expect(registry.get(records[1]!.workId)?.result).toEqual({ summary: "kept" });
+		expect(registry.get(records[3]!.workId)?.result).toBeUndefined();
+		expect(registry.get(records[4]!.workId)?.error).toBeUndefined();
+	});
+
+	it("queues at most a bounded number of notices, recording later results without one", async () => {
+		const { registry, conversation } = await setup();
+		registry.register(kind({ delivery: "message", maxActive: 64 }));
+		const count = WORK_NOTICES_MAX_QUEUED + 4;
+		for (let index = 0; index < count; index++) {
+			await registry.start("ext:test/run", index, async () => ({ outcome: "completed" }));
+			await registry.waitForIdle();
+		}
+		expect(registry.list().filter((record) => record.outcome === "completed")).toHaveLength(count);
+		expect(conversation.state.clientInputs.queued).toHaveLength(WORK_NOTICES_MAX_QUEUED);
+	});
+
+	it("runs work awaiting approval only once it is approved, and ends it unrun when stopped first", async () => {
+		const { registry, log } = await setup();
+		registry.register(kind({ kind: "host_action", approval: true, cancellable: true }));
+		let runs = 0;
+		const execute: WorkExecutor = async () => {
+			runs++;
+			return { outcome: "completed" };
+		};
+		const approved = await registry.start("host_action", null, execute);
+		const denied = await registry.start("host_action", null, execute);
+		const closed = await registry.start("host_action", null, execute);
+		expect(approved.state).toBe("awaiting_approval");
+		await Promise.resolve();
+		expect(runs).toBe(0);
+		await registry.approve(approved.workId);
+		await vi.waitFor(() => expect(registry.get(approved.workId)?.outcome).toBe("completed"));
+		expect(runs).toBe(1);
+		await expect(registry.approve(approved.workId)).rejects.toMatchObject({ code: "finished" });
+		await registry.cancel(denied.workId);
+		await vi.waitFor(() => expect(registry.get(denied.workId)?.outcome).toBe("cancelled"));
+		await registry.cancelAll("closed");
+		expect(registry.get(closed.workId)?.outcome).toBe("interrupted");
+		expect(runs).toBe(1);
+		const states = workEntries(await entriesOf(log))
+			.filter((entry) => entry.type === "work_checkpoint")
+			.map((entry) => entry.payload);
+		expect(states).toEqual([
+			{ workId: approved.workId, state: "running" },
+			{ workId: denied.workId, state: "cancelling" },
+		]);
+	});
+
+	it("resumes nothing an executor left behind by closing still runs, in the same process", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const first = await setup();
+		const lingering = Promise.withResolvers<WorkExecution>();
+		const resumable = kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) });
+		first.registry.register(resumable);
+		const child = await first.registry.start("subagent", null, () => lingering.promise);
+		const closing = first.registry.cancelAll("closed");
+		await vi.advanceTimersByTimeAsync(WORK_CLOSE_GRACE_MS);
+		await closing;
+		const second = await nextRuntime(first);
+		second.registry.register(resumable);
+		await expect(second.registry.resume(child.workId)).rejects.toMatchObject({ code: "running" });
+		lingering.resolve({ outcome: "completed" });
+		await vi.waitFor(async () => {
+			await second.registry.resume(child.workId);
+		});
+		await second.registry.waitForIdle();
+		expect(second.registry.get(child.workId)?.outcome).toBe("completed");
+	});
+
+	it("lets a client cancel suspended work no executor here can resume, whatever its kind declares", async () => {
+		const first = await setup();
+		const fixed = kind({
+			kind: "subagent",
+			cancellable: false,
+			resume: () => async () => ({ outcome: "completed" }),
+		});
+		first.registry.register(fixed);
+		const kept = await first.registry.start("subagent", null, held().execute);
+		const orphan = await first.registry.start("subagent", null, held().execute);
+		await first.registry.cancelAll("closed");
+		const second = await nextRuntime(first);
+		const keptRecord = second.registry.get(kept.workId);
+		if (!keptRecord) throw new Error("Expected the suspended work");
+		// Nothing here resumes it: it can only be cancelled.
+		expect(second.registry.cancellable(keptRecord)).toBe(true);
+		await second.registry.cancel(orphan.workId);
+		expect(second.registry.get(orphan.workId)?.outcome).toBe("cancelled");
+		second.registry.register(fixed);
+		expect(second.registry.cancellable(keptRecord)).toBe(false);
+		await expect(second.registry.cancel(kept.workId)).rejects.toMatchObject({ code: "not_cancellable" });
+	});
+
+	it("writes an unchanged phase once", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const { registry, log } = await setup();
+		registry.register(kind());
+		const run = held();
+		let ctx: Parameters<WorkExecutor>[0] | undefined;
+		await registry.start("ext:test/run", null, async (context) => {
+			ctx = context;
+			return await run.execute(context);
+		});
+		await vi.waitFor(() => expect(ctx).toBeDefined());
+		ctx?.checkpoint({ text: "same" });
+		await vi.advanceTimersByTimeAsync(WORK_CHECKPOINT_INTERVAL_MS);
+		ctx?.checkpoint({ text: "same" });
+		await vi.advanceTimersByTimeAsync(WORK_CHECKPOINT_INTERVAL_MS);
+		run.release();
+		await registry.waitForIdle();
+		const checkpoints = workEntries(await entriesOf(log)).filter((entry) => entry.type === "work_checkpoint");
+		expect(checkpoints).toHaveLength(1);
 	});
 });

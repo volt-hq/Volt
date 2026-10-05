@@ -167,6 +167,7 @@ export class HostedConversation {
 		this.liveFeed = feedLiveState(this.session);
 		const session = this.session;
 		this.work = new WorkRegistry({
+			conversationId: () => session.sessionId,
 			work: () => session.conversationWork,
 			state: () => session.sessionManager.getConversationState(),
 			live: () => session.liveState,

@@ -8,7 +8,7 @@
  */
 
 import { writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
 	CONTENT_TEXT_MAX_SCALARS,
 	type HostFrame,
@@ -16,6 +16,9 @@ import {
 	REMOTE_CAPABILITIES,
 	type RemoteGrant,
 	WORK_NOTICE_CUSTOM_TYPE,
+	WORK_OUTPUT_MAX_UTF8_BYTES,
+	WORK_TEXT_MAX_CHARS,
+	WORK_TITLE_MAX_CHARS,
 } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoopbackClient, ProtocolQueryError, ProtocolRejectedError } from "../../src/client/protocol-client.ts";
@@ -318,6 +321,60 @@ describe("work in hosted conversations", () => {
 			reason: { code: "not_allowed", requiredCapability: "conversation.control.v1" },
 		});
 		await conversation.work.cancelAll("closed");
+	});
+
+	it("shows a paired device no part of a root that a host cut or the output bound left", async () => {
+		const harness = await harnessFor();
+		const workspace = harness.tempDir;
+		const conversation = await harness.openStartup();
+		const name = basename(workspace);
+		// The title's cut falls one character into the workspace's unique name.
+		const lead = "x".repeat(WORK_TITLE_MAX_CHARS - workspace.length + name.length - 3);
+		conversation.work.register(kind({ title: () => `${lead} ${workspace}/file.ts` }));
+		// Output whose kept tail starts inside a line, and so inside a root.
+		let lines = Array.from({ length: 2_000 }, (_, index) => `${workspace}/file-${index}.ts`).join("\n");
+		while (lines[lines.length - WORK_OUTPUT_MAX_UTF8_BYTES - 1] === "\n") lines += "e";
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: workspace },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
+			ctx.output(lines);
+			return {
+				outcome: "failed",
+				error: `${"y".repeat(WORK_TEXT_MAX_CHARS - workspace.length + 3)} ${workspace}`,
+			};
+		});
+		await conversation.work.waitForIdle();
+		expect(record.title.endsWith("…")).toBe(true);
+		expect(conversation.work.get(record.workId)?.result?.output?.truncated).toBe(true);
+		await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "entry" }> =>
+				frame.type === "entry" && frame.entry.type === "work_finished",
+		);
+		expect(record.title.endsWith(`${workspace.slice(0, -name.length + 1)}…`)).toBe(true);
+		const wire = JSON.stringify(phone.frames);
+		expect(wire).not.toContain(workspace.slice(0, -name.length + 1));
+		const read = await phone.query("work_output", { workId: record.workId });
+		if (read.type !== "result") throw new Error("Expected the output");
+		const output = read.data as { text: string; truncated: boolean };
+		expect(output.truncated).toBe(true);
+		// The tail starts at a line, so no part of a root the cut left reaches the device.
+		expect(output.text.startsWith("/workspace/file-")).toBe(true);
+		const local = conversation.work.output(record.workId)?.text ?? "";
+		expect(local.startsWith(workspace)).toBe(false);
 	});
 
 	it("never carries work entries into a fork, a clone, or an import", async () => {

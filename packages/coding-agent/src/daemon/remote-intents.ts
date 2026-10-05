@@ -580,6 +580,9 @@ const WORK_INTENTS: ReadonlySet<string> = new Set([
 	"review_open_session",
 	"review_start_discussions",
 	"review_reset_discussion",
+	"open_work",
+	"resume_work",
+	"start_subagent",
 ]);
 
 /** What an observer of a subagent conversation may still do: stop it. */

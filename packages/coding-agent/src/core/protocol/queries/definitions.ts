@@ -236,9 +236,14 @@ export const workOutputQuery = defineQuery({
 		const output = targetOf(ctx).conversation.work.output(params.workId);
 		if (!output) throw new QueryRejectedError("invalid_input", `Unknown work ${JSON.stringify(params.workId)}`);
 		// Plain text, its paths redacted for the subscriber before it is cut into chunks.
-		const plain = stripVTControlCharacters(output.text)
+		let plain = stripVTControlCharacters(output.text)
 			.replace(/\r\n?/g, "\n")
 			.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+		if (output.truncated && ctx.subscriber?.fidelity === "transcript") {
+			// The kept tail starts mid-line, where a root may have been cut: a transcript profile starts at the next line.
+			const lineEnd = plain.indexOf("\n");
+			plain = lineEnd === -1 ? "" : plain.slice(lineEnd + 1);
+		}
 		const scalars = Array.from(ctx.subscriber ? ctx.subscriber.source(plain) : plain);
 		const offset = Math.min(params.offset ?? 0, scalars.length);
 		const end = Math.min(scalars.length, offset + CONTENT_TEXT_MAX_SCALARS);

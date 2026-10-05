@@ -47,29 +47,31 @@ function withoutImageData<T extends { readonly data: string }>(images: readonly 
  * A work entry as a transcript profile sends it: without the work's input,
  * its child's locator, its output text, and its result data, which may hold
  * host paths, secrets, or bulk (output is read with `work_output`). Paths
- * are redacted first, and the text redaction lengthened is bounded again.
+ * are redacted first, text the host cut to its bound loses a root's start
+ * the cut left, and text redaction lengthened is bounded again.
  */
 function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, profile: Profile): unknown {
+	const cut = (text: string, max?: number): string => workText(profile.sourceCut(text), max);
 	if (entry.type === "work_started") {
-		const { input: _input, child, title, ...started } = profile.source(payload as WorkStartedEntryPayload);
+		const { input: _input, child, title, ...started } = payload as WorkStartedEntryPayload;
 		return {
-			...started,
-			title: workText(title, WORK_TITLE_MAX_CHARS),
+			...profile.source(started),
+			title: cut(title, WORK_TITLE_MAX_CHARS),
 			input: null,
 			...(child === undefined ? {} : { child: { conversation: child.conversation } }),
 		} satisfies WorkStartedEntryPayload;
 	}
 	if (entry.type !== "work_finished") return profile.source(payload);
-	const { result, error, ...finished } = profile.source(payload as WorkFinishedEntryPayload);
+	const { result, error, ...finished } = payload as WorkFinishedEntryPayload;
 	const kept: WorkResult = {
-		...(result?.summary === undefined ? {} : { summary: workText(result.summary) }),
+		...(result?.summary === undefined ? {} : { summary: cut(result.summary) }),
 		...(result?.output === undefined ? {} : { output: { text: "", truncated: result.output.truncated } }),
 		...(result?.child === undefined ? {} : { child: result.child }),
 	};
 	return {
-		...finished,
+		...profile.source(finished),
 		...(Object.keys(kept).length === 0 ? {} : { result: kept }),
-		...(error === undefined ? {} : { error: workText(error) }),
+		...(error === undefined ? {} : { error: cut(error) }),
 	} satisfies WorkFinishedEntryPayload;
 }
 
