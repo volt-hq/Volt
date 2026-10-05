@@ -67,7 +67,12 @@ async function fixture() {
 		close: vi.fn(async () => {}),
 		dispose: vi.fn(async () => {}),
 	};
-	const conversation = { id: harness.session.sessionId, session: harness.session, lost: lost.promise };
+	const conversation = {
+		id: harness.session.sessionId,
+		session: harness.session,
+		work: harness.session.work,
+		lost: lost.promise,
+	};
 	const mode = new InteractiveMode(
 		host as unknown as ConversationHost,
 		conversation as unknown as HostedConversation,
