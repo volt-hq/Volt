@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { DeviceCodeCredential, type DeviceCodeCredentialOptions, type DeviceCodeInfo } from "@azure/identity";
-import { StringEnum } from "@earendil-works/volt-ai";
+import { StringEnum } from "@hansjm10/volt-ai";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -10,7 +10,7 @@ import {
 	truncateHead,
 	type ExtensionAPI,
 	type ExtensionContext,
-} from "@earendil-works/volt-coding-agent";
+} from "@hansjm10/volt-coding-agent";
 import * as azdev from "azure-devops-node-api";
 import type * as CoreInterfaces from "azure-devops-node-api/interfaces/CoreInterfaces";
 import type * as GitInterfaces from "azure-devops-node-api/interfaces/GitInterfaces";

@@ -13,7 +13,7 @@ From the Volt store:
 Or install the package source directly:
 
 ```bash
-volt install git:https://github.com/hansjm10/Volt@store/azure-devops
+volt install git:https://github.com/volt-hq/Volt@store/azure-devops
 ```
 
 ## Configure
