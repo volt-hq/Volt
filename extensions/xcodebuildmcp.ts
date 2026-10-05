@@ -17,6 +17,14 @@ const DEFAULT_WORKFLOWS = "simulator,ui-automation,debugging";
 type JsonRecord = Record<string, unknown>;
 type VoltContent = TextContent | ImageContent;
 
+/**
+ * The settings the manifest declares (package.json `volt.settings`): the
+ * workflows XcodeBuildMCP enables, edited from `/extensions`.
+ */
+type BuildIosSettings = {
+	readonly workflows?: string;
+};
+
 interface JsonRpcSuccess {
 	jsonrpc: "2.0";
 	id: number;
@@ -195,6 +203,12 @@ function getXcodeBuildMcpCliPath(): string {
 }
 
 class XcodeBuildMcpClient {
+	/**
+	 * The workflows setting as the extension loaded: every (re)start uses it,
+	 * so the server keeps the tools registered from it. Unset uses the
+	 * environment, then the default.
+	 */
+	private readonly workflows: string | undefined;
 	private proc: ChildProcessWithoutNullStreams | undefined;
 	private cwd: string | undefined;
 	private nextId = 1;
@@ -202,6 +216,10 @@ class XcodeBuildMcpClient {
 	private stderrTail = "";
 	private pending = new Map<number, PendingRequest>();
 	private startPromise: Promise<void> | undefined;
+
+	constructor(workflows: string | undefined) {
+		this.workflows = workflows;
+	}
 
 	async ensureStarted(cwd: string): Promise<void> {
 		if (this.proc && this.cwd === cwd) return;
@@ -283,9 +301,7 @@ class XcodeBuildMcpClient {
 		const env = {
 			...process.env,
 			XCODEBUILDMCP_ENABLED_WORKFLOWS:
-				process.env.VOLT_XCODEBUILDMCP_WORKFLOWS ??
-				process.env.XCODEBUILDMCP_ENABLED_WORKFLOWS ??
-				DEFAULT_WORKFLOWS,
+				this.workflows ?? process.env.XCODEBUILDMCP_ENABLED_WORKFLOWS ?? DEFAULT_WORKFLOWS,
 		};
 
 		this.cwd = cwd;
@@ -448,8 +464,10 @@ function createToolDefinition(
 	};
 }
 
-export default function xcodeBuildMcpExtension(volt: ExtensionAPI): void {
-	const client = new XcodeBuildMcpClient();
+export default function xcodeBuildMcpExtension(
+	volt: ExtensionAPI<BuildIosSettings>,
+): void {
+	const client = new XcodeBuildMcpClient(volt.settings.workflows);
 	const registered = new Set<string>();
 
 	volt.on("session_start", async (_event, ctx) => {
@@ -474,5 +492,14 @@ export default function xcodeBuildMcpExtension(volt: ExtensionAPI): void {
 
 	volt.on("session_shutdown", () => {
 		client.stop();
+	});
+
+	// The tools come from the workflows the server started with, so new workflows need new tools.
+	volt.on("settings_changed", (event, ctx) => {
+		if (event.settings.workflows === event.previous.workflows) return;
+		ctx.ui.notify(
+			"XcodeBuildMCP workflows changed: run /reload to load their tools.",
+			"info",
+		);
 	});
 }

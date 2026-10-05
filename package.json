@@ -1,6 +1,6 @@
 {
 	"name": "volt-build-ios-apps",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
 	"type": "module",
 	"keywords": [
@@ -32,6 +32,18 @@
 		"displayName": "Build iOS Apps",
 		"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
 		"entry": "extensions/xcodebuildmcp.ts",
+		"settings": {
+			"type": "object",
+			"properties": {
+				"workflows": {
+					"type": "string",
+					"title": "XcodeBuildMCP workflows",
+					"description": "Comma-separated workflows XcodeBuildMCP enables. Unset: XCODEBUILDMCP_ENABLED_WORKFLOWS, else simulator,ui-automation,debugging. Applies after /reload.",
+					"maxLength": 256,
+					"pattern": "[a-z0-9_,-]+"
+				}
+			}
+		},
 		"permissions": [
 			"exec",
 			"network",
