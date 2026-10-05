@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type JsonValue, type Usage } from "@hansjm10/volt-ai";
-import { QUERY_SCHEMAS, type ReviewUsageAccounting } from "@hansjm10/volt-protocol";
+import { QUERY_SCHEMAS, type ReviewUsageAccounting, type UiNode, type WorkProgress } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeHostProvider } from "../../../src/core/code-host/index.ts";
@@ -28,11 +28,11 @@ import { publishReviewRun } from "../../../src/core/review-publish.ts";
 import {
 	appendReviewRun,
 	appendReviewRunDurably,
-	appendReviewUsageCheckpoint,
 	captureReviewStateForHandoff,
 	getCanonicalReviewRun,
 	getReviewRun,
 	listReviewRuns,
+	REVIEW_RUN_CUSTOM_ENTRY_TYPE,
 	type ReviewRunRecord,
 	restoreReviewStateFromHandoff,
 } from "../../../src/core/review-state.ts";
@@ -42,7 +42,6 @@ import {
 	type ReviewUsageAttempt,
 	ReviewUsageCollector,
 } from "../../../src/core/review-usage.ts";
-import { ReviewWorkflowManager } from "../../../src/core/review-workflows.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
@@ -135,13 +134,19 @@ function verification(incomplete = false, value = usage()) {
 	);
 }
 
-function unfinished(runId = "review:409"): ReviewRunRecord {
+function terminal(
+	runId = "review:409",
+	status: ReviewRunRecord["status"] = "failed",
+	accounting?: ReviewUsageAccounting,
+): ReviewRunRecord {
 	return {
 		schemaVersion: 1,
 		runId,
 		workflowAction: "review.uncommitted",
-		status: "unfinished",
+		status,
 		startedAt: 1,
+		endedAt: 2,
+		...(accounting === undefined ? {} : { usage: accounting }),
 		target: {
 			description: "Test",
 			diffCommand: "git diff",
@@ -150,6 +155,36 @@ function unfinished(runId = "review:409"): ReviewRunRecord {
 		},
 		options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
 	};
+}
+
+/** The custom entries of `manager`'s log a review run wrote, by type. */
+function reviewEntries(manager: SessionManager): { runs: number; usage: number } {
+	const custom = manager.getEntries().filter((entry) => entry.type === "custom");
+	return {
+		runs: custom.filter((entry) => entry.customType === REVIEW_RUN_CUSTOM_ENTRY_TYPE).length,
+		usage: custom.filter((entry) => entry.customType === "volt.review.usage").length,
+	};
+}
+
+/** A review's work, recording what the review reports through it. */
+function recordingWork() {
+	const checkpoints: Array<{ progress: WorkProgress; detail?: UiNode }> = [];
+	const progress: Array<{ progress: WorkProgress; detail?: UiNode }> = [];
+	return {
+		checkpoints,
+		progress,
+		work: {
+			progress: (value: WorkProgress, detail?: UiNode) => progress.push({ progress: value, detail }),
+			checkpoint: (value: WorkProgress, detail?: UiNode) => checkpoints.push({ progress: value, detail }),
+		},
+	};
+}
+
+/** The request count a review usage detail shows. */
+function requestsOf(detail: UiNode | undefined): string | undefined {
+	if (detail?.type !== "keyValue") return undefined;
+	const value = detail.items.find((item) => item.key === "requests")?.value;
+	return typeof value === "string" ? value : undefined;
 }
 
 describe("#409 initial review accounting", () => {
@@ -246,35 +281,45 @@ describe("#409 initial review accounting", () => {
 		await expect(collector.finish()).rejects.toThrow("accounting could not be retained");
 	});
 
-	it("persists and lists checkpoint-only runs after close/reopen, with no fabricated end time", async () => {
-		const h = await harness();
-		const directory = join(h.tempDir, "store");
-		const manager = await SessionManager.create(h.tempDir, directory);
-		const record = unfinished();
-		await appendReviewRunDurably(manager.logWriter, record);
-		const collector = new ReviewUsageCollector(async (value) => {
-			await appendReviewUsageCheckpoint(manager.logWriter, record.runId, value);
+	it("reports accounting as a work checkpoint per pass and writes only the terminal run record", async () => {
+		const { h, manager, options } = await fixture();
+		const recorded = recordingWork();
+		h.setResponses([
+			() => {
+				// While the review runs, the log holds no run record and no accounting entries.
+				expect(reviewEntries(manager)).toEqual({ runs: 0, usage: 0 });
+				return candidates();
+			},
+			verification(),
+		]);
+		const result = await executeReviewWorkflow({ ...options, work: recorded.work });
+		expect(result.status).toBe("completed");
+		expect(recorded.checkpoints.map((checkpoint) => checkpoint.progress.text)).toEqual([
+			"Discovery pass",
+			"Verification pass",
+		]);
+		expect(recorded.checkpoints.every((checkpoint) => checkpoint.detail?.key === "review-usage")).toBe(true);
+		expect(recorded.checkpoints.map((checkpoint) => requestsOf(checkpoint.detail))).toEqual([
+			"0 (0 pending)",
+			"1 (0 pending)",
+		]);
+		// Live progress carries the accounting as it changes, and tool names without their arguments.
+		expect(recorded.progress.some((entry) => requestsOf(entry.detail) === "1 (1 pending)")).toBe(true);
+		expect(recorded.progress.at(-1)?.progress.text).toBe("Finalizing verified findings");
+		expect(reviewEntries(manager)).toEqual({ runs: 1, usage: 0 });
+		expect(getReviewRun(manager, options.prepared.workflowId)?.usage?.summary).toMatchObject({
+			status: "complete",
+			requests: 2,
+			tokens: { input: 20 },
 		});
-		const request = await collector.start(identity, h.getModel());
-		await request.observe(usage(5, "partial"), 1, false, false);
-		const saved = getReviewRun(manager, record.runId)!;
 		const ref = manager.getSessionRef()!;
 		await manager.closePersistence();
 		const reopened = await SessionManager.open(ref);
 		cleanups.push(() => reopened.closePersistence());
-		expect(getReviewRun(reopened, record.runId)).toEqual(saved);
-		expect(saved.endedAt).toBeUndefined();
-		expect(saved.usage?.summary).toMatchObject({
-			status: "partial",
-			requests: 1,
-			pendingRequests: 1,
-			tokens: { input: 5 },
-		});
-		expect((await SessionManager.list(h.tempDir, directory)).map((entry) => entry.id)).toContain(ref.sessionId);
-		expect(h.faux.state.callCount).toBe(0);
+		expect(getReviewRun(reopened, options.prepared.workflowId)?.endedAt).toEqual(expect.any(Number));
 	});
 
-	it("uses latest checkpoints and canonical aliases without counting copies or stale terminal updates", async () => {
+	it("uses canonical aliases without counting copies or stale terminal updates", async () => {
 		const h = await harness();
 		const directory = join(h.tempDir, "store");
 		const source = await SessionManager.create(h.tempDir, directory);
@@ -283,25 +328,21 @@ describe("#409 initial review accounting", () => {
 			() => source.closePersistence(),
 			() => alias.closePersistence(),
 		);
-		const record = unfinished();
-		await appendReviewRunDurably(source.logWriter, record);
-		const collector = new ReviewUsageCollector(async (value) => {
-			await appendReviewUsageCheckpoint(source.logWriter, record.runId, value);
-		});
+		const collector = new ReviewUsageCollector();
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(5, "partial"), 1, false, false);
-		const stale = collector.snapshot();
+		const stale = terminal("review:409", "failed", collector.snapshot());
+		await appendReviewRunDurably(source.logWriter, stale);
 		await restoreReviewStateFromHandoff(alias.logWriter, captureReviewStateForHandoff(source));
-		await registerReviewHandoffAliases(source, alias, [record.runId]);
+		await registerReviewHandoffAliases(source, alias, [stale.runId]);
 		await request.observe(usage(10), 2, true, true);
-		const final = { ...record, status: "failed" as const, endedAt: 3, usage: await collector.finish() };
+		const final = { ...stale, endedAt: 3, usage: await collector.finish() };
 		await appendReviewRunDurably(source.logWriter, final);
-		await appendReviewUsageCheckpoint(source.logWriter, record.runId, stale);
-		await appendReviewRun(source.logWriter, record);
+		await appendReviewRun(source.logWriter, stale);
 		expect(listReviewRuns(source).runs).toHaveLength(1);
-		expect(await getCanonicalReviewRun(alias, record.runId)).toEqual(final);
-		expect(getReviewRun(alias, record.runId)?.usage?.summary.tokens?.input).toBe(5);
-		expect(getReviewRun(source, record.runId)?.usage?.summary.tokens?.input).toBe(10);
+		expect(await getCanonicalReviewRun(alias, stale.runId)).toEqual(final);
+		expect(getReviewRun(alias, stale.runId)?.usage?.summary.tokens?.input).toBe(5);
+		expect(getReviewRun(source, stale.runId)?.usage?.summary.tokens?.input).toBe(10);
 	});
 
 	it("runs reviews with no UI observer, includes repairs/repeated passes, and leaves discussion totals alone", async () => {
@@ -513,13 +554,19 @@ describe("#409 initial review accounting", () => {
 		});
 	});
 
-	it("disposes the prepared snapshot when initial materialization fails", async () => {
+	it("disposes the prepared snapshot and surfaces a run record it cannot write", async () => {
 		const { h, manager, options } = await fixture();
 		const dispose = vi.spyOn(options.prepared.resolution, "dispose");
-		vi.spyOn(manager.logWriter, "appendCustomEntry").mockRejectedValue(new Error("Initial write failed"));
-		await expect(executeReviewWorkflow(options)).rejects.toThrow("Initial write failed");
+		const append = manager.logWriter.appendCustomEntry.bind(manager.logWriter);
+		vi.spyOn(manager.logWriter, "appendCustomEntry").mockImplementation(async (type, data) => {
+			if (type === REVIEW_RUN_CUSTOM_ENTRY_TYPE) throw new Error("Run record write failed");
+			return append(type, data);
+		});
+		h.setResponses([candidates(), verification()]);
+		await expect(executeReviewWorkflow(options)).rejects.toThrow("Run record write failed");
 		expect(dispose).toHaveBeenCalledOnce();
-		expect(h.faux.state.callCount).toBe(0);
+		expect(h.faux.state.callCount).toBe(2);
+		expect(reviewEntries(manager)).toEqual({ runs: 0, usage: 0 });
 	});
 
 	it("fences observations after the captured source generation changes", async () => {
@@ -536,24 +583,33 @@ describe("#409 initial review accounting", () => {
 		]);
 		await expect(executeReviewWorkflow(options)).rejects.toThrow("accounting could not be retained");
 		expect(h.faux.state.callCount).toBe(1);
-		expect(getReviewRun(manager, options.prepared.workflowId)?.usage?.summary).toMatchObject({
-			requests: 1,
-			pendingRequests: 1,
-			status: "unavailable",
-		});
+		// Nothing is written into a source that changed.
+		expect(reviewEntries(manager)).toEqual({ runs: 0, usage: 0 });
 	});
 
-	it("prevents provider dispatch if the source checkpoint fails", async () => {
+	it("prevents provider dispatch once the source changed before the first request", async () => {
 		const { h, manager, options } = await fixture();
-		const append = manager.logWriter.appendCustomEntry.bind(manager.logWriter);
-		vi.spyOn(manager.logWriter, "appendCustomEntry").mockImplementation(async (type, data) => {
-			if (type === "volt.review.usage") throw new Error("Store unavailable");
-			return append(type, data);
-		});
+		const ref = manager.getSessionRef()!;
+		let changed = false;
 		h.setResponses([candidates(), verification()]);
-		await expect(executeReviewWorkflow(options)).rejects.toThrow("accounting could not be retained");
+		const result = executeReviewWorkflow({
+			...options,
+			work: {
+				progress: () => {},
+				checkpoint: () => {
+					if (changed) return;
+					changed = true;
+					vi.spyOn(manager, "getSessionRef").mockReturnValue({
+						...ref,
+						sessionGeneration: ref.sessionGeneration + 1,
+					});
+				},
+			},
+		});
+		await expect(result).rejects.toThrow("accounting could not be retained");
+		expect(changed).toBe(true);
 		expect(h.faux.state.callCount).toBe(0);
-		expect(getReviewRun(manager, options.prepared.workflowId)?.status).toBe("unfinished");
+		expect(reviewEntries(manager)).toEqual({ runs: 0, usage: 0 });
 	});
 
 	it.each(["failed", "cancelled"] as const)("preserves observed usage when the review is %s", async (status) => {
@@ -594,34 +650,29 @@ describe("#409 initial review accounting", () => {
 		const collector = new ReviewUsageCollector();
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(), 1, true, true);
-		const record = { ...unfinished(), status: "failed" as const, endedAt: 2, usage: await collector.finish() };
+		const accounting = await collector.finish();
+		const record = terminal("review:409", "failed", accounting);
 		await appendReviewRun(h.session.sessionWriter, record);
 		const { usage: _usage, ...historical } = record;
 		await appendReviewRun(h.session.sessionWriter, { ...historical, runId: "historical" });
 		const context: IntentContext = {
-			target: {
-				session: h.session,
-				conversation: { reviewWorkflows: new ReviewWorkflowManager() },
-			} as unknown as IntentTarget,
+			target: { session: h.session, conversation: {} } as unknown as IntentTarget,
 			services: {},
 			profile: LOCAL_INTENT_PROFILE,
 		};
 		const resultSchema = Compile(QUERY_SCHEMAS["review.result"].result);
 		const result = await queryRegistry.run(context, "review.result", { runId: record.runId });
 		expect(resultSchema.Errors(result)).toEqual([]);
-		expect(result).toMatchObject({ usage: record.usage.summary, usageBreakdown: record.usage.attempts });
+		expect(result).toMatchObject({ usage: accounting.summary, usageBreakdown: accounting.attempts });
 		expect(await queryRegistry.run(context, "review.result", { runId: "historical" })).toMatchObject({
 			usage: { status: "unavailable" },
 		});
-		const live = new ReviewUsageCollector();
-		await live.start(identity, h.getModel());
-		await appendReviewRun(h.session.sessionWriter, { ...unfinished("interrupted"), usage: live.snapshot() });
-		const interrupted = await queryRegistry.run(context, "review.result", { runId: "interrupted" });
-		expect(resultSchema.Errors(interrupted)).toEqual([]);
-		expect(interrupted).toMatchObject({ status: "unfinished", usage: { pendingRequests: 1 } });
 		const listed = await queryRegistry.run(context, "review.workflows", {});
 		expect(Compile(QUERY_SCHEMAS["review.workflows"].result).Errors(listed)).toEqual([]);
 		expect(JSON.stringify(listed)).toContain("pendingRequests");
+		// Running reviews are work items; the durable listing holds ended runs only.
+		expect(listed).not.toHaveProperty("activeWorkflows");
+		expect(listed.runs.map((run) => run.status)).toEqual(["failed", "failed"]);
 	});
 
 	it("renders accounting details without adding them to model-facing seed content", async () => {

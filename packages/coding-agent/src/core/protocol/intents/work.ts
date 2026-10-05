@@ -134,6 +134,8 @@ export const openWorkIntent = defineIntent({
 	remote: "safe",
 	requires: control,
 	whileBusy: "run",
+	/** Opening a review's findings is a lifecycle operation its source owns. */
+	sourceOwned: (input, view) => view.target?.conversation.work.get(input.workId)?.kind === "review",
 	run(ctx, input) {
 		const { host, client } = targetOf(ctx);
 		return workOperation(ctx, input.workId, (work) =>

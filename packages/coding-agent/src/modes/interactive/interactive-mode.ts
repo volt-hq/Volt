@@ -118,7 +118,6 @@ import {
 	runReviewWorkflow,
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
-import { resolveReviewAccountingMessage } from "../../core/review-state.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import type { ExtensionTerminalUI } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -4739,11 +4738,7 @@ export class InteractiveMode {
 			case "custom": {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(
-						resolveReviewAccountingMessage(this.sessionManager, message),
-						renderer,
-						this.getMarkdownThemeWithSettings(),
-					);
+					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -9733,7 +9728,7 @@ export class InteractiveMode {
 					diagnosticRetentionWarning = message;
 				},
 				createHooks: () => this.createReviewWorkflowHooks(),
-				workflowManager: this.conversation.reviewWorkflows,
+				work: this.conversation.work,
 			});
 
 			if (result.status !== "completed") {

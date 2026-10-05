@@ -216,8 +216,6 @@ export interface TestDaemonRuntimeParts {
 	cwd?: string;
 	/** Runs when the daemon closes the conversation; resolves by default. */
 	close?: () => Promise<void>;
-	/** An idle manager by default. */
-	reviewWorkflows?: object;
 	startRecoveredClientInputs?: () => Promise<void>;
 	listSessions?: () => Promise<object[]>;
 	/** Never resolves by default. */
@@ -246,12 +244,6 @@ export function createTestDaemonRuntime(parts: TestDaemonRuntimeParts, host?: Co
 		cwd: parts.cwd ?? "/workspace",
 		closed: false,
 		lost: parts.lost ?? new Promise<Error>(() => {}),
-		reviewWorkflows: parts.reviewWorkflows ?? {
-			hasActiveWorkflows: false,
-			waitForIdle: async () => {},
-			list: () => [],
-			attachSink: () => () => {},
-		},
 		startRecoveredClientInputs: parts.startRecoveredClientInputs ?? (async () => {}),
 		listSessions: parts.listSessions ?? (async () => []),
 	} as unknown as HostedConversation;

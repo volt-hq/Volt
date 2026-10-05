@@ -160,7 +160,7 @@ export interface IntentHostTheme {
 export interface IntentServices {
 	/** Stop the run: hosts differ in the abort reason and whether queued input is delivered. */
 	readonly abortRun?: (session: AgentSession) => Promise<void>;
-	/** Start a review. A detached host registers a workflow and answers `accepted`. */
+	/** Start a review. A detached host starts it as `review` work and answers `accepted`. */
 	readonly runReview?: (target: ReviewTarget, options: IntentReviewOptions) => Promise<ReviewWorkflowResult>;
 	/** Reviews run detached from the conversation, so its busy states do not gate them. */
 	readonly detachedReviews?: boolean;
@@ -276,7 +276,7 @@ export interface IntentDefinition<N extends BuiltinIntentName, O> extends Intent
 	 * A review discussion's source owns this lifecycle operation (for this
 	 * input): the discussion rejects it. Linkage is not a capability ceiling.
 	 */
-	readonly sourceOwned?: boolean | ((input: IntentInput<N>) => boolean);
+	readonly sourceOwned?: boolean | ((input: IntentInput<N>, view: IntentView) => boolean);
 	available?(view: IntentView, input?: IntentInput<N>): IntentAvailability;
 	state?(view: IntentView): IntentStateValue | undefined;
 	complete?(ctx: IntentContext, field: string, prefix: string): Promise<IntentOption[]>;

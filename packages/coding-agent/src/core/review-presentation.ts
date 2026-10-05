@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import type { ReviewUsageAccounting, UiNode } from "@hansjm10/volt-protocol";
 import type { ParsedReview, ReviewFinding, ReviewLocation } from "./review-report.ts";
 import type { ReviewRunRecord } from "./review-state.ts";
 import { parseReviewUsage } from "./review-usage.ts";
@@ -222,6 +223,32 @@ export function formatReviewUsage(value: unknown, expanded: boolean): string {
 			);
 		}
 	return lines.join("  \n");
+}
+
+/** A running review's accounting so far, as its work detail: request, token, and estimate totals. */
+export function reviewUsageDetail(usage: ReviewUsageAccounting): UiNode {
+	const { summary } = usage;
+	const tokens = summary.tokens;
+	const estimate = summary.estimatedCost;
+	return {
+		type: "keyValue",
+		key: "review-usage",
+		items: [
+			{ key: "requests", label: "Requests", value: `${summary.requests} (${summary.pendingRequests} pending)` },
+			{
+				key: "tokens",
+				label: "Tokens",
+				value: tokens
+					? `${tokens.input} input, ${tokens.output} output, ${tokens.cacheRead} cache read, ${tokens.cacheWrite} cache write`
+					: "unavailable",
+			},
+			{
+				key: "estimate",
+				label: "Model-priced estimate",
+				value: estimate ? `$${estimate.total.toFixed(6)} USD` : "unavailable",
+			},
+		],
+	};
 }
 
 /** Accounting stays in display details, never model-facing content. */

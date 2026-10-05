@@ -132,7 +132,7 @@ import {
 	IntentSourceSchema,
 	IntentStateValueSchema,
 	IntentWhileBusySchema,
-	ReviewWorkflowStartedSchema,
+	ReviewStartedSchema,
 	RpcBashResultSchema,
 	RpcCompactionResultSchema,
 } from "./intents.ts";
@@ -204,7 +204,6 @@ import {
 	TranscriptItemSchema,
 } from "./projected.ts";
 import {
-	RpcProjectionTruncationSchema,
 	RpcReviewAcknowledgmentResponseSchema,
 	RpcReviewCompletionStatusSchema,
 	RpcReviewCorrectnessSchema,
@@ -216,14 +215,8 @@ import {
 	RpcReviewRunDescriptorSchema,
 	RpcReviewRunStatusSchema,
 	RpcReviewTargetIdentitySchema,
-	RpcReviewWorkflowDescriptorSchema,
-	RpcReviewWorkflowLifecycleStatusSchema,
 	RpcReviewWorkflowListResponseSchema,
 	RpcReviewWorkflowResultResponseSchema,
-	RpcWorkflowEventSchema,
-	RpcWorkflowKindSchema,
-	RpcWorkflowStatusSchema,
-	RpcWorkflowToolEventSchema,
 } from "./projections.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import { QUERY_FRAME_SCHEMAS, QUERY_NAMES, QUERY_SCHEMAS, QueryFrameSchema, QueryNameSchema } from "./queries.ts";
@@ -403,24 +396,17 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcAssistantMessageDiagnostic: AssistantMessageDiagnosticSchema,
 	RpcAssistantMessage: AssistantMessageSchema,
 
-	// Projection metadata + workflows + review
+	// Review
 	RpcReviewDiscussionLink: RpcReviewDiscussionLinkSchema,
 	RpcReviewDiscussion: RpcReviewDiscussionSchema,
 	RpcStartReviewDiscussions: RpcStartReviewDiscussionsSchema,
 	RpcListReviewDiscussions: RpcListReviewDiscussionsSchema,
 	RpcResetReviewDiscussion: RpcResetReviewDiscussionSchema,
-	RpcWorkflowKind: RpcWorkflowKindSchema,
-	RpcWorkflowStatus: RpcWorkflowStatusSchema,
-	RpcProjectionTruncation: RpcProjectionTruncationSchema,
-	RpcWorkflowEvent: RpcWorkflowEventSchema,
-	RpcWorkflowToolEvent: RpcWorkflowToolEventSchema,
 	RpcReviewAcknowledgmentResponse: RpcReviewAcknowledgmentResponseSchema,
-	RpcReviewWorkflowLifecycleStatus: RpcReviewWorkflowLifecycleStatusSchema,
 	RpcReviewRunStatus: RpcReviewRunStatusSchema,
 	RpcReviewCompletionStatus: RpcReviewCompletionStatusSchema,
 	RpcReviewCorrectness: RpcReviewCorrectnessSchema,
 	RpcReviewFindingStatus: RpcReviewFindingStatusSchema,
-	RpcReviewWorkflowDescriptor: RpcReviewWorkflowDescriptorSchema,
 	RpcReviewLocation: RpcReviewLocationSchema,
 	RpcReviewFinding: RpcReviewFindingSchema,
 	RpcReviewCoverage: RpcReviewCoverageSchema,
@@ -613,7 +599,7 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	// Intents
 	EmptyInput: EmptyInputSchema,
 	IntentCancelled: IntentCancelledSchema,
-	ReviewWorkflowStarted: ReviewWorkflowStartedSchema,
+	ReviewStarted: ReviewStartedSchema,
 	BuiltinIntentName: BuiltinIntentNameSchema,
 	DynamicIntentName: DynamicIntentNameSchema,
 	IntentName: IntentNameSchema,

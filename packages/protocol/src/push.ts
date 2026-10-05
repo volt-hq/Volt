@@ -11,6 +11,7 @@
 
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
+import { WorkKindSchema } from "./work.ts";
 
 export const MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES = 128;
 export const MAX_IROH_REMOTE_NOTIFICATION_BODY_UTF8_BYTES = 512;
@@ -21,7 +22,7 @@ export const MAX_IROH_REMOTE_NOTIFICATION_EVENT_ID_UTF8_BYTES = 512;
 export const IROH_REMOTE_NOTIFICATION_KINDS = [
 	"conversation_completed",
 	"plan_ready",
-	"review_completed",
+	"work_finished",
 	"host_notice",
 ] as const;
 
@@ -54,7 +55,7 @@ const notificationProperties = {
 	workspaceName: Type.Optional(notificationText(MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES)),
 };
 
-/** `plan_ready` names its plan, `review_completed` its workflow; every other kind carries neither. */
+/** `plan_ready` names its plan, `work_finished` its work item and the item's kind; every other kind carries neither. */
 export const IrohRemotePushNotificationSchema = Type.Union([
 	Type.Object(
 		{
@@ -74,8 +75,9 @@ export const IrohRemotePushNotificationSchema = Type.Union([
 	Type.Object(
 		{
 			...notificationProperties,
-			kind: Type.Literal("review_completed"),
-			workflowId: notificationMetadata(MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES),
+			kind: Type.Literal("work_finished"),
+			workId: notificationMetadata(MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES),
+			workKind: WorkKindSchema,
 		},
 		{ additionalProperties: false },
 	),

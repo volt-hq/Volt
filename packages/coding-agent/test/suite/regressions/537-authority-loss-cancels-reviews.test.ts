@@ -5,7 +5,7 @@ import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../../../src/core/review.ts";
+import { reviewWorkInput } from "../../../src/core/review-work.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
@@ -56,59 +56,69 @@ async function openConversation(): Promise<HostedConversation> {
 	return conversation;
 }
 
-function startReview(conversation: HostedConversation, workflowId: string, launched = true) {
+/** Start a review on `conversation` as its `review` work; its executor runs until it is stopped or finished. */
+async function startReview(conversation: HostedConversation, workId: string) {
 	const finished = Promise.withResolvers<void>();
 	const cleanupFinished = Promise.withResolvers<void>();
-	const started = Promise.withResolvers<void>();
-	const workflow = conversation.reviewWorkflows.start({
-		prepared: {
-			workflowId,
-			action: "review.custom",
-			startedAt: Date.now(),
-			resolution: { description: "test review", diffCommand: "git diff" },
-		},
-		execute: async ({ signal }) => {
+	const started = Promise.withResolvers<AbortSignal>();
+	await conversation.work.start(
+		"review",
+		reviewWorkInput("review.custom", "test review"),
+		async ({ signal }) => {
 			signal.addEventListener("abort", () => finished.resolve(), { once: true });
-			started.resolve();
+			started.resolve(signal);
 			await finished.promise;
 			await cleanupFinished.promise;
-			return { status: "cancelled" };
+			return signal.aborted ? { outcome: "cancelled" } : { outcome: "completed", result: { summary: "Reviewed." } };
 		},
-	});
+		{ workId },
+	);
 	cleanups.push(() => {
 		finished.resolve();
 		cleanupFinished.resolve();
 	});
-	if (launched) workflow.launch();
-	return { workflow, started: started.promise, finish: finished.resolve, releaseCleanup: cleanupFinished.resolve };
+	return { started: started.promise, finish: finished.resolve, releaseCleanup: cleanupFinished.resolve };
 }
 
-describe("regression #537: a conversation that loses its log cancels only its own reviews", () => {
-	it("cancels a running review and joins its cleanup, leaving other conversations' reviews running", async () => {
+describe("regression #537: a conversation that loses its log stops only its own reviews", () => {
+	it("stops a running review and joins its cleanup, leaving other conversations' reviews running", async () => {
 		const conversation = await openConversation();
 		const other = await openConversation();
-		const unrelated = startReview(other, "unrelated");
-		const events: Array<ReviewWorkflowEvent | ReviewWorkflowToolEvent> = [];
-		conversation.reviewWorkflows.attachSink((event) => events.push(event));
-		const review = startReview(conversation, "review");
-		await review.started;
+		const unrelated = await startReview(other, "unrelated");
+		const review = await startReview(conversation, "review");
+		const signal = await review.started;
+		const unrelatedSignal = await unrelated.started;
 
 		const lost = await loseLog(conversation.session.sessionWriter);
 		await expect(conversation.lost).resolves.toBe(lost);
 
-		await vi.waitFor(() => expect(review.workflow.signal.aborted).toBe(true));
-		expect(unrelated.workflow.signal.aborted).toBe(false);
+		await vi.waitFor(() => expect(signal.aborted).toBe(true));
+		expect(unrelatedSignal.aborted).toBe(false);
+		expect(conversation.work.running().map((record) => record.workId)).toEqual(["review"]);
 		review.releaseCleanup();
-		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
-		expect(conversation.reviewWorkflows.get("review")?.status).toBe("cancelled");
-		expect(events.filter((event) => event.type === "workflow_end" && event.workflowId === "review")).toHaveLength(1);
+		// The review stops; its lost log cannot record how, so the next open reconciles it.
+		await vi.waitFor(() => expect(conversation.work.running()).toEqual([]));
+		expect(conversation.session.hasRunningWork).toBe(false);
+		expect(conversation.work.get("review")?.outcome).toBeUndefined();
+
+		// The other conversation's review runs on and finishes as usual.
+		expect(other.work.running().map((record) => record.workId)).toEqual(["unrelated"]);
+		unrelated.finish();
+		unrelated.releaseCleanup();
+		await other.work.settled("unrelated");
+		expect(other.work.get("unrelated")).toMatchObject({ kind: "review", outcome: "completed" });
 	});
 
-	it("cancels a review registered before launch without starting its executor", async () => {
+	it("starts no review once the conversation lost its log", async () => {
 		const conversation = await openConversation();
-		const review = startReview(conversation, "not-launched", false);
 		await loseLog(conversation.session.sessionWriter);
-		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
-		expect(review.workflow.signal.aborted).toBe(true);
+		const execute = vi.fn(async () => ({ outcome: "completed" as const }));
+		await expect(
+			conversation.work.start("review", reviewWorkInput("review.custom", "test review"), execute, {
+				workId: "after-loss",
+			}),
+		).rejects.toMatchObject({ code: "closed" });
+		expect(execute).not.toHaveBeenCalled();
+		expect(conversation.work.get("after-loss")).toBeUndefined();
 	});
 });

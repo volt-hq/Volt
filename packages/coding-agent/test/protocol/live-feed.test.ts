@@ -89,41 +89,6 @@ describe("live feed", () => {
 		});
 	});
 
-	it("shows a review workflow until it ends", async () => {
-		const { harness, feed, items } = await feedHarness();
-		const base = {
-			workflowId: "w1",
-			kind: "review" as const,
-			action: "review.uncommitted",
-			title: "Review",
-			startedAt: 1,
-		};
-		feed.workflowEvent({ type: "workflow_start", ...base, message: "starting", status: "running" });
-		feed.workflowEvent({
-			type: "tool_execution_start",
-			workflowId: "w1",
-			workflowKind: "review",
-			workflowAction: "review.uncommitted",
-			toolCallId: "t1",
-			toolName: "read",
-		});
-		expect(harness.session.liveState.get("workflow/w1")).toMatchObject({
-			kind: "workflow",
-			event: { type: "workflow_start" },
-			activeTools: [{ toolCallId: "t1" }],
-		});
-		feed.workflowEvent({ type: "workflow_end", ...base, message: "done", status: "completed", endedAt: 2 });
-		expect(harness.session.liveState.get("workflow/w1")).toBeUndefined();
-		expect(
-			items()
-				.filter((item) => item.type === "set" && item.key === "workflow/w1")
-				.at(-1),
-		).toMatchObject({
-			value: { event: { type: "workflow_end", status: "completed" } },
-		});
-		feed.close();
-	});
-
 	it("streams an MCP server call's progress as a tool item that ends with the call", async () => {
 		const { harness, feed, items } = await feedHarness();
 		const emit = (event: AgentSessionEvent): void =>

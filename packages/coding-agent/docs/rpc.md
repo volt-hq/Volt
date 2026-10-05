@@ -169,7 +169,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 |---|---|---|
 | `prompt` | `{message, images?, streamingBehavior?: steer|followUp}` | |
 | `steer`, `follow_up` | `{message, images?}` | |
-| `abort` | `{}`: abort the run and cancel running work (subagents and approved host actions run on until `cancel_work`); queued input is delivered | |
+| `abort` | `{}`: abort the run and cancel running work (subagents, reviews, and approved host actions run on until `cancel_work`); queued input is delivered | |
 | `abort_retry`, `abort_bash` | `{}` | |
 | `bash` | `{command, excludeFromContext?}` | `{output, exitCode?, cancelled, truncated, fullOutputPath?}` |
 | `compact` | `{customInstructions?}` | the compaction result |

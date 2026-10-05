@@ -14,8 +14,7 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`, `workflow/<workflowId>`. A value's `kind` is its key's
- * family. `workflow` is an interim value until work items replace it
+ * `work/<workId>`. A value's `kind` is its key's family.
  * (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
@@ -35,7 +34,6 @@ import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
-import { RpcWorkflowEventSchema, RpcWorkflowToolEventSchema } from "./projections.ts";
 import {
 	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
@@ -254,16 +252,6 @@ export const LiveWorkValueSchema = Type.Object(
 	closed,
 );
 
-/** A review workflow's latest event and running tools (interim until work items). */
-export const LiveWorkflowValueSchema = Type.Object(
-	{
-		kind: Type.Literal("workflow"),
-		event: RpcWorkflowEventSchema,
-		activeTools: Type.Array(RpcWorkflowToolEventSchema),
-	},
-	closed,
-);
-
 /** Every live value, keyed by kind. */
 export const LIVE_VALUE_SCHEMAS = {
 	phase: LivePhaseValueSchema,
@@ -276,7 +264,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
-	workflow: LiveWorkflowValueSchema,
 } as const;
 
 export type LiveValueKind = keyof typeof LIVE_VALUE_SCHEMAS;
@@ -292,7 +279,6 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionWidgetValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
-	LiveWorkflowValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
 
@@ -312,7 +298,6 @@ export const LIVE_KEYED_KINDS = [
 	"ext_status",
 	"ext_widget",
 	"work",
-	"workflow",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Longest id in a keyed live key, in characters. */

@@ -257,7 +257,7 @@ describe("review completeness recovery", () => {
 				expect(tools).not.toContain("bash");
 			}),
 		]);
-		const result = await run({ onEvent: (event) => events.push(event) });
+		const result = await run({ onPass: (pass, round) => events.push({ pass, round }) });
 		expect(result.errorMessage).toBeUndefined();
 		expect(result.parsed).toMatchObject({ completionStatus: "incomplete", findings: [] });
 		expect(result.parsed?.overallCorrectness).toBeUndefined();
@@ -267,6 +267,13 @@ describe("review completeness recovery", () => {
 		expect(result.parsed?.coverage.residualRisk).toContain(STATIC_REVIEW_LIMITATION);
 		expect(blindContext).not.toContain(PRIVATE);
 		expect(JSON.stringify({ result, events })).not.toContain(PRIVATE);
+		expect(events).toEqual([
+			{ pass: "discovery", round: 1 },
+			{ pass: "verification", round: 1 },
+			{ pass: "discovery", round: 2 },
+			{ pass: "verification", round: 2 },
+			{ pass: "presentation", round: 2 },
+		]);
 		const record = createReviewRunRecord({
 			workflowId: "review:budget",
 			workflowAction: "review.pr",

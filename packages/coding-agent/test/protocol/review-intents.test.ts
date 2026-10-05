@@ -158,7 +158,6 @@ describe("durable review lifecycle intents", () => {
 
 			const opened = await intentRegistry.invoke(ctx, "review_open_session", { runId: "review:test" });
 			expect(opened.conversation).toBe(replacementManager.getSessionId());
-			expect(opened.outcome.selectedCount).toBe(2);
 			const seedMessages = replacementManager.getBranch().filter((entry) => entry.type === "custom_message");
 			expect(seedMessages).toHaveLength(1);
 			const seedMessage = seedMessages[0] as { details?: { findings?: Array<{ id: string }> } };

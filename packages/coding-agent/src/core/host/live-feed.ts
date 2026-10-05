@@ -1,11 +1,11 @@
 /**
  * What feeds a conversation's live state from its session (RFC §6.1): the
  * run phase, Git and prompt-cache status, token use, the intents whose
- * availability follows the conversation, review workflows,
- * the streaming assistant message, running tools, and the MCP server calls
- * they make. Each value is set when it changes; streaming items are published
- * as the session emits them and leave the live state when the entry that
- * commits them is applied (an MCP call, which no entry commits, when it ends).
+ * availability follows the conversation, the streaming assistant message,
+ * running tools, and the MCP server calls they make. Each value is set when
+ * it changes; streaming items are published as the session emits them and
+ * leave the live state when the entry that commits them is applied (an MCP
+ * call, which no entry commits, when it ends).
  */
 
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
@@ -13,12 +13,9 @@ import type { LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
 import type { LiveToolPartial } from "../protocol/live-fold.ts";
-import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../review.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
-import { liveKey } from "./live-state.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
-type WorkflowToolStart = Extract<ReviewWorkflowToolEvent, { type: "tool_execution_start" }>;
 
 /** Entry types whose commit changes what the live `intents` value reads. */
 const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
@@ -30,13 +27,11 @@ const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 export interface LiveFeed {
-	/** A review workflow of the conversation reported progress. */
-	workflowEvent(event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void;
 	/** Stop feeding; the live state closes with the session. */
 	close(): void;
 }
 
-const NOOP_FEED: LiveFeed = { workflowEvent() {}, close() {} };
+const NOOP_FEED: LiveFeed = { close() {} };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -293,19 +288,6 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		if (INTENT_STATE_ENTRY_TYPES.has(entry.type)) updateIntents();
 	};
 
-	/** Running workflows: the latest event and the tools still running. */
-	const workflows = new Map<string, { event?: ReviewWorkflowEvent; tools: Map<string, WorkflowToolStart> }>();
-	const publishWorkflow = (workflowId: string): void => {
-		const workflow = workflows.get(workflowId);
-		if (!workflow?.event) return;
-		const event = workflow.event;
-		update(liveKey("workflow", workflowId), () => ({
-			kind: "workflow",
-			event,
-			activeTools: [...workflow.tools.values()],
-		}));
-	};
-
 	const unsubscribers: Array<() => void> = [];
 	unsubscribers.push(session.subscribe(onEvent, { monitorGitContext: false }));
 	unsubscribers.push(session.sessionManager.subscribeEntries(onEntry));
@@ -325,29 +307,6 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 	update("prompt_cache", () => ({ kind: "prompt_cache", promptCache: session.getPromptCacheStatus() ?? null }));
 
 	return {
-		workflowEvent(event) {
-			if (closed) return;
-			const workflow = workflows.get(event.workflowId) ?? { tools: new Map<string, WorkflowToolStart>() };
-			workflows.set(event.workflowId, workflow);
-			switch (event.type) {
-				case "tool_execution_start":
-					workflow.tools.set(event.toolCallId, event);
-					break;
-				case "tool_execution_end":
-					workflow.tools.delete(event.toolCallId);
-					break;
-				default:
-					workflow.event = event;
-			}
-			publishWorkflow(event.workflowId);
-			if (event.type === "workflow_end") {
-				// The final status reaches the clients; nothing of the workflow stays.
-				workflows.delete(event.workflowId);
-				const key = liveKey("workflow", event.workflowId);
-				published.delete(key);
-				live.clear(key);
-			}
-		},
 		close() {
 			if (closed) return;
 			closed = true;

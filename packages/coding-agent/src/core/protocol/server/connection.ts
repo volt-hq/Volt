@@ -75,7 +75,7 @@ import { queryRegistry } from "../queries/index.ts";
 import { QueryRejectedError } from "../queries/types.ts";
 import { formatSchemaBoundError } from "../schema-errors.ts";
 import { RpcFrameTooLargeError, type RpcTransport } from "../transport/transport.ts";
-import { createLocalIntentServices, PendingReviewWorkflows } from "./local-services.ts";
+import { createLocalIntentServices } from "./local-services.ts";
 import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
 
 /** Frames a connection holds for its intent and query lane, at most. */
@@ -424,7 +424,6 @@ export function serveConnection(
 	const reads = new ReadBudget(profile.limits.readBurst, profile.limits.readRefillMs);
 	const subscriptions = new Map<string, Subscription>();
 	const subscriptionUsage = new SubscriptionUsageService();
-	const reviews = new PendingReviewWorkflows();
 	let home = options.conversation;
 	let accepts: ReadonlySet<HostRequestKind> = new Set();
 	let helloReceived = false;
@@ -655,7 +654,7 @@ export function serveConnection(
 	};
 
 	const intentServices = (conversation: HostedConversation | undefined): IntentServices => ({
-		...(conversation === undefined ? {} : createLocalIntentServices(conversation, { reviews, subscriptionUsage })),
+		...(conversation === undefined ? {} : createLocalIntentServices(conversation, { subscriptionUsage })),
 		...options.services?.(conversation),
 	});
 
@@ -776,12 +775,8 @@ export function serveConnection(
 			return;
 		}
 		const outcome = Promise.withResolvers<IntentOutcomeFrame>();
-		/** Prompt-like intents settle off the lane, where a lane intent's pending reviews are not theirs. */
-		const settle = (result: IntentOutcomeFrame, onLane: boolean): void => {
-			// The outcome is written before a review it registered launches, so `accepted` precedes its progress.
+		const settle = (result: IntentOutcomeFrame): void => {
 			write(result);
-			if (onLane && result.type === "accepted") reviews.launchAll();
-			else if (onLane) reviews.cancelAll();
 			outcome.resolve(result);
 			if (result.type !== "accepted") return;
 			const ending = ENDING_INTENTS.get(frame.type);
@@ -810,7 +805,7 @@ export function serveConnection(
 			);
 		} catch (error) {
 			// A refusal is not remembered: a retry is admitted afresh.
-			settle(rejected(error), true);
+			settle(rejected(error));
 			return;
 		}
 		window?.set(frame.intentId, fingerprint, outcome.promise);
@@ -827,12 +822,12 @@ export function serveConnection(
 		// Prompts and dynamic intents answer once admitted, without holding later frames.
 		if (input || !isBuiltinIntentName(frame.type)) {
 			void run.then((result) => {
-				settle(result, false);
+				settle(result);
 				if (!laneBusy) flushMoves();
 			});
 			return;
 		}
-		settle(await run, true);
+		settle(await run);
 	};
 
 	const runQuery = async (frame: QueryEnvelope): Promise<void> => {
@@ -1082,7 +1077,6 @@ export function serveConnection(
 		detachClose();
 		for (const subscription of subscriptions.values()) subscription.dispose();
 		subscriptions.clear();
-		reviews.cancelAll();
 		const errors: unknown[] = failure ? [failure.error] : [];
 		try {
 			// Not waiting for the attach: its session_start may wait for a dialog only leaving ends.

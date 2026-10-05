@@ -197,21 +197,27 @@ test("notification input preserves bounded Plan and review navigation metadata f
 		pushTargetAuthToken: "a".repeat(32),
 		eventId: "review:one:completed",
 		hostNodeId: HOST_NODE_ID,
-		kind: "review_completed",
+		kind: "work_finished",
 		title: "Your review is ready",
 		body: "PR #151 completed with 4 findings.",
-		workflowId: "review:one",
+		workId: "review:one",
+		workKind: "review",
 		data: {
 			eventId: "review:one:completed",
 			hostNodeId: HOST_NODE_ID,
-			kind: "review_completed",
+			kind: "work_finished",
 			sessionId: "session-one",
-			workflowId: "review:one",
+			workId: "review:one",
+			workKind: "review",
 		},
 	});
 	assert.equal(review.hostNodeId, HOST_NODE_ID);
-	assert.equal(review.workflowId, "review:one");
-	assert.equal(review.data.workflowId, "review:one");
+	assert.equal(review.workId, "review:one");
+	assert.equal(review.workKind, "review");
+	assert.deepEqual(
+		{ workId: review.data.workId, workKind: review.data.workKind },
+		{ workId: "review:one", workKind: "review" },
+	);
 });
 
 test("notification input rejects control characters, host paths, overlong copy, and metadata drift", () => {
@@ -220,15 +226,17 @@ test("notification input rejects control characters, host paths, overlong copy, 
 		pushTargetAuthToken: "a".repeat(32),
 		eventId: "review:one:completed",
 		hostNodeId: HOST_NODE_ID,
-		kind: "review_completed",
+		kind: "work_finished",
 		title: "Your review is ready",
 		body: "Review completed with 1 finding.",
-		workflowId: "review:one",
+		workId: "review:one",
+		workKind: "review",
 		data: {
 			eventId: "review:one:completed",
 			hostNodeId: HOST_NODE_ID,
-			kind: "review_completed",
-			workflowId: "review:one",
+			kind: "work_finished",
+			workId: "review:one",
+			workKind: "review",
 		},
 	};
 	for (const [hostNodeId, message] of [
@@ -244,14 +252,25 @@ test("notification input rejects control characters, host paths, overlong copy, 
 		["body", "Open /Users/private/review.diff", "body_has_invalid_notification_text"],
 		["title", "🚀".repeat(Math.floor(MAX_NOTIFICATION_TITLE_UTF8_BYTES / 4) + 1), "title_has_invalid_notification_text"],
 		["body", "x".repeat(MAX_NOTIFICATION_BODY_UTF8_BYTES + 1), "body_has_invalid_notification_text"],
-		["workflowId", "w".repeat(MAX_NOTIFICATION_METADATA_UTF8_BYTES + 1), "workflowId_has_invalid_notification_metadata"],
+		["workId", "w".repeat(MAX_NOTIFICATION_METADATA_UTF8_BYTES + 1), "workId_has_invalid_notification_metadata"],
+		["workKind", "review/../job", "workKind_has_invalid_work_kind"],
 	]) {
 		expectRequestError(() => parseNotification({ ...base, [field]: value }), 400, message);
 	}
 	expectRequestError(
-		() => parseNotification({ ...base, data: { ...base.data, workflowId: "review:other" } }),
+		() => parseNotification({ ...base, data: { ...base.data, workId: "review:other" } }),
 		400,
 		"notification_data_mismatch",
+	);
+	expectRequestError(
+		() => parseNotification({ ...base, data: { ...base.data, workKind: "job" } }),
+		400,
+		"notification_data_mismatch",
+	);
+	expectRequestError(
+		() => parseNotification({ ...base, workKind: undefined, data: { ...base.data, workKind: undefined } }),
+		400,
+		"notification_navigation_metadata_mismatch",
 	);
 	expectRequestError(
 		() => parseNotification({ ...base, data: { ...base.data, command: "git diff HEAD" } }),
