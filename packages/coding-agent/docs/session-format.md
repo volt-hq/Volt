@@ -49,23 +49,29 @@ Listing, exact-ID resolution, continuation candidate selection, and RPC session 
 
 ## Session Store Upgrade
 
-The current SQLite schema is v4. Before opening an existing store with this
+The current SQLite schema is v5. Before opening an existing store with this
 version, stop older Volt CLI and daemon processes that own that store. Do not run
 old and new host versions against the same live store.
 
-The first open upgrades only the exact supported v1, v2, or v3 schema, in one
-serialized transaction. It preserves the store ID, session IDs and generations,
-entries, parent references, and client inputs. Upgrading from v1 or v2 removes
-the per-session store revision and its revision-keyed commit records; the log
-ordinal replaces them. New stores initialize at v4 directly. Concurrent
-new-version opens converge on the same upgrade; an upgrade failure rolls back
-rather than partially changing the store.
+The first open upgrades only the exact supported v1, v2, v3, or v4 schema, in
+one serialized transaction. It preserves the store ID, session IDs and
+generations, entries, parent references, and client inputs. Upgrading from v1
+or v2 removes the per-session store revision and its revision-keyed commit
+records; the log ordinal replaces them. New stores initialize at v5 directly.
+Concurrent new-version opens converge on the same upgrade; an upgrade failure
+rolls back rather than partially changing the store.
+
+v5 keeps review state in the logs (see [Review State Entries](#review-state-entries-host-only)).
+Upgrading from v2, v3, or v4 drops the review anchor, alias, discussion, and
+discussion-child tables without carrying their rows anywhere: a review run from
+before v5 stays readable in each session that holds it as an unanchored report,
+with no handoff alias, General, or discussion linkage. v5 adds two indexes the
+store derives from the review entries it commits, `review_run_index` and
+`review_discussion_index`; they start empty.
 
 Unknown versions, altered schema objects, invalid metadata and failed integrity
 checks are rejected without repair or deletion. Older binaries cannot reopen a
-v4 store; downgrading the executable does not downgrade storage. Upgrading a v1
-store adds host-only review anchors, discussion links and child-session history.
-These records do not grant authority through portable JSONL snapshots.
+v5 store; downgrading the executable does not downgrade storage.
 
 ## JSONL Snapshots
 
@@ -81,7 +87,7 @@ Delete sessions through `/resume` or `SessionManager.delete(ref)`. When the `tra
 
 The current header has `version: 5` for session entries and `snapshotVersion: 1` for the interchange envelope. Import requires both exact values and rejects unmarked or older JSONL.
 
-A snapshot contains the header, then the session's public entries with contiguous ordinals starting at 1, then exactly one final `leaf` entry that records the active leaf. Malformed or truncated final lines are rejected. Client-input records, starting Git context, PR review bindings, subagent links, fork lineage, and transport-owned `clientMessageId` values are never accepted as interchange data.
+A snapshot contains the header, then the session's public entries with contiguous ordinals starting at 1, then exactly one final `leaf` entry that records the active leaf. Malformed or truncated final lines are rejected. Client-input records, starting Git context, PR review bindings, subagent links, work and review records, fork lineage, and transport-owned `clientMessageId` values are never accepted as interchange data.
 
 Import creates a session with a new ID, unless `options.id` (`--session-id` with `--fork`) names one. Its log is a fork of the snapshot at its active leaf: a `forked_from` entry naming the snapshot's session ID and leaf, then the snapshot's active branch with ordinals assigned again, then its labels. Other branches of the snapshot are not imported.
 
@@ -295,6 +301,11 @@ A public entry's parent is always a public entry. A host entry's `parentId` is t
 | `forked_from` | host | Lineage of a forked, cloned, or imported session; always the first entry |
 | `session_start_git_context` | host | First Git observation (coding-agent product type) |
 | `pr_review_binding` | host | PR checkout a review session is bound to (coding-agent product type) |
+| `review_general` | host | A review run's General moved; in the run's source (coding-agent product type) |
+| `review_alias` | host | A handoff target carries a review run of its source (coding-agent product type) |
+| `review_discussion` | host | A finding discussion and its first child; in the run's source (coding-agent product type) |
+| `review_discussion_reset` | host | A discussion reset to a new child; in the run's source (coding-agent product type) |
+| `review_discussion_link` | host | A discussion child's link; always its first entry (coding-agent product type) |
 
 The examples below use short IDs, abbreviated messages, and illustrative ordinals; each block stands alone.
 
@@ -514,6 +525,24 @@ path-free value as optional `startingGitContext`.
 
 The immutable PR checkout identity of a review session (`placement`). Recording the same placement again is a no-op and a different one is refused. It is never imported, exported, or sent to the model.
 
+### Review State Entries (host-only)
+
+A review run belongs to the session that ran it, its source: the `work_started` entry of its `review` work (`workId` is the run ID) anchors the run there. The rest of a run's cross-session state is coding-agent product entries, which only the host writes. Each names sessions by exact identity (`sessionId` and `sessionGeneration`):
+
+- `review_alias {runId, source}`: in a handoff target (a new session that carries the run, such as a review fix or a plan execution), the run's source.
+- `review_general {runId, general}`: in the source, the session the run's General discussion moved to. The latest one is current; until the first, the source is the General.
+- `review_discussion {discussionId, runId, findingId, contextSnapshot, child, requestId, kickoffClientMessageId}`: in the source, a finding's discussion and its first child session. `contextSnapshot` is the finding's immutable context, at most 64 KiB of JSON.
+- `review_discussion_reset {discussionId, child, requestId, kickoffClientMessageId}`: in the source, a reset to a new child, which becomes the discussion's current child.
+- `review_discussion_link {discussionId, runId, findingId, source, contextSnapshot}`: the first entry of a discussion child, which makes the child a finding discussion. A child stays linked after a reset or after its source is deleted.
+
+```json
+{"type":"review_discussion","id":"r1s2t3u4","parentId":"m5n6o7p8","timestamp":"2026-10-05T12:00:00.000Z","ordinal":42,"discussionId":"d-uuid","runId":"run-uuid","findingId":"f1","contextSnapshot":{"finding":{"id":"f1","title":"Unchecked input"}},"child":{"sessionId":"child-uuid","sessionGeneration":"generation-uuid"},"requestId":"request-1","kickoffClientMessageId":"kickoff-uuid"}
+```
+
+When it commits these entries, the store maintains two derived indexes: `review_run_index` (each run's source and current General) and `review_discussion_index` (each discussion child its source records). It refuses an entry that does not fit the other logs: a second session anchoring a run, a General or discussion recorded outside the run's source, an alias or link naming a session that does not anchor the run, a second discussion of a finding, a reset by another session, or a child already used. The indexes answer cross-session lookups and grant nothing by themselves; a write to a source's log first re-reads that log. A row leaves with the session it derives from.
+
+These entries never move the active leaf, enter model context, reach a client, or copy into forks, clones, imports, or snapshots, so a copied review stays a local report.
+
 ## Tree Structure
 
 Public entries form a tree:
@@ -662,6 +691,8 @@ Tree reads return public entries only.
 - `isPersisted()` - Whether the session uses SQLite persistence.
 - `getForkedFrom()` - The source session and entry of a forked, cloned, or imported session, or `undefined`.
 - `getStartingGitContext()`, `getPrReviewBinding()`, `getSessionEntrySummary()`
+- `getReviewState()` - The session's review state: the runs it anchors or carries as an alias, their General, the discussions it is the source of, and its discussion link.
+- `getReviewDiscussion()` - The session's discussion link when it is a review finding discussion, or `null`.
 
 ### Writing
 
@@ -671,5 +702,6 @@ Tree reads return public entries only.
 - `appendModelChange(provider, modelId)`, `appendThinkingLevelChange(level)`, `appendFastModeChange(enabled)`, `appendPlanningState(planning)`
 - `appendSessionInfo(name)`, `appendLabelChange(targetId, label)` - An empty or missing label clears it.
 - `recordStartingGitContext(gitContext)`, `recordPrReviewBinding(placement)`
+- `recordReviewState(build)` - Append the review entries `build` returns from the committed review state; no other review entry of the session commits in between.
 
 `LogWriter` also moves the leaf and compacts before a session opens: `appendCompaction(...)`, `branch(entryId)`, `resetLeaf()`, and `branchWithSummary(entryId, summary, details?, fromHook?)`. A live session does these through `session.compact()` and `session.navigateTree()`.

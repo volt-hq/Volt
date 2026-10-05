@@ -3,13 +3,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import {
-	registerDurableReviewAnchor,
-	registerReviewHandoffAliases,
-	resolveCanonicalReviewSource,
-} from "../../../src/core/review-anchors.ts";
+import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-links.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -58,6 +55,11 @@ async function fixture() {
 	return { root, directory, source, client, managers };
 }
 
+/** Anchor run "run" in the open source conversation, as a review it ran does. */
+async function anchor(client: TestClient): Promise<void> {
+	await anchorLiveReviewRun(client.session, "run");
+}
+
 describe("#342 empty review handoffs", () => {
 	it("creates a new session in another store without transferring review runs", async () => {
 		const { root, source, client } = await fixture();
@@ -74,23 +76,23 @@ describe("#342 empty review handoffs", () => {
 	});
 
 	it("allows empty cross-store handoffs but rejects actual review linkage", async () => {
-		const { root, source, managers } = await fixture();
+		const { root, source, managers, client } = await fixture();
 		const target = await SessionManager.create(root, join(root, "other-store"));
 		managers.push(target);
-		await registerDurableReviewAnchor(source, "run");
-		await expect(registerReviewHandoffAliases(source, target, [])).resolves.toBeUndefined();
-		await expect(registerReviewHandoffAliases(source, target, ["run"])).rejects.toThrow(
+		await anchor(client);
+		await expect(registerReviewHandoffAliases(source, target.logWriter, [])).resolves.toBeUndefined();
+		await expect(registerReviewHandoffAliases(source, target.logWriter, ["run"])).rejects.toThrow(
 			"Review handoff crosses stores",
 		);
 		expect(await resolveCanonicalReviewSource(target, "run")).toBeUndefined();
 	});
 
 	it("retains same-store alias registration", async () => {
-		const { root, directory, source, managers } = await fixture();
+		const { root, directory, source, managers, client } = await fixture();
 		const target = await SessionManager.create(root, directory);
 		managers.push(target);
-		await registerDurableReviewAnchor(source, "run");
-		await registerReviewHandoffAliases(source, target, ["run"]);
+		await anchor(client);
+		await registerReviewHandoffAliases(source, target.logWriter, ["run"]);
 		expect(await resolveCanonicalReviewSource(target, "run")).toEqual(source.getSessionRef());
 	});
 });

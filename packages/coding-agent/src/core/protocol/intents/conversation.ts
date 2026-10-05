@@ -444,6 +444,7 @@ export const newSessionIntent = defineIntent({
 		return openNewSession(host, client, {
 			...(input.preserveReviewRunId ? { preserveReviewRunId: input.preserveReviewRunId } : {}),
 			...(input.replaceReviewGeneral ? { replaceReviewGeneral: true } : {}),
+			...(ctx.services.reviewDiscussions ? { reviewSourceWriter: ctx.services.reviewDiscussions.writeSource } : {}),
 			...(parentSessionRef ? { parentSessionRef } : {}),
 			...(preservedReviewRun
 				? {

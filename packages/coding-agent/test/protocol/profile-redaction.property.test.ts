@@ -5,7 +5,8 @@
  * checkout, or worktrees root, and no provider signature, in any frame:
  * entries, snapshots, live streaming split at any point, keyed values, and
  * query results. Its work entries carry no input, child locator, output
- * text, or result data (Phase 4 plan §9).
+ * text, or result data (Phase 4 plan §9). Review state records (RFC §14 Q7)
+ * stay on the host for both profiles: no frame carries them.
  */
 
 import { resolve } from "node:path";
@@ -24,7 +25,8 @@ type Step =
 	| { kind: "result"; text: string }
 	| { kind: "custom"; value: string }
 	| { kind: "label"; text: string }
-	| { kind: "work"; text: string; finish: boolean };
+	| { kind: "work"; text: string; finish: boolean }
+	| { kind: "review"; text: string };
 
 const text = fc.string({ maxLength: 40 });
 const step: fc.Arbitrary<Step> = fc.oneof(
@@ -34,16 +36,68 @@ const step: fc.Arbitrary<Step> = fc.oneof(
 	fc.record({ kind: fc.constant("custom" as const), value: text }),
 	fc.record({ kind: fc.constant("label" as const), text: fc.string({ minLength: 1, maxLength: 10 }) }),
 	fc.record({ kind: fc.constant("work" as const), text, finish: fc.boolean() }),
+	fc.record({ kind: fc.constant("review" as const), text }),
 );
+
+/** Review state record types: host records no profile projects. */
+const REVIEW_RECORD = /^review_/;
 
 async function seed(steps: readonly Step[], cwd = (path: string) => path): Promise<SessionManager> {
 	const manager = SessionManager.inMemory(cwd("/tmp/volt-profile-redaction/workspace"));
 	const open: string[] = [];
 	let call = 0;
 	let works = 0;
+	let reviews = 0;
 	await seedSession(manager, (log: LogSeed) => {
 		for (const item of steps) {
 			switch (item.kind) {
+				case "review": {
+					// A review run and every review record, with paths in the discussion context.
+					const runId = `run-${reviews++}`;
+					const path = `${cwd("/tmp/volt-profile-redaction/workspace")}/file.ts`;
+					const contextSnapshot = {
+						finding: { title: `${item.text} ${path}`, path },
+						target: { description: path },
+					};
+					const other = { sessionId: "other-session", sessionGeneration: "other-generation" };
+					if (log.drafts.length === 0) {
+						log.hostRecord("review_discussion_link", {
+							discussionId: `link-${runId}`,
+							runId: "source-run",
+							findingId: "finding",
+							source: other,
+							contextSnapshot,
+						});
+					}
+					log.hostRecord("work_started", {
+						workId: runId,
+						kind: "review",
+						title: `Review ${item.text}`.slice(0, 200),
+						input: { action: "review.uncommitted", target: path },
+						cancellable: true,
+						delivery: "none",
+						resume: false,
+						state: "running",
+					});
+					log.hostRecord("review_general", { runId, general: other });
+					log.hostRecord("review_alias", { runId: `alias-${runId}`, source: other });
+					log.hostRecord("review_discussion", {
+						discussionId: `discussion-${runId}`,
+						runId,
+						findingId: "finding",
+						contextSnapshot,
+						child: { sessionId: `child-${runId}`, sessionGeneration: "child-generation" },
+						requestId: `request-${runId}`,
+						kickoffClientMessageId: `kickoff-${runId}`,
+					});
+					log.hostRecord("review_discussion_reset", {
+						discussionId: `discussion-${runId}`,
+						child: { sessionId: `next-${runId}`, sessionGeneration: "next-generation" },
+						requestId: `reset-${runId}`,
+						kickoffClientMessageId: `reset-kickoff-${runId}`,
+					});
+					break;
+				}
 				case "work": {
 					// Work whose input, child locator, progress, output, and data name the workspace.
 					const workId = `work-${works++}`;
@@ -122,7 +176,8 @@ describe("profile redaction", () => {
 				const source = sessionProjectionSource(manager);
 				for (const entry of manager.committedEntriesAfter(0)) {
 					const projected = projectEntry(entry, source, localProfile);
-					expect(projected).toBeDefined();
+					// Review records are host state: even the local profile never sends them.
+					expect(projected === undefined).toBe(REVIEW_RECORD.test(entry.type));
 					if (!projected) continue;
 					const frame: HostFrame = { type: "entry", subscriptionId: "s", entry: projected };
 					expect(localProfile.redactor().redact(frame)).toBe(frame);
@@ -164,6 +219,7 @@ describe("profile redaction", () => {
 			fc.record({ kind: fc.constant("custom" as const), value: prose }),
 			fc.record({ kind: fc.constant("label" as const), text: fc.string({ minLength: 1, maxLength: 10 }) }),
 			fc.record({ kind: fc.constant("work" as const), text: prose, finish: fc.boolean() }),
+			fc.record({ kind: fc.constant("review" as const), text: prose }),
 		);
 		const leaks = (frame: HostFrame | undefined): string[] => {
 			const wire = JSON.stringify(frame ?? null);
@@ -195,12 +251,15 @@ describe("profile redaction", () => {
 					const projected = manager
 						.committedEntriesAfter(0)
 						.flatMap((entry) => projectEntry(entry, source, profile) ?? []);
+					expect(projected.filter((entry) => REVIEW_RECORD.test(entry.type))).toEqual([]);
 					for (const entry of projected) {
 						expect(leaks(redactor.redact({ type: "entry", subscriptionId: "s", entry }))).toEqual([]);
 						// Work reaches the device without its input, child locator, output text, or data.
 						if (entry.type === "work_started") {
 							expect(entry.payload?.input).toBeNull();
-							expect(entry.payload?.child).toEqual({ conversation: "child-session" });
+							if (entry.payload?.kind === "job") {
+								expect(entry.payload.child).toEqual({ conversation: "child-session" });
+							}
 						}
 						if (entry.type === "work_finished") {
 							expect(entry.payload?.result?.output?.text).toBe("");

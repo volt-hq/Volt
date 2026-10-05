@@ -36,7 +36,6 @@ import {
 	type SessionStoreClientInput,
 	type SessionStoreCommitEvidence,
 	type SessionStoreCommitReconciliation,
-	type SessionStoreCreateReviewDiscussionInput,
 	type SessionStoreCreateSessionInput,
 	type SessionStoreDeleteSessionInput,
 	type SessionStoreDeleteSessionResult,
@@ -46,14 +45,8 @@ import {
 	type SessionStoreInfo,
 	type SessionStoreReadEntriesInput,
 	type SessionStoreReadEntriesResult,
-	type SessionStoreRegisterReviewAnchorInput,
-	type SessionStoreReplaceReviewGeneralInput,
-	type SessionStoreResetReviewDiscussionInput,
-	type SessionStoreResetReviewDiscussionResult,
-	type SessionStoreReviewAnchor,
-	type SessionStoreReviewDiscussion,
 	type SessionStoreReviewDiscussionChild,
-	type SessionStoreReviewSource,
+	type SessionStoreReviewRun,
 	type SessionStoreSearchChunk,
 	type SessionStoreSearchResult,
 	type SessionStoreSessionIdentity,
@@ -354,19 +347,6 @@ function findSummary(
 }
 
 function insertSession(db: DatabaseSync, input: SessionStoreCreateSessionInput): void {
-	// Historical references are tombstones for exact incarnations, even after session deletion.
-	if (
-		db
-			.prepare(`SELECT 1 FROM review_anchors WHERE source_session_id = ? AND source_session_generation = ?
-		UNION ALL SELECT 1 FROM review_discussion_children WHERE child_session_id = ? AND child_session_generation = ?
-		UNION ALL SELECT 1 FROM review_anchor_aliases WHERE session_id = ? AND session_generation = ? LIMIT 1`)
-			.get(input.id, input.sessionGeneration, input.id, input.sessionGeneration, input.id, input.sessionGeneration)
-	) {
-		throw new SessionStoreError(
-			"review_identity_conflict",
-			"Cannot reuse a historically referenced session incarnation",
-		);
-	}
 	try {
 		db.prepare(
 			`INSERT INTO sessions (
@@ -397,345 +377,200 @@ function insertSession(db: DatabaseSync, input: SessionStoreCreateSessionInput):
 	}
 }
 
-function reviewSourceAvailable(db: DatabaseSync, source: SessionStoreReviewSource): boolean {
-	const summary = findSummary(db, source.sessionId, source.sessionGeneration);
-	return summary !== null && canonicalCwdIdentity(summary.cwd) === source.cwd;
-}
+const REVIEW_DISCUSSION_CHILD_COLUMNS = `discussion_id AS discussionId, run_id AS runId, finding_id AS findingId,
+	session_id AS sourceSessionId, session_generation AS sourceSessionGeneration,
+	child_session_id AS childSessionId, child_session_generation AS childSessionGeneration, ordinal`;
 
-function findReviewAnchor(db: DatabaseSync, runId: string): SessionStoreReviewAnchor | null {
-	const row = db.prepare("SELECT * FROM review_anchors WHERE run_id = ?").get(runId);
-	if (!row) return null;
-	const source = {
-		sessionId: sqlString(row, "source_session_id"),
-		sessionGeneration: sqlString(row, "source_session_generation"),
-		cwd: sqlString(row, "cwd"),
-	};
-	const general = {
-		sessionId: sqlString(row, "general_session_id"),
-		sessionGeneration: sqlString(row, "general_session_generation"),
-	};
+function reviewDiscussionChildFromRow(row: Record<string, unknown>): SessionStoreReviewDiscussionChild {
 	return {
-		runId,
-		source,
-		createdAt: sqlString(row, "created_at"),
-		sourceAvailable: reviewSourceAvailable(db, source),
-		general,
-		generalRevision: sqlInteger(row, "general_revision"),
-		generalAvailable: reviewSourceAvailable(db, { ...general, cwd: source.cwd }),
-	};
-}
-
-function resolveReviewAnchor(
-	db: DatabaseSync,
-	runId: string,
-	member: SessionStoreReviewSource,
-): SessionStoreReviewAnchor | null {
-	const anchor = findReviewAnchor(db, runId);
-	if (
-		!anchor ||
-		anchor.source.cwd !== canonicalCwdIdentity(member.cwd) ||
-		!reviewSourceAvailable(db, { ...member, cwd: anchor.source.cwd })
-	)
-		return null;
-	const canonical =
-		anchor.source.sessionId === member.sessionId && anchor.source.sessionGeneration === member.sessionGeneration;
-	const alias = db
-		.prepare("SELECT 1 FROM review_anchor_aliases WHERE run_id = ? AND session_id = ? AND session_generation = ?")
-		.get(runId, member.sessionId, member.sessionGeneration);
-	return canonical || alias ? anchor : null;
-}
-
-function registerReviewAlias(
-	runId: string,
-	member: SessionStoreReviewSource,
-	alias: SessionStoreReviewSource,
-): SessionStoreReviewAnchor {
-	const db = requireDatabase();
-	return withTransaction(db, () => {
-		const anchor = resolveReviewAnchor(db, runId, member);
-		if (!anchor)
-			throw new SessionStoreError("review_identity_conflict", "Review handoff is not owned by this session");
-		requireAvailableReviewSource(anchor);
-		if (anchor.source.cwd !== canonicalCwdIdentity(alias.cwd))
-			throw new SessionStoreError("review_cwd_mismatch", "Review handoff cwd mismatch");
-		if (!reviewSourceAvailable(db, { ...alias, cwd: anchor.source.cwd }))
-			throw new SessionStoreError("review_source_unavailable", "Review handoff session is unavailable");
-		if (
-			db
-				.prepare(
-					"SELECT 1 FROM review_discussion_children WHERE child_session_id = ? AND child_session_generation = ?",
-				)
-				.get(alias.sessionId, alias.sessionGeneration)
-		)
-			throw new SessionStoreError(
-				"review_identity_conflict",
-				"Discussion children cannot become source authorities",
-			);
-		db.prepare(
-			"INSERT OR IGNORE INTO review_anchor_aliases (run_id, session_id, session_generation) VALUES (?, ?, ?)",
-		).run(runId, alias.sessionId, alias.sessionGeneration);
-		return anchor;
-	});
-}
-
-/** Read-only membership includes historical finding children, never canonical write authority. */
-function resolveReviewGeneral(
-	db: DatabaseSync,
-	runId: string,
-	member: SessionStoreReviewSource,
-): SessionStoreReviewAnchor | null {
-	const anchor = findReviewAnchor(db, runId);
-	if (
-		!anchor ||
-		anchor.source.cwd !== canonicalCwdIdentity(member.cwd) ||
-		!reviewSourceAvailable(db, { ...member, cwd: anchor.source.cwd })
-	)
-		return null;
-	if (resolveReviewAnchor(db, runId, member)) return anchor;
-	const child = db
-		.prepare(`SELECT 1 FROM review_discussion_children c
-		JOIN review_discussions d ON d.discussion_id = c.discussion_id
-		WHERE d.run_id = ? AND c.child_session_id = ? AND c.child_session_generation = ?`)
-		.get(runId, member.sessionId, member.sessionGeneration);
-	return child ? anchor : null;
-}
-
-function replaceReviewGeneral(input: SessionStoreReplaceReviewGeneralInput): SessionStoreReviewAnchor {
-	const db = requireDatabase();
-	return withTransaction(db, () => {
-		const anchor = resolveReviewAnchor(db, input.runId, input.member);
-		if (
-			!anchor ||
-			!anchor.generalAvailable ||
-			anchor.generalRevision !== input.expectedRevision ||
-			anchor.general.sessionId !== input.member.sessionId ||
-			anchor.general.sessionGeneration !== input.member.sessionGeneration
-		)
-			throw new SessionStoreError("review_identity_conflict", "Only the exact current General can replace itself");
-		const replacement = input.replacement;
-		if (
-			anchor.source.cwd !== canonicalCwdIdentity(replacement.cwd) ||
-			!reviewSourceAvailable(db, { ...replacement, cwd: anchor.source.cwd })
-		)
-			throw new SessionStoreError("review_source_unavailable", "Replacement General is unavailable");
-		if (
-			db
-				.prepare(
-					"SELECT 1 FROM review_discussion_children WHERE child_session_id = ? AND child_session_generation = ?",
-				)
-				.get(replacement.sessionId, replacement.sessionGeneration) ||
-			(replacement.sessionId === input.member.sessionId &&
-				replacement.sessionGeneration === input.member.sessionGeneration)
-		)
-			throw new SessionStoreError(
-				"review_identity_conflict",
-				"Replacement General must be a new source conversation",
-			);
-		db.prepare(
-			"INSERT OR IGNORE INTO review_anchor_aliases (run_id, session_id, session_generation) VALUES (?, ?, ?)",
-		).run(input.runId, replacement.sessionId, replacement.sessionGeneration);
-		db.prepare(`UPDATE review_anchors SET general_session_id = ?, general_session_generation = ?, general_revision = general_revision + 1
-			WHERE run_id = ? AND general_revision = ?`).run(
-			replacement.sessionId,
-			replacement.sessionGeneration,
-			input.runId,
-			input.expectedRevision,
-		);
-		return findReviewAnchor(db, input.runId)!;
-	});
-}
-
-function assertReviewSource(anchor: Pick<SessionStoreReviewAnchor, "source">, source: SessionStoreReviewSource): void {
-	if (anchor.source.sessionId !== source.sessionId || anchor.source.sessionGeneration !== source.sessionGeneration) {
-		throw new SessionStoreError("review_identity_conflict", "Review run belongs to a different source incarnation");
-	}
-	if (anchor.source.cwd !== canonicalCwdIdentity(source.cwd)) {
-		throw new SessionStoreError("review_cwd_mismatch", "Review source cwd does not match its canonical anchor");
-	}
-}
-
-function requireAvailableReviewSource(anchor: Pick<SessionStoreReviewAnchor, "sourceAvailable">): void {
-	if (!anchor.sourceAvailable)
-		throw new SessionStoreError(
-			"review_source_unavailable",
-			"Review source is missing, deleted, stale or has a different cwd",
-		);
-}
-
-function registerReviewAnchor(input: SessionStoreRegisterReviewAnchorInput): SessionStoreReviewAnchor {
-	const db = requireDatabase();
-	return withTransaction(db, () => {
-		const existing = findReviewAnchor(db, input.runId);
-		if (existing) {
-			assertReviewSource(existing, input.source);
-			requireAvailableReviewSource(existing);
-			return existing;
-		}
-		const source = { ...input.source, cwd: canonicalCwdIdentity(input.source.cwd) };
-		const summary = findSummary(db, source.sessionId, source.sessionGeneration);
-		if (!summary)
-			throw new SessionStoreError("review_source_unavailable", "Review source incarnation does not exist");
-		if (canonicalCwdIdentity(summary.cwd) !== source.cwd)
-			throw new SessionStoreError("review_cwd_mismatch", "Review source cwd mismatch");
-		db.prepare(
-			`INSERT INTO review_anchors (run_id, source_session_id, source_session_generation, cwd, created_at,
-			general_session_id, general_session_generation, general_revision) VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
-		).run(
-			input.runId,
-			source.sessionId,
-			source.sessionGeneration,
-			source.cwd,
-			input.createdAt,
-			source.sessionId,
-			source.sessionGeneration,
-		);
-		return findReviewAnchor(db, input.runId)!;
-	});
-}
-
-function reviewChildFromRow(
-	db: DatabaseSync,
-	row: Record<string, unknown>,
-	cwd: string,
-): SessionStoreReviewDiscussionChild {
-	const child: SessionStoreSessionIdentity = {
-		sessionId: sqlString(row, "child_session_id"),
-		sessionGeneration: sqlString(row, "child_session_generation"),
-	};
-	const summary = findSummary(db, child.sessionId, child.sessionGeneration);
-	return {
-		discussionId: sqlString(row, "discussion_id"),
+		discussionId: sqlString(row, "discussionId"),
+		runId: sqlString(row, "runId"),
+		findingId: sqlString(row, "findingId"),
+		source: {
+			sessionId: sqlString(row, "sourceSessionId"),
+			sessionGeneration: sqlString(row, "sourceSessionGeneration"),
+		},
+		child: {
+			sessionId: sqlString(row, "childSessionId"),
+			sessionGeneration: sqlString(row, "childSessionGeneration"),
+		},
 		ordinal: sqlInteger(row, "ordinal"),
-		child,
-		createdAt: sqlString(row, "created_at"),
-		requestId: sqlString(row, "request_id"),
-		kickoffClientMessageId: sqlString(row, "kickoff_client_message_id"),
-		available: summary !== null && canonicalCwdIdentity(summary.cwd) === cwd,
 	};
 }
 
-function reviewDiscussionFromRow(db: DatabaseSync, row: Record<string, unknown>): SessionStoreReviewDiscussion {
-	const discussionId = sqlString(row, "discussion_id");
-	const runId = sqlString(row, "run_id");
-	const anchor = findReviewAnchor(db, runId);
-	const childRow = db
-		.prepare("SELECT * FROM review_discussion_children WHERE discussion_id = ? AND ordinal = ?")
-		.get(discussionId, sqlInteger(row, "current_ordinal"));
-	if (!anchor || !childRow)
-		throw new SessionStoreError("constraint_failed", "Review discussion has missing canonical relations");
-	return {
-		discussionId,
-		runId,
-		findingId: sqlString(row, "finding_id"),
-		source: anchor.source,
-		sourceAvailable: anchor.sourceAvailable,
-		contextSnapshot: parseCanonicalSessionStoreJson(sqlString(row, "context_snapshot_json"), "Review context"),
-		createdAt: sqlString(row, "created_at"),
-		current: reviewChildFromRow(db, childRow, anchor.source.cwd),
-	};
-}
-
-function requireReviewDiscussion(db: DatabaseSync, discussionId: string): SessionStoreReviewDiscussion {
-	const row = db.prepare("SELECT * FROM review_discussions WHERE discussion_id = ?").get(discussionId);
-	if (!row) throw new SessionStoreError("review_discussion_not_found", "Review discussion does not exist");
-	return reviewDiscussionFromRow(db, row);
-}
-
-function reserveReviewChild(
-	db: DatabaseSync,
-	input: SessionStoreCreateReviewDiscussionInput | SessionStoreResetReviewDiscussionInput,
-	cwd: string,
-	ordinal: number,
-): void {
-	if (canonicalCwdIdentity(input.child.cwd) !== cwd)
-		throw new SessionStoreError("review_cwd_mismatch", "Discussion child must use the canonical source cwd");
-	insertSession(db, input.child);
-	db.prepare(`INSERT INTO review_discussion_children (discussion_id, ordinal, child_session_id, child_session_generation,
-		request_id, request_json, kickoff_client_message_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
-		input.discussionId,
-		ordinal,
-		input.child.id,
-		input.child.sessionGeneration,
-		input.requestId,
-		stringifyCanonicalSessionStoreJson(input, "Review request"),
-		input.kickoffClientMessageId,
-		input.createdAt,
-	);
-}
-
-function createReviewDiscussion(input: SessionStoreCreateReviewDiscussionInput): SessionStoreReviewDiscussion {
-	const db = requireDatabase();
-	return withTransaction(db, () => {
-		const anchor = findReviewAnchor(db, input.runId);
-		if (!anchor)
-			throw new SessionStoreError(
-				"review_anchor_not_found",
-				"Canonical review anchor must be registered before creating discussions",
-			);
-		assertReviewSource(anchor, input.source);
-		requireAvailableReviewSource(anchor);
-		if (canonicalCwdIdentity(input.child.cwd) !== anchor.source.cwd)
-			throw new SessionStoreError("review_cwd_mismatch", "Discussion child cwd mismatch");
-		const existing = db
-			.prepare("SELECT * FROM review_discussions WHERE run_id = ? AND finding_id = ?")
-			.get(input.runId, input.findingId);
-		if (existing) return reviewDiscussionFromRow(db, existing);
-		if (db.prepare("SELECT 1 FROM review_discussions WHERE discussion_id = ?").get(input.discussionId)) {
-			throw new SessionStoreError("review_identity_conflict", "Discussion id already belongs to another finding");
-		}
-		db.prepare(`INSERT INTO review_discussions (discussion_id, run_id, finding_id, context_snapshot_json, created_at, current_ordinal)
-			VALUES (?, ?, ?, ?, ?, 1)`).run(
-			input.discussionId,
-			input.runId,
-			input.findingId,
-			stringifyCanonicalSessionStoreJson(input.contextSnapshot, "Review context"),
-			input.createdAt,
-		);
-		reserveReviewChild(db, input, anchor.source.cwd, 1);
-		return requireReviewDiscussion(db, input.discussionId);
-	});
-}
-
-function resetReviewDiscussion(input: SessionStoreResetReviewDiscussionInput): SessionStoreResetReviewDiscussionResult {
-	const db = requireDatabase();
-	return withTransaction(db, () => {
-		const discussion = requireReviewDiscussion(db, input.discussionId);
-		const anchor = {
-			runId: discussion.runId,
-			source: discussion.source,
-			createdAt: discussion.createdAt,
-			sourceAvailable: discussion.sourceAvailable,
-		};
-		assertReviewSource(anchor, input.source);
-		const previous = db
-			.prepare("SELECT * FROM review_discussion_children WHERE discussion_id = ? AND request_id = ?")
-			.get(input.discussionId, input.requestId);
-		if (previous) {
-			if (
-				sqlString(previous, "request_json") !== stringifyCanonicalSessionStoreJson(input, "Review reset request")
-			) {
-				throw new SessionStoreError(
-					"review_identity_conflict",
-					"Review request id already identifies a different operation",
-				);
+function findReviewRun(db: DatabaseSync, runId: string): SessionStoreReviewRun | null {
+	const row = db
+		.prepare(
+			`SELECT session_id AS sessionId, session_generation AS sessionGeneration,
+				general_session_id AS generalSessionId, general_session_generation AS generalSessionGeneration
+			FROM review_run_index WHERE run_id = ?`,
+		)
+		.get(runId);
+	return row
+		? {
+				runId,
+				source: { sessionId: sqlString(row, "sessionId"), sessionGeneration: sqlString(row, "sessionGeneration") },
+				general: {
+					sessionId: sqlString(row, "generalSessionId"),
+					sessionGeneration: sqlString(row, "generalSessionGeneration"),
+				},
 			}
-			return { status: "reset", child: reviewChildFromRow(db, previous, discussion.source.cwd) };
-		}
-		requireAvailableReviewSource(anchor);
+		: null;
+}
+
+function findReviewDiscussion(db: DatabaseSync, discussionId: string): SessionStoreReviewDiscussionChild | null {
+	const row = db
+		.prepare(
+			`SELECT ${REVIEW_DISCUSSION_CHILD_COLUMNS} FROM review_discussion_index
+			WHERE discussion_id = ? ORDER BY ordinal DESC LIMIT 1`,
+		)
+		.get(discussionId);
+	return row ? reviewDiscussionChildFromRow(row) : null;
+}
+
+function findReviewDiscussionChild(
+	db: DatabaseSync,
+	child: SessionStoreSessionIdentity,
+): SessionStoreReviewDiscussionChild | null {
+	const row = db
+		.prepare(
+			`SELECT ${REVIEW_DISCUSSION_CHILD_COLUMNS} FROM review_discussion_index
+			WHERE child_session_id = ? AND child_session_generation = ?`,
+		)
+		.get(child.sessionId, child.sessionGeneration);
+	return row ? reviewDiscussionChildFromRow(row) : null;
+}
+
+function reviewIndexError(message: string): SessionStoreError {
+	return new SessionStoreError("constraint_failed", message);
+}
+
+/** That review run `runId` is anchored by exactly `source`, per the run index. */
+function requireReviewAnchor(db: DatabaseSync, runId: string, source: SessionStoreSessionIdentity): void {
+	const run = findReviewRun(db, runId);
+	if (run?.source.sessionId !== source.sessionId || run.source.sessionGeneration !== source.sessionGeneration) {
+		throw reviewIndexError(`Review run ${JSON.stringify(runId)} is not anchored by the named source`);
+	}
+}
+
+/**
+ * Maintain the review indexes for the review records one transaction appends
+ * to session `self`, and refuse records that do not fit the other logs: a run
+ * anchored twice, a General or discussion of a run this log does not anchor,
+ * an alias or discussion link to a source that does not anchor the run, a
+ * second discussion of a finding, a reset of a discussion another log owns,
+ * or a child already used by a discussion. The indexes are derived from the
+ * logs and grant no authority; these checks keep the logs consistent with
+ * each other for every writer.
+ */
+function indexReviewEntries(
+	db: DatabaseSync,
+	self: SessionStoreSessionIdentity,
+	entries: readonly SessionEntry[],
+): void {
+	const insertChild = db.prepare(
+		`INSERT INTO review_discussion_index (discussion_id, ordinal, run_id, finding_id, session_id, session_generation,
+			child_session_id, child_session_generation, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+	);
+	const assertNewChild = (child: SessionStoreSessionIdentity): void => {
 		if (
-			discussion.current.child.sessionId !== input.expectedChild.sessionId ||
-			discussion.current.child.sessionGeneration !== input.expectedChild.sessionGeneration
+			(child.sessionId === self.sessionId && child.sessionGeneration === self.sessionGeneration) ||
+			findReviewDiscussionChild(db, child)
 		) {
-			return { status: "conflict", child: discussion.current };
+			throw reviewIndexError("A review discussion child must be a new conversation");
 		}
-		// A deleted current child can be reset, but never silently rebound to a reused id.
-		const ordinal = discussion.current.ordinal + 1;
-		reserveReviewChild(db, input, discussion.source.cwd, ordinal);
-		db.prepare(
-			"UPDATE review_discussions SET current_ordinal = ? WHERE discussion_id = ? AND current_ordinal = ?",
-		).run(ordinal, input.discussionId, discussion.current.ordinal);
-		return { status: "reset", child: requireReviewDiscussion(db, input.discussionId).current };
-	});
+	};
+	for (const entry of entries) {
+		switch (entry.type) {
+			case "work_started":
+				if (entry.kind !== "review") break;
+				if (findReviewRun(db, entry.workId)) {
+					throw reviewIndexError(`Review run ${JSON.stringify(entry.workId)} is already anchored`);
+				}
+				db.prepare(
+					`INSERT INTO review_run_index (run_id, session_id, session_generation, general_session_id,
+						general_session_generation) VALUES (?, ?, ?, ?, ?)`,
+				).run(entry.workId, self.sessionId, self.sessionGeneration, self.sessionId, self.sessionGeneration);
+				break;
+			case "review_general": {
+				requireReviewAnchor(db, entry.runId, self);
+				const general = findSummary(db, entry.general.sessionId, entry.general.sessionGeneration);
+				const source = findSummary(db, self.sessionId, self.sessionGeneration);
+				if (
+					!general ||
+					!source ||
+					canonicalCwdIdentity(general.cwd) !== canonicalCwdIdentity(source.cwd) ||
+					findReviewDiscussionChild(db, entry.general)
+				) {
+					throw reviewIndexError("A review General must be a conversation in its source's cwd, not a discussion");
+				}
+				db.prepare(
+					"UPDATE review_run_index SET general_session_id = ?, general_session_generation = ? WHERE run_id = ?",
+				).run(entry.general.sessionId, entry.general.sessionGeneration, entry.runId);
+				break;
+			}
+			case "review_alias":
+			case "review_discussion_link":
+				if (entry.source.sessionId === self.sessionId) {
+					throw reviewIndexError("A review record cannot name its own conversation as the source");
+				}
+				requireReviewAnchor(db, entry.runId, entry.source);
+				break;
+			case "review_discussion":
+				requireReviewAnchor(db, entry.runId, self);
+				if (
+					db
+						.prepare(
+							"SELECT 1 FROM review_discussion_index WHERE discussion_id = ? OR (run_id = ? AND finding_id = ?)",
+						)
+						.get(entry.discussionId, entry.runId, entry.findingId)
+				) {
+					throw reviewIndexError("The review discussion or its finding's discussion already exists");
+				}
+				assertNewChild(entry.child);
+				insertChild.run(
+					entry.discussionId,
+					1,
+					entry.runId,
+					entry.findingId,
+					self.sessionId,
+					self.sessionGeneration,
+					entry.child.sessionId,
+					entry.child.sessionGeneration,
+					entry.requestId,
+				);
+				break;
+			case "review_discussion_reset": {
+				const current = findReviewDiscussion(db, entry.discussionId);
+				if (
+					current?.source.sessionId !== self.sessionId ||
+					current.source.sessionGeneration !== self.sessionGeneration
+				) {
+					throw reviewIndexError("Only a review discussion's source can reset it");
+				}
+				if (
+					db
+						.prepare("SELECT 1 FROM review_discussion_index WHERE discussion_id = ? AND request_id = ?")
+						.get(entry.discussionId, entry.requestId)
+				) {
+					throw reviewIndexError("The review discussion reset request was already recorded");
+				}
+				assertNewChild(entry.child);
+				insertChild.run(
+					entry.discussionId,
+					current.ordinal + 1,
+					current.runId,
+					current.findingId,
+					self.sessionId,
+					self.sessionGeneration,
+					entry.child.sessionId,
+					entry.child.sessionGeneration,
+					entry.requestId,
+				);
+				break;
+			}
+		}
+	}
 }
 
 function createSession(input: SessionStoreCreateSessionInput): SessionStoreSessionSummary {
@@ -1348,6 +1183,7 @@ function applyTransactionInCurrentTransaction(
 		);
 		insertionOrdinal += 1;
 	}
+	indexReviewEntries(db, { sessionId: input.sessionId, sessionGeneration: input.sessionGeneration }, canonicalEntries);
 
 	const upsertClientInput = db.prepare(
 		`INSERT INTO client_inputs (
@@ -1492,72 +1328,16 @@ function closeDatabase(): null {
 
 function execute(operation: SessionStoreWorkerOperation): unknown {
 	switch (operation.kind) {
-		case "replace_review_general":
-			return replaceReviewGeneral(operation.input);
-		case "resolve_review_general":
-			return withDeferredReadTransaction(requireDatabase(), () =>
-				resolveReviewGeneral(requireDatabase(), operation.runId, operation.member),
-			);
-		case "register_review_alias":
-			return registerReviewAlias(operation.runId, operation.member, operation.alias);
-		case "resolve_review_anchor":
-			return withDeferredReadTransaction(requireDatabase(), () =>
-				resolveReviewAnchor(requireDatabase(), operation.runId, operation.member),
-			);
-		case "register_review_anchor":
-			return registerReviewAnchor(operation.input);
-		case "create_review_discussion":
-			return createReviewDiscussion(operation.input);
-		case "reset_review_discussion":
-			return resetReviewDiscussion(operation.input);
-		case "find_review_anchor":
-			return withDeferredReadTransaction(requireDatabase(), () =>
-				findReviewAnchor(requireDatabase(), operation.runId),
-			);
-		case "find_review_discussion_by_id":
+		case "find_review_run":
+			return withDeferredReadTransaction(requireDatabase(), () => findReviewRun(requireDatabase(), operation.runId));
 		case "find_review_discussion":
-		case "find_review_discussion_by_child":
-		case "list_review_discussions":
-		case "list_review_discussion_history": {
-			const db = requireDatabase();
-			return withDeferredReadTransaction(db, () => {
-				if (operation.kind === "find_review_discussion_by_id") {
-					const row = db
-						.prepare("SELECT * FROM review_discussions WHERE discussion_id = ?")
-						.get(operation.discussionId);
-					return row ? reviewDiscussionFromRow(db, row) : null;
-				}
-				if (operation.kind === "find_review_discussion") {
-					const row = db
-						.prepare("SELECT * FROM review_discussions WHERE run_id = ? AND finding_id = ?")
-						.get(operation.runId, operation.findingId);
-					return row ? reviewDiscussionFromRow(db, row) : null;
-				}
-				if (operation.kind === "find_review_discussion_by_child") {
-					const row = db
-						.prepare(
-							"SELECT * FROM review_discussion_children WHERE child_session_id = ? AND child_session_generation = ?",
-						)
-						.get(operation.child.sessionId, operation.child.sessionGeneration);
-					if (!row) return null;
-					const discussion = requireReviewDiscussion(db, sqlString(row, "discussion_id"));
-					return { discussion, child: reviewChildFromRow(db, row, discussion.source.cwd) };
-				}
-				if (operation.kind === "list_review_discussions") {
-					return db
-						.prepare("SELECT * FROM review_discussions WHERE run_id = ? ORDER BY discussion_id LIMIT ? OFFSET ?")
-						.all(operation.runId, operation.limit, operation.offset)
-						.map((row) => reviewDiscussionFromRow(db, row));
-				}
-				const discussion = requireReviewDiscussion(db, operation.discussionId);
-				return db
-					.prepare(
-						"SELECT * FROM review_discussion_children WHERE discussion_id = ? ORDER BY ordinal LIMIT ? OFFSET ?",
-					)
-					.all(operation.discussionId, operation.limit, operation.offset)
-					.map((row) => reviewChildFromRow(db, row, discussion.source.cwd));
-			});
-		}
+			return withDeferredReadTransaction(requireDatabase(), () =>
+				findReviewDiscussion(requireDatabase(), operation.discussionId),
+			);
+		case "find_review_discussion_child":
+			return withDeferredReadTransaction(requireDatabase(), () =>
+				findReviewDiscussionChild(requireDatabase(), operation.child),
+			);
 		case "initialize":
 			return openDatabase();
 		case "verify_foreign_keys":

@@ -17,9 +17,9 @@ import {
 } from "../../../src/core/protocol/intents/index.ts";
 import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
-import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../../src/core/review-discussion-policy.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
+import { registerReviewHandoffAliases } from "../../../src/core/review-links.ts";
 import {
 	appendReviewRun,
 	appendReviewRunDurably,
@@ -32,6 +32,7 @@ import { SQLiteSessionStoreClient } from "../../../src/core/session-store/client
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
+import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -202,6 +203,7 @@ async function fixture(models?: FauxModelDefinition[]) {
 	};
 	const source = await own(await SessionManager.create(root, join(root, "sessions")));
 	await source.session.setSessionName("Source");
+	await anchorLiveReviewRun(source.session, "review-341");
 	await appendReviewRunDurably(source.session.sessionWriter, record());
 	const service = new HostReviewDiscussionService({
 		findRuntime: (ref) =>
@@ -328,6 +330,25 @@ describe("Regression #341 host sibling lifecycle", () => {
 			api.start("review-341", ["f1"], "no-auth", { model: { provider, modelId: "chat" } }),
 		).rejects.toThrow("unavailable");
 		expect((await api.list("review-341")).discussions).toEqual([]);
+	});
+
+	it("fails a finding whose context exceeds the bound without leaving a child session", async () => {
+		const { source, api, root } = await fixture();
+		const oversized = record();
+		oversized.runId = "review-oversized";
+		oversized.result!.findings[0]!.body = "x".repeat(70_000);
+		await anchorLiveReviewRun(source.session, oversized.runId);
+		await appendReviewRunDurably(source.session.sessionWriter, oversized);
+		const before = await SessionManager.list(root, join(root, "sessions"), undefined, {
+			includeMessageFreeDurable: true,
+		});
+		expect((await api.start(oversized.runId, ["f1"], "oversized")).results).toEqual([
+			{ findingId: "f1", outcome: "failed", errorCode: "launch_failed" },
+		]);
+		expect(
+			await SessionManager.list(root, join(root, "sessions"), undefined, { includeMessageFreeDurable: true }),
+		).toHaveLength(before.length);
+		expect((await api.list(oversized.runId)).discussions).toEqual([]);
 	});
 
 	it("rejects malformed nested discussion configuration at the intent boundary", () => {
@@ -464,9 +485,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		expect((await second.list("review-341")).discussions).toHaveLength(4);
 		expect(gates).toHaveLength(4);
 		const child = runtimes[1]!;
-		expect(child.session.sessionManager.getReviewDiscussion()?.discussion.source.sessionId).toBe(
-			source.session.sessionId,
-		);
+		expect(child.session.sessionManager.getReviewDiscussion()?.source.sessionId).toBe(source.session.sessionId);
 		expect((await child.reviewDiscussions!.source())?.sourceSessionId).toBe(source.session.sessionId);
 		const abort = child.session.abort();
 		for (const release of gates) release();
@@ -639,7 +658,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		await appendReviewRun(target.logWriter, record());
 		const alias = await own(target);
 		await expect(service.forRuntime(alias.conversation).list("review-341")).rejects.toThrow("not owned");
-		await registerReviewHandoffAliases(source.session.sessionManager, target, ["review-341"]);
+		await registerReviewHandoffAliases(source.session.sessionManager, alias.session.sessionWriter, ["review-341"]);
 		expect(
 			successful(await service.forRuntime(alias.conversation).start("review-341", ["f1"], "alias"))[0]!.discussionId,
 		).toBe(first.discussionId);
@@ -688,20 +707,19 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const store = await SQLiteSessionStoreClient.open(join(root, "sessions"));
 		try {
 			const sourceRef = source.session.sessionRef!;
+			// Runs and children are exact incarnations: another generation of either is neither.
+			expect(await store.findReviewRun("review-341")).toMatchObject({
+				source: { sessionId: sourceRef.sessionId, sessionGeneration: sourceRef.sessionGeneration },
+			});
 			expect(
-				await store.resolveReviewAnchor("review-341", {
-					sessionId: sourceRef.sessionId,
-					sessionGeneration: "stale",
-					cwd: root,
-				}),
+				await store.findReviewDiscussionChild({ sessionId: childRef.sessionId, sessionGeneration: "stale" }),
 			).toBeNull();
 			expect(
-				await store.resolveReviewAnchor("review-341", {
-					sessionId: sourceRef.sessionId,
-					sessionGeneration: sourceRef.sessionGeneration,
-					cwd: join(root, "other"),
+				await store.findReviewDiscussionChild({
+					sessionId: childRef.sessionId,
+					sessionGeneration: childRef.sessionGeneration,
 				}),
-			).toBeNull();
+			).toMatchObject({ discussionId: first!.discussionId, ordinal: 1 });
 		} finally {
 			await store.close();
 		}

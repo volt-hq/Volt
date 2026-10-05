@@ -9,7 +9,6 @@ import {
 	digestSessionStoreTransactionPayload,
 	stringifyCanonicalSessionStoreJson,
 } from "../../src/core/session-store/canonical-json.ts";
-import { REVIEW_DISCUSSION_SCHEMA_SQL } from "../../src/core/session-store/discussion-schema.ts";
 import {
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreTransactionPayload,
@@ -17,27 +16,34 @@ import {
 } from "../../src/core/session-store/index.ts";
 import {
 	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
+	SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL,
 	SESSION_STORE_SCHEMA_SQL,
 	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
 } from "../../src/core/session-store/schema.ts";
 import {
 	initializeSessionStoreSchema,
 	SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL,
+	SESSION_STORE_V5_REVIEW_UPGRADE_SQL,
 } from "../../src/core/session-store/schema-migration.ts";
 import { SESSION_STORE_V1_SCHEMA_SQL } from "../../src/core/session-store/schema-v1.ts";
 import { SESSION_STORE_V2_SCHEMA_SQL } from "../../src/core/session-store/schema-v2.ts";
 import { SESSION_STORE_V3_SCHEMA_SQL } from "../../src/core/session-store/schema-v3.ts";
+import { SESSION_STORE_V4_SCHEMA_SQL } from "../../src/core/session-store/schema-v4.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
-const VERSIONS = [1, 2, 3] as const;
+const VERSIONS = [1, 2, 3, 4] as const;
 type LegacyVersion = (typeof VERSIONS)[number];
 const LEGACY_SCHEMA_SQL: Record<LegacyVersion, string> = {
 	1: SESSION_STORE_V1_SCHEMA_SQL,
 	2: SESSION_STORE_V2_SCHEMA_SQL,
 	3: SESSION_STORE_V3_SCHEMA_SQL,
+	4: SESSION_STORE_V4_SCHEMA_SQL,
 };
+/** The tables v2 added for review state and v5 dropped. */
+const REVIEW_TABLES = ["review_anchors", "review_anchor_aliases", "review_discussions", "review_discussion_children"];
 const [CLIENT_INPUT_COPY, CLIENT_INPUT_DROP, , CLIENT_INPUT_RESTORE, CLIENT_INPUT_COPY_DROP] =
 	SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL;
+const [DROP_CHILDREN, DROP_DISCUSSIONS, DROP_ALIASES, DROP_ANCHORS] = SESSION_STORE_V5_REVIEW_UPGRADE_SQL;
 const COMMIT_DIGEST = `sha256:${"a".repeat(64)}`;
 const roots: string[] = [];
 const clients: SQLiteSessionStoreClient[] = [];
@@ -68,8 +74,10 @@ function freshSchemaObjects(): Record<string, unknown>[] {
 }
 
 /**
- * Seeds an exact pre-v4 store with one accepted client input. Pre-v3 sessions
- * carry revisions and revision-keyed commit evidence.
+ * Seeds an exact pre-v5 store with one accepted client input, and from v2
+ * on a review run with an alias and a discussion whose child is a session of
+ * the store. Pre-v3 sessions carry revisions and revision-keyed commit
+ * evidence; pre-v4 client inputs have no origin.
  */
 function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[version]): string {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -80,6 +88,7 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 		const digest = `sha256:${createHash("sha256")
 			.update(canonical(schemaObjects(db)))
 			.digest("hex")}`;
+		db.exec("BEGIN");
 		for (const [key, value] of Object.entries({
 			schema_id: `volt-session-store-v${version}`,
 			schema_digest: digest,
@@ -89,8 +98,7 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 		})) {
 			db.prepare("INSERT INTO store_metadata VALUES (?, ?)").run(key, canonical(value));
 		}
-		db.exec(`PRAGMA user_version = ${version}`);
-		const revision = version === 3 ? { column: "", value: "" } : { column: " revision,", value: " 1," };
+		const revision = version >= 3 ? { column: "", value: "" } : { column: " revision,", value: " 1," };
 		db.prepare(`INSERT INTO sessions (id, session_generation, format_version, cwd, created_at, updated_at,
 			visible,${revision.column} leaf_entry_id, message_count, first_message) VALUES (?, ?, 5, ?, ?, ?, 1,${revision.value} 'message', 1, 'preserved')`).run(
 			"source",
@@ -137,7 +145,9 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 			canonical(message),
 		);
 		db.prepare(
-			"INSERT INTO client_inputs VALUES ('source', 'client', 'receipt', 'steer', ?, ?, NULL, NULL, 'accepted', NULL, NULL)",
+			version === 4
+				? "INSERT INTO client_inputs VALUES ('source', 'client', 'receipt', 'steer', NULL, ?, ?, NULL, NULL, 'accepted', NULL, NULL)"
+				: "INSERT INTO client_inputs VALUES ('source', 'client', 'receipt', 'steer', ?, ?, NULL, NULL, 'accepted', NULL, NULL)",
 		).run(semanticDigest, canonical(input));
 		db.exec("INSERT INTO search_chunks VALUES ('source', 0, 'message', 'preserved')");
 		db.prepare("INSERT INTO transaction_commits VALUES ('commit', 'source', 'source-generation', ?, 0, 1, ?)").run(
@@ -148,7 +158,15 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 			db.prepare(`INSERT INTO review_anchors (run_id, source_session_id, source_session_generation, cwd,
 				general_session_id, general_session_generation, general_revision, created_at)
 				VALUES ('run', 'source', 'source-generation', ?, 'source', 'source-generation', 0, ?)`).run(dir, NOW);
+			db.exec("INSERT INTO review_anchor_aliases VALUES ('run', 'related', 'related-generation')");
+			db.prepare(`INSERT INTO sessions (id, session_generation, format_version, cwd, created_at, updated_at)
+				VALUES ('child', 'child-generation', 5, ?, ?, ?)`).run(dir, NOW, NOW);
+			db.prepare("INSERT INTO review_discussions VALUES ('discussion', 'run', 'finding', '{}', ?, 1)").run(NOW);
+			db.prepare(`INSERT INTO review_discussion_children VALUES ('discussion', 1, 'child', 'child-generation',
+				'create', '{}', 'kickoff', ?)`).run(NOW);
 		}
+		db.exec("COMMIT");
+		db.exec(`PRAGMA user_version = ${version}`);
 	} finally {
 		db.close();
 	}
@@ -276,9 +294,9 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("exact v1, v2, and v3 to v4 session store migration", () => {
+describe("exact v1 to v4 to v5 session store migration", () => {
 	it.each(VERSIONS)(
-		"upgrades v%i in place, dropping revisions and rebuilding client inputs with origins",
+		"upgrades v%i in place, dropping revisions and the review tables without carrying their rows",
 		async (version) => {
 			const dir = directory();
 			const path = seed(dir, version);
@@ -286,13 +304,14 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 			const before = tableRows(beforeDb);
 			beforeDb.close();
 			const client = await open(dir);
-			expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 4 });
+			expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 5 });
 			const db = new DatabaseSync(path);
 			try {
 				const after = tableRows(db);
-				expect(Object.fromEntries(Object.keys(before).map((table) => [table, after[table]]))).toEqual({
-					...before,
-					...(version === 3
+				const kept = Object.keys(before).filter((table) => !REVIEW_TABLES.includes(table));
+				expect(Object.fromEntries(kept.map((table) => [table, after[table]]))).toEqual({
+					...Object.fromEntries(kept.map((table) => [table, before[table]])),
+					...(version >= 3
 						? {}
 						: {
 								sessions: before.sessions!.map((row) => {
@@ -301,17 +320,25 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 								}),
 								transaction_commits: [],
 							}),
-					client_inputs: before.client_inputs!.map((row) => ({
-						...(row as Record<string, unknown>),
-						origin: null,
-					})),
+					...(version === 4
+						? {}
+						: {
+								client_inputs: before.client_inputs!.map((row) => ({
+									...(row as Record<string, unknown>),
+									origin: null,
+								})),
+							}),
 				});
+				// No review row survives in any form: the derived indexes start empty.
+				for (const table of REVIEW_TABLES) expect(after[table]).toBeUndefined();
+				expect(after.review_run_index).toEqual([]);
+				expect(after.review_discussion_index).toEqual([]);
 				expect(schemaObjects(db)).toEqual(freshSchemaObjects());
 				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'created_at'").get()?.value_json).toBe(
 					canonical(NOW),
 				);
 				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'schema_id'").get()?.value_json).toBe(
-					canonical("volt-session-store-v4"),
+					canonical("volt-session-store-v5"),
 				);
 				expect(db.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe("ok");
 				expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -331,7 +358,7 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 				digest: COMMIT_DIGEST,
 			});
 			// Ordinal-keyed v3 evidence survives; revision-keyed evidence has no ordinal form.
-			expect(evidence.status).toBe(version === 3 ? "committed" : "not_found");
+			expect(evidence.status).toBe(version >= 3 ? "committed" : "not_found");
 			expect(await client.applyTransaction(sessionInfoTransaction(1, "stale"))).toEqual({
 				status: "conflict",
 				actualOrdinal: 2,
@@ -344,8 +371,12 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 			expect((await client.loadSession("source", "source-generation"))?.clientInputs).toMatchObject([
 				{ clientMessageId: "client", origin: null, state: "withdrawn" },
 			]);
-			expect(await client.listReviewDiscussions("absent")).toEqual([]);
-			if (version !== 1) expect(await client.findReviewAnchor("run")).toMatchObject({ generalRevision: 0 });
+			// The pre-v5 run is an unanchored report: no anchor, alias, or discussion linkage remains.
+			expect(await client.findReviewRun("run")).toBeNull();
+			expect(await client.findReviewDiscussion("discussion")).toBeNull();
+			expect(
+				await client.findReviewDiscussionChild({ sessionId: "child", sessionGeneration: "child-generation" }),
+			).toBeNull();
 			const manager = await SessionManager.open({
 				sessionDirectory: dir,
 				storeId: "original-store",
@@ -358,8 +389,22 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 					sessionId: "source",
 					sessionGeneration: "source-generation",
 				});
+				expect(manager.getReviewState().aliases.size).toBe(0);
 			} finally {
 				await manager.closePersistence();
+			}
+			if (version !== 1) {
+				const child = await SessionManager.open({
+					sessionDirectory: dir,
+					storeId: "original-store",
+					sessionId: "child",
+					sessionGeneration: "child-generation",
+				});
+				try {
+					expect(child.getReviewDiscussion()).toBeNull();
+				} finally {
+					await child.closePersistence();
+				}
 			}
 			await client.close();
 			const reopened = await open(dir);
@@ -370,10 +415,10 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 		},
 	);
 
-	it("creates fresh v4 stores and leaves repeat opens unchanged", async () => {
+	it("creates fresh v5 stores and leaves repeat opens unchanged", async () => {
 		const dir = directory();
 		const client = await open(dir);
-		expect(client.info.schemaVersion).toBe(4);
+		expect(client.info.schemaVersion).toBe(5);
 		await client.close();
 		const db = new DatabaseSync(client.info.databasePath);
 		const before = dump(db);
@@ -396,30 +441,39 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 		expect(results.filter((result) => result.status === "rejected")).toEqual([]);
 		const opened = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
 		expect(new Set(opened.map((client) => client.info.storeId))).toEqual(new Set(["original-store"]));
-		expect(opened.every((client) => client.info.schemaVersion === 4)).toBe(true);
+		expect(opened.every((client) => client.info.schemaVersion === 5)).toBe(true);
 		for (const client of opened)
 			expect((await client.loadSession("source", "source-generation"))?.entries).toHaveLength(2);
 	});
 
 	it.each([
-		[1, "discussion DDL", REVIEW_DISCUSSION_SCHEMA_SQL],
 		[1, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
 		[1, "client input restore", CLIENT_INPUT_RESTORE],
-		[1, "version", "PRAGMA user_version = 4"],
+		[1, "review index DDL", SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL],
+		[1, "version", "PRAGMA user_version = 5"],
 		[1, "commit", "COMMIT"],
 		[2, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
 		[2, "evidence drop", "DROP TABLE transaction_commits"],
 		[2, "evidence DDL", SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL],
 		[2, "client input restore", CLIENT_INPUT_RESTORE],
-		[2, "version", "PRAGMA user_version = 4"],
+		[2, "review anchor drop", DROP_ANCHORS],
+		[2, "version", "PRAGMA user_version = 5"],
 		[2, "commit", "COMMIT"],
 		[3, "client input copy", CLIENT_INPUT_COPY],
 		[3, "client input drop", CLIENT_INPUT_DROP],
 		[3, "client input DDL", SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL],
 		[3, "client input restore", CLIENT_INPUT_RESTORE],
 		[3, "client input copy drop", CLIENT_INPUT_COPY_DROP],
-		[3, "version", "PRAGMA user_version = 4"],
+		[3, "review discussion drop", DROP_DISCUSSIONS],
+		[3, "version", "PRAGMA user_version = 5"],
 		[3, "commit", "COMMIT"],
+		[4, "review child drop", DROP_CHILDREN],
+		[4, "review discussion drop", DROP_DISCUSSIONS],
+		[4, "review alias drop", DROP_ALIASES],
+		[4, "review anchor drop", DROP_ANCHORS],
+		[4, "review index DDL", SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL],
+		[4, "version", "PRAGMA user_version = 5"],
+		[4, "commit", "COMMIT"],
 	] as const)("rolls back a v%i %s failure completely and permits a clean retry", (version, _phase, failingSql) => {
 		const path = seed(directory(), version);
 		const db = new DatabaseSync(path);
@@ -437,20 +491,20 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 			expect(dump(db)).toEqual(before);
 			spy.mockRestore();
 			expect(initializeSessionStoreSchema(db)).toBe("original-store");
-			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(4);
+			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
 		} finally {
 			db.close();
 		}
 	});
 
-	it.each(VERSIONS)("rolls back failed v4 postvalidation including metadata and retries from v%i", (version) => {
+	it.each(VERSIONS)("rolls back failed v5 postvalidation including metadata and retries from v%i", (version) => {
 		const db = new DatabaseSync(seed(directory(), version));
 		try {
 			const before = dump(db);
 			const exec = db.exec.bind(db);
 			const spy = vi.spyOn(db, "exec").mockImplementation((sql) => {
 				exec(sql);
-				if (sql === "PRAGMA user_version = 4") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
+				if (sql === "PRAGMA user_version = 5") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
 			});
 			expect(() => initializeSessionStoreSchema(db)).toThrow(/exact supported schema/);
 			expect(db.isTransaction).toBe(false);
@@ -475,6 +529,14 @@ describe("exact v1, v2, and v3 to v4 session store migration", () => {
 				"PRAGMA user_version = 7",
 				"PRAGMA foreign_keys = OFF; INSERT INTO search_chunks VALUES ('missing', 0, NULL, 'orphan')",
 				"PRAGMA ignore_check_constraints = ON; UPDATE sessions SET format_version = 0",
+				// A partial or altered review schema is not an exact one either.
+				...(version === 1
+					? []
+					: [
+							"DROP TABLE review_anchor_aliases",
+							"DROP INDEX review_discussions_run_idx",
+							"CREATE TABLE review_run_index (run_id TEXT PRIMARY KEY) STRICT",
+						]),
 			].map((sql) => [version, sql] as const),
 		),
 	)("rejects v%i tampering without partial upgrade: %s", async (version, sql) => {
