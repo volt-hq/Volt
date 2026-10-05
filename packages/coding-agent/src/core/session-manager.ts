@@ -34,7 +34,6 @@ import {
 	type ClientInputState as ProtocolClientInputState,
 	RpcGitContextSchema,
 	type SessionInfoEntryPayload,
-	type SubagentSpawnEntryPayload,
 	type ThinkingLevelChangeEntryPayload,
 	type WorkCheckpointEntryPayload,
 	type WorkFinishedEntryPayload,
@@ -340,23 +339,6 @@ export interface CustomMessageEntry extends SessionEntryBase, CustomMessageEntry
 }
 
 /**
- * Durable spawn edge for one subagent child started by a `subagent` tool call.
- * Host metadata only: never part of model context, branch navigation, forks, or
- * transcript projection. Appended at the two-phase publish commit point, so a
- * recorded edge always refers to a child whose first prompt was accepted.
- *
- * Edge state is derived, not stored: an edge is settled when its toolCallId
- * has a persisted toolResult produced by the tool itself. A missing result or
- * a dispose-time synthesized aborted result leaves the edge recoverable —
- * see docs/design/subagent-durable-spawn-graph.md §4. Registry hydration
- * reads these entries together with the named child transcripts to recover
- * results after a crash or runtime disposal (issue #129).
- */
-export interface SubagentSpawnEntry extends SessionEntryBase, SubagentSpawnEntryPayload {
-	type: "subagent_spawn";
-}
-
-/**
  * Lineage of a session created by fork, clone, or import: the source session
  * and the entry its copied branch ends at (`null` for an empty branch). Always
  * the first entry of its log, followed by the copied branch. Host metadata
@@ -437,7 +419,6 @@ export type SessionEntry =
 	| SessionStartGitContextEntry
 	| PrReviewBindingEntry
 	| LeafEntry
-	| SubagentSpawnEntry
 	| ForkedFromEntry
 	| WorkStartedEntry
 	| WorkCheckpointEntry
@@ -1630,8 +1611,8 @@ export class SessionManager {
 	 * Observe public conversation entries in ordinal order, each only after its
 	 * commit, from inside the write that committed it: the manager's reads
 	 * already include the entry. An entry whose commit fails is never
-	 * delivered. Host-only sidecar records (admission WAL, subagent spawn
-	 * edges) are intentionally excluded.
+	 * delivered. Host-only sidecar records (the admission WAL, work entries)
+	 * are intentionally excluded.
 	 */
 	subscribeEntries(listener: SessionEntryListener): () => void {
 		this.entryListeners.add(listener);
@@ -1723,6 +1704,13 @@ export class SessionManager {
 		return this.byId.get(id) as CommittedSessionEntry | undefined;
 	}
 
+	/** The committed entry at `ordinal`, host-only records included, such as the work entry a work record names. */
+	getCommittedEntryAt(ordinal: number): CommittedSessionEntry | undefined {
+		// Ordinals are contiguous from 1, after the header (which has none).
+		const entry = this.fileEntries[ordinal] as CommittedSessionEntry | undefined;
+		return entry?.ordinal === ordinal ? entry : undefined;
+	}
+
 	/**
 	 * Get all direct children of an entry.
 	 */
@@ -1744,16 +1732,11 @@ export class SessionManager {
 		return this.getEntry(id) ? this.labelsById.get(id) : undefined;
 	}
 
-	/** All durable spawn edges in file order, including edges recorded on other branches. */
-	getSubagentSpawnEntries(): SubagentSpawnEntry[] {
-		return [...this.derivedState.subagentSpawns];
-	}
-
 	/**
 	 * Walk from entry to root, returning all entries in path order.
 	 * Includes all conversation entry types (messages, compaction, model changes, etc.)
 	 * while traversing transparently across any host-only sidecar parents
-	 * (admission WAL, subagent spawn edges).
+	 * (the admission WAL, work entries).
 	 * `getConversationState().context` holds the branch's resolved model context.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {

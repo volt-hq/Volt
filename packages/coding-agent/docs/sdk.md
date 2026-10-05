@@ -312,7 +312,7 @@ During normal execution, `waitForEnd()` resolves after the child session settles
 interface SubagentResult {
   id: string;
   sessionId: string;
-  status: "completed" | "failed" | "aborted";
+  status: "completed" | "failed" | "cancelled";
   error?: string;
   event: SubagentEndEvent;
 }
@@ -323,6 +323,8 @@ interface SubagentResult {
 Cancellation remains authoritative while a child is prepared but not yet published. If `handle.abort()` is called or the delegation scope aborts before the first prompt is accepted, a later `handle.prompt()` rejects, rolls back the prepared runtime registration, disposes the handle, and leaves no activity or registry record. Any already committed child session row is retained and remains addressable by its session identity.
 
 Definition-less `start()` children join the session tree exactly like definition-backed ones — they share the session-wide registry, the delegation scope's ceilings, and depth accounting — but they are fail-closed for nested delegation: only a definition can declare an `allowedSubagents` policy, so an unnamed child cannot spawn further subagents.
+
+A manager passed to a session as `subagentToolManager` belongs to that conversation (one conversation per manager): every child it starts is `subagent` work of the conversation (`session.work`), recorded before the child's first prompt, with the child's conversation as its `child`. A stop of the session (`session.abort()`) leaves subagents running; `session.work.cancel(id)` stops one. A subagent running when the conversation closes stays open, suspended, and resumes only when asked (`session.work.resume(id)`, the `resume_work` intent, or the tool's `{ resume }` mode), which reopens the child's log and prompts it to finish its task. `manager.startWork(agent, task)` starts a subagent as conversation work without a tool call; it runs until it ends or is cancelled. A manager that belongs to no conversation records no work.
 
 To expose the built-in `subagent` tool in an SDK-created parent session, pass the manager as `subagentToolManager`. It is active by default when no explicit tool allowlist is provided:
 
@@ -377,7 +379,7 @@ Crossing a configured token, cost, or deadline budget aborts that delegation tre
 
 The initial subagent confirmation preflight remains synchronous. A confirmed single, parallel, or chain spawning call can return a job ID before children finish. The `jobs` tool supports `list`, `read`, `wait`, and `cancel`; `read` and `wait` return bounded, non-consuming snapshots. See [Background jobs](usage.md#background-jobs) for arguments and limits.
 
-Jobs are `job` work items of the conversation (`session.work`, the conversation's work registry; `session.jobs` reads and controls its jobs). `session.waitForIdle()` reports foreground settlement but does not wait for still-running jobs. `session.hasRunningWork` includes running and cancelling work; `session.work.waitForIdle()` joins it without cancellation. `session.abort()` cancels both foreground and running work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup, and a job still running then ends `interrupted`. Running jobs block reload, tree navigation, and Plan entry. Compaction keeps their IDs valid. A completed or failed job queues a notice that resumes an idle conversation and otherwise enters the next request; cancelled and interrupted jobs never notify.
+Jobs are `job` work items of the conversation (`session.work`, the conversation's work registry; `session.jobs` reads and controls its jobs). `session.waitForIdle()` reports foreground settlement but does not wait for still-running jobs. `session.hasRunningWork` includes running and cancelling work; `session.work.waitForIdle()` joins it without cancellation. `session.abort()` cancels both foreground and running work (subagents, reviews, and approved host actions excepted) and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup, and a job still running then ends `interrupted`. Running jobs block reload, tree navigation, and Plan entry. Compaction keeps their IDs valid. A completed or failed job queues a notice that resumes an idle conversation and otherwise enters the next request; cancelled and interrupted jobs never notify.
 
 Host policies registered with `session.registerTurnPolicy({ nextAction })` return `undefined` for no change, `{ type: "stop" }` for explicit termination, or `{ type: "pause" }` for a resumable interruption. Returning `context.defaultAction` is an explicit override, not a no-op. A turn that ends on a policy stop, a tool stop, or a forced final response fences the notices of the jobs it started, including still-running workers, without cancelling them or discarding output; newly launched jobs notify as usual. Ordinary completion and compaction pauses preserve notices.
 
@@ -1056,7 +1058,7 @@ try {
 
 Sessions are written through a `SessionWriter`, never through `SessionManager` itself:
 
-- Before a session opens, write through `sessionManager.logWriter`: `appendMessage`, `appendCustomEntry`, `appendCustomMessageEntry`, `appendModelChange`, `appendThinkingLevelChange`, `appendFastModeChange`, `appendPlanningState`, `appendSessionInfo`, `appendLabelChange`, `appendSubagentSpawn`, `recordStartingGitContext`, `recordPrReviewBinding`, and the structural `appendCompaction`, `branch`, `resetLeaf`, and `branchWithSummary`.
+- Before a session opens, write through `sessionManager.logWriter`: `appendMessage`, `appendCustomEntry`, `appendCustomMessageEntry`, `appendModelChange`, `appendThinkingLevelChange`, `appendFastModeChange`, `appendPlanningState`, `appendSessionInfo`, `appendLabelChange`, `recordStartingGitContext`, `recordPrReviewBinding`, and the structural `appendCompaction`, `branch`, `resetLeaf`, and `branchWithSummary`.
 - While an `AgentSession` is open, its conversation is the log's only writer: write through `session.sessionWriter`. The log writer refuses writes meanwhile. Compaction and tree navigation are the session's own operations (`session.compact()`, `session.navigateTree()`).
 
 Code that runs in either phase takes the `SessionWriter` interface; its `sessionManager` is the view it writes. Every write resolves after its entries commit, and the view already holds them; read the entry a model, thinking level, Fast mode, plan, name, or label write appended from `getLeafId()`. Writes run one at a time, reads return committed state only, and entry listeners see an entry only after it commits. A write whose commit rolls back rejects with `SessionAtomicAppendError` and leaves the session unchanged and writable.

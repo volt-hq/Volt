@@ -66,6 +66,7 @@ import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
+import { linkedSubagentConversation } from "../../subagents/work.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
@@ -74,7 +75,7 @@ import { queryRegistry } from "../queries/index.ts";
 import { QueryRejectedError } from "../queries/types.ts";
 import { formatSchemaBoundError } from "../schema-errors.ts";
 import { RpcFrameTooLargeError, type RpcTransport } from "../transport/transport.ts";
-import { ConnectionSubagents, createLocalIntentServices } from "./local-services.ts";
+import { createLocalIntentServices } from "./local-services.ts";
 import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
 
 /** Frames a connection holds for its intent and query lane, at most. */
@@ -424,10 +425,6 @@ export function serveConnection(
 	const subscriptions = new Map<string, Subscription>();
 	const subscriptionUsage = new SubscriptionUsageService();
 	let home = options.conversation;
-	const subagents = new ConnectionSubagents(() => {
-		if (!home) throw new Error("The connection has no conversation");
-		return home;
-	});
 	let accepts: ReadonlySet<HostRequestKind> = new Set();
 	let helloReceived = false;
 	let closing: Promise<void> | undefined;
@@ -578,10 +575,9 @@ export function serveConnection(
 				prepare: (to) => {
 					home = to;
 				},
-				onMoved: async (to, from) => {
+				onMoved: (to, from) => {
 					observeLoss(to);
 					observeHome(to);
-					await subagents.disposeAll();
 					if (from) moves.push({ from, to: to.id });
 					if (!laneBusy) flushMoves();
 				},
@@ -641,16 +637,13 @@ export function serveConnection(
 	};
 
 	/**
-	 * A subagent child a client may read but not act on: one this connection
-	 * started, or, on a profile bound to a conversation, any subagent child of
-	 * that conversation.
+	 * A subagent child a client may read but not act on: an open conversation
+	 * the client's conversation links by subagent work in its log, directly or
+	 * through linked children, when the profile admits children of it.
 	 */
 	const resolveChild = (id: string): HostedConversation | undefined => {
-		const started = subagents.conversation(id);
-		if (started && profile.conversations(id)) return started;
-		if (profile.bound === undefined || !home || home.id !== profile.bound) return started;
-		const child = home.session.getSubagentToolManager()?.childConversation?.(id);
-		return child && !child.closed ? child : undefined;
+		if (!home || !profile.conversations(id, home.id)) return undefined;
+		return linkedSubagentConversation(home, id);
 	};
 
 	/** A conversation a client may subscribe to or read: a target, or a subagent child. */
@@ -661,7 +654,7 @@ export function serveConnection(
 	};
 
 	const intentServices = (conversation: HostedConversation | undefined): IntentServices => ({
-		...(conversation === undefined ? {} : createLocalIntentServices(conversation, { subagents, subscriptionUsage })),
+		...(conversation === undefined ? {} : createLocalIntentServices(conversation, { subscriptionUsage })),
 		...options.services?.(conversation),
 	});
 
@@ -1072,7 +1065,6 @@ export function serveConnection(
 		left ??= (async () => {
 			stopObservingClose();
 			unsubscribeHome();
-			await subagents.disposeAll();
 			if (!host) return;
 			if (host.conversationOf(client) !== undefined) await host.detach(client);
 			else if (anchor && home && !home.closed) await host.close(home);

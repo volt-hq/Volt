@@ -374,13 +374,6 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			excludeFromContext: true,
 		});
 		await session.logWriter.appendLabelChange(greeting, undefined);
-		await session.logWriter.appendSubagentSpawn({
-			toolCallId: "call-x",
-			subagentId: "sub-1",
-			agent: "worker",
-			childSessionId: "child-1",
-			requestKey: "request-1",
-		});
 		const state = await expectParity(session);
 		expect(state.name).toBe("Parity");
 		expect(state.labels.size).toBe(0);
@@ -459,8 +452,7 @@ type SessionOp =
 	| { kind: "receipt"; command: ClientInputCommand; behavior: "steer" | "followUp" | null }
 	| { kind: "queue"; pick: number }
 	| { kind: "transition"; pick: number; choice: number }
-	| { kind: "complete"; pick: number }
-	| { kind: "spawn" };
+	| { kind: "complete"; pick: number };
 
 const pick = fc.nat({ max: 1_000 });
 const sessionOpArbitrary: fc.Arbitrary<SessionOp> = fc.oneof(
@@ -511,7 +503,6 @@ const sessionOpArbitrary: fc.Arbitrary<SessionOp> = fc.oneof(
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("queue" as const), pick }) },
 	{ weight: 3, arbitrary: fc.record({ kind: fc.constant("transition" as const), pick, choice: pick }) },
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("complete" as const), pick }) },
-	fc.constant({ kind: "spawn" as const }),
 );
 
 const MODELS = [
@@ -686,15 +677,6 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			}
 			return;
 		}
-		case "spawn":
-			await session.logWriter.appendSubagentSpawn({
-				toolCallId: `call-${toolCalls.length}`,
-				subagentId: `sub-${publicIds.length}`,
-				agent: "worker",
-				childSessionId: `child-${publicIds.length}`,
-				requestKey: `request-${publicIds.length}`,
-			});
-			return;
 	}
 }
 

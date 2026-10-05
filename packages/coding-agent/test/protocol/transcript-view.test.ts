@@ -256,7 +256,7 @@ describe("protocol transcript view", () => {
 			subagentId: string;
 			sessionId: string;
 			agent: { name: string; source: string };
-			summary: { total: number; completed: number; failed: number; aborted: number; running: number };
+			summary: { total: number; completed: number; failed: number; cancelled: number; running: number };
 			childSessions: Array<{
 				index: number;
 				subagentId: string;
@@ -276,7 +276,7 @@ describe("protocol transcript view", () => {
 				subagentId: "sa_child",
 				sessionId: "child-session",
 				agent: { name: "general", source: "built-in" },
-				summary: { total: 1, completed: 1, failed: 0, aborted: 0, running: 0 },
+				summary: { total: 1, completed: 1, failed: 0, cancelled: 0, running: 0 },
 				childSessions: [
 					{
 						index: 0,
@@ -314,7 +314,7 @@ describe("protocol transcript view", () => {
 				subagentId: "sa_child",
 				sessionId: "child-session",
 				agent: { name: "general", source: "built-in" },
-				summary: { total: 1, completed: 1, failed: 0, aborted: 0, running: 0 },
+				summary: { total: 1, completed: 1, failed: 0, cancelled: 0, running: 0 },
 				childSessions: [
 					{
 						index: 0,
@@ -369,7 +369,7 @@ describe("protocol transcript view", () => {
 					total: 120,
 					completed: 100,
 					failed: 10,
-					aborted: 5,
+					cancelled: 5,
 					running: 5,
 					returned: 50,
 					nextCursor: 20,

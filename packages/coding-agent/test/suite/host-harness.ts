@@ -24,6 +24,7 @@ import type { ConversationFactory, HostedConversation } from "../../src/core/hos
 import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
 
 /** A lifecycle event an extension instance saw, tagged with the session it belongs to. */
 export type RecordedLifecycleEvent = (
@@ -48,6 +49,8 @@ export interface HostHarnessOptions {
 	/** Runs before the factory creates each session; throw to fail the open. */
 	beforeCreate?: (sessionManager: SessionManager) => Promise<void> | void;
 	responses?: string[];
+	/** Give each session a subagent manager over these definitions; children open through the same factory. */
+	subagents?: readonly SubagentDefinition[];
 }
 
 export interface HostHarness {
@@ -72,7 +75,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 	const events: RecordedLifecycleEvent[] = [];
 
-	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent, subagentContext }) => {
 		await options.beforeCreate?.(sessionManager);
 		const services = await createAgentSessionServices({
 			cwd,
@@ -112,11 +115,25 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 				noThemes: true,
 			},
 		});
+		const definitions = options.subagents;
+		let subagentToolManager: SubagentManager | undefined;
+		if (definitions) {
+			services.resourceLoader.getSubagents = () => ({ definitions: [...definitions], diagnostics: [] });
+			subagentToolManager = new SubagentManager({
+				createRuntime: factory,
+				cwd,
+				agentDir: tempDir,
+				resourceLoader: services.resourceLoader,
+				parentSessionManager: sessionManager,
+				...(subagentContext === undefined ? {} : { subagentContext }),
+			});
+		}
 		return {
 			...(await createAgentSessionFromServices({
 				services,
 				sessionManager,
 				sessionStartEvent,
+				...(subagentToolManager === undefined ? {} : { subagentToolManager }),
 				model: faux.getModel(),
 			})),
 			services,

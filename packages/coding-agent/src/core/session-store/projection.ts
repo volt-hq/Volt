@@ -14,13 +14,7 @@ import {
 	normalizeClientInputPayload,
 	normalizeClientInputQueuedPayload,
 } from "../session-entry-codec.ts";
-import type {
-	ClientInputQueuedPayload,
-	ClientInputRecord,
-	SessionEntry,
-	SessionHeader,
-	SubagentSpawnEntry,
-} from "../session-manager.ts";
+import type { ClientInputQueuedPayload, ClientInputRecord, SessionEntry, SessionHeader } from "../session-manager.ts";
 import type {
 	SessionStoreClientInputWrite,
 	SessionStoreJsonValue,
@@ -53,7 +47,6 @@ export interface SessionDerivedState {
 	labelTimestampsById: Map<string, string>;
 	clientInputsById: Map<string, ClientInputRecord>;
 	clientInputIdByEntryId: Map<string, string>;
-	subagentSpawns: SubagentSpawnEntry[];
 	searchChunks: SessionStoreSearchChunkWrite[];
 	searchChunkByEntryId: Map<string, SessionStoreSearchChunkWrite>;
 	leafId: string | null;
@@ -95,7 +88,6 @@ function createEmptySessionDerivedState(headerTimestamp: string): SessionDerived
 		labelTimestampsById: new Map(),
 		clientInputsById: new Map(),
 		clientInputIdByEntryId: new Map(),
-		subagentSpawns: [],
 		searchChunks: [],
 		searchChunkByEntryId: new Map(),
 		leafId: null,
@@ -214,7 +206,6 @@ export function cloneSessionDerivedState(state: SessionDerivedState): SessionDer
 			]),
 		),
 		clientInputIdByEntryId: new Map(state.clientInputIdByEntryId),
-		subagentSpawns: [...state.subagentSpawns],
 		searchChunks: [...state.searchChunks],
 		searchChunkByEntryId: new Map(state.searchChunkByEntryId),
 		leafId: state.leafId,
@@ -540,7 +531,6 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 		state.clientInputsById.set(clientInput.clientMessageId, clientInput);
 		state.clientInputIdByEntryId.set(entry.id, clientInput.clientMessageId);
 	}
-	if (entry.type === "subagent_spawn") state.subagentSpawns.push(entry);
 	if (searchChunk) {
 		state.searchChunks.push(searchChunk);
 		state.searchChunkByEntryId.set(entry.id, searchChunk);

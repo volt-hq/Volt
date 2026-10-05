@@ -38,8 +38,7 @@ export type LogOp =
 	  }
 	| { kind: "queue"; pick: number; messages: boolean }
 	| { kind: "transition"; pick: number; choice: number; error: string | null }
-	| { kind: "complete"; pick: number }
-	| { kind: "spawn" };
+	| { kind: "complete"; pick: number };
 
 const text = fc.string({ maxLength: 12 });
 const pick = fc.nat({ max: 1_000 });
@@ -114,7 +113,6 @@ export const logOpArbitrary: fc.Arbitrary<LogOp> = fc.oneof(
 		}),
 	},
 	{ weight: 3, arbitrary: fc.record({ kind: fc.constant("complete" as const), pick }) },
-	fc.record({ kind: fc.constant("spawn" as const) }),
 );
 
 /** Generated operations; build their log with {@link buildLog}. */
@@ -496,20 +494,6 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 				input.state = "completed";
 				break;
 			}
-			case "spawn":
-				append({
-					...base(),
-					type: "subagent_spawn",
-					visibility: "host",
-					payload: {
-						toolCallId: `call-${ordinal}`,
-						subagentId: `sub-${ordinal}`,
-						agent: "worker",
-						childSessionId: `child-${ordinal}`,
-						requestKey: `request-${ordinal}`,
-					},
-				});
-				break;
 		}
 	}
 	return entries;

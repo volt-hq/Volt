@@ -93,18 +93,25 @@ function validEntries(): Array<Record<string, unknown>> {
 		{ ...base("session_start_git_context", "git", 15), gitContext: null },
 		{ ...base("leaf", "leaf", 16), targetId: "message" },
 		{
-			...base("subagent_spawn", "spawn", 17),
+			...base("work_started", "subagent-work", 17),
+			workId: "sa_child",
+			kind: "subagent",
+			title: "researcher: audit",
+			input: { agent: "researcher", task: "audit" },
+			cancellable: true,
+			delivery: "none",
+			resume: true,
+			state: "running",
 			toolCallId: "call-1",
-			subagentId: "sa_child",
-			agent: "researcher",
-			childSessionId: "child-session",
-			childSessionRef: {
-				sessionDirectory: "/sessions/child",
-				storeId: "store-child",
-				sessionId: "child-session",
-				sessionGeneration: "generation-child",
+			child: {
+				conversation: "child-session",
+				ref: {
+					sessionDirectory: "/sessions/child",
+					storeId: "store-child",
+					sessionId: "child-session",
+					sessionGeneration: "generation-child",
+				},
 			},
-			requestKey: "request-1",
 		},
 		{
 			...base("client_input_receipt", "host-receipt", 18),
@@ -191,7 +198,6 @@ const REQUIRED_TYPE_FIELD: Record<string, string> = {
 	session_info: "id",
 	session_start_git_context: "gitContext",
 	leaf: "targetId",
-	subagent_spawn: "requestKey",
 	forked_from: "entryId",
 	work_started: "title",
 	work_checkpoint: "workId",
@@ -215,7 +221,6 @@ describe("session entry codec", () => {
 					"client_input_state",
 					"session_start_git_context",
 					"leaf",
-					"subagent_spawn",
 					"forked_from",
 					"work_started",
 					"work_checkpoint",
@@ -667,12 +672,11 @@ describe("session entry codec", () => {
 				{ ...base("session_start_git_context", "git-2", 3), gitContext: null },
 			]),
 		).toThrow("more than one starting Git context");
+		const subagentWork = validEntries().find((entry) => entry.id === "subagent-work");
+		const child = subagentWork?.child as { ref: Record<string, unknown> } | undefined;
 		expect(() =>
-			parsePersistedSessionEntry({
-				...validEntries().find((entry) => entry.type === "subagent_spawn"),
-				childSessionId: "other-child",
-			}),
-		).toThrow("must match childSessionId");
+			parsePersistedSessionEntry({ ...subagentWork, child: { conversation: "other-child", ref: child?.ref } }),
+		).toThrow("must match child.conversation");
 	});
 
 	it("validates strict snapshot headers", () => {

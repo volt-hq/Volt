@@ -2,9 +2,10 @@
  * Work intents (RFC §7, §6.3): cancel, open, and resume a work item of the
  * conversation by its id, and start a subagent. Each acts through the
  * conversation's work registry, whose kinds decide what cancelling, opening,
- * and resuming do.
+ * and resuming do, and what of it a paired remote device may do.
  */
 
+import type { WorkRecord } from "@hansjm10/volt-agent-core";
 import type { RejectionCode } from "@hansjm10/volt-protocol";
 import { WorkError, type WorkErrorCode, type WorkRegistry } from "../../work/registry.ts";
 import { targetOf } from "./conversation.ts";
@@ -34,14 +35,21 @@ const WORK_REJECTIONS: Readonly<Record<WorkErrorCode, RejectionCode>> = {
 	closed: "ended",
 };
 
+/** A refused work operation as its protocol rejection; other errors as they are. */
+function workRejection(error: unknown): unknown {
+	return error instanceof WorkError ? new IntentRejectedError(WORK_REJECTIONS[error.code], error.message) : error;
+}
+
 /**
  * Run a work operation on `workId`, answering a refusal with its protocol
- * code. A remote client needs the capabilities the work's kind requires too.
+ * code. A remote client needs the capabilities the work's kind requires too,
+ * and to cancel or resume it (`remote`), the kind's leave.
  */
 async function workOperation<T>(
 	ctx: IntentContext,
 	workId: string,
 	operation: (work: WorkRegistry) => Promise<T>,
+	remote?: "cancel" | "resume",
 ): Promise<T> {
 	ctx.assertCurrent?.();
 	const work = targetOf(ctx).conversation.work;
@@ -52,12 +60,32 @@ async function workOperation<T>(
 			requiredCapability: missing,
 		});
 	}
+	const record = remote === undefined ? undefined : work.get(workId);
+	if (record && remote !== undefined) {
+		const availability = remoteAvailability(ctx, work, record, remote);
+		if (!availability.enabled) throw new IntentRejectedError("not_allowed", availability.reason);
+	}
 	try {
 		return await operation(work);
 	} catch (error) {
-		if (error instanceof WorkError) throw new IntentRejectedError(WORK_REJECTIONS[error.code], error.message);
-		throw error;
+		throw workRejection(error);
 	}
+}
+
+/** Refuses a remote device what `record`'s kind keeps from remote devices. */
+function remoteAvailability(
+	view: Pick<IntentView, "profile">,
+	work: WorkRegistry,
+	record: WorkRecord,
+	operation: "cancel" | "resume",
+): IntentAvailability {
+	return view.profile.name === "remote" && !work.remoteAllows(record, operation)
+		? {
+				enabled: false,
+				code: "not_allowed",
+				reason: `A remote client cannot ${operation} ${record.kind} work`,
+			}
+		: INTENT_ENABLED;
 }
 
 /** Whether the conversation holds `workId` as open work; the intent's own checks follow. */
@@ -85,12 +113,14 @@ export const cancelWorkIntent = defineIntent({
 		if (!availability.enabled || input === undefined || !view.target) return availability;
 		const { work } = view.target.conversation;
 		const record = work.get(input.workId);
-		return record && !work.cancellable(record)
-			? { enabled: false, code: "not_allowed", reason: `Work ${input.workId} cannot be cancelled` }
-			: INTENT_ENABLED;
+		if (!record) return INTENT_ENABLED;
+		if (!work.cancellable(record)) {
+			return { enabled: false, code: "not_allowed", reason: `Work ${input.workId} cannot be cancelled` };
+		}
+		return remoteAvailability(view, work, record, "cancel");
 	},
 	async run(ctx, input) {
-		await workOperation(ctx, input.workId, (work) => work.cancel(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.cancel(input.workId), "cancel");
 	},
 });
 
@@ -134,9 +164,15 @@ export const resumeWorkIntent = defineIntent({
 	remote: "safe",
 	requires: control,
 	whileBusy: "run",
-	available: (view, input) => openWorkAvailability(view, input?.workId),
+	available(view, input) {
+		const availability = openWorkAvailability(view, input?.workId);
+		if (!availability.enabled || input === undefined || !view.target) return availability;
+		const { work } = view.target.conversation;
+		const record = work.get(input.workId);
+		return record ? remoteAvailability(view, work, record, "resume") : INTENT_ENABLED;
+	},
 	async run(ctx, input) {
-		await workOperation(ctx, input.workId, (work) => work.resume(input.workId));
+		await workOperation(ctx, input.workId, (work) => work.resume(input.workId), "resume");
 	},
 });
 
@@ -152,8 +188,13 @@ export const startSubagentIntent = defineIntent({
 	async run(ctx, input) {
 		const subagents = ctx.services.subagents;
 		if (!subagents) throw new IntentRejectedError("unavailable", "Subagents are not available in this host");
-		const started = await subagents.start(input.agent, input.prompt);
-		return { workId: started.subagentId, conversation: started.sessionId };
+		ctx.assertCurrent?.();
+		// The subagent is work of the conversation: cancel_work stops it, and closing the conversation suspends it.
+		try {
+			return await subagents.start(input.agent, input.prompt);
+		} catch (error) {
+			throw workRejection(error);
+		}
 	},
 	accept: (result) => ({ result }),
 });

@@ -141,7 +141,6 @@ export const SESSION_ENTRY_TYPES = {
 	label: CORE_LOG_ENTRY_TYPES.label,
 	session_info: CORE_LOG_ENTRY_TYPES.session_info,
 	leaf: CORE_LOG_ENTRY_TYPES.leaf,
-	subagent_spawn: CORE_LOG_ENTRY_TYPES.subagent_spawn,
 	forked_from: CORE_LOG_ENTRY_TYPES.forked_from,
 	work_started: CORE_LOG_ENTRY_TYPES.work_started,
 	work_checkpoint: CORE_LOG_ENTRY_TYPES.work_checkpoint,

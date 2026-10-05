@@ -1,14 +1,13 @@
 /**
- * Issue #129 §4: after a reload, the first prompt surfaces completed-but-
- * unclaimed subagent results recovered by registry hydration as one persisted
- * custom-message notice, deduplicated durably against notices already in the
- * transcript.
+ * After a reload, the first prompt surfaces the subagent runs of the
+ * conversation that a restart left suspended as one persisted custom-message
+ * notice, deduplicated durably against notices already in the transcript.
+ * Nothing resumes on its own: the notice tells the model how to resume.
  */
 
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
 import { SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE } from "../src/core/session/lifecycle.ts";
@@ -17,6 +16,7 @@ import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import { type SubagentDefinition, SubagentManager, type SubagentRegistryRecord } from "../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../src/core/tools/index.ts";
 import { createHarness } from "./test-harness.ts";
+import { seedSession } from "./utilities/seed-log.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 function record(overrides: Partial<SubagentRegistryRecord> & { id: string }): SubagentRegistryRecord {
@@ -24,8 +24,7 @@ function record(overrides: Partial<SubagentRegistryRecord> & { id: string }): Su
 		sequence: 0,
 		agent: { name: "researcher" },
 		path: ["researcher"],
-		status: "completed",
-		hydrated: true,
+		status: "suspended",
 		startedAt: 1,
 		finishedAt: 2,
 		...overrides,
@@ -65,13 +64,13 @@ function noticeEntries(harness: { sessionManager: { getEntries(): Array<{ type: 
 }
 
 describe("subagent recovery notice", () => {
-	it("offers unclaimed completed recoveries once, before the first user message", async () => {
+	it("offers this conversation's suspended runs once, before the first user message", async () => {
 		const { manager, hydrateCalls } = createStubManager([
 			record({ id: "sa_unclaimed", task: "inspect\nthe   incident" }),
-			record({ id: "sa_interrupted", status: "aborted", error: "Interrupted before completion" }),
-			record({ id: "sa_claimed", claimed: true }),
-			record({ id: "sa_stranded", stranded: true }),
-			record({ id: "sa_live", hydrated: undefined, status: "completed" }),
+			record({ id: "sa_interrupted", status: "interrupted", error: "Interrupted before completion" }),
+			record({ id: "sa_completed", status: "completed" }),
+			record({ id: "sa_nested", parentId: "sa_unclaimed" }),
+			record({ id: "sa_live", status: "running" }),
 		]);
 		const harness = await createHarness({ responses: ["ok", "ok"], subagentToolManager: manager });
 		try {
@@ -84,10 +83,12 @@ describe("subagent recovery notice", () => {
 			expect(text).toContain("sa_unclaimed");
 			expect(text).toContain("inspect the incident");
 			expect(text).not.toContain("sa_interrupted");
-			expect(text).not.toContain("sa_claimed");
-			expect(text).not.toContain("sa_stranded");
+			expect(text).not.toContain("sa_completed");
+			// A descendant's run resumes from its own parent's conversation.
+			expect(text).not.toContain("sa_nested");
 			expect(text).not.toContain("sa_live");
-			expect(text).toContain('{ "follow": "<id>" }');
+			expect(text).toContain('{ "resume": "<id>" }');
+			expect(text).toContain("unless the user asks");
 
 			// The feature's point: the model sees the notice in THIS turn's
 			// provider context, not after the next reload. Custom messages reach
@@ -148,8 +149,8 @@ describe("subagent recovery notice", () => {
 		}
 	});
 
-	it("appends nothing when hydration recovers no unclaimed work", async () => {
-		const { manager } = createStubManager([record({ id: "sa_claimed", claimed: true })]);
+	it("appends nothing when no run is suspended", async () => {
+		const { manager } = createStubManager([record({ id: "sa_done", status: "completed" })]);
 		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			await harness.session.prompt("hello");
@@ -172,44 +173,38 @@ describe("subagent recovery notice", () => {
 		}
 	});
 
-	it("end to end: reopened transcript hydrates, offers, and follow returns the report", async () => {
-		const sessionDir = mkdtempSync(join(tmpdir(), "issue-129-e2e-"));
+	it("end to end: a reopened conversation offers its suspended work, which stays suspended", async () => {
+		const sessionDir = mkdtempSync(join(tmpdir(), "subagent-recovery-e2e-"));
 		const parent = await SessionManager.create(tmpdir(), sessionDir);
-		await parent.logWriter.appendMessage(
-			fauxAssistantMessage([fauxToolCall("subagent", {}, { id: "call_e2e" })], { stopReason: "toolUse" }),
-		);
 		const child = await SessionManager.create(tmpdir(), sessionDir);
-		await child.logWriter.appendMessage({ role: "user", content: "audit the daemon", timestamp: Date.now() });
-		await child.logWriter.appendMessage(fauxAssistantMessage("daemon audit report"));
-		await parent.logWriter.appendSubagentSpawn({
-			toolCallId: "call_e2e",
-			subagentId: "sa_e2e",
-			agent: "researcher",
-			childSessionId: child.getSessionId(),
-			childSessionRef: child.getSessionRef()!,
-			requestKey: "rk-e2e",
-		});
-		// The incident shape: dispose synthesized an abort marker, which is not
-		// settlement.
-		await parent.logWriter.appendMessage({
-			role: "toolResult",
-			toolCallId: "call_e2e",
-			toolName: "subagent",
-			content: [{ type: "text", text: "Operation aborted: the session closed before this tool call completed." }],
-			isError: true,
-			timestamp: Date.now(),
-		});
+		const childRef = child.getSessionRef()!;
+		await seedSession(child, (seed) => seed.user("audit the daemon").assistant("halfway through"));
+		await child.closePersistence();
+		// The shape a closed runtime leaves: open subagent work over a persisted child.
+		await seedSession(parent, (seed) =>
+			seed.user("audit everything").hostRecord("work_started", {
+				workId: "sa_e2e",
+				kind: "subagent",
+				title: "researcher: audit the daemon",
+				input: { agent: "researcher", task: "audit the daemon" },
+				cancellable: true,
+				delivery: "none",
+				resume: true,
+				state: "running",
+				child: { conversation: childRef.sessionId, ref: childRef },
+			}),
+		);
 
 		const definition: SubagentDefinition = {
 			name: "researcher",
 			description: "Research the task",
 			systemPrompt: "Research the task.",
 			source: "user",
-			sourceInfo: createSyntheticSourceInfo(join(tmpdir(), "issue-129-e2e.md"), {
+			sourceInfo: createSyntheticSourceInfo(join(tmpdir(), "subagent-recovery-e2e.md"), {
 				source: "local",
 				scope: "user",
 			}),
-			filePath: join(tmpdir(), "issue-129-e2e.md"),
+			filePath: join(tmpdir(), "subagent-recovery-e2e.md"),
 		};
 		const resourceLoader: ResourceLoader = {
 			...createTestResourceLoader(),
@@ -239,12 +234,13 @@ describe("subagent recovery notice", () => {
 			const text = notices[0].content as string;
 			expect(text).toContain("sa_e2e");
 			expect(text).toContain("audit the daemon");
-
-			const followed = await manager.followDelegation("sa_e2e");
-			expect(followed.status).toBe("completed");
-			expect(followed.output).toBe("daemon audit report");
+			// The notice spent this turn only: the run is still suspended.
+			expect(harness.session.work.get("sa_e2e")?.outcome).toBeUndefined();
+			expect(harness.session.work.running()).toEqual([]);
+			await expect(manager.followDelegation("sa_e2e")).resolves.toMatchObject({ status: "suspended" });
 		} finally {
 			harness.cleanup();
+			await harness.session.waitForClosed();
 			await manager.dispose();
 		}
 	});

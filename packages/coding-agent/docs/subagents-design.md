@@ -278,25 +278,9 @@ App-visible agents use existing Iroh conversation streams:
 
 The MVP intentionally avoids an `initialPrompt` handshake field or any other Iroh protocol change.
 
-### Nested subagents over one local RPC connection
+### Subagents over a local protocol connection
 
-Local RPC clients can multiplex definition-backed subagents on one RPC connection:
-
-```json
-{"type":"list_subagents"}
-{"type":"subagent_start","agent":"scout","prompt":"Find auth code"}
-{"type":"subagent_abort","subagentId":"sa_123"}
-{"type":"subagent_get_state","subagentId":"sa_123"}
-{"type":"subagent_get_transcript","subagentId":"sa_123"}
-{"type":"subagent_dispose","subagentId":"sa_123"}
-```
-
-Child events wrap normal child RPC events:
-
-```json
-{"type":"subagent_event","subagentId":"sa_123","event":{"type":"message_update", "...":"..."}}
-{"type":"subagent_end","subagentId":"sa_123","result":{"id":"sa_123","sessionId":"child-session-id","status":"completed","event":{"type":"agent_end","messages":[],"willRetry":false}}}
-```
+Every subagent is `subagent` work of the conversation that started it (Phase 4 of the architecture rewrite). A local protocol client lists definitions with the `subagent_definitions` query, starts a subagent with the `start_subagent` intent (`{workId, conversation}`), reads its log by subscribing to `conversation`, follows it through the live `work/<workId>` value, and stops it with `cancel_work`. A subagent running when its conversation closes is suspended and resumes only through `resume_work` or the tool's `{ resume }` mode.
 
 The result's required `status` (`completed`, `failed`, or `aborted`) is authoritative; optional `error` carries terminal failure detail when available. The nested `agent_end` remains low-level attempt history and must not be used to infer terminal status.
 
