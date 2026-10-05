@@ -6,16 +6,16 @@
 			"name": "RTK Output Compression",
 			"description": "Rewrites bash commands through RTK for token-optimized command output.",
 			"version": "0.3.0",
-			"source": "git:https://github.com/volt-hq/Volt@9134218abc0f629e030ce02ad6eca28753e33920",
+			"source": "git:https://github.com/volt-hq/Volt@3de085f180654df6a5553e930e266f350dc3fb71",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/rtk",
 			"permissions": [
 				"exec"
 			],
 			"review": {
-				"commit": "9134218abc0f629e030ce02ad6eca28753e33920",
+				"commit": "3de085f180654df6a5553e930e266f350dc3fb71",
 				"reviewer": "volt-agent[bot]",
 				"date": "2026-10-05",
-				"notes": "settings enabled (replaces RTK_DISABLED) and rewriteTimeoutMs (100 to 30000 ms, bounds one rtk rewrite) on top of 06276dff3688; permission exec unchanged (the extension runs the rtk binary through volt.exec and rewrites every bash command); version 0.3.0. Automated review (AI security-reviewer pass) in #674; awaiting maintainer review."
+				"notes": "settings enabled (replaces RTK_DISABLED) and rewriteTimeoutMs (100 to 30000 ms, bounds one rtk rewrite) on top of 06276dff3688; permission exec unchanged (the extension runs the rtk binary through volt.exec and rewrites every bash command); version 0.3.0. Automated review (AI security-reviewer pass) in #674; squash-merged with the reviewed tree; awaiting maintainer review."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -32,7 +32,7 @@
 			"name": "Terminal-Bench Harbor",
 			"description": "Runs Volt on Terminal-Bench through Harbor.",
 			"version": "0.5.0",
-			"source": "git:https://github.com/volt-hq/Volt@2b2a5e1be8408fb29deef3b32878d2ed8aa1f4db",
+			"source": "git:https://github.com/volt-hq/Volt@97fda802eeacc70ab3d99ce8bc9d13fa4fce850d",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/terminal-bench-harbor",
 			"permissions": [
 				"exec",
@@ -41,10 +41,10 @@
 				"secrets"
 			],
 			"review": {
-				"commit": "2b2a5e1be8408fb29deef3b32878d2ed8aa1f4db",
+				"commit": "97fda802eeacc70ab3d99ce8bc9d13fa4fce850d",
 				"reviewer": "volt-agent[bot]",
 				"date": "2026-10-05",
-				"notes": "settings model (ASCII provider/model pattern; reaches harbor -m as one argv entry and the rendered copy-paste command, whose PowerShell quoting now also doubles typographic single quotes), taskLimit, and concurrentTrials hold /tbench's defaults on top of 4fb0cd6af46d; /tbench asks with one form that can store them; the status uses a semantic token instead of ctx.ui.theme. Permissions unchanged: exec, network, fs-write, secrets (harbor through volt.exec; /tbench forwards ~/.volt/agent/auth.json and the agent directory into each Harbor environment); version 0.5.0. Automated review (AI security-reviewer pass) in #675; awaiting maintainer review."
+				"notes": "settings model (ASCII provider/model pattern; reaches harbor -m as one argv entry and the rendered copy-paste command, whose PowerShell quoting now also doubles typographic single quotes), taskLimit, and concurrentTrials hold /tbench's defaults on top of 4fb0cd6af46d; /tbench asks with one form that can store them; the status uses a semantic token instead of ctx.ui.theme. Permissions unchanged: exec, network, fs-write, secrets (harbor through volt.exec; /tbench forwards ~/.volt/agent/auth.json and the agent directory into each Harbor environment); version 0.5.0. Automated review (AI security-reviewer pass) in #675; squash-merged with the reviewed tree; awaiting maintainer review."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -62,17 +62,17 @@
 			"name": "Azure DevOps",
 			"description": "Azure DevOps integration tools for Volt.",
 			"version": "0.3.0",
-			"source": "git:https://github.com/volt-hq/Volt@efe7483efceb3836156852d09ac553eb3601359e",
+			"source": "git:https://github.com/volt-hq/Volt@1aa6a27093efc704367dcb3ee26b77b6566edfd2",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/azure-devops",
 			"permissions": [
 				"network",
 				"secrets"
 			],
 			"review": {
-				"commit": "efe7483efceb3836156852d09ac553eb3601359e",
+				"commit": "1aa6a27093efc704367dcb3ee26b77b6566edfd2",
 				"reviewer": "volt-agent[bot]",
 				"date": "2026-10-05",
-				"notes": "settings organization (letters, digits, hyphens; also checked before each request so the PAT or token cannot reach another host), project, authMode, tenantId, and clientId (GUID) replace .volt/azure-devops.json on top of ab50b96c5595: no file writes, so fs-write is dropped (permissions network, secrets: Azure DevOps API calls, PAT and bearer tokens from the environment, device-code sign-in). /ado-config asks with one form; /ado-config save stores session values (default project scope, trusted projects only), never environment values; the device-code prompt is a card panel. Dependencies unchanged; version 0.3.0. Automated review (AI security-reviewer pass) in #676; awaiting maintainer review."
+				"notes": "settings organization (letters, digits, hyphens; also checked before each request so the PAT or token cannot reach another host), project, authMode, tenantId, and clientId (GUID) replace .volt/azure-devops.json on top of ab50b96c5595: no file writes, so fs-write is dropped (permissions network, secrets: Azure DevOps API calls, PAT and bearer tokens from the environment, device-code sign-in). /ado-config asks with one form; /ado-config save stores session values (default project scope, trusted projects only), never environment values; the device-code prompt is a card panel. Dependencies unchanged; version 0.3.0. Automated review (AI security-reviewer pass) in #676; squash-merged with the reviewed tree; awaiting maintainer review."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -90,7 +90,7 @@
 			"name": "Review Loop",
 			"description": "Runs isolated review/fix loops for a branch until findings are resolved.",
 			"version": "0.3.0",
-			"source": "git:https://github.com/volt-hq/Volt@d2e7dab6bad0a4b232273384240fc545b9196ec2",
+			"source": "git:https://github.com/volt-hq/Volt@c8791cae6c188bb025f110f60c0a20b619972545",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/review-loop",
 			"permissions": [
 				"exec",
@@ -98,10 +98,10 @@
 				"fs-write"
 			],
 			"review": {
-				"commit": "d2e7dab6bad0a4b232273384240fc545b9196ec2",
+				"commit": "c8791cae6c188bb025f110f60c0a20b619972545",
 				"reviewer": "volt-agent[bot]",
 				"date": "2026-10-05",
-				"notes": "settings maxLoops and baseBranch (ref-name pattern, no leading dash; one git argv entry) on top of 128764c290ab; progress is a card panel instead of a string widget. Permissions unchanged: exec, network, fs-write (git and child volt processes that call model providers with the user's auth, fix commits); version 0.3.0. Automated review (AI security-reviewer pass) in #677; awaiting maintainer review."
+				"notes": "settings maxLoops and baseBranch (ref-name pattern, no leading dash; one git argv entry) on top of 128764c290ab; progress is a card panel instead of a string widget. Permissions unchanged: exec, network, fs-write (git and child volt processes that call model providers with the user's auth, fix commits); version 0.3.0. Automated review (AI security-reviewer pass) in #677; squash-merged with the reviewed tree; awaiting maintainer review."
 			},
 			"author": "Volt",
 			"license": "MIT",
@@ -119,7 +119,7 @@
 			"name": "Build iOS Apps",
 			"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
 			"version": "0.3.0",
-			"source": "git:https://github.com/volt-hq/Volt@520289c2aa2ca7c7a79ef43cb9e6fa7fb917c772",
+			"source": "git:https://github.com/volt-hq/Volt@2b67624ff572a6bfe4f22ceca139c71d22dff9c0",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/build-ios-apps",
 			"permissions": [
 				"exec",
@@ -127,10 +127,10 @@
 				"fs-write"
 			],
 			"review": {
-				"commit": "520289c2aa2ca7c7a79ef43cb9e6fa7fb917c772",
+				"commit": "2b67624ff572a6bfe4f22ceca139c71d22dff9c0",
 				"reviewer": "volt-agent[bot]",
 				"date": "2026-10-05",
-				"notes": "setting workflows ([a-z0-9_,-]+, an environment value for a process spawned without a shell) replaces VOLT_XCODEBUILDMCP_WORKFLOWS on top of 65da7e803bea; unset falls back to XCODEBUILDMCP_ENABLED_WORKFLOWS. Permissions unchanged: exec, network, fs-write (spawns xcodebuildmcp with the full environment; Sentry telemetry unless XCODEBUILDMCP_SENTRY_DISABLED is set). Skills and dependencies unchanged; version 0.3.0. Automated review (AI security-reviewer pass) in #678; awaiting maintainer review."
+				"notes": "setting workflows ([a-z0-9_,-]+, an environment value for a process spawned without a shell) replaces VOLT_XCODEBUILDMCP_WORKFLOWS on top of 65da7e803bea; unset falls back to XCODEBUILDMCP_ENABLED_WORKFLOWS. Permissions unchanged: exec, network, fs-write (spawns xcodebuildmcp with the full environment; Sentry telemetry unless XCODEBUILDMCP_SENTRY_DISABLED is set). Skills and dependencies unchanged; version 0.3.0. Automated review (AI security-reviewer pass) in #678; squash-merged with the reviewed tree; awaiting maintainer review."
 			},
 			"author": "OpenAI",
 			"license": "MIT",
