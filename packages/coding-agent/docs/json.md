@@ -12,7 +12,7 @@ The stream is one subscription (`subscriptionId: "json-1"`) of the conversation 
 
 1. `snapshot{ordinal, state}`: the conversation before the run, as a client fold snapshot (`state.entries` holds every entry);
 2. `entry{entry}` for each entry the run commits, in log order, and `head{ordinal}` when the last entries of a batch are hidden;
-3. `live{basedOn, seq, reset?, items}` for the live lane: the first is a reset; then the run phase, token use, the streaming assistant message (`assistant_start`, `assistant_delta`, `assistant_end`), running tools (`tool`), extension status and notices;
+3. `live{basedOn, seq, reset?, items}` for the live lane: the first is a reset; then the run phase, token use, the streaming assistant message (`assistant_start`, `assistant_delta`, `assistant_end`), running tools (`tool`, with their `presentation` or a `patch` of it), work (`work/<id>`), extension status items, panels, and title (`ext_status/…`, `ext_panel/…`, `ext_title`, and `patch` items for panels), and notices;
 4. `ended{reason: "closed"}` once the run ends.
 
 When an extension command moves the run to another conversation (`ctx.newSession()` and the like), the subscription ends with `ended{reason: "moved", target}` and a new one (`json-2`, ...) starts from that conversation's snapshot.
@@ -29,9 +29,9 @@ When an extension command moves the run to another conversation (`ctx.newSession
 {"type":"ended","subscriptionId":"json-1","reason":"closed"}
 ```
 
-Entries carry their whole payload (a message entry's `payload.message` is the stored message) and, for message-like entries, a bounded transcript `view`. The frame shapes, the live lane's rules, and the client fold are described in [RPC mode](rpc.md#subscriptions); the JSON Schemas are in the `@hansjm10/volt-protocol` contract artifact.
+Entries carry their whole payload (a message entry's `payload.message` is the stored message) and, for message-like entries, a bounded transcript `view`; a tool call's view, and a custom message's whose type has a presenter, carries its `presentation` as [`UiNode` data](ui-nodes.md). The frame shapes, the live lane's rules, and the client fold are described in [RPC mode](rpc.md#subscriptions); the JSON Schemas are in the `@hansjm10/volt-protocol` contract artifact.
 
-JSON mode answers no host requests: extension dialogs resolve to their defaults. Extension errors are `notice` items with `level: "error"`.
+JSON mode answers no host requests: extension dialogs resolve to their defaults, and `ctx.hasUI` is `false`. Extension errors are `notice` items with `level: "error"` and the extension's manifest id as `source`.
 
 ## Example
 

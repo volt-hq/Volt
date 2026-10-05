@@ -82,8 +82,6 @@ export type {
 	AgentStartEvent,
 	AgentToolResult,
 	AgentToolUpdateCallback,
-	AppKeybinding,
-	AutocompleteProviderFactory,
 	BashToolCallEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -157,19 +155,15 @@ export type {
 	ExtensionSource,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
-	ExtensionWidgetOptions,
 	FindToolCallEvent,
 	GrepToolCallEvent,
 	InputEvent,
 	InputEventResult,
 	InputSource,
-	KeybindingsManager,
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	MessagePresenter,
 	MessagePresentInput,
-	MessageRenderer,
-	MessageRenderOptions,
 	PolicyRegistration,
 	ProjectTrustContext,
 	ProjectTrustEvent,
@@ -199,7 +193,6 @@ export type {
 	SlashCommandSource,
 	SourceInfo,
 	StartWorkOptions,
-	TerminalInputHandler,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolDefinition,
@@ -209,7 +202,6 @@ export type {
 	ToolPresentInput,
 	ToolPresentResult,
 	ToolPresentState,
-	ToolRenderResultOptions,
 	ToolResultEvent,
 	TurnEndEvent,
 	TurnStartEvent,
@@ -219,10 +211,8 @@ export type {
 	WebFetchToolResultEvent,
 	WebSearchToolCallEvent,
 	WebSearchToolResultEvent,
-	WidgetPlacement,
 	WorkDetailInput,
 	WorkDetailPresenter,
-	WorkingIndicatorOptions,
 	WorkKindDeclaration,
 	WorkRun,
 	WorkRunContext,
@@ -237,7 +227,6 @@ export {
 	ExtensionPermissionError,
 	ExtensionRunner,
 	ExtensionSettingsError,
-	ExtensionUIDismissedError,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,
@@ -251,8 +240,6 @@ export {
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 } from "./core/extensions/index.ts";
-// Footer data provider (Git branch + extension statuses - data not otherwise available to extensions)
-export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
 export {
 	detectGitOperation,
 	type GitContextObservation,
@@ -721,7 +708,7 @@ export {
 	type WorkspaceSessionSummary,
 } from "./core/sdk.ts";
 export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
-export type { ExtensionClient, ExtensionTerminalUI } from "./core/session/extension-binding.ts";
+export type { ExtensionClient, ExtensionClientThemes } from "./core/session/extension-binding.ts";
 export type { HostActionOutcome, HostActionRequest, HostActions } from "./core/session/host-actions.ts";
 export {
 	assertCurrentSessionSnapshot,
@@ -826,17 +813,6 @@ export {
 	type SubagentTurnLimits,
 	type SubagentWorkBinding,
 } from "./core/subagents/index.ts";
-// Theme utilities for custom tools and extensions
-export {
-	getLanguageFromPath,
-	getMarkdownTheme,
-	getSelectListTheme,
-	getSettingsListTheme,
-	highlightCode,
-	initTheme,
-	Theme,
-	type ThemeColor,
-} from "./core/theme/runtime.ts";
 // Tools
 export {
 	type BashOperations,
@@ -983,42 +959,6 @@ export {
 	runPrintMode,
 	runRpcMode,
 } from "./modes/index.ts";
-// UI components for extensions
-export {
-	ArminComponent,
-	AssistantMessageComponent,
-	BashExecutionComponent,
-	BorderedLoader,
-	BranchSummaryMessageComponent,
-	CompactionSummaryMessageComponent,
-	CustomEditor,
-	DynamicBorder,
-	ExtensionEditorComponent,
-	ExtensionInputComponent,
-	ExtensionSelectorComponent,
-	FooterComponent,
-	keyHint,
-	keyText,
-	LoginDialogComponent,
-	ModelSelectorComponent,
-	OAuthSelectorComponent,
-	type RenderDiffOptions,
-	rawKeyHint,
-	renderDiff,
-	SessionSelectorComponent,
-	type SettingsCallbacks,
-	type SettingsConfig,
-	SettingsSelectorComponent,
-	ShowImagesSelectorComponent,
-	SkillInvocationMessageComponent,
-	ThemeSelectorComponent,
-	ThinkingSelectorComponent,
-	TreeSelectorComponent,
-	truncateToVisualLines,
-	UserMessageComponent,
-	UserMessageSelectorComponent,
-	type VisualTruncateResult,
-} from "./modes/interactive/components/index.ts";
 export {
 	DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
 	type DetachedRuntimeRetentionHandle,

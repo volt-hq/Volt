@@ -100,6 +100,10 @@
         {
           "title": "Iroh Remote Protocol",
           "path": "iroh-remote-protocol.md"
+        },
+        {
+          "title": "UI Nodes",
+          "path": "ui-nodes.md"
         }
       ]
     },
@@ -117,10 +121,6 @@
         {
           "title": "JSON Event Stream Mode",
           "path": "json.md"
-        },
-        {
-          "title": "TUI Components",
-          "path": "tui.md"
         }
       ]
     },

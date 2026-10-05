@@ -16,7 +16,6 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
-import type { ExtensionUIContext } from "../../../core/extensions/types.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { Theme } from "../../../core/theme/theme.ts";
 import type { UserInputRequest, UserInputResponse } from "../../../core/user-input.ts";
@@ -391,6 +390,20 @@ export class UserInputDialog implements Component, Focusable {
 	}
 }
 
+/** Builds the dialog that asks a request's questions; it calls `done` once with the response. */
+export type UserInputDialogFactory = (
+	tui: TUI,
+	theme: Theme,
+	keybindings: KeybindingsManager,
+	done: (response: UserInputResponse) => void,
+) => UserInputDialog;
+
+/**
+ * Mounts the dialog `create` builds, with keyboard focus, until it answers;
+ * rejects when the host dismisses it first.
+ */
+export type MountUserInputDialog = (create: UserInputDialogFactory) => Promise<UserInputResponse>;
+
 /**
  * Ask a request's questions in a user input dialog that `show` mounts (the
  * TUI's focused component host). A call aborted before or while the dialog
@@ -398,13 +411,13 @@ export class UserInputDialog implements Component, Focusable {
  * late never shows an abandoned request.
  */
 export async function promptUserInput(
-	show: ExtensionUIContext["custom"],
+	show: MountUserInputDialog,
 	request: UserInputRequest,
 	signal?: AbortSignal,
 ): Promise<UserInputResponse> {
 	let removeAbortListener: (() => void) | undefined;
 	try {
-		return await show<UserInputResponse>((tui, theme, keybindings, done) => {
+		return await show((tui, theme, keybindings, done) => {
 			const abort = () => done({ status: "cancelled", answers: {} });
 			signal?.addEventListener("abort", abort, { once: true });
 			removeAbortListener = () => signal?.removeEventListener("abort", abort);

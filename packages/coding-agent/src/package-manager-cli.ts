@@ -623,15 +623,17 @@ export async function createCommandSettingsManager(options: {
 /**
  * Review the permissions of the package installed from `source` in `scope`:
  * in a terminal, show the ones not acknowledged yet and ask; otherwise show
- * them, unacknowledged. A manifest that cannot be read is reported and left
- * to fail when the extension loads.
+ * them, unacknowledged, with `reviewCommand` (default `volt install
+ * <source>`) as the way to review them. A manifest that cannot be read is
+ * reported and left to fail when the extension loads.
  */
-async function reviewInstalledPermissions(
+export async function reviewInstalledPermissions(
 	packageManager: DefaultPackageManager,
 	agentDir: string,
 	source: string,
 	scope: "user" | "project",
 	consequence: string,
+	reviewCommand = `${APP_NAME} install ${source}`,
 ): Promise<PackagePermissionOutcome["status"] | "failed"> {
 	const root = packageManager.getInstalledPath(source, scope);
 	if (root === undefined) return "none";
@@ -653,7 +655,7 @@ async function reviewInstalledPermissions(
 			console.log(chalk.yellow(permissionRequestLines(outcome.subject, []).join("\n")));
 			console.log(
 				chalk.yellow(
-					`These permissions are not acknowledged. Run "${APP_NAME} install ${source}" in a terminal to review them.`,
+					`These permissions are not acknowledged. Run "${reviewCommand}" in a terminal to review them.`,
 				),
 			);
 		}

@@ -7,7 +7,6 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionError, ExtensionFactory } from "../../../src/core/extensions/index.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import { ExtensionUIDismissedError } from "../../../src/index.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -179,15 +178,9 @@ describe("regression #525: a session that loses its log cancels its own work", (
 		expect(signals[0]?.aborted).toBe(true);
 	});
 
-	it("ends a command quietly when its custom UI is dismissed by the host", async () => {
+	it("reports a failing command as its extension's error", async () => {
 		const { harness, extensionErrors } = await createTestHarness({
 			extension: (volt) => {
-				volt.registerCommand("dismissed", {
-					description: "UI torn down by the host",
-					handler: async () => {
-						throw new ExtensionUIDismissedError();
-					},
-				});
 				volt.registerCommand("broken", {
 					description: "Fails on its own",
 					handler: async () => {
@@ -196,9 +189,6 @@ describe("regression #525: a session that loses its log cancels its own work", (
 				});
 			},
 		});
-
-		await harness.session.prompt("/dismissed");
-		expect(extensionErrors).toEqual([]);
 
 		await harness.session.prompt("/broken");
 		expect(extensionErrors).toEqual([

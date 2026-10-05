@@ -7,6 +7,7 @@ Volt packages bundle extensions, skills, prompt templates, and themes so you can
 ## Table of Contents
 
 - [Install and Manage](#install-and-manage)
+- [Volt Store](#volt-store)
 - [Package Sources](#package-sources)
 - [Creating a Volt Package](#creating-a-volt-package)
 - [Package Structure](#package-structure)
@@ -38,7 +39,7 @@ volt update --extension npm:@foo/bar
 
 These commands manage volt packages, not the volt CLI installation. To uninstall volt itself, see [Quickstart](quickstart.md#uninstall).
 
-When an installed package's extension declares [permissions](extensions.md#permissions) you have not acknowledged, `volt install` lists them and asks; declining removes the package. `volt update` asks again only when an update adds a permission or the package changes source. Without a terminal, the permissions are listed and left unacknowledged.
+When an installed package's extension declares [permissions](extensions.md#permissions) you have not acknowledged, `volt install` lists them and asks; declining removes the package. `volt update` asks again only when an update adds a permission or the package changes source. Ending the prompt with Ctrl+C or Ctrl+D declines. Without a terminal, the permissions are listed and left unacknowledged. Volt records what you acknowledge in `~/.volt/agent/extension-permissions.json`.
 
 By default, `install` and `remove` write to user settings (`~/.volt/agent/settings.json`). Use `-l` to write to project settings (`.volt/settings.json`) instead. Project settings can be shared with your team, and volt installs any missing packages automatically on startup after the project is trusted.
 
@@ -48,6 +49,24 @@ To try a package without installing it, use `--extension` or `-e`. This installs
 volt -e npm:@foo/bar
 volt -e git:github.com/user/repo
 ```
+
+## Volt Store
+
+The store is a reviewed catalog of volt packages, served at `https://volt-cli.dev/store/catalog.json`. Browse and manage it with `/store` in interactive mode or `volt store` from the shell:
+
+```bash
+volt store search [query]          # search catalog packages
+volt store show <id|source>        # show catalog and package metadata
+volt store install <id|source> [-l]
+volt store update [id|source] [-l]
+volt store remove <id|source> [-l]
+```
+
+- **Reviewed pins.** Each catalog entry pins one reviewed commit of its package and carries a review record (the commit, the reviewer, the date, and notes), and repeats the package's manifest id, display name, version, and permissions. Installing or updating a catalog package moves only to the commit the catalog pins; `--ref` and `--track` are refused for catalog packages, and apply only to sources outside the catalog.
+- **Permissions.** `/store install` and `volt store install` review a package's declared permissions as `volt install` does: in a terminal they ask, and declining (or a failed review) removes the package; without a terminal they list the permissions, leave them unacknowledged, and suggest running `volt store install <id|source>` in a terminal. `volt store update` reviews every package it updated once it updated them, and fails (exit code 1) when you decline or a review fails. When an installed catalog package moves to a new pin, `volt store update` in a terminal installs the new pin, asks about permissions it adds, and reinstalls the previous pin if you decline (removing the package when the previous pin cannot be reinstalled). Without a terminal it reads the new pin's manifest before installing, and keeps the installed pin (exit code 1) when that manifest declares a permission the installed pin did not, or cannot be read; update it from a terminal to review the new permissions.
+- **Submissions.** New and updated entries arrive as pull requests to the catalog; CI checks every entry against its pinned commit without running package code. See the [site README](https://github.com/volt-hq/Volt/blob/main/site/README.md).
+
+Store packages are packages with a `volt` manifest in `package.json`; single-file extensions cannot be catalog entries.
 
 ## Package Sources
 
@@ -202,6 +221,8 @@ Filter what a package loads using the object form in settings:
 ## Enable and Disable Resources
 
 Use `volt config` to enable or disable extensions, skills, prompt templates, and themes from installed packages and local directories. Works for both global (`~/.volt/agent`) and project (`.volt/`) scopes. Press Enter on an extension that shows "settings" to edit its [settings](extensions.md#settings).
+
+In a running session, `/extensions` lists every extension with its state, permissions, and settings, and enables or disables one by manifest id (`/extensions enable <id>`, `/extensions disable <id>`). That stores `extensions.<id>.enabled` (see [Settings](settings.md#extensions)), and open conversations start or stop the extension at once, without `/reload` (see [Enabling and disabling](extensions.md#enabling-and-disabling)).
 
 ## Scope and Deduplication
 

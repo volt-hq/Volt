@@ -419,8 +419,6 @@ describe("planning tool presenters", () => {
 		const definitions = createPlanningToolDefinitions(createController(planning));
 		for (const definition of definitions) {
 			expect(definition.present).toBeDefined();
-			expect(definition).not.toHaveProperty("renderCall");
-			expect(definition).not.toHaveProperty("renderResult");
 			const input = done(planning);
 			const present = definition.present as ToolPresenter | undefined;
 			expect(present?.(input)).toEqual(BUILTIN_PRESENTERS.tool(definition.name)?.present(input));

@@ -35,7 +35,6 @@ import type {
 	Keybinding,
 	MarkdownTheme,
 	OverlayHandle,
-	OverlayOptions,
 	RenderSuspensionLease,
 	SlashCommand,
 	Terminal,
@@ -52,7 +51,6 @@ import {
 	isKeyRepeat,
 	isViewportTUI,
 	Loader,
-	type LoaderIndicatorOptions,
 	Markdown,
 	ProcessTerminal,
 	renderStyledText,
@@ -82,24 +80,20 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
-	AutocompleteProviderFactory,
-	EditorFactory,
 	ExtensionCommandContext,
 	ExtensionRunner,
 	ExtensionUIDialogOptions,
-	ExtensionWidgetOptions,
 	ProjectTrustContext,
 	SessionIntentResult,
 	ToolInfo,
 } from "../../core/extensions/index.ts";
-import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import {
 	ExtensionPermissionStore,
 	type PackagePermissionOutcome,
 	permissionRequestLines,
 	reviewPackagePermissions,
 } from "../../core/extensions/permissions.ts";
-import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
 import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
@@ -136,7 +130,6 @@ import {
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
-import type { ExtensionTerminalUI } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import {
 	findSessionInfoById,
@@ -152,6 +145,7 @@ import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import { presentCustomMessage } from "../../core/ui/presentation.ts";
+import type { UserInputResponse } from "../../core/user-input.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
 	type IntegratedConversationSessionSelection,
@@ -257,14 +251,11 @@ import {
 	getCurrentThemeName,
 	getEditorTheme,
 	getMarkdownTheme,
-	getThemeByName,
 	initTheme,
 	onThemeChange,
 	setRegisteredThemes,
 	setTheme,
-	setThemeInstance,
 	stopThemeWatcher,
-	Theme,
 	theme,
 } from "../../core/theme/runtime.ts";
 import {
@@ -288,7 +279,7 @@ import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
-import { promptUserInput, UserInputDialog } from "./components/user-input-dialog.ts";
+import { promptUserInput, type UserInputDialogFactory } from "./components/user-input-dialog.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WorkInspector } from "./components/work-inspector.ts";
@@ -578,23 +569,17 @@ export class InteractiveMode {
 	private lastObservedPlan: { id: string; phase: PlanPhase } | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
-	private editorComponentFactory: EditorFactory | undefined;
-	private autocompleteProvider: AutocompleteProvider | undefined;
-	private autocompleteProviderWrappers: AutocompleteProviderFactory[] = [];
 	private fdPath: string | undefined;
 	private editorContainer: Container;
 	private footer: FooterComponent;
 	private footerDataProvider: FooterDataProvider;
-	// Stored so the same manager can be injected into custom editors, selectors, and extension UI.
+	// Stored so the same manager can be injected into the editor, selectors, and dialogs.
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
 	private onInputCallback?: (text: string) => void;
 	private pendingUserInputs: string[] = [];
 	private loadingAnimation: Loader | undefined = undefined;
-	private workingMessage: string | undefined = undefined;
-	private workingVisible = true;
-	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private turnStartedAt: number | undefined = undefined;
 	private workingElapsedTimer: ReturnType<typeof setInterval> | undefined = undefined;
 	/** Current operation, summarized in the transcript once the session stays idle. */
@@ -603,8 +588,6 @@ export class InteractiveMode {
 	private promptCacheAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private promptCacheAlertAt: number | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
 
 	private lastSigintTime = 0;
 	private lastEscapeTime = 0;
@@ -718,14 +701,8 @@ export class InteractiveMode {
 	 * settles its dialog once. The live view closes the dialogs it shows itself.
 	 */
 	private readonly pendingExtensionDialogs = new Set<() => void>();
-	private extensionTerminalInputSubscriptions = new Set<{
-		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
-		unsubscribe: () => void;
-	}>();
 
-	// Extension widgets (components rendered above/below the editor)
-	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
-	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
+	/** The rows above and below the editor: a blank line, then the panels above it; the panels below it. */
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 	/** Extension panels: above and below the editor, and in fullscreen's sidebar. */
@@ -733,17 +710,11 @@ export class InteractiveMode {
 	/** The keybinding-table entries of the extensions' shortcuts. */
 	private readonly extensionShortcuts: ExtensionShortcutBindings;
 
-	// Custom footer from extension (undefined = use built-in footer)
-	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
-
-	// Header container that holds the built-in or custom header
+	// Header container that holds the header
 	private headerContainer: Container;
 
-	// Built-in header (logo + keybinding hints + changelog)
+	// The header (logo + keybinding hints + changelog)
 	private builtInHeader: Component | undefined = undefined;
-
-	// Custom header from extension (undefined = use built-in header)
-	private customHeader: (Component & { dispose?(): void }) | undefined = undefined;
 
 	private options: InteractiveModeOptions;
 	private readonly onRightClickPaste = (): void => {
@@ -1122,26 +1093,12 @@ export class InteractiveMode {
 	}
 
 	private setupAutocompleteProvider(): void {
-		let provider = this.createBaseAutocompleteProvider();
-		const triggerCharacters: string[] = [];
-		for (const wrapProvider of this.autocompleteProviderWrappers) {
-			provider = wrapProvider(provider);
-			triggerCharacters.push(...(provider.triggerCharacters ?? []));
-		}
-		if (triggerCharacters.length > 0) {
-			provider.triggerCharacters = [...new Set(triggerCharacters)];
-		}
 		// The extensions' completion providers answer through the host's editor_completions query.
-		provider = withEditorCompletions(provider, {
+		const provider = withEditorCompletions(this.createBaseAutocompleteProvider(), {
 			triggers: this.session.extensionRunner.getCompletionProviders().map((completion) => completion.trigger),
 			complete: (text, cursor) => queryRegistry.run(this.intentContext(), "editor_completions", { text, cursor }),
 		});
-
-		this.autocompleteProvider = provider;
 		this.defaultEditor.setAutocompleteProvider(provider);
-		if (this.editor !== this.defaultEditor) {
-			this.editor.setAutocompleteProvider?.(provider);
-		}
 	}
 
 	private showStartupNoticesIfNeeded(): void {
@@ -2013,9 +1970,20 @@ export class InteractiveMode {
 	 */
 	private createExtensionSurface(): NonNullable<HostClient["surface"]> {
 		return {
-			ui: this.createExtensionTerminalUI(),
+			themes: {
+				getAllThemes: () => getAvailableThemesWithPaths(),
+				setTheme: (name) => {
+					const result = setTheme(name, true);
+					if (result.success) {
+						if (this.settingsManager.getTheme() !== name) this.settingsManager.setTheme(name);
+						this.localThemeOverride = true;
+						this.ui.requestRender();
+					}
+					return result;
+				},
+			},
 			userInput: (request, signal) =>
-				promptUserInput((factory, options) => this.showExtensionCustom(factory, options), request, signal),
+				promptUserInput((create) => this.mountUserInputDialog(create), request, signal),
 			abortHandler: () => {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
@@ -2497,10 +2465,6 @@ export class InteractiveMode {
 		const autocompleteMaxVisible = settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor.setPaddingX(editorPaddingX);
 		this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
-		if (this.editor !== this.defaultEditor) {
-			this.editor.setPaddingX?.(editorPaddingX);
-			this.editor.setAutocompleteMaxVisible?.(autocompleteMaxVisible);
-		}
 	}
 
 	private beginSessionReplacementUi(): void {
@@ -2703,7 +2667,7 @@ export class InteractiveMode {
 	}
 
 	private getWorkingLoaderMessage(): string {
-		const base = this.workingMessage ?? this.defaultWorkingMessage;
+		const base = this.defaultWorkingMessage;
 		if (this.turnStartedAt === undefined) return base;
 		const elapsed = formatElapsedDuration(Date.now() - this.turnStartedAt);
 		return `${base} (${elapsed} · ${keyText("app.interrupt")} to interrupt)`;
@@ -2729,7 +2693,6 @@ export class InteractiveMode {
 			(spinner) => theme.fg("accent", spinner),
 			(text) => theme.fg("muted", text),
 			this.getWorkingLoaderMessage(),
-			this.workingIndicatorOptions,
 		);
 	}
 
@@ -2739,27 +2702,6 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.statusContainer.clear();
-	}
-
-	private setWorkingVisible(visible: boolean): void {
-		this.workingVisible = visible;
-		if (!visible) {
-			this.stopWorkingLoader();
-			this.ui.requestRender();
-			return;
-		}
-		if (this.session.isStreaming && !this.loadingAnimation) {
-			this.statusContainer.clear();
-			this.loadingAnimation = this.createWorkingLoader();
-			this.statusContainer.addChild(this.loadingAnimation);
-		}
-		this.ui.requestRender();
-	}
-
-	private setWorkingIndicator(options?: LoaderIndicatorOptions): void {
-		this.workingIndicatorOptions = options;
-		this.loadingAnimation?.setIndicator(options);
-		this.ui.requestRender();
 	}
 
 	private clearTurnDoneAlertTimer(): void {
@@ -2878,114 +2820,30 @@ export class InteractiveMode {
 		}, delayMs);
 	}
 
-	private setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-			}
-		}
-		if (this.streamingComponent) {
-			this.streamingComponent.setHiddenThinkingLabel(this.hiddenThinkingLabel);
-		}
-		this.ui.requestRender();
-	}
-
 	/**
-	 * Set an extension widget (string array or custom component).
-	 */
-	private setExtensionWidget(
-		key: string,
-		content: string[] | ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined,
-		options?: ExtensionWidgetOptions,
-	): void {
-		const placement = options?.placement ?? "aboveEditor";
-		const removeExisting = (map: Map<string, Component & { dispose?(): void }>) => {
-			const existing = map.get(key);
-			if (existing?.dispose) existing.dispose();
-			map.delete(key);
-		};
-
-		removeExisting(this.extensionWidgetsAbove);
-		removeExisting(this.extensionWidgetsBelow);
-
-		if (content === undefined) {
-			this.renderWidgets();
-			return;
-		}
-
-		let component: Component & { dispose?(): void };
-
-		if (Array.isArray(content)) {
-			// Wrap string array in a Container with Text components
-			const container = new Container();
-			for (const line of content.slice(0, InteractiveMode.MAX_WIDGET_LINES)) {
-				container.addChild(new Text(line, 1, 0));
-			}
-			if (content.length > InteractiveMode.MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
-			}
-			component = container;
-		} else {
-			// Factory function - create component
-			component = content(this.ui, theme);
-		}
-
-		const targetMap = placement === "belowEditor" ? this.extensionWidgetsBelow : this.extensionWidgetsAbove;
-		targetMap.set(key, component);
-		this.renderWidgets();
-	}
-
-	/** Remove the component widgets; panels, string widgets among them, come from the live view. */
-	private clearComponentWidgets(): void {
-		for (const widgets of [this.extensionWidgetsAbove, this.extensionWidgetsBelow]) {
-			for (const widget of widgets.values()) widget.dispose?.();
-			widgets.clear();
-		}
-		this.renderWidgets();
-	}
-
-	/**
-	 * Reset the UI the extensions drive through the TUI's terminal. Status,
-	 * string widgets, title, and the dialogs of the live state stay with the
-	 * live view, which follows the live state of the conversation the TUI shows.
+	 * Reset the TUI's UI for the extensions of a conversation it leaves:
+	 * pending dialogs, completions, and shortcuts. Status, panels, title, and
+	 * the dialogs of the live state stay with the live view, which follows the
+	 * live state of the conversation the TUI shows.
 	 */
 	private resetExtensionUI(): void {
 		this.dismissWorkInspector?.();
 		this.dismissPendingExtensionDialogs();
 		this.clearTurnDoneAlertTimer();
 		this.clearPromptCacheAlertTimer();
-		this.clearExtensionTerminalInputListeners();
-		this.setExtensionFooter(undefined);
-		this.setExtensionHeader(undefined);
-		this.clearComponentWidgets();
 		this.footer.invalidate();
-		this.autocompleteProviderWrappers = [];
-		this.setCustomEditorComponent(undefined);
 		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
 		this.extensionShortcuts.clear();
-		this.workingMessage = undefined;
-		this.workingVisible = true;
-		this.setWorkingIndicator();
-		if (this.loadingAnimation) {
-			this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
-		}
-		this.setHiddenThinkingLabel();
 	}
 
-	// Maximum total widget lines to prevent viewport overflow
-	private static readonly MAX_WIDGET_LINES = 10;
-
-	/**
-	 * Render all extension widgets to the widget container.
-	 */
+	/** Lay out the rows around the editor: a blank line, then the panels above it; the panels below it. */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, [...this.extensionWidgetsAbove.values()], true, true);
-		this.renderWidgetContainer(this.widgetContainerBelow, [...this.extensionWidgetsBelow.values()], false, false);
-		// The panel slots render nothing without panels; panels show after the component widgets.
+		this.widgetContainerAbove.clear();
+		this.widgetContainerAbove.addChild(new Spacer(1));
 		this.widgetContainerAbove.addChild(this.panels.aboveEditor);
+		this.widgetContainerBelow.clear();
 		this.widgetContainerBelow.addChild(this.panels.belowEditor);
 		this.ui.requestRender();
 	}
@@ -3007,125 +2865,6 @@ export class InteractiveMode {
 			this.showError(`Extension panel ${key}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		this.ui.requestRender();
-	}
-
-	private renderWidgetContainer(
-		container: Container,
-		widgets: readonly Component[],
-		spacerWhenEmpty: boolean,
-		leadingSpacer: boolean,
-	): void {
-		container.clear();
-
-		if (widgets.length === 0) {
-			if (spacerWhenEmpty) {
-				container.addChild(new Spacer(1));
-			}
-			return;
-		}
-
-		if (leadingSpacer) {
-			container.addChild(new Spacer(1));
-		}
-		for (const component of widgets) {
-			container.addChild(component);
-		}
-	}
-
-	/**
-	 * Set a custom footer component, or restore the built-in footer.
-	 */
-	private setExtensionFooter(
-		factory:
-			| ((tui: TUI, thm: Theme, footerData: ReadonlyFooterDataProvider) => Component & { dispose?(): void })
-			| undefined,
-	): void {
-		// Dispose existing custom footer
-		if (this.customFooter?.dispose) {
-			this.customFooter.dispose();
-		}
-
-		this.footerContainer.clear();
-		if (factory) {
-			// Create and mount a custom footer inside the stable footer container.
-			this.customFooter = factory(this.ui, theme, this.footerDataProvider);
-			this.footerContainer.addChild(this.customFooter);
-		} else {
-			// Restore the built-in footer without changing top-level composition.
-			this.customFooter = undefined;
-			this.footerContainer.addChild(this.footer);
-		}
-		// The work line stays below any footer.
-		this.footerContainer.addChild(this.workStatus);
-
-		this.ui.requestRender();
-	}
-
-	/**
-	 * Set a custom header component, or restore the built-in header.
-	 */
-	private setExtensionHeader(factory: ((tui: TUI, thm: Theme) => Component & { dispose?(): void }) | undefined): void {
-		// Header may not be initialized yet if called during early initialization
-		if (!this.builtInHeader) {
-			return;
-		}
-
-		// Dispose existing custom header
-		if (this.customHeader?.dispose) {
-			this.customHeader.dispose();
-		}
-
-		// Find the index of the current header in the header container
-		const currentHeader = this.customHeader || this.builtInHeader;
-		const index = this.headerContainer.children.indexOf(currentHeader);
-
-		if (factory) {
-			// Create and add custom header
-			this.customHeader = factory(this.ui, theme);
-			if (isExpandable(this.customHeader)) {
-				this.customHeader.setExpanded(this.toolOutputExpanded);
-			}
-			if (index !== -1) {
-				this.headerContainer.children[index] = this.customHeader;
-			} else {
-				// If not found (e.g. builtInHeader was never added), add at the top
-				this.headerContainer.children.unshift(this.customHeader);
-			}
-		} else {
-			// Restore built-in header
-			this.customHeader = undefined;
-			if (isExpandable(this.builtInHeader)) {
-				this.builtInHeader.setExpanded(this.toolOutputExpanded);
-			}
-			if (index !== -1) {
-				this.headerContainer.children[index] = this.builtInHeader;
-			}
-		}
-
-		this.ui.requestRender();
-	}
-
-	private addExtensionTerminalInputListener(
-		handler: (data: string) => { consume?: boolean; data?: string } | undefined,
-	): () => void {
-		const subscription = { handler, unsubscribe: this.ui.addInputListener(handler) };
-		this.extensionTerminalInputSubscriptions.add(subscription);
-		return () => {
-			subscription.unsubscribe();
-			this.extensionTerminalInputSubscriptions.delete(subscription);
-		};
-	}
-
-	private rebindExtensionTerminalInputListeners(): void {
-		for (const subscription of this.extensionTerminalInputSubscriptions) {
-			subscription.unsubscribe();
-			subscription.unsubscribe = this.ui.addInputListener(subscription.handler);
-		}
-	}
-
-	private clearExtensionTerminalInputListeners(): void {
-		for (const subscription of this.extensionTerminalInputSubscriptions) subscription.unsubscribe();
-		this.extensionTerminalInputSubscriptions.clear();
 	}
 
 	/** The trust prompts of a conversation the TUI opens, shown before its extensions bind. */
@@ -3295,56 +3034,6 @@ export class InteractiveMode {
 			this.jobsRenderCoalescer?.update(undefined);
 			this.ui.requestRender();
 		});
-	}
-
-	/** The TUI's terminal for the extensions; dialogs, status, string widgets, and title come from the live view. */
-	private createExtensionTerminalUI(): ExtensionTerminalUI {
-		return {
-			onTerminalInput: (handler) => this.addExtensionTerminalInputListener(handler),
-			setWorkingMessage: (message) => {
-				this.workingMessage = message;
-				if (this.loadingAnimation) {
-					this.loadingAnimation.setMessage(this.getWorkingLoaderMessage());
-				}
-			},
-			setWorkingVisible: (visible) => this.setWorkingVisible(visible),
-			setWorkingIndicator: (options) => this.setWorkingIndicator(options),
-			setHiddenThinkingLabel: (label) => this.setHiddenThinkingLabel(label),
-			setWidget: (key, content, options) => this.setExtensionWidget(key, content, options),
-			setFooter: (factory) => this.setExtensionFooter(factory),
-			setHeader: (factory) => this.setExtensionHeader(factory),
-			custom: (factory, options) => this.showExtensionCustom(factory, options),
-			addAutocompleteProvider: (factory) => {
-				this.autocompleteProviderWrappers.push(factory);
-				this.setupAutocompleteProvider();
-			},
-			setEditorComponent: (factory) => this.setCustomEditorComponent(factory),
-			getEditorComponent: () => this.editorComponentFactory,
-			get theme() {
-				return theme;
-			},
-			getAllThemes: () => getAvailableThemesWithPaths(),
-			getTheme: (name) => getThemeByName(name),
-			setTheme: (themeOrName) => {
-				if (themeOrName instanceof Theme) {
-					setThemeInstance(themeOrName);
-					this.localThemeOverride = true;
-					this.ui.requestRender();
-					return { success: true };
-				}
-				const result = setTheme(themeOrName, true);
-				if (result.success) {
-					if (this.settingsManager.getTheme() !== themeOrName) {
-						this.settingsManager.setTheme(themeOrName);
-					}
-					this.localThemeOverride = true;
-					this.ui.requestRender();
-				}
-				return result;
-			},
-			getToolsExpanded: () => this.toolOutputExpanded,
-			setToolsExpanded: (expanded) => this.setToolsExpanded(expanded),
-		};
 	}
 
 	/**
@@ -3562,86 +3251,6 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Set a custom editor component from an extension.
-	 * Pass undefined to restore the default editor.
-	 */
-	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
-		this.dismissWorkInspector?.();
-		this.editorComponentFactory = factory;
-
-		// Save text from current editor before switching
-		const currentText = this.editor.getText();
-
-		this.editorContainer.clear();
-
-		if (factory) {
-			// Create the custom editor with tui, theme, and keybindings
-			const newEditor = factory(this.ui, getEditorTheme(), this.keybindings);
-
-			// Wire up callbacks from the default editor
-			newEditor.onSubmit = this.defaultEditor.onSubmit;
-			newEditor.onChange = this.defaultEditor.onChange;
-
-			// Copy text from previous editor
-			newEditor.setText(currentText);
-
-			// Copy appearance settings if supported
-			if (newEditor.borderColor !== undefined) {
-				newEditor.borderColor = this.defaultEditor.borderColor;
-			}
-			if (newEditor.setPaddingX !== undefined) {
-				newEditor.setPaddingX(this.defaultEditor.getPaddingX());
-			}
-			newEditor.setTopBorderLabel?.(
-				editorTopBorderLabelForState({
-					bashMode: this.isBashMode,
-					streaming: this.session.isStreaming,
-					hasText: currentText.length > 0,
-					agentMode: this.session.agentMode,
-					planReady: this.session.planningState.plan?.phase === "ready",
-				}),
-			);
-
-			// Set autocomplete if supported
-			if (newEditor.setAutocompleteProvider && this.autocompleteProvider) {
-				newEditor.setAutocompleteProvider(this.autocompleteProvider);
-			}
-
-			// If extending CustomEditor, copy app-level handlers
-			// Use duck typing since instanceof fails across jiti module boundaries
-			const customEditor = newEditor as unknown as Record<string, unknown>;
-			if ("actionHandlers" in customEditor && customEditor.actionHandlers instanceof Map) {
-				if (!customEditor.onEscape) {
-					customEditor.onEscape = () => this.defaultEditor.onEscape?.();
-				}
-				if (!customEditor.onCtrlD) {
-					customEditor.onCtrlD = () => this.defaultEditor.onCtrlD?.();
-				}
-				if (!customEditor.onPasteImage) {
-					customEditor.onPasteImage = () => this.defaultEditor.onPasteImage?.();
-				}
-				if (!customEditor.onExtensionShortcut) {
-					customEditor.onExtensionShortcut = (data: string) => this.defaultEditor.onExtensionShortcut?.(data);
-				}
-				// Copy action handlers (clear, suspend, model switching, etc.)
-				for (const [action, handler] of this.defaultEditor.actionHandlers) {
-					(customEditor.actionHandlers as Map<string, () => void>).set(action, handler);
-				}
-			}
-
-			this.editor = newEditor;
-		} else {
-			// Restore default editor with text from custom editor
-			this.defaultEditor.setText(currentText);
-			this.editor = this.defaultEditor;
-		}
-
-		this.editorContainer.addChild(this.editor as Component);
-		this.ui.setFocus(this.editor as Component);
-		this.ui.requestRender();
-	}
-
-	/**
 	 * Show a notification for extensions.
 	 */
 	private showExtensionNotify(message: string, type?: "info" | "warning" | "error"): void {
@@ -3654,121 +3263,43 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Show a custom component with keyboard focus. Overlay mode renders on top of existing content. */
-	private async showExtensionCustom<T>(
-		factory: (
-			tui: TUI,
-			theme: Theme,
-			keybindings: KeybindingsManager,
-			done: (result: T) => void,
-		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: {
-			overlay?: boolean;
-			overlayOptions?: OverlayOptions | (() => OverlayOptions);
-			onHandle?: (handle: OverlayHandle) => void;
-			signal?: AbortSignal;
-		},
-	): Promise<T> {
-		if (options?.signal?.aborted) return Promise.reject(new ExtensionUIDismissedError());
-		const savedText = this.editor.getText();
-		const isOverlay = options?.overlay ?? false;
-		if (!isOverlay) this.dismissWorkInspector?.();
+	/**
+	 * Show the request_user_input dialog `create` builds in the conversation,
+	 * with keyboard focus, until it answers; the editor and its draft stay as
+	 * they are. Rejects when the TUI dismisses its pending dialogs first.
+	 */
+	private mountUserInputDialog(create: UserInputDialogFactory): Promise<UserInputResponse> {
+		this.dismissWorkInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
-		let nativeQuestion = false;
-
-		const restoreView = () => {
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			// Native questions leave the editor untouched, including paste expansions,
-			// cursor/undo state, and queued text restored during an external abort.
-			if (!nativeQuestion) this.editor.setText(savedText);
-			this.activateView(previousView, previousFocus ?? this.editor, false);
-		};
-
 		return new Promise((resolve, reject) => {
-			let component: Component & { dispose?(): void };
-			let overlayHandle: OverlayHandle | undefined;
+			let mounted = false;
 			let closed = false;
-			let dismissed = false;
-
-			const disposeComponent = (target: (Component & { dispose?(): void }) | undefined) => {
-				try {
-					target?.dispose?.();
-				} catch {
-					/* ignore dispose errors */
-				}
-			};
 			const finish = (): boolean => {
 				if (closed) return false;
 				closed = true;
 				this.pendingExtensionDialogs.delete(dismiss);
-				options?.signal?.removeEventListener("abort", dismiss);
-				// A local jobs inspector can be stacked above an asynchronous extension dialog.
-				if (isOverlay) overlayHandle?.hide();
-				else restoreView();
+				if (mounted) {
+					this.editorContainer.clear();
+					this.editorContainer.addChild(this.editor);
+					this.activateView(previousView, previousFocus ?? this.editor, false);
+				}
 				return true;
 			};
-			const close = (result: T) => {
-				if (!finish()) return;
-				resolve(result);
-				disposeComponent(component);
+			const dismiss = (): void => {
+				if (finish()) reject(new Error("The question was dismissed before it was answered"));
 			};
-			// Volt removed the component before done(); settle so its caller cannot hang.
-			const dismiss = () => {
-				if (!finish()) return;
-				dismissed = true;
-				reject(new ExtensionUIDismissedError());
-				disposeComponent(component);
-			};
-
-			const created = factory(this.ui, theme, this.keybindings, close);
-			if (!closed) {
-				this.pendingExtensionDialogs.add(dismiss);
-				options?.signal?.addEventListener("abort", dismiss, { once: true });
-			}
-			Promise.resolve(created)
-				.then((c) => {
-					if (closed) {
-						// Never mounted: an asynchronous factory resolved after dismissal.
-						if (dismissed) disposeComponent(c);
-						return;
-					}
-					component = c;
-					if (isOverlay) {
-						// Resolve overlay options - can be static or dynamic function
-						const resolveOptions = (): OverlayOptions | undefined => {
-							if (options?.overlayOptions) {
-								return typeof options.overlayOptions === "function"
-									? options.overlayOptions()
-									: options.overlayOptions;
-							}
-							// Fallback: use component's width property if available
-							const width = (component as { width?: number }).width;
-							return width ? { width } : undefined;
-						};
-						overlayHandle = this.ui.showOverlay(component, resolveOptions());
-						// Expose handle to caller for visibility control
-						options?.onHandle?.(overlayHandle);
-					} else if (component instanceof UserInputDialog) {
-						// Keep native preferences in the conversation with its real status,
-						// footer and plan pane; extensions retain their dedicated view.
-						nativeQuestion = true;
-						this.editorContainer.clear();
-						this.editorContainer.addChild(component);
-						this.activateView(this.conversationView, component);
-					} else {
-						this.activateView(this.createDedicatedView(component), component);
-					}
-				})
-				.catch((err) => {
-					if (closed) return;
-					closed = true;
-					this.pendingExtensionDialogs.delete(dismiss);
-					options?.signal?.removeEventListener("abort", dismiss);
-					if (!isOverlay) restoreView();
-					reject(err);
-				});
+			const dialog = create(this.ui, theme, this.keybindings, (response) => {
+				if (finish()) resolve(response);
+			});
+			// Answered (cancelled) while it was built: it never shows.
+			if (closed) return;
+			this.pendingExtensionDialogs.add(dismiss);
+			mounted = true;
+			// The question stays in the conversation with its status, footer, and plan pane.
+			this.editorContainer.clear();
+			this.editorContainer.addChild(dialog);
+			this.activateView(this.conversationView, dialog);
 		});
 	}
 
@@ -4502,10 +4033,8 @@ export class InteractiveMode {
 					this.retryLoader = undefined;
 				}
 				this.stopWorkingLoader();
-				if (this.workingVisible) {
-					this.loadingAnimation = this.createWorkingLoader();
-					this.statusContainer.addChild(this.loadingAnimation);
-				}
+				this.loadingAnimation = this.createWorkingLoader();
+				this.statusContainer.addChild(this.loadingAnimation);
 				this.updateEditorBorderColor(true);
 				this.ui.requestRender();
 				break;
@@ -4553,7 +4082,6 @@ export class InteractiveMode {
 						undefined,
 						this.hideThinkingBlock,
 						this.getMarkdownThemeWithSettings(),
-						this.hiddenThinkingLabel,
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -4982,7 +4510,6 @@ export class InteractiveMode {
 					message,
 					this.hideThinkingBlock,
 					this.getMarkdownThemeWithSettings(),
-					this.hiddenThinkingLabel,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -5827,9 +5354,8 @@ export class InteractiveMode {
 
 	private setToolsExpanded(expanded: boolean): void {
 		this.toolOutputExpanded = expanded;
-		const activeHeader = this.customHeader ?? this.builtInHeader;
-		if (isExpandable(activeHeader)) {
-			activeHeader.setExpanded(expanded);
+		if (isExpandable(this.builtInHeader)) {
+			this.builtInHeader.setExpanded(expanded);
 		}
 		for (const child of this.chatContainer.children) {
 			if (isExpandable(child)) {
@@ -6287,7 +5813,6 @@ export class InteractiveMode {
 		if (startRenderer) nextUi.start();
 		this.setupGlobalInputRouting();
 		this.setupPlanPaneInputRouting();
-		this.rebindExtensionTerminalInputListeners();
 		if (
 			startRenderer &&
 			restoreProgress &&
@@ -8739,9 +8264,8 @@ export class InteractiveMode {
 			configureHttpDispatcher(this.settingsManager.getHttpIdleTimeoutMs());
 			this.session.setTransport(this.settingsManager.getTransport());
 			this.keybindings.reload();
-			const activeHeader = this.customHeader ?? this.builtInHeader;
-			if (isExpandable(activeHeader)) {
-				activeHeader.setExpanded(this.toolOutputExpanded);
+			if (isExpandable(this.builtInHeader)) {
+				this.builtInHeader.setExpanded(this.toolOutputExpanded);
 			}
 			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
@@ -9980,7 +9504,6 @@ export class InteractiveMode {
 							undefined,
 							this.hideThinkingBlock,
 							this.getMarkdownThemeWithSettings(),
-							this.hiddenThinkingLabel,
 						);
 						group.addChild(streaming);
 						streamingRenderCoalescer = new StreamingRenderCoalescer((message: AssistantMessage) => {
@@ -10185,7 +9708,6 @@ export class InteractiveMode {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
 		}
-		this.clearExtensionTerminalInputListeners();
 		this.globalInputUnsubscribe?.();
 		this.globalInputUnsubscribe = undefined;
 		this.planPaneInputUnsubscribe?.();

@@ -148,7 +148,11 @@ Keyed values (`value.kind` is the key's family):
 
 ### Extension UI
 
-Extension panels, dialogs, forms, and status are data every client renders: `UiNode` trees (`text`, `markdown`, `list`, `table`, `keyValue`, `progress`, `form`, `actions`, `card`, `diff`, `terminal`, `code`, `image`, `tree`) and styled text with semantic tokens, never ANSI. The host normalizes them before any client sees them: a panel's node is at most 32 KB of JSON and a status item at most 1 KB. An action or form in extension UI sends only that extension's own intents (`extension.intent.<id>.*`) and commands (`extension.command.<id>.*`), and `open_work` or `cancel_work` for its own work; the host leaves out any other. Clients without a sidebar show `sidebar` panels above the editor.
+Extension status items, panels, dialogs, and forms, tool-call and custom-message presentations, and work detail are data every client renders: `UiNode` trees (`text`, `markdown`, `list`, `table`, `keyValue`, `progress`, `form`, `actions`, `card`, `diff`, `terminal`, `code`, `image`, `tree`) and styled text with semantic tokens, never ANSI. [UI Nodes](ui-nodes.md) is the reference for the node types, tokens, actions, patch operations, and limits.
+
+- **Where it arrives.** Status items, panels, and the title are keyed live values (`ext_status/…`, `ext_panel/…`, `ext_title`); a work item's detail is the `detail` of its `work/…` value; notifications are `notice` items; dialogs and forms are host requests. A running tool call's presentation is the `presentation` of its `tool` items, which later items replace or `patch` (`{summary?, body?}`, a `UiNode` patch of each tree). A committed tool call or custom message carries its presentation in the entry's `view.presentation`.
+- **Normalized on the host.** Before any client sees the data, the host converts ANSI styling to tokens, checks it against the schema, and bounds it: a panel's node holds at most 32 KB of JSON, a status item 1 KB, and a presentation 64 KB on the local profile (16 KB on the remote profile). An action or form in extension UI sends only that extension's own intents (`extension.intent.<id>.*`) and commands (`extension.command.<id>.*`), and `open_work` or `cancel_work` for its own work; the host leaves out any other.
+- **Rendering.** A client draws the chrome around a presentation: the call's state, its elapsed time when `showsDuration`, collapsing between `summary` and `body`, and the result's images. Clients without a sidebar show `sidebar` panels above the editor.
 
 ## Intents
 
@@ -249,7 +253,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |
 | `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` | see the contract | Durable review reads; `review.runs` pages the conversation's review runs. |
 
-`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, or an extension is enabled, disabled, or changes state, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
+`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent or when any client, extension, or conversation saves extension settings, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, or an extension is enabled, disabled, or changes state, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
 
 ## Host requests
 
@@ -278,10 +282,12 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`. The data-only UI reaches the client through the live lane:
 
 - `select`, `confirm`, `input`, `editor`, `dialog`, `form`, and `getEditorText()` (`editor_text`) are host requests;
-- `notify` is a `notice`; `setStatus`, `setPanel`, string `setWidget` (a panel), and `setTitle` are keyed values; `setEditorText` and `pasteToEditor` are `set_editor_text` and `insert_editor_text` directives;
-- extension errors are `notice{level: "error", message: "<event>: <error>", source: <extension path>}`.
+- `notify` is a `notice` whose `source` is the extension's manifest id; `setStatus`, `setPanel`, and `setTitle` are keyed values; `setEditorText` and `pasteToEditor` are `set_editor_text` and `insert_editor_text` directives;
+- tool calls carry the presentations of their tools' `present()`, custom messages those of their types' message presenters, and extension work the detail its kind presents;
+- the extension's intents and commands are [dynamic intents](#dynamic-intents), its completion providers answer the `editor_completions` query, and its shortcuts are TUI keybindings of its intents;
+- extension errors are `notice{level: "error", message: "<event>: <error>", source: <extension id>}`.
 
-The terminal-only UI needs a terminal and does nothing in RPC mode: `custom()` returns `undefined`; component widgets, `setFooter()`, `setHeader()`, `setEditorComponent()`, `setWorkingMessage()`, `setWorkingIndicator()`, and theme changes are no-ops (`setTheme()` reports that no UI is available).
+RPC mode has no terminal client, so `getAllThemes()` returns `[]` and `setTheme()` fails.
 
 ## Example session
 

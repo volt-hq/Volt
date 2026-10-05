@@ -9,20 +9,18 @@
  * surface. The extension registry (core/extensions/registry.ts) keeps which
  * extensions run in line with settings: an extension enabled or disabled
  * while the session runs starts or stops alone, and what it declared here
- * (UI, dialogs, terminal UI, providers, services tasks, work) goes with it.
- * The data-only
- * UI calls (dialogs, forms, notifications, status, panels, string widgets,
- * title, and editor text) write the conversation's live state, which every
- * attached client that accepts them sees; the first answer to a dialog wins.
- * Each extension's `ctx.ui` is its own: its status items and panels are keyed
- * by its manifest id (core/ui/extension-ui.ts). Reading the editor text asks
+ * (UI, dialogs, providers, services tasks, work) goes with it.
+ * The UI calls (dialogs, forms, notifications, status, panels, title, and
+ * editor text) write the conversation's live state, which every attached
+ * client that accepts them sees; the first answer to a dialog wins. Each
+ * extension's `ctx.ui` is its own: its status items and panels are keyed by
+ * its manifest id (core/ui/extension-ui.ts). Reading the editor text asks
  * only the client the call runs for, or the anchor outside any client's call.
- * The terminal-only UI calls go to the last attached client with a terminal,
- * which receives the latest component widgets when it starts showing UI.
- * Errors go to every client. Command context actions, abort, and shutdown go
- * to the client the call runs for (its client scope); calls outside any
- * client scope go to the anchor, the oldest attached client, and calls for a
- * client that has left go nowhere.
+ * Theme calls go to the last attached client with themes. Errors go to every
+ * client. Command context actions, abort, and shutdown go to the client the
+ * call runs for (its client scope); calls outside any client scope go to the
+ * anchor, the oldest attached client, and calls for a client that has left
+ * go nowhere.
  */
 
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
@@ -46,7 +44,7 @@ import {
 	emitSessionShutdownEvent,
 	registerReplacedSessionContext,
 } from "../extensions/runner.ts";
-import { type Extension, ExtensionUIDismissedError } from "../extensions/types.ts";
+import type { Extension } from "../extensions/types.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
@@ -56,7 +54,6 @@ import type { SessionManager } from "../session-manager.ts";
 import { type ExtensionSessionWriter, extensionSessionWriter, type SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
-import { theme } from "../theme/runtime.ts";
 import { stripTerminalControls } from "../ui/ansi-tokens.ts";
 import {
 	dialogRequest,
@@ -177,30 +174,8 @@ export interface SessionExtensionBindingHost {
 	extensionsChanged(): void;
 }
 
-/** The `ctx.ui` members the conversation's live state carries. */
-type LiveUIMember =
-	| "select"
-	| "confirm"
-	| "input"
-	| "editor"
-	| "form"
-	| "dialog"
-	| "notify"
-	| "setStatus"
-	| "setPanel"
-	| "setTitle"
-	| "setEditorText"
-	| "getEditorText"
-	| "pasteToEditor";
-
-/**
- * A client's terminal: the `ctx.ui` members that need one (custom components,
- * header, footer, editor components, terminal input, working indicators,
- * themes, and component widgets) until extensions declare their UI as data.
- * Dialogs, forms, notifications, status, panels, string widgets, title, and
- * editor text reach every client through the conversation's live state.
- */
-export type ExtensionTerminalUI = Omit<ExtensionUIContext, LiveUIMember>;
+/** A client's themes: the ones `ctx.ui.getAllThemes` lists and `ctx.ui.setTheme` switches to. */
+export type ExtensionClientThemes = Pick<ExtensionUIContext, "getAllThemes" | "setTheme">;
 
 /**
  * A client's surface on the session's extensions. A client keeps its id across
@@ -214,12 +189,8 @@ export interface ExtensionClient {
 	 * `ctx.mode`; a `ConversationHost` attaches every client in its own mode.
 	 */
 	readonly mode: ExtensionMode;
-	/**
-	 * The client's terminal. Terminal-only calls go to the last attached client
-	 * with one; a client without one receives none. Component widgets are
-	 * passed to `setWidget`, string widgets go to the live state.
-	 */
-	readonly ui?: ExtensionTerminalUI;
+	/** The client's themes: theme calls go to the last attached client with them. */
+	readonly themes?: ExtensionClientThemes;
 	/** Session control for the commands the client invoked. */
 	readonly commandContextActions?: ExtensionCommandContextActions;
 	/** Replaces the session abort for the `ctx.abort()` calls the client invoked. */
@@ -228,37 +199,12 @@ export interface ExtensionClient {
 	readonly shutdownHandler?: ShutdownHandler;
 	/** Receives every extension error. */
 	readonly onError?: ExtensionErrorListener;
-	/** Asks the user the request_user_input tool's questions in the client's terminal. */
+	/**
+	 * Asks the user the request_user_input tool's questions in the client's
+	 * terminal. The last attached client with it asks them; while none is
+	 * attached, the tool is not offered.
+	 */
 	readonly userInput?: UserInputPrompt;
-}
-
-/** The terminal-only UI a client shows once at a time; the extension that set it last undoes it when it stops. */
-type TerminalSlot =
-	| "footer"
-	| "header"
-	| "editorComponent"
-	| "workingMessage"
-	| "workingVisible"
-	| "workingIndicator"
-	| "hiddenThinkingLabel";
-
-/** Undo a terminal slot an extension set: its default comes back. */
-const RESET_TERMINAL_SLOT: Readonly<Record<TerminalSlot, (ui: ExtensionTerminalUI) => void>> = {
-	footer: (ui) => ui.setFooter(undefined),
-	header: (ui) => ui.setHeader(undefined),
-	editorComponent: (ui) => ui.setEditorComponent(undefined),
-	workingMessage: (ui) => ui.setWorkingMessage(),
-	workingVisible: (ui) => ui.setWorkingVisible(true),
-	workingIndicator: (ui) => ui.setWorkingIndicator(),
-	hiddenThinkingLabel: (ui) => ui.setHiddenThinkingLabel(),
-};
-
-/** What one extension holds of the terminal client's UI, released when it stops. */
-interface OwnedTerminalUI {
-	/** Its raw terminal input listeners' removals. */
-	readonly inputListeners: Set<() => void>;
-	/** Aborted when it stops: its custom components close. */
-	readonly stopped: AbortController;
 }
 
 /**
@@ -276,22 +222,10 @@ const STOPPED_UI: Partial<Record<keyof ExtensionUIContext, unknown>> = {
 	setPanel: () => {},
 	setStatus: () => {},
 	setTitle: () => {},
-	setWidget: () => {},
 	pasteToEditor: () => {},
 	setEditorText: () => {},
 	getEditorText: async () => undefined,
-	onTerminalInput: () => () => {},
-	setFooter: () => {},
-	setHeader: () => {},
-	setEditorComponent: () => {},
-	setWorkingMessage: () => {},
-	setWorkingVisible: () => {},
-	setWorkingIndicator: () => {},
-	setHiddenThinkingLabel: () => {},
-	addAutocompleteProvider: () => {},
-	setToolsExpanded: () => {},
 	setTheme: () => ({ success: false, error: "The extension is stopping" }),
-	custom: () => Promise.reject(new ExtensionUIDismissedError()),
 };
 
 /** A client's attachment to a session's extensions. */
@@ -319,14 +253,8 @@ export class SessionExtensionBinding {
 	private readonly clients: ExtensionClient[] = [];
 	/** Set by the first attachment; settles once `session_start` and resource discovery ran. */
 	private bound: Promise<void> | undefined;
-	/** The latest component widget per key, and the extension that set it, replayed to a client that starts showing UI. */
-	private readonly widgets = new Map<string, { owner: string | undefined; show: (ui: ExtensionTerminalUI) => void }>();
 	/** Dialogs the extensions asked, by the extension that asked: ended when the extensions reload, or it stops. */
 	private readonly extensionRequests = new Map<AbortController, string | undefined>();
-	/** What each extension holds of the terminal client's UI, by manifest id. */
-	private readonly terminalUI = new Map<string, OwnedTerminalUI>();
-	/** The extension that last set each terminal slot. */
-	private readonly terminalSlots = new Map<TerminalSlot, string | undefined>();
 	/** Whether `activate` and `session_start` reached the extensions: one enabled now hears them itself. */
 	private started = false;
 	/** The extensions of the session, which run as settings enable them. */
@@ -398,8 +326,8 @@ export class SessionExtensionBinding {
 
 	/**
 	 * Remove what the stopped `extension` declared outside its record: its
-	 * status items, panels, and title; its pending dialogs; its terminal UI;
-	 * its managed-services tasks; and the providers it registered.
+	 * status items, panels, and title; its pending dialogs; its `ctx.ui`; its
+	 * managed-services tasks; and the providers it registered.
 	 */
 	private retireDeclarations(extension: Extension): void {
 		const id = extension.id;
@@ -408,7 +336,8 @@ export class SessionExtensionBinding {
 		const title = live.get("ext_title");
 		if (title?.kind === "ext_title" && title.extension === id) live.clear("ext_title");
 		for (const [request, owner] of this.extensionRequests) if (owner === id) request.abort();
-		this.releaseTerminalUI(id);
+		// An instance that runs again gets a new `ctx.ui`.
+		this.uiRouters.delete(id);
 		this.host.extensionServices().servicesManager.retire(id);
 		this.retireProviders(extension);
 	}
@@ -463,42 +392,6 @@ export class SessionExtensionBinding {
 		this.refreshModelAfterProviderChange();
 	}
 
-	/** Undo what the extension `id` set on the terminal client: its input listeners, components, widgets, and slots. */
-	private releaseTerminalUI(id: string): void {
-		const owned = this.terminalUI.get(id);
-		this.terminalUI.delete(id);
-		owned?.stopped.abort();
-		for (const remove of owned?.inputListeners ?? []) {
-			try {
-				remove();
-			} catch {
-				// The listener is gone either way.
-			}
-		}
-		const ui = this.uiClient()?.ui;
-		for (const [key, widget] of [...this.widgets]) {
-			if (widget.owner !== id) continue;
-			this.widgets.delete(key);
-			ui?.setWidget(key, undefined);
-		}
-		for (const [slot, owner] of [...this.terminalSlots]) {
-			if (owner !== id) continue;
-			this.terminalSlots.delete(slot);
-			if (ui) RESET_TERMINAL_SLOT[slot](ui);
-		}
-		this.uiRouters.delete(id);
-	}
-
-	/** What the extension `owner` holds of the terminal client's UI. */
-	private ownedTerminalUI(owner: string): OwnedTerminalUI {
-		let owned = this.terminalUI.get(owner);
-		if (!owned) {
-			owned = { inputListeners: new Set(), stopped: new AbortController() };
-			this.terminalUI.set(owner, owned);
-		}
-		return owned;
-	}
-
 	/** The runner over the loaded extensions. */
 	get runner(): ExtensionRunner {
 		return this.extensionRunner;
@@ -511,15 +404,12 @@ export class SessionExtensionBinding {
 
 	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
 	get uiContext(): ExtensionUIContext | undefined {
-		return this.uiClient() ? this.uiFor(undefined) : undefined;
+		return this.terminalClient() ? this.uiFor(undefined) : undefined;
 	}
 
-	/**
-	 * Ask the user `request`'s questions in the client terminal-only calls go
-	 * to; undefined when that client cannot ask them.
-	 */
+	/** Ask the user `request`'s questions in the terminal client; undefined when none is attached. */
 	askUserInput(request: UserInputRequest, signal?: AbortSignal): Promise<UserInputResponse> | undefined {
-		return this.uiClient()?.userInput?.(request, signal);
+		return this.terminalClient()?.userInput?.(request, signal);
 	}
 
 	/** The mode the first attached client fixed. */
@@ -544,11 +434,11 @@ export class SessionExtensionBinding {
 	 */
 	attach(client: ExtensionClient): ExtensionClientAttachment {
 		this.host.assertActive();
-		const previousUIClient = this.uiClient();
+		const previousTerminal = this.terminalClient();
 		const index = this.clients.findIndex((attached) => attached.id === client.id);
 		if (index === -1) this.clients.push(client);
 		else this.clients[index] = client;
-		this.uiClientChanged(previousUIClient);
+		this.terminalClientChanged(previousTerminal);
 		const detach = (): void => this.detach(client);
 		const bound = this.bound ?? this.bind(client.mode);
 		this.bound = bound;
@@ -565,9 +455,9 @@ export class SessionExtensionBinding {
 		// A later attachment under the same id replaced this one and owns the slot.
 		const index = this.clients.indexOf(client);
 		if (index === -1) return;
-		const previousUIClient = this.uiClient();
+		const previousTerminal = this.terminalClient();
 		this.clients.splice(index, 1);
-		this.uiClientChanged(previousUIClient);
+		this.terminalClientChanged(previousTerminal);
 	}
 
 	private bind(mode: ExtensionMode): Promise<void> {
@@ -588,13 +478,14 @@ export class SessionExtensionBinding {
 		});
 	}
 
-	/** The client terminal-only calls go to: the last attached client with a terminal. */
-	private uiClient(): ExtensionClient | undefined {
-		for (let index = this.clients.length - 1; index >= 0; index--) {
-			const client = this.clients[index];
-			if (client?.ui) return client;
-		}
-		return undefined;
+	/** The terminal client: the last attached client that asks the request_user_input questions. */
+	private terminalClient(): ExtensionClient | undefined {
+		return this.clients.findLast((client) => client.userInput !== undefined);
+	}
+
+	/** The client theme calls go to: the last attached client with themes. */
+	private themeClient(): ExtensionClient | undefined {
+		return this.clients.findLast((client) => client.themes !== undefined);
 	}
 
 	/** The attached client the current call runs for, if any. */
@@ -612,38 +503,19 @@ export class SessionExtensionBinding {
 		return ClientScope.current() === undefined ? this.clients[0] : this.scopedClient();
 	}
 
-	private uiClientChanged(previous: ExtensionClient | undefined): void {
-		const current = this.uiClient();
-		if (current && current.id !== previous?.id) this.replayUI(current);
-		// request_user_input is offered only while an interactive client shows UI.
-		if (this.bound && this.extensionMode === "tui" && (current === undefined) !== (previous === undefined)) {
+	private terminalClientChanged(previous: ExtensionClient | undefined): void {
+		// request_user_input is offered only while a terminal client is attached.
+		if (
+			this.bound &&
+			this.extensionMode === "tui" &&
+			(this.terminalClient() === undefined) !== (previous === undefined)
+		) {
 			this.host.tools().syncPlanningRuntime();
 		}
 	}
 
-	/** Show the latest component widgets on a client that starts showing UI. */
-	private replayUI(client: ExtensionClient): void {
-		const ui = client.ui;
-		if (!ui) return;
-		for (const widget of this.widgets.values()) {
-			try {
-				widget.show(ui);
-			} catch (error) {
-				this.extensionRunner.emitError({
-					extensionId: "<runtime>",
-					event: "ui_replay",
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
-		}
-	}
-
-	/** Forget what the extensions declared: their component widgets, terminal UI, and live status, panels, and title. */
+	/** Forget what the extensions declared: their live status, panels, and title. */
 	private clearDeclaredUI(): void {
-		this.widgets.clear();
-		for (const owned of this.terminalUI.values()) owned.stopped.abort();
-		this.terminalUI.clear();
-		this.terminalSlots.clear();
 		this.host.liveState.clearMatching(["ext_status/", "ext_panel/", "ext_title"]);
 	}
 
@@ -780,27 +652,18 @@ export class SessionExtensionBinding {
 
 	/**
 	 * The UI one extension sees (`owner`, its manifest id), or contexts no
-	 * extension owns (`undefined`). Data-only calls write the live state;
-	 * status items, panels, string widgets, and the title need an owner.
-	 * Terminal-only calls go to the terminal client with their arguments as
-	 * given, and no-op without one; what an extension sets there is recorded,
-	 * so it is undone when the extension stops.
+	 * extension owns (`undefined`). UI calls write the live state; status
+	 * items, panels, and the title need an owner. Theme calls go to the theme
+	 * client, and do nothing without one.
 	 */
 	private createUIRouter(owner: string | undefined): ExtensionUIContext {
-		const ui = () => this.uiClient()?.ui;
+		const themes = () => this.themeClient()?.themes;
 		// The router is built before the binding's host is set.
 		const live = () => this.host.liveState;
 		const owned = (member: string): string => {
 			if (owner === undefined) throw new Error(`ctx.ui.${member} is available only in an extension's own context`);
 			return owner;
 		};
-		/** Set a terminal slot, recording that `owner` set it last. */
-		const setSlot = (slot: TerminalSlot, set: (target: ExtensionTerminalUI) => void): void => {
-			this.terminalSlots.set(slot, owner);
-			const target = ui();
-			if (target) set(target);
-		};
-		type UI = ExtensionUIContext;
 		return {
 			select: (title, options, opts) => {
 				// Nothing to choose from: the dialog would only be dismissed.
@@ -860,88 +723,14 @@ export class SessionExtensionBinding {
 			},
 			notify: (message, type) =>
 				live().notice(type === "warning" || type === "error" ? type : "info", notificationText(message), owner),
-			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => {
-				const remove = ui()?.onTerminalInput(...args) ?? (() => {});
-				if (owner === undefined) return remove;
-				const listeners = this.ownedTerminalUI(owner).inputListeners;
-				listeners.add(remove);
-				return () => {
-					listeners.delete(remove);
-					remove();
-				};
-			},
 			setStatus: (key, text) => setExtensionStatus(this.uiHost, owned("setStatus"), key, text),
 			setPanel: (name, panel) => setExtensionPanel(this.uiHost, owned("setPanel"), name, panel),
-			setWorkingMessage: (...args: Parameters<UI["setWorkingMessage"]>) =>
-				setSlot("workingMessage", (target) => target.setWorkingMessage(...args)),
-			setWorkingVisible: (...args: Parameters<UI["setWorkingVisible"]>) =>
-				setSlot("workingVisible", (target) => target.setWorkingVisible(...args)),
-			setWorkingIndicator: (...args: Parameters<UI["setWorkingIndicator"]>) =>
-				setSlot("workingIndicator", (target) => target.setWorkingIndicator(...args)),
-			setHiddenThinkingLabel: (...args: Parameters<UI["setHiddenThinkingLabel"]>) =>
-				setSlot("hiddenThinkingLabel", (target) => target.setHiddenThinkingLabel(...args)),
-			setWidget: (key, content, options) => {
-				// A string widget is the panel `key`; a component widget is the terminal's.
-				if (content === undefined) {
-					this.widgets.delete(key);
-					setExtensionPanel(this.uiHost, owned("setWidget"), key, undefined);
-					ui()?.setWidget(key, undefined, options);
-				} else if (Array.isArray(content)) {
-					setExtensionPanel(this.uiHost, owned("setWidget"), key, {
-						placement: options?.placement ?? "aboveEditor",
-						node: { type: "text", text: content.join("\n") },
-					});
-					// The lines replace a component widget under the key, which no terminal shows again.
-					if (this.widgets.delete(key)) ui()?.setWidget(key, undefined, options);
-				} else {
-					setExtensionPanel(this.uiHost, owned("setWidget"), key, undefined);
-					const show = (target: ExtensionTerminalUI): void => target.setWidget(key, content, options);
-					this.widgets.set(key, { owner, show });
-					const target = ui();
-					if (target) show(target);
-				}
-			},
-			setFooter: (...args: Parameters<UI["setFooter"]>) => setSlot("footer", (target) => target.setFooter(...args)),
-			setHeader: (...args: Parameters<UI["setHeader"]>) => setSlot("header", (target) => target.setHeader(...args)),
 			setTitle: (title) => setExtensionTitle(this.uiHost, owned("setTitle"), title),
-			custom: (factory, options) => {
-				// A stopping extension's component closes: its call rejects as dismissed.
-				const signal =
-					owner === undefined
-						? options?.signal
-						: options?.signal === undefined
-							? this.ownedTerminalUI(owner).stopped.signal
-							: AbortSignal.any([options.signal, this.ownedTerminalUI(owner).stopped.signal]);
-				return (
-					ui()?.custom(factory, { ...options, ...(signal === undefined ? {} : { signal }) }) ??
-					Promise.resolve(undefined as never)
-				);
-			},
 			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
 			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
 			getEditorText: () => this.editorText(owner),
-			addAutocompleteProvider: (factory: Parameters<UI["addAutocompleteProvider"]>[0]) => {
-				// A stopped instance's provider steps aside each time the client builds its providers, even once
-				// its id runs again.
-				const lifetime = owner === undefined ? undefined : this.registry.instance(owner)?.lifetime;
-				ui()?.addAutocompleteProvider((current) =>
-					owner !== undefined && (this.registry.stopped(owner) || lifetime?.stopped === true)
-						? current
-						: factory(current),
-				);
-			},
-			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) =>
-				setSlot("editorComponent", (target) => target.setEditorComponent(...args)),
-			getEditorComponent: () => ui()?.getEditorComponent(),
-			get theme() {
-				return ui()?.theme ?? theme;
-			},
-			getAllThemes: () => ui()?.getAllThemes() ?? [],
-			getTheme: (...args: Parameters<UI["getTheme"]>) => ui()?.getTheme(...args),
-			setTheme: (...args: Parameters<UI["setTheme"]>) =>
-				ui()?.setTheme(...args) ?? { success: false, error: "UI not available" },
-			getToolsExpanded: () => ui()?.getToolsExpanded() ?? false,
-			setToolsExpanded: (...args: Parameters<UI["setToolsExpanded"]>) => ui()?.setToolsExpanded(...args),
+			getAllThemes: () => themes()?.getAllThemes() ?? [],
+			setTheme: (name) => themes()?.setTheme(name) ?? { success: false, error: "UI not available" },
 		};
 	}
 
@@ -977,7 +766,7 @@ export class SessionExtensionBinding {
 			(owner) => this.uiFor(owner),
 			this.extensionMode,
 			() =>
-				this.uiClient() !== undefined ||
+				this.terminalClient() !== undefined ||
 				this.acceptsDialogs() ||
 				this.extensionMode === "tui" ||
 				this.extensionMode === "rpc",

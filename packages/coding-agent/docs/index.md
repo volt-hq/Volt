@@ -47,7 +47,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 ## Customization
 
-- [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
+- [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and UI that every client renders.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [Prompt templates](prompt-templates.md) - reusable prompts that expand from slash commands.
 - [Themes](themes.md) - built-in and custom terminal themes.
@@ -63,11 +63,11 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Iroh remote protocol](iroh-remote-protocol.md) - v1 ticket, handshake, JSONL, command, and redaction contract for client authors.
 - [Iroh remote access design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md) - architecture, support boundary, and limitations for Volt access over Iroh.
 - [JSON event stream mode](json.md) - print mode with structured events.
-- [TUI components](tui.md) - build custom terminal UI for extensions.
 
 ## Reference
 
 - [Session format](session-format.md) - SQLite storage, JSONL snapshot interchange, entry types, and SessionManager API.
+- [UI nodes](ui-nodes.md) - the `UiNode` data of extension UI and tool presentations: node types, styled text, actions, patches, and limits.
 
 ## Platform setup
 

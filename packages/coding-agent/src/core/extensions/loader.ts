@@ -77,7 +77,6 @@ import {
 	ExtensionLifetime,
 	type ExtensionRuntime,
 	type LoadExtensionsResult,
-	type MessageRenderer,
 	type ProviderConfig,
 	type RegisteredCommand,
 	type RegisteredIntent,
@@ -570,11 +569,6 @@ function createExtensionAPI(
 			runtime.refreshWorkKinds();
 		},
 
-		registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
-			assertRunning();
-			extension.messageRenderers.set(customType, renderer as MessageRenderer);
-		},
-
 		registerMessagePresenter<T>(customType: string, present: MessagePresenter<T>): void {
 			assertRunning();
 			if (typeof customType !== "string" || customType.length === 0) {
@@ -899,7 +893,6 @@ function createExtension(candidate: Candidate): Extension {
 		fingerprint: candidateFingerprint(candidate),
 		handlers: new ExtensionHandlerRegistry(),
 		tools: new Map(),
-		messageRenderers: new Map(),
 		messagePresenters: new Map(),
 		commands: new Map(),
 		flags: new Map(),

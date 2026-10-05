@@ -710,26 +710,7 @@ export default function(volt) {
 		});
 	});
 
-	describe("message renderers", () => {
-		it("gets message renderer by type", async () => {
-			const extCode = `
-				export const manifest = { id: "renderer", displayName: "renderer" };
-				export default function(volt) {
-					volt.registerMessageRenderer("my-type", (message, options, theme) => null);
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "renderer.ts"), extCode);
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-
-			const renderer = runner.getMessageRenderer("my-type");
-			expect(renderer).toBeDefined();
-
-			const missing = runner.getMessageRenderer("not-exists");
-			expect(missing).toBeUndefined();
-		});
-
+	describe("message presenters", () => {
 		it("gets the first message presenter of a type, with the extension that registered it", async () => {
 			for (const id of ["a-presenter", "b-presenter"]) {
 				fs.writeFileSync(

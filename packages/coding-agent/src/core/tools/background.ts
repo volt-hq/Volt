@@ -34,10 +34,10 @@ function labelOf(input: Record<string, unknown>): string | undefined {
 }
 
 /** Applied only to native Bash/subagent definitions, before extension overrides. */
-export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
-	definition: ToolDefinition<TObject<T>, TDetails, TState>,
+export function withBackgroundJobs<T extends TProperties, TDetails>(
+	definition: ToolDefinition<TObject<T>, TDetails>,
 	options: BackgroundToolOptions,
-): ToolDefinition<BackgroundParameters<T>, unknown, TState> {
+): ToolDefinition<BackgroundParameters<T>, unknown> {
 	if (definition.name !== "bash" && definition.name !== "subagent") {
 		throw new Error("Only native bash and subagent tools support background jobs.");
 	}
@@ -47,8 +47,8 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 		...definition.parameters,
 		properties: { ...definition.parameters.properties, background: backgroundParameter },
 	} as BackgroundParameters<T>;
-	// The wrapped definition's own renderers are typed for its parameters; the wrapper presents instead.
-	const { present: _present, renderCall: _renderCall, renderResult: _renderResult, ...base } = definition;
+	// The wrapped definition's presenter is typed for its parameters; the wrapper presents instead.
+	const { present: _present, ...base } = definition;
 	return {
 		...base,
 		parameters,

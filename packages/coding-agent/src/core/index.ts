@@ -60,7 +60,6 @@ export {
 	type ExtensionShortcut,
 	type ExtensionUIContext,
 	type LoadExtensionsResult,
-	type MessageRenderer,
 	type RegisteredCommand,
 	type SessionBeforeCompactEvent,
 	type SessionBeforeForkEvent,
@@ -73,11 +72,9 @@ export {
 	type ToolCallEvent,
 	type ToolCallEventResult,
 	type ToolDefinition,
-	type ToolRenderResultOptions,
 	type ToolResultEvent,
 	type TurnEndEvent,
 	type TurnStartEvent,
-	type WorkingIndicatorOptions,
 } from "./extensions/index.ts";
 export {
 	ConversationHost,

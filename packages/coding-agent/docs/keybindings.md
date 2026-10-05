@@ -2,7 +2,7 @@
 
 All keyboard shortcuts can be customized via `~/.volt/agent/keybindings.json`. Each action can be bound to one or more keys.
 
-The config file uses the same namespaced keybinding ids that volt uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
+The config file uses the same namespaced keybinding ids that volt uses internally.
 
 Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
 

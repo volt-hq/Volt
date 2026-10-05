@@ -378,22 +378,20 @@ export default function(volt) {
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
-	it("registers message renderers", async () => {
+	it("registers message presenters", async () => {
 		const extCode = `
-			export const manifest = { id: "with-renderer", displayName: "with-renderer" };
+			export const manifest = { id: "with-presenter", displayName: "with-presenter" };
 			export default function(volt) {
-				volt.registerMessageRenderer("my-custom-type", (message, options, theme) => {
-					return null; // Use default rendering
-				});
+				volt.registerMessagePresenter("my-custom-type", (message) => ({ body: [{ type: "text", text: "shown" }] }));
 			}
 		`;
-		fs.writeFileSync(path.join(extensionsDir, "with-renderer.ts"), extCode);
+		fs.writeFileSync(path.join(extensionsDir, "with-presenter.ts"), extCode);
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].messageRenderers.has("my-custom-type")).toBe(true);
+		expect(result.extensions[0].messagePresenters.has("my-custom-type")).toBe(true);
 	});
 
 	it("reports error when extension throws during initialization", async () => {

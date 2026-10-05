@@ -167,15 +167,6 @@ describe("built-in query tool presenters", () => {
 		] as const) {
 			expect(BUILTIN_TOOL_PRESENTERS.get(name)).toBe(present);
 		}
-		for (const definition of [
-			createGrepToolDefinition(CWD),
-			createLsToolDefinition(CWD),
-			createWebFetchToolDefinition(CWD),
-			createRequestUserInputToolDefinition(),
-		]) {
-			expect(definition.renderCall).toBeUndefined();
-			expect(definition.renderResult).toBeUndefined();
-		}
 	});
 
 	it("title calls whose arguments are streaming, missing, or of the wrong type", () => {

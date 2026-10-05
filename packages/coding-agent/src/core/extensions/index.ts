@@ -98,9 +98,6 @@ export type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	AppendEntryHandler,
-	// App keybindings (for custom editors)
-	AppKeybinding,
-	AutocompleteProviderFactory,
 	// Events - Tool (ToolCallEvent types)
 	BashToolCallEvent,
 	BashToolResultEvent,
@@ -118,7 +115,6 @@ export type {
 	ContextUsage,
 	CustomToolCallEvent,
 	CustomToolResultEvent,
-	EditorFactory,
 	EditToolCallEvent,
 	EditToolResultEvent,
 	ExecOptions,
@@ -155,7 +151,6 @@ export type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
-	ExtensionWidgetOptions,
 	FindToolCallEvent,
 	FindToolResultEvent,
 	GetActiveToolsHandler,
@@ -168,15 +163,11 @@ export type {
 	InputEvent,
 	InputEventResult,
 	InputSource,
-	KeybindingsManager,
 	LoadExtensionsResult,
 	LsToolCallEvent,
 	LsToolResultEvent,
 	// Events - Message
 	MessageEndEvent,
-	// Message Rendering
-	MessageRenderer,
-	MessageRenderOptions,
 	MessageStartEvent,
 	MessageUpdateEvent,
 	ModelSelectEvent,
@@ -225,7 +216,6 @@ export type {
 	SetThinkingLevelHandler,
 	SettingsChangedEvent,
 	StartWorkOptions,
-	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -238,7 +228,6 @@ export type {
 	ToolExecutionStartEvent,
 	ToolExecutionUpdateEvent,
 	ToolInfo,
-	ToolRenderResultOptions,
 	ToolResultEvent,
 	ToolResultEventResult,
 	TreePreparation,
@@ -251,8 +240,6 @@ export type {
 	WebFetchToolResultEvent,
 	WebSearchToolCallEvent,
 	WebSearchToolResultEvent,
-	WidgetPlacement,
-	WorkingIndicatorOptions,
 	WorkKindDeclaration,
 	WorkRun,
 	WorkRunContext,
@@ -263,7 +250,6 @@ export type {
 // Type guards
 export {
 	defineTool,
-	ExtensionUIDismissedError,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,

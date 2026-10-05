@@ -432,16 +432,22 @@ function tailLines(content: string, count: number): string[] {
 	return lines.slice(-count);
 }
 
-/** Ask a yes/no question on an interactive terminal; non-interactive runs answer no. */
+/**
+ * Ask a yes/no question on an interactive terminal; non-interactive runs
+ * answer no, and so does ending the prompt with Ctrl+C or Ctrl+D.
+ */
 export async function promptConfirm(message: string): Promise<boolean> {
 	if (!process.stdin.isTTY || !process.stdout.isTTY) {
 		return false;
 	}
 	return new Promise((resolve) => {
 		const readline = createInterface({ input: process.stdin, output: process.stdout });
+		readline.on("SIGINT", () => readline.close());
+		// Closing without an answer is no; after an answer it changes nothing.
+		readline.on("close", () => resolve(false));
 		readline.question(`${message} [y/N] `, (answer) => {
-			readline.close();
 			resolve(answer.trim().toLowerCase() === "y" || answer.trim().toLowerCase() === "yes");
+			readline.close();
 		});
 	});
 }

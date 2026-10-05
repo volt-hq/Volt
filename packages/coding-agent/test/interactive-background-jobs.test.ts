@@ -55,10 +55,6 @@ type InteractiveTestAccess = {
 		dialog: Component,
 		prompt: { message: string; options: { id: string; label: string }[] },
 	): Promise<string | undefined>;
-	showExtensionCustom(
-		factory: (ui: TUI, theme: unknown, keys: unknown, done: () => void) => Component | Promise<Component>,
-		options: { overlay: boolean },
-	): Promise<void>;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	subscribeToBackgroundJobs(session: AgentSession): void;
 	handleEvent(event: AgentSessionEvent): Promise<void>;
@@ -449,33 +445,6 @@ describe("interactive background jobs", () => {
 		},
 	);
 
-	it("keeps the inspector open when an underlying asynchronous extension overlay closes", async () => {
-		const { access, terminal, listeners } = await createFixture("fullscreen");
-		let closeExtension!: () => void;
-		const extension = access.showExtensionCustom(
-			(_ui, _theme, _keys, done) => {
-				closeExtension = done;
-				return new Text("Asynchronous extension work", 0, 0);
-			},
-			{ overlay: true },
-		);
-		await terminal.waitForRender();
-		terminal.sendInput("\x1bj");
-		await terminal.waitForRender();
-		const inspector = access.ui.getFocusedComponent();
-		expect(inspector).toBeInstanceOf(WorkInspector);
-		closeExtension();
-		await extension;
-		await terminal.waitForRender();
-		expect(access.ui.getFocusedComponent()).toBe(inspector);
-		expect(access.workInspector).toBe(inspector);
-		terminal.sendInput("\x1b");
-		await terminal.waitForRender();
-		expect(access.ui.getFocusedComponent()).toBe(access.editor);
-		expect(access.workInspector).toBeUndefined();
-		expect(listeners.size).toBe(1);
-	});
-
 	it.each(["regular", "fullscreen"] as const)(
 		"keeps confirmations visible and prevents inspection keys from approving them (%s)",
 		async (tuiMode) => {
@@ -511,38 +480,6 @@ describe("interactive background jobs", () => {
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
 			expect(jobs.get(job.id).status).toBe("running");
-		},
-	);
-
-	it.each(["regular", "fullscreen"] as const)(
-		"dismisses inspection before an asynchronous dedicated UI takes focus (%s)",
-		async (tuiMode) => {
-			const { access, terminal, listeners } = await createFixture(tuiMode);
-			let ready!: (component: Component) => void;
-			let close!: () => void;
-			const pendingComponent = new Promise<Component>((resolve) => {
-				ready = resolve;
-			});
-			const extension = access.showExtensionCustom(
-				(_ui, _theme, _keys, done) => {
-					close = done;
-					return pendingComponent;
-				},
-				{ overlay: false },
-			);
-			terminal.sendInput("\x1bj");
-			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
-			const component = new Text("Dedicated confirmation content", 0, 0);
-			ready(component);
-			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBe(component);
-			expect(access.workInspector).toBeUndefined();
-			expect(terminal.getViewport().join("\n")).toContain("Dedicated confirmation content");
-			expect(listeners.size).toBe(1);
-			close();
-			await extension;
-			expect(access.ui.getFocusedComponent()).toBe(access.editor);
 		},
 	);
 

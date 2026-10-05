@@ -449,7 +449,7 @@ See [packages.md](packages.md) for package management details.
 }
 ```
 
-Values an extension does not declare, or that its schema does not allow, are ignored with a warning. Settings never hold credentials. See [extensions.md](extensions.md#settings).
+A manifest declares a flat object of string, string enum, boolean, and integer settings, and every client edits them with the same form. Values an extension does not declare, or that its schema does not allow, are ignored with a warning, and one extension's values in one scope hold at most 16 KB of JSON. Project values apply, and can be written, only in a trusted project. Settings never hold credentials. See [extensions.md](extensions.md#settings).
 
 ## Example
 

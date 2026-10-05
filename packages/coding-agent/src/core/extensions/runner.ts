@@ -3,7 +3,7 @@
  *
  * The runner runs the active extensions of one runtime generation, in order.
  * Every contribution an extension makes lives on its record (handlers, tools,
- * commands, intents, shortcuts, completion providers, flags, renderers, work
+ * commands, intents, shortcuts, completion providers, flags, presenters, work
  * kinds), and the runner reads contributions only from the active records:
  * replacing the active set (`setExtensions`) removes a record's
  * contributions at once. A context an extension's handler, command, or tool
@@ -21,7 +21,6 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
-import { type Theme, theme } from "../theme/runtime.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
 import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
@@ -61,7 +60,6 @@ import type {
 	LoadExtensionsResult,
 	MessageEndEvent,
 	MessageEndEventResult,
-	MessageRenderer,
 	ProjectTrustContext,
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
@@ -371,32 +369,14 @@ const noOpUIContext: ExtensionUIContext = {
 	dialog: async () => undefined,
 	notify: () => {},
 	setPanel: () => {},
-	onTerminalInput: () => () => {},
 	setStatus: () => {},
-	setWorkingMessage: () => {},
-	setWorkingVisible: () => {},
-	setWorkingIndicator: () => {},
-	setHiddenThinkingLabel: () => {},
-	setWidget: () => {},
-	setFooter: () => {},
-	setHeader: () => {},
 	setTitle: () => {},
-	custom: async () => undefined as never,
 	pasteToEditor: () => {},
 	setEditorText: () => {},
 	getEditorText: async () => undefined,
 	editor: async () => undefined,
-	addAutocompleteProvider: () => {},
-	setEditorComponent: () => {},
-	getEditorComponent: () => undefined,
-	get theme() {
-		return theme;
-	},
 	getAllThemes: () => [],
-	getTheme: () => undefined,
-	setTheme: (_theme: string | Theme) => ({ success: false, error: "UI not available" }),
-	getToolsExpanded: () => false,
-	setToolsExpanded: () => {},
+	setTheme: () => ({ success: false, error: "UI not available" }),
 };
 
 /** The UI of the extension with manifest id `owner`; `undefined` for a context no extension owns. */
@@ -738,7 +718,7 @@ export class ExtensionRunner {
 	/**
 	 * Replace the active extensions: what a removed extension contributed
 	 * (hooks, tools, commands, intents, shortcuts, completion providers, flags,
-	 * renderers, work kinds) is gone at once; an added one's settings start
+	 * presenters, work kinds) is gone at once; an added one's settings start
 	 * from what they are now. Contexts of a removed instance keep working until
 	 * it retires.
 	 *
@@ -1009,16 +989,6 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const present = ext.messagePresenters.get(customType);
 			if (present) return { present, extensionId: ext.id };
-		}
-		return undefined;
-	}
-
-	getMessageRenderer(customType: string): MessageRenderer | undefined {
-		for (const ext of this.extensions) {
-			const renderer = ext.messageRenderers.get(customType);
-			if (renderer) {
-				return renderer;
-			}
 		}
 		return undefined;
 	}

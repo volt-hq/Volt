@@ -32,6 +32,8 @@ const inspectorMock = vi.hoisted(() => ({
 		inspectorMock.calls.push(options);
 		return {
 			source: options.source,
+			// Catalog entries declare an extension: an update reads its manifest before installing it.
+			volt: { manifest: { id: "theme", displayName: "Theme", entry: "index.ts" } },
 			discoveredResources: {
 				extensions: [],
 				skills: [],
