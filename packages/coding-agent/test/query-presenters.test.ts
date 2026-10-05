@@ -505,7 +505,7 @@ describe("built-in query tool presenters", () => {
 	});
 
 	describe("web_fetch", () => {
-		it("shows the page's details, its first lines collapsed, and bounded Markdown expanded", () => {
+		it("shows the page's details, its first lines collapsed, and its text as literal lines expanded", () => {
 			const content = Array.from({ length: 30 }, (_, index) => `Paragraph ${index}`).join("\n");
 			const text = `Fetched: https://example.com/page\nTitle: Example\n\n${content}\n\n[20.0KB limit reached]\n\n[Download truncated at 1.0MB]`;
 			const presentation = presented(
@@ -528,11 +528,16 @@ describe("built-in query tool presenters", () => {
 			expect(summary?.lines[0]).toBe("Paragraph 0");
 			expect(texts(presentation.summary)).toContain("[Truncated: 20.0KB limit]");
 			expect(texts(presentation.summary)).toContain("[Download truncated: 1.0MB limit]");
-			expect(find(presentation.body, "markdown")?.markdown).toBe(content);
+			// Fetched text is untrusted: it shows as it is, never as Markdown.
+			expect(find(presentation.body, "markdown")).toBeUndefined();
+			expect(find(presentation.body, "terminal")?.lines).toEqual(content.split("\n"));
 		});
 
-		it("bounds the Markdown it shows", () => {
-			const content = Array.from({ length: 2_000 }, (_, index) => `Line ${index} ${"y".repeat(20)}`).join("\n");
+		it("keeps a large page within the bound by trimming its oldest lines", () => {
+			const content = Array.from(
+				{ length: 2_000 },
+				(_, index) => `Line ${index} [link](https://example.com) ${"y".repeat(20)}`,
+			).join("\n");
 			const presentation = presented(
 				"web_fetch",
 				presentWebFetch,
@@ -540,9 +545,8 @@ describe("built-in query tool presenters", () => {
 					url: "https://example.com",
 				}),
 			);
-			const markdown = find(presentation.body, "markdown")?.markdown ?? "";
-			expect(markdown.length).toBeLessThanOrEqual(12_000);
-			expect(texts(presentation.body)).toMatch(/… \d+ more characters/);
+			expect(find(presentation.body, "markdown")).toBeUndefined();
+			expect(find(presentation.body, "terminal")?.omittedLines).toBeGreaterThan(0);
 		});
 	});
 

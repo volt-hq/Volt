@@ -53,8 +53,6 @@ const LSP_SUMMARY_LINES = 10;
 const WEB_SUMMARY_LINES = 16;
 /** Result titles web_search lists collapsed. */
 const WEB_SEARCH_SUMMARY_RESULTS = 5;
-/** Most characters of fetched text web_fetch shows as Markdown. */
-const WEB_FETCH_MARKDOWN_MAX_CHARS = 12_000;
 /** Lines of an mcp result's JSON shown collapsed. */
 const MCP_SUMMARY_LINES = 18;
 
@@ -437,18 +435,12 @@ function fetchedContent(text: string): string {
 		.trim();
 }
 
-/** Text cut to about `max` characters at a line end. */
-function boundedText(text: string, max: number): { text: string; omitted: number } {
-	if (text.length <= max) return { text, omitted: 0 };
-	const end = text.lastIndexOf("\n", max);
-	const cut = text.slice(0, end > max / 2 ? end : max);
-	return { text: cut, omitted: text.length - cut.length };
-}
-
 /**
- * web_fetch: the URL; the page's URL, title, and content type; its text
- * (collapsed, the first lines; expanded, as Markdown within a bound); and
- * how the text or download was truncated.
+ * web_fetch: the URL; the page's URL, title, and content type; its text as
+ * literal lines (collapsed, the first lines; expanded, all of them, which a
+ * bounded presentation trims); and how the text or download was truncated.
+ * Fetched text is untrusted and shows as it is, never as Markdown, so a page
+ * cannot style links or images into what the user sees.
  */
 export const presentWebFetch: ToolPresenter = (input) => {
 	const titleText = titleSpans("web_fetch", argSpan(input.args, "url"));
@@ -497,22 +489,8 @@ export const presentWebFetch: ToolPresenter = (input) => {
 	];
 	const content = fetchedContent(resultText(input.result));
 	if (!content) return presentationOf(titleText, { summary: [...info, ...warnings], showsDuration: true });
-	const lines = outputLines(content);
-	const shown = lines.slice(0, WEB_SUMMARY_LINES);
-	const markdown = boundedText(stripTerminalControls(content), WEB_FETCH_MARKDOWN_MAX_CHARS);
 	return presentationOf(titleText, {
-		summary: [
-			...info,
-			{ type: "terminal", key: "text", lines: shown },
-			...moreLines(shown.length, lines.length),
-			...warnings,
-		],
-		body: [
-			...info,
-			{ type: "markdown", key: "markdown", markdown: markdown.text },
-			...(markdown.omitted > 0 ? [textNode("omitted", `… ${markdown.omitted} more characters`, "muted")] : []),
-			...warnings,
-		],
+		...linesOutput(outputLines(content), WEB_SUMMARY_LINES, info, warnings, "text"),
 		showsDuration: true,
 	});
 };

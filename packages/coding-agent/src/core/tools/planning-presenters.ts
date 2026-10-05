@@ -9,6 +9,7 @@
  * still presents within the remote bound; the plan inspector shows it whole.
  */
 
+import { Buffer } from "node:buffer";
 import type { ToolPresentation, UiNode, UiNodeStyledText, UiNodeToken } from "@hansjm10/volt-protocol";
 import {
 	getPlanLeafSteps,
@@ -192,7 +193,7 @@ function checklistNodes(plan: PlanState): UiNode[] {
 	};
 	/** Spend the budget on `step`; false when it is spent. */
 	const fits = (step: Step): boolean => {
-		const bytes = JSON.stringify(step).length;
+		const bytes = Buffer.byteLength(JSON.stringify(step), "utf8");
 		if (bytes > budget) return false;
 		budget -= bytes;
 		shown += 1;
@@ -208,7 +209,7 @@ function checklistNodes(plan: PlanState): UiNode[] {
 		}
 		flush();
 		const title = oneLine(step.text, STEP_TEXT_MAX_CHARS);
-		budget -= title.length;
+		budget -= Buffer.byteLength(title, "utf8");
 		const steps: Step[] = [];
 		for (const [subindex, substep] of step.substeps.entries()) {
 			const presented = stepOf(substep, subindex);

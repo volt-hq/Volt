@@ -61,14 +61,12 @@ export class SessionPresenters implements PresenterSet {
 
 	tool(toolName: string): ResolvedToolPresenter | undefined {
 		const tool = this.host.tool(toolName);
-		if (tool?.present !== undefined) {
-			return {
-				present: tool.present,
-				policy: tool.extensionId === undefined ? HOST_UI_POLICY : this.extensionPolicy(tool.extensionId),
-			};
-		}
+		const policy = tool?.extensionId === undefined ? HOST_UI_POLICY : this.extensionPolicy(tool.extensionId);
+		if (tool?.present !== undefined) return { present: tool.present, policy };
+		// An extension's tool of a built-in's name presents as the built-in, binding only what the extension may:
+		// its results are the extension's, so the actions they name are too.
 		const builtin = BUILTIN_TOOL_PRESENTERS.get(toolName);
-		return builtin === undefined ? undefined : { present: builtin, policy: HOST_UI_POLICY };
+		return builtin === undefined ? undefined : { present: builtin, policy };
 	}
 
 	message(customType: string): ResolvedMessagePresenter | undefined {

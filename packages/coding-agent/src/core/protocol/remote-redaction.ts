@@ -544,16 +544,26 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	/**
-	 * `value` with each string the host cut (ending in "…") losing the start of
-	 * a root the cut left, as UI data the host normalized ends a cut.
-	 * Identifiers are never cut.
+	 * `text` with each cut it holds ("…", where a presenter or the host cut a
+	 * value, at its end or before more text) losing the start of a root the
+	 * cut left.
+	 */
+	const withoutCutRoots = (text: string): string => {
+		if (!text.includes("…")) return text;
+		const parts = text.split("…");
+		const rest = parts.pop() ?? "";
+		return `${parts.map((part) => sanitizer.sanitizeCutText(`${part}…`)).join("")}${rest}`;
+	};
+
+	/**
+	 * `value` with each string the host cut losing the start of a root the cut
+	 * left, as UI data marks a cut with "…" (`withoutCutRoots`). Identifiers
+	 * are never cut.
 	 */
 	const cutAware = <T>(value: T): T => {
 		const visit = (entry: unknown, key: string | undefined): unknown => {
 			if (typeof entry === "string") {
-				return entry.endsWith("…") && (key === undefined || !PRESERVED_KEYS.has(key))
-					? sanitizer.sanitizeCutText(entry)
-					: entry;
+				return key === undefined || !PRESERVED_KEYS.has(key) ? withoutCutRoots(entry) : entry;
 			}
 			if (Array.isArray(entry)) return entry.map((item) => visit(item, key));
 			if (!isRecord(entry)) return entry;
@@ -564,7 +574,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 
 	/**
 	 * `value` with each run of styled spans whose joined text spells a root, or
-	 * ends a cut at the start of one, as one string: styling may split a path
+	 * cuts one short anywhere in it, as one string: styling may split a path
 	 * into spans (a dimmed directory, a highlighted match), which redaction must
 	 * see whole. Such text loses its styling.
 	 */
@@ -573,7 +583,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			if (Array.isArray(entry)) {
 				if (isStyledSpans(entry)) {
 					const joined = entry.map((span) => span.text).join("");
-					const cut = joined.endsWith("…") && sanitizer.rootPrefixSuffix(joined.slice(0, -1)) > 0;
+					const cut = withoutCutRoots(joined) !== joined;
 					if (cut || sanitizer.containsRoot(joined)) return joined;
 				}
 				return entry.map(visit);

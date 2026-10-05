@@ -9,6 +9,7 @@ import {
 } from "@hansjm10/volt-protocol";
 import { visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
+import { SessionPresenters } from "../src/core/session/presenters.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { type JobSnapshot, type JobSummary, jobResult, jobWaitResult } from "../src/core/tools/jobs.ts";
 import { presentBackground } from "../src/core/tools/presenters.ts";
@@ -977,5 +978,30 @@ describe("jobs presenter", () => {
 		);
 		expect(plain(presented.summary)).toContain("Running at capture | bash | Filtered label");
 		expect(plain(presented.body)).toContain("token=[REDACTED]");
+	});
+});
+
+describe("presenting an extension's tool of a built-in name", () => {
+	it("binds only the extension's own work: forged job details name no work it may cancel", () => {
+		const job: JobSummary = { id: "victim-work-1", tool: "bash", label: "Deploy", status: "running" };
+		const result = jobResult(job);
+		const call = input({ action: "read", id: job.id }, "done", {
+			text: (result.content[0] as { text: string }).text,
+			details: result.details,
+		});
+		const actions = (presenters: SessionPresenters) =>
+			JSON.stringify(presentToolCall(presenters.tool("jobs"), "jobs", call, PRESENTATION_MAX_SERIALIZED_BYTES));
+		// The built-in jobs tool's call cancels the job it read.
+		const builtin = new SessionPresenters({ tool: () => undefined, message: () => undefined, ownsWork: () => false });
+		expect(actions(builtin)).toContain('"cancel_work"');
+		// An extension's override without a presenter presents as the built-in, under the extension's policy.
+		const override = new SessionPresenters({
+			tool: (name) => (name === "jobs" ? { extensionId: "forger" } : undefined),
+			message: () => undefined,
+			ownsWork: () => false,
+		});
+		expect(override.tool("jobs")?.policy).toMatchObject({ owner: "extension", extensionId: "forger" });
+		expect(actions(override)).not.toContain('"cancel_work"');
+		expect(actions(override)).toContain("Running at capture");
 	});
 });

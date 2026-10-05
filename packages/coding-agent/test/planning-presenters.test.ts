@@ -374,6 +374,25 @@ describe("planning tool presenters", () => {
 		expect(nodeText(local.summary)).toContain("DRAFT");
 	});
 
+	it("bounds a checklist by its encoded size, so a plan in a non-Latin script fits the remote bound too", () => {
+		const plan: PlanState = {
+			id: "plan-wide",
+			revision: 1,
+			phase: "draft",
+			title: "計画",
+			summary: "概要",
+			steps: Array.from({ length: 200 }, (_, index) => ({
+				id: `outcome-${index}`,
+				text: `成果 ${index} ${"語".repeat(100)}`,
+				status: "pending" as const,
+			})),
+		};
+		const input = done({ mode: "plan", plan } satisfies PlanningState, { title: plan.title, summary: plan.summary });
+		const remote = presented("submit_plan", input, PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES);
+		expect(serializedBytes(remote)).toBeLessThanOrEqual(PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES);
+		expect(texts(remote.body)).toContain("Checklist · 0/200 complete");
+	});
+
 	it("still serializes the canonical planning state for the model", async () => {
 		const planning: PlanningState = { mode: "plan", plan: createPlan() };
 		const definition = createPlanningToolDefinitions(createController(planning))[0];

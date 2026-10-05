@@ -46,17 +46,12 @@ type RenderSessionContextThis = {
 	toolOutputExpanded: boolean;
 	isInitialized: boolean;
 	updateEditorBorderColor(): void;
-	getRegisteredToolDefinition(toolName: string): undefined;
-	createPresentedToolComponent(
-		toolName: string,
-		toolCallId: string,
-		args: unknown,
-		live: boolean,
-	): PresentedToolComponent;
+	toolCallWork(toolCallId: string): [];
+	createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): PresentedToolComponent;
 	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
 };
 
-type CreatePresentedToolComponent = RenderSessionContextThis["createPresentedToolComponent"];
+type CreateToolRow = RenderSessionContextThis["createToolRow"];
 
 type RenderSessionContext = (
 	this: RenderSessionContextThis,
@@ -89,11 +84,12 @@ function createFakeInteractiveModeThis(): RenderSessionContextThis {
 		toolOutputExpanded: false,
 		isInitialized: true,
 		updateEditorBorderColor: vi.fn(),
-		getRegisteredToolDefinition: (_toolName: string) => undefined,
-		createPresentedToolComponent(...args) {
-			return (
-				InteractiveMode.prototype as unknown as { createPresentedToolComponent: CreatePresentedToolComponent }
-			).createPresentedToolComponent.apply(this, args);
+		toolCallWork: () => [],
+		createToolRow(...args) {
+			return (InteractiveMode.prototype as unknown as { createToolRow: CreateToolRow }).createToolRow.apply(
+				this,
+				args,
+			);
 		},
 		addMessageToChat(message: AgentMessage) {
 			chatContainer.addChild(new Text(message.role, 0, 0));
