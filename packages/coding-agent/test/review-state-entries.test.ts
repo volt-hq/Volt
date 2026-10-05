@@ -121,6 +121,10 @@ describe("review state entries and the store's derived indexes", () => {
 		const general: ReviewRecord = { type: "review_general", runId: "run", general: identity(other) };
 		await expect(record(other, general)).rejects.toThrow(/not anchored/);
 		await expect(record(source, { ...general, runId: "unanchored" })).rejects.toThrow(/not anchored/);
+		// The General is a conversation of the source's store and cwd.
+		await expect(
+			record(source, { ...general, general: { sessionId: "missing", sessionGeneration: "generation" } }),
+		).rejects.toThrow(/General must be/);
 		await record(source, general);
 		expect(source.getReviewState().generals.get("run")).toEqual(identity(other));
 		await store.close();
@@ -171,6 +175,9 @@ describe("review state entries and the store's derived indexes", () => {
 			requestId,
 			kickoffClientMessageId: `kickoff-${requestId}`,
 		});
+		await expect(record(source, { type: "review_general", runId: "run", general: identity(first) })).rejects.toThrow(
+			/General must be/,
+		);
 		await expect(record(first, reset(second, "reset"))).rejects.toThrow(/source can reset/);
 		await record(source, reset(second, "reset"));
 		await expect(record(source, reset(third, "reset"))).rejects.toThrow(/already recorded/);

@@ -3,7 +3,8 @@
  * records of the conversation that wrote them. Fork, clone, and import copy
  * a branch's public entries only, so a copy never carries `work_*` or
  * `review_*` entries, never anchors, aliases, or discusses a review run, and
- * an imported snapshot cannot smuggle such a record in.
+ * an imported snapshot cannot smuggle such a record in. An extension seeding
+ * a new session gets a writer without review records.
  */
 
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -13,8 +14,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { appendReviewRun, type ReviewRunRecord } from "../../../src/core/review-state.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../../../src/core/session-store/index.ts";
+import type { ReviewRecord } from "../../../src/core/session-writer.ts";
+import { runPrintMode } from "../../../src/modes/print-mode.ts";
 import { anchorReviewRun, recordReviewDiscussion } from "../../utilities/review-runs.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
+import { createHostHarness } from "../host-harness.ts";
 
 const roots: string[] = [];
 const managers: SessionManager[] = [];
@@ -200,6 +204,41 @@ describe("regression #585: fork, clone, and import never carry work or review re
 				`unsupported host-only entry: ${record.type}`,
 			);
 		}
+	});
+
+	it("gives an extension seeding a new session a writer without review records", async () => {
+		let writable: string[] | undefined;
+		const harness = await createHostHarness({
+			extension: (volt) => {
+				volt.registerCommand("seed", {
+					handler: async (_args, ctx) => {
+						await ctx.newSession({
+							setup: async (writer) => {
+								writable = Object.keys(writer).filter((key) => key !== "sessionManager");
+								await writer.appendCustomEntry("seeded", {});
+							},
+						});
+					},
+				});
+			},
+		});
+		try {
+			const source = await harness.openStartup();
+			expect(await runPrintMode(harness.host, source, { mode: "text", messages: ["/seed"] })).toBe(0);
+			expect(writable).toContain("appendCustomEntry");
+			expect(writable).not.toContain("recordReviewState");
+		} finally {
+			await harness.cleanup();
+		}
+	});
+
+	it("records only review entries through the review writer", async () => {
+		const { source } = await fixture();
+		const forged = { type: "work_started", workId: "forged", kind: "review" } as unknown as ReviewRecord;
+		await expect(
+			source.logWriter.recordReviewState(() => ({ records: [forged], result: undefined })),
+		).rejects.toThrow("is not a review record");
+		expect(source.getReviewState().anchors.has("forged")).toBe(false);
 	});
 
 	it("refuses to fork or clone a discussion child, whose identity is its source's", async () => {

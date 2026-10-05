@@ -39,7 +39,7 @@ import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
 import type { SessionManager } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
+import { type ExtensionSessionWriter, extensionSessionWriter, type SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { theme } from "../theme/runtime.ts";
@@ -392,7 +392,15 @@ export class SessionExtensionBinding {
 		const unchanged = { cancelled: true } as const;
 		return {
 			waitForIdle: () => actions()?.waitForIdle() ?? Promise.resolve(),
-			newSession: (options) => actions()?.newSession(options) ?? Promise.resolve(unchanged),
+			newSession: (options) => {
+				// An extension seeds the new session without review records, which only the host writes.
+				const setup = options?.setup;
+				const seeded =
+					setup === undefined
+						? options
+						: { ...options, setup: (writer: ExtensionSessionWriter) => setup(extensionSessionWriter(writer)) };
+				return actions()?.newSession(seeded) ?? Promise.resolve(unchanged);
+			},
 			fork: (entryId, options) => actions()?.fork(entryId, options) ?? Promise.resolve(unchanged),
 			navigateTree: (targetId, options) =>
 				actions()?.navigateTree(targetId, options) ?? Promise.resolve({ cancelled: this.invokerLeft() }),

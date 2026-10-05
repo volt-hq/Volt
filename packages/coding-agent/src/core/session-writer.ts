@@ -31,6 +31,7 @@ import { type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import type { ReviewLogState } from "./review-log-state.ts";
 import { digestClientInputPayload, parseSessionEntryForAdmission } from "./session-entry-codec.ts";
+import { REVIEW_SESSION_ENTRY_TYPE_NAMES } from "./session-entry-types.ts";
 import type {
 	BranchSummaryEntry,
 	ClientInputQueuedEntry,
@@ -235,8 +236,33 @@ function prReviewBindingEntry(placement: PrReviewPlacement, sessionManager: Sess
 	return entry;
 }
 
-function reviewEntry(record: ReviewRecord): SessionEntry {
+/** A review record admitted as an entry. Only the review types are review records. */
+export function admitReviewRecord(record: ReviewRecord): SessionEntry {
+	if (!REVIEW_SESSION_ENTRY_TYPE_NAMES.has(record.type)) {
+		throw new Error(`Entry type ${JSON.stringify(record.type)} is not a review record`);
+	}
 	return admitEntry({ ...record, ...pendingEnvelope() } as SessionEntry);
+}
+
+/** The writes code outside the host may make: every write but review records, which only the host writes. */
+export type ExtensionSessionWriter = Omit<SessionWriter, "recordReviewState">;
+
+/** `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method. */
+export function extensionSessionWriter(writer: ExtensionSessionWriter): ExtensionSessionWriter {
+	return Object.freeze({
+		sessionManager: writer.sessionManager,
+		appendMessage: writer.appendMessage.bind(writer),
+		appendCustomEntry: writer.appendCustomEntry.bind(writer),
+		appendCustomMessageEntry: writer.appendCustomMessageEntry.bind(writer),
+		appendModelChange: writer.appendModelChange.bind(writer),
+		appendThinkingLevelChange: writer.appendThinkingLevelChange.bind(writer),
+		appendFastModeChange: writer.appendFastModeChange.bind(writer),
+		appendPlanningState: writer.appendPlanningState.bind(writer),
+		appendSessionInfo: writer.appendSessionInfo.bind(writer),
+		appendLabelChange: writer.appendLabelChange.bind(writer),
+		recordStartingGitContext: writer.recordStartingGitContext.bind(writer),
+		recordPrReviewBinding: writer.recordPrReviewBinding.bind(writer),
+	});
 }
 
 /** Whether `existing` already records `entry`'s placement; throws when it records another one. */
@@ -385,7 +411,7 @@ export class LogWriter implements SessionWriter {
 		// Built on the lane, against the committed view, so earlier writes are in the state it reads.
 		return this.lane.commit((write) => {
 			const { records, result } = build(this.sessionManager.getReviewState());
-			for (const record of records) write.place(reviewEntry(record));
+			for (const record of records) write.place(admitReviewRecord(record));
 			return result;
 		}, true);
 	}
@@ -588,7 +614,7 @@ export class ConversationSessionWriter implements SessionWriter {
 		const recording = this.reviews.then(async () => {
 			const { records, result } = build(this.sessionManager.getReviewState());
 			if (records.length > 0) {
-				const drafts = records.map((record) => toLogEntryDraft(reviewEntry(record)));
+				const drafts = records.map((record) => toLogEntryDraft(admitReviewRecord(record)));
 				await this.intents.append(drafts.map((draft) => ({ type: draft.type, payload: draft.payload })));
 			}
 			return result;

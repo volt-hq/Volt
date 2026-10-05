@@ -332,6 +332,25 @@ describe("Regression #341 host sibling lifecycle", () => {
 		expect((await api.list("review-341")).discussions).toEqual([]);
 	});
 
+	it("fails a finding whose context exceeds the bound without leaving a child session", async () => {
+		const { source, api, root } = await fixture();
+		const oversized = record();
+		oversized.runId = "review-oversized";
+		oversized.result!.findings[0]!.body = "x".repeat(70_000);
+		await anchorLiveReviewRun(source.session, oversized.runId);
+		await appendReviewRunDurably(source.session.sessionWriter, oversized);
+		const before = await SessionManager.list(root, join(root, "sessions"), undefined, {
+			includeMessageFreeDurable: true,
+		});
+		expect((await api.start(oversized.runId, ["f1"], "oversized")).results).toEqual([
+			{ findingId: "f1", outcome: "failed", errorCode: "launch_failed" },
+		]);
+		expect(
+			await SessionManager.list(root, join(root, "sessions"), undefined, { includeMessageFreeDurable: true }),
+		).toHaveLength(before.length);
+		expect((await api.list(oversized.runId)).discussions).toEqual([]);
+	});
+
 	it("rejects malformed nested discussion configuration at the intent boundary", () => {
 		for (const discussionConfiguration of [
 			null,

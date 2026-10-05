@@ -36,7 +36,7 @@ import { appendReviewFindingTransition, getReviewRun, type ReviewFindingTransiti
 import { decodeStoredSessionEntry } from "./session-entry-codec.ts";
 import { SessionManager, type SessionReference, type ThinkingLevelChangeEntry } from "./session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreClient } from "./session-store/client.ts";
-import type { ReviewRecord, SessionWriter } from "./session-writer.ts";
+import { admitReviewRecord, type ReviewRecord, type SessionWriter } from "./session-writer.ts";
 
 type DiscussionConfiguration = IntentInput<"review_start_discussions">["discussionConfiguration"];
 
@@ -144,29 +144,49 @@ export async function getReviewDiscussionLink(ref: SessionReference): Promise<Rp
 }
 
 /**
- * Create discussion child `link` beside its source in `cwd`: a hidden empty
- * conversation whose first entry is its link. Its source records it next.
+ * Create discussion child `link` beside its source in `cwd`: a hidden
+ * conversation whose first entry is its link. Its source records it next. A
+ * link the store refuses leaves no session behind.
  */
 async function createDiscussionChild(
 	source: SessionReference,
 	cwd: string,
 	link: ReviewDiscussionLink,
 ): Promise<ReviewSessionIdentity> {
+	const record = { type: "review_discussion_link" as const, ...link };
+	// Bounds and identities are checked before the session exists.
+	admitReviewRecord(record);
 	const manager = await SessionManager.create(cwd, source.sessionDirectory);
+	const ref = manager.getSessionRef()!;
 	try {
-		await manager.logWriter.recordReviewState(() => ({
-			records: [{ type: "review_discussion_link", ...link }],
-			result: undefined,
-		}));
-		return identityOf(manager.getSessionRef()!);
-	} finally {
-		await manager.closePersistence();
+		await manager.logWriter.recordReviewState(() => ({ records: [record], result: undefined }));
+	} catch (error) {
+		await manager.closePersistence().catch(() => undefined);
+		await SessionManager.delete(ref, 0).catch(() => false);
+		throw error;
 	}
+	await manager.closePersistence();
+	return identityOf(ref);
 }
 
-/** Delete a discussion child its source never recorded; best effort, as a hidden unrecorded child is inert. */
+/**
+ * Delete a discussion child unless its source recorded it (the store's
+ * index says whether a write that failed late committed). Best effort: an
+ * unrecorded child is a hidden conversation that grants nothing.
+ */
 async function discardDiscussionChild(source: SessionReference, child: ReviewSessionIdentity): Promise<void> {
-	await SessionManager.delete({ ...source, ...child }, 1).catch(() => false);
+	try {
+		const lease = await acquireSharedSQLiteSessionStore(source.sessionDirectory);
+		try {
+			if (lease.client.info.storeId !== source.storeId || (await lease.client.findReviewDiscussionChild(child)))
+				return;
+		} finally {
+			await lease.release();
+		}
+		await SessionManager.delete({ ...source, ...child }, 1);
+	} catch {
+		// Left hidden and unrecorded.
+	}
 }
 
 /** A source's discussion, read from its log, with the cwd its children share. */
@@ -507,9 +527,11 @@ export class HostReviewDiscussionService {
 			throw new Error("Select between 1 and 50 unique findings");
 		const sourceRef = await this.requireSource(runtime, runId);
 		assertCurrent();
-		const { record, cwd } = await this.readSource(runtime, sourceRef, (manager) => ({
+		// One read of the source per request; each new discussion is checked again when its source records it.
+		const { record, cwd, review } = await this.readSource(runtime, sourceRef, (manager) => ({
 			record: getReviewRun(manager, runId),
 			cwd: manager.getCwd(),
+			review: manager.getReviewState(),
 		}));
 		assertCurrent();
 		// Resolve normal chat defaults, never the source review's temporary selection.
@@ -553,9 +575,7 @@ export class HostReviewDiscussionService {
 							assertCurrent();
 							const finding = record?.result?.findings.find((item) => item.id === findingId);
 							if (!finding || !record) return { findingId, outcome: "failed", errorCode: "unknown_finding" };
-							const existing = await this.readSource(runtime, sourceRef, (manager) =>
-								findReviewDiscussion(manager.getReviewState(), runId, findingId),
-							);
+							const existing = findReviewDiscussion(review, runId, findingId);
 							let created = false;
 							if (existing) {
 								view = { ref: sourceRef, cwd, discussion: existing };

@@ -492,12 +492,23 @@ function indexReviewEntries(
 						general_session_generation) VALUES (?, ?, ?, ?, ?)`,
 				).run(entry.workId, self.sessionId, self.sessionGeneration, self.sessionId, self.sessionGeneration);
 				break;
-			case "review_general":
+			case "review_general": {
 				requireReviewAnchor(db, entry.runId, self);
+				const general = findSummary(db, entry.general.sessionId, entry.general.sessionGeneration);
+				const source = findSummary(db, self.sessionId, self.sessionGeneration);
+				if (
+					!general ||
+					!source ||
+					canonicalCwdIdentity(general.cwd) !== canonicalCwdIdentity(source.cwd) ||
+					findReviewDiscussionChild(db, entry.general)
+				) {
+					throw reviewIndexError("A review General must be a conversation in its source's cwd, not a discussion");
+				}
 				db.prepare(
 					"UPDATE review_run_index SET general_session_id = ?, general_session_generation = ? WHERE run_id = ?",
 				).run(entry.general.sessionId, entry.general.sessionGeneration, entry.runId);
 				break;
+			}
 			case "review_alias":
 			case "review_discussion_link":
 				if (entry.source.sessionId === self.sessionId) {
