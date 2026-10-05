@@ -6,6 +6,7 @@ import { type Container, Text } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
+import { liveKey } from "../src/core/host/live-state.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
@@ -316,16 +317,25 @@ describe("interactive background jobs", () => {
 	it.each(["regular", "fullscreen"] as const)(
 		"keeps a one-row work line in the footer below the editor beside a wide plan (%s)",
 		async (tuiMode) => {
-			const { access, terminal } = await createFixture(tuiMode, 160, true);
+			const { access, terminal, runtime, job } = await createFixture(tuiMode, 160, true);
+			// A job's last output line is its progress, which its live work value carries a coalescing
+			// interval after the output: wait for it, so the line is read as it settles.
+			await vi.waitFor(() =>
+				expect(runtime.live.get(liveKey("work", job.id))).toMatchObject({
+					progress: { text: "first live output" },
+				}),
+			);
+			await terminal.waitForRender();
 			const viewport = terminal.getViewport();
 			const statusRow = viewport.findIndex((line) => line.includes("Work · ● running"));
 			const editorRow = viewport.findIndex((line) => line.includes("ASK VOLT"));
 			expect(statusRow).toBeGreaterThanOrEqual(0);
 			expect(statusRow).toBeGreaterThan(editorRow);
 			expect(viewport.join("\n")).toContain("Keep the plan visible");
-			expect(viewport.join("\n")).not.toContain("first live output");
 			expect(viewport.filter((line) => line.includes("Work · ● running"))).toHaveLength(1);
-			expect(viewport[statusRow]).toContain("Run focused integration checks");
+			expect(viewport[statusRow]).toContain("Run focused integration checks · first live output");
+			// The output shows only as the work line's progress: not in the transcript or the plan pane.
+			expect(viewport.filter((line) => line.includes("first live output"))).toEqual([viewport[statusRow]]);
 			expect(access.workStatus.render(80).lines).toHaveLength(1);
 
 			access.ui.setFocus(access.editor);
