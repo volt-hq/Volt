@@ -1,6 +1,15 @@
+/**
+ * Azure DevOps tools for Volt.
+ *
+ * Settings (`/extensions`, or `extensions.azure-devops.settings` in
+ * settings.json, globally or for a trusted project): organization, project,
+ * authMode, tenantId, and clientId. `/ado-config` sets them for the session
+ * or saves them to the settings; environment variables (VOLT_ADO_*) override
+ * the settings, and the session's values override both. Credentials come
+ * from the environment or device-code sign-in, never from the settings.
+ */
+
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
 import { DeviceCodeCredential, type DeviceCodeCredentialOptions, type DeviceCodeInfo } from "@azure/identity";
 import { StringEnum } from "@hansjm10/volt-ai";
 import {
@@ -18,7 +27,13 @@ import type * as WorkItemTrackingInterfaces from "azure-devops-node-api/interfac
 import { Type } from "typebox";
 
 const STATE_TYPE = "azure-devops-config";
-const PROJECT_CONFIG_PATH = ".volt/azure-devops.json";
+const DEVICE_CODE_PANEL = "device-code";
+/**
+ * An organization name. It becomes the request URL's path, so anything else
+ * (a slash or backslash) could point requests, and their credentials, at
+ * another host.
+ */
+const ORGANIZATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]{0,49}$/;
 const ADO_SCOPE = "https://app.vssps.visualstudio.com/.default";
 const DEFAULT_WORK_ITEM_FIELDS = [
 	"System.Id",
@@ -40,6 +55,15 @@ type SavedConfig = {
 	authMode?: AuthMode;
 	tenantId?: string;
 	clientId?: string;
+};
+
+/** The settings the manifest declares (package.json `volt.settings`); none has a default. */
+type AzureDevOpsSettings = {
+	readonly organization?: string;
+	readonly project?: string;
+	readonly authMode?: AuthMode;
+	readonly tenantId?: string;
+	readonly clientId?: string;
 };
 
 type ResolvedConfig = SavedConfig & {
@@ -150,27 +174,31 @@ function sanitizeConfig(config: SavedConfig): SavedConfig {
 	return sanitized;
 }
 
-function getConfig(sessionConfig: SavedConfig, projectConfig: SavedConfig = {}): ResolvedConfig {
+/** The session's values, then the environment's, then the settings'. */
+function getConfig(sessionConfig: SavedConfig, settings: SavedConfig = {}): ResolvedConfig {
 	const authMode =
 		sessionConfig.authMode ??
 		normalizeAuthMode(env("VOLT_ADO_AUTH")) ??
-		projectConfig.authMode ??
+		settings.authMode ??
 		(getPat() ? "pat" : undefined) ??
 		(getBearerTokenFromEnv() ? "bearer" : undefined) ??
 		"device-code";
 
 	return {
-		organization: sessionConfig.organization ?? env("VOLT_ADO_ORG") ?? env("AZURE_DEVOPS_ORG") ?? projectConfig.organization,
-		project: sessionConfig.project ?? env("VOLT_ADO_PROJECT") ?? env("AZURE_DEVOPS_PROJECT") ?? projectConfig.project,
+		organization: sessionConfig.organization ?? env("VOLT_ADO_ORG") ?? env("AZURE_DEVOPS_ORG") ?? settings.organization,
+		project: sessionConfig.project ?? env("VOLT_ADO_PROJECT") ?? env("AZURE_DEVOPS_PROJECT") ?? settings.project,
 		authMode,
-		tenantId: sessionConfig.tenantId ?? env("VOLT_ADO_TENANT_ID") ?? env("AZURE_TENANT_ID") ?? projectConfig.tenantId,
-		clientId: sessionConfig.clientId ?? env("VOLT_ADO_CLIENT_ID") ?? env("AZURE_CLIENT_ID") ?? projectConfig.clientId,
+		tenantId: sessionConfig.tenantId ?? env("VOLT_ADO_TENANT_ID") ?? env("AZURE_TENANT_ID") ?? settings.tenantId,
+		clientId: sessionConfig.clientId ?? env("VOLT_ADO_CLIENT_ID") ?? env("AZURE_CLIENT_ID") ?? settings.clientId,
 	};
 }
 
 function requireOrganization(config: ResolvedConfig): string {
 	if (!config.organization) {
-		throw new Error("Azure DevOps organization is not configured. Run /ado-config or set VOLT_ADO_ORG.");
+		throw new Error("Azure DevOps organization is not configured. Set it in /extensions, run /ado-config, or set VOLT_ADO_ORG.");
+	}
+	if (!ORGANIZATION_PATTERN.test(config.organization)) {
+		throw new Error("Azure DevOps organization must be at most 50 letters, digits, and hyphens, starting with a letter or digit.");
 	}
 	return config.organization;
 }
@@ -248,12 +276,7 @@ function isSavedConfig(value: unknown): value is SavedConfig {
 	return !candidate.authMode || AUTH_MODES.includes(candidate.authMode);
 }
 
-function isFileNotFoundError(error: unknown): boolean {
-	return error instanceof Error && "code" in error && (error as { code?: unknown }).code === "ENOENT";
-}
-
-export default function azureDevOps(volt: ExtensionAPI): void {
-	let projectConfig: SavedConfig = {};
+export default function azureDevOps(volt: ExtensionAPI<AzureDevOpsSettings>): void {
 	let savedConfig: SavedConfig = {};
 	let deviceCredential: DeviceCodeCredential | undefined;
 	let tokenCache: TokenCache | undefined;
@@ -264,40 +287,33 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		tokenCache = undefined;
 	}
 
-	function getProjectConfigPath(ctx: ExtensionContext): string {
-		return join(ctx.cwd, PROJECT_CONFIG_PATH);
+	/** The stored settings, as a config the environment and the session override. */
+	function settingsConfig(): SavedConfig {
+		return sanitizeConfig({ ...volt.settings });
 	}
 
-	async function loadProjectConfig(ctx: ExtensionContext): Promise<void> {
-		projectConfig = {};
-		if (!ctx.isProjectTrusted()) return;
-
-		const configPath = getProjectConfigPath(ctx);
-		try {
-			const rawConfig = await readFile(configPath, "utf8");
-			const parsedConfig = JSON.parse(rawConfig) as unknown;
-			if (!isSavedConfig(parsedConfig)) {
-				ctx.ui.notify(`Ignoring invalid Azure DevOps config: ${PROJECT_CONFIG_PATH}`, "warning");
-				return;
-			}
-			projectConfig = sanitizeConfig(parsedConfig);
-		} catch (error) {
-			if (!isFileNotFoundError(error)) {
-				ctx.ui.notify(`Failed to read ${PROJECT_CONFIG_PATH}: ${error instanceof Error ? error.message : String(error)}`, "warning");
-			}
-		}
+	function currentConfig(): ResolvedConfig {
+		return getConfig(savedConfig, settingsConfig());
 	}
 
-	async function saveProjectConfig(ctx: ExtensionContext, config: SavedConfig): Promise<void> {
-		if (!ctx.isProjectTrusted()) {
-			throw new Error("Refusing to write project-local Azure DevOps config because this project is not trusted.");
-		}
+	/** The values the user chose: the session's over the settings', without the environment's. */
+	function chosenConfig(): SavedConfig {
+		return { ...settingsConfig(), ...savedConfig };
+	}
 
-		const configPath = getProjectConfigPath(ctx);
+	/** Store `config` in the settings of `scope`; an empty value clears that setting there. */
+	async function saveSettings(config: SavedConfig, scope: "global" | "project"): Promise<void> {
 		const sanitized = sanitizeConfig(config);
-		await mkdir(dirname(configPath), { recursive: true });
-		await writeFile(configPath, `${JSON.stringify(sanitized, null, "\t")}\n`, "utf8");
-		projectConfig = sanitized;
+		await volt.updateSettings(
+			{
+				organization: sanitized.organization,
+				project: sanitized.project,
+				authMode: sanitized.authMode,
+				tenantId: sanitized.tenantId,
+				clientId: sanitized.clientId,
+			},
+			{ scope },
+		);
 	}
 
 	function restoreSessionConfig(ctx: ExtensionContext): void {
@@ -311,11 +327,6 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		resetAuthCache();
 	}
 
-	async function restoreConfig(ctx: ExtensionContext): Promise<void> {
-		await loadProjectConfig(ctx);
-		restoreSessionConfig(ctx);
-	}
-
 	function persistConfig(): void {
 		savedConfig = sanitizeConfig(savedConfig);
 		volt.appendEntry<SavedConfig>(STATE_TYPE, savedConfig);
@@ -324,7 +335,28 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 	function getDeviceCredential(ctx: ExtensionContext, config: ResolvedConfig): DeviceCodeCredential {
 		deviceCodePrompt = (info) => {
 			if (ctx.hasUI) {
-				ctx.ui.setWidget("azure-devops-device-code", info.message.split("\n"));
+				ctx.ui.setPanel(DEVICE_CODE_PANEL, {
+					node: {
+						type: "card",
+						title: "Azure DevOps sign-in",
+						token: "accent",
+						sections: [
+							{
+								key: "code",
+								children: [
+									{
+										type: "keyValue",
+										key: "code",
+										items: [
+											{ key: "url", label: "Open", value: info.verificationUri },
+											{ key: "code", label: "Code", value: [{ text: info.userCode, token: "accent", bold: true }] },
+										],
+									},
+								],
+							},
+						],
+					},
+				});
 				ctx.ui.notify("Azure DevOps device-code login required. Use the code shown above the editor.", "info");
 				return;
 			}
@@ -355,12 +387,12 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 			tokenCache = token;
 			return token.token;
 		} finally {
-			if (ctx.hasUI) ctx.ui.setWidget("azure-devops-device-code", undefined);
+			if (ctx.hasUI) ctx.ui.setPanel(DEVICE_CODE_PANEL, undefined);
 		}
 	}
 
 	async function createConnection(ctx: ExtensionContext): Promise<azdev.WebApi> {
-		const config = getConfig(savedConfig, projectConfig);
+		const config = currentConfig();
 		const organization = requireOrganization(config);
 		const orgUrl = `https://dev.azure.com/${organization}`;
 
@@ -380,8 +412,10 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		return new azdev.WebApi(orgUrl, azdev.getBearerHandler(token));
 	}
 
-	volt.on("session_start", async (_event, ctx) => restoreConfig(ctx));
-	volt.on("session_tree", async (_event, ctx) => restoreConfig(ctx));
+	volt.on("session_start", async (_event, ctx) => restoreSessionConfig(ctx));
+	volt.on("session_tree", async (_event, ctx) => restoreSessionConfig(ctx));
+	// New settings may name another tenant or app: sign in again.
+	volt.on("settings_changed", () => resetAuthCache());
 
 	function formatConfigSummary(config: ResolvedConfig): string {
 		return [
@@ -401,24 +435,31 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 	}
 
 	volt.registerCommand("ado-config", {
-		description: "Configure Azure DevOps for this session",
+		description: "Configure Azure DevOps for this session or save it to the settings",
 		handler: async (args, ctx) => {
 			const parts = args.trim().split(/\s+/).filter(Boolean);
 			const subcommand = parts[0]?.toLowerCase();
 
 			if (subcommand === "show") {
-				ctx.ui.notify(`Azure DevOps config: ${formatConfigSummary(getConfig(savedConfig, projectConfig))}`, "info");
+				ctx.ui.notify(`Azure DevOps config: ${formatConfigSummary(currentConfig())}`, "info");
 				return;
 			}
 
 			if (subcommand === "save") {
-				const config = getConfig(savedConfig, projectConfig);
+				const scope = parts[1]?.toLowerCase() === "global" ? "global" : "project";
+				// Environment values stay in the environment: AZURE_TENANT_ID and the like often belong to other tools.
+				const config = chosenConfig();
 				if (!config.organization) {
-					ctx.ui.notify("Set an Azure DevOps organization before saving project config.", "error");
+					ctx.ui.notify("Set an Azure DevOps organization before saving it to the settings.", "error");
 					return;
 				}
-				await saveProjectConfig(ctx, config);
-				ctx.ui.notify(`Azure DevOps config saved to ${PROJECT_CONFIG_PATH}`, "info");
+				try {
+					await saveSettings(config, scope);
+				} catch (error) {
+					ctx.ui.notify(`Could not save the Azure DevOps settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+					return;
+				}
+				ctx.ui.notify(`Azure DevOps config saved to the ${scope} settings.`, "info");
 				return;
 			}
 
@@ -426,7 +467,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 				savedConfig = {};
 				persistConfig();
 				resetAuthCache();
-				const suffix = projectConfig.organization ? ` Project config from ${PROJECT_CONFIG_PATH} still applies.` : "";
+				const suffix = settingsConfig().organization ? " The settings from /extensions still apply." : "";
 				ctx.ui.notify(`Azure DevOps session config cleared.${suffix}`, "info");
 				return;
 			}
@@ -448,51 +489,118 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 				};
 				persistConfig();
 				resetAuthCache();
-				ctx.ui.notify(`Azure DevOps config updated: ${formatConfigSummary(getConfig(savedConfig, projectConfig))}`, "info");
+				ctx.ui.notify(`Azure DevOps config updated: ${formatConfigSummary(currentConfig())}`, "info");
 				return;
 			}
 
 			if (!ctx.hasUI) {
 				ctx.ui.notify(
-					`Usage: /ado-config <organization> [project] [${AUTH_MODES.join("|")}] [tenantId] [clientId]`,
+					`Usage: /ado-config <organization> [project] [${AUTH_MODES.join("|")}] [tenantId] [clientId] | show | save [project|global] | clear`,
 					"error",
 				);
 				return;
 			}
 
-			const current = getConfig(savedConfig, projectConfig);
-			const organization = await ctx.ui.input("Azure DevOps organization", current.organization ?? "contoso");
-			if (!organization) return;
-			const project = await ctx.ui.input("Default Azure DevOps project (optional)", current.project ?? "");
-			const authMode = normalizeAuthMode(await ctx.ui.select("Azure DevOps auth mode", [...AUTH_MODES]));
-			if (!authMode) return;
+			// The form shows the values the user chose; an environment value shows as a placeholder and is not stored.
+			const chosen = chosenConfig();
+			const current = currentConfig();
+			const fromEnvironment = (value: string | undefined, chosenValue: string | undefined) =>
+				value !== undefined && chosenValue === undefined ? { placeholder: `${value} (environment)` } : {};
+			const values = await ctx.ui.form({
+				title: "Azure DevOps",
+				fields: [
+					{
+						kind: "string",
+						id: "organization",
+						label: "Organization",
+						value: chosen.organization ?? "",
+						...fromEnvironment(current.organization, chosen.organization),
+						maxLength: 50,
+						pattern: "[A-Za-z0-9][A-Za-z0-9-]*",
+					},
+					{
+						kind: "string",
+						id: "project",
+						label: "Default project",
+						value: chosen.project ?? "",
+						...fromEnvironment(current.project, chosen.project),
+						maxLength: 256,
+					},
+					{
+						kind: "enum",
+						id: "authMode",
+						label: "Authentication",
+						description: "Unset: pat or bearer when its variable is set, else device-code.",
+						options: AUTH_MODES.map((mode) => ({ value: mode })),
+						...(chosen.authMode ? { value: chosen.authMode } : {}),
+					},
+					{
+						kind: "string",
+						id: "tenantId",
+						label: "Tenant ID",
+						description: "Device-code sign-in only; empty for the Azure SDK default.",
+						value: chosen.tenantId ?? "",
+						...fromEnvironment(current.tenantId, chosen.tenantId),
+						maxLength: 256,
+					},
+					{
+						kind: "string",
+						id: "clientId",
+						label: "App client ID",
+						description: "Device-code sign-in only; empty for the Azure SDK default.",
+						value: chosen.clientId ?? "",
+						...fromEnvironment(current.clientId, chosen.clientId),
+						maxLength: 36,
+					},
+					{
+						kind: "enum",
+						id: "saveTo",
+						label: "Save to",
+						options: [
+							{ value: "session", label: "This session" },
+							{ value: "global", label: "Global settings" },
+							...(ctx.isProjectTrusted() ? [{ value: "project", label: "Project settings" }] : []),
+						],
+						value: "session",
+						required: true,
+					},
+				],
+			});
+			if (values === undefined) return;
 
-			let tenantId = current.tenantId;
-			let clientId = current.clientId;
-			if (authMode === "device-code") {
-				tenantId = (await ctx.ui.input("Azure tenant ID (optional, empty to clear)", current.tenantId ?? "")) || undefined;
-				clientId = (await ctx.ui.input("App client ID (optional, empty to use Azure SDK default)", current.clientId ?? "")) || undefined;
-			} else if (authMode === "pat" && !getPat()) {
+			const text = (value: unknown): string | undefined => (typeof value === "string" && value.trim() ? value.trim() : undefined);
+			const authMode = normalizeAuthMode(text(values.authMode));
+			const config: SavedConfig = {
+				organization: text(values.organization),
+				project: text(values.project),
+				authMode,
+				tenantId: text(values.tenantId),
+				clientId: text(values.clientId),
+			};
+			const effectiveAuth = authMode ?? current.authMode;
+			if (effectiveAuth === "pat" && !getPat()) {
 				ctx.ui.notify("PAT auth selected. Set VOLT_ADO_PAT or AZURE_DEVOPS_EXT_PAT before testing.", "warning");
-			} else if (authMode === "bearer" && !getBearerTokenFromEnv()) {
+			} else if (effectiveAuth === "bearer" && !getBearerTokenFromEnv()) {
 				ctx.ui.notify("Bearer auth selected. Set VOLT_ADO_TOKEN before testing.", "warning");
 			}
 
-			savedConfig = {
-				...savedConfig,
-				organization,
-				project: project || undefined,
-				authMode,
-				tenantId,
-				clientId,
-			};
-			persistConfig();
-			resetAuthCache();
-			ctx.ui.notify(`Azure DevOps config saved: ${formatConfigSummary(getConfig(savedConfig, projectConfig))}`, "info");
-
-			if (await ctx.ui.confirm("Save config to project file?", `Write non-secret settings to ${PROJECT_CONFIG_PATH}?`)) {
-				await saveProjectConfig(ctx, savedConfig);
-				ctx.ui.notify(`Azure DevOps config saved to ${PROJECT_CONFIG_PATH}`, "info");
+			if (values.saveTo === "global" || values.saveTo === "project") {
+				try {
+					await saveSettings(config, values.saveTo);
+				} catch (error) {
+					ctx.ui.notify(`Could not save the Azure DevOps settings: ${error instanceof Error ? error.message : String(error)}`, "error");
+					return;
+				}
+				// The settings now hold these values: session values no longer override them.
+				savedConfig = {};
+				persistConfig();
+				resetAuthCache();
+				ctx.ui.notify(`Azure DevOps config saved to the ${values.saveTo} settings: ${formatConfigSummary(currentConfig())}`, "info");
+			} else {
+				savedConfig = config;
+				persistConfig();
+				resetAuthCache();
+				ctx.ui.notify(`Azure DevOps config saved for this session: ${formatConfigSummary(currentConfig())}`, "info");
 			}
 
 			if (await ctx.ui.confirm("Test Azure DevOps connection?", "This may prompt you to complete device-code authentication.")) {
@@ -506,7 +614,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		description: "Validate Azure DevOps authentication and project access",
 		handler: async (_args, ctx) => {
 			const projectCount = await testConnection(ctx);
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			ctx.ui.notify(
 				`Azure DevOps connected to ${config.organization}. Retrieved ${projectCount} project(s).`,
 				"info",
@@ -537,7 +645,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_list_teams when the user asks about Azure DevOps teams."],
 		parameters: ListTeamsParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const project = requireProject(config, params.project);
 			const connection = await createConnection(ctx);
 			const coreApi = await connection.getCoreApi();
@@ -554,7 +662,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_get_work_item when the user asks for an Azure DevOps work item by ID."],
 		parameters: GetWorkItemParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const connection = await createConnection(ctx);
 			const witApi = await connection.getWorkItemTrackingApi();
 			const workItem = await witApi.getWorkItem(
@@ -576,7 +684,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_query_wiql when the user asks to search or query Azure DevOps work items."],
 		parameters: QueryWiqlParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const project = getProject(config, params.project);
 			const teamContext: CoreInterfaces.TeamContext | undefined = project ? { project } : undefined;
 			const connection = await createConnection(ctx);
@@ -605,7 +713,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_list_repos when the user asks about Azure DevOps repositories."],
 		parameters: ListReposParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const connection = await createConnection(ctx);
 			const gitApi = await connection.getGitApi();
 			const repos = await gitApi.getRepositories(getProject(config, params.project), undefined, undefined, params.includeHidden);
@@ -621,7 +729,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_list_pull_requests when the user asks about Azure DevOps pull requests."],
 		parameters: ListPullRequestsParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const project = requireProject(config, params.project);
 			const connection = await createConnection(ctx);
 			const gitApi = await connection.getGitApi();
@@ -652,7 +760,7 @@ export default function azureDevOps(volt: ExtensionAPI): void {
 		promptGuidelines: ["Use ado_get_pull_request when the user asks for details about an Azure DevOps pull request."],
 		parameters: GetPullRequestParams,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const config = getConfig(savedConfig, projectConfig);
+			const config = currentConfig();
 			const project = requireProject(config, params.project);
 			const connection = await createConnection(ctx);
 			const gitApi = await connection.getGitApi();
