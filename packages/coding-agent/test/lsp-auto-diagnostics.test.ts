@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
 import * as childProcess from "../src/utils/child-process.ts";
+import { type Approver, testHostActions } from "./host-action-doubles.ts";
 
 const roots: string[] = [];
 const managers: LspManager[] = [];
@@ -82,12 +83,12 @@ describe("automatic diagnostic controls", () => {
 	it("does not offer installation or synchronize with checks disabled", async () => {
 		const root = mkdtempSync(join(tmpdir(), "volt-lsp-auto-"));
 		roots.push(root);
-		const requestAction = vi.fn();
+		const requestAction = vi.fn<Approver>(() => ({ decision: "approved" }));
 		const spawn = vi.spyOn(childProcess, "spawnProcess");
 		const manager = new LspManager({
 			cwd: root,
 			config: resolveLspConfig({ autoDiagnostics: false }),
-			hostInteraction: { requestAction },
+			hostActions: testHostActions(requestAction).actions,
 		});
 		managers.push(manager);
 		expect(await manager.getDiagnostics(join(root, "missing.ts"), "ERROR")).toMatchObject({

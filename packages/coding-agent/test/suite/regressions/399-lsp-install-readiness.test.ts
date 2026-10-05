@@ -3,11 +3,12 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import type { HostResponse } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HostActionUpdate, HostInteraction } from "../../../src/core/host-interaction.ts";
 import { LspClient } from "../../../src/core/lsp/client.ts";
 import { resolveLspConfig } from "../../../src/core/lsp/config.ts";
 import { LspManager } from "../../../src/core/lsp/manager.ts";
+import { type Approver, testHostActions } from "../../host-action-doubles.ts";
 import { createHarness } from "../harness.ts";
 
 const fake = join(__dirname, "../../fixtures/fake-lsp-server.mjs");
@@ -37,9 +38,9 @@ function fixture(install: (bin: string, component: string) => void = () => {}) {
 	writeFileSync(path, "symbol\n");
 	vi.stubEnv("PATH", bin);
 	vi.stubEnv("VOLT_OFFLINE", "0");
-	const updates: HostActionUpdate[] = [];
 	const completionStates: string[] = [];
-	const requestAction = vi.fn<HostInteraction["requestAction"]>(async () => ({ decision: "approved" }));
+	const requestAction = vi.fn<Approver>(async () => ({ decision: "approved" }));
+	const host = testHostActions(requestAction);
 	const installRunner = vi.fn(async () => {
 		install(bin, component);
 		return { exitCode: 0, output: "component installed" };
@@ -47,18 +48,26 @@ function fixture(install: (bin: string, component: string) => void = () => {}) {
 	const manager = new LspManager({
 		cwd: root,
 		config: resolveLspConfig({ idleShutdownMs: 0 }),
-		hostInteraction: {
-			requestAction,
-			updateAction: (update) => {
-				updates.push(update);
-				if (update.status === "completed")
-					completionStates.push(manager.getStatus().find((entry) => entry.name === "rust")?.state ?? "unknown");
-			},
-		},
+		hostActions: host.actions,
 		installRunner,
 	});
+	host.onFinished = (record) => {
+		if (record.outcome === "completed")
+			completionStates.push(manager.getStatus().find((entry) => entry.name === "rust")?.state ?? "unknown");
+	};
 	managers.push(manager);
-	return { manager, root, bin, component, path, updates, completionStates, requestAction, installRunner };
+	return { manager, root, bin, component, path, host, completionStates, requestAction, installRunner };
+}
+
+/** Each install action that finished: the state it last ran in, and its outcome. */
+function ran(item: ReturnType<typeof fixture>): string[][] {
+	return item.host.finished.map((record) => [record.state, record.outcome ?? "open"]);
+}
+
+/** The last finished install action's report: its summary, or its error. */
+function report(item: ReturnType<typeof fixture>): string | undefined {
+	const record = item.host.finished.at(-1);
+	return record?.error ?? record?.result?.summary;
 }
 
 afterEach(async () => {
@@ -88,8 +97,7 @@ describe("LSP install readiness (#399)", () => {
 			expect(result.text).toContain("lsp.servers.rust.command");
 			expect(result.text).toContain("/reload");
 			expect(result.text).toContain("/lsp restart");
-			expect(item.updates.map((update) => update.status)).toEqual(["running", "failed"]);
-			expect(item.updates.at(-1)?.exitCode).toBe(0);
+			expect(ran(item)).toEqual([["running", "failed"]]);
 			expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
 				state: "failed",
 				breaker: "closed",
@@ -113,8 +121,8 @@ describe("LSP install readiness (#399)", () => {
 		const item = fixture((bin) => launcher(bin));
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.completionStates).toEqual(["ready"]);
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
-		expect(item.updates.at(-1)?.message).toContain("initialize succeeded");
+		expect(ran(item)).toEqual([["running", "completed"]]);
+		expect(report(item)).toContain("initialize succeeded");
 	});
 
 	it("distinguishes a successful installer from a failed handshake without double-counting failures", async () => {
@@ -124,7 +132,7 @@ describe("LSP install readiness (#399)", () => {
 		expect(result.text).toContain("Install command succeeded");
 		expect(result.text).toContain("initialize failed");
 		expect(result.reason).not.toBe("missing-executable");
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "failed"]);
+		expect(ran(item)).toEqual([["running", "failed"]]);
 		await item.manager.hover(item.path, "symbol");
 		expect(item.manager.getStatus().find((entry) => entry.name === "rust")?.breaker).toBe("closed");
 		await item.manager.hover(item.path, "symbol");
@@ -192,15 +200,12 @@ describe("LSP install readiness (#399)", () => {
 				]);
 				expect(item.installRunner).toHaveBeenCalledTimes(1);
 				expect(item.requestAction).toHaveBeenCalledTimes(1);
-				expect(item.updates.map((update) => update.status)).toEqual([
-					"running",
-					failBroken ? "failed" : "completed",
-				]);
-				expect(new Set(item.updates.map((update) => update.id)).size).toBe(1);
-				expect(item.updates.at(-1)).toMatchObject({ exitCode: 0, message: expect.stringContaining("broken") });
+				// One action for both roots, reporting the outcome of each.
+				expect(ran(item)).toEqual([["running", failBroken ? "failed" : "completed"]]);
+				expect(report(item)).toContain("broken");
 				if (failBroken) {
-					expect(item.updates.at(-1)?.message).toContain("initialize failed");
-					expect(item.updates.at(-1)?.message).toContain("/lsp restart");
+					expect(report(item)).toContain("initialize failed");
+					expect(report(item)).toContain("/lsp restart");
 				}
 				expect(item.manager.getStatus().find((entry) => entry.root.endsWith("broken"))).toMatchObject({
 					state: failBroken ? "failed" : "ready",
@@ -229,7 +234,7 @@ describe("LSP install readiness (#399)", () => {
 		expect(await item.manager.hover(item.path, "symbol", undefined, controller.signal)).toMatchObject({
 			outcome: "cancelled",
 		});
-		await expect.poll(() => item.updates.at(-1)?.status).toBe("completed");
+		await expect.poll(() => item.host.finished.at(-1)?.outcome).toBe("completed");
 		expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
 			alive: true,
 			serverInfo: { name: "fake-lsp" },
@@ -243,44 +248,48 @@ describe("LSP install readiness (#399)", () => {
 		{ mode: "automatic", lifecycle: "restart" },
 		{ mode: "explicit", lifecycle: "dispose" },
 		{ mode: "automatic", lifecycle: "dispose" },
-	] as const)("does not restore failures when a prompt rejects on $lifecycle ($mode)", async ({ mode, lifecycle }) => {
-		const item = fixture((bin) => launcher(bin));
-		const promptStarted = Promise.withResolvers<void>();
-		item.requestAction.mockImplementationOnce((_request, options) => {
-			promptStarted.resolve();
-			return new Promise((_resolve, reject) => {
-				options?.signal?.addEventListener("abort", () => reject(new Error("Host action aborted")), { once: true });
+	] as const)(
+		"does not restore failures when a pending approval ends on $lifecycle ($mode)",
+		async ({ mode, lifecycle }) => {
+			const item = fixture((bin) => launcher(bin));
+			const promptStarted = Promise.withResolvers<void>();
+			item.requestAction.mockImplementationOnce(() => {
+				promptStarted.resolve();
+				// Never answered: the restart or dispose withdraws it.
+				return new Promise<HostResponse & { decision: "approved" }>(() => {});
 			});
-		});
-		const pending =
-			mode === "explicit"
-				? item.manager.hover(item.path, "symbol")
-				: item.manager.getDiagnostics(item.path, "symbol\n");
-		await promptStarted.promise;
-		item.manager[lifecycle]();
-		expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
-		const status = item.manager.getStatus().find((entry) => entry.name === "rust");
-		expect(status).toMatchObject({ state: "unused", attempts: 0, breaker: "closed" });
-		expect(status?.lastError).toBeUndefined();
-		expect(item.requestAction).toHaveBeenCalledTimes(1);
-		expect(item.installRunner).not.toHaveBeenCalled();
+			const pending =
+				mode === "explicit"
+					? item.manager.hover(item.path, "symbol")
+					: item.manager.getDiagnostics(item.path, "symbol\n");
+			await promptStarted.promise;
+			item.manager[lifecycle]();
+			expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
+			const status = item.manager.getStatus().find((entry) => entry.name === "rust");
+			expect(status).toMatchObject({ state: "unused", attempts: 0, breaker: "closed" });
+			expect(status?.lastError).toBeUndefined();
+			expect(item.requestAction).toHaveBeenCalledTimes(1);
+			expect(item.installRunner).not.toHaveBeenCalled();
+			await vi.waitFor(() => expect(item.host.records()[0]).toMatchObject({ outcome: "cancelled" }));
+			expect(item.host.records()[0]?.progress).toBeUndefined();
 
-		if (lifecycle === "restart") {
-			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
-			expect(item.requestAction).toHaveBeenCalledTimes(2);
-			expect(item.installRunner).toHaveBeenCalledTimes(1);
-			expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
-				state: "ready",
-				breaker: "closed",
-			});
-		}
-	});
+			if (lifecycle === "restart") {
+				expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
+				expect(item.requestAction).toHaveBeenCalledTimes(2);
+				expect(item.installRunner).toHaveBeenCalledTimes(1);
+				expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
+					state: "ready",
+					breaker: "closed",
+				});
+			}
+		},
+	);
 
 	it.each([
 		{ lifecycle: "restart", timing: "installer-result" },
 		{ lifecycle: "dispose", timing: "installer-result" },
-		{ lifecycle: "restart", timing: "before-readiness" },
-		{ lifecycle: "dispose", timing: "before-readiness" },
+		{ lifecycle: "restart", timing: "installer-running" },
+		{ lifecycle: "dispose", timing: "installer-running" },
 	] as const)("finalizes a successful install cancelled by $lifecycle at $timing", async ({ lifecycle, timing }) => {
 		const item = fixture();
 		const installStarted = Promise.withResolvers<void>();
@@ -293,20 +302,18 @@ describe("LSP install readiness (#399)", () => {
 		const pending = item.manager.hover(item.path, "symbol");
 		await installStarted.promise;
 		launcher(item.bin);
-		installResult.resolve({ exitCode: 0, output: "installed" });
-		if (timing === "before-readiness") {
-			// Let the installer-result continuation run, then cancel before the
-			// queued shared-attempt continuation begins readiness verification.
-			await Promise.resolve();
+		if (timing === "installer-running") {
+			// Cancelled while the installer runs; it ignores the abort and succeeds anyway.
+			item.manager[lifecycle]();
+			installResult.resolve({ exitCode: 0, output: "installed" });
+		} else {
+			// Cancelled after the installer succeeded, before the action read its result.
+			installResult.resolve({ exitCode: 0, output: "installed" });
+			item.manager[lifecycle]();
 		}
-		item.manager[lifecycle]();
 		expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "cancelled"]);
-		expect(item.updates.at(-1)).toMatchObject({
-			id: item.updates[0].id,
-			action: "lsp.install_server",
-			exitCode: 0,
-		});
+		await vi.waitFor(() => expect(ran(item)).toEqual([["running", "cancelled"]]));
+		expect(item.host.finished[0]).toMatchObject({ kind: "host_action", input: { action: "lsp.install_server" } });
 		expect(start).not.toHaveBeenCalled();
 		const status = item.manager.getStatus().find((entry) => entry.name === "rust");
 		expect(status).toMatchObject({ state: "unused", attempts: 0, breaker: "closed" });
@@ -317,14 +324,24 @@ describe("LSP install readiness (#399)", () => {
 		}
 	});
 
-	it("still reports prompt rejections when the install attempt has not been cancelled", async () => {
+	it("still reports a host action that fails to ask when the install attempt has not been cancelled", async () => {
 		const item = fixture();
-		item.requestAction.mockRejectedValueOnce(new Error("Host prompt unavailable"));
-		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({
+		const manager = new LspManager({
+			cwd: item.root,
+			config: resolveLspConfig({ idleShutdownMs: 0 }),
+			hostActions: {
+				run: async () => {
+					throw new Error("Host prompt unavailable");
+				},
+			},
+			installRunner: item.installRunner,
+		});
+		managers.push(manager);
+		expect(await manager.hover(item.path, "symbol")).toMatchObject({
 			outcome: "unavailable",
 			text: expect.stringContaining("LSP install prompt failed: Host prompt unavailable"),
 		});
-		expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
+		expect(manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
 			state: "failed",
 			lastError: expect.stringContaining("Host prompt unavailable"),
 		});
@@ -347,7 +364,7 @@ describe("LSP install readiness (#399)", () => {
 			return startup;
 		});
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "cancelled" });
-		expect(item.updates.map((update) => update.status)).toEqual(["running", "cancelled"]);
+		await vi.waitFor(() => expect(ran(item)).toEqual([["running", "cancelled"]]));
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
 			state: "ready",
@@ -361,11 +378,8 @@ describe("LSP install readiness (#399)", () => {
 			outcome: "unavailable",
 			reason: "unusable-executable",
 		});
-		expect(item.updates.at(-1)).toMatchObject({
-			status: "failed",
-			exitCode: 0,
-			message: expect.stringContaining("EACCES"),
-		});
+		await vi.waitFor(() => expect(ran(item)).toEqual([["running", "failed"]]));
+		expect(report(item)).toContain("EACCES");
 	});
 
 	it("reloads an explicit command in the same conversation without extensions or a daemon restart", async () => {
@@ -375,15 +389,20 @@ describe("LSP install readiness (#399)", () => {
 			settings: { lsp: { idleShutdownMs: 0 } },
 			initialActiveToolNames: ["lsp"],
 		});
-		const updates: HostActionUpdate[] = [];
 		// Use the real installer process boundary, but a harmless rustup fixture.
 		const rustup = join(item.bin, process.platform === "win32" ? "rustup.cmd" : "rustup");
 		writeFileSync(rustup, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
 		chmodSync(rustup, 0o755);
-		harness.session.setHostInteraction({
-			requestAction: async () => ({ decision: "approved" }),
-			updateAction: (update) => {
-				updates.push(update);
+		// A client of the conversation approves the install it is asked.
+		const { liveState } = harness.session;
+		liveState.attach("approver", {
+			acceptsHostRequest: (kind) => kind === "approval",
+			apply: (update) => {
+				for (const entry of update.items) {
+					if (entry.type !== "set" || entry.value.kind !== "host_request") continue;
+					const { requestId } = entry.value;
+					queueMicrotask(() => liveState.answer(requestId, { decision: "approved" }, "approver"));
+				}
 			},
 		});
 		try {
@@ -394,7 +413,14 @@ describe("LSP install readiness (#399)", () => {
 				fauxAssistantMessage("not ready"),
 			]);
 			await harness.session.prompt("Inspect the Rust symbol");
-			expect(updates.at(-1)?.message).toContain("Install command succeeded");
+			const install = harness.session.work.list().filter((record) => record.kind === "host_action");
+			expect(install).toEqual([
+				expect.objectContaining({
+					state: "running",
+					outcome: "failed",
+					error: expect.stringContaining("Install command succeeded"),
+				}),
+			]);
 			const sessionId = harness.sessionManager.getSessionId();
 			const messages = [...harness.session.messages];
 			harness.settingsManager.applyOverrides({ lsp: { servers: { rust: { command: [explicit] } } } });

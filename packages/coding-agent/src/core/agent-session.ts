@@ -47,7 +47,6 @@ import type { ExtensionServicesLimits } from "./extensions/services-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { ClientScope } from "./host/client-scope.ts";
 import { LiveState } from "./host/live-state.ts";
-import type { HostInteraction } from "./host-interaction.ts";
 import type { LspServerStatus } from "./lsp/manager.ts";
 import type { LspServerPool } from "./lsp/server-pool.ts";
 import type { McpManager } from "./mcp/manager.ts";
@@ -69,6 +68,7 @@ import {
 	SessionExtensionBinding,
 } from "./session/extension-binding.ts";
 import { SessionExtensionServices } from "./session/extension-services.ts";
+import { HOST_ACTION_WORK_KIND, type HostActions, SessionHostActions } from "./session/host-actions.ts";
 import { SessionJobs } from "./session/jobs.ts";
 import { SessionLifecycle } from "./session/lifecycle.ts";
 import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
@@ -278,8 +278,6 @@ export interface AgentSessionConfig {
 	extensionRunnerRef?: { current?: ExtensionRunner };
 	/** Session start event metadata emitted when extensions bind to this runtime. */
 	sessionStartEvent?: SessionStartEvent;
-	/** Answers host-initiated actions (approvals). Default: they wait in the session's live state for an attached client. */
-	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
 	/** Optional manager enabling the native MCP gateway tool when configured. */
@@ -454,6 +452,8 @@ export class AgentSession {
 			this._jobs.runtime.changed();
 		},
 	});
+	/** Host actions (an LSP server install) wait in the live state for a client's approval, then run as `host_action` work. */
+	private readonly _hostActions = new SessionHostActions({ liveState: this.liveState, work: () => this._work });
 
 	// Extension system
 	private _extensionServices!: SessionExtensionServices;
@@ -614,6 +614,7 @@ export class AgentSession {
 				lostSignal: this._lostAbort.signal,
 				planningController: this,
 				liveState: this.liveState,
+				hostActions: this._hostActions,
 				conversation: () => this._conversation,
 				extensions: () => this._extensions,
 				extensionServices: () => this._extensionServices,
@@ -635,8 +636,6 @@ export class AgentSession {
 				allowUnlistedExtensionTools: config.allowUnlistedExtensionTools,
 				excludedToolNames: config.excludedToolNames,
 				baseToolsOverride: config.baseToolsOverride,
-				// Approvals wait in the live state unless the session's creator answers them itself.
-				hostInteraction: config.hostInteraction ?? this.liveState.hostInteraction,
 				lspServerPool: config.lspServerPool,
 				subagentToolManager: config.subagentToolManager,
 				mcpManager: config.mcpManager,
@@ -722,6 +721,7 @@ export class AgentSession {
 			recordDiagnostic: (event) => this._providerStream.recordDiagnostic(event),
 		});
 		this._work.register(this._jobs.runtime.kind());
+		this._work.register(HOST_ACTION_WORK_KIND);
 		this._events = new SessionEvents({
 			gitContextProvider: this.gitContextProvider,
 			toolProgressDiagnostics: this._toolProgressDiagnostics,
@@ -1012,6 +1012,14 @@ export class AgentSession {
 		return this._work;
 	}
 
+	/**
+	 * Runs host actions, such as an LSP server install: `host_action` work
+	 * that waits in the live state for a client's approval before it runs.
+	 */
+	get hostActions(): HostActions {
+		return this._hostActions;
+	}
+
 	/** The running turn's operation id, if a turn runs: work started meanwhile belongs to it. */
 	private get _turnId(): string | undefined {
 		const operation = this._conversation?.operation;
@@ -1074,12 +1082,6 @@ export class AgentSession {
 	suspendAdmission(): () => void {
 		this._assertActive();
 		return this._admissionGate.suspend();
-	}
-
-	/** Replace what answers host-initiated actions; `liveState.hostInteraction` is the default. */
-	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
-		this._assertActive();
-		this._tools.setHostInteraction(hostInteraction);
 	}
 
 	/** LSP status for the /lsp command. */

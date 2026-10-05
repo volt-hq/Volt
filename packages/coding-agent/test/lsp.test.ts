@@ -15,12 +15,6 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-	HostActionDecision,
-	HostActionRequest,
-	HostActionUpdate,
-	HostInteraction,
-} from "../src/core/host-interaction.ts";
 import { LspClient } from "../src/core/lsp/client.ts";
 import { resolveLspLaunch } from "../src/core/lsp/command-resolver.ts";
 import { installHintForCommand, installRecipeForCommand, resolveLspConfig } from "../src/core/lsp/config.ts";
@@ -32,6 +26,7 @@ import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-prov
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createLspToolDefinition, type LspNavigationProvider } from "../src/core/tools/lsp.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
+import { type ApprovalAnswer, testHostActions } from "./host-action-doubles.ts";
 import { directorySymlinkType } from "./symlink-utils.ts";
 
 const FAKE_SERVER = join(__dirname, "fixtures", "fake-lsp-server.mjs");
@@ -1616,7 +1611,7 @@ describe("LspManager", () => {
 
 	it("includes manual repair context without prompting for a missing explicit path", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "approved" }));
 		manager = new LspManager({
 			cwd: tempDir,
 			config: resolveLspConfig({
@@ -1634,12 +1629,7 @@ describe("LspManager", () => {
 					rust: { enabled: false },
 				},
 			}),
-			hostInteraction: {
-				requestAction: async (request) => {
-					requests.push(request);
-					return { decision: "approved" };
-				},
-			},
+			hostActions: approvals.actions,
 		});
 		const filePath = join(tempDir, "test.foo");
 		const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
@@ -1648,7 +1638,7 @@ describe("LspManager", () => {
 		expect(first).toContain("Launch source: absolute");
 		expect(first).toContain("Automatic install is unavailable for explicit paths");
 		expect(first).toContain("Install with: go install golang.org/x/tools/gopls@latest");
-		expect(requests).toEqual([]);
+		expect(approvals.requests).toEqual([]);
 	});
 
 	it("retains bounded startup stderr for a present but broken server", async () => {
@@ -1686,7 +1676,7 @@ describe("LspManager", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		const previousPath = process.env.PATH;
 		process.env.PATH = tempDir;
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "denied" }));
 		try {
 			manager = new LspManager({
 				cwd: tempDir,
@@ -1699,18 +1689,13 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction: {
-					requestAction: async (request) => {
-						requests.push(request);
-						return { decision: "denied" };
-					},
-				},
+				hostActions: approvals.actions,
 			});
 			const filePath = join(tempDir, "test.foo");
 			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
-			expect(requests).toEqual([]);
+			expect(approvals.requests).toEqual([]);
 		} finally {
 			if (previousPath === undefined) delete process.env.PATH;
 			else process.env.PATH = previousPath;
@@ -1732,7 +1717,7 @@ describe("LspManager", () => {
 		const previousPathExt = process.env.PATHEXT;
 		process.env.PATH = binDir;
 		if (process.platform === "win32") process.env.PATHEXT = ".CMD";
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "denied" }));
 		try {
 			manager = new LspManager({
 				cwd: tempDir,
@@ -1744,12 +1729,7 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction: {
-					requestAction: async (request) => {
-						requests.push(request);
-						return { decision: "denied" };
-					},
-				},
+				hostActions: approvals.actions,
 			});
 			const filePath = join(tempDir, "test.foo");
 			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
@@ -1757,7 +1737,7 @@ describe("LspManager", () => {
 			expect(first).toContain("is present but not executable");
 			expect(first).toContain("EACCES");
 			expect(first).not.toContain("ENOENT");
-			expect(requests).toEqual([]);
+			expect(approvals.requests).toEqual([]);
 			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].lastError).toContain(
 				`Unusable executable: ${unusablePath}`,
 			);
@@ -1773,7 +1753,7 @@ describe("LspManager", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		const previousPath = process.env.PATH;
 		process.env.PATH = tempDir;
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "approved" }));
 		const installCommands: string[][] = [];
 		try {
 			manager = new LspManager({
@@ -1792,12 +1772,7 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction: {
-					requestAction: async (request) => {
-						requests.push(request);
-						return { decision: "approved" };
-					},
-				},
+				hostActions: approvals.actions,
 				installRunner: async (command) => {
 					installCommands.push([...command]);
 					return { exitCode: 0, output: "" };
@@ -1808,7 +1783,7 @@ describe("LspManager", () => {
 
 			expect(first).toContain("lsp(custom):");
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
-			expect(requests).toEqual([]);
+			expect(approvals.requests).toEqual([]);
 			expect(installCommands).toEqual([]);
 		} finally {
 			if (previousPath === undefined) {
@@ -1825,18 +1800,8 @@ describe("LspManager", () => {
 		mkdirSync(binDir);
 		const previousPath = process.env.PATH;
 		process.env.PATH = binDir;
-		const requests: HostActionRequest[] = [];
-		const updates: HostActionUpdate[] = [];
+		const approvals = testHostActions();
 		const installCommands: string[][] = [];
-		const hostInteraction: HostInteraction = {
-			requestAction: async (request) => {
-				requests.push(request);
-				return { decision: "approved" };
-			},
-			updateAction: (update) => {
-				updates.push(update);
-			},
-		};
 		try {
 			manager = new LspManager({
 				cwd: tempDir,
@@ -1850,7 +1815,7 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction,
+				hostActions: approvals.actions,
 				installRunner: async (command) => {
 					installCommands.push([...command]);
 					writeFakeServerExecutable(binDir, "tsc");
@@ -1864,8 +1829,8 @@ describe("LspManager", () => {
 			const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 
 			expect(result).toContain("test.foo(1,5): error: found ERROR on line 1");
-			expect(requests).toHaveLength(1);
-			expect(requests[0]).toMatchObject({
+			expect(approvals.requests).toHaveLength(1);
+			expect(approvals.requests[0]).toMatchObject({
 				action: "lsp.install_server",
 				commandPreview: "npm install -g typescript@7.0.2 --ignore-scripts --include=optional",
 				metadata: { server: "typescript", binary: "tsc" },
@@ -1873,7 +1838,14 @@ describe("LspManager", () => {
 			expect(installCommands).toEqual([
 				["npm", "install", "-g", "typescript@7.0.2", "--ignore-scripts", "--include=optional"],
 			]);
-			expect(updates.map((update) => update.status)).toEqual(["running", "completed"]);
+			await vi.waitFor(() => expect(approvals.finished).toHaveLength(1));
+			expect(approvals.finished[0]).toMatchObject({
+				kind: "host_action",
+				state: "running",
+				outcome: "completed",
+				progress: { text: expect.stringContaining("Running npm install -g typescript@7.0.2") },
+				result: { summary: expect.stringContaining("initialize succeeded") },
+			});
 		} finally {
 			if (previousPath === undefined) {
 				delete process.env.PATH;
@@ -1895,7 +1867,7 @@ describe("LspManager", () => {
 		writeFileSync(join(secondRoot, ".root"), "");
 		const previousPath = process.env.PATH;
 		process.env.PATH = binDir;
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "approved" }));
 		let installs = 0;
 		try {
 			manager = new LspManager({
@@ -1910,12 +1882,7 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction: {
-					requestAction: async (request) => {
-						requests.push(request);
-						return { decision: "approved" };
-					},
-				},
+				hostActions: approvals.actions,
 				installRunner: async () => {
 					installs++;
 					await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1933,7 +1900,7 @@ describe("LspManager", () => {
 			]);
 			expect(first).toContain("error: found ERROR");
 			expect(second).toContain("error: found ERROR");
-			expect(requests).toHaveLength(1);
+			expect(approvals.requests).toHaveLength(1);
 			expect(installs).toBe(1);
 		} finally {
 			if (previousPath === undefined) delete process.env.PATH;
@@ -1953,7 +1920,7 @@ describe("LspManager", () => {
 		process.env.PATH = binDir;
 		const firstPromptStarted = createDeferred<void>();
 		const secondPromptStarted = createDeferred<void>();
-		const firstDecision = createDeferred<HostActionDecision>();
+		const firstDecision = createDeferred<ApprovalAnswer>();
 		let firstRequests = 0;
 		let secondRequests = 0;
 		let secondInstalls = 0;
@@ -1962,24 +1929,20 @@ describe("LspManager", () => {
 			manager = new LspManager({
 				cwd: firstRoot,
 				config: builtInTypescriptInstallConfig(),
-				hostInteraction: {
-					requestAction: async () => {
-						firstRequests++;
-						firstPromptStarted.resolve();
-						return firstDecision.promise;
-					},
-				},
+				hostActions: testHostActions(async () => {
+					firstRequests++;
+					firstPromptStarted.resolve();
+					return firstDecision.promise;
+				}).actions,
 			});
 			secondManager = new LspManager({
 				cwd: secondRoot,
 				config: builtInTypescriptInstallConfig(),
-				hostInteraction: {
-					requestAction: async () => {
-						secondRequests++;
-						secondPromptStarted.resolve();
-						return { decision: "approved" };
-					},
-				},
+				hostActions: testHostActions(async () => {
+					secondRequests++;
+					secondPromptStarted.resolve();
+					return { decision: "approved" };
+				}).actions,
 				installRunner: async () => {
 					secondInstalls++;
 					writeFakeServerExecutable(binDir, "tsc");
@@ -2030,7 +1993,7 @@ describe("LspManager", () => {
 		const previousPath = process.env.PATH;
 		process.env.PATH = binDir;
 		const promptStarted = createDeferred<void>();
-		const promptDecision = createDeferred<HostActionDecision>();
+		const promptDecision = createDeferred<ApprovalAnswer>();
 		let requests = 0;
 		let installs = 0;
 		try {
@@ -2038,26 +2001,12 @@ describe("LspManager", () => {
 				cwd: firstRoot,
 				projectCwd: tempDir,
 				config: builtInTypescriptInstallConfig([".root"]),
-				hostInteraction: {
-					requestAction: async (_request, options) => {
-						requests++;
-						promptStarted.resolve();
-						return Promise.race([
-							promptDecision.promise,
-							new Promise<HostActionDecision>((resolve) => {
-								options?.signal?.addEventListener(
-									"abort",
-									() =>
-										resolve({
-											decision: "dismissed",
-											message: "host prompt aborted with initiating request",
-										}),
-									{ once: true },
-								);
-							}),
-						]);
-					},
-				},
+				// A caller's cancellation never reaches the shared prompt: it stays pending for the second caller.
+				hostActions: testHostActions(async () => {
+					requests++;
+					promptStarted.resolve();
+					return promptDecision.promise;
+				}).actions,
 				installRunner: async () => {
 					installs++;
 					writeFakeServerExecutable(binDir, "tsc");
@@ -2099,7 +2048,7 @@ describe("LspManager", () => {
 		const previousPath = process.env.PATH;
 		process.env.PATH = binDir;
 		const promptStarted = createDeferred<void>();
-		const promptDecision = createDeferred<HostActionDecision>();
+		const promptDecision = createDeferred<ApprovalAnswer>();
 		const installFinished = createDeferred<void>();
 		let requests = 0;
 		let installs = 0;
@@ -2107,13 +2056,11 @@ describe("LspManager", () => {
 			manager = new LspManager({
 				cwd: tempDir,
 				config: builtInTypescriptInstallConfig(),
-				hostInteraction: {
-					requestAction: async () => {
-						requests++;
-						promptStarted.resolve();
-						return promptDecision.promise;
-					},
-				},
+				hostActions: testHostActions(async () => {
+					requests++;
+					promptStarted.resolve();
+					return promptDecision.promise;
+				}).actions,
 				installRunner: async () => {
 					installs++;
 					writeFakeServerExecutable(binDir, "tsc");
@@ -2158,26 +2105,16 @@ describe("LspManager", () => {
 		const previousPath = process.env.PATH;
 		process.env.PATH = tempDir;
 		const promptStarted = createDeferred<void>();
-		const manualDecision = createDeferred<HostActionDecision>();
+		const manualDecision = createDeferred<ApprovalAnswer>();
+		const approvals = testHostActions(async () => {
+			promptStarted.resolve();
+			return manualDecision.promise;
+		});
 		try {
 			manager = new LspManager({
 				cwd: tempDir,
 				config: builtInTypescriptInstallConfig(),
-				hostInteraction: {
-					requestAction: async (_request, options) => {
-						promptStarted.resolve();
-						return Promise.race([
-							manualDecision.promise,
-							new Promise<HostActionDecision>((resolve) => {
-								options?.signal?.addEventListener(
-									"abort",
-									() => resolve({ decision: "dismissed", message: "manager disposed" }),
-									{ once: true },
-								);
-							}),
-						]);
-					},
-				},
+				hostActions: approvals.actions,
 			});
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ERROR\n");
@@ -2194,6 +2131,9 @@ describe("LspManager", () => {
 
 			expect(settledBeforeFallback).toBe(true);
 			expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
+			// Disposing the manager withdrew the approval and cancelled the action before it ran.
+			await vi.waitFor(() => expect(approvals.records()[0]).toMatchObject({ outcome: "cancelled" }));
+			expect(approvals.records()[0]?.progress).toBeUndefined();
 		} finally {
 			manualDecision.resolve({ decision: "dismissed" });
 			if (previousPath === undefined) delete process.env.PATH;
@@ -2205,7 +2145,7 @@ describe("LspManager", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
 		const previousPath = process.env.PATH;
 		process.env.PATH = tempDir;
-		const requests: HostActionRequest[] = [];
+		const approvals = testHostActions(() => ({ decision: "denied" }));
 		try {
 			manager = new LspManager({
 				cwd: tempDir,
@@ -2219,12 +2159,7 @@ describe("LspManager", () => {
 						},
 					},
 				}),
-				hostInteraction: {
-					requestAction: async (request) => {
-						requests.push(request);
-						return { decision: "denied" };
-					},
-				},
+				hostActions: approvals.actions,
 			});
 			const filePath = join(tempDir, "test.foo");
 			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
@@ -2232,7 +2167,7 @@ describe("LspManager", () => {
 
 			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
 			expect(second).toBe("");
-			expect(requests).toHaveLength(1);
+			expect(approvals.requests).toHaveLength(1);
 		} finally {
 			if (previousPath === undefined) {
 				delete process.env.PATH;

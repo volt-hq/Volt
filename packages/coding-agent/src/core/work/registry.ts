@@ -43,6 +43,7 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import {
 	BUILTIN_WORK_KINDS,
 	EXTENSION_WORK_KIND_PATTERN,
+	type RemoteCapability,
 	type UiNode,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 	WORK_NOTICE_CUSTOM_TYPE,
@@ -137,6 +138,10 @@ export interface WorkKindDefinition {
 	readonly delivery: WorkDelivery;
 	/** Whether a client may cancel the kind's work. */
 	readonly cancellable: boolean;
+	/** `false`: aborting the conversation's run leaves the kind's work running. */
+	readonly cancelOnAbort?: false;
+	/** Remote capabilities a client needs, beyond the intent's own, to cancel, resume, or open the kind's work. */
+	readonly requires?: readonly RemoteCapability[];
 	/** The kind's work starts awaiting approval instead of running. */
 	readonly approval?: boolean;
 	/** `tool_grant`: the kind's work starts only from a tool call, under that call's grant. */
@@ -505,7 +510,11 @@ export class WorkRegistry {
 		return !this.active.has(record.workId) && !this.resumable(record);
 	}
 
-	/** Let work awaiting approval run: a `running` checkpoint, then its executor. */
+	/**
+	 * Let work awaiting approval run: a `running` checkpoint, then its
+	 * executor. Rejects when it was cancelled or the conversation closed
+	 * first: then it never runs.
+	 */
 	async approve(workId: string): Promise<WorkRecord> {
 		this.assertOpen();
 		const record = this.requireOpen(workId);
@@ -514,6 +523,9 @@ export class WorkRegistry {
 			throw new WorkError("unavailable", `Work ${workId} is not awaiting approval`);
 		}
 		await this.write(active, () => this.host.work().checkpoint(workId, { state: "running" }));
+		if (active.controller.signal.aborted) {
+			throw new WorkError("unavailable", `Work ${workId} stopped before it could run`);
+		}
 		active.approval.resolve(true);
 		return this.get(workId) ?? record;
 	}
@@ -585,6 +597,17 @@ export class WorkRegistry {
 		return [...this.active.keys()].flatMap((workId) => this.get(workId) ?? []);
 	}
 
+	/** The signal of work this runtime runs, awaiting approval included: aborted once it is cancelled or the conversation closes. */
+	signal(workId: string): AbortSignal | undefined {
+		return this.active.get(workId)?.controller.signal;
+	}
+
+	/** The remote capabilities, beyond an intent's own, a client needs to act on `workId`: its kind's `requires`. */
+	requires(workId: string): readonly RemoteCapability[] {
+		const record = this.get(workId);
+		return (record && this.kinds.get(record.kind)?.requires) ?? [];
+	}
+
 	/** The output of `workId`, or undefined for unknown work. */
 	output(workId: string): WorkOutput | undefined {
 		const record = this.get(workId);
@@ -651,6 +674,11 @@ export class WorkRegistry {
 		return false;
 	}
 
+	/** Resolves once the executor of `workId` detached: its work finished, or closing left it open. */
+	async settled(workId: string): Promise<void> {
+		await this.active.get(workId)?.done.promise;
+	}
+
 	/** Resolves once no executor runs. */
 	async waitForIdle(): Promise<void> {
 		while (this.active.size > 0) {
@@ -659,8 +687,10 @@ export class WorkRegistry {
 	}
 
 	/**
-	 * Stop every executor. `cancelled` cancels each cancellable running item
-	 * as `cancel` does and resolves once their executors stopped. `closed` (the conversation closes; no work starts
+	 * Stop every executor. `cancelled` (the run was aborted) cancels each
+	 * running item of a cancellable kind that does not opt out with
+	 * `cancelOnAbort: false`, as `cancel` does, and resolves once their
+	 * executors stopped. `closed` (the conversation closes; no work starts
 	 * afterwards) aborts every executor and waits up to
 	 * {@link WORK_CLOSE_GRACE_MS}: resumable work stays open, suspended on
 	 * the next open, and other work finishes `interrupted` unless it completed
@@ -668,7 +698,9 @@ export class WorkRegistry {
 	 */
 	async cancelAll(reason: "cancelled" | "closed"): Promise<void> {
 		if (reason === "cancelled") {
-			const cancellable = [...this.active.values()].filter((active) => active.definition.cancellable);
+			const cancellable = [...this.active.values()].filter(
+				(active) => active.definition.cancellable && active.definition.cancelOnAbort !== false,
+			);
 			await Promise.allSettled(cancellable.map((active) => this.cancel(active.workId)));
 			await Promise.all(cancellable.map((active) => active.done.promise));
 			return;

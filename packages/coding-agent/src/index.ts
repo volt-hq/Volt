@@ -243,16 +243,6 @@ export {
 	type LiveUpdate,
 	type PendingHostRequest,
 } from "./core/host/live-state.ts";
-export type {
-	HostActionDecision,
-	HostActionDecisionKind,
-	HostActionMetadata,
-	HostActionMetadataValue,
-	HostActionRequest,
-	HostActionStatus,
-	HostActionUpdate,
-	HostInteraction,
-} from "./core/host-interaction.ts";
 // LSP
 export {
 	installHintForCommand,
@@ -695,6 +685,7 @@ export {
 } from "./core/sdk.ts";
 export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
 export type { ExtensionClient, ExtensionTerminalUI } from "./core/session/extension-binding.ts";
+export type { HostActionOutcome, HostActionRequest, HostActions } from "./core/session/host-actions.ts";
 export {
 	assertCurrentSessionSnapshot,
 	type BranchSummaryEntry,

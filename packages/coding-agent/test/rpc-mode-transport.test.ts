@@ -20,6 +20,7 @@ import {
 	type RpcTransport,
 } from "../src/core/protocol/transport/index.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
+import type { WorkExecution } from "../src/core/work/registry.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
@@ -515,96 +516,112 @@ describe("approvals over protocol connections", () => {
 		return client;
 	}
 
+	/** The id of the one approval `client` holds: its host action's work id. */
+	function approvalOf(client: ProtocolClient): string | undefined {
+		const keys = [...client.live.values.keys()].filter((key) => key.startsWith("host_request/"));
+		return keys.length === 1 ? keys[0]!.slice("host_request/".length) : undefined;
+	}
+
 	it("asks only clients that accept approvals, shows the action's progress, and takes the decision", async () => {
 		const { harness, conversation } = await setup();
-		const interaction = conversation.liveState.hostInteraction;
+		const actions = conversation.session.hostActions;
 		const observer = await connect(harness, conversation, ["confirm"]);
+		let runs = 0;
 		await expect(
-			interaction.requestAction({ id: "no-taker", action: "test.action", title: "Unavailable action" }),
-		).resolves.toEqual({ decision: "unavailable" });
+			actions.run({ action: "test.action", title: "Unavailable action" }, async () => {
+				runs++;
+				return { outcome: "completed" };
+			}),
+		).resolves.toEqual({ status: "unavailable" });
+		expect(conversation.work.list()).toEqual([]);
 
 		const approver = await connect(harness, conversation, ["approval"]);
-		const decision = interaction.requestAction({
-			id: "host-1",
-			action: "test.action",
-			title: "Approve test action?",
-			message: "This action is blocking.",
-			blocking: true,
-		});
-		await vi.waitFor(() =>
-			expect(approver.live.values.get("host_request/host-1")).toEqual({
-				kind: "host_request",
-				requestId: "host-1",
-				request: {
-					kind: "approval",
-					action: "test.action",
-					title: "Approve test action?",
-					message: "This action is blocking.",
-					blocking: true,
-				},
-			}),
+		const release = Promise.withResolvers<WorkExecution>();
+		const ran = actions.run(
+			{ action: "test.action", title: "Approve test action?", message: "This action is blocking.", blocking: true },
+			async (ctx) => {
+				runs++;
+				ctx.checkpoint({ text: "Running the test action" });
+				return await release.promise;
+			},
 		);
-		interaction.updateAction?.({ id: "host-1", action: "test.action", status: "running" });
-		await vi.waitFor(() =>
-			expect(approver.live.values.get("host_action/host-1")).toEqual({
-				kind: "host_action",
+		await vi.waitFor(() => expect(approvalOf(approver)).toBeDefined());
+		const workId = approvalOf(approver)!;
+		expect(approver.live.values.get(`host_request/${workId}`)).toEqual({
+			kind: "host_request",
+			requestId: workId,
+			request: {
+				kind: "approval",
 				action: "test.action",
-				status: "running",
+				title: "Approve test action?",
+				message: "This action is blocking.",
+				blocking: true,
+			},
+		});
+		expect(conversation.work.get(workId)).toMatchObject({ kind: "host_action", state: "awaiting_approval" });
+		expect(runs).toBe(0);
+
+		approver.answer(workId, { decision: "approved" });
+		await vi.waitFor(() =>
+			expect(approver.live.values.get(`work/${workId}`)).toMatchObject({
+				progress: { text: "Running the test action" },
 			}),
 		);
-
-		approver.answer("host-1", { decision: "approved" });
-		await expect(decision).resolves.toEqual({ decision: "approved" });
-		await vi.waitFor(() => expect(approver.live.values.has("host_request/host-1")).toBe(false));
+		expect(conversation.work.get(workId)).toMatchObject({ state: "running" });
+		release.resolve({ outcome: "completed", result: { summary: "done" } });
+		await expect(ran).resolves.toEqual({
+			status: "ran",
+			execution: { outcome: "completed", result: { summary: "done" } },
+		});
+		expect(conversation.work.get(workId)).toMatchObject({ outcome: "completed", result: { summary: "done" } });
+		await vi.waitFor(() => expect(approver.live.values.has(`host_request/${workId}`)).toBe(false));
+		await vi.waitFor(() => expect(approver.live.values.has(`work/${workId}`)).toBe(false));
 		for (const key of observer.live.values.keys()) expect(key).not.toMatch(/^host_request\//);
+		expect(runs).toBe(1);
 	});
 
 	it("keeps a pending approval across a reconnect, for the next client that accepts approvals", async () => {
 		const { harness, conversation } = await setup();
-		const interaction = conversation.liveState.hostInteraction;
 		const first = await connect(harness, conversation, ["approval"]);
-		const decision = interaction.requestAction({
-			id: "host-reconnect",
-			action: "test.action",
-			title: "Approve after reconnect?",
-			blocking: true,
-		});
+		const ran = conversation.session.hostActions.run(
+			{ action: "test.action", title: "Approve after reconnect?", blocking: true },
+			async () => ({ outcome: "completed" }),
+		);
 		let settled = false;
-		void decision.then(() => {
+		void ran.then(() => {
 			settled = true;
 		});
-		await vi.waitFor(() => expect(first.live.values.has("host_request/host-reconnect")).toBe(true));
+		await vi.waitFor(() => expect(approvalOf(first)).toBeDefined());
+		const workId = approvalOf(first)!;
 
 		await first.stop();
 		expect(settled).toBe(false);
 		expect(conversation.closed).toBe(false);
-		expect(conversation.liveState.pendingRequest("host-reconnect")).toBeDefined();
+		expect(conversation.liveState.pendingRequest(workId)).toBeDefined();
 
 		const second = await connect(harness, conversation, ["approval"]);
-		expect(second.live.values.get("host_request/host-reconnect")).toMatchObject({
+		expect(second.live.values.get(`host_request/${workId}`)).toMatchObject({
 			request: { kind: "approval", title: "Approve after reconnect?" },
 		});
-		interaction.updateAction?.({ id: "host-reconnect", action: "test.action", status: "running" });
-		await vi.waitFor(() =>
-			expect(second.live.values.get("host_action/host-reconnect")).toMatchObject({ status: "running" }),
-		);
-		second.answer("host-reconnect", { decision: "approved", message: "approved after reconnect" });
-		await expect(decision).resolves.toEqual({ decision: "approved", message: "approved after reconnect" });
+		second.answer(workId, { decision: "approved", message: "approved after reconnect" });
+		await expect(ran).resolves.toEqual({ status: "ran", execution: { outcome: "completed" } });
+		expect(conversation.work.get(workId)).toMatchObject({ state: "running", outcome: "completed" });
 	});
 
-	it("dismisses a pending approval when its conversation closes with the anchor", async () => {
+	it("ends a pending approval unrun when its conversation closes with the anchor", async () => {
 		const { harness, conversation } = await setup();
 		const client = await connect(harness, conversation, ["approval"], true);
-		const decision = conversation.liveState.hostInteraction.requestAction({
-			id: "host-dispose",
-			action: "test.action",
-			title: "Dispose?",
+		let runs = 0;
+		const ran = conversation.session.hostActions.run({ action: "test.action", title: "Dispose?" }, async () => {
+			runs++;
+			return { outcome: "completed" };
 		});
-		await vi.waitFor(() => expect(client.live.values.has("host_request/host-dispose")).toBe(true));
+		await vi.waitFor(() => expect(approvalOf(client)).toBeDefined());
 
 		await client.stop();
-		await expect(decision).resolves.toEqual({ decision: "dismissed", message: "The conversation closed" });
+		await expect(ran).resolves.toMatchObject({ status: "declined" });
 		expect(conversation.closed).toBe(true);
+		expect(runs).toBe(0);
 	});
 });
 
@@ -676,13 +693,33 @@ describe("host requests on the remote profile", () => {
 		});
 
 		const controller = await phone(harness, conversation, ["conversation.observe.v1", "conversation.control.v1"]);
-		const decision = live.hostInteraction.requestAction({ id: "approval-1", action: "test.action", title: "Ok?" });
-		await vi.waitFor(() => expect(hostRequests(manager).map((value) => value.requestId)).toEqual(["approval-1"]));
-		// The controller was not asked, and its answer to the approval changes nothing.
-		await answer(controller, conversation, "approval-1", { decision: "approved" }, "barrier-1");
-		expect(live.pendingRequest("approval-1")).toBeDefined();
-		manager.send({ type: "host_response", requestId: "approval-1", response: { decision: "denied" } });
-		await expect(decision).resolves.toEqual({ decision: "denied" });
+		let runs = 0;
+		const ran = conversation.session.hostActions.run(
+			{ action: "test.action", title: "Ok?", commandPreview: `${conversation.cwd}/bin/install` },
+			async () => {
+				runs++;
+				return { outcome: "completed" };
+			},
+		);
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(1));
+		const approval = hostRequests(manager)[0]!;
+		const workId = approval.requestId;
+		expect(conversation.work.get(workId)).toMatchObject({ kind: "host_action", state: "awaiting_approval" });
+		// The device sees the command without the host's workspace path.
+		expect(approval.request).toMatchObject({ kind: "approval", title: "Ok?" });
+		expect(JSON.stringify(approval)).not.toContain(conversation.cwd);
+		// The controller was not asked, and neither its answer nor its cancel reaches the action.
+		await answer(controller, conversation, workId, { decision: "approved" }, "barrier-1");
+		expect(live.pendingRequest(workId)).toBeDefined();
+		expect(await controller.intent("cancel_work", { workId })).toMatchObject({
+			type: "rejected",
+			reason: { code: "not_allowed", requiredCapability: "host.manage.v1" },
+		});
+		expect(conversation.work.get(workId)).toMatchObject({ state: "awaiting_approval" });
+		manager.send({ type: "host_response", requestId: workId, response: { decision: "denied" } });
+		await expect(ran).resolves.toEqual({ status: "declined" });
+		expect(conversation.work.get(workId)).toMatchObject({ outcome: "cancelled" });
+		expect(runs).toBe(0);
 
 		const asked = live.request({ kind: "confirm", title: "Sure?", message: "Really?" });
 		await vi.waitFor(() => expect(hostRequests(controller).map((value) => value.request.kind)).toEqual(["confirm"]));
@@ -694,5 +731,39 @@ describe("host requests on the remote profile", () => {
 
 		expect(hostRequests(controller).map((value) => value.request.kind)).toEqual(["confirm"]);
 		expect(hostRequests(manager).map((value) => value.request.kind)).toEqual(["approval"]);
+	});
+
+	it("lets a device granted host management cancel a host action, before or after it was approved", async () => {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const manager = await phone(harness, conversation, [
+			"conversation.observe.v1",
+			"conversation.control.v1",
+			"host.manage.v1",
+		]);
+		const pending = conversation.session.hostActions.run({ action: "test.action", title: "Pending" }, async () => ({
+			outcome: "completed",
+		}));
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(1));
+		const pendingId = hostRequests(manager)[0]!.requestId;
+		expect(await manager.intent("cancel_work", { workId: pendingId })).toMatchObject({ type: "accepted" });
+		await expect(pending).resolves.toEqual({ status: "declined", message: "Host action cancelled" });
+		expect(conversation.liveState.pendingRequest(pendingId)).toBeUndefined();
+		expect(conversation.work.get(pendingId)).toMatchObject({ outcome: "cancelled" });
+
+		const started = Promise.withResolvers<void>();
+		const running = conversation.session.hostActions.run({ action: "test.action", title: "Running" }, async (ctx) => {
+			started.resolve();
+			await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
+			return { outcome: "cancelled" };
+		});
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(2));
+		const runningId = hostRequests(manager)[1]!.requestId;
+		manager.send({ type: "host_response", requestId: runningId, response: { decision: "approved" } });
+		await started.promise;
+		expect(await manager.intent("cancel_work", { workId: runningId })).toMatchObject({ type: "accepted" });
+		await expect(running).resolves.toEqual({ status: "ran", execution: { outcome: "cancelled" } });
+		expect(conversation.work.get(runningId)).toMatchObject({ state: "cancelling", outcome: "cancelled" });
 	});
 });

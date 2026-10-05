@@ -114,21 +114,20 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 
 		// The phone's attach binds nothing again: session_start ran once, through the TUI.
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
-		// An approval reaches the TUI and the phone, whose grant manages the host; the first answer wins.
-		const approval = runtime.conversation.liveState.hostInteraction.requestAction({
-			id: "relay-approval",
-			action: "test.action",
-			title: "Approve?",
-		});
-		expect(tuiLive.pending().map((pending) => pending.requestId)).toEqual(["relay-approval"]);
-		await vi.waitFor(() => expect(hostRequestIds(phone)).toEqual(["relay-approval"]));
-		expect(runtime.conversation.liveState.answer("relay-approval", { decision: "approved" }, "tui")).toBe("accepted");
-		await expect(approval).resolves.toEqual({ decision: "approved" });
+		// A host action's approval reaches the TUI and the phone, whose grant manages the host; the first answer wins.
+		const approval = runtime.session.hostActions.run({ action: "test.action", title: "Approve?" }, async () => ({
+			outcome: "completed",
+		}));
+		await vi.waitFor(() => expect(tuiLive.pending()).toHaveLength(1));
+		const approvalId = tuiLive.pending()[0]!.requestId;
+		await vi.waitFor(() => expect(hostRequestIds(phone)).toEqual([approvalId]));
+		expect(runtime.conversation.liveState.answer(approvalId, { decision: "approved" }, "tui")).toBe("accepted");
+		await expect(approval).resolves.toEqual({ status: "ran", execution: { outcome: "completed" } });
 		await vi.waitFor(() =>
-			expect(liveItems(phone)).toContainEqual({ type: "clear", key: "host_request/relay-approval" }),
+			expect(liveItems(phone)).toContainEqual({ type: "clear", key: `host_request/${approvalId}` }),
 		);
 		const before = phone.frames.length;
-		phone.send({ type: "host_response", requestId: "relay-approval", response: { decision: "denied" } });
+		phone.send({ type: "host_response", requestId: approvalId, response: { decision: "denied" } });
 
 		// A dialog the TUI's extension asks reaches the phone too; here the phone answers first.
 		const proceeding = runtime.session.prompt("/proceed");
