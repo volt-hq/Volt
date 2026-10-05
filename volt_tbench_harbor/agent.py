@@ -122,7 +122,7 @@ class VoltAgent(BaseInstalledAgent):
         source_url = (
             self.source_url
             or self._get_env("VOLT_TBENCH_SOURCE_URL")
-            or "https://github.com/hansjm10/Volt.git"
+            or "https://github.com/volt-hq/Volt.git"
         )
         source_ref = self.source_ref or self._get_env("VOLT_TBENCH_SOURCE_REF") or "main"
         source_dir = "/tmp/volt-source"
