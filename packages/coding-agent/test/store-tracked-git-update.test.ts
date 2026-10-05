@@ -10,9 +10,10 @@ import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import type { StoreCatalog } from "../src/store/catalog.ts";
 import type { StorePackageInspection } from "../src/store/inspector.ts";
 import type { ResolveStoreSourceOptions, StoreResolvedSource } from "../src/store/resolver.ts";
+import { testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
 
-const trackedGitSource = "git:https://github.com/acme/rtk";
-const pinnedGitSource = "git:https://github.com/acme/rtk@0123456789abcdef0123456789abcdef01234567";
+const trackedGitSource = "git:https://github.com/volt-hq/Volt";
+const pinnedGitSource = testStoreSource();
 
 const resolverMock = vi.hoisted(() => ({
 	resolveStoreSource: vi.fn<(options: ResolveStoreSourceOptions) => Promise<StoreResolvedSource>>(),
@@ -37,19 +38,14 @@ const inspectorMock = vi.hoisted(() => ({
 	),
 }));
 
-function resolveTrackedGitStoreSource(options: ResolveStoreSourceOptions): StoreResolvedSource {
+function resolveCatalogStoreSource(options: ResolveStoreSourceOptions): StoreResolvedSource {
 	return {
 		input: options.input,
-		source: options.pinGit ? pinnedGitSource : trackedGitSource,
+		source: pinnedGitSource,
 		kind: "catalog",
-		catalogPackage: {
-			id: "rtk",
-			name: "RTK",
-			description: "Token optimized shell output",
-			source: trackedGitSource,
-		},
-		pinned: options.pinGit === true,
-		tracking: options.pinGit !== true,
+		catalogPackage: testCatalogEntry("rtk"),
+		pinned: true,
+		tracking: false,
 		warnings: [],
 	};
 }
@@ -65,6 +61,7 @@ vi.mock("../src/store/inspector.ts", () => ({
 interface InteractiveSettingsManager {
 	isProjectTrusted(): boolean;
 	flush(): Promise<void>;
+	getNpmCommand(): string[] | undefined;
 }
 
 interface FakeStorePackageManager {
@@ -97,17 +94,7 @@ interface InteractiveStoreMode {
 	offerStoreReload(message: string): Promise<void>;
 }
 
-const storeCatalog: StoreCatalog = {
-	schemaVersion: 1,
-	packages: [
-		{
-			id: "rtk",
-			name: "RTK",
-			description: "Token optimized shell output",
-			source: trackedGitSource,
-		},
-	],
-};
+const storeCatalog: StoreCatalog = testCatalog(testCatalogEntry("rtk"));
 
 function createCatalogResponse(): Response {
 	return Response.json(storeCatalog);
@@ -115,7 +102,7 @@ function createCatalogResponse(): Response {
 
 function getFakePackageIdentity(source: string, scope?: "user" | "project"): string {
 	if (source === trackedGitSource || source === pinnedGitSource) {
-		return "git:github.com/acme/rtk";
+		return "git:github.com/volt-hq/Volt";
 	}
 	if (source === "/repo/project/pkg") {
 		return "local:/repo/project/pkg";
@@ -133,6 +120,7 @@ function createInteractiveMode(packageManager: FakeStorePackageManager): Interac
 	const settingsManager: InteractiveSettingsManager = {
 		isProjectTrusted: () => true,
 		flush: vi.fn(async () => {}),
+		getNpmCommand: () => undefined,
 	};
 	const sessionManager = {
 		getCwd: () => "/repo/project",
@@ -182,7 +170,7 @@ function getInteractiveStoreRemoveFlow(): (
 	) => Promise<void>;
 }
 
-describe("tracked git store updates", () => {
+describe("catalog updates of a tracking install", () => {
 	let tempDir: string;
 	let agentDir: string;
 	let projectDir: string;
@@ -203,7 +191,7 @@ describe("tracked git store updates", () => {
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.chdir(projectDir);
-		resolverMock.resolveStoreSource.mockImplementation(async (options) => resolveTrackedGitStoreSource(options));
+		resolverMock.resolveStoreSource.mockImplementation(async (options) => resolveCatalogStoreSource(options));
 		inspectorMock.inspectStorePackage.mockClear();
 		vi.stubGlobal(
 			"fetch",
@@ -224,7 +212,7 @@ describe("tracked git store updates", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("preserves tracked git sources during CLI catalog updates", async () => {
+	it("moves a tracking install to the reviewed pin during CLI catalog updates", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
@@ -232,16 +220,18 @@ describe("tracked git store updates", () => {
 
 		await main(["store", "update", "rtk", "--yes"]);
 
-		expect(updateSpy).toHaveBeenCalledWith(trackedGitSource, { local: false, scripts: "never" });
-		expect(installSpy).not.toHaveBeenCalled();
-		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(updateSpy).not.toHaveBeenCalled();
+		expect(installSpy).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
+		expect(inspectorMock.inspectStorePackage).toHaveBeenCalledWith(
+			expect.objectContaining({ source: pinnedGitSource }),
+		);
 		expect(errorSpy).not.toHaveBeenCalled();
 		expect(process.exitCode).toBeUndefined();
 		logSpy.mockRestore();
 		errorSpy.mockRestore();
 	});
 
-	it("preserves tracked git sources during interactive catalog updates", async () => {
+	it("moves a tracking install to the reviewed pin during interactive catalog updates", async () => {
 		const update = vi
 			.fn<(source?: string, options?: PackageUpdateOptions) => Promise<void>>()
 			.mockResolvedValue(undefined);
@@ -261,9 +251,11 @@ describe("tracked git store updates", () => {
 
 		await getInteractiveStoreUpdateFlow().call(mode, "rtk", storeCatalog);
 
-		expect(update).toHaveBeenCalledWith(trackedGitSource, { local: false, scripts: "never" });
-		expect(installAndPersist).not.toHaveBeenCalled();
-		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(update).not.toHaveBeenCalled();
+		expect(installAndPersist).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
+		expect(inspectorMock.inspectStorePackage).toHaveBeenCalledWith(
+			expect.objectContaining({ source: pinnedGitSource }),
+		);
 	});
 });
 

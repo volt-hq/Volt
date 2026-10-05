@@ -150,6 +150,7 @@ import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../d
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
+	STORE_CATALOG_SCHEMA_VERSION,
 	type StoreCatalog,
 	type StoreCatalogPackage,
 	searchCatalogPackages,
@@ -6587,7 +6588,7 @@ export class InteractiveMode {
 				return undefined;
 			}
 			this.showWarning(`${message}; continuing without catalog metadata.`);
-			return { schemaVersion: 1, packages: [] };
+			return { schemaVersion: STORE_CATALOG_SCHEMA_VERSION, packages: [] };
 		}
 	}
 
@@ -6598,8 +6599,7 @@ export class InteractiveMode {
 	}
 
 	private formatStorePackageOption(pkg: StoreCatalogPackage, index: number): string {
-		const verified = pkg.verified ? " verified" : "";
-		return `${index + 1}. ${pkg.id} - ${pkg.name}${verified}`;
+		return `${index + 1}. ${pkg.id} - ${pkg.name}`;
 	}
 
 	private getStorePackageTitle(input: string, catalog: StoreCatalog): string {

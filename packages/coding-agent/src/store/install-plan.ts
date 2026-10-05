@@ -88,9 +88,6 @@ export function buildStoreInstallPlan(options: BuildStoreInstallPlanOptions): St
 		"Extensions run as local code with the full permissions of the Volt process.",
 	];
 
-	if (options.resolved.catalogPackage && options.resolved.catalogPackage.verified !== true) {
-		warnings.push("This catalog entry is not marked verified by Volt maintainers.");
-	}
 	if (compatibility === "incompatible") {
 		warnings.push(`Catalog compatibility range is ${options.resolved.catalogPackage?.compatibility?.volt}.`);
 	}

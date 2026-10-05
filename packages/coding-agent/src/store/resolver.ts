@@ -9,6 +9,7 @@ import { isLocalPath } from "../utils/paths.ts";
 import { getSubprocessEnv } from "../utils/process-env.ts";
 import {
 	findCatalogPackage,
+	getCatalogPackagePin,
 	type StoreCatalog,
 	type StoreCatalogPackage,
 	suggestCatalogPackageIds,
@@ -149,6 +150,38 @@ function buildUnknownSourceError(input: string, catalog: StoreCatalog): Error {
 	return new Error(`Unknown store package or source: ${input}.${suffix}`);
 }
 
+/**
+ * A catalog package resolves to its reviewed commit and nothing else: `--ref`
+ * and `--track` would install code the catalog's review does not cover.
+ */
+function resolveCatalogSource(
+	input: string,
+	pkg: StoreCatalogPackage,
+	options: ResolveStoreSourceOptions,
+): StoreResolvedSource {
+	if (options.ref || options.track) {
+		throw new Error(
+			`${options.ref ? "--ref" : "--track"} does not apply to catalog package ${pkg.id}: it installs at its reviewed commit`,
+		);
+	}
+	try {
+		getCatalogPackagePin(pkg);
+	} catch (error: unknown) {
+		throw new Error(
+			`Catalog package ${pkg.id} is not installable: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return {
+		input,
+		source: pkg.source,
+		kind: "catalog",
+		catalogPackage: pkg,
+		pinned: true,
+		tracking: false,
+		warnings: [],
+	};
+}
+
 export async function resolveStoreSource(options: ResolveStoreSourceOptions): Promise<StoreResolvedSource> {
 	const input = options.input.trim();
 	if (!input) {
@@ -156,12 +189,13 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 	}
 
 	const catalogPackage = findCatalogPackage(options.catalog, input);
-	const baseSource = catalogPackage?.source ?? input;
-	const baseKind: StoreResolvedSourceKind = catalogPackage ? "catalog" : "local";
+	if (catalogPackage) {
+		return resolveCatalogSource(input, catalogPackage, options);
+	}
 	const warnings: string[] = [];
 	const track = options.track ?? false;
 
-	const npmInfo = parseNpmSource(baseSource);
+	const npmInfo = parseNpmSource(input);
 	if (npmInfo) {
 		if (options.ref) {
 			throw new Error("--ref is only valid for git store sources");
@@ -177,16 +211,15 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 		const pinned = npmInfo.exactVersion;
 		return {
 			input,
-			source: baseSource,
-			kind: catalogPackage ? "catalog" : "npm",
-			...(catalogPackage ? { catalogPackage } : {}),
+			source: input,
+			kind: "npm",
 			pinned,
 			tracking: !pinned,
 			warnings,
 		};
 	}
 
-	let gitSource = parseGitUrl(baseSource);
+	let gitSource = parseGitUrl(input);
 	if (gitSource) {
 		if (options.ref) {
 			gitSource = withGitRef(gitSource, options.ref);
@@ -198,8 +231,7 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 				return {
 					input,
 					source: formatGitSource(gitSource),
-					kind: catalogPackage ? "catalog" : "git",
-					...(catalogPackage ? { catalogPackage } : {}),
+					kind: "git",
 					pinned: false,
 					tracking: true,
 					warnings,
@@ -209,8 +241,7 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 			return {
 				input,
 				source: formatGitSource(gitSource, commit),
-				kind: catalogPackage ? "catalog" : "git",
-				...(catalogPackage ? { catalogPackage } : {}),
+				kind: "git",
 				pinned: true,
 				tracking: false,
 				warnings,
@@ -222,16 +253,15 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 		}
 		return {
 			input,
-			source: options.ref ? formatGitSource(gitSource, gitSource.ref) : baseSource,
-			kind: catalogPackage ? "catalog" : "git",
-			...(catalogPackage ? { catalogPackage } : {}),
+			source: options.ref ? formatGitSource(gitSource, gitSource.ref) : input,
+			kind: "git",
 			pinned: !track,
 			tracking: track,
 			warnings,
 		};
 	}
 
-	if (!catalogPackage && !isStoreLocalPathInput(input)) {
+	if (!isStoreLocalPathInput(input)) {
 		throw buildUnknownSourceError(input, options.catalog);
 	}
 	if (options.ref) {
@@ -241,16 +271,11 @@ export async function resolveStoreSource(options: ResolveStoreSourceOptions): Pr
 		throw new Error("--track is only valid for git store sources");
 	}
 
-	if (catalogPackage && !isLocalPath(baseSource)) {
-		throw new Error(`Catalog package ${catalogPackage.id} has an unsupported source: ${baseSource}`);
-	}
-
 	warnings.push("Local package paths are not reproducible and should not appear in public catalogs.");
 	return {
 		input,
-		source: baseSource,
-		kind: catalogPackage ? baseKind : "local",
-		...(catalogPackage ? { catalogPackage } : {}),
+		source: input,
+		kind: "local",
 		pinned: false,
 		tracking: false,
 		warnings,
