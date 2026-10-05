@@ -1,7 +1,7 @@
 /**
  * What a local protocol connection gives intents beyond the conversation:
- * aborts that deliver queued input, detached review workflows launched once
- * their acceptance is written, the connection's subagents, and subscription
+ * aborts that deliver queued input, detached reviews run as the
+ * conversation's `review` work, the connection's subagents, and subscription
  * usage.
  */
 
@@ -13,9 +13,10 @@ import {
 	prepareReviewWorkflow,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
 	REMOTE_REVIEW_TOOL_NAMES,
+	reviewWorkExecution,
+	reviewWorkTarget,
 } from "../../review.ts";
-import { appendReviewRun, createReviewRunRecord } from "../../review-state.ts";
-import { createEmptyReviewUsage } from "../../review-usage.ts";
+import { reviewWorkInput } from "../../review-work.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../subagents/index.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
 import type { IntentServices, IntentSubagentServices } from "../intents/types.ts";
@@ -145,43 +146,8 @@ export class ConnectionSubagents implements IntentSubagentServices {
 	}
 }
 
-interface PendingReviewWorkflow {
-	readonly launch: () => void;
-	readonly cancel: () => void;
-}
-
-/**
- * Detached review workflows an intent registered: each launches once the
- * intent's acceptance is written, so `accepted` precedes the workflow's live
- * progress, or is cancelled when the intent is not accepted.
- */
-export class PendingReviewWorkflows {
-	private readonly pending = new Map<string, PendingReviewWorkflow>();
-
-	add(workflowId: string, workflow: PendingReviewWorkflow): void {
-		this.pending.set(workflowId, workflow);
-	}
-
-	/** Launch what an accepted intent registered; nothing stays pending. */
-	launchAll(): void {
-		for (const [workflowId, workflow] of [...this.pending]) {
-			this.pending.delete(workflowId);
-			workflow.launch();
-		}
-	}
-
-	/** Cancel what a rejected intent registered. */
-	cancelAll(): void {
-		for (const [workflowId, workflow] of [...this.pending]) {
-			this.pending.delete(workflowId);
-			workflow.cancel();
-		}
-	}
-}
-
 export interface LocalIntentServicesOptions {
 	readonly subagents: ConnectionSubagents;
-	readonly reviews: PendingReviewWorkflows;
 	readonly subscriptionUsage: SubscriptionUsageService;
 }
 
@@ -196,7 +162,7 @@ export function createLocalIntentServices(
 		detachedReviews: true,
 		runReview: async (target, reviewOptions) => {
 			// The fast preflight runs inline so target errors fail the intent; the
-			// execution is registered and launched once the acceptance is written.
+			// review then runs as the conversation's work.
 			const prepared = await prepareReviewWorkflow({
 				target,
 				controls: reviewOptions.controls,
@@ -214,12 +180,12 @@ export function createLocalIntentServices(
 			const authStorage = session.modelRegistry.authStorage;
 			const modelRegistry = session.modelRegistry;
 			const settingsManager = session.settingsManager;
-			let started: ReturnType<typeof conversation.reviewWorkflows.start>;
+			const reviewed = reviewWorkTarget(prepared.resolution);
 			try {
-				started = conversation.reviewWorkflows.start({
-					prepared,
-					fastModeEnabled,
-					execute: async (hooks) => {
+				await conversation.work.start(
+					"review",
+					reviewWorkInput(prepared.action, reviewed),
+					async (ctx) => {
 						try {
 							const result = await executeReviewWorkflow({
 								prepared,
@@ -234,53 +200,27 @@ export function createLocalIntentServices(
 								fastModeEnabled,
 								// Immutable snapshot tools only: reviews get no workspace or command-capable tools.
 								tools: REMOTE_REVIEW_TOOL_NAMES,
-								signal: hooks.signal,
-								onEvent: hooks.onEvent,
+								signal: ctx.signal,
+								work: ctx,
 							});
 							if (reviewOptions.remote && result.status === "failed") {
-								return { ...result, errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+								return { outcome: "failed", error: REMOTE_REVIEW_FAILURE_MESSAGE };
 							}
-							return result;
+							return reviewWorkExecution(result, reviewed);
 						} catch (error) {
-							if (reviewOptions.remote) return { status: "failed", errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+							if (reviewOptions.remote) return { outcome: "failed", error: REMOTE_REVIEW_FAILURE_MESSAGE };
 							throw error;
 						}
 					},
-				});
+					{ workId: prepared.workflowId },
+				);
 			} catch (error) {
 				await prepared.resolution.dispose();
 				throw error;
 			}
-			const { descriptor, launch } = started;
-			let launched = false;
-			options.reviews.add(descriptor.workflowId, {
-				launch: () => {
-					launched = true;
-					launch();
-				},
-				cancel: () => {
-					if (!launched) {
-						// The cancelled run record is best-effort; a lost log ends the runtime.
-						void appendReviewRun(
-							session.sessionWriter,
-							createReviewRunRecord({
-								workflowId: prepared.workflowId,
-								workflowAction: prepared.action,
-								startedAt: prepared.startedAt,
-								snapshot: prepared.resolution,
-								controls: prepared.controls,
-								status: "cancelled",
-								usage: createEmptyReviewUsage(),
-								incrementalPlan: prepared.incrementalPlan,
-							}),
-						).catch(() => {});
-					}
-					conversation.reviewWorkflows.cancel(descriptor.workflowId);
-				},
-			});
 			return {
 				status: "accepted",
-				workflowId: descriptor.workflowId,
+				workId: prepared.workflowId,
 				...(prepared.modelWarning === undefined || reviewOptions.remote ? {} : { message: prepared.modelWarning }),
 			};
 		},

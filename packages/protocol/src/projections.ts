@@ -1,41 +1,17 @@
 /**
- * Projection-truncation metadata and workflow event schemas. The recursive
- * `RpcProjectionTruncation` keeps its hand-written interface below and is
- * pinned via `Type.Unsafe` + `Type.Cyclic` — the one place recursion makes a
- * derived static type more fragile than the source of truth.
+ * Review run projections: the durable review runs, findings, coverage, and
+ * target metadata clients read with the review queries.
  */
 
 import { Type } from "typebox";
-import { openStringEnum, stringEnum } from "./helpers.ts";
+import { stringEnum } from "./helpers.ts";
 import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "./review-usage.ts";
-
-/**
- * Describes a value whose wire projection was reduced to satisfy a byte
- * budget. Hand-written because it is recursive; the schema below is pinned to
- * this exact type.
- */
-export interface RpcProjectionTruncation {
-	truncated: true;
-	/** UTF-8 JSON bytes before projection, or null when intentionally unmeasured or not JSON-serializable. */
-	originalBytes: number | null;
-	/** UTF-8 JSON bytes after projection, excluding this metadata record. */
-	projectedBytes: number;
-	omittedEntries?: number;
-	fields?: Record<string, RpcProjectionTruncation>;
-}
-
-export const RpcWorkflowKindSchema = openStringEnum(["review"]);
-export const RpcWorkflowStatusSchema = openStringEnum(["running", "finalizing", "completed", "cancelled", "failed"]);
 
 const reviewPullRequestReferenceProperties = {
 	provider: Type.String({ minLength: 1, maxLength: 64, pattern: "^[^\\s\\x00-\\x1f\\x7f]+$" }),
 	number: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
 };
-
-export const RpcReviewPullRequestReferenceSchema = Type.Object(reviewPullRequestReferenceProperties, {
-	additionalProperties: false,
-});
 
 export const RpcReviewPullRequestMetadataSchema = Type.Object(
 	{
@@ -100,104 +76,14 @@ export const RpcReviewFileMetadataSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-/** Describes a value whose wire projection was reduced to satisfy a byte budget. */
-export const RpcProjectionTruncationSchema = Type.Unsafe<RpcProjectionTruncation>(
-	Type.Cyclic(
-		{
-			RpcProjectionTruncation: Type.Object(
-				{
-					truncated: Type.Literal(true),
-					originalBytes: Type.Union([Type.Number(), Type.Null()]),
-					projectedBytes: Type.Number(),
-					omittedEntries: Type.Optional(Type.Number()),
-					fields: Type.Optional(Type.Record(Type.String(), Type.Ref("RpcProjectionTruncation"))),
-				},
-				{ additionalProperties: false },
-			),
-		},
-		"RpcProjectionTruncation",
-	),
-);
-
-export const RpcWorkflowEventSchema = Type.Object(
-	{
-		type: stringEnum(["workflow_start", "workflow_update", "workflow_end"]),
-		workflowId: Type.String(),
-		kind: RpcWorkflowKindSchema,
-		action: Type.Optional(Type.String()),
-		title: Type.Optional(Type.String()),
-		message: Type.Optional(Type.String()),
-		status: Type.Optional(RpcWorkflowStatusSchema),
-		/** Host-authoritative Unix epoch milliseconds for timed workflow presentation. */
-		startedAt: Type.Optional(Type.Number()),
-		endedAt: Type.Optional(Type.Number()),
-		pullRequest: Type.Optional(RpcReviewPullRequestReferenceSchema),
-		projection: Type.Optional(RpcProjectionTruncationSchema),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcWorkflowToolEventSchema = Type.Union([
-	Type.Object(
-		{
-			type: Type.Literal("tool_execution_start"),
-			workflowId: Type.String(),
-			workflowKind: RpcWorkflowKindSchema,
-			workflowAction: Type.String(),
-			toolCallId: Type.String(),
-			toolName: Type.String(),
-			args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-			projection: Type.Optional(RpcProjectionTruncationSchema),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			type: Type.Literal("tool_execution_end"),
-			workflowId: Type.String(),
-			workflowKind: RpcWorkflowKindSchema,
-			workflowAction: Type.String(),
-			toolCallId: Type.String(),
-			toolName: Type.String(),
-			isError: Type.Boolean(),
-			projection: Type.Optional(RpcProjectionTruncationSchema),
-		},
-		{ additionalProperties: false },
-	),
-]);
-
 // ============================================================================
-// Detached review workflows
+// Review runs
 // ============================================================================
 
-export const RpcReviewWorkflowLifecycleStatusSchema = stringEnum(["running", "completed", "cancelled", "failed"]);
-export const RpcReviewRunStatusSchema = stringEnum(["unfinished", "completed", "incomplete", "cancelled", "failed"]);
+export const RpcReviewRunStatusSchema = stringEnum(["completed", "incomplete", "cancelled", "failed"]);
 export const RpcReviewCompletionStatusSchema = stringEnum(["complete", "incomplete"]);
 export const RpcReviewCorrectnessSchema = stringEnum(["correct", "incorrect"]);
 export const RpcReviewFindingStatusSchema = stringEnum(["open", "accepted", "fixed", "dismissed", "uncertain"]);
-
-const reviewWorkflowDescriptorProperties = {
-	workflowId: Type.String(),
-	action: Type.String(),
-	status: RpcReviewWorkflowLifecycleStatusSchema,
-	target: Type.Object(
-		{
-			description: Type.String(),
-			diffCommand: Type.String(),
-			pullRequest: Type.Optional(RpcReviewPullRequestMetadataSchema),
-			files: Type.Optional(RpcReviewFileMetadataSchema),
-		},
-		{ additionalProperties: false },
-	),
-	findingsCount: Type.Optional(Type.Number()),
-	errorMessage: Type.Optional(Type.String()),
-	startedAt: Type.Number(),
-	endedAt: Type.Optional(Type.Number()),
-};
-
-export const RpcReviewWorkflowDescriptorSchema = Type.Object(reviewWorkflowDescriptorProperties, {
-	additionalProperties: false,
-});
 
 export const RpcReviewLocationSchema = Type.Object(
 	{
@@ -313,7 +199,7 @@ const reviewRunProperties = {
 	workflowAction: Type.String(),
 	status: RpcReviewRunStatusSchema,
 	startedAt: Type.Number(),
-	endedAt: Type.Optional(Type.Number()),
+	endedAt: Type.Number(),
 	usage: Type.Optional(
 		Type.Union([
 			ReviewUsageSummarySchema,
@@ -380,7 +266,6 @@ export const RpcReviewRunDescriptorSchema = Type.Object(
 export const RpcReviewWorkflowListResponseSchema = Type.Object(
 	{
 		runs: Type.Array(RpcReviewRunDescriptorSchema),
-		activeWorkflows: Type.Array(RpcReviewWorkflowDescriptorSchema),
 		nextCursor: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },

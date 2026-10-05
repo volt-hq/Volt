@@ -59,6 +59,7 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
 import { SessionClientInputs } from "./session/client-inputs.ts";
 import { SessionCompaction } from "./session/compaction.ts";
@@ -722,6 +723,7 @@ export class AgentSession {
 			recordDiagnostic: (event) => this._providerStream.recordDiagnostic(event),
 		});
 		this._work.register(this._jobs.runtime.kind());
+		this._work.register(reviewWorkKind(() => this.sessionManager));
 		this._events = new SessionEvents({
 			gitContextProvider: this.gitContextProvider,
 			toolProgressDiagnostics: this._toolProgressDiagnostics,

@@ -22,11 +22,12 @@ import {
 	MAX_REVIEW_STATE_RECORD_BYTES,
 	planIncrementalReview,
 	REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE,
+	REVIEW_RUN_CUSTOM_ENTRY_TYPE,
 	type ReviewRunRecord,
 	reconcileFindingIdentities,
 	restoreReviewStateFromHandoff,
 } from "../src/core/review-state.ts";
-import { createReviewFileMetadata } from "../src/core/review-workflows.ts";
+import { createReviewFileMetadata } from "../src/core/review-target-metadata.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 
@@ -330,6 +331,16 @@ describe("durable review state", () => {
 		expect(exportReviewFeedback(target).outcomes).toEqual(snapshot.transitions);
 		expect(target.getConversationState().context.messages).toEqual([]);
 		expect(JSON.stringify(target.getBranch())).not.toContain("SOURCE_ONLY_DISCUSSION");
+	});
+
+	it("hydrates only terminal run records: a record without an end is not a run", async () => {
+		const manager = SessionManager.inMemory("/workspace");
+		const { endedAt: _endedAt, ...open } = record("run-open", 5);
+		await manager.logWriter.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, { ...open, status: "unfinished" });
+		await manager.logWriter.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, open);
+		await appendReviewRun(manager.logWriter, record("run-ended", 3));
+		expect(listReviewRuns(manager).runs.map((run) => run.runId)).toEqual(["run-ended"]);
+		expect(getReviewRun(manager, "run-open")).toBeUndefined();
 	});
 
 	it("durably records a review before any prompt and recovers it after restart", async () => {

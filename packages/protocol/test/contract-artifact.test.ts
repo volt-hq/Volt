@@ -173,7 +173,7 @@ describe("committed protocol contract artifact", () => {
 		}
 	});
 
-	test.each(["RpcProjectionTruncation", "UiNode", "UiTreeItem"])(
+	test.each(["UiNode", "UiTreeItem"])(
 		"the recursive %s definition is hoisted with pointer refs and no $id",
 		(name) => {
 			const artifact = loadArtifact();

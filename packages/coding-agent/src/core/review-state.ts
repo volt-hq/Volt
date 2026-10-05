@@ -1,8 +1,6 @@
 import { Buffer } from "node:buffer";
-import type { JsonValue } from "@hansjm10/volt-ai";
 import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 import { minimatch } from "minimatch";
-import type { CustomMessage } from "./messages.ts";
 import type { ReviewRunControls } from "./review.ts";
 import {
 	ReviewSourceUnavailableError,
@@ -23,7 +21,6 @@ import { type CustomEntry, type SessionEntry, SessionManager } from "./session-m
 import type { SessionWriter } from "./session-writer.ts";
 
 export const REVIEW_RUN_CUSTOM_ENTRY_TYPE = "volt.review.run";
-export const REVIEW_USAGE_CUSTOM_ENTRY_TYPE = "volt.review.usage";
 export const REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE = "volt.review.acknowledgment";
 export const REVIEW_FINDING_TRANSITION_CUSTOM_ENTRY_TYPE = "volt.review.finding-transition";
 export const REVIEW_PUBLICATION_CUSTOM_ENTRY_TYPE = "volt.review.publication";
@@ -38,7 +35,7 @@ const MAX_REVIEW_FOCUS_BYTES = 4_000;
 const MAX_REVIEW_SCOPE_PATTERNS = 50;
 const MAX_REVIEW_SCOPE_PATTERN_BYTES = 500;
 
-export type ReviewRunStatus = "unfinished" | "completed" | "incomplete" | "failed" | "cancelled";
+export type ReviewRunStatus = "completed" | "incomplete" | "failed" | "cancelled";
 
 export interface ReviewRunFileIdentity {
 	path: string;
@@ -80,8 +77,7 @@ export interface ReviewRunRecord {
 	workflowAction: string;
 	status: ReviewRunStatus;
 	startedAt: number;
-	/** Absent for unfinished runs; never inferred from checkpoint time. */
-	endedAt?: number;
+	endedAt: number;
 	usage?: ReviewUsageAccounting;
 	target: {
 		description: string;
@@ -308,7 +304,6 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
 	if (
-		value.status !== "unfinished" &&
 		value.status !== "completed" &&
 		value.status !== "incomplete" &&
 		value.status !== "failed" &&
@@ -317,9 +312,7 @@ function parseRun(value: unknown): ReviewRunRecord | undefined {
 		return undefined;
 	if (
 		!Number.isFinite(value.startedAt) ||
-		(value.status === "unfinished"
-			? value.endedAt !== undefined || value.result !== undefined
-			: !Number.isFinite(value.endedAt)) ||
+		!Number.isFinite(value.endedAt) ||
 		!isObject(value.target) ||
 		!isObject(value.options)
 	)
@@ -413,36 +406,19 @@ function decodeCursor(cursor: string): { endedAt: number; runId: string } {
 }
 
 function compareRuns(left: ReviewRunRecord, right: ReviewRunRecord): number {
-	return (
-		(right.endedAt ?? right.startedAt) - (left.endedAt ?? left.startedAt) || right.runId.localeCompare(left.runId)
-	);
+	return right.endedAt - left.endedAt || right.runId.localeCompare(left.runId);
 }
 
 function hydrateRuns(entries: readonly CustomEntry[]): Map<string, ReviewRunRecord> {
 	const runs = new Map<string, ReviewRunRecord>();
-	const checkpoints = new Map<string, ReviewUsageAccounting>();
 	for (const entry of entries) {
-		if (entry.customType === REVIEW_RUN_CUSTOM_ENTRY_TYPE) {
-			const run = parseRun(entry.data);
-			if (!run) continue;
-			const previous = runs.get(run.runId);
-			if (previous && previous.status !== "unfinished" && run.status === "unfinished") continue;
-			if (previous?.usage && run.usage && previous.usage.revision > run.usage.revision) continue;
-			if (previous?.usage && !run.usage) run.usage = previous.usage;
-			runs.set(run.runId, run);
-		} else if (
-			entry.customType === REVIEW_USAGE_CUSTOM_ENTRY_TYPE &&
-			isObject(entry.data) &&
-			typeof entry.data.runId === "string"
-		) {
-			const usage = parseReviewUsage(entry.data.usage);
-			if (usage && !usage.finalized && usage.revision > (checkpoints.get(entry.data.runId)?.revision ?? -1))
-				checkpoints.set(entry.data.runId, usage);
-		}
-	}
-	for (const run of runs.values()) {
-		const usage = checkpoints.get(run.runId);
-		if (run.status === "unfinished" && usage && usage.revision > (run.usage?.revision ?? -1)) run.usage = usage;
+		if (entry.customType !== REVIEW_RUN_CUSTOM_ENTRY_TYPE) continue;
+		const run = parseRun(entry.data);
+		if (!run) continue;
+		const previous = runs.get(run.runId);
+		if (previous?.usage && run.usage && previous.usage.revision > run.usage.revision) continue;
+		if (previous?.usage && !run.usage) run.usage = previous.usage;
+		runs.set(run.runId, run);
 	}
 	return runs;
 }
@@ -495,9 +471,7 @@ export function listReviewRuns(
 	let runs = [...byRunId.values()].sort(compareRuns).slice(0, MAX_HYDRATED_REVIEW_RUNS);
 	if (options.cursor) {
 		const cursor = decodeCursor(options.cursor);
-		const index = runs.findIndex(
-			(run) => (run.endedAt ?? run.startedAt) === cursor.endedAt && run.runId === cursor.runId,
-		);
+		const index = runs.findIndex((run) => run.endedAt === cursor.endedAt && run.runId === cursor.runId);
 		if (index < 0) throw new Error("Review result cursor no longer identifies a retained run.");
 		runs = runs.slice(index + 1);
 	}
@@ -506,7 +480,7 @@ export function listReviewRuns(
 	return {
 		runs: selected,
 		...(runs.length > selected.length && finalRun
-			? { nextCursor: encodeCursor(finalRun.endedAt ?? finalRun.startedAt, finalRun.runId) }
+			? { nextCursor: encodeCursor(finalRun.endedAt, finalRun.runId) }
 			: {}),
 	};
 }
@@ -520,27 +494,6 @@ export function getReviewRun(sessionManager: SessionManager, runId: string): Hyd
 		cursor = page.nextCursor;
 	} while (cursor);
 	return undefined;
-}
-
-/** Recover unfinished accounting for display without changing transcript or model-facing messages. */
-export function resolveReviewAccountingMessage(sessionManager: SessionManager, message: CustomMessage): CustomMessage {
-	const details = message.details;
-	if (
-		message.customType !== "review" ||
-		!isObject(details) ||
-		details.kind !== "accounting" ||
-		details.status !== "unfinished" ||
-		typeof details.runId !== "string"
-	)
-		return message;
-	// Replay can contain notices older than the recent-run listing window. Stay branch-local
-	// and do not resolve canonical finding outcomes or refresh terminal transcript snapshots.
-	const run = hydrateRuns(branchCustomEntries(sessionManager)).get(details.runId);
-	if (run?.status !== "unfinished" || !run.usage || run.usage.finalized) return message;
-	const savedUsage = parseReviewUsage(details.usage);
-	if (savedUsage && (savedUsage.finalized || savedUsage.revision >= run.usage.revision)) return message;
-	// Session entry admission already guarantees lossless JSON; hydration validated the accounting schema.
-	return { ...message, details: { ...details, usage: run.usage as unknown as JsonValue } };
 }
 
 function reviewConversationGuard(manager: SessionManager): () => void {
@@ -668,20 +621,9 @@ export async function appendReviewRun(writer: SessionWriter, record: ReviewRunRe
 	await writer.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, persistedRecord);
 }
 
-export async function appendReviewUsageCheckpoint(
-	writer: SessionWriter,
-	runId: string,
-	usage: ReviewUsageAccounting,
-): Promise<void> {
-	if (!parseReviewUsage(usage) || usage.finalized) throw new Error("Invalid review accounting checkpoint");
-	const record = { runId, usage };
-	assertRecordSize(record);
-	await writer.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, record);
-}
-
 export async function appendReviewRunDurably(writer: SessionWriter, record: ReviewRunRecord): Promise<void> {
 	await appendReviewRun(writer, record);
-	if (!record.result && (record.status !== "unfinished" || writer.sessionManager.isPersisted())) {
+	if (!record.result) {
 		const notice = createReviewAccountingMessage(record);
 		await writer.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
 	}
@@ -819,7 +761,7 @@ export function createReviewRunRecord(options: {
 		workflowAction: options.workflowAction,
 		status: options.status,
 		startedAt: options.startedAt,
-		...(options.status === "unfinished" ? {} : { endedAt: options.endedAt ?? Date.now() }),
+		endedAt: options.endedAt ?? Date.now(),
 		...(options.usage ? { usage: structuredClone(options.usage) } : {}),
 		target: {
 			description: truncateUtf8(options.snapshot.description, 4_000),

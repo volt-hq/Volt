@@ -34,8 +34,8 @@ import {
 	type IrohRemotePushTarget,
 } from "../src/core/remote/iroh/index.ts";
 import type * as ReviewModule from "../src/core/review.ts";
-import type { ExecuteReviewWorkflowResult } from "../src/core/review.ts";
-import type { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
+import { type ExecuteReviewWorkflowResult, reviewWorkExecution } from "../src/core/review.ts";
+import { reviewWorkInput } from "../src/core/review-work.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
@@ -125,38 +125,19 @@ function completedReview(
 	};
 }
 
+/** Start review work `workId` of `target` on `conversation`; it ends with the result `finish` gives it. */
 function startTestReview(
-	manager: ReviewWorkflowManager,
-	workflowId: string,
+	conversation: HostedConversation,
+	workId: string,
 	targetDescription = "uncommitted changes",
 ): { finish(result: ExecuteReviewWorkflowResult): void } {
 	const result = Promise.withResolvers<ExecuteReviewWorkflowResult>();
-	const { launch } = manager.start({
-		prepared: {
-			workflowId,
-			action: "review.uncommitted",
-			startedAt: 1_782_470_400_000,
-			resolution: {
-				description: "private review target",
-				workflowDescription: targetDescription,
-				diffCommand: "git diff HEAD",
-			},
-		},
-		execute: async (hooks) => {
-			hooks.onEvent({
-				type: "workflow_start",
-				workflowId,
-				kind: "review",
-				action: "review.uncommitted",
-				title: "Review",
-				message: "Reviewing uncommitted changes.",
-				status: "running",
-				startedAt: 1_782_470_400_000,
-			});
-			return result.promise;
-		},
-	});
-	launch();
+	void conversation.work.start(
+		"review",
+		reviewWorkInput("review.uncommitted", targetDescription),
+		async () => reviewWorkExecution(await result.promise, targetDescription),
+		{ workId },
+	);
 	return { finish: (value) => result.resolve(value) };
 }
 
@@ -809,13 +790,13 @@ describe("Iroh remote completion notifications", () => {
 		const first = await connectDevice(harness, conversation, { notifications });
 		await prompt(first.phone, "hello");
 		await idle(conversation);
-		startTestReview(conversation.reviewWorkflows, "review:once", "PR #7").finish(completedReview(0));
+		startTestReview(conversation, "review:once", "PR #7").finish(completedReview(0));
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(2));
 		await first.connection.close();
 
 		// The device's next stream shares its delivery history: neither event is pushed again.
 		await connectDevice(harness, conversation, { notifications });
-		startTestReview(conversation.reviewWorkflows, "review:later", "PR #8").finish(completedReview(1));
+		startTestReview(conversation, "review:later", "PR #8").finish(completedReview(1));
 		await vi.waitFor(() =>
 			expect(relayClient.sendNotification).toHaveBeenCalledWith(
 				expect.objectContaining({ eventId: "review:later:completed" }),
@@ -828,7 +809,20 @@ describe("Iroh remote completion notifications", () => {
 		]);
 	});
 
-	test("formats complete and incomplete review results from retained workflow records", async () => {
+	test("does not push reviews that finished before the device first attached", async () => {
+		const { harness, conversation } = await setup();
+		startTestReview(conversation, "review:earlier", "PR #5").finish(completedReview(1));
+		await vi.waitFor(() => expect(conversation.work.get("review:earlier")?.outcome).toBe("completed"));
+		const delivery = recordingDelivery();
+		await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
+		startTestReview(conversation, "review:later", "PR #6").finish(completedReview(0));
+		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(1));
+		expect(delivery.delivered[0]).toMatchObject({ eventId: "review:later:completed", workId: "review:later" });
+	});
+
+	test("formats complete and incomplete review results from finished review work", async () => {
 		const { harness, conversation } = await setup();
 		const delivery = recordingDelivery();
 		await connectDevice(harness, conversation, {
@@ -840,8 +834,8 @@ describe("Iroh remote completion notifications", () => {
 			["review:many", completedReview(4)],
 			["review:incomplete", completedReview(0, "incomplete")],
 		];
-		for (const [index, [workflowId, result]] of completions.entries()) {
-			startTestReview(conversation.reviewWorkflows, workflowId, "PR #123").finish(result);
+		for (const [index, [workId, result]] of completions.entries()) {
+			startTestReview(conversation, workId, "PR #123").finish(result);
 			await vi.waitFor(() => expect(delivery.delivered).toHaveLength(index + 1));
 		}
 
@@ -851,7 +845,7 @@ describe("Iroh remote completion notifications", () => {
 			"PR #123 completed with 4 findings.",
 			"PR #123 review is incomplete.",
 		]);
-		expect(delivery.delivered.map((notification) => notification.workflowId)).toEqual([
+		expect(delivery.delivered.map((notification) => notification.workId)).toEqual([
 			"review:zero",
 			"review:one",
 			"review:many",
@@ -860,17 +854,17 @@ describe("Iroh remote completion notifications", () => {
 		expect(delivery.delivered[0]).toEqual({
 			eventId: "review:zero:completed",
 			hostNodeId: TEST_HOST_NODE_ID,
-			kind: "review_completed",
+			kind: "work_finished",
 			title: "Your review is ready",
 			body: "PR #123 completed with no issues found.",
 			sessionId: conversation.session.sessionId,
-			workflowId: "review:zero",
+			workId: "review:zero",
+			workKind: "review",
 		});
 	});
 
 	test("omits malicious review targets and cancelled reviews from lock-screen delivery", async () => {
 		const { harness, conversation } = await setup();
-		const reviewWorkflows = conversation.reviewWorkflows;
 		const delivery = recordingDelivery();
 		await connectDevice(harness, conversation, {
 			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
@@ -888,25 +882,25 @@ describe("Iroh remote completion notifications", () => {
 			verificationInspectionComplete: true,
 		};
 		startTestReview(
-			reviewWorkflows,
+			conversation,
 			"review:malicious",
 			`${"PR #123".repeat(100)}\n/Users/private/project\ngit diff HEAD`,
 		).finish(privateContextResult);
 		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(1));
 		expect(delivery.delivered[0]).toMatchObject({
 			body: "Review completed with 2 findings.",
-			workflowId: "review:malicious",
+			workId: "review:malicious",
 		});
 		expect(JSON.stringify(delivery.delivered)).not.toContain("Users/private");
 		expect(JSON.stringify(delivery.delivered)).not.toContain("git diff");
 		expect(JSON.stringify(delivery.delivered)).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
 
-		startTestReview(reviewWorkflows, "review:cancelled").finish({ status: "cancelled" });
-		await reviewWorkflows.waitForIdle();
+		startTestReview(conversation, "review:cancelled").finish({ status: "cancelled" });
+		await vi.waitFor(() => expect(conversation.work.get("review:cancelled")?.outcome).toBe("cancelled"));
 		// A later completion is pushed after anything the cancelled review would have pushed.
-		startTestReview(reviewWorkflows, "review:after").finish(completedReview(0));
+		startTestReview(conversation, "review:after").finish(completedReview(0));
 		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(2));
-		expect(delivery.delivered.map((notification) => notification.workflowId)).toEqual([
+		expect(delivery.delivered.map((notification) => notification.workId)).toEqual([
 			"review:malicious",
 			"review:after",
 		]);
@@ -914,15 +908,14 @@ describe("Iroh remote completion notifications", () => {
 
 	test("retries a review completion whose push failed when the device reconnects, and never repeats a delivered one", async () => {
 		const { harness, conversation } = await setup();
-		const reviewWorkflows = conversation.reviewWorkflows;
 		const unreachable = recordingDelivery(() => "failed");
 		const first = await connectDevice(harness, conversation, {
 			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery: unreachable },
 		});
-		const review = startTestReview(reviewWorkflows, "review:reconnect", "PR #151");
+		const review = startTestReview(conversation, "review:reconnect", "PR #151");
 		await first.connection.close();
 		review.finish(completedReview(0));
-		await reviewWorkflows.waitForIdle();
+		await vi.waitFor(() => expect(conversation.work.get("review:reconnect")?.outcome).toBe("completed"));
 		await vi.waitFor(() => expect(unreachable.deliverNotification).toHaveBeenCalledOnce());
 
 		const reachable = recordingDelivery();
@@ -934,11 +927,12 @@ describe("Iroh remote completion notifications", () => {
 				{
 					eventId: "review:reconnect:completed",
 					hostNodeId: TEST_HOST_NODE_ID,
-					kind: "review_completed",
+					kind: "work_finished",
 					title: "Your review is ready",
 					body: "PR #151 completed with no issues found.",
 					sessionId: conversation.session.sessionId,
-					workflowId: "review:reconnect",
+					workId: "review:reconnect",
+					workKind: "review",
 				},
 			]),
 		);
@@ -947,13 +941,13 @@ describe("Iroh remote completion notifications", () => {
 		await connectDevice(harness, conversation, {
 			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery: third },
 		});
-		startTestReview(reviewWorkflows, "review:next").finish(completedReview(1));
+		startTestReview(conversation, "review:next").finish(completedReview(1));
 		await vi.waitFor(() => expect(third.delivered).toHaveLength(1));
 		expect(third.delivered[0]).toMatchObject({ eventId: "review:next:completed" });
 		expect(reachable.delivered).toHaveLength(1);
 	});
 
-	test("emits one review completion notification after a detached remote review completes", async () => {
+	test("emits one review completion notification after a remote review's work completes", async () => {
 		const { harness, conversation } = await setup();
 		const delivery = recordingDelivery();
 		const { phone } = await connectDevice(harness, conversation, {
@@ -962,18 +956,19 @@ describe("Iroh remote completion notifications", () => {
 
 		expect(await phone.intent("review_uncommitted", {})).toMatchObject({
 			type: "accepted",
-			result: { workflowId: "review:test" },
+			result: { workId: "review:test" },
 		});
 		await vi.waitFor(() =>
 			expect(delivery.delivered).toEqual([
 				{
 					eventId: "review:test:completed",
 					hostNodeId: TEST_HOST_NODE_ID,
-					kind: "review_completed",
+					kind: "work_finished",
 					title: "Your review is ready",
 					body: "uncommitted changes completed with 1 finding.",
 					sessionId: conversation.session.sessionId,
-					workflowId: "review:test",
+					workId: "review:test",
+					workKind: "review",
 				},
 			]),
 		);

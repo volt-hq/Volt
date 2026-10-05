@@ -55,7 +55,6 @@ import {
 import {
 	reviewAcknowledgeIntent,
 	reviewBranchIntent,
-	reviewCancelWorkflowIntent,
 	reviewCommitIntent,
 	reviewExportFeedbackIntent,
 	reviewOpenSessionIntent,
@@ -110,7 +109,6 @@ export function createBuiltinIntents() {
 		review_pr: reviewPrIntent,
 		review_commit: reviewCommitIntent,
 		review_rerun: reviewRerunIntent,
-		review_cancel_workflow: reviewCancelWorkflowIntent,
 		review_open_session: reviewOpenSessionIntent,
 		review_acknowledge: reviewAcknowledgeIntent,
 		review_record_finding_outcome: reviewRecordFindingOutcomeIntent,

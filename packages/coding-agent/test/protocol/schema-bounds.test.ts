@@ -68,18 +68,16 @@ describe("annotated budgets", () => {
 
 describe("intent and query admission", () => {
 	it("rejects an identifier past 256 UTF-8 bytes as invalid input, and admits one at the limit", () => {
-		const error = rejection(() =>
-			intentRegistry.prepareFrame(LOCAL, "review_cancel_workflow", { workflowId: LONG_ID }),
-		);
+		const error = rejection(() => intentRegistry.prepareFrame(LOCAL, "review_acknowledge", { runId: LONG_ID }));
 		expect(error).toBeInstanceOf(IntentRejectedError);
 		expect(error).toMatchObject({
 			code: "invalid_input",
-			message: `Invalid review_cancel_workflow input: "workflowId" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`,
+			message: `Invalid review_acknowledge input: "runId" exceeds the ${RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES}-byte UTF-8 limit`,
 		});
 		const atLimit = "é".repeat(RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES / 2);
 		// Admitted past the budget check; a conversation-scope intent then needs a conversation.
 		expect(
-			rejection(() => intentRegistry.prepareFrame(LOCAL, "review_cancel_workflow", { workflowId: atLimit })),
+			rejection(() => intentRegistry.prepareFrame(LOCAL, "review_acknowledge", { runId: atLimit })),
 		).toMatchObject({
 			code: "unavailable",
 		});

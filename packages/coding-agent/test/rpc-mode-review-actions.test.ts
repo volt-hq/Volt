@@ -1,9 +1,9 @@
 /**
  * Durable review intents and queries over protocol frames: a review starts as
- * a detached workflow whose `accepted` precedes its live progress, and the
- * durable run's lifecycle (outcomes, feedback export, fix sessions,
- * acknowledgement, discussion sessions, reruns, cancellation) runs through
- * `review_*` intents and `review.*` queries.
+ * the conversation's `review` work, whose `work_started` entry its `accepted`
+ * names, and the durable run's lifecycle (outcomes, feedback export, fix
+ * sessions, acknowledgement, discussion sessions, reruns) runs through
+ * `review_*` intents and `review.*` queries; `cancel_work` cancels a run.
  */
 
 import type { HostFrame } from "@hansjm10/volt-protocol";
@@ -176,7 +176,7 @@ interface ExecuteOptions {
 	sessionWriter?: SessionWriter;
 	sanitizeRemoteErrors?: boolean;
 	signal?: AbortSignal;
-	onEvent?: (event: Record<string, unknown>) => void;
+	work?: { progress(progress: { text?: string }): void };
 }
 
 type ExecuteResult =
@@ -231,33 +231,7 @@ const reviewMocks = vi.hoisted(() => {
 			}),
 		),
 		executeReviewWorkflow: vi.fn(async (options: ExecuteOptions): Promise<ExecuteResult> => {
-			options.onEvent?.({
-				type: "workflow_start",
-				workflowId: options.prepared.workflowId,
-				kind: "review",
-				action: options.prepared.action,
-				title: "Review",
-				message: "Reviewing uncommitted changes.",
-				status: "running",
-			});
-			options.onEvent?.({
-				type: "tool_execution_start",
-				workflowId: options.prepared.workflowId,
-				workflowKind: "review",
-				workflowAction: options.prepared.action,
-				toolCallId: "tool-1",
-				toolName: "review_file",
-				args: { path: "src/value.ts" },
-			});
-			options.onEvent?.({
-				type: "tool_execution_end",
-				workflowId: options.prepared.workflowId,
-				workflowKind: "review",
-				workflowAction: options.prepared.action,
-				toolCallId: "tool-1",
-				toolName: "review_file",
-				isError: false,
-			});
+			options.work?.progress({ text: "Discovery pass: review_file" });
 			const record = durableRecord(options.prepared.workflowId);
 			if (options.sessionWriter) await appendReviewRun(options.sessionWriter, record);
 			return {
@@ -379,20 +353,12 @@ describe("durable review intents over protocol frames", () => {
 
 	/**
 	 * A paired device on the remote profile starts a review of uncommitted
-	 * changes; the detached run emits its own start, then waits for `release`.
+	 * changes; the review's work reports progress, then waits for `release`.
 	 */
 	async function startRemoteReview() {
 		const gate = Promise.withResolvers<void>();
 		reviewMocks.executeReviewWorkflow.mockImplementationOnce(async (options: ExecuteOptions) => {
-			options.onEvent?.({
-				type: "workflow_start",
-				workflowId: "review:test",
-				kind: "review",
-				action: "review.uncommitted",
-				title: "Review",
-				message: "Reviewing.",
-				status: "running",
-			});
+			options.work?.progress({ text: "Reviewing." });
 			await gate.promise;
 			const record = durableRecord();
 			if (options.sessionWriter) await appendReviewRun(options.sessionWriter, record);
@@ -426,24 +392,47 @@ describe("durable review intents over protocol frames", () => {
 		const accepted = await phone.intent("review_uncommitted", {});
 		const isProgress = (frame: HostFrame): frame is HostFrame =>
 			frame.type === "live" &&
-			frame.items.some((item) => item.type === "set" && item.key === "workflow/review:test");
+			frame.items.some(
+				(item) =>
+					item.type === "set" &&
+					item.key === "work/review:test" &&
+					item.value.kind === "work" &&
+					item.value.progress?.text === "Reviewing.",
+			);
 		await phone.waitFor(isProgress);
 		return { source, phone, accepted, isProgress, release: () => gate.resolve() };
 	}
 
-	test("starts a remote review as a detached workflow with remote failures sanitized", async () => {
+	test("starts a remote review as review work with remote failures sanitized", async () => {
 		const { source, accepted, release } = await startRemoteReview();
-		expect(accepted).toMatchObject({ type: "accepted", result: { workflowId: "review:test" } });
+		expect(accepted).toMatchObject({ type: "accepted", result: { workId: "review:test" } });
 		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledWith(
 			expect.objectContaining({ sanitizeRemoteErrors: true }),
 		);
+		expect(source.work.get("review:test")).toMatchObject({
+			kind: "review",
+			title: "Review uncommitted changes",
+			delivery: "none",
+			state: "running",
+		});
 		release();
-		await vi.waitFor(() => expect(source.reviewWorkflows.get("review:test")?.status).toBe("completed"));
+		await vi.waitFor(() =>
+			expect(source.work.get("review:test")).toMatchObject({
+				outcome: "completed",
+				result: {
+					summary: "Review complete: 1 finding.",
+					data: { target: "uncommitted changes", findingsCount: 1, completionStatus: "complete" },
+				},
+			}),
+		);
 	});
 
-	test("writes accepted before the detached workflow's first live progress", async () => {
-		const { phone, accepted, isProgress, release } = await startRemoteReview();
-		expect(phone.frames.indexOf(accepted)).toBeLessThan(phone.frames.findIndex(isProgress));
+	test("names the review's work_started entry among the accepted ordinals", async () => {
+		const { source, accepted, release } = await startRemoteReview();
+		const started = source.work.get("review:test")?.startedOrdinal;
+		if (started === undefined) throw new Error("Expected the review's work_started entry");
+		expect(accepted).toMatchObject({ type: "accepted" });
+		expect(accepted.type === "accepted" ? accepted.ordinals : []).toContain(started);
 		release();
 	});
 
@@ -706,9 +695,9 @@ describe("durable review intents over protocol frames", () => {
 
 		// The preserved run reruns from the discussion session.
 		await expect(client.intent("review_rerun", { runId: "review:test" })).resolves.toMatchObject({
-			result: { workflowId: "review:test" },
+			result: { workId: "review:test" },
 		});
-		await vi.waitFor(() => expect(target.reviewWorkflows.get("review:test")?.status).toBe("completed"));
+		await vi.waitFor(() => expect(target.work.get("review:test")?.outcome).toBe("completed"));
 
 		await expect(client.intent("new_session", { preserveReviewRunId: "review:missing" })).rejects.toMatchObject({
 			reason: { code: "failed", message: "Unknown review run: review:missing" },
@@ -724,7 +713,7 @@ describe("durable review intents over protocol frames", () => {
 		expect(JSON.stringify(list)).not.toContain("branchBase");
 
 		await expect(client.intent("review_rerun", { runId: "review:test", mode: "incremental" })).resolves.toMatchObject(
-			{ result: { workflowId: "review:test" } },
+			{ result: { workId: "review:test" } },
 		);
 		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());
 		expect(reviewMocks.prepareReviewWorkflow).toHaveBeenCalledWith(
@@ -739,7 +728,7 @@ describe("durable review intents over protocol frames", () => {
 		);
 	});
 
-	test("cancels a detached run and reaches a terminal state", async () => {
+	test("cancels a review's work and reaches a terminal state", async () => {
 		reviewMocks.executeReviewWorkflow.mockImplementationOnce(async (options: ExecuteOptions) => {
 			await new Promise<void>((resolve) =>
 				options.signal?.addEventListener("abort", () => resolve(), { once: true }),
@@ -749,10 +738,10 @@ describe("durable review intents over protocol frames", () => {
 		const { client, source } = await setup();
 
 		await expect(client.intent("review_uncommitted", {})).resolves.toMatchObject({
-			result: { workflowId: "review:test" },
+			result: { workId: "review:test" },
 		});
 		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());
-		await client.intent("review_cancel_workflow", { workflowId: "review:test" });
-		await vi.waitFor(() => expect(source.reviewWorkflows.get("review:test")?.status).toBe("cancelled"));
+		await client.intent("cancel_work", { workId: "review:test" });
+		await vi.waitFor(() => expect(source.work.get("review:test")?.outcome).toBe("cancelled"));
 	});
 });

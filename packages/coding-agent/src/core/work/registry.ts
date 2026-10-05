@@ -137,6 +137,8 @@ export interface WorkKindDefinition {
 	readonly delivery: WorkDelivery;
 	/** Whether a client may cancel the kind's work. */
 	readonly cancellable: boolean;
+	/** `false`: aborting the conversation's run leaves the kind's work running. */
+	readonly cancelOnAbort?: false;
 	/** The kind's work starts awaiting approval instead of running. */
 	readonly approval?: boolean;
 	/** `tool_grant`: the kind's work starts only from a tool call, under that call's grant. */
@@ -651,6 +653,14 @@ export class WorkRegistry {
 		return false;
 	}
 
+	/**
+	 * Resolves once `workId` no longer runs in this runtime: its finish is
+	 * written, or closing left it; at once when it does not run here.
+	 */
+	async settled(workId: string): Promise<void> {
+		await this.active.get(workId)?.done.promise;
+	}
+
 	/** Resolves once no executor runs. */
 	async waitForIdle(): Promise<void> {
 		while (this.active.size > 0) {
@@ -659,8 +669,10 @@ export class WorkRegistry {
 	}
 
 	/**
-	 * Stop every executor. `cancelled` cancels each cancellable running item
-	 * as `cancel` does and resolves once their executors stopped. `closed` (the conversation closes; no work starts
+	 * Stop every executor. `cancelled` (the run was aborted) cancels each
+	 * running item of a cancellable kind that does not opt out with
+	 * `cancelOnAbort: false`, as `cancel` does, and resolves once their
+	 * executors stopped. `closed` (the conversation closes; no work starts
 	 * afterwards) aborts every executor and waits up to
 	 * {@link WORK_CLOSE_GRACE_MS}: resumable work stays open, suspended on
 	 * the next open, and other work finishes `interrupted` unless it completed
@@ -668,7 +680,9 @@ export class WorkRegistry {
 	 */
 	async cancelAll(reason: "cancelled" | "closed"): Promise<void> {
 		if (reason === "cancelled") {
-			const cancellable = [...this.active.values()].filter((active) => active.definition.cancellable);
+			const cancellable = [...this.active.values()].filter(
+				(active) => active.definition.cancellable && active.definition.cancelOnAbort !== false,
+			);
 			await Promise.allSettled(cancellable.map((active) => this.cancel(active.workId)));
 			await Promise.all(cancellable.map((active) => active.done.promise));
 			return;

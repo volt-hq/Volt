@@ -74,8 +74,8 @@ export const IntentCancelledSchema = Type.Object(
 	{ ...closed, description: "The intent was cancelled; the client stays where it is." },
 );
 
-/** The output of an intent that started a review workflow. */
-export const ReviewWorkflowStartedSchema = Type.Object({ workflowId: RpcConversationIdentifierSchema }, closed);
+/** The output of an intent that started a review: its `review` work item, whose id is the review's run id. */
+export const ReviewStartedSchema = Type.Object({ workId: LogEntryIdSchema }, closed);
 
 /** The output of `bash`: the command's combined output, sanitized and possibly truncated. */
 export const RpcBashResultSchema = Type.Object(
@@ -252,24 +252,23 @@ export const INTENT_SCHEMAS = {
 	},
 
 	// Review
-	review_uncommitted: { input: Type.Object(reviewOptions, closed), output: ReviewWorkflowStartedSchema },
+	review_uncommitted: { input: Type.Object(reviewOptions, closed), output: ReviewStartedSchema },
 	review_branch: {
 		input: Type.Object({ base: Type.Optional(Type.String()), ...reviewOptions }, closed),
-		output: ReviewWorkflowStartedSchema,
+		output: ReviewStartedSchema,
 	},
 	review_pr: {
 		input: Type.Object({ number: Type.Optional(Type.String()), ...reviewOptions }, closed),
-		output: ReviewWorkflowStartedSchema,
+		output: ReviewStartedSchema,
 	},
 	review_commit: {
 		input: Type.Object({ ref: Type.String({ minLength: 1 }), ...reviewOptions }, closed),
-		output: ReviewWorkflowStartedSchema,
+		output: ReviewStartedSchema,
 	},
 	review_rerun: {
 		input: Type.Object({ runId, mode: Type.Optional(stringEnum(["incremental", "full"])) }, closed),
-		output: ReviewWorkflowStartedSchema,
+		output: ReviewStartedSchema,
 	},
-	review_cancel_workflow: { input: Type.Object({ workflowId: RpcConversationIdentifierSchema }, closed) },
 	review_open_session: {
 		input: Type.Object(
 			{ runId, findingIds: Type.Optional(Type.Array(RpcConversationIdentifierSchema, { maxItems: 50 })) },

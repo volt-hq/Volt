@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as SessionIntents from "../src/core/host/session-intents.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { ReviewWorkflowHooks, ReviewWorkflowOptions, ReviewWorkflowResult } from "../src/core/review.ts";
-import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
@@ -30,7 +29,8 @@ interface ReviewContext {
 	conversation: {
 		session: Record<string, unknown>;
 		services: { agentDir: string };
-		reviewWorkflows: ReviewWorkflowManager;
+		/** The conversation's work registry; the review runs as its `review` work. */
+		work: object;
 	};
 	host: object;
 	client: object;
@@ -87,7 +87,7 @@ function createContext(): ReviewContext {
 		conversation: {
 			session,
 			services: { agentDir: "/workspace/.volt" },
-			reviewWorkflows: new ReviewWorkflowManager(),
+			work: {},
 		},
 		host: {},
 		client: {},
@@ -378,14 +378,13 @@ describe("InteractiveMode review workflow", () => {
 		expect(context.ui.setFocus).toHaveBeenLastCalledWith(context.editor);
 	});
 
-	it("registers a TUI-started review with the runtime workflow manager", async () => {
+	it("starts a TUI review as the conversation's review work", async () => {
 		const context = createContext();
-		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			expect(options.workflowManager).toBe(context.conversation.reviewWorkflows);
-			return { status: "cancelled" };
-		});
+		reviewMocks.runReviewWorkflow.mockResolvedValueOnce({ status: "cancelled" });
 
 		await run(context);
+		expect(reviewMocks.runReviewWorkflow).toHaveBeenCalledOnce();
+		expect(reviewMocks.runReviewWorkflow.mock.calls[0]?.[0].work).toBe(context.conversation.work);
 	});
 
 	it("rejects a duplicate local start while the first review is active", async () => {

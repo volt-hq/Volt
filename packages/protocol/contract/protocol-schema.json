@@ -164,7 +164,6 @@
 				"review_pr",
 				"review_commit",
 				"review_rerun",
-				"review_cancel_workflow",
 				"review_open_session",
 				"review_acknowledge",
 				"review_record_finding_outcome",
@@ -3396,9 +3395,6 @@
 					"$ref": "#/$defs/Frame.intent.review_rerun"
 				},
 				{
-					"$ref": "#/$defs/Frame.intent.review_cancel_workflow"
-				},
-				{
 					"$ref": "#/$defs/Frame.intent.review_open_session"
 				},
 				{
@@ -4470,35 +4466,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.review_branch"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.review_cancel_workflow": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "review_cancel_workflow"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.review_cancel_workflow"
 				}
 			},
 			"additionalProperties": false
@@ -7781,18 +7748,6 @@
 			},
 			"additionalProperties": false
 		},
-		"IntentInput.review_cancel_workflow": {
-			"type": "object",
-			"required": [
-				"workflowId"
-			],
-			"properties": {
-				"workflowId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				}
-			},
-			"additionalProperties": false
-		},
 		"IntentInput.review_commit": {
 			"type": "object",
 			"required": [
@@ -8688,10 +8643,10 @@
 			"$ref": "#/$defs/RpcReviewAcknowledgmentResponse"
 		},
 		"IntentOutput.review_branch": {
-			"$ref": "#/$defs/ReviewWorkflowStarted"
+			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_commit": {
-			"$ref": "#/$defs/ReviewWorkflowStarted"
+			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_export_feedback": {
 			"type": "object",
@@ -8727,7 +8682,7 @@
 			"$ref": "#/$defs/IntentCancelled"
 		},
 		"IntentOutput.review_pr": {
-			"$ref": "#/$defs/ReviewWorkflowStarted"
+			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_publish": {
 			"type": "object",
@@ -8800,7 +8755,7 @@
 			"additionalProperties": false
 		},
 		"IntentOutput.review_rerun": {
-			"$ref": "#/$defs/ReviewWorkflowStarted"
+			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_reset_discussion": {
 			"$ref": "#/$defs/RpcResetReviewDiscussion"
@@ -8809,7 +8764,7 @@
 			"$ref": "#/$defs/RpcStartReviewDiscussions"
 		},
 		"IntentOutput.review_uncommitted": {
-			"$ref": "#/$defs/ReviewWorkflowStarted"
+			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.set_keep_awake": {
 			"$ref": "#/$defs/RpcKeepAwakeStatus"
@@ -9130,7 +9085,8 @@
 						"title",
 						"body",
 						"kind",
-						"workflowId"
+						"workId",
+						"workKind"
 					],
 					"properties": {
 						"eventId": {
@@ -9169,13 +9125,16 @@
 						},
 						"kind": {
 							"type": "string",
-							"const": "review_completed"
+							"const": "work_finished"
 						},
-						"workflowId": {
+						"workId": {
 							"type": "string",
 							"maxLength": 128,
 							"pattern": "^[^\\s/\\\\\\p{Cc}\\p{Cf}\\p{Cs}]+$",
 							"x-volt-max-utf8-bytes": 128
+						},
+						"workKind": {
+							"$ref": "#/$defs/WorkKind"
 						}
 					},
 					"additionalProperties": false
@@ -9655,7 +9614,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|workflow|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LiveToolPartial": {
@@ -9732,9 +9691,6 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.work"
-				},
-				{
-					"$ref": "#/$defs/LiveValue.workflow"
 				},
 				{
 					"$ref": "#/$defs/LiveValue.subagent"
@@ -10132,30 +10088,6 @@
 						}
 					},
 					"additionalProperties": false
-				}
-			},
-			"additionalProperties": false
-		},
-		"LiveValue.workflow": {
-			"type": "object",
-			"required": [
-				"kind",
-				"event",
-				"activeTools"
-			],
-			"properties": {
-				"kind": {
-					"type": "string",
-					"const": "workflow"
-				},
-				"event": {
-					"$ref": "#/$defs/RpcWorkflowEvent"
-				},
-				"activeTools": {
-					"type": "array",
-					"items": {
-						"$ref": "#/$defs/RpcWorkflowToolEvent"
-					}
 				}
 			},
 			"additionalProperties": false
@@ -14863,14 +14795,17 @@
 			"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
 			"x-volt-expected": "match lowercase worktree id syntax"
 		},
-		"ReviewWorkflowStarted": {
+		"ReviewStarted": {
 			"type": "object",
 			"required": [
-				"workflowId"
+				"workId"
 			],
 			"properties": {
-				"workflowId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
+				"workId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
 				}
 			},
 			"additionalProperties": false
@@ -16739,45 +16674,6 @@
 			},
 			"additionalProperties": false
 		},
-		"RpcProjectionTruncation": {
-			"type": "object",
-			"required": [
-				"truncated",
-				"originalBytes",
-				"projectedBytes"
-			],
-			"properties": {
-				"truncated": {
-					"type": "boolean",
-					"const": true
-				},
-				"originalBytes": {
-					"anyOf": [
-						{
-							"type": "number"
-						},
-						{
-							"type": "null"
-						}
-					]
-				},
-				"projectedBytes": {
-					"type": "number"
-				},
-				"omittedEntries": {
-					"type": "number"
-				},
-				"fields": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {
-							"$ref": "#/$defs/RpcProjectionTruncation"
-						}
-					}
-				}
-			},
-			"additionalProperties": false
-		},
 		"RpcPromptCacheStatus": {
 			"anyOf": [
 				{
@@ -17386,6 +17282,7 @@
 				"workflowAction",
 				"status",
 				"startedAt",
+				"endedAt",
 				"target",
 				"options"
 			],
@@ -17851,7 +17748,6 @@
 		"RpcReviewRunStatus": {
 			"type": "string",
 			"enum": [
-				"unfinished",
 				"completed",
 				"incomplete",
 				"cancelled",
@@ -17932,286 +17828,16 @@
 			},
 			"additionalProperties": false
 		},
-		"RpcReviewWorkflowDescriptor": {
-			"type": "object",
-			"required": [
-				"workflowId",
-				"action",
-				"status",
-				"target",
-				"startedAt"
-			],
-			"properties": {
-				"workflowId": {
-					"type": "string"
-				},
-				"action": {
-					"type": "string"
-				},
-				"status": {
-					"$ref": "#/$defs/RpcReviewWorkflowLifecycleStatus"
-				},
-				"target": {
-					"type": "object",
-					"required": [
-						"description",
-						"diffCommand"
-					],
-					"properties": {
-						"description": {
-							"type": "string"
-						},
-						"diffCommand": {
-							"type": "string"
-						},
-						"pullRequest": {
-							"type": "object",
-							"required": [
-								"provider",
-								"number",
-								"title",
-								"url",
-								"baseRefName",
-								"headRefName",
-								"headRefOid"
-							],
-							"properties": {
-								"provider": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 64,
-									"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
-								},
-								"number": {
-									"type": "integer",
-									"minimum": 1,
-									"maximum": 2147483647
-								},
-								"title": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 512
-								},
-								"url": {
-									"type": "string",
-									"minLength": 1,
-									"maxLength": 2000
-								},
-								"baseRefName": {
-									"$ref": "#/$defs/RpcGitRef"
-								},
-								"headRefName": {
-									"$ref": "#/$defs/RpcGitRef"
-								},
-								"headRefOid": {
-									"type": "string",
-									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
-								},
-								"author": {
-									"type": "object",
-									"required": [
-										"login"
-									],
-									"properties": {
-										"login": {
-											"type": "string",
-											"minLength": 1,
-											"maxLength": 256
-										},
-										"avatarUrl": {
-											"type": "string",
-											"maxLength": 2000,
-											"pattern": "^https://"
-										}
-									},
-									"additionalProperties": false
-								},
-								"reviewState": {
-									"type": "string",
-									"enum": [
-										"draft",
-										"ready",
-										"merged",
-										"closed"
-									]
-								},
-								"mergeability": {
-									"type": "string",
-									"enum": [
-										"mergeable",
-										"conflicting",
-										"unknown"
-									]
-								},
-								"checks": {
-									"type": "object",
-									"required": [
-										"state",
-										"totalCount",
-										"passedCount",
-										"pendingCount",
-										"failedCount",
-										"neutralCount",
-										"unknownCount"
-									],
-									"properties": {
-										"state": {
-											"type": "string",
-											"enum": [
-												"passing",
-												"pending",
-												"failing",
-												"none",
-												"unknown"
-											]
-										},
-										"totalCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										},
-										"passedCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										},
-										"pendingCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										},
-										"failedCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										},
-										"neutralCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										},
-										"unknownCount": {
-											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-										}
-									},
-									"additionalProperties": false
-								},
-								"observedAt": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								}
-							},
-							"additionalProperties": false
-						},
-						"files": {
-							"type": "object",
-							"required": [
-								"totalCount",
-								"projectedCount",
-								"omittedCount",
-								"additions",
-								"deletions",
-								"isComplete",
-								"items"
-							],
-							"properties": {
-								"totalCount": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								},
-								"projectedCount": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								},
-								"omittedCount": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								},
-								"additions": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								},
-								"deletions": {
-									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-								},
-								"isComplete": {
-									"type": "boolean"
-								},
-								"items": {
-									"type": "array",
-									"items": {
-										"type": "object",
-										"required": [
-											"path",
-											"status",
-											"additions",
-											"deletions"
-										],
-										"properties": {
-											"path": {
-												"type": "string",
-												"minLength": 1,
-												"maxLength": 4096
-											},
-											"previousPath": {
-												"type": "string",
-												"minLength": 1,
-												"maxLength": 4096
-											},
-											"status": {
-												"type": "string",
-												"enum": [
-													"added",
-													"modified",
-													"deleted",
-													"renamed",
-													"copied",
-													"type-changed"
-												]
-											},
-											"additions": {
-												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-											},
-											"deletions": {
-												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-											}
-										},
-										"additionalProperties": false
-									},
-									"maxItems": 200
-								}
-							},
-							"additionalProperties": false
-						}
-					},
-					"additionalProperties": false
-				},
-				"findingsCount": {
-					"type": "number"
-				},
-				"errorMessage": {
-					"type": "string"
-				},
-				"startedAt": {
-					"type": "number"
-				},
-				"endedAt": {
-					"type": "number"
-				}
-			},
-			"additionalProperties": false
-		},
-		"RpcReviewWorkflowLifecycleStatus": {
-			"type": "string",
-			"enum": [
-				"running",
-				"completed",
-				"cancelled",
-				"failed"
-			]
-		},
 		"RpcReviewWorkflowListResponse": {
 			"type": "object",
 			"required": [
-				"runs",
-				"activeWorkflows"
+				"runs"
 			],
 			"properties": {
 				"runs": {
 					"type": "array",
 					"items": {
 						"$ref": "#/$defs/RpcReviewRunDescriptor"
-					}
-				},
-				"activeWorkflows": {
-					"type": "array",
-					"items": {
-						"$ref": "#/$defs/RpcReviewWorkflowDescriptor"
 					}
 				},
 				"nextCursor": {
@@ -18227,6 +17853,7 @@
 				"workflowAction",
 				"status",
 				"startedAt",
+				"endedAt",
 				"target",
 				"options"
 			],
@@ -19676,175 +19303,6 @@
 				}
 			},
 			"additionalProperties": false
-		},
-		"RpcWorkflowEvent": {
-			"type": "object",
-			"required": [
-				"type",
-				"workflowId",
-				"kind"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"enum": [
-						"workflow_start",
-						"workflow_update",
-						"workflow_end"
-					]
-				},
-				"workflowId": {
-					"type": "string"
-				},
-				"kind": {
-					"$ref": "#/$defs/RpcWorkflowKind"
-				},
-				"action": {
-					"type": "string"
-				},
-				"title": {
-					"type": "string"
-				},
-				"message": {
-					"type": "string"
-				},
-				"status": {
-					"$ref": "#/$defs/RpcWorkflowStatus"
-				},
-				"startedAt": {
-					"type": "number"
-				},
-				"endedAt": {
-					"type": "number"
-				},
-				"pullRequest": {
-					"type": "object",
-					"required": [
-						"provider",
-						"number"
-					],
-					"properties": {
-						"provider": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 64,
-							"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
-						},
-						"number": {
-							"type": "integer",
-							"minimum": 1,
-							"maximum": 2147483647
-						}
-					},
-					"additionalProperties": false
-				},
-				"projection": {
-					"$ref": "#/$defs/RpcProjectionTruncation"
-				}
-			},
-			"additionalProperties": false
-		},
-		"RpcWorkflowKind": {
-			"type": "string",
-			"x-volt-known-values": [
-				"review"
-			]
-		},
-		"RpcWorkflowStatus": {
-			"type": "string",
-			"x-volt-known-values": [
-				"running",
-				"finalizing",
-				"completed",
-				"cancelled",
-				"failed"
-			]
-		},
-		"RpcWorkflowToolEvent": {
-			"anyOf": [
-				{
-					"type": "object",
-					"required": [
-						"type",
-						"workflowId",
-						"workflowKind",
-						"workflowAction",
-						"toolCallId",
-						"toolName"
-					],
-					"properties": {
-						"type": {
-							"type": "string",
-							"const": "tool_execution_start"
-						},
-						"workflowId": {
-							"type": "string"
-						},
-						"workflowKind": {
-							"$ref": "#/$defs/RpcWorkflowKind"
-						},
-						"workflowAction": {
-							"type": "string"
-						},
-						"toolCallId": {
-							"type": "string"
-						},
-						"toolName": {
-							"type": "string"
-						},
-						"args": {
-							"type": "object",
-							"patternProperties": {
-								"^.*$": {}
-							}
-						},
-						"projection": {
-							"$ref": "#/$defs/RpcProjectionTruncation"
-						}
-					},
-					"additionalProperties": false
-				},
-				{
-					"type": "object",
-					"required": [
-						"type",
-						"workflowId",
-						"workflowKind",
-						"workflowAction",
-						"toolCallId",
-						"toolName",
-						"isError"
-					],
-					"properties": {
-						"type": {
-							"type": "string",
-							"const": "tool_execution_end"
-						},
-						"workflowId": {
-							"type": "string"
-						},
-						"workflowKind": {
-							"$ref": "#/$defs/RpcWorkflowKind"
-						},
-						"workflowAction": {
-							"type": "string"
-						},
-						"toolCallId": {
-							"type": "string"
-						},
-						"toolName": {
-							"type": "string"
-						},
-						"isError": {
-							"type": "boolean"
-						},
-						"projection": {
-							"$ref": "#/$defs/RpcProjectionTruncation"
-						}
-					},
-					"additionalProperties": false
-				}
-			]
 		},
 		"SessionReference": {
 			"type": "object",

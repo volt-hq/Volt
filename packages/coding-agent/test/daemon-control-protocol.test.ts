@@ -164,12 +164,13 @@ const REQUESTS: ByType<ControlRequest> = {
 const REVIEW_NOTIFICATION = {
 	eventId: "review:one:completed",
 	hostNodeId: HOST_NODE_ID,
-	kind: "review_completed",
+	kind: "work_finished",
 	title: "Your review is ready",
 	body: "PR #151 completed with 4 findings.",
 	sessionId: "s-1",
 	workspaceName: "volt",
-	workflowId: "review:one",
+	workId: "review:one",
+	workKind: "review",
 };
 
 // Type-specific rejections; every closed message also rejects an unknown field and a missing or wrong type.
@@ -234,7 +235,9 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	relay_notification_delivery: [
 		{ notification: { eventId: "e-1", kind: "conversation_completed", title: "Volt finished" } },
 		{ notification: { ...REVIEW_NOTIFICATION, planId: "plan-1" } },
-		{ notification: { ...REVIEW_NOTIFICATION, workflowId: undefined } },
+		{ notification: { ...REVIEW_NOTIFICATION, workId: undefined } },
+		{ notification: { ...REVIEW_NOTIFICATION, workKind: undefined } },
+		{ notification: { ...REVIEW_NOTIFICATION, workKind: "ext:Bad/kind" } },
 		{ notification: { ...REVIEW_NOTIFICATION, kind: "secret_kind" } },
 		{ notification: { ...REVIEW_NOTIFICATION, title: "Review\nready" } },
 		{ notification: { ...REVIEW_NOTIFICATION, title: "Review  ready" } },
@@ -243,8 +246,8 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ notification: { ...REVIEW_NOTIFICATION, title: "r".repeat(129) } },
 		{ notification: { ...REVIEW_NOTIFICATION, body: "Open /Users/private/review.diff" } },
 		{ notification: { ...REVIEW_NOTIFICATION, workspaceName: "private/path" } },
-		{ notification: { ...REVIEW_NOTIFICATION, workflowId: "w".repeat(129) } },
-		{ notification: { ...REVIEW_NOTIFICATION, workflowId: "review one" } },
+		{ notification: { ...REVIEW_NOTIFICATION, workId: "w".repeat(129) } },
+		{ notification: { ...REVIEW_NOTIFICATION, workId: "review one" } },
 		{ notification: { ...REVIEW_NOTIFICATION, eventId: "e".repeat(513) } },
 		{ notification: { ...REVIEW_NOTIFICATION, hostNodeId: "A".repeat(64) } },
 		{ notification: { ...REVIEW_NOTIFICATION, workspaceName: undefined, workspace: "volt" } },
@@ -517,8 +520,19 @@ describe("daemon control contract", () => {
 		expect(
 			admitControlRequest(
 				mutate(request, {
-					notification: { ...REVIEW_NOTIFICATION, kind: "conversation_completed", workflowId: undefined },
+					notification: {
+						...REVIEW_NOTIFICATION,
+						kind: "conversation_completed",
+						workId: undefined,
+						workKind: undefined,
+					},
 				}),
+			),
+		).toBe(true);
+		expect(admitControlRequest(mutate(request, { notification: REVIEW_NOTIFICATION }))).toBe(true);
+		expect(
+			admitControlRequest(
+				mutate(request, { notification: { ...REVIEW_NOTIFICATION, workKind: "ext:swarm-review/run" } }),
 			),
 		).toBe(true);
 	});
