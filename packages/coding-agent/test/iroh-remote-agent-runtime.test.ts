@@ -103,6 +103,7 @@ describe("createIrohRemoteAgentRuntime", () => {
 			join(agentDir, "extensions", "remote-tool.ts"),
 			`import { Type } from "typebox";
 
+export const manifest = { id: "remote-tool", displayName: "remote-tool" };
 export default function (volt) {
 	volt.registerTool({
 		name: "remote_extension_tool",
@@ -132,7 +133,8 @@ export default function (volt) {
 		mkdirSync(join(agentDir, "extensions"), { recursive: true });
 		writeFileSync(
 			join(agentDir, "extensions", "broken-provider.ts"),
-			`export default function (volt) {
+			`export const manifest = { id: "broken-provider", displayName: "broken-provider" };
+export default function (volt) {
 	volt.registerProvider("broken-provider", {
 		streamSimple: () => {
 			throw new Error("should not run");

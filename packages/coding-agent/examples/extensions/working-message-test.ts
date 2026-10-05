@@ -12,10 +12,12 @@
  * loader appears, not revert to the default gray "Working...".
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const CUSTOM_MESSAGE = "\x1b[38;2;155;86;63mWorking... (custom)\x1b[39m";
 const CUSTOM_INDICATOR = { frames: ["\x1b[38;2;155;86;63m●\x1b[39m"] };
+
+export const manifest = defineManifest({ id: "working-message-test", displayName: "Working Message Persistence Test" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_start", async (_event, ctx) => {

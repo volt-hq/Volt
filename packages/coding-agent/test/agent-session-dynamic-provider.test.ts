@@ -11,6 +11,7 @@ import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createAgentSessionTestControl } from "./agent-session-test-control.ts";
+import { testExtension } from "./utilities.ts";
 
 describe("AgentSession dynamic provider registration", () => {
 	let tempDir: string;
@@ -37,7 +38,9 @@ describe("AgentSession dynamic provider registration", () => {
 			cwd: tempDir,
 			agentDir,
 			settingsManager,
-			extensionFactories,
+			extensionFactories: extensionFactories.map((factory, index) =>
+				testExtension(`test-extension-${index + 1}`, factory),
+			),
 		});
 		await resourceLoader.reload();
 
@@ -91,7 +94,7 @@ describe("AgentSession dynamic provider registration", () => {
 			agentDir,
 			settingsManager,
 			extensionFactories: [
-				(volt) => {
+				testExtension("test-extension-1", (volt) => {
 					volt.registerProvider("invalid-extension-provider", {
 						streamSimple: () => {
 							throw new Error("should not run");
@@ -113,7 +116,7 @@ describe("AgentSession dynamic provider registration", () => {
 							},
 						],
 					});
-				},
+				}),
 			],
 		});
 		await resourceLoader.reload();

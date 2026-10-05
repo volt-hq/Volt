@@ -1,5 +1,6 @@
 import {
 	CustomEditor,
+	defineManifest,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type KeybindingsManager,
@@ -73,6 +74,8 @@ class EmptyFooter implements Component {
 
 	invalidate(): void {}
 }
+
+export const manifest = defineManifest({ id: "border-status-editor", displayName: "Border Status Editor" });
 
 export default function (volt: ExtensionAPI) {
 	let isWorking = false;

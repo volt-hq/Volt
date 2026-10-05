@@ -7,7 +7,13 @@
  * - /timed-signal - Shows confirm using AbortSignal (manual approach)
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "timed-confirm",
+	displayName: "Timed Confirm",
+	description: "Example extension demonstrating timed dialogs with live countdown.",
+});
 
 export default function (volt: ExtensionAPI) {
 	// Simple approach: use timeout option (recommended)

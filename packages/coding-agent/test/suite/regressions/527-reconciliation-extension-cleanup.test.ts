@@ -21,6 +21,7 @@ import type {
 } from "../../../src/index.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { testExtension } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
 
 describe("regression #527: extension cleanup when a session ends", () => {
@@ -52,7 +53,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 				resourceLoaderOptions: {
 					eventBus,
 					extensionFactories: [
-						(volt) => {
+						testExtension("test-extension-1", (volt) => {
 							const instance = ++instances;
 							let resource: AbortController;
 							volt.on("session_start", (event) => {
@@ -67,8 +68,8 @@ describe("regression #527: extension cleanup when a session ends", () => {
 								resource.abort();
 								lifecycle.push(`${instance}:shutdown:${event.reason}`);
 							});
-						},
-						...otherExtensions,
+						}),
+						...otherExtensions.map((factory, index) => testExtension(`other-${index + 1}`, factory)),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

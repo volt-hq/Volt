@@ -2010,7 +2010,7 @@ export class InteractiveMode {
 				}
 			},
 			onError: (error) => {
-				this.showExtensionError(error.extensionPath, error.error, error.stack);
+				this.showExtensionError(error.extensionId, error.error, error.stack);
 			},
 		};
 	}
@@ -2559,7 +2559,7 @@ export class InteractiveMode {
 		if (shortcuts.size === 0) return;
 
 		// Create a context for shortcut handlers. Its UI is the extensions' own: dialogs and status reach every client.
-		const createContext = (extensionPath: string): ExtensionContext => ({
+		const createContext = (extensionId: string): ExtensionContext => ({
 			ui: extensionRunner.getUIContext(),
 			mode: "tui",
 			hasUI: true,
@@ -2592,7 +2592,7 @@ export class InteractiveMode {
 				})();
 			},
 			getSystemPrompt: () => this.session.systemPrompt,
-			startWork: (kind, options, run) => extensionRunner.createContext(extensionPath).startWork(kind, options, run),
+			startWork: (kind, options, run) => extensionRunner.createContext(extensionId).startWork(kind, options, run),
 		});
 
 		// Set up the extension shortcut handler on the default editor
@@ -2601,7 +2601,7 @@ export class InteractiveMode {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext(shortcut.extensionPath))).catch((err) => {
+					Promise.resolve(shortcut.handler(createContext(shortcut.extensionId))).catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 					return true;
@@ -3610,8 +3610,8 @@ export class InteractiveMode {
 	/**
 	 * Show an extension error in the UI.
 	 */
-	private showExtensionError(extensionPath: string, error: string, stack?: string): void {
-		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
+	private showExtensionError(extensionId: string, error: string, stack?: string): void {
+		const errorMsg = `Extension "${extensionId}" error: ${error}`;
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
 		this.chatContainer.addChild(errorText);
 		if (stack) {
@@ -9095,7 +9095,7 @@ export class InteractiveMode {
 				title: "Extensions",
 				entries: Array.from(shortcuts, ([key, shortcut]) => ({
 					key: formatKeyText(key, { capitalize: true }),
-					action: shortcut.description ?? shortcut.extensionPath,
+					action: shortcut.description ?? shortcut.extensionId,
 				})),
 			});
 		}

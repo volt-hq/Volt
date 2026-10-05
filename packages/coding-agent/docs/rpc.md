@@ -214,7 +214,7 @@ Remote-only intents (`set_keep_awake`, `set_web_search_key`, `upload_device_logs
 
 ### Dynamic intents
 
-Extension commands, prompt templates, and skills are intents named `extension.command.<id>`, `prompt.template.<id>`, and `skill.<id>`, with input `{arguments?, streamingBehavior?}`. The `intents` query lists them with their ids, labels, and sources. Invoking one sends its slash text as a prompt. A prompt whose text starts with `/` runs an extension command of that name too.
+Extension commands, prompt templates, and skills are intents named `extension.command.<extension id>.<command>`, `prompt.template.<id>`, and `skill.<id>`, with input `{arguments?, streamingBehavior?}`. An extension command's name stays the same while its extension keeps its manifest id; prompt template and skill ids are opaque. The `intents` query lists them with their ids, labels, and sources. Invoking one sends its slash text as a prompt. A prompt whose text starts with `/` runs an extension command of that name too.
 
 ## Queries
 

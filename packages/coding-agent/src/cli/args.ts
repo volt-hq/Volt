@@ -249,7 +249,7 @@ export function printHelp(extensionFlags?: ExtensionFlag[]): void {
 			? `\n${chalk.bold("Extension CLI Flags:")}\n${extensionFlags
 					.map((flag) => {
 						const value = flag.type === "string" ? " <value>" : "";
-						const description = flag.description ?? `Registered by ${flag.extensionPath}`;
+						const description = flag.description ?? `Registered by extension ${flag.extensionId}`;
 						return `  --${flag.name}${value}`.padEnd(30) + description;
 					})
 					.join("\n")}\n`

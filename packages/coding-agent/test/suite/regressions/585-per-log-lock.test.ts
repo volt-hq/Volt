@@ -20,6 +20,7 @@ import type { ExtensionAPI } from "../../../src/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestHost } from "../../utilities/host-client.ts";
+import { testExtension } from "../../utilities.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -100,7 +101,7 @@ async function openConversation(
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-1", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -117,7 +118,7 @@ async function openConversation(
 								maxTokens: model.maxTokens,
 							})),
 						});
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

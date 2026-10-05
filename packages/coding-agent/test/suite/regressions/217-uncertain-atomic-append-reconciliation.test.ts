@@ -33,6 +33,7 @@ import {
 	lose,
 } from "../../utilities/faulty-log.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { testExtension } from "../../utilities.ts";
 import {
 	createHarness,
 	getAssistantTexts,
@@ -192,7 +193,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			model,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-1", (volt: ExtensionAPI) => {
 						volt.registerProvider(model.provider, {
 							baseUrl: model.baseUrl,
 							apiKey: "faux-key",
@@ -211,7 +212,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 						});
 						volt.on("session_before_switch", replacementHook);
 						volt.on("session_shutdown", replacementHook);
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

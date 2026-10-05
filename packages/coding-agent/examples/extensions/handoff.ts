@@ -14,8 +14,14 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
-import type { ExtensionAPI, SessionEntry } from "@hansjm10/volt-coding-agent";
-import { BorderedLoader, convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
+import {
+	BorderedLoader,
+	convertToLlm,
+	defineManifest,
+	type ExtensionAPI,
+	type SessionEntry,
+	serializeConversation,
+} from "@hansjm10/volt-coding-agent";
 
 const SYSTEM_PROMPT = `You are a context transfer assistant. Given a conversation history and the user's goal for a new thread, generate a focused prompt that:
 
@@ -76,6 +82,12 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 	];
 	return compactedBranch.map(entryToMessage).filter((message) => message !== undefined);
 }
+
+export const manifest = defineManifest({
+	id: "handoff",
+	displayName: "Handoff",
+	description: "Transfer context to a new focused session.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("handoff", {

@@ -16,6 +16,7 @@ import type { ConversationFactory, HostedConversation } from "../../src/core/hos
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/index.ts";
 import { openTestHost } from "../utilities/host-client.ts";
+import { testExtension } from "../utilities.ts";
 
 export interface ExtensionRuntime {
 	host: ConversationHost;
@@ -39,7 +40,7 @@ export async function createExtensionRuntime(
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -57,7 +58,7 @@ export async function createExtensionRuntime(
 							})),
 						});
 						extensionFactory(volt);
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

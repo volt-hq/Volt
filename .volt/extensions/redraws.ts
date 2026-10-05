@@ -4,8 +4,14 @@
  * Exposes /tui to show TUI redraw stats.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Text } from "@hansjm10/volt-tui";
+
+export const manifest = defineManifest({
+	id: "redraws",
+	displayName: "Redraws",
+	description: "Shows TUI redraw stats with /tui.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("tui", {

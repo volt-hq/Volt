@@ -37,6 +37,7 @@ import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 import { type SeedLogBuild, seedSession } from "./utilities/seed-log.ts";
+import { testExtension } from "./utilities.ts";
 
 type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
 
@@ -88,7 +89,7 @@ describe("conversation host client session lifecycle events", () => {
 			authStorage,
 			model: faux.getModel(),
 			resourceLoaderOptions: {
-				extensionFactories: [extensionFactory],
+				extensionFactories: [testExtension("test-extension", extensionFactory)],
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,

@@ -7,6 +7,7 @@ import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
+import { testExtension } from "./utilities.ts";
 
 // Self-updates here must not rewrite the login service of the user running the tests.
 vi.mock("../src/daemon/service-install.ts", async (importOriginal) => ({
@@ -409,9 +410,9 @@ describe("package commands", () => {
 			await expect(
 				main(["list"], {
 					extensionFactories: [
-						(volt) => {
+						testExtension("test-extension-1", (volt) => {
 							volt.on("project_trust", () => ({ trusted: "yes" }));
-						},
+						}),
 					],
 				}),
 			).resolves.toBeUndefined();
@@ -446,12 +447,12 @@ describe("package commands", () => {
 			await expect(
 				main(["update", "--extensions"], {
 					extensionFactories: [
-						(volt) => {
+						testExtension("test-extension-2", (volt) => {
 							volt.on("project_trust", () => {
 								projectTrustCalled = true;
 								return { trusted: "yes" };
 							});
-						},
+						}),
 					],
 				}),
 			).resolves.toBeUndefined();

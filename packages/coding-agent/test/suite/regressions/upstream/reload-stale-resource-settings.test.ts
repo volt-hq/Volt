@@ -13,6 +13,7 @@ import { AuthStorage } from "../../../../src/core/auth-storage.ts";
 import type { ConversationFactory } from "../../../../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../../../../src/core/session-manager.ts";
 import { openTestHost } from "../../../utilities/host-client.ts";
+import { testExtension } from "../../../utilities.ts";
 
 describe("issue #2753 reload stale resource settings", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -43,7 +44,7 @@ describe("issue #2753 reload stale resource settings", () => {
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt) => {
+						testExtension("test-extension-1", (volt) => {
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
@@ -60,7 +61,7 @@ describe("issue #2753 reload stale resource settings", () => {
 									maxTokens: registeredModel.maxTokens,
 								})),
 							});
-						},
+						}),
 					],
 					noSkills: true,
 					noThemes: true,

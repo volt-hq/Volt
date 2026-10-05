@@ -581,7 +581,7 @@ export class SessionPrompting {
 		// waitForIdle still waits for active runs and non-command prompt work.
 		const ctx = this.host
 			.extensionRunner()
-			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal, command.extensionPath);
+			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal, command.extensionId);
 
 		const releaseActivity = this.host.conversation().beginActivity("extension_command");
 		this.activeExtensionCommandHandlers++;
@@ -605,7 +605,7 @@ export class SessionPrompting {
 			if (err instanceof ExtensionUIDismissedError) return true;
 			// Emit error via extension runner
 			this.host.extensionRunner().emitError({
-				extensionPath: `command:${commandName}`,
+				extensionId: command.extensionId,
 				event: "command",
 				error: err instanceof Error ? err.message : String(err),
 			});
@@ -640,7 +640,7 @@ export class SessionPrompting {
 		} catch (err) {
 			// Emit error like extension commands do
 			this.host.extensionRunner().emitError({
-				extensionPath: skill.filePath,
+				extensionId: "<skill>",
 				event: "skill_expansion",
 				error: err instanceof Error ? err.message : String(err),
 			});

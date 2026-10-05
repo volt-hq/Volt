@@ -7,10 +7,23 @@ export type { SourceInfo } from "../source-info.ts";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,
+	type ExtensionSource,
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "./loader.ts";
+export {
+	declaresPackageExtension,
+	defineManifest,
+	type ExtensionManifest,
+	ExtensionManifestError,
+	LOCAL_EXTENSION_VERSION,
+	type PackageExtension,
+	readModuleManifest,
+	readPackageManifest,
+	validateManifest,
+} from "./manifest.ts";
 export type {
+	DiscoveredResourcePath,
 	ExtensionErrorListener,
 	ForkHandler,
 	NavigateTreeHandler,
@@ -91,6 +104,7 @@ export type {
 	ExtensionCommandContextActions,
 	ExtensionContext,
 	ExtensionContextActions,
+	ExtensionDefinition,
 	// Errors
 	ExtensionError,
 	ExtensionEvent,

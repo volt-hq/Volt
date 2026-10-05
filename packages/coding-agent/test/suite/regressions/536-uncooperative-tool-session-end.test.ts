@@ -22,6 +22,7 @@ import type { CustomEditor } from "../../../src/modes/interactive/components/cus
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { openTestHost, type TestHost } from "../../utilities/host-client.ts";
+import { testExtension } from "../../utilities.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -73,7 +74,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt: ExtensionAPI) => {
+						testExtension("test-extension-1", (volt: ExtensionAPI) => {
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
@@ -93,7 +94,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 								})),
 							});
 							options.extensionFactory?.(volt);
-						},
+						}),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

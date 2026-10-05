@@ -25,6 +25,7 @@ import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
+import { testExtension } from "../utilities.ts";
 
 /** A lifecycle event an extension instance saw, tagged with the session it belongs to. */
 export type RecordedLifecycleEvent = (
@@ -83,7 +84,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -108,7 +109,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 						volt.on("session_before_fork", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
 						volt.on("session_shutdown", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
 						options.extension?.(volt);
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

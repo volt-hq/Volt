@@ -19,7 +19,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 /**
  * Recursively find all .md files in a directory
@@ -45,6 +45,8 @@ function findMarkdownFiles(dir: string, basePath: string = ""): string[] {
 
 	return results;
 }
+
+export const manifest = defineManifest({ id: "claude-rules", displayName: "Claude Rules" });
 
 export default function claudeRulesExtension(volt: ExtensionAPI) {
 	let ruleFiles: string[] = [];

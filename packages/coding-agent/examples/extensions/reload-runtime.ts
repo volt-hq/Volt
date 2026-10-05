@@ -5,8 +5,10 @@
  * tool that queues a follow-up command to trigger reload.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+
+export const manifest = defineManifest({ id: "reload-runtime", displayName: "Reload Runtime" });
 
 export default function (volt: ExtensionAPI) {
 	// Command entrypoint for reload.

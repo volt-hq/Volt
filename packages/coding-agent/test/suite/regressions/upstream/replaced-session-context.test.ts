@@ -15,6 +15,7 @@ import type { ConversationFactory } from "../../../../src/core/host/hosted-conve
 import { SessionManager, type SessionReference } from "../../../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../../src/index.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../../utilities/host-client.ts";
+import { testExtension } from "../../../utilities.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {
@@ -56,7 +57,7 @@ describe("regression #2860: replaced session callbacks", () => {
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt: ExtensionAPI) => {
+						testExtension("test-extension-1", (volt: ExtensionAPI) => {
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
@@ -74,7 +75,7 @@ describe("regression #2860: replaced session callbacks", () => {
 								})),
 							});
 							extensionFactory(volt);
-						},
+						}),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

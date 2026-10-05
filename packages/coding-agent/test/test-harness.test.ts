@@ -266,6 +266,7 @@ describe("test harness", () => {
 		harness = await createHarnessWithExtensions({
 			extensionFactories: [
 				{
+					id: "alpha",
 					path: "<alpha>",
 					factory: (volt) => {
 						volt.registerCommand("shared-cmd", {
@@ -277,6 +278,7 @@ describe("test harness", () => {
 					},
 				},
 				{
+					id: "beta",
 					path: "<beta>",
 					factory: (volt) => {
 						volt.registerCommand("shared-cmd", {
@@ -302,12 +304,12 @@ describe("test harness", () => {
 				path: command.sourceInfo.path,
 			})),
 		).toEqual([
-			{ name: "shared-cmd", invocationName: "shared-cmd:1", description: "Alpha command", path: "<alpha>" },
-			{ name: "shared-cmd", invocationName: "shared-cmd:2", description: "Beta command", path: "<beta>" },
+			{ name: "shared-cmd", invocationName: "shared-cmd", description: "Alpha command", path: "<alpha>" },
+			{ name: "shared-cmd", invocationName: "beta:shared-cmd", description: "Beta command", path: "<beta>" },
 		]);
 
-		await runner!.getCommand("shared-cmd:1")?.handler("first", runner!.createCommandContext());
-		await runner!.getCommand("shared-cmd:2")?.handler("second", runner!.createCommandContext());
+		await runner!.getCommand("shared-cmd")?.handler("first", runner!.createCommandContext());
+		await runner!.getCommand("beta:shared-cmd")?.handler("second", runner!.createCommandContext());
 
 		expect(calls).toEqual(["alpha:first", "beta:second"]);
 	});

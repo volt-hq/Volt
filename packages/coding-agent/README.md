@@ -472,7 +472,9 @@ Create a package by adding a `volt` key to `package.json`:
   "name": "my-volt-package",
   "keywords": ["volt-package"],
   "volt": {
-    "extensions": ["./extensions"],
+    "id": "my-volt-package",
+    "displayName": "My Volt Package",
+    "entry": "extensions/index.ts",
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]
@@ -480,7 +482,7 @@ Create a package by adding a `volt` key to `package.json`:
 }
 ```
 
-Without a `volt` manifest, volt auto-discovers from conventional directories (`extensions/`, `skills/`, `prompts/`, `themes/`).
+`id`, `displayName`, and `entry` declare the package's extension (its [manifest](docs/extensions.md#manifest)); a package with only skills, prompts, or themes leaves them out. Without a `volt` key, volt auto-discovers skills, prompts, and themes from conventional directories (`skills/`, `prompts/`, `themes/`).
 
 See [docs/packages.md](docs/packages.md).
 

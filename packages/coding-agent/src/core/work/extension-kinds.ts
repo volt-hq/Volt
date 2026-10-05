@@ -2,10 +2,8 @@
  * The work kinds a session's extensions declare (RFC §7.2, `ext:<id>/<kind>`),
  * registered in the conversation's work registry, and the work they start.
  *
- * An extension's id is provisional until extensions declare manifest ids
- * (RFC §8.1): a slug of its path, the directory's name for an index file. The
- * first extension in load order with an id owns it; another extension with
- * the same id registers no kinds. An extension starts only its own kinds:
+ * The id is the extension's manifest id (RFC §8.1), which no other extension
+ * in the conversation has. An extension starts only its own kinds:
  * `ctx.startWork` finds a kind by name among the kinds of the extension the
  * context belongs to, and a name never spells another extension's or a
  * built-in kind.
@@ -21,7 +19,6 @@
  * conversation.
  */
 
-import { basename, dirname, parse } from "node:path";
 import type { JsonValue } from "@hansjm10/volt-ai";
 import {
 	REMOTE_CAPABILITIES,
@@ -56,8 +53,6 @@ const PROGRESS_STEPS_MAX = 64;
 const DELIVERIES: ReadonlySet<string> = new Set(["none", "message", "wake"]);
 const CAPABILITIES: ReadonlySet<string> = new Set(REMOTE_CAPABILITIES);
 const STEP_STATUSES: ReadonlySet<string> = new Set(["pending", "active", "done", "failed", "skipped"]);
-/** Directories an index file's extension is not named after. */
-const BUILD_DIRECTORIES: ReadonlySet<string> = new Set(["src", "dist", "lib"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,35 +60,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isCapability(value: unknown): value is RemoteCapability {
 	return typeof value === "string" && CAPABILITIES.has(value);
-}
-
-/**
- * An extension's provisional id: a slug of its path's name, the directory's
- * for an index file (past `src`, `dist`, and `lib`). `<inline:1>` is `inline-1`.
- */
-export function provisionalExtensionId(extensionPath: string): string {
-	let name: string;
-	if (extensionPath.startsWith("<")) {
-		name = extensionPath.replace(/^<|>$/g, "");
-	} else {
-		const parsed = parse(extensionPath);
-		name = parsed.name;
-		let directory = parsed.dir;
-		if (name === "index") {
-			name = basename(directory);
-			while (BUILD_DIRECTORIES.has(name)) {
-				directory = dirname(directory);
-				name = basename(directory);
-			}
-		}
-	}
-	const slug = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, "-")
-		.replace(/^-+/, "")
-		.slice(0, 64)
-		.replace(/-+$/, "");
-	return slug.length > 0 ? slug : "extension";
 }
 
 /** The declaration of kind `name`, checked and copied; throws what an extension author must fix. */
@@ -187,18 +153,19 @@ function ownedExecution(value: WorkRunResult): WorkExecution {
 
 /** A kind an extension declared, as its runner lists them in load order. */
 export interface DeclaredWorkKind {
-	readonly extensionPath: string;
+	/** The manifest id of the extension that declared it. */
+	readonly extensionId: string;
 	readonly name: string;
 	readonly kind: WorkKindDeclaration;
 }
 
 /** A declared kind the host did not register, and why. */
 export interface WorkKindRefusal {
-	readonly extensionPath: string;
+	readonly extensionId: string;
 	readonly error: string;
 }
 
-/** Owns `ctx.startWork`: starts work of `name` for the extension at `owner`. */
+/** Owns `ctx.startWork`: starts work of `name` for the extension whose manifest id is `owner`. */
 export type StartWorkHandler = (
 	owner: string | undefined,
 	name: string,
@@ -214,9 +181,7 @@ interface OwnedKind {
 /** The extension kinds registered in one conversation's work registry. */
 export class ExtensionKinds {
 	private readonly work: () => WorkRegistry;
-	/** Extension ids, each owned by the first extension in load order with it. */
-	private owners = new Map<string, string>();
-	/** The registered kinds, by extension path, then name. */
+	/** The registered kinds, by extension id, then name. */
 	private kinds = new Map<string, Map<string, OwnedKind>>();
 	/** Declared kinds already refused, so each is reported once. */
 	private refused = new Set<string>();
@@ -226,53 +191,39 @@ export class ExtensionKinds {
 	}
 
 	/**
-	 * Bind the kinds of a runner generation whose extensions are
-	 * `extensionPaths` in load order. Clear the previous generation's kinds
-	 * first. Returns the declared kinds it refused.
+	 * Bind the kinds of a runner generation, whose extensions have distinct
+	 * ids. Clear the previous generation's kinds first. Returns the declared
+	 * kinds it refused.
 	 */
-	bind(extensionPaths: readonly string[], declared: readonly DeclaredWorkKind[]): WorkKindRefusal[] {
-		this.owners = new Map();
+	bind(declared: readonly DeclaredWorkKind[]): WorkKindRefusal[] {
 		this.refused = new Set();
-		for (const extensionPath of extensionPaths) {
-			const id = provisionalExtensionId(extensionPath);
-			if (!this.owners.has(id)) this.owners.set(id, extensionPath);
-		}
 		return this.sync(declared);
 	}
 
 	/** Register the declared kinds not registered yet. Returns the ones it refused, each once. */
 	sync(declared: readonly DeclaredWorkKind[]): WorkKindRefusal[] {
 		const refusals: WorkKindRefusal[] = [];
-		for (const { extensionPath, name, kind } of declared) {
-			const owned = this.kinds.get(extensionPath) ?? new Map<string, OwnedKind>();
-			const key = `${extensionPath}\u0000${name}`;
+		for (const { extensionId, name, kind } of declared) {
+			const owned = this.kinds.get(extensionId) ?? new Map<string, OwnedKind>();
+			const key = `${extensionId}\u0000${name}`;
 			if (owned.has(name) || this.refused.has(key)) continue;
-			const id = provisionalExtensionId(extensionPath);
-			const owner = this.owners.get(id);
-			const workKind: WorkKind = `ext:${id}/${name}`;
-			let error: string | undefined;
-			if (owner !== extensionPath) {
-				error = `Work kind ${workKind} is not registered: the extension id ${id} belongs to ${owner ?? "another extension"}`;
-			} else {
-				try {
-					const remove = this.work().register({
-						kind: workKind,
-						delivery: kind.delivery ?? "none",
-						cancellable: kind.cancellable ?? true,
-						...(kind.cancelOnAbort === false ? { cancelOnAbort: false as const } : {}),
-						...(kind.requires === undefined || kind.requires.length === 0 ? {} : { requires: kind.requires }),
-						maxActive: kind.maxActive ?? 1,
-						title: () => name,
-					});
-					owned.set(name, { kind: workKind, remove });
-					this.kinds.set(extensionPath, owned);
-				} catch (refusal) {
-					error = refusal instanceof Error ? refusal.message : String(refusal);
-				}
-			}
-			if (error !== undefined) {
+			const workKind: WorkKind = `ext:${extensionId}/${name}`;
+			try {
+				// The registry refuses a kind that is not `ext:<extension id>/<name>`.
+				const remove = this.work().register({
+					kind: workKind,
+					delivery: kind.delivery ?? "none",
+					cancellable: kind.cancellable ?? true,
+					...(kind.cancelOnAbort === false ? { cancelOnAbort: false as const } : {}),
+					...(kind.requires === undefined || kind.requires.length === 0 ? {} : { requires: kind.requires }),
+					maxActive: kind.maxActive ?? 1,
+					title: () => name,
+				});
+				owned.set(name, { kind: workKind, remove });
+				this.kinds.set(extensionId, owned);
+			} catch (refusal) {
 				this.refused.add(key);
-				refusals.push({ extensionPath, error });
+				refusals.push({ extensionId, error: refusal instanceof Error ? refusal.message : String(refusal) });
 			}
 		}
 		return refusals;
@@ -289,8 +240,8 @@ export class ExtensionKinds {
 	}
 
 	/**
-	 * Start work of kind `name` for the extension at `owner`, as `ctx.startWork`
-	 * does: only that extension's kinds are found.
+	 * Start work of kind `name` for the extension whose manifest id is `owner`,
+	 * as `ctx.startWork` does: only that extension's kinds are found.
 	 */
 	readonly start: StartWorkHandler = async (owner, name, options, run) => {
 		if (owner === undefined) {

@@ -5,7 +5,9 @@
  * Uses the last assistant message to generate a commit message.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "auto-commit-on-exit", displayName: "Auto Commit on Exit" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_shutdown", async (_event, ctx) => {

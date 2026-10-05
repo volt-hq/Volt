@@ -34,7 +34,13 @@ import type {
 	TextContent,
 	ToolResultMessage,
 } from "@hansjm10/volt-ai";
-import type { RemoteCapability, WorkDelivery, WorkProgress, WorkResult } from "@hansjm10/volt-protocol";
+import type {
+	ExtensionManifest,
+	RemoteCapability,
+	WorkDelivery,
+	WorkProgress,
+	WorkResult,
+} from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -1341,9 +1347,10 @@ export interface RegisteredCommand {
 }
 
 export interface ResolvedCommand extends RegisteredCommand {
+	/** The slash name: `name`, or `<extension id>:<name>` when an earlier extension took `name`. */
 	invocationName: string;
-	/** The extension that registered the command: its handler's `ctx` belongs to it. */
-	extensionPath: string;
+	/** The manifest id of the extension that registered the command: its handler's `ctx` belongs to it. */
+	extensionId: string;
 }
 
 // ============================================================================
@@ -1426,7 +1433,12 @@ export interface ExtensionAPI {
 	// Command, Shortcut, Flag Registration
 	// =========================================================================
 
-	/** Register a custom command. */
+	/**
+	 * Register a slash command: `name` is a letter or digit, then at most 63
+	 * letters, digits, `_`, `:`, and `-`. Clients invoke it as the intent
+	 * `extension.command.<manifest id>.<name>`. When an earlier extension took
+	 * the name, the command is `/<manifest id>:<name>`.
+	 */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
 	/** Register a keyboard shortcut. */
@@ -1456,12 +1468,10 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/**
-	 * Register a kind of work (RFC §7) as `ext:<extension>/<name>`: `name` is
+	 * Register a kind of work (RFC §7) as `ext:<manifest id>/<name>`: `name` is
 	 * lowercase letters, digits, `-`, and `_`, starting with a letter or digit.
-	 * The extension id is derived from the extension's path (its directory for
-	 * an index file) until extensions declare manifest ids. Start the kind's
-	 * work with `ctx.startWork(name, ...)`. Reloading the extensions removes the
-	 * kind and interrupts the work it runs.
+	 * Start the kind's work with `ctx.startWork(name, ...)`. Reloading the
+	 * extensions removes the kind and interrupts the work it runs.
 	 */
 	registerWorkKind(name: string, kind?: WorkKindDeclaration): void;
 
@@ -1698,6 +1708,15 @@ export interface ProviderModelConfig {
 /** Extension factory function type. Supports both sync and async initialization. */
 export type ExtensionFactory = (volt: ExtensionAPI) => void | Promise<void>;
 
+/**
+ * An extension given to the SDK (`extensionFactories`): its manifest, without
+ * `entry`, and its factory.
+ */
+export interface ExtensionDefinition {
+	readonly manifest: ExtensionManifest;
+	readonly factory: ExtensionFactory;
+}
+
 // ============================================================================
 // Loaded Extension Types
 // ============================================================================
@@ -1705,8 +1724,8 @@ export type ExtensionFactory = (volt: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
-	/** The extension that registered the tool: its executions' `ctx` belongs to it. */
-	extensionPath?: string;
+	/** The manifest id of the extension that registered the tool: its executions' `ctx` belongs to it. */
+	extensionId?: string;
 }
 
 export interface ExtensionFlag {
@@ -1714,14 +1733,16 @@ export interface ExtensionFlag {
 	description?: string;
 	type: "boolean" | "string";
 	default?: boolean | string;
-	extensionPath: string;
+	/** The manifest id of the extension that registered the flag. */
+	extensionId: string;
 }
 
 export interface ExtensionShortcut {
 	shortcut: KeyId;
 	description?: string;
 	handler: (ctx: ExtensionContext) => Promise<void> | void;
-	extensionPath: string;
+	/** The manifest id of the extension that registered the shortcut: its handler's `ctx` belongs to it. */
+	extensionId: string;
 }
 
 export type SendMessageHandler = <T>(
@@ -1768,10 +1789,11 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => Pr
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	/** The managed-services status of the extension with manifest id `owner`. */
 	getServicesStatus(owner: string): ExtensionServicesStatus;
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
-	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
+	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionId: string }>;
 	/** Registers the work kinds declared since the runner bound; does nothing before. */
 	refreshWorkKinds: () => void;
 	/** Throws when this extension instance is stale after runtime replacement. */
@@ -1784,8 +1806,8 @@ export interface ExtensionRuntimeState {
 	 * Before bindCore(): queues registrations / removes from queue.
 	 * After bindCore(): calls ModelRegistry directly for immediate effect.
 	 */
-	registerProvider: (name: string, config: ProviderConfig, extensionPath?: string) => void;
-	unregisterProvider: (name: string, extensionPath?: string) => void;
+	registerProvider: (name: string, config: ProviderConfig, extensionId?: string) => void;
+	unregisterProvider: (name: string, extensionId?: string) => void;
 }
 
 /**
@@ -1861,8 +1883,15 @@ export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionAction
 
 /** Loaded extension with all registered items. */
 export interface Extension {
+	/** The manifest id: the extension's identity. Contributions, errors, and work kinds are keyed by it. */
+	readonly id: string;
+	readonly manifest: ExtensionManifest;
+	/** The package version, or `local` for a single-file or SDK extension. */
+	readonly version: string;
+	/** What was loaded: a module, a directory, or a package root; `<inline:N>` for an SDK extension. */
 	path: string;
 	resolvedPath: string;
+	/** Where the extension was found: its scope (user, project, or temporary), origin, and path. */
 	sourceInfo: SourceInfo;
 	readonly handlers: ExtensionHandlerRegistry;
 	tools: Map<string, RegisteredTool>;
@@ -1887,7 +1916,12 @@ export interface LoadExtensionsResult {
 // ============================================================================
 
 export interface ExtensionError {
-	extensionPath: string;
+	/**
+	 * The manifest id of the extension the error belongs to, or a label in
+	 * angle brackets (such as `<runtime>`) for an error of the host's own
+	 * extension runtime. No manifest id contains `<`.
+	 */
+	extensionId: string;
 	event: string;
 	error: string;
 	stack?: string;

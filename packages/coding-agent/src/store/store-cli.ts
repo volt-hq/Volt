@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import chalk from "chalk";
 import { APP_NAME, getAgentDir } from "../config.ts";
-import type { ExtensionFactory } from "../core/extensions/types.ts";
+import type { ExtensionDefinition } from "../core/extensions/types.ts";
 import type { PackageInstallScriptPolicy } from "../core/package-manager.ts";
 import { DefaultPackageManager } from "../core/package-manager.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
@@ -51,7 +51,7 @@ interface StoreCommandOptions {
 }
 
 export interface StoreCommandRuntimeOptions {
-	extensionFactories?: ExtensionFactory[];
+	extensionFactories?: ExtensionDefinition[];
 	profile?: string;
 }
 

@@ -7,7 +7,7 @@
  * - Registers additional tools at runtime via /add-echo-tool <name>
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 
 const ECHO_PARAMS = Type.Object({
@@ -20,6 +20,8 @@ function normalizeToolName(input: string): string | undefined {
 	if (!/^[a-z0-9_]+$/.test(trimmed)) return undefined;
 	return trimmed;
 }
+
+export const manifest = defineManifest({ id: "dynamic-tools", displayName: "Dynamic Tools" });
 
 export default function dynamicToolsExtension(volt: ExtensionAPI) {
 	const registeredToolNames = new Set<string>();

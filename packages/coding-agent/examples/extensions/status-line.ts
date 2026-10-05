@@ -5,7 +5,9 @@
  * Shows turn progress with themed colors.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "status-line", displayName: "Status Line" });
 
 export default function (volt: ExtensionAPI) {
 	let turnCount = 0;

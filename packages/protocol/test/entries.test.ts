@@ -321,10 +321,27 @@ describe("work entries", () => {
 		entryOf(type, { payload: { ...PAYLOADS[type], ...changes } });
 
 	it("accepts built-in and extension kinds only", () => {
-		for (const kind of ["job", "subagent", "review", "host_action", "ext:swarm-review/run", "ext:a/b_c-1"]) {
+		for (const kind of [
+			"job",
+			"subagent",
+			"review",
+			"host_action",
+			"ext:swarm-review/run",
+			"ext:a/b_c-1",
+			"ext:volt-x/run",
+		]) {
 			expect(Check(WorkKindSchema, kind), kind).toBe(true);
 		}
-		for (const kind of ["", "jobs", "ext:", "ext:Swarm/run", "ext:swarm-review", "ext:-x/run", "ext:a/b/c"]) {
+		for (const kind of [
+			"",
+			"jobs",
+			"ext:",
+			"ext:Swarm/run",
+			"ext:swarm-review",
+			"ext:-x/run",
+			"ext:a/b/c",
+			"ext:volt/run",
+		]) {
 			expect(Check(WorkKindSchema, kind), kind).toBe(false);
 		}
 	});

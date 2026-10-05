@@ -426,12 +426,12 @@ async function createAgentSessionWithTrackedResources(
 	const extensionsResult = resourceLoader.getExtensions();
 	const pendingProviderRegistrations = extensionsResult.runtime.pendingProviderRegistrations;
 	extensionsResult.runtime.pendingProviderRegistrations = [];
-	for (const { name, config, extensionPath } of pendingProviderRegistrations) {
+	for (const { name, config, extensionId } of pendingProviderRegistrations) {
 		try {
 			modelRegistry.registerProvider(name, config);
 		} catch (error) {
 			extensionsResult.errors.push({
-				path: extensionPath,
+				path: extensionsResult.extensions.find((extension) => extension.id === extensionId)?.path ?? extensionId,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}

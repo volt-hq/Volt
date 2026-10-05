@@ -9,9 +9,10 @@
     "check": "echo 'nothing to check'"
   },
   "volt": {
-    "extensions": [
-      "./index.ts"
-    ]
+    "id": "with-deps",
+    "displayName": "With Dependencies",
+    "description": "An extension with its own npm dependencies.",
+    "entry": "index.ts"
   },
   "dependencies": {
     "ms": "2.1.3"

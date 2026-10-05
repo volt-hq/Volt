@@ -1,6 +1,8 @@
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 const COMPACT_THRESHOLD_TOKENS = 100_000;
+
+export const manifest = defineManifest({ id: "trigger-compact", displayName: "Trigger Compact" });
 
 export default function (volt: ExtensionAPI) {
 	let previousTokens: number | null | undefined;

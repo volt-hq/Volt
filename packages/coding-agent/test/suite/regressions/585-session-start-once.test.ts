@@ -161,7 +161,10 @@ describe("regression #585: a session's extensions are bound once", () => {
 		for (const client of [first, second]) {
 			await vi.waitFor(() =>
 				expect(notices(client.frames, "error")).toEqual([
-					expect.objectContaining({ source: "command:fail", message: expect.stringContaining("command failed") }),
+					expect.objectContaining({
+						source: "test-extension",
+						message: expect.stringContaining("command failed"),
+					}),
 				]),
 			);
 		}

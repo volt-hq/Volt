@@ -57,7 +57,7 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
 			options.projectTrustContext,
 		);
 		for (const error of errors) {
-			options.onExtensionError?.(`Extension "${error.extensionPath}" project_trust error: ${error.error}`);
+			options.onExtensionError?.(`Extension "${error.extensionId}" project_trust error: ${error.error}`);
 		}
 		if (result) {
 			const trusted = result.trusted === "yes";

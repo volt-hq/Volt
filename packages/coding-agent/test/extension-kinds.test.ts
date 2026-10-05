@@ -1,8 +1,7 @@
 /**
- * Extension work kinds (RFC §7.2): provisional extension ids, kind
- * declarations, ownership of kind ids and starts, the narrowed context
- * extension work reports through, what of its result the log keeps, and
- * removal.
+ * Extension work kinds (RFC §7.2): kind declarations, kind ids under manifest
+ * ids, ownership of starts, the narrowed context extension work reports
+ * through, what of its result the log keeps, and removal.
  */
 
 import { Conversation, InMemoryConversationLog, type StreamFn } from "@hansjm10/volt-agent-core";
@@ -14,7 +13,6 @@ import {
 	type DeclaredWorkKind,
 	EXTENSION_KIND_MAX_ACTIVE,
 	ExtensionKinds,
-	provisionalExtensionId,
 	validateWorkKind,
 } from "../src/core/work/extension-kinds.ts";
 import { WorkRegistry } from "../src/core/work/registry.ts";
@@ -60,11 +58,11 @@ async function setup(): Promise<{
 	return { conversation, registry, kinds: new ExtensionKinds(() => registry), live };
 }
 
-const SWARM = "/repo/.volt/extensions/swarm-review/index.ts";
-const OTHER = "/repo/.volt/extensions/other.ts";
+const SWARM = "swarm-review";
+const OTHER = "other";
 
-function declared(extensionPath: string, name: string, kind = {}): DeclaredWorkKind {
-	return { extensionPath, name, kind: validateWorkKind(name, kind) };
+function declared(extensionId: string, name: string, kind = {}): DeclaredWorkKind {
+	return { extensionId, name, kind: validateWorkKind(name, kind) };
 }
 
 /** A run that holds until its signal aborts or it is released. */
@@ -80,16 +78,6 @@ function held(): { run: (ctx: WorkRunContext) => Promise<WorkRunResult>; release
 }
 
 describe("extension work kinds", () => {
-	it("derives a provisional extension id from the extension's path", () => {
-		expect(provisionalExtensionId(SWARM)).toBe("swarm-review");
-		expect(provisionalExtensionId("/home/me/.volt/agent/extensions/My Tool.ts")).toBe("my-tool");
-		expect(provisionalExtensionId("/repo/node_modules/@scope/pkg/dist/index.js")).toBe("pkg");
-		expect(provisionalExtensionId("/repo/ext/src/index.ts")).toBe("ext");
-		expect(provisionalExtensionId("<inline:2>")).toBe("inline-2");
-		expect(provisionalExtensionId("/repo/___.ts")).toBe("extension");
-		expect(provisionalExtensionId(`/repo/${"a".repeat(70)}-b.ts`)).toBe("a".repeat(64));
-	});
-
 	it("checks and copies a declaration, refusing names and settings outside the kind contract", () => {
 		const requires = ["host.manage.v1", "host.manage.v1"] as const;
 		const declaration = validateWorkKind("run", { delivery: "message", requires });
@@ -113,19 +101,20 @@ describe("extension work kinds", () => {
 		expect(() => validateWorkKind("run", null)).toThrow(/object/);
 	});
 
-	it("registers kinds under the id their extension owns, refusing an extension whose id another owns", async () => {
+	it("registers kinds under their extension's manifest id, refusing reserved and invalid ids", async () => {
 		const { registry, kinds } = await setup();
-		const twin = "/home/me/.volt/agent/extensions/swarm-review/index.ts";
-		const refusals = kinds.bind(
-			[SWARM, twin, OTHER],
-			[declared(SWARM, "run"), declared(twin, "run"), declared(twin, "audit"), declared(OTHER, "run")],
-		);
+		const refusals = kinds.bind([
+			declared(SWARM, "run"),
+			declared(OTHER, "run"),
+			declared("volt", "run"),
+			declared("Not An Id", "run"),
+		]);
 		expect(refusals).toEqual([
-			{ extensionPath: twin, error: expect.stringContaining(`the extension id swarm-review belongs to ${SWARM}`) },
-			{ extensionPath: twin, error: expect.stringContaining("ext:swarm-review/audit") },
+			{ extensionId: "volt", error: expect.stringContaining("Invalid work kind") },
+			{ extensionId: "Not An Id", error: expect.stringContaining("Invalid work kind") },
 		]);
 		// A refusal is reported once.
-		expect(kinds.sync([declared(twin, "audit")])).toEqual([]);
+		expect(kinds.sync([declared("volt", "run")])).toEqual([]);
 		const { workId } = await kinds.start(SWARM, "run", { title: "Swarm" }, async () => ({ outcome: "completed" }));
 		const other = await kinds.start(OTHER, "run", { title: "Other" }, async () => ({ outcome: "completed" }));
 		await registry.waitForIdle();
@@ -135,7 +124,7 @@ describe("extension work kinds", () => {
 
 	it("starts only the kinds of the extension a context belongs to", async () => {
 		const { kinds } = await setup();
-		kinds.bind([SWARM, OTHER], [declared(SWARM, "run")]);
+		kinds.bind([declared(SWARM, "run")]);
 		const run = vi.fn(async (): Promise<WorkRunResult> => ({ outcome: "completed" }));
 		await expect(kinds.start(OTHER, "run", { title: "Not mine" }, run)).rejects.toThrow(/Unknown work kind "run"/);
 		await expect(kinds.start(OTHER, "ext:swarm-review/run", { title: "Spelled" }, run)).rejects.toThrow(
@@ -152,7 +141,7 @@ describe("extension work kinds", () => {
 
 	it("hands the run a narrowed context and keeps only the result parts extension work may give", async () => {
 		const { conversation, registry, kinds } = await setup();
-		kinds.bind([SWARM], [declared(SWARM, "run", { delivery: "message" })]);
+		kinds.bind([declared(SWARM, "run", { delivery: "message" })]);
 		let reporter: WorkRunContext | undefined;
 		const { workId } = await kinds.start(SWARM, "run", { title: "Swarm", input: { waves: 3 } }, async (ctx) => {
 			reporter = ctx;
@@ -186,7 +175,7 @@ describe("extension work kinds", () => {
 
 	it("sanitizes the progress live clients see", async () => {
 		const { registry, kinds, live } = await setup();
-		kinds.bind([SWARM], [declared(SWARM, "run")]);
+		kinds.bind([declared(SWARM, "run")]);
 		const run = held();
 		const { workId } = await kinds.start(SWARM, "run", { title: "Swarm" }, async (ctx) => {
 			ctx.progress({
@@ -219,14 +208,14 @@ describe("extension work kinds", () => {
 
 	it("clearing the kinds interrupts their work and refuses further starts", async () => {
 		const { registry, kinds } = await setup();
-		kinds.bind([SWARM], [declared(SWARM, "run")]);
+		kinds.bind([declared(SWARM, "run")]);
 		const run = held();
 		const { workId } = await kinds.start(SWARM, "run", { title: "Swarm" }, run.run);
 		await kinds.clear();
 		expect(registry.get(workId)?.outcome).toBe("interrupted");
 		await expect(kinds.start(SWARM, "run", { title: "Again" }, run.run)).rejects.toThrow(/Unknown work kind/);
 		// The next generation registers the same kind again.
-		expect(kinds.bind([SWARM], [declared(SWARM, "run")])).toEqual([]);
+		expect(kinds.bind([declared(SWARM, "run")])).toEqual([]);
 		const next = await kinds.start(SWARM, "run", { title: "Next" }, async () => ({ outcome: "completed" }));
 		await registry.waitForIdle();
 		expect(registry.get(next.workId)?.outcome).toBe("completed");

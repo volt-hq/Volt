@@ -5,8 +5,10 @@
  * Demonstrates how extensions can use ctx.shutdown() to exit volt cleanly.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+
+export const manifest = defineManifest({ id: "shutdown-command", displayName: "Shutdown Command" });
 
 export default function (volt: ExtensionAPI) {
 	// Register a /quit command that cleanly exits volt

@@ -73,6 +73,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		]);
 
 		return {
+			id: "test-extension",
+			manifest: { id: "test-extension", displayName: "test-extension" },
+			version: "local",
 			path: "test-extension",
 			resolvedPath: "/test/test-extension.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:test-extension>", { source: "test" }),
@@ -225,6 +228,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 
 	it("should continue with default compaction if extension throws error", async () => {
 		const throwingExtension: Extension = {
+			id: "throwing-extension",
+			manifest: { id: "throwing-extension", displayName: "throwing-extension" },
+			version: "local",
 			path: "throwing-extension",
 			resolvedPath: "/test/throwing-extension.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:throwing-extension>", { source: "test" }),
@@ -275,6 +281,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		const callOrder: string[] = [];
 
 		const extension1: Extension = {
+			id: "extension1",
+			manifest: { id: "extension1", displayName: "extension1" },
+			version: "local",
 			path: "extension1",
 			resolvedPath: "/test/extension1.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:extension1>", { source: "test" }),
@@ -307,6 +316,9 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 		};
 
 		const extension2: Extension = {
+			id: "extension2",
+			manifest: { id: "extension2", displayName: "extension2" },
+			version: "local",
 			path: "extension2",
 			resolvedPath: "/test/extension2.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:extension2>", { source: "test" }),

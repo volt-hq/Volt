@@ -17,6 +17,7 @@
 
 import { type Static, Type } from "typebox";
 import type { WorkCheckpointEntryPayload, WorkFinishedEntryPayload, WorkStartedEntryPayload } from "./entries.ts";
+import { RESERVED_EXTENSION_IDS } from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
 import { UI_NODE_LINE_PATTERN, UI_NODE_TEXT_PATTERN, UiNodeKeySchema, UiNodeTextSchema } from "./ui-node.ts";
 
@@ -56,8 +57,11 @@ export const WORK_LIMITS = {
 /** The kinds a host defines itself. */
 export const BUILTIN_WORK_KINDS = ["job", "subagent", "review", "host_action"] as const;
 
-/** An extension's kind: `ext:<extension id>/<kind name>`. */
-export const EXTENSION_WORK_KIND_PATTERN = "^ext:[a-z0-9][a-z0-9-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$";
+/**
+ * An extension's kind: `ext:<extension id>/<kind name>`. The id is a manifest
+ * id (`EXTENSION_ID_PATTERN`), so never a reserved one.
+ */
+export const EXTENSION_WORK_KIND_PATTERN = `^ext:(?!(?:${RESERVED_EXTENSION_IDS.join("|")})/)[a-z0-9][a-z0-9-]{0,63}/[a-z0-9][a-z0-9_-]{0,63}$`;
 
 export type ExtensionWorkKind = `ext:${string}/${string}`;
 

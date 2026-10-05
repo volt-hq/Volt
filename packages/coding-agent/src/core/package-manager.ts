@@ -14,6 +14,7 @@ import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../util
 import { getNpmUpdateSpec, parseNpmSpec } from "../utils/npm-spec.ts";
 import { canonicalizePath, isLocalPath, markPathIgnoredByCloudSync, resolvePath } from "../utils/paths.ts";
 import { getSubprocessEnv } from "../utils/process-env.ts";
+import { declaresPackageExtension } from "./extensions/manifest.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import type { PackageSource, ProfileSettings, Settings, SettingsManager } from "./settings-manager.ts";
 
@@ -159,6 +160,11 @@ interface GitUpdateTarget extends ConfiguredUpdateSource {
 	parsed: GitSource;
 }
 
+/**
+ * A package's resources as its `volt` field lists them. A package whose field
+ * declares an extension is that extension (`extensions: ["."]`): the loader
+ * reads its manifest and entry from package.json.
+ */
 interface VoltManifest {
 	extensions?: string[];
 	skills?: string[];
@@ -495,32 +501,10 @@ function collectAutoThemeEntries(dir: string): string[] {
 	return entries;
 }
 
-function readVoltManifestFile(packageJsonPath: string): VoltManifest | null {
-	try {
-		const content = readFileSync(packageJsonPath, "utf-8");
-		const pkg = JSON.parse(content) as { volt?: unknown };
-		return (pkg.volt ?? null) as VoltManifest | null;
-	} catch {
-		return null;
-	}
-}
-
+/** A directory's extension: the directory itself when its package.json declares one, else its index module. */
 function resolveExtensionEntries(dir: string): string[] | null {
-	const packageJsonPath = join(dir, "package.json");
-	if (existsSync(packageJsonPath)) {
-		const manifest = readVoltManifestFile(packageJsonPath);
-		if (manifest?.extensions?.length) {
-			const entries: string[] = [];
-			for (const extPath of manifest.extensions) {
-				const resolvedExtPath = resolve(dir, extPath);
-				if (existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
-				}
-			}
-			if (entries.length > 0) {
-				return entries;
-			}
-		}
+	if (declaresPackageExtension(dir)) {
+		return [dir];
 	}
 
 	const indexTs = join(dir, "index.ts");
@@ -539,7 +523,7 @@ function collectAutoExtensionEntries(dir: string): string[] {
 	const entries: string[] = [];
 	if (!existsSync(dir)) return entries;
 
-	// First check if this directory itself has explicit extension entries (package.json volt manifest or index)
+	// First check if this directory itself is an extension (a package manifest or an index module)
 	const rootEntries = resolveExtensionEntries(dir);
 	if (rootEntries) {
 		return rootEntries;
@@ -2399,13 +2383,23 @@ export class DefaultPackageManager implements PackageManager {
 			return null;
 		}
 
+		let volt: unknown;
 		try {
 			const content = readFileSync(packageJsonPath, "utf-8");
-			const pkg = JSON.parse(content) as { volt?: unknown };
-			return (pkg.volt ?? null) as VoltManifest | null;
+			volt = (JSON.parse(content) as { volt?: unknown }).volt;
 		} catch {
 			return null;
 		}
+		if (volt === undefined || volt === null) return null;
+		const field = isRecord(volt) ? volt : {};
+		const entries = (value: unknown): string[] | undefined =>
+			Array.isArray(value) && value.every((entry) => typeof entry === "string") ? value : undefined;
+		return {
+			...(declaresPackageExtension(packageRoot) ? { extensions: ["."] } : {}),
+			skills: entries(field.skills),
+			prompts: entries(field.prompts),
+			themes: entries(field.themes),
+		};
 	}
 
 	private addManifestEntries(

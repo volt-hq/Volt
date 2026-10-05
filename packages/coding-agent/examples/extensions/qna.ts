@@ -8,8 +8,7 @@
  */
 
 import type { UserMessage } from "@hansjm10/volt-ai";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
-import { BorderedLoader } from "@hansjm10/volt-coding-agent";
+import { BorderedLoader, defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
 
@@ -26,6 +25,12 @@ Q: Should we use TypeScript or JavaScript?
 A: 
 
 Keep questions in the order they appeared. Be concise.`;
+
+export const manifest = defineManifest({
+	id: "qna",
+	displayName: "Q&A",
+	description: "Extracts questions from assistant responses.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("qna", {

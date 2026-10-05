@@ -5,7 +5,7 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  * Escape in editor returns to options, Escape in options cancels
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, Text, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
@@ -32,6 +32,12 @@ const OptionSchema = Type.Object({
 const QuestionParams = Type.Object({
 	question: Type.String({ description: "The question to ask the user" }),
 	options: Type.Array(OptionSchema, { description: "Options for the user to choose from" }),
+});
+
+export const manifest = defineManifest({
+	id: "question",
+	displayName: "Question",
+	description: "Single question with options.",
 });
 
 export default function question(volt: ExtensionAPI) {

@@ -1,7 +1,7 @@
 // Requires GitHub CLI (`gh`) and a GitHub repository checkout.
 // Preloads the latest open issues once per session, then filters them locally for fast `#...` completion.
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	type AutocompleteItem,
 	type AutocompleteProvider,
@@ -126,6 +126,8 @@ function createIssueAutocompleteProvider(
 		},
 	};
 }
+
+export const manifest = defineManifest({ id: "github-issue-autocomplete", displayName: "GitHub Issue Autocomplete" });
 
 export default function (volt: ExtensionAPI): void {
 	volt.on("session_start", async (_event, ctx) => {

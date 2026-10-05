@@ -8,7 +8,7 @@
  * - Windows toast: Windows Terminal (WSL)
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 function windowsToastScript(title: string, body: string): string {
 	const type = "Windows.UI.Notifications";
@@ -47,6 +47,8 @@ function notify(title: string, body: string): void {
 		notifyOSC777(title, body);
 	}
 }
+
+export const manifest = defineManifest({ id: "notify", displayName: "Notify" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("agent_end", async () => {

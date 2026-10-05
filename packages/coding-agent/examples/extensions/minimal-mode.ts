@@ -16,7 +16,6 @@
  * Then use ctrl+o to toggle between minimal (collapsed) and full (expanded) views.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	createBashTool,
 	createEditTool,
@@ -25,6 +24,8 @@ import {
 	createLsTool,
 	createReadTool,
 	createWriteTool,
+	defineManifest,
+	type ExtensionAPI,
 } from "@hansjm10/volt-coding-agent";
 import { Text } from "@hansjm10/volt-tui";
 import { homedir } from "os";
@@ -63,6 +64,12 @@ function getBuiltInTools(cwd: string) {
 	}
 	return tools;
 }
+
+export const manifest = defineManifest({
+	id: "minimal-mode",
+	displayName: "Minimal Mode",
+	description: 'Demonstrates a "minimal" tool display mode.',
+});
 
 export default function (volt: ExtensionAPI) {
 	// =========================================================================

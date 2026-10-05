@@ -16,7 +16,12 @@
  *   /working-indicator reset     Restore volt's default spinner
  */
 
-import type { ExtensionAPI, ExtensionContext, WorkingIndicatorOptions } from "@hansjm10/volt-coding-agent";
+import {
+	defineManifest,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type WorkingIndicatorOptions,
+} from "@hansjm10/volt-coding-agent";
 
 type WorkingIndicatorMode = "dot" | "none" | "pulse" | "spinner" | "default";
 
@@ -82,6 +87,8 @@ function describeMode(mode: WorkingIndicatorMode): string {
 			return "volt default spinner";
 	}
 }
+
+export const manifest = defineManifest({ id: "working-indicator", displayName: "Working Indicator" });
 
 export default function (volt: ExtensionAPI) {
 	let mode: WorkingIndicatorMode = "spinner";

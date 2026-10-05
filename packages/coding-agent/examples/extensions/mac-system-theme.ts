@@ -7,7 +7,7 @@
 
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const execAsync = promisify(exec);
 
@@ -21,6 +21,12 @@ async function isDarkMode(): Promise<boolean> {
 		return false;
 	}
 }
+
+export const manifest = defineManifest({
+	id: "mac-system-theme",
+	displayName: "macOS System Theme",
+	description: "Syncs volt theme with macOS system appearance (dark/light mode).",
+});
 
 export default function (volt: ExtensionAPI) {
 	let intervalId: ReturnType<typeof setInterval> | null = null;

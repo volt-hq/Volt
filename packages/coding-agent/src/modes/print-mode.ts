@@ -107,8 +107,8 @@ export async function runPrintMode(
 			},
 			onError: (err) => {
 				// JSON mode tells its reader on the live lane, as RPC clients are told.
-				if (subscription) subscription.notice("error", `${err.event}: ${err.error}`, err.extensionPath);
-				else console.error(`Extension error (${err.extensionPath}): ${err.error}`);
+				if (subscription) subscription.notice("error", `${err.event}: ${err.error}`, err.extensionId);
+				else console.error(`Extension error (${err.extensionId}): ${err.error}`);
 			},
 		},
 		move: {

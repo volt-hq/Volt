@@ -7,7 +7,13 @@
  * Usage: /session-name [name] - set or show session name
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "session-name",
+	displayName: "Session Name",
+	description: "Session naming example.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("session-name", {

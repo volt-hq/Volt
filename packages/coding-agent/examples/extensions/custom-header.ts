@@ -6,8 +6,7 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  * (logo + keybinding hints) with a custom component showing the volt mascot.
  */
 
-import type { ExtensionAPI, Theme } from "@hansjm10/volt-coding-agent";
-import { VERSION } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type Theme, VERSION } from "@hansjm10/volt-coding-agent";
 
 // --- VOLT MASCOT ---
 function getVoltMascot(theme: Theme): string[] {
@@ -43,6 +42,8 @@ function getVoltMascot(theme: Theme): string[] {
 	// --- ASSEMBLY ---
 	return ["", lineEyes, lineBar, lineLeg, lineLeg, lineLeg, lineLeg, ""];
 }
+
+export const manifest = defineManifest({ id: "custom-header", displayName: "Custom Header" });
 
 export default function (volt: ExtensionAPI) {
 	// Set custom header immediately on load (if UI is available)

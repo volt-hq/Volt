@@ -19,7 +19,12 @@ import { type MockInstance, vi } from "vitest";
 import { AgentSession, type AgentSessionConfig } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
-import type { Extension, ExtensionFactory, LoadExtensionsResult } from "../src/core/extensions/index.ts";
+import type {
+	Extension,
+	ExtensionDefinition,
+	ExtensionFactory,
+	LoadExtensionsResult,
+} from "../src/core/extensions/index.ts";
 import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import { convertToLlm } from "../src/core/messages.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -223,11 +228,19 @@ export interface TestSessionContext {
 	cleanup: () => Promise<void>;
 }
 
+/** An SDK extension for tests: a manifest with `id` (the display name too), and `factory`. */
+export function testExtension(id: string, factory: ExtensionFactory): ExtensionDefinition {
+	return { manifest: { id, displayName: id }, factory };
+}
+
 export interface CreateTestExtensionsResultInput {
 	factory: ExtensionFactory;
+	/** The manifest id; `inline-<n>` by default. */
+	id?: string;
 	path?: string;
 }
 
+/** Load test extensions; a bare factory, or one without an id, is `inline-<n>` for its 1-based position. */
 export async function createTestExtensionsResult(
 	inputs: Array<ExtensionFactory | CreateTestExtensionsResultInput>,
 	cwd = process.cwd(),
@@ -238,9 +251,12 @@ export async function createTestExtensionsResult(
 
 	for (const [index, input] of inputs.entries()) {
 		const factory = typeof input === "function" ? input : input.factory;
+		const id = (typeof input === "function" ? undefined : input.id) ?? `inline-${index + 1}`;
 		const extensionPath =
 			typeof input === "function" ? `<inline:${index + 1}>` : (input.path ?? `<inline:${index + 1}>`);
-		extensions.push(await loadExtensionFromFactory(factory, cwd, eventBus, runtime, extensionPath));
+		extensions.push(
+			await loadExtensionFromFactory(testExtension(id, factory), cwd, eventBus, runtime, extensionPath),
+		);
 	}
 
 	return {

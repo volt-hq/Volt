@@ -13,8 +13,9 @@
  *   volt --extension examples/extensions/custom-compaction.ts
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
-import { convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
+import { convertToLlm, defineManifest, type ExtensionAPI, serializeConversation } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "custom-compaction", displayName: "Custom Compaction" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_compact", async (event, ctx) => {

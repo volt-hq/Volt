@@ -12,7 +12,7 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  */
 
 import { StringEnum } from "@hansjm10/volt-ai";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext, type Theme } from "@hansjm10/volt-coding-agent";
 import { matchesKey, Text, truncateToWidth } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
@@ -102,6 +102,12 @@ class TodoListComponent {
 		this.cachedLines = undefined;
 	}
 }
+
+export const manifest = defineManifest({
+	id: "todo",
+	displayName: "Todo",
+	description: "Demonstrates state management via session entries.",
+});
 
 export default function (volt: ExtensionAPI) {
 	// In-memory state (reconstructed from session on load)

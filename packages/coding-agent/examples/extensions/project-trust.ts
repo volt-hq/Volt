@@ -13,7 +13,9 @@
  * Try it in a project containing .volt, AGENTS.md/CLAUDE.md, or .agents/skills.
  */
 
-import type { ExtensionAPI, ProjectTrustEventResult } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ProjectTrustEventResult } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "project-trust", displayName: "Project Trust" });
 
 export default function (volt: ExtensionAPI) {
 	let loadCount = 0;

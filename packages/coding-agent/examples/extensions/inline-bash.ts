@@ -14,7 +14,13 @@
  *
  * Note: Regular !command syntax (whole-line bash) is preserved and works as before.
  */
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "inline-bash",
+	displayName: "Inline Bash",
+	description: "Expands inline bash commands in user prompts.",
+});
 
 export default function (volt: ExtensionAPI) {
 	const PATTERN = /!\{([^}]+)\}/g;

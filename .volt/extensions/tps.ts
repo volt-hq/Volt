@@ -1,11 +1,17 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
 	if (!message || typeof message !== "object") return false;
 	const role = (message as { role?: unknown }).role;
 	return role === "assistant";
 }
+
+export const manifest = defineManifest({
+	id: "tps",
+	displayName: "TPS",
+	description: "Reports output tokens per second after each turn.",
+});
 
 export default function (volt: ExtensionAPI) {
 	let agentStartMs: number | null = null;

@@ -9,7 +9,7 @@
  */
 
 import path from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 const BRAILLE_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -18,6 +18,8 @@ function getBaseTitle(volt: ExtensionAPI): string {
 	const session = volt.getSessionName();
 	return session ? `Volt - ${session} - ${cwd}` : `Volt - ${cwd}`;
 }
+
+export const manifest = defineManifest({ id: "titlebar-spinner", displayName: "Titlebar Spinner" });
 
 export default function (volt: ExtensionAPI) {
 	let timer: ReturnType<typeof setInterval> | null = null;

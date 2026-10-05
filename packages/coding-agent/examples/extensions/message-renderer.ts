@@ -7,8 +7,14 @@
  * Usage: /status [message] - sends a status message with custom rendering
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Box, Text } from "@hansjm10/volt-tui";
+
+export const manifest = defineManifest({
+	id: "message-renderer",
+	displayName: "Message Renderer",
+	description: "Custom message rendering example.",
+});
 
 export default function (volt: ExtensionAPI) {
 	// Register custom renderer for "status-update" messages

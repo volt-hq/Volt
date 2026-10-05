@@ -23,6 +23,7 @@ import type { ExtensionAPI } from "../../../src/index.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type IntentOutcome, type RemotePhone } from "../../utilities/remote-phone.ts";
+import { testExtension } from "../../utilities.ts";
 
 interface LifecycleEvent {
 	type: string;
@@ -61,7 +62,7 @@ function createDaemon() {
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-1", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -99,7 +100,7 @@ function createDaemon() {
 								reason: event.reason,
 							});
 						});
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

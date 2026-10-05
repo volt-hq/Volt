@@ -150,10 +150,10 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			{ event: "ask", mode: "tui", hasUI: true },
 		]);
 		// Errors reach every client: the TUI and the phone.
-		expect(tuiErrors).toEqual([expect.objectContaining({ extensionPath: "command:fail" })]);
+		expect(tuiErrors).toEqual([expect.objectContaining({ extensionId: "test-extension", event: "command" })]);
 		await vi.waitFor(() =>
 			expect(liveItems(phone)).toContainEqual(
-				expect.objectContaining({ type: "notice", level: "error", source: "command:fail" }),
+				expect.objectContaining({ type: "notice", level: "error", source: "test-extension" }),
 			),
 		);
 		// The phone's late answer found nothing to answer, and its stream goes on.

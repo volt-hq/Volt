@@ -14,14 +14,15 @@
  */
 
 import { spawn } from "node:child_process";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	type BashOperations,
 	createBashTool,
 	createEditTool,
 	createReadTool,
 	createWriteTool,
+	defineManifest,
 	type EditOperations,
+	type ExtensionAPI,
 	type ReadOperations,
 	type WriteOperations,
 } from "@hansjm10/volt-coding-agent";
@@ -110,6 +111,8 @@ function createRemoteBashOps(remote: string, remoteCwd: string, localCwd: string
 			}),
 	};
 }
+
+export const manifest = defineManifest({ id: "ssh", displayName: "SSH" });
 
 export default function (volt: ExtensionAPI) {
 	volt.registerFlag("ssh", { description: "SSH remote: user@host or user@host:/path", type: "string" });

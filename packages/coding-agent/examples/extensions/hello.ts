@@ -3,7 +3,7 @@
  */
 
 import { Type } from "@hansjm10/volt-ai";
-import { defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const helloTool = defineTool({
 	name: "hello",
@@ -19,6 +19,12 @@ const helloTool = defineTool({
 			details: { greeted: params.name },
 		};
 	},
+});
+
+export const manifest = defineManifest({
+	id: "hello",
+	displayName: "Hello",
+	description: "Minimal custom tool example.",
 });
 
 export default function (volt: ExtensionAPI) {

@@ -9,8 +9,9 @@
     "check": "echo 'nothing to check'"
   },
   "volt": {
-    "extensions": [
-      "./index.ts"
-    ]
+    "id": "gitlab-duo",
+    "displayName": "GitLab Duo Provider",
+    "description": "Registers GitLab Duo as a model provider.",
+    "entry": "index.ts"
   }
 }

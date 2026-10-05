@@ -14,7 +14,7 @@ import {
 	type SelfUpdateCommand,
 	VERSION,
 } from "./config.ts";
-import type { ExtensionFactory } from "./core/extensions/types.ts";
+import type { ExtensionDefinition } from "./core/extensions/types.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader } from "./core/resource-loader.ts";
@@ -530,7 +530,7 @@ export function parseProjectTrustOverride(args: readonly string[]): boolean | un
 }
 
 export interface PackageCommandRuntimeOptions {
-	extensionFactories?: ExtensionFactory[];
+	extensionFactories?: ExtensionDefinition[];
 	profile?: string;
 }
 
@@ -563,7 +563,7 @@ export async function createCommandSettingsManager(options: {
 	agentDir: string;
 	projectTrustOverride?: boolean;
 	useSavedProjectTrustOnly?: boolean;
-	extensionFactories?: ExtensionFactory[];
+	extensionFactories?: ExtensionDefinition[];
 	loadProjectTrustExtensions?: boolean;
 	profile?: string;
 }): Promise<CommandSettingsResult> {

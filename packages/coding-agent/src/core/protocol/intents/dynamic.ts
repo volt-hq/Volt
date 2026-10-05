@@ -1,8 +1,8 @@
 /**
- * Dynamic intents: extension commands, prompt templates, and skills, named
- * `extension.command.<id>`, `prompt.template.<id>`, and `skill.<id>` by
- * opaque per-catalog ids (they keep these prefixes until Phase 5). Invoking
- * one sends its slash text as a prompt.
+ * Dynamic intents: extension commands, prompt templates, and skills. An
+ * extension command is `extension.command.<manifest id>.<command name>`;
+ * prompt templates and skills are `prompt.template.<id>` and `skill.<id>` by
+ * opaque per-catalog ids. Invoking one sends its slash text as a prompt.
  *
  * Descriptors never carry prompt bodies, skill content, raw source info, or
  * host paths: display strings are bounded and path-like text is redacted.
@@ -58,9 +58,7 @@ const catalogStates = new WeakMap<DynamicIntentSource, CatalogState>();
 /** The session's dynamic intents, extension commands first, at most {@link MAX_DYNAMIC_INTENTS}. */
 export function listDynamicIntents(source: DynamicIntentSource): DynamicIntent[] {
 	const token = getCatalogToken(source);
-	const extensionIntents = source.extensionRunner
-		.getRegisteredCommands()
-		.map((command, index) => createExtensionCommandIntent(command, index, token));
+	const extensionIntents = source.extensionRunner.getRegisteredCommands().map(createExtensionCommandIntent);
 	const promptIntents = source.promptTemplates.map((template, index) =>
 		createPromptTemplateIntent(template, index, token),
 	);
@@ -99,11 +97,12 @@ const dynamicIntentBase = {
 	requires: ["conversation.control.v1"],
 } as const;
 
-function createExtensionCommandIntent(command: ResolvedCommand, index: number, token: string): DynamicIntent {
+function createExtensionCommandIntent(command: ResolvedCommand): DynamicIntent {
 	return {
 		...dynamicIntentBase,
 		...safeSourceFields(command.sourceInfo),
-		name: `extension.command.${opaqueId("ec", token, index)}`,
+		// Both parts are validated: the manifest id and the command name. The intent is stable across reloads.
+		name: `extension.command.${command.extensionId}.${command.name}`,
 		label: boundedDisplayString(command.invocationName, MAX_INTENT_LABEL_LENGTH) ?? "Extension command",
 		description: boundedDisplayString(command.description, MAX_DESCRIPTION_LENGTH),
 		category: "extension",
@@ -170,13 +169,6 @@ function getCatalogToken(source: DynamicIntentSource): string {
 
 function getCatalogFingerprint(source: DynamicIntentSource): string {
 	return JSON.stringify({
-		commands: source.extensionRunner.getRegisteredCommands().map((command) => ({
-			description: command.description,
-			invocationName: command.invocationName,
-			name: command.name,
-			remoteSafe: command.remoteSafe === true,
-			sourceInfo: sourceFingerprint(command.sourceInfo),
-		})),
 		prompts: source.promptTemplates.map((template) => ({
 			argumentHint: template.argumentHint,
 			content: template.content,

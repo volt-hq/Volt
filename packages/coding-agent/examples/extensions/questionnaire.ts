@@ -6,7 +6,7 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  * Multiple questions: tab bar navigation between questions
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, Text, visibleWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
@@ -73,6 +73,12 @@ function errorResult(
 		details: { questions, answers: [], cancelled: true },
 	};
 }
+
+export const manifest = defineManifest({
+	id: "questionnaire",
+	displayName: "Questionnaire",
+	description: "Unified tool for asking single or multiple questions.",
+});
 
 export default function questionnaire(volt: ExtensionAPI) {
 	volt.registerTool({

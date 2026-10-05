@@ -283,7 +283,7 @@ describe("protocol client of an in-process host", () => {
 		// Built-in intents first, then extension commands, prompt templates, and skills.
 		expect(intents.slice(0, builtins.length)).toEqual(builtins);
 		expect(dynamic.map((intent) => intent.name)).toEqual([
-			expect.stringMatching(/^extension\.command\.ec_[a-f0-9]{12}_1$/),
+			"extension.command.test-extension.deploy",
 			expect.stringMatching(/^prompt\.template\.pt_[a-f0-9]{12}_1$/),
 			expect.stringMatching(/^skill\.sk_[a-f0-9]{12}_1$/),
 		]);
