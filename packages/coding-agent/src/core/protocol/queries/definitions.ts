@@ -14,6 +14,7 @@ import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
 import { missingCapability } from "../intents/types.ts";
+import { editorCompletionsQuery, extensionSettingsQuery, extensionsQuery } from "./extensions.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 
@@ -525,12 +526,15 @@ export const reviewRunsQuery = defineQuery({
 export const BUILTIN_QUERIES = {
 	intents: intentsQuery,
 	intent_completions: intentCompletionsQuery,
+	editor_completions: editorCompletionsQuery,
 	history: historyQuery,
 	content: contentQuery,
 	models: modelsQuery,
 	sessions: sessionsQuery,
 	settings: settingsQuery,
 	subscription_usage: subscriptionUsageQuery,
+	extensions: extensionsQuery,
+	extension_settings: extensionSettingsQuery,
 	host_status: hostStatusQuery,
 	web_search_status: webSearchStatusQuery,
 	subagent_definitions: subagentDefinitionsQuery,

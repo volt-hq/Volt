@@ -606,7 +606,10 @@ function answers(request: HostRequest, response: HostResponse): boolean {
 			return "value" in response && request.options.includes(response.value);
 		case "input":
 		case "editor":
+		case "editor_text":
 			return "value" in response;
+		case "dialog":
+			return "value" in response && request.actions.some((action) => action.id === response.value);
 		case "confirm":
 			return "confirmed" in response;
 		case "approval":

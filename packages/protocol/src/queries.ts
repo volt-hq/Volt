@@ -12,6 +12,7 @@ import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
+import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema } from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
 import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema, IntentOptionSchema } from "./intents.ts";
 import {
@@ -45,7 +46,10 @@ import {
 	RpcWebSearchStatusSchema,
 } from "./session.ts";
 import { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
-import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "./wire-limits.ts";
+import {
+	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
+	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
+} from "./wire-limits.ts";
 import { IrohRemoteWorkspaceDirectorySchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -55,6 +59,25 @@ export const HISTORY_PAGE_MAX_ENTRIES = 200;
 
 /** Most Unicode scalars of entry text one `content` answer carries. */
 export const CONTENT_TEXT_MAX_SCALARS = IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS;
+
+/** Most items one `editor_completions` answer carries. */
+export const EDITOR_COMPLETIONS_MAX_ITEMS = 50;
+
+/** Longest completion value, label, description, or prefix, in characters. */
+export const EDITOR_COMPLETION_TEXT_MAX_CHARS = 1_024;
+
+const completionText = Type.String({ maxLength: EDITOR_COMPLETION_TEXT_MAX_CHARS });
+
+/** One editor completion: the text that replaces the answer's `prefix`, and how to list it. */
+export const EditorCompletionItemSchema = Type.Object(
+	{
+		value: completionText,
+		label: Type.Optional(completionText),
+		description: Type.Optional(completionText),
+	},
+	closed,
+);
+export type EditorCompletionItem = Static<typeof EditorCompletionItemSchema>;
 
 const server = Type.String();
 const runId = RpcConversationIdentifierSchema;
@@ -78,6 +101,29 @@ export const QUERY_SCHEMAS = {
 			closed,
 		),
 		result: Type.Object({ completions: Type.Array(IntentOptionSchema) }, closed),
+	},
+
+	// Editor
+	/**
+	 * Completions for the editor's text at `cursor` (in Unicode scalars) from
+	 * the completion providers extensions registered: `items` replace the
+	 * `prefix` that ends at the cursor. No provider answers with no items.
+	 */
+	editor_completions: {
+		params: Type.Object(
+			{
+				text: Type.String({ "x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES }),
+				cursor: Type.Integer({ minimum: 0 }),
+			},
+			closed,
+		),
+		result: Type.Object(
+			{
+				prefix: completionText,
+				items: Type.Array(EditorCompletionItemSchema, { maxItems: EDITOR_COMPLETIONS_MAX_ITEMS }),
+			},
+			closed,
+		),
 	},
 
 	// Conversation log
@@ -188,6 +234,13 @@ export const QUERY_SCHEMAS = {
 		),
 	},
 	subscription_usage: { params: EmptyInputSchema, result: RpcSubscriptionUsageReportSchema },
+	/** The conversation's extensions, enabled or not; refetched on `changed{extensions}`. */
+	extensions: {
+		params: EmptyInputSchema,
+		result: Type.Object({ extensions: Type.Array(ExtensionSummarySchema) }, closed),
+	},
+	/** One extension's settings form and stored values; refetched on `changed{settings}`. */
+	extension_settings: { params: Type.Object({ id: ExtensionIdSchema }, closed), result: ExtensionSettingsViewSchema },
 	/** The host's keep-awake state and, when the host shares it, its theme colors; refetched on `changed{host}`. */
 	host_status: {
 		params: EmptyInputSchema,

@@ -22,6 +22,7 @@ import {
 	steerIntent,
 	switchSessionIntent,
 } from "./conversation.ts";
+import { setExtensionEnabledIntent, setExtensionSettingsIntent } from "./extensions.ts";
 import {
 	createWorktreeIntent,
 	mcpAuthCancelIntent,
@@ -110,6 +111,8 @@ export function createBuiltinIntents() {
 		review_export_feedback: reviewExportFeedbackIntent,
 		review_start_discussions: reviewStartDiscussionsIntent,
 		review_reset_discussion: reviewResetDiscussionIntent,
+		set_extension_enabled: setExtensionEnabledIntent,
+		set_extension_settings: setExtensionSettingsIntent,
 		set_default_model: setDefaultModelIntent,
 		set_default_thinking_level: setDefaultThinkingLevelIntent,
 		set_steering_mode: setSteeringModeIntent,

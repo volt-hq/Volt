@@ -14,8 +14,10 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`. A value's `kind` is its key's family.
- * (Phase 4).
+ * `ext_panel/<extension>/<name>`, `work/<workId>`. A value's `kind` is its
+ * key's family. A `patch` item updates the node of an `ext_panel` or `work`
+ * value in place (ui-patch.ts); a client that cannot apply it resubscribes
+ * after its position.
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
  * until answered; any client that accepts the request's kind may answer with
@@ -30,9 +32,11 @@ import {
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
 import { LogEntryIdSchema } from "./entries.ts";
+import { ExtensionIdSchema } from "./extensions.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
+import { ToolPresentationPatchSchema, ToolPresentationSchema } from "./presentation.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
 import {
 	RpcActiveAgentRunSchema,
@@ -40,7 +44,15 @@ import {
 	RpcActiveRetrySchema,
 	RpcPromptCacheStatusSchema,
 } from "./session.ts";
-import { UiNodeFormFieldSchema, UiNodeSchema } from "./ui-node.ts";
+import {
+	UiNodeActionSchema,
+	UiNodeFormFieldSchema,
+	UiNodeSchema,
+	UiNodeStyledTextSchema,
+	UiNodeTextSchema,
+	UiNodeTokenSchema,
+} from "./ui-node.ts";
+import { UiPatchSchema } from "./ui-patch.ts";
 import { WorkProgressSchema } from "./work.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -51,16 +63,39 @@ const timeoutMs = Type.Optional(Type.Integer({ minimum: 0 }));
 // Host requests
 // ============================================================================
 
-export const HOST_REQUEST_KINDS = ["select", "confirm", "input", "editor", "form", "approval", "mcp_auth"] as const;
+export const HOST_REQUEST_KINDS = [
+	"select",
+	"confirm",
+	"input",
+	"editor",
+	"form",
+	"dialog",
+	"approval",
+	"mcp_auth",
+	"editor_text",
+] as const;
 
 /** The kinds of host request a client may accept in `hello.accepts.hostRequests`. */
 export const HostRequestKindSchema = stringEnum(HOST_REQUEST_KINDS);
 export type HostRequestKind = Static<typeof HostRequestKindSchema>;
 
+/** A dialog button: answering with its id. */
+export const HostDialogActionSchema = Type.Object(
+	{
+		id: UiNodeActionSchema.properties.id,
+		label: UiNodeTextSchema,
+		token: Type.Optional(UiNodeTokenSchema),
+		destructive: Type.Optional(Type.Boolean()),
+	},
+	closed,
+);
+
 /**
  * A question the host asks a client. Answers: `select`, `input`, and `editor`
  * take `{value}`; `confirm` takes `{confirmed}`; `form` takes `{values}`;
- * `approval` takes `{decision}`; every kind may be answered `{cancelled}`.
+ * `dialog` takes `{value}` with an action id; `approval` takes `{decision}`;
+ * `editor_text` takes `{value}` with the client's editor text; every kind may
+ * be answered `{cancelled}`.
  */
 export const HostRequestSchema = Type.Union([
 	Type.Object(
@@ -83,6 +118,17 @@ export const HostRequestSchema = Type.Union([
 			kind: Type.Literal("form"),
 			title: Type.String(),
 			fields: Type.Array(UiNodeFormFieldSchema, { minItems: 1 }),
+			timeoutMs,
+		},
+		closed,
+	),
+	/** UI data and the buttons that answer it. */
+	Type.Object(
+		{
+			kind: Type.Literal("dialog"),
+			title: UiNodeTextSchema,
+			body: Type.Array(UiNodeSchema),
+			actions: Type.Array(HostDialogActionSchema, { minItems: 1 }),
 			timeoutMs,
 		},
 		closed,
@@ -123,6 +169,8 @@ export const HostRequestSchema = Type.Union([
 		},
 		closed,
 	),
+	/** The text in the client's editor, which the client answers without asking the user. */
+	Type.Object({ kind: Type.Literal("editor_text"), timeoutMs }, closed),
 ]);
 export type HostRequest = Static<typeof HostRequestSchema>;
 
@@ -212,9 +260,9 @@ export const LiveHostRequestValueSchema = Type.Object(
 	closed,
 );
 
-/** An extension status line. */
+/** An extension status line, and the extension that set it. */
 export const LiveExtensionStatusValueSchema = Type.Object(
-	{ kind: Type.Literal("ext_status"), text: Type.String() },
+	{ kind: Type.Literal("ext_status"), extension: Type.Optional(ExtensionIdSchema), text: Type.String() },
 	closed,
 );
 
@@ -224,6 +272,21 @@ export const LiveExtensionWidgetValueSchema = Type.Object(
 		kind: Type.Literal("ext_widget"),
 		lines: Type.Array(Type.String()),
 		placement: stringEnum(["aboveEditor", "belowEditor"]),
+	},
+	closed,
+);
+
+/** Where a client shows an extension panel; clients without a sidebar show `sidebar` panels above the editor. */
+export const ExtensionPanelPlacementSchema = stringEnum(["aboveEditor", "belowEditor", "sidebar"]);
+
+/** A named extension panel: UI data an extension placed beside the conversation. */
+export const LiveExtensionPanelValueSchema = Type.Object(
+	{
+		kind: Type.Literal("ext_panel"),
+		extension: ExtensionIdSchema,
+		title: Type.Optional(UiNodeStyledTextSchema),
+		placement: ExtensionPanelPlacementSchema,
+		node: UiNodeSchema,
 	},
 	closed,
 );
@@ -262,6 +325,7 @@ export const LIVE_VALUE_SCHEMAS = {
 	host_request: LiveHostRequestValueSchema,
 	ext_status: LiveExtensionStatusValueSchema,
 	ext_widget: LiveExtensionWidgetValueSchema,
+	ext_panel: LiveExtensionPanelValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
 } as const;
@@ -277,6 +341,7 @@ export const LiveValueSchema = Type.Union([
 	LiveHostRequestValueSchema,
 	LiveExtensionStatusValueSchema,
 	LiveExtensionWidgetValueSchema,
+	LiveExtensionPanelValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
 ]);
@@ -297,6 +362,7 @@ export const LIVE_KEYED_KINDS = [
 	"host_request",
 	"ext_status",
 	"ext_widget",
+	"ext_panel",
 	"work",
 ] as const satisfies readonly LiveValueKind[];
 
@@ -371,7 +437,11 @@ export const LiveToolPartialSchema = Type.Object(
 	closed,
 );
 
-/** A tool execution starts, reports progress, or ends; its result entry follows the end. */
+/**
+ * A tool execution starts, reports progress, or ends; its result entry follows
+ * the end. `presentation` replaces the call's presentation; `patch` updates
+ * the one the client holds.
+ */
 export const LiveToolItemSchema = Type.Object(
 	{
 		type: Type.Literal("tool"),
@@ -381,6 +451,8 @@ export const LiveToolItemSchema = Type.Object(
 		args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 		partial: Type.Optional(LiveToolPartialSchema),
 		isError: Type.Optional(Type.Boolean()),
+		presentation: Type.Optional(ToolPresentationSchema),
+		patch: Type.Optional(ToolPresentationPatchSchema),
 	},
 	closed,
 );
@@ -393,6 +465,25 @@ export const LiveSetItemSchema = Type.Object(
 
 /** Remove one keyed value. */
 export const LiveClearItemSchema = Type.Object({ type: Type.Literal("clear"), key: LiveKeySchema }, closed);
+
+/** Keyed families whose node a `patch` item updates: a panel's `node` and a work item's `detail`. */
+export const LIVE_PATCHABLE_KINDS = ["ext_panel", "work"] as const satisfies readonly LiveValueKind[];
+
+export const LivePatchKeySchema = Type.String({
+	pattern: `^(?:${LIVE_PATCHABLE_KINDS.join("|")})/[^\\u0000-\\u001f\\u007f]{1,${LIVE_KEY_ID_MAX_CHARS}}$`,
+	"x-volt-expected": "be the live key of a panel or work item",
+});
+
+/**
+ * Update one keyed value's node in place. `ops` apply to the node as a
+ * one-node tree: an `ext_panel` value's `node`, which stays one node, or a
+ * `work` value's `detail` (the empty tree without one), which stays at most
+ * one node.
+ */
+export const LivePatchItemSchema = Type.Object(
+	{ type: Type.Literal("patch"), key: LivePatchKeySchema, ops: UiPatchSchema },
+	closed,
+);
 
 /** A transient message for the user: a notification or an error. */
 export const LiveNoticeItemSchema = Type.Object(
@@ -420,6 +511,7 @@ export const LIVE_ITEM_SCHEMAS = {
 	tool: LiveToolItemSchema,
 	set: LiveSetItemSchema,
 	clear: LiveClearItemSchema,
+	patch: LivePatchItemSchema,
 	notice: LiveNoticeItemSchema,
 	directive: LiveDirectiveItemSchema,
 } as const;
@@ -431,6 +523,7 @@ export const LiveItemSchema = Type.Union([
 	LiveToolItemSchema,
 	LiveSetItemSchema,
 	LiveClearItemSchema,
+	LivePatchItemSchema,
 	LiveNoticeItemSchema,
 	LiveDirectiveItemSchema,
 ]);

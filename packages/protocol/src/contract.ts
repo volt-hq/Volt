@@ -85,6 +85,24 @@ import {
 	WorkResultSchema,
 } from "./entries.ts";
 import {
+	EXTENSION_LIMITS,
+	ExtensionDescriptionSchema,
+	ExtensionDisplayNameSchema,
+	ExtensionEntrySchema,
+	ExtensionIdSchema,
+	ExtensionManifestSchema,
+	ExtensionPermissionSchema,
+	ExtensionPermissionsSchema,
+	ExtensionSettingSchema,
+	ExtensionSettingsSchema,
+	ExtensionSettingsScopeSchema,
+	ExtensionSettingsValuesSchema,
+	ExtensionSettingsViewSchema,
+	ExtensionSourceScopeSchema,
+	ExtensionStateSchema,
+	ExtensionSummarySchema,
+} from "./extensions.ts";
+import {
 	CatalogNameSchema,
 	CLIENT_FRAME_SCHEMAS,
 	ClientFrameSchema,
@@ -137,6 +155,8 @@ import {
 	RpcCompactionResultSchema,
 } from "./intents.ts";
 import {
+	ExtensionPanelPlacementSchema,
+	HostDialogActionSchema,
 	HostRequestKindSchema,
 	HostRequestSchema,
 	HostResponseSchema,
@@ -145,6 +165,7 @@ import {
 	LiveAssistantEventSchema,
 	LiveItemSchema,
 	LiveKeySchema,
+	LivePatchKeySchema,
 	LiveToolPartialSchema,
 	LiveValueSchema,
 } from "./live.ts";
@@ -185,6 +206,12 @@ import {
 	RpcPlanStepStatusSchema,
 } from "./planning.ts";
 import {
+	MessagePresentationSchema,
+	PRESENTATION_LIMITS,
+	ToolPresentationPatchSchema,
+	ToolPresentationSchema,
+} from "./presentation.ts";
+import {
 	RpcClientMessageIdSchema,
 	RpcConversationIdentifierSchema,
 	RpcConversationInputImagesSchema,
@@ -219,7 +246,14 @@ import {
 	RpcReviewWorkflowResultResponseSchema,
 } from "./projections.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
-import { QUERY_FRAME_SCHEMAS, QUERY_NAMES, QUERY_SCHEMAS, QueryFrameSchema, QueryNameSchema } from "./queries.ts";
+import {
+	EditorCompletionItemSchema,
+	QUERY_FRAME_SCHEMAS,
+	QUERY_NAMES,
+	QUERY_SCHEMAS,
+	QueryFrameSchema,
+	QueryNameSchema,
+} from "./queries.ts";
 import {
 	RemoteAccessPresetNameSchema,
 	RemoteCapabilitiesSchema,
@@ -302,6 +336,7 @@ import {
 	UiTreeItemSchema,
 	UiTreeNodeSchema,
 } from "./ui-node.ts";
+import { UI_PATCH_LIMITS, UiPatchOpSchema, UiPatchPathSchema, UiPatchSchema } from "./ui-patch.ts";
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
@@ -528,6 +563,29 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	UiTreeItem: UiTreeItemSchema,
 	UiTreeNode: UiTreeNodeSchema,
 	UiNode: UiNodeSchema,
+	UiPatchPath: UiPatchPathSchema,
+	UiPatchOp: UiPatchOpSchema,
+	UiPatch: UiPatchSchema,
+
+	// Extensions and presentations
+	ExtensionId: ExtensionIdSchema,
+	ExtensionDisplayName: ExtensionDisplayNameSchema,
+	ExtensionDescription: ExtensionDescriptionSchema,
+	ExtensionEntry: ExtensionEntrySchema,
+	ExtensionPermission: ExtensionPermissionSchema,
+	ExtensionPermissions: ExtensionPermissionsSchema,
+	ExtensionSetting: ExtensionSettingSchema,
+	ExtensionSettings: ExtensionSettingsSchema,
+	ExtensionSettingsValues: ExtensionSettingsValuesSchema,
+	ExtensionSettingsScope: ExtensionSettingsScopeSchema,
+	ExtensionManifest: ExtensionManifestSchema,
+	ExtensionState: ExtensionStateSchema,
+	ExtensionSourceScope: ExtensionSourceScopeSchema,
+	ExtensionSummary: ExtensionSummarySchema,
+	ExtensionSettingsView: ExtensionSettingsViewSchema,
+	ToolPresentation: ToolPresentationSchema,
+	ToolPresentationPatch: ToolPresentationPatchSchema,
+	MessagePresentation: MessagePresentationSchema,
 
 	// Push notifications and the workspace catalog
 	IrohRemotePushNotification: IrohRemotePushNotificationSchema,
@@ -618,12 +676,16 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 
 	// Queries
 	QueryName: QueryNameSchema,
+	EditorCompletionItem: EditorCompletionItemSchema,
 
 	// Live lane and host requests
 	HostRequestKind: HostRequestKindSchema,
+	HostDialogAction: HostDialogActionSchema,
 	HostRequest: HostRequestSchema,
 	HostResponse: HostResponseSchema,
 	LiveKey: LiveKeySchema,
+	LivePatchKey: LivePatchKeySchema,
+	ExtensionPanelPlacement: ExtensionPanelPlacementSchema,
 	LiveAssistantEvent: LiveAssistantEventSchema,
 	LiveToolPartial: LiveToolPartialSchema,
 
@@ -759,11 +821,15 @@ export const RPC_WIRE_LIMITS = {
 
 /**
  * Everything exported into the artifact as `x-volt-limits`: the wire limits,
- * the `UiNode` and work entry bounds, and the protocol constants.
+ * the `UiNode`, patch, presentation, extension, and work entry bounds, and
+ * the protocol constants.
  */
 export const CONTRACT_LIMITS = {
 	...RPC_WIRE_LIMITS,
 	uiNode: UI_NODE_LIMITS,
+	uiPatch: UI_PATCH_LIMITS,
+	presentation: PRESENTATION_LIMITS,
+	extensions: EXTENSION_LIMITS,
 	/** `clientFinishedMax`: the finished work items a client fold keeps beside the open ones. */
 	work: { ...WORK_LIMITS, clientFinishedMax: CLIENT_WORK_FINISHED_MAX },
 	protocol: PROTOCOL_LIMITS,

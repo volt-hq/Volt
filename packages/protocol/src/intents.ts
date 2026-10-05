@@ -25,6 +25,7 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import { type Static, type TObject, type TSchema, type TString, type TUnion, Type } from "typebox";
 import { RpcAgentOptionsModelSelectionSchema } from "./agent-options.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
+import { ExtensionIdSchema, ExtensionSettingsScopeSchema, ExtensionSettingsValuesSchema } from "./extensions.ts";
 import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcMcpAuthResponseSchema, RpcMcpServerResponseSchema } from "./mcp.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
@@ -347,6 +348,22 @@ export const INTENT_SCHEMAS = {
 			closed,
 		),
 		output: RpcResetReviewDiscussionSchema,
+	},
+
+	// Extensions (RFC §8.2), by manifest id
+	/** Enable or disable an extension in a settings scope; open conversations load or unload it at once. */
+	set_extension_enabled: {
+		input: Type.Object(
+			{ id: ExtensionIdSchema, enabled: Type.Boolean(), scope: ExtensionSettingsScopeSchema },
+			closed,
+		),
+	},
+	/** Replace an extension's settings in a scope; settings left out fall back to the other scope or the default. */
+	set_extension_settings: {
+		input: Type.Object(
+			{ id: ExtensionIdSchema, scope: ExtensionSettingsScopeSchema, values: ExtensionSettingsValuesSchema },
+			closed,
+		),
 	},
 
 	// Host settings
