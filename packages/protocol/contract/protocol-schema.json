@@ -152,9 +152,6 @@
 				"fork",
 				"clone",
 				"export_html",
-				"subagent_start",
-				"subagent_abort",
-				"subagent_dispose",
 				"cancel_work",
 				"open_work",
 				"resume_work",
@@ -3360,15 +3357,6 @@
 					"$ref": "#/$defs/Frame.intent.export_html"
 				},
 				{
-					"$ref": "#/$defs/Frame.intent.subagent_start"
-				},
-				{
-					"$ref": "#/$defs/Frame.intent.subagent_abort"
-				},
-				{
-					"$ref": "#/$defs/Frame.intent.subagent_dispose"
-				},
-				{
 					"$ref": "#/$defs/Frame.intent.cancel_work"
 				},
 				{
@@ -5249,93 +5237,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.steer"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.subagent_abort": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "subagent_abort"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.subagent_abort"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.subagent_dispose": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "subagent_dispose"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.subagent_dispose"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.subagent_start": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "subagent_start"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.subagent_start"
 				}
 			},
 			"additionalProperties": false
@@ -8295,46 +8196,6 @@
 			},
 			"additionalProperties": false
 		},
-		"IntentInput.subagent_abort": {
-			"type": "object",
-			"required": [
-				"subagentId"
-			],
-			"properties": {
-				"subagentId": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.subagent_dispose": {
-			"type": "object",
-			"required": [
-				"subagentId"
-			],
-			"properties": {
-				"subagentId": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.subagent_start": {
-			"type": "object",
-			"required": [
-				"agent",
-				"prompt"
-			],
-			"properties": {
-				"agent": {
-					"type": "string"
-				},
-				"prompt": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
 		"IntentInput.switch_session": {
 			"type": "object",
 			"required": [
@@ -8829,24 +8690,6 @@
 					"minLength": 1,
 					"maxLength": 512,
 					"pattern": "^[^\\u0000]+$"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentOutput.subagent_start": {
-			"type": "object",
-			"required": [
-				"subagentId",
-				"conversation"
-			],
-			"properties": {
-				"subagentId": {
-					"type": "string"
 				},
 				"conversation": {
 					"type": "string",
@@ -9655,7 +9498,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|workflow|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work|workflow|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LiveToolPartial": {
@@ -9735,9 +9578,6 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.workflow"
-				},
-				{
-					"$ref": "#/$defs/LiveValue.subagent"
 				},
 				{
 					"$ref": "#/$defs/LiveValue.host_action"
@@ -9978,45 +9818,6 @@
 			},
 			"additionalProperties": false
 		},
-		"LiveValue.subagent": {
-			"type": "object",
-			"required": [
-				"kind",
-				"subagentId",
-				"conversation",
-				"status"
-			],
-			"properties": {
-				"kind": {
-					"type": "string",
-					"const": "subagent"
-				},
-				"subagentId": {
-					"type": "string"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"agent": {
-					"type": "string"
-				},
-				"status": {
-					"type": "string",
-					"enum": [
-						"running",
-						"completed",
-						"failed",
-						"aborted"
-					]
-				},
-				"error": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
 		"LiveValue.usage": {
 			"type": "object",
 			"required": [
@@ -10206,9 +10007,6 @@
 				},
 				{
 					"$ref": "#/$defs/LogEntry.leaf"
-				},
-				{
-					"$ref": "#/$defs/LogEntry.subagent_spawn"
 				},
 				{
 					"$ref": "#/$defs/LogEntry.forked_from"
@@ -11052,61 +10850,6 @@
 			},
 			"additionalProperties": false
 		},
-		"LogEntry.subagent_spawn": {
-			"type": "object",
-			"required": [
-				"ordinal",
-				"id",
-				"parentId",
-				"type",
-				"timestamp",
-				"visibility",
-				"payload"
-			],
-			"properties": {
-				"ordinal": {
-					"type": "integer",
-					"minimum": 1,
-					"maximum": 9007199254740991
-				},
-				"id": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
-				},
-				"parentId": {
-					"anyOf": [
-						{
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 512,
-							"pattern": "^[^\\u0000]+$"
-						},
-						{
-							"type": "null"
-						}
-					]
-				},
-				"type": {
-					"type": "string",
-					"const": "subagent_spawn"
-				},
-				"timestamp": {
-					"type": "string",
-					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
-				},
-				"visibility": {
-					"type": "string",
-					"const": "host"
-				},
-				"payload": {
-					"$ref": "#/$defs/LogEntryPayload.subagent_spawn"
-				}
-			},
-			"additionalProperties": false
-		},
 		"LogEntry.thinking_level_change": {
 			"type": "object",
 			"required": [
@@ -11670,50 +11413,6 @@
 			},
 			"additionalProperties": false
 		},
-		"LogEntryPayload.subagent_spawn": {
-			"type": "object",
-			"required": [
-				"toolCallId",
-				"subagentId",
-				"agent",
-				"childSessionId",
-				"requestKey"
-			],
-			"properties": {
-				"toolCallId": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
-				},
-				"subagentId": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
-				},
-				"agent": {
-					"type": "string",
-					"minLength": 1,
-					"pattern": "^[^\\u0000]+$"
-				},
-				"childSessionId": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"childSessionRef": {
-					"$ref": "#/$defs/SessionReference"
-				},
-				"requestKey": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
-				}
-			},
-			"additionalProperties": false
-		},
 		"LogEntryPayload.thinking_level_change": {
 			"type": "object",
 			"required": [
@@ -11922,9 +11621,6 @@
 				},
 				{
 					"$ref": "#/$defs/ProjectedEntry.leaf"
-				},
-				{
-					"$ref": "#/$defs/ProjectedEntry.subagent_spawn"
 				},
 				{
 					"$ref": "#/$defs/ProjectedEntry.forked_from"
@@ -12687,55 +12383,6 @@
 			},
 			"additionalProperties": false
 		},
-		"ProjectedEntry.subagent_spawn": {
-			"type": "object",
-			"required": [
-				"ordinal",
-				"id",
-				"parentId",
-				"type",
-				"timestamp"
-			],
-			"properties": {
-				"ordinal": {
-					"type": "integer",
-					"minimum": 1,
-					"maximum": 9007199254740991
-				},
-				"id": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 512,
-					"pattern": "^[^\\u0000]+$"
-				},
-				"parentId": {
-					"anyOf": [
-						{
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 512,
-							"pattern": "^[^\\u0000]+$"
-						},
-						{
-							"type": "null"
-						}
-					]
-				},
-				"type": {
-					"type": "string",
-					"const": "subagent_spawn"
-				},
-				"timestamp": {
-					"type": "string",
-					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
-					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
-				},
-				"payload": {
-					"$ref": "#/$defs/LogEntryPayload.subagent_spawn"
-				}
-			},
-			"additionalProperties": false
-		},
 		"ProjectedEntry.thinking_level_change": {
 			"type": "object",
 			"required": [
@@ -12988,9 +12635,6 @@
 		},
 		"ProjectedPayload.session_info": {
 			"$ref": "#/$defs/LogEntryPayload.session_info"
-		},
-		"ProjectedPayload.subagent_spawn": {
-			"$ref": "#/$defs/LogEntryPayload.subagent_spawn"
 		},
 		"ProjectedPayload.thinking_level_change": {
 			"$ref": "#/$defs/LogEntryPayload.thinking_level_change"

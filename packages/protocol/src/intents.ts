@@ -217,14 +217,6 @@ export const INTENT_SCHEMAS = {
 		output: Type.Object({ path: Type.String({ minLength: 1 }) }, closed),
 	},
 
-	// Subagents
-	subagent_start: {
-		input: Type.Object({ agent: Type.String(), prompt: Type.String() }, closed),
-		output: Type.Object({ subagentId: Type.String(), conversation: LogSessionIdSchema }, closed),
-	},
-	subagent_abort: { input: Type.Object({ subagentId: Type.String() }, closed) },
-	subagent_dispose: { input: Type.Object({ subagentId: Type.String() }, closed) },
-
 	// Work (RFC §7): work items of the conversation, by work id
 	/** Cancel open work; rejected `not_allowed` when its kind is not cancellable. */
 	cancel_work: { input: Type.Object({ workId: LogEntryIdSchema }, closed) },

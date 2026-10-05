@@ -20,9 +20,6 @@ import {
 	setSessionNameIntent,
 	setThinkingLevelIntent,
 	steerIntent,
-	subagentAbortIntent,
-	subagentDisposeIntent,
-	subagentStartIntent,
 	switchSessionIntent,
 } from "./conversation.ts";
 import {
@@ -98,9 +95,6 @@ export function createBuiltinIntents() {
 		fork: forkIntent,
 		clone: cloneIntent,
 		export_html: exportHtmlIntent,
-		subagent_start: subagentStartIntent,
-		subagent_abort: subagentAbortIntent,
-		subagent_dispose: subagentDisposeIntent,
 		cancel_work: cancelWorkIntent,
 		open_work: openWorkIntent,
 		resume_work: resumeWorkIntent,

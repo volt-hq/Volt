@@ -14,8 +14,8 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`,
- * `host_action/<id>`. A value's `kind` is its key's family. `workflow`, `subagent`, and `host_action` are interim values until work
+ * `work/<workId>`, `workflow/<workflowId>`, `host_action/<id>`. A value's
+ * `kind` is its key's family. `workflow` and `host_action` are interim values until work
  * items replace them (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
@@ -30,7 +30,7 @@ import {
 	ToolCallSchema,
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
-import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
+import { LogEntryIdSchema } from "./entries.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
@@ -264,19 +264,6 @@ export const LiveWorkflowValueSchema = Type.Object(
 	closed,
 );
 
-/** A subagent child conversation's run status (interim until work items). Subscribe to `conversation` for its log. */
-export const LiveSubagentValueSchema = Type.Object(
-	{
-		kind: Type.Literal("subagent"),
-		subagentId: Type.String(),
-		conversation: LogSessionIdSchema,
-		agent: Type.Optional(Type.String()),
-		status: stringEnum(["running", "completed", "failed", "aborted"]),
-		error: Type.Optional(Type.String()),
-	},
-	closed,
-);
-
 /** A host action's progress after approval (interim until work items). */
 export const LiveHostActionValueSchema = Type.Object(
 	{
@@ -302,7 +289,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
 	workflow: LiveWorkflowValueSchema,
-	subagent: LiveSubagentValueSchema,
 	host_action: LiveHostActionValueSchema,
 } as const;
 
@@ -320,7 +306,6 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
 	LiveWorkflowValueSchema,
-	LiveSubagentValueSchema,
 	LiveHostActionValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
@@ -342,7 +327,6 @@ export const LIVE_KEYED_KINDS = [
 	"ext_widget",
 	"work",
 	"workflow",
-	"subagent",
 	"host_action",
 ] as const satisfies readonly LiveValueKind[];
 

@@ -30,7 +30,6 @@ import type { Personality } from "../personality.ts";
 import { formatPlanPolicy, type PlanningState } from "../planning.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { SessionManager } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "../source-info.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
@@ -104,7 +103,6 @@ export interface SessionToolRuntimeHost {
 	extensions(): SessionExtensionBinding;
 	extensionServices(): SessionExtensionServices;
 	jobs(): SessionJobs;
-	sessionWriter(): SessionWriter;
 	isDisposed(): boolean;
 	/** Rejects once the session is disposed or has lost its log. */
 	assertActive(): void;
@@ -262,6 +260,22 @@ export class SessionToolRuntime {
 
 	getSubagentToolManager(): SubagentToolManager | undefined {
 		return this.subagentToolManager;
+	}
+
+	/**
+	 * The tool policy a subagent this session starts or resumes is clamped to:
+	 * the active tools, with the registry tool for a root session's children.
+	 */
+	subagentAllowedTools(): string[] {
+		const activeToolNames = this.getActiveToolNames();
+		if (
+			this.subagentToolManager?.isSubagentRuntime?.() !== true &&
+			(this.allowedToolNames === undefined || this.allowedToolNames.has(SUBAGENT_REGISTRY_TOOL_NAME)) &&
+			!this.excludedToolNames?.has(SUBAGENT_REGISTRY_TOOL_NAME)
+		) {
+			return [...activeToolNames, SUBAGENT_REGISTRY_TOOL_NAME];
+		}
+		return activeToolNames;
 	}
 
 	async disposeSubagentToolManager(): Promise<void> {
@@ -854,19 +868,7 @@ export class SessionToolRuntime {
 						? {
 								subagent: {
 									manager: subagentToolManager,
-									sessionWriter: this.host.sessionWriter(),
-									getAllowedTools: () => {
-										const activeToolNames = this.getActiveToolNames();
-										if (
-											!isSubagentRuntime &&
-											(this.allowedToolNames === undefined ||
-												this.allowedToolNames.has(SUBAGENT_REGISTRY_TOOL_NAME)) &&
-											!this.excludedToolNames?.has(SUBAGENT_REGISTRY_TOOL_NAME)
-										) {
-											return [...activeToolNames, SUBAGENT_REGISTRY_TOOL_NAME];
-										}
-										return activeToolNames;
-									},
+									getAllowedTools: () => this.subagentAllowedTools(),
 									includeRegistryModes: !isSubagentRuntime,
 								},
 							}
@@ -875,7 +877,6 @@ export class SessionToolRuntime {
 						? {
 								subagentRegistry: {
 									manager: subagentRegistryManager,
-									getAllowedTools: () => this.getActiveToolNames(),
 								},
 							}
 						: {}),

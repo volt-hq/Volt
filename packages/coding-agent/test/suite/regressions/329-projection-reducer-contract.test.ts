@@ -394,7 +394,7 @@ function replayComparableState(manager: SessionManager, targetId: string, client
 		startingGitContext: manager.getStartingGitContext(),
 		context: manager.getConversationState().context,
 		label: manager.getLabel(targetId),
-		subagentSpawns: manager.getSubagentSpawnEntries(),
+		work: [...manager.getConversationState().work.values()],
 		clientInput: clientMessageId === undefined ? undefined : manager.getClientInput(clientMessageId),
 		recovery: clientInputRecovery(manager.getConversationState()),
 	};
@@ -559,12 +559,11 @@ function partitionFinalState(manager: SessionManager, rootEntryId: string, clien
 			planning: state.planning,
 			messages: context.messages.map((message) => ({ role: message.role, text: messageText(message) })),
 		},
-		subagentSpawns: manager.getSubagentSpawnEntries().map((entry) => ({
-			toolCallId: entry.toolCallId,
-			subagentId: entry.subagentId,
-			agent: entry.agent,
-			childSessionId: entry.childSessionId,
-			requestKey: entry.requestKey,
+		work: [...manager.getConversationState().work.values()].map((record) => ({
+			workId: record.workId,
+			kind: record.kind,
+			toolCallId: record.toolCallId,
+			child: record.child,
 		})),
 		clientInput:
 			clientInput === undefined
@@ -609,13 +608,20 @@ async function runProjectionPropertyPartition(
 	await expectReplayMatches(manager, rootEntryId);
 	expect(await manager.logWriter.recordStartingGitContext(propertyGitContext(scenario))).toBe(true);
 	await expectReplayMatches(manager, rootEntryId);
-	await manager.logWriter.appendSubagentSpawn({
-		toolCallId: `property-call-${caseId}`,
-		subagentId: `sa_property_${caseId}`,
-		agent: "researcher",
-		childSessionId: `property-child-${caseId}`,
-		requestKey: `property-request-${caseId}`,
-	});
+	await seedSession(manager, (seed) =>
+		seed.hostRecord("work_started", {
+			workId: `sa_property_${caseId}`,
+			kind: "subagent",
+			title: "researcher",
+			input: { agent: "researcher" },
+			cancellable: true,
+			delivery: "none",
+			resume: true,
+			state: "running",
+			toolCallId: `property-call-${caseId}`,
+			child: { conversation: `property-child-${caseId}` },
+		}),
+	);
 	await expectReplayMatches(manager, rootEntryId);
 	const clientMessageId = `property-client-${caseId}`;
 	const input = { message: scenario.clientInputMessage, images: [] };

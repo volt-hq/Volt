@@ -43,7 +43,6 @@ export type ProjectedLogOp =
 	| { kind: "queue"; pick: number }
 	| { kind: "transition"; pick: number; choice: number }
 	| { kind: "complete"; pick: number }
-	| { kind: "spawn" }
 	| {
 			kind: "work_start";
 			workKind: number;
@@ -99,7 +98,6 @@ const opArbitrary: fc.Arbitrary<ProjectedLogOp> = fc.oneof(
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("queue" as const), pick }) },
 	{ weight: 3, arbitrary: fc.record({ kind: fc.constant("transition" as const), pick, choice: pick }) },
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("complete" as const), pick }) },
-	fc.record({ kind: fc.constant("spawn" as const) }),
 	{
 		weight: 3,
 		arbitrary: fc.record({
@@ -499,19 +497,6 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 				input.state = "completed";
 				break;
 			}
-			case "spawn":
-				append({
-					parentId: leafId,
-					type: "subagent_spawn",
-					payload: {
-						toolCallId: `call-${ordinal}`,
-						subagentId: `sub-${ordinal}`,
-						agent: "worker",
-						childSessionId: `child-${ordinal}`,
-						requestKey: `request-${ordinal}`,
-					},
-				});
-				break;
 			case "work_start": {
 				const workId = `w${ordinal}`;
 				const parentWorkId = op.parent === null ? undefined : choose([...work.keys()], op.parent);
@@ -632,7 +617,7 @@ export const projectedLogArbitrary: fc.Arbitrary<ProjectedLog> = fc
 export type StreamFrame = { readonly entry: ProjectedEntry } | { readonly head: number };
 
 /**
- * The stream a profile that hides `custom` and `subagent_spawn` entries
+ * The stream a profile that hides `custom` entries
  * (and labels on hidden entries) sends: hidden entries become `head` frames,
  * and parents and leaf targets name the nearest visible ancestor.
  */
@@ -653,7 +638,6 @@ export function hidingStream(log: ProjectedLog): {
 		parents.set(entry.id, entry.parentId);
 		const hide =
 			entry.type === "custom" ||
-			entry.type === "subagent_spawn" ||
 			(entry.type === "label" && entry.payload !== undefined && hidden.has(entry.payload.targetId));
 		if (hide) {
 			hidden.add(entry.id);

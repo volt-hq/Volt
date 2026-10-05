@@ -870,22 +870,29 @@ describe("SQLite session store", () => {
 					label: "start",
 				}),
 				entryWrite({
-					type: "subagent_spawn",
+					type: "work_started",
 					id: "spawn-1",
 					parentId: "label-1",
 					timestamp: UPDATED_AT,
 					ordinal: 7,
+					workId: "subagent-1",
+					kind: "subagent",
+					title: "general-purpose",
+					input: { agent: "general-purpose" },
+					cancellable: true,
+					delivery: "none",
+					resume: true,
+					state: "running",
 					toolCallId: "tool-1",
-					subagentId: "subagent-1",
-					agent: "general-purpose",
-					childSessionId: "child-1",
-					childSessionRef: {
-						sessionDirectory: "/sessions/child",
-						storeId: "child-store-1",
-						sessionId: "child-1",
-						sessionGeneration: "child-generation-1",
+					child: {
+						conversation: "child-1",
+						ref: {
+							sessionDirectory: "/sessions/child",
+							storeId: "child-store-1",
+							sessionId: "child-1",
+							sessionGeneration: "child-generation-1",
+						},
 					},
-					requestKey: "request-1",
 				}),
 			],
 			clientInputs: [
@@ -947,9 +954,8 @@ describe("SQLite session store", () => {
 		expect(snapshot?.entries[5]?.payload).toMatchObject({ targetId: "message-1", label: "start" });
 		expect(snapshot?.clientInputs[0]).toMatchObject({ clientMessageId: "client-1", state: "completed" });
 		expect(snapshot?.entries[6]?.payload).toMatchObject({
-			requestKey: "request-1",
-			childSessionId: "child-1",
-			childSessionRef: { storeId: "child-store-1" },
+			workId: "subagent-1",
+			child: { conversation: "child-1", ref: { storeId: "child-store-1" } },
 		});
 		expect(snapshot?.searchChunks).toEqual([{ chunkIndex: 0, entryId: "message-1", text: "hello sqlite" }]);
 	});

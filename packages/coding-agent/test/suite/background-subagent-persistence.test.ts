@@ -143,6 +143,10 @@ async function setup(withConfiguredAuth = true) {
 		async wait(id: string) {
 			return await jobs.execute("collect", { action: "wait", ids: [id], timeoutMs: 30_000 });
 		},
+		/** The parent's `subagent` work, in start order. */
+		subagentWork() {
+			return session.work.list().filter((record) => record.kind === "subagent");
+		},
 		/** Wait until the delegated child run settled; the job records its result after the parent writes queued before it. */
 		async childSettled() {
 			await vi.waitFor(() =>
@@ -178,35 +182,42 @@ async function setup(withConfiguredAuth = true) {
 
 type Context = Awaited<ReturnType<typeof setup>>;
 
-function pauseParent(context: Context, outcome: "commit" | "rollback" | "conflict" = "commit", failSpawn = false) {
+/** The work payload types of a store transaction's entries. */
+function workTypes(types: readonly string[]): boolean {
+	return types.every((type) => type.startsWith("work_"));
+}
+
+/**
+ * Pause the parent's first write that is not work: a concurrent parent
+ * commit. Writes queued behind it, the subagent's `work_started` included,
+ * wait for it. `failSubagentStart` fails the write that records the subagent.
+ */
+function pauseParent(context: Context, outcome: "commit" | "conflict" = "commit", failSubagentStart = false) {
 	const started = deferred();
 	const release = deferred();
-	const spawnStarted = deferred();
-	const releaseSpawn = deferred();
 	const apply = context.store.applyTransaction.bind(context.store);
 	const writes: string[][] = [];
 	let paused = false;
 	const spy = vi.spyOn(context.store, "applyTransaction").mockImplementation(async (input) => {
 		if (input.sessionId !== context.parent.getSessionId()) return apply(input);
-		const types = input.payload.entries.map((entry) => parsePersistedSessionEntry(entry.entry).type);
-		// The background job's own work entries are not the parent writes under test.
-		if (types.every((type) => type.startsWith("work_"))) return apply(input);
+		const entries = input.payload.entries.map((entry) => parsePersistedSessionEntry(entry.entry));
+		const types = entries.map((entry) => entry.type);
 		writes.push(types);
-		if (!paused) {
+		if (!paused && !workTypes(types)) {
 			paused = true;
 			started.resolve();
 			await release.promise;
-			if (outcome === "rollback") throw new Error("injected parent rollback");
 			// The parent's lock was lost: another writer appended, so the fence fails.
 			if (outcome === "conflict") return { status: "conflict", actualOrdinal: input.expectedOrdinal + 1 };
-		} else if (types.includes("subagent_spawn")) {
-			spawnStarted.resolve();
-			await releaseSpawn.promise;
-			if (failSpawn) throw new Error("injected spawn write failure");
+		} else if (
+			failSubagentStart &&
+			entries.some((entry) => entry.type === "work_started" && entry.kind === "subagent")
+		) {
+			throw new Error("injected subagent start write failure");
 		}
 		return apply(input);
 	});
-	return { started, release, spawnStarted, releaseSpawn, writes, restore: () => spy.mockRestore() };
+	return { started, release, writes, restore: () => spy.mockRestore() };
 }
 
 /**
@@ -220,9 +231,9 @@ function commitParent(context: Context, kind: "append" | "navigation"): Promise<
 	return context.control.conversation.navigate(null);
 }
 
-describe("background subagent spawn persistence", () => {
+describe("background subagent work persistence", () => {
 	it.each(["append", "navigation"] as const)(
-		"persists one hidden edge after a concurrent parent %s commit and reopens it",
+		"records the subagent's work before its first prompt, behind a concurrent parent %s, and reopens it",
 		async (kind) => {
 			const context = await setup();
 			const barrier = pauseParent(context);
@@ -230,46 +241,32 @@ describe("background subagent spawn persistence", () => {
 				const jobId = await context.start();
 				const waited = context.wait(jobId);
 				const leaf = context.parent.getLeafId();
-				const observed: string[] = [];
-				const branches: unknown[] = [];
-				context.parent.subscribeEntries((entry) => {
-					if (!entry.type.startsWith("work_")) observed.push(entry.type);
-				});
-				context.parent.subscribeBranchChanges((change) => branches.push(change));
 				const commit = commitParent(context, kind);
 				await barrier.started.promise;
 				context.allowPrompt.resolve();
-				await context.published.promise;
-				context.finishChild.resolve();
-				await context.childSettled();
-				expect(context.manager.listDelegations()).toMatchObject([{ status: "completed" }]);
-				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
-				expect(context.parent.getLeafId()).toBe(leaf);
-				expect(observed).toEqual([]);
+				// The child's first prompt waits for its work to be recorded, behind the parent commit.
+				await setImmediate();
+				expect(context.subagentWork()).toEqual([]);
+				expect(context.manager.listDelegations()).toEqual([]);
 				barrier.release.resolve();
 				await commit;
-				await barrier.spawnStarted.promise;
-				await setImmediate();
-				// The edge commits after the parent commit; it is not visible while its own commit is in flight.
-				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
+				await context.published.promise;
+				const [started] = context.subagentWork();
+				expect(started).toMatchObject({
+					kind: "subagent",
+					state: "running",
+					toolCallId: "background-spawn",
+					input: { agent: "general", task: "independent work" },
+					child: { conversation: expect.any(String), ref: expect.any(Object) },
+				});
+				expect(started?.outcome).toBeUndefined();
+				// Work entries are host records: they never move the leaf.
 				const finalLeaf = context.parent.getLeafId();
-				const entries = context.parent.getEntries();
-				const branch = context.parent.getBranch();
-				barrier.releaseSpawn.resolve();
-				await vi.waitFor(() => expect(context.parent.getSubagentSpawnEntries()).toHaveLength(1));
-				const edges = context.parent.getSubagentSpawnEntries();
-				expect(edges).toHaveLength(1);
-				expect(edges[0]).toMatchObject({ toolCallId: "background-spawn", parentId: finalLeaf });
-				expect(context.parent.getEntry(edges[0].id)).toBeUndefined();
-				expect(context.parent.getLeafId()).toBe(finalLeaf);
-				expect(context.parent.getEntries()).toEqual(entries);
-				expect(context.parent.getBranch()).toEqual(branch);
-				// Only a leaf entry moves the branch; appends advance the leaf without a branch change.
-				expect(observed).toEqual(kind === "append" ? ["message"] : []);
-				expect(branches).toEqual(kind === "navigation" ? [{ previousLeafId: leaf, nextLeafId: null }] : []);
-				expect(barrier.writes).toEqual([kind === "append" ? ["message"] : ["leaf"], ["subagent_spawn"]]);
-				// A navigation that commits before the job's result passes the result policy leaves that
-				// result stale for the new branch: the job then ends failed.
+				if (kind === "navigation") expect(finalLeaf).toBeNull();
+				else expect(finalLeaf).not.toBe(leaf);
+				context.finishChild.resolve();
+				await context.childSettled();
+				expect(context.manager.listDelegations()).toMatchObject([{ id: started?.workId, status: "completed" }]);
 				expect(await waited).toMatchObject({
 					details: {
 						wait: {
@@ -280,13 +277,28 @@ describe("background subagent spawn persistence", () => {
 									status: kind === "append" ? "completed" : expect.stringMatching(/^(completed|failed)$/),
 								},
 							],
-							pending: [],
 						},
 					},
 				});
+				await vi.waitFor(() => expect(context.subagentWork()[0]?.outcome).toBe("completed"));
+				expect(context.parent.getLeafId()).toBe(finalLeaf);
+				// The parent commit was the only non-work write; the subagent's start queued behind it.
+				expect(barrier.writes.filter((types) => !workTypes(types))).toEqual([
+					kind === "append" ? ["message"] : ["leaf"],
+				]);
+				const entries = context.parent.getEntries();
 				const reopened = await SessionManager.openReadOnly(context.parent.getSessionRef()!);
 				try {
-					expect(reopened.getSubagentSpawnEntries()).toEqual(edges);
+					const work = [...reopened.getConversationState().work.values()].filter(
+						(record) => record.kind === "subagent",
+					);
+					expect(work).toMatchObject([
+						{
+							workId: started?.workId,
+							outcome: "completed",
+							result: { output: { text: "durable child report" } },
+						},
+					]);
 					expect(reopened.getEntries()).toEqual(entries);
 					expect(reopened.getLeafId()).toBe(finalLeaf);
 				} finally {
@@ -294,143 +306,67 @@ describe("background subagent spawn persistence", () => {
 				}
 			} finally {
 				barrier.release.resolve();
-				barrier.releaseSpawn.resolve();
 				barrier.restore();
 				await context.cleanup();
 			}
 		},
 	);
 
-	it.each(["commit", "rollback"] as const)(
-		"drains accepted edges on close after a parent append %s, preserving owned attribution",
-		async (outcome) => {
-			const context = await setup();
-			const barrier = pauseParent(context, outcome);
-			try {
-				const leaf = context.parent.getLeafId();
-				const ref = context.parent.getSessionRef()!;
-				const child = await SessionManager.create(context.parent.getCwd(), context.parent.getSessionDir(), {
-					origin: "subagent",
-					parentSession: ref,
-				});
-				const childRef = child.getSessionRef()!;
-				await child.closePersistence();
-				const commit = commitParent(context, "append").then(
-					() => undefined,
-					(error: unknown) => error,
-				);
-				await barrier.started.promise;
-				const spawn = {
-					toolCallId: "owned-call",
-					subagentId: "sa_owned",
-					agent: "general",
-					childSessionId: childRef.sessionId,
-					childSessionRef: { ...childRef },
-					requestKey: "owned-request",
-				};
-				const first = context.session.sessionWriter.appendSubagentSpawn(spawn);
-				spawn.childSessionRef.sessionId = "mutated-child";
-				spawn.requestKey = "mutated-request";
-				const second = context.session.sessionWriter.appendSubagentSpawn({
-					...spawn,
-					childSessionRef: childRef,
-					subagentId: "sa_second",
-				});
-				let closed = false;
-				const close = context.close().then(
-					() => {
-						closed = true;
-						return undefined;
-					},
-					(error: unknown) => {
-						closed = true;
-						return error;
-					},
-				);
-				barrier.release.resolve();
-				const result = await commit;
-				if (outcome === "rollback") expect(result).toMatchObject({ code: "commit_rolled_back" });
-				else expect(result).toBeUndefined();
-				// The edges commit after the parent append, under the leaf it left.
-				const edgeParent = context.parent.getLeafId();
-				if (outcome === "rollback") expect(edgeParent).toBe(leaf);
-				await barrier.spawnStarted.promise;
-				await setImmediate();
-				expect(closed).toBe(false);
-				barrier.releaseSpawn.resolve();
-				// An earlier write's failure is reported by that write, not by close.
-				expect(await close).toBeUndefined();
-				// The closed session's log refuses later writes.
-				await expect(
-					context.parent.logWriter.appendSubagentSpawn({
-						...spawn,
-						childSessionRef: childRef,
-						subagentId: "sa_after_close",
-					}),
-				).rejects.toThrow(/closed/);
-				const firstId = await first;
-				const secondId = await second;
-				const reopened = await SessionManager.open(ref);
-				try {
-					expect(reopened.getSubagentSpawnEntries()).toMatchObject([
-						{ id: firstId, parentId: edgeParent, requestKey: "owned-request", childSessionRef: childRef },
-						{ id: secondId, parentId: edgeParent, subagentId: "sa_second" },
-					]);
-					if (outcome === "rollback") expect(reopened.getLeafId()).toBe(leaf);
-				} finally {
-					await reopened.closePersistence();
-				}
-			} finally {
-				barrier.release.resolve();
-				barrier.releaseSpawn.resolve();
-				barrier.restore();
-				expect(await context.cleanup()).toBeUndefined();
-			}
-		},
-	);
-
-	it.each(["rejected", "aborted-before", "aborted-after"] as const)(
-		"records only accepted prompts when the child is %s during the parent commit",
-		async (phase) => {
-			const context = await setup(phase !== "rejected");
-			const barrier = pauseParent(context);
-			try {
-				const jobId = await context.start();
-				const waited = context.wait(jobId);
-				const commit = commitParent(context, "append");
-				await barrier.started.promise;
-				// The abort stops the job at once; the job records the cancel after the parent commit.
-				let abort: Promise<void> | undefined;
-				if (phase === "aborted-before") {
+	it.each([
+		["rejected", ["failed"]],
+		["aborted-before", ["cancelled"]],
+		["aborted-after", ["cancelled"]],
+	] as const)("ends the subagent's work when its child is %s during the parent commit", async (phase, outcomes) => {
+		const context = await setup(phase !== "rejected");
+		const barrier = pauseParent(context);
+		try {
+			const jobId = await context.start();
+			const waited = context.wait(jobId);
+			const commit = commitParent(context, "append");
+			await barrier.started.promise;
+			// The abort stops the job at once; the job records the cancel after the parent commit.
+			let abort: Promise<void> | undefined;
+			if (phase === "aborted-before") {
+				abort = context.session.abort();
+				context.allowPrompt.resolve();
+			} else {
+				context.allowPrompt.resolve();
+				if (phase === "aborted-after") {
+					barrier.release.resolve();
+					await context.published.promise;
 					abort = context.session.abort();
-					context.allowPrompt.resolve();
-				} else {
-					context.allowPrompt.resolve();
-					if (phase === "aborted-after") {
-						await context.published.promise;
-						abort = context.session.abort();
-					}
 				}
-				await context.childSettled();
-				barrier.release.resolve();
-				barrier.releaseSpawn.resolve();
-				await commit;
-				await abort;
-				await waited;
-				// Close waits for every write already called, including an edge written after the commit.
-				await context.close();
-				expect(context.parent.getSubagentSpawnEntries()).toHaveLength(phase === "aborted-after" ? 1 : 0);
-				expect(context.manager.listDelegations()).toHaveLength(phase === "aborted-after" ? 1 : 0);
-			} finally {
-				barrier.release.resolve();
-				barrier.releaseSpawn.resolve();
-				barrier.restore();
-				await context.cleanup();
 			}
-		},
-	);
+			barrier.release.resolve();
+			await commit;
+			await abort;
+			await waited;
+			await vi.waitFor(() => expect(context.subagentWork().every((record) => record.outcome)).toBe(true));
+			// A child stopped before its work was recorded leaves none (the abort races the start);
+			// once recorded, the work ends with the child.
+			const work = context.subagentWork();
+			expect(work.map((record) => record.outcome)).toEqual(
+				phase === "aborted-before" && work.length === 0 ? [] : outcomes,
+			);
+			if (phase === "rejected") expect(work[0]?.error).toMatch(/API key|auth/i);
+			await context.close();
+			const reopened = await SessionManager.openReadOnly(context.parent.getSessionRef()!);
+			try {
+				const reopenedWork = [...reopened.getConversationState().work.values()].filter(
+					(record) => record.kind === "subagent",
+				);
+				expect(reopenedWork.map((record) => record.outcome)).toEqual(work.map((record) => record.outcome));
+			} finally {
+				await reopened.closePersistence();
+			}
+		} finally {
+			barrier.release.resolve();
+			barrier.restore();
+			await context.cleanup();
+		}
+	});
 
-	it("rejects queued edges when the parent loses its log", async () => {
+	it("never prompts a child whose work cannot be recorded because the parent lost its log", async () => {
 		const context = await setup();
 		const barrier = pauseParent(context, "conflict");
 		try {
@@ -440,64 +376,29 @@ describe("background subagent spawn persistence", () => {
 			const rejectedCommit = expect(commit).rejects.toThrow(/but the log head is/);
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
-			await context.published.promise;
-			context.finishChild.resolve();
-			// The job's result cannot be recorded once the log is lost; the next open interrupts it.
-			await context.childSettled();
-			expect(jobId).toBeDefined();
 			barrier.release.resolve();
 			await rejectedCommit;
 			await expect(context.parent.lost).resolves.toMatchObject({ reason: "fence_conflict" });
-			// Closing reports nothing new: `lost` already did. It waits for the queued edge, which the loss rejects.
+			expect(jobId).toBeDefined();
+			// The subagent's start was queued behind the lost commit: its child never runs a turn.
 			await expect(context.close()).resolves.toBeUndefined();
-			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
-			await expect(context.parent.logWriter.appendSessionInfo("must reject")).rejects.toThrow(/but the log head is/);
+			expect(context.manager.listDelegations()).toEqual([]);
 			const reopened = await SessionManager.openReadOnly(ref);
 			try {
-				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
+				expect(
+					[...reopened.getConversationState().work.values()].filter((record) => record.kind === "subagent"),
+				).toEqual([]);
 			} finally {
 				await reopened.closePersistence();
 			}
 		} finally {
 			barrier.release.resolve();
-			barrier.releaseSpawn.resolve();
 			barrier.restore();
 			expect(await context.cleanup(true)).toBeUndefined();
 		}
 	});
 
-	it("drains edges admitted while close waits for an earlier write", async () => {
-		const context = await setup();
-		const barrier = pauseParent(context);
-		try {
-			const jobId = await context.start();
-			const earlier = context.session.sessionWriter.appendSessionInfo("earlier write");
-			await barrier.started.promise;
-			context.allowPrompt.resolve();
-			await context.published.promise;
-			context.finishChild.resolve();
-			await context.childSettled();
-			expect(jobId).toBeDefined();
-			const drain = context.close();
-			barrier.release.resolve();
-			await earlier;
-			const leaf = context.parent.getLeafId();
-			barrier.releaseSpawn.resolve();
-			await drain;
-			// Close waits for the writes called before it, the edge queued behind the earlier write included.
-			expect(context.parent.getSubagentSpawnEntries()).toMatchObject([{ parentId: leaf }]);
-			expect(context.parent.getSubagentSpawnEntries()).toHaveLength(1);
-			expect(context.parent.getLeafId()).toBe(leaf);
-			expect(context.parent.getSessionName()).toBe("earlier write");
-		} finally {
-			barrier.release.resolve();
-			barrier.releaseSpawn.resolve();
-			barrier.restore();
-			await context.cleanup();
-		}
-	});
-
-	it("rolls back a failed edge write without claiming durable recovery", async () => {
+	it("ends a subagent start whose work write fails without a child turn, and the parent stays live", async () => {
 		const context = await setup();
 		const barrier = pauseParent(context, "commit", true);
 		try {
@@ -507,29 +408,22 @@ describe("background subagent spawn persistence", () => {
 			const commit = commitParent(context, "append");
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
-			await context.published.promise;
-			context.finishChild.resolve();
-			await context.childSettled();
 			barrier.release.resolve();
 			await commit;
-			await barrier.spawnStarted.promise;
-			barrier.releaseSpawn.resolve();
-			await waited;
-			// Close waits for the failed edge write; that failure is the write's own, not close's.
-			await expect(context.close()).resolves.toBeUndefined();
-			// The edge was rolled back, so the parent still matches its log and was not lost.
-			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
+			expect(await waited).toMatchObject({ details: { wait: { results: [{ id: jobId, status: "failed" }] } } });
+			expect(context.subagentWork()).toEqual([]);
+			expect(context.manager.listDelegations()).toEqual([]);
+			// The failed write was rolled back, so the parent still matches its log and was not lost.
 			await expect(Promise.race([context.parent.lost, setImmediate("live")])).resolves.toBe("live");
+			await expect(context.close()).resolves.toBeUndefined();
 			const reopened = await SessionManager.open(ref);
 			try {
-				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
 				expect(getMessageText(reopened.getConversationState().context.messages.at(-1))).toBe("parent continuation");
 			} finally {
 				await reopened.closePersistence();
 			}
 		} finally {
 			barrier.release.resolve();
-			barrier.releaseSpawn.resolve();
 			barrier.restore();
 			expect(await context.cleanup(true)).toBeUndefined();
 		}

@@ -129,24 +129,8 @@ describe("SessionManager canonical data admission", () => {
 		await expect(
 			manager.logWriter.appendCustomMessageEntry("custom", [{ type: "video", data: "nope" }] as never, true),
 		).rejects.toThrow("unsupported user content type");
-		await expect(
-			manager.logWriter.appendSubagentSpawn({
-				toolCallId: "call-1",
-				subagentId: "sa_child",
-				agent: "researcher",
-				childSessionId: "child-session",
-				childSessionRef: {
-					sessionDirectory: "/sessions",
-					storeId: "store",
-					sessionId: "other-child",
-					sessionGeneration: "generation",
-				},
-				requestKey: "request-1",
-			}),
-		).rejects.toThrow("must match childSessionId");
 
 		expect(manager.getEntries()).toEqual([]);
-		expect(manager.getSubagentSpawnEntries()).toEqual([]);
 		expect(manager.getLeafId()).toBeNull();
 		expect(observed).toEqual([]);
 		await manager.logWriter.appendSessionInfo("valid");

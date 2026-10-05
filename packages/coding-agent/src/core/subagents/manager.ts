@@ -1,6 +1,7 @@
+import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
-import type { AgentAbortSource, AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage, Message, TextContent } from "@hansjm10/volt-ai";
+import type { AgentAbortSource, AgentMessage, ThinkingLevel, WorkRecord } from "@hansjm10/volt-agent-core";
+import { WORK_OUTPUT_MAX_UTF8_BYTES } from "@hansjm10/volt-protocol/work";
 import type { AgentSessionEvent, SessionStats } from "../agent-session.ts";
 import { ConversationLockedError } from "../conversation-log/conversation-lock.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -11,7 +12,14 @@ import type { HostClient } from "../host/targets.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { SessionManager, type SessionReference } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
+import {
+	type WorkContext,
+	WorkError,
+	type WorkExecution,
+	type WorkExecutor,
+	type WorkKindDefinition,
+	type WorkRegistry,
+} from "../work/registry.ts";
 import type {
 	SubagentCapacityLimitSnapshot,
 	SubagentSpawnCapacityConstraint,
@@ -32,16 +40,16 @@ import {
 	SubagentRegistry,
 	type SubagentRegistryRecord,
 	type SubagentRegistrySnapshot,
-	type SubagentRegistryStatus,
+	type SubagentRunStatus,
 	type SubagentSpawnConfirmationPreflight,
 } from "./registry.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 import { SubagentTurnBudget, type SubagentTurnLimits } from "./turn-budget.ts";
+import { readSubagentWorkInput, SUBAGENT_WORK_KIND, subagentWorkKind } from "./work.ts";
 
 export type SubagentEvent = AgentSessionEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
 export type SubagentEventListener = (event: SubagentEvent) => void;
-export type SubagentActivityStatus = "running" | "completed" | "failed" | "aborted";
 
 export interface SubagentActivityEvent {
 	sequence: number;
@@ -58,7 +66,7 @@ export interface SubagentActivity {
 		source: SubagentDefinition["source"] | undefined;
 	};
 	task?: string;
-	status: SubagentActivityStatus;
+	status: SubagentRunStatus;
 	startedAt: number;
 	updatedAt: number;
 	finishedAt?: number;
@@ -72,11 +80,14 @@ export interface SubagentActivity {
 
 export type SubagentActivityListener = (activityId: string) => void;
 
+/** How a child's run ended. */
+export type SubagentResultStatus = Extract<SubagentRunStatus, "completed" | "failed" | "cancelled">;
+
 export interface SubagentResult {
 	id: string;
 	sessionId: string;
 	event: SubagentEndEvent;
-	status: Exclude<SubagentActivityStatus, "running">;
+	status: SubagentResultStatus;
 	error?: string;
 }
 
@@ -175,31 +186,27 @@ export interface SubagentStartOptions {
 	delegationScope?: SubagentDelegationScope;
 	/** Whole-batch admission issued by this manager for a confirmed spawn request. */
 	spawnBatchLease?: SubagentSpawnBatchLease;
-	/**
-	 * Attribution for the durable spawn edge recorded in the parent transcript at
-	 * the publish commit point (issue #129). Omitted for programmatic starts,
-	 * which record no edge and are invisible to registry hydration.
-	 */
-	spawnRecord?: SubagentSpawnRecordContext;
-	/**
-	 * §5 resume: reuse this id instead of minting a fresh one, so the resumed
-	 * run re-occupies its claimed registry record. Set only by resumeDelegation.
-	 */
-	resumeSubagentId?: string;
-	/**
-	 * §5 resume: the interrupted run's original task, restored on the
-	 * re-registered record instead of the continuation prompt.
-	 */
-	resumeTaskLabel?: string;
+	/** The tool call that starts the child: its work item records it. */
+	toolCallId?: string;
 }
 
-/** Tool-call attribution for one durable spawn edge. */
-export interface SubagentSpawnRecordContext {
-	toolCallId: string;
-	/** createSubagentSpawnRequestKey hash of the originating spawn request. */
-	requestKey: string;
-	/** Writer of the session whose tool call spawned the child: the edge commits there. */
-	writer: SessionWriter;
+/**
+ * The conversation a manager belongs to: each child it starts is a
+ * `subagent` work item of that conversation (subagents/work.ts).
+ */
+export interface SubagentWorkBinding {
+	/** The conversation's work registry. */
+	work(): WorkRegistry;
+	/** The tool policy a resumed child is clamped to: the conversation's, as for a new start. */
+	allowedTools(): string[] | undefined;
+}
+
+/** How a manager runs one child beyond its start options. */
+interface SubagentRunControl {
+	/** The run's work ends it: its conversation closes once the run ends. */
+	readonly detached?: boolean;
+	/** Continue suspended work under its id instead of starting new work. */
+	readonly resume?: { readonly item: WorkRecord; readonly task?: string };
 }
 
 export interface SubagentStartByNameOptions extends SubagentStartOptions {
@@ -256,7 +263,7 @@ interface MutableSubagentActivity {
 	sessionId: string;
 	agent: SubagentActivity["agent"];
 	task: string | undefined;
-	status: SubagentActivityStatus;
+	status: SubagentRunStatus;
 	startedAt: number;
 	updatedAt: number;
 	finishedAt: number | undefined;
@@ -364,7 +371,7 @@ function resolveTerminalResult(
 	abortRequested: boolean,
 ): Pick<SubagentResult, "status" | "error"> {
 	if (abortRequested) {
-		return { status: "aborted" };
+		return { status: "cancelled" };
 	}
 	for (let index = event.messages.length - 1; index >= 0; index -= 1) {
 		const message = event.messages[index];
@@ -373,7 +380,7 @@ function resolveTerminalResult(
 		}
 		const assistant = message as { stopReason?: unknown; error?: { message?: unknown } };
 		if (assistant.stopReason === "aborted") {
-			return { status: "aborted" };
+			return { status: "cancelled" };
 		}
 		if (assistant.stopReason === "error") {
 			return {
@@ -431,102 +438,47 @@ const RESUME_ID_PREVIEW_CHARS = 120;
 const SUBAGENT_RESUME_PROMPT =
 	"You were interrupted before completing your task. Review the conversation so far, finish the original task, and reply with your complete final report.";
 
-function messageText(content: Message["content"]): string {
-	if (typeof content === "string") {
-		return content;
+/** `text` within the work output bound, keeping its start: a report reads from the top. */
+function boundedOutput(text: string): { text: string; truncated: boolean } {
+	if (Buffer.byteLength(text, "utf8") <= WORK_OUTPUT_MAX_UTF8_BYTES) return { text, truncated: false };
+	let low = 0;
+	let high = Math.min(text.length, WORK_OUTPUT_MAX_UTF8_BYTES);
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (Buffer.byteLength(text.slice(0, middle), "utf8") <= WORK_OUTPUT_MAX_UTF8_BYTES) low = middle;
+		else high = middle - 1;
 	}
-	return content
-		.filter((part): part is TextContent => part.type === "text" && typeof part.text === "string")
-		.map((part) => part.text)
-		.join("\n")
-		.trim();
+	const last = text.charCodeAt(low - 1);
+	if (last >= 0xd800 && last <= 0xdbff) low -= 1;
+	return { text: text.slice(0, low), truncated: true };
 }
 
-/**
- * ToolCall ids of this transcript's settled subagent results. A synthesized
- * abort marker (agent-loop abort or dispose-time persistence, both prefixed
- * "Operation aborted") is not settlement: its children remain recoverable
- * (design §§2, 4 of docs/design/subagent-durable-spawn-graph.md).
- */
-function collectSettledToolCallIds(sessionManager: SessionManager): Set<string> {
-	const settled = new Set<string>();
-	for (const entry of sessionManager.getEntries()) {
-		if (entry.type !== "message" || entry.message.role !== "toolResult") {
-			continue;
-		}
-		const message = entry.message;
-		if (message.isError && messageText(message.content).startsWith("Operation aborted")) {
-			continue;
-		}
-		settled.add(message.toolCallId);
-	}
-	return settled;
-}
-
-/** ToolCall ids present anywhere in the transcript; an edge without one is stranded (design §3). */
-function collectToolCallIds(sessionManager: SessionManager): Set<string> {
-	const ids = new Set<string>();
-	for (const entry of sessionManager.getEntries()) {
-		if (entry.type !== "message" || entry.message.role !== "assistant") {
-			continue;
-		}
-		for (const block of entry.message.content) {
-			if (block.type === "toolCall") {
-				ids.add(block.id);
-			}
-		}
-	}
-	return ids;
-}
-
-interface HydratedChildState {
-	status: Exclude<SubagentRegistryStatus, "running">;
-	task?: string;
-	output?: string;
-	error?: string;
-	finishedAt: number;
-}
-
-/** Terminal state of a child run derived from its persisted transcript alone. */
-function deriveHydratedChildState(child: SessionManager, fallbackTime: number): HydratedChildState {
-	// The task comes from the raw entry stream, not the built context: a child
-	// that auto-compacted mid-run replaces its early messages with a summary,
-	// and the summary must not masquerade as the original task.
-	let task: string | undefined;
-	for (const entry of child.getEntries()) {
-		if (entry.type === "message" && entry.message.role === "user") {
-			task = messageText(entry.message.content) || undefined;
-			break;
-		}
-	}
-	const messages = child.getConversationState().context.messages;
-	const last = messages.at(-1);
-	const finishedAt = typeof last?.timestamp === "number" ? last.timestamp : fallbackTime;
-	if (last?.role === "assistant") {
-		const assistant = last as AssistantMessage;
-		if (assistant.stopReason === "error") {
-			return {
-				status: "failed",
-				...(task !== undefined ? { task } : {}),
-				error: assistant.error?.message || "The run failed before producing a result.",
-				finishedAt,
-			};
-		}
-		if (assistant.stopReason === "stop" || assistant.stopReason === "length") {
-			const output = messageText(assistant.content);
-			return {
-				status: "completed",
-				...(task !== undefined ? { task } : {}),
-				...(output ? { output } : {}),
-				finishedAt,
-			};
-		}
-	}
+/** What a child's ended run records on its work: the final report as output, or why it failed. */
+function subagentExecution(result: SubagentResult): WorkExecution {
+	if (result.status === "cancelled") return { outcome: "cancelled" };
+	const output = getFinalAssistantText(result.event);
 	return {
-		status: "aborted",
-		...(task !== undefined ? { task } : {}),
-		error: "Interrupted before completion: the runtime closed mid-turn.",
-		finishedAt,
+		outcome: result.status,
+		...(output === undefined ? {} : { result: { output: boundedOutput(output) } }),
+		...(result.status === "failed" && result.error !== undefined ? { error: result.error } : {}),
+	};
+}
+
+/** When `record`'s work started and finished, from the entries `sessionManager`'s log holds for it. */
+function workTimes(
+	sessionManager: SessionManager | undefined,
+	record: WorkRecord,
+): { startedAt?: number; finishedAt?: number } {
+	const at = (ordinal: number | undefined): number | undefined => {
+		const timestamp = ordinal === undefined ? undefined : sessionManager?.getCommittedEntryAt(ordinal)?.timestamp;
+		const time = timestamp === undefined ? Number.NaN : Date.parse(timestamp);
+		return Number.isNaN(time) ? undefined : time;
+	};
+	const startedAt = at(record.startedOrdinal);
+	const finishedAt = at(record.finishedOrdinal);
+	return {
+		...(startedAt === undefined ? {} : { startedAt }),
+		...(finishedAt === undefined ? {} : { finishedAt }),
 	};
 }
 
@@ -534,6 +486,8 @@ class LocalSubagentHandle implements SubagentHandle {
 	readonly id: string;
 	readonly sessionId: string;
 	readonly conversation: HostedConversation;
+	/** Runs the child's work until its run ends; a resumed run is prompted with `continuation` first. */
+	runWork: ((ctx: WorkContext, continuation?: string) => Promise<WorkExecution>) | undefined;
 	/** Leaves the child conversation, which closes it unless its runtime is retained. */
 	private readonly leave: () => Promise<void>;
 	private readonly sessionRef: SessionReference | undefined;
@@ -541,6 +495,9 @@ class LocalSubagentHandle implements SubagentHandle {
 	private readonly removeFromManager: (id: string) => void;
 	private readonly onPromptAccepted: (message: string) => void;
 	private readonly onPromptFailed: (error: unknown) => Promise<void>;
+	/** Record the child's work before its first prompt. */
+	private readonly recordWork: (message: string) => Promise<void>;
+	private workRecorded = false;
 	private readonly onAbortRequested: () => void;
 	private readonly isAbortRequested: () => boolean;
 	private readonly resolveTerminalResult: (event: SubagentEndEvent) => Pick<SubagentResult, "status" | "error">;
@@ -573,6 +530,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		removeFromManager: (id: string) => void;
 		onPromptAccepted: (message: string) => void;
 		onPromptFailed: (error: unknown) => Promise<void>;
+		recordWork: (message: string) => Promise<void>;
 		onAbortRequested: () => void;
 		isAbortRequested: () => boolean;
 		resolveTerminalResult: (event: SubagentEndEvent) => Pick<SubagentResult, "status" | "error">;
@@ -584,12 +542,14 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.id = options.id;
 		this.sessionId = options.sessionId;
 		this.conversation = options.conversation;
+		this.runWork = undefined;
 		this.sessionRef = options.sessionRef;
 		this.leave = options.leave;
 		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
 		this.onPromptAccepted = options.onPromptAccepted;
 		this.onPromptFailed = options.onPromptFailed;
+		this.recordWork = options.recordWork;
 		this.onAbortRequested = options.onAbortRequested;
 		this.isAbortRequested = options.isAbortRequested;
 		this.resolveTerminalResult = options.resolveTerminalResult;
@@ -610,6 +570,10 @@ class LocalSubagentHandle implements SubagentHandle {
 		try {
 			if (this.isAbortRequested()) {
 				throw new Error(`Subagent ${this.id} was aborted before prompt acceptance`);
+			}
+			if (!this.workRecorded) {
+				this.workRecorded = true;
+				await this.recordWork(message);
 			}
 			await this.promptChild(message, () => {
 				// Cancellation can land after the prompt is queued but before its
@@ -856,6 +820,8 @@ export class SubagentManager {
 	private readonly baseRef?: string;
 	private readonly resourceLoader?: ResourceLoader;
 	private readonly parentSessionManager?: SessionManager;
+	/** The conversation this manager belongs to: its children are work there. */
+	private workBinding: SubagentWorkBinding | undefined;
 	private hydrationPromise: Promise<void> | undefined;
 	private readonly allowedTools?: string[];
 	private readonly subagentContext?: SubagentRuntimeContext;
@@ -897,20 +863,45 @@ export class SubagentManager {
 		return this.subagentContext !== undefined;
 	}
 
-	/** An open child conversation this manager started, or one its children started, by conversation id. */
-	childConversation(id: string, depth = 8): HostedConversation | undefined {
+	/** An open child conversation this manager started, by conversation id. */
+	childConversation(id: string): HostedConversation | undefined {
 		for (const host of this.childHosts.values()) {
 			const child = host.get(id);
 			if (child && !child.closed) return child;
 		}
-		if (depth <= 0) return undefined;
-		for (const host of this.childHosts.values()) {
-			for (const child of host.list()) {
-				const nested = child.session.getSubagentToolManager()?.childConversation?.(id, depth - 1);
-				if (nested) return nested;
-			}
-		}
 		return undefined;
+	}
+
+	/**
+	 * Bind the manager to its conversation: each child it starts from now on
+	 * is a `subagent` work item there, recorded before the child's first
+	 * prompt. Returns the kind the conversation's registry runs it with. A
+	 * manager belongs to one conversation.
+	 */
+	workKind(binding: SubagentWorkBinding): WorkKindDefinition {
+		if (this.workBinding) throw new Error("The subagent manager already belongs to a conversation");
+		this.workBinding = binding;
+		return subagentWorkKind({
+			resume: (item, signal) => this.prepareResume(item, signal),
+			childConversation: (id) => this.childConversation(id),
+		});
+	}
+
+	/**
+	 * Start a subagent as work of the manager's conversation, detached from any
+	 * tool call: it runs until it ends or its work is cancelled, then its
+	 * conversation closes. Resolves once the child accepted `task`.
+	 */
+	async startWork(agentName: string, task: string): Promise<{ workId: string; conversation: string }> {
+		if (!this.workBinding) throw new Error("Subagents start as work only in a conversation");
+		// Clamped to the conversation's tool policy, as a tool's start and a resume are.
+		const allowedTools = this.workBinding.allowedTools();
+		const handle = await this.startNamed(agentName, allowedTools === undefined ? {} : { allowedTools }, {
+			detached: true,
+		});
+		// A rejected prompt disposes the handle; its work, if recorded, ends failed.
+		await handle.prompt(task);
+		return { workId: handle.id, conversation: handle.sessionId };
 	}
 
 	createDelegationScope(options: SubagentDelegationScopeOptions = {}): SubagentDelegationScopeLease {
@@ -1038,88 +1029,43 @@ export class SubagentManager {
 	}
 
 	/**
-	 * §5 resume: reload an interrupted recovered run from its child transcript
-	 * and prompt it to finish its original task. The run re-registers under
-	 * its original id through the live pipeline, so settlement, list, and
-	 * follow behave as for any run started by this process. Depth, policy,
-	 * and delegation-scope checks apply as for a new start; a start failure
-	 * restores the interrupted record.
+	 * Resume suspended subagent work of the manager's conversation, then wait
+	 * for its result. The run continues under its id through the work
+	 * registry: its child's log reopens and the child is prompted to finish
+	 * its task. Aborting `signal` cancels the resumed run.
 	 */
-	async resumeDelegation(
-		subagentId: string,
-		options: { signal?: AbortSignal; allowedTools?: string[] } = {},
-	): Promise<SubagentFollowResult> {
+	async resumeDelegation(subagentId: string, options: { signal?: AbortSignal } = {}): Promise<SubagentFollowResult> {
+		const work = this.workBinding?.work();
+		if (!work) throw new Error("Subagent resume is not available in this session.");
 		await this.ensureRegistryHydrated();
-		const claim = this.getRegistry().claimResume(subagentId);
-		if (!claim) {
-			const preview =
-				subagentId.length <= RESUME_ID_PREVIEW_CHARS
-					? subagentId
-					: `${subagentId.slice(0, RESUME_ID_PREVIEW_CHARS - 1)}…`;
+		if (options.signal?.aborted) throw new Error("Operation aborted");
+		const preview =
+			subagentId.length <= RESUME_ID_PREVIEW_CHARS
+				? subagentId
+				: `${subagentId.slice(0, RESUME_ID_PREVIEW_CHARS - 1)}…`;
+		const record = work.get(subagentId);
+		if (record?.kind !== SUBAGENT_WORK_KIND || record.outcome !== undefined) {
 			throw new Error(
-				`Subagent run "${preview}" is not a resumable interrupted recovery. Use { follow: "<id>" } for completed runs or { list: true } to inspect the registry.`,
+				`Subagent run "${preview}" is not suspended in this conversation. Use { follow: "<id>" } for finished runs or { list: true } to inspect the registry.`,
 			);
 		}
-		let handle: SubagentHandle;
 		try {
-			let resumedManager: SessionManager;
-			try {
-				resumedManager = await SessionManager.open(claim.childSessionRef);
-			} catch (error) {
-				if (error instanceof ConversationLockedError) throw error;
-				throw new Error("The interrupted run's transcript no longer exists; it cannot be resumed.");
-			}
-			handle = await this.startByName(claim.agentName, {
-				sessionManager: resumedManager,
-				resumeSubagentId: subagentId,
-				...(claim.task !== undefined ? { resumeTaskLabel: claim.task } : {}),
-				...(options.allowedTools ? { allowedTools: options.allowedTools } : {}),
-			});
+			await work.resume(subagentId);
 		} catch (error) {
-			claim.rollback();
-			throw error;
+			if (!(error instanceof WorkError)) throw error;
+			throw new Error(`Subagent run "${preview}" cannot resume: ${error.message}`);
 		}
-		const onAbort = () => {
-			void handle.abort().catch(() => undefined);
+		const cancel = (): void => {
+			void work.cancel(subagentId).catch(() => undefined);
 		};
-		options.signal?.addEventListener("abort", onAbort, { once: true });
-		let resumeError: unknown;
-		let hasResumeError = false;
+		options.signal?.addEventListener("abort", cancel, { once: true });
+		// An abort that landed while the child was being prepared stops the run it resumed.
+		if (options.signal?.aborted) cancel();
 		try {
-			// An abort that landed while the runtime was being prepared no-ops
-			// against the idle session; honor it before spending a turn.
-			if (options.signal?.aborted) {
-				throw new Error("Operation aborted");
-			}
-			const completion = handle.waitForEnd();
-			await handle.prompt(SUBAGENT_RESUME_PROMPT);
-			await completion;
-		} catch (error) {
-			// A published run settles through the live pipeline and is reported
-			// below. An unpublished failure (prompt rejected before acceptance,
-			// pre-prompt abort) never re-registered the id: restore the record
-			// and surface the real cause instead of an unknown-id follow error.
-			if (this.getRegistry().get(subagentId) === undefined) {
-				claim.rollback();
-				resumeError = error;
-				hasResumeError = true;
-			}
+			return await this.followDelegation(subagentId, options);
+		} finally {
+			options.signal?.removeEventListener("abort", cancel);
 		}
-		options.signal?.removeEventListener("abort", onAbort);
-		let disposeError: unknown;
-		let hasDisposeError = false;
-		try {
-			await handle.dispose();
-		} catch (error) {
-			disposeError = error;
-			hasDisposeError = true;
-		}
-		if (hasResumeError && hasDisposeError) {
-			throw new AggregateError([resumeError, disposeError], "Subagent resume failed and cleanup did not complete");
-		}
-		if (hasResumeError) throw resumeError;
-		if (hasDisposeError) throw disposeError;
-		return this.followDelegation(subagentId, options);
 	}
 
 	private getRegistry(): SubagentRegistry {
@@ -1142,10 +1088,15 @@ export class SubagentManager {
 			scopeLease = this.resolveDelegationScope(options.delegationScope);
 			treeReservation = scopeLease.scope.reserve("subagent", (this.subagentContext?.depth ?? 0) + 1);
 			managerTransferred = true;
-			return await this.startRuntime(options, undefined, {
-				scopeLease,
-				reservation: treeReservation,
-			});
+			return await this.startRuntime(
+				options,
+				undefined,
+				{
+					scopeLease,
+					reservation: treeReservation,
+				},
+				{},
+			);
 		} catch (error) {
 			releaseReservation();
 			treeReservation?.rollback();
@@ -1220,7 +1171,15 @@ export class SubagentManager {
 		return this.resolveDefinition(agentName, options.resourceLoader);
 	}
 
-	async startByName(agentName: string, options: SubagentStartByNameOptions = {}): Promise<SubagentHandle> {
+	startByName(agentName: string, options: SubagentStartByNameOptions = {}): Promise<SubagentHandle> {
+		return this.startNamed(agentName, options, {});
+	}
+
+	private async startNamed(
+		agentName: string,
+		options: SubagentStartByNameOptions,
+		control: SubagentRunControl,
+	): Promise<LocalSubagentHandle> {
 		let finishStart = (): void => undefined;
 		let releaseReservation = (): void => undefined;
 		let scopeLease: SubagentDelegationScopeLease | undefined;
@@ -1253,6 +1212,7 @@ export class SubagentManager {
 					scopeLease,
 					reservation: treeReservation,
 				},
+				control,
 			);
 		} catch (error) {
 			releaseReservation();
@@ -1508,7 +1468,8 @@ export class SubagentManager {
 			scopeLease: SubagentDelegationScopeLease;
 			reservation: SubagentDelegationReservation;
 		},
-	): Promise<SubagentHandle> {
+		control: SubagentRunControl = {},
+	): Promise<LocalSubagentHandle> {
 		const cwd = options.cwd ?? this.cwd;
 		const agentDir = options.agentDir ?? this.agentDir;
 		if (!delegation) {
@@ -1521,7 +1482,7 @@ export class SubagentManager {
 		const childHost = this.childHost(agentDir);
 		let runtime: HostedConversation;
 		try {
-			id = options.resumeSubagentId ?? `sa_${randomUUID()}`;
+			id = control.resume?.item.workId ?? `sa_${randomUUID()}`;
 			subagentContext = this.createChildSubagentContext(
 				id,
 				definitionOptions?.definition,
@@ -1730,18 +1691,66 @@ export class SubagentManager {
 				runtimeRegistration?.commit();
 				runtimeRegistration = undefined;
 				published = true;
-				this.recordSpawnEdge(options.spawnRecord, id, definitionOptions?.definition, runtime);
-				this.getRegistry().register({
-					id,
-					...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
-					agent: {
-						name: definitionOptions?.definition.name ?? "subagent",
-						...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
+				// A resumed run took its record back when it was prepared.
+				if (!control.resume) {
+					this.getRegistry().register({
+						id,
+						...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
+						agent: {
+							name: definitionOptions?.definition.name ?? "subagent",
+							...(definitionOptions?.definition.source ? { source: definitionOptions.definition.source } : {}),
+						},
+						path: subagentContext.path,
+					});
+					this.getRegistry().setTask(id, message);
+				}
+				this.registerActivity(id, runtime, definitionOptions?.definition, control.resume?.task ?? message);
+			};
+			/** Why the child's prompt failed, and whether a stop was asked for first. */
+			let promptFailure: { readonly error: unknown; readonly stopped: boolean } | undefined;
+			/**
+			 * The child's work: it ends with the child's run, which a cancel or
+			 * close of the work stops. A resumed run is prompted to continue first.
+			 */
+			const runWork = async (ctx: WorkContext, continuation?: string): Promise<WorkExecution> => {
+				const stop = (): void => {
+					markRunAbortRequested();
+					void runtime.session.abort().catch(() => undefined);
+				};
+				ctx.signal.addEventListener("abort", stop, { once: true });
+				if (ctx.signal.aborted) stop();
+				try {
+					const completion = handle!.waitForEnd();
+					if (continuation !== undefined) await handle!.prompt(continuation);
+					return subagentExecution(await completion);
+				} catch (error) {
+					const stopped = promptFailure?.stopped ?? abortRequested;
+					return stopped
+						? { outcome: "cancelled" }
+						: { outcome: "failed", error: errorMessage(promptFailure?.error ?? error) };
+				} finally {
+					ctx.signal.removeEventListener("abort", stop);
+					if (control.detached) await handle!.dispose().catch(() => undefined);
+				}
+			};
+			/** Record the child's work before its first prompt, in the conversation the manager belongs to. */
+			const recordWork = async (message: string): Promise<void> => {
+				const work = this.workBinding?.work();
+				if (!work || control.resume) return;
+				const childLog = runtime.session.sessionManager;
+				const ref = childLog.getSessionRef();
+				await work.start(
+					SUBAGENT_WORK_KIND,
+					{ agent: definitionOptions?.definition.name ?? "subagent", task: message },
+					(ctx) => runWork(ctx),
+					{
+						workId: id,
+						...(options.toolCallId === undefined ? {} : { toolCallId: options.toolCallId }),
+						// A nested child's parent is its parent run, in the parent conversation's log.
+						...(this.subagentContext ? { parentWorkId: this.subagentContext.subagentId } : {}),
+						child: { conversation: childLog.getSessionId(), ...(ref === undefined ? {} : { ref }) },
 					},
-					path: subagentContext.path,
-				});
-				this.getRegistry().setTask(id, options.resumeTaskLabel ?? message);
-				this.registerActivity(id, runtime, definitionOptions?.definition, message);
+				);
 			};
 			let idleActivityRevision = -1;
 			handle = new LocalSubagentHandle({
@@ -1755,11 +1764,13 @@ export class SubagentManager {
 					this.handles.delete(handleId);
 				},
 				onPromptAccepted: publish,
+				recordWork,
 				onPromptFailed: async (error) => {
+					promptFailure ??= { error, stopped: abortRequested };
 					if (published) {
 						this.finishActivity(
 							id,
-							abortRequested ? "aborted" : "failed",
+							abortRequested ? "cancelled" : "failed",
 							abortRequested ? undefined : errorMessage(error),
 						);
 						return;
@@ -1795,6 +1806,7 @@ export class SubagentManager {
 				markRunAbortRequested();
 				void runtime.session.abort();
 			});
+			handle.runWork = runWork;
 			this.handles.set(id, handle);
 			void handle.waitForEnd().then(
 				(result) => {
@@ -1806,7 +1818,7 @@ export class SubagentManager {
 					});
 				},
 				(error: unknown) => {
-					const status = abortRequested ? "aborted" : "failed";
+					const status = abortRequested ? "cancelled" : "failed";
 					const message = status === "failed" ? errorMessage(error) : undefined;
 					this.finishActivity(id, status, message);
 					this.getRegistry().complete(id, status, message !== undefined ? { error: message } : {});
@@ -1912,7 +1924,7 @@ export class SubagentManager {
 		this.notifyActivity(activity);
 	}
 
-	private finishActivity(id: string, status: Exclude<SubagentActivityStatus, "running">, error?: string): void {
+	private finishActivity(id: string, status: SubagentResultStatus, error?: string): void {
 		const activity = this.activities.get(id);
 		if (!activity || activity.status !== "running") return;
 		const conversation = activity.conversation;
@@ -1990,166 +2002,140 @@ export class SubagentManager {
 		});
 	}
 
-	private recordSpawnEdge(
-		spawnRecord: SubagentSpawnRecordContext | undefined,
-		id: string,
-		definition: SubagentDefinition | undefined,
-		runtime: HostedConversation,
-	): void {
-		if (!spawnRecord?.writer.sessionManager.isPersisted()) return;
-		// Both identity fields come from the child's own session manager: a
-		// factory that swaps managers must not produce an edge whose id and
-		// reference disagree.
-		const childSessionManager = runtime.session.sessionManager;
-		const childSessionRef = childSessionManager.getSessionRef();
-		void spawnRecord.writer
-			.appendSubagentSpawn({
-				toolCallId: spawnRecord.toolCallId,
-				requestKey: spawnRecord.requestKey,
-				subagentId: id,
-				agent: definition?.name ?? "subagent",
-				childSessionId: childSessionManager.getSessionId(),
-				...(childSessionRef !== undefined ? { childSessionRef } : {}),
-			})
-			.catch(() => {
-				// The child is already running: losing the recovery edge must not turn
-				// an accepted spawn into a failure. A parent that lost its log has
-				// already lost recoverability wholesale.
-			});
-	}
-
 	/**
-	 * Recover pre-restart delegation records from persisted transcripts into
-	 * the registry (issue #129, design §3). Root-manager only — descendants
-	 * share the root registry. Lazy and idempotent; awaited from the async
-	 * model-facing paths before registry reads. Failures are contained per
-	 * edge: an unreadable child transcript records an unrecoverable run
-	 * instead of failing hydration.
+	 * Recover the runs of earlier processes into the registry from the
+	 * conversation's `subagent` work and, through each child's locator, the
+	 * child logs' (root manager only: descendants share the root registry).
+	 * Lazy and idempotent; awaited from the model-facing paths before registry
+	 * reads. A child log that cannot be read leaves its descendants out.
 	 */
 	async ensureRegistryHydrated(): Promise<void> {
-		if (this.subagentContext || !this.parentSessionManager?.isPersisted()) {
+		const binding = this.workBinding;
+		if (this.subagentContext || !binding) {
 			return;
 		}
-		const parentSessionRef = this.parentSessionManager.getSessionRef();
-		if (!parentSessionRef) {
-			return;
-		}
-		this.hydrationPromise ??= this.hydrateSpawnEdges(
-			this.getRegistry(),
-			this.parentSessionManager,
-			[],
-			undefined,
-			new Set([
-				JSON.stringify([parentSessionRef.storeId, parentSessionRef.sessionId, parentSessionRef.sessionGeneration]),
-			]),
-		).catch((error) => {
-			// Per-edge failures are contained inside the walk; an unexpected
-			// rejection here must not brick every later registry read on a
-			// memoized failure — drop the memo so the next read retries.
+		this.hydrationPromise ??= this.hydrateWork(binding.work()).catch((error) => {
+			// An unexpected failure must not brick later registry reads on a memoized rejection.
 			this.hydrationPromise = undefined;
 			throw error;
 		});
 		return this.hydrationPromise;
 	}
 
-	private async hydrateSpawnEdges(
+	private async hydrateWork(work: WorkRegistry): Promise<void> {
+		// Work this process runs registers as it publishes; the rest is history or suspended.
+		const running = new Set(work.running().map((record) => record.workId));
+		await this.hydrateRuns(
+			this.getRegistry(),
+			work.list().filter((record) => !running.has(record.workId)),
+			this.parentSessionManager,
+			[],
+			undefined,
+			new Set(),
+			(id) => work.get(id),
+		);
+	}
+
+	private async hydrateRuns(
 		registry: SubagentRegistry,
-		sessionManager: SessionManager,
-		ancestorPath: string[],
-		parentRegistryId: string | undefined,
-		visitedSessions: Set<string>,
+		records: Iterable<WorkRecord>,
+		log: SessionManager | undefined,
+		ancestorPath: readonly string[],
+		parentId: string | undefined,
+		visited: Set<string>,
+		source?: (id: string) => WorkRecord | undefined,
 	): Promise<void> {
-		const settledToolCallIds = collectSettledToolCallIds(sessionManager);
-		const presentToolCallIds = collectToolCallIds(sessionManager);
-		for (const edge of sessionManager.getSubagentSpawnEntries()) {
-			if (
-				typeof edge.subagentId !== "string" ||
-				edge.subagentId.length === 0 ||
-				typeof edge.toolCallId !== "string" ||
-				typeof edge.agent !== "string"
-			) {
-				continue;
-			}
-			// A settled edge needs no record, but its transcript can hold
-			// unsettled descendant edges (e.g. a grandchild that completed while
-			// its parent's failure was captured as a task error), so the walk
-			// still descends into every child transcript.
-			const settled = settledToolCallIds.has(edge.toolCallId) || registry.get(edge.subagentId) !== undefined;
-			const path = [...ancestorPath, edge.agent];
-			const parsedStart = Date.parse(edge.timestamp);
-			const startedAt = Number.isNaN(parsedStart) ? Date.now() : parsedStart;
-			const base = {
-				id: edge.subagentId,
-				...(parentRegistryId !== undefined ? { parentId: parentRegistryId } : {}),
-				agent: { name: edge.agent },
+		for (const record of records) {
+			if (record.kind !== SUBAGENT_WORK_KIND) continue;
+			const { agent, task } = readSubagentWorkInput(record.input);
+			const path = [...ancestorPath, agent];
+			const time = workTimes(log, record);
+			registry.hydrate({
+				id: record.workId,
+				...(parentId === undefined ? {} : { parentId }),
+				agent: { name: agent },
 				path,
-				...(presentToolCallIds.has(edge.toolCallId) ? {} : { stranded: true }),
-				startedAt,
-			};
-			const childSessionRef = edge.childSessionRef;
-			if (!childSessionRef) {
-				if (!settled) {
-					registry.hydrate({
-						...base,
-						status: "failed",
-						error: "Child session was not persisted; its result is unrecoverable.",
-						finishedAt: startedAt,
-					});
-				}
-				continue;
-			}
-			const childSessionKey = JSON.stringify([
-				childSessionRef.storeId,
-				childSessionRef.sessionId,
-				childSessionRef.sessionGeneration,
-			]);
-			if (visitedSessions.has(childSessionKey)) {
-				if (!settled) {
-					registry.hydrate({
-						...base,
-						status: "failed",
-						error: "Child transcript is already attributed to another edge; its result is unrecoverable.",
-						finishedAt: startedAt,
-					});
-				}
-				continue;
-			}
-			visitedSessions.add(childSessionKey);
-			// One macrotask per child keeps multi-megabyte transcript loads from
-			// monopolizing the event loop (the #46/#123 lesson).
+				...(task === undefined ? {} : { task }),
+				status: record.outcome ?? "suspended",
+				...(record.result?.output === undefined ? {} : { output: record.result.output.text }),
+				...(record.error === undefined ? {} : { error: record.error }),
+				startedAt: time.startedAt ?? Date.now(),
+				...(time.finishedAt === undefined ? {} : { finishedAt: time.finishedAt }),
+				...(record.outcome === undefined && source ? { source: () => source(record.workId) } : {}),
+			});
+			const ref = record.child?.ref;
+			if (!ref) continue;
+			const key = JSON.stringify([ref.storeId, ref.sessionId, ref.sessionGeneration]);
+			if (visited.has(key)) continue;
+			visited.add(key);
+			// One macrotask per child keeps large log loads from monopolizing the event loop.
 			await new Promise((resolve) => setImmediate(resolve));
 			let child: SessionManager;
 			try {
-				child = await SessionManager.openReadOnly(childSessionRef);
+				child = await SessionManager.openReadOnly(ref);
 			} catch {
-				if (!settled) {
-					registry.hydrate({
-						...base,
-						status: "failed",
-						error: "Child transcript is missing or unreadable; its result is unrecoverable.",
-						finishedAt: startedAt,
-					});
-				}
 				continue;
 			}
 			try {
-				if (!settled) {
-					const state = deriveHydratedChildState(child, startedAt);
-					registry.hydrate({
-						...base,
-						status: state.status,
-						...(state.task !== undefined ? { task: state.task } : {}),
-						...(state.output !== undefined ? { output: state.output } : {}),
-						...(state.error !== undefined ? { error: state.error } : {}),
-						childSessionRef,
-						finishedAt: state.finishedAt,
-					});
-				}
-				await this.hydrateSpawnEdges(registry, child, path, edge.subagentId, visitedSessions);
+				await this.hydrateRuns(
+					registry,
+					child.getConversationState().work.values(),
+					child,
+					path,
+					record.workId,
+					visited,
+				);
 			} finally {
 				await child.closePersistence();
 			}
 		}
+	}
+
+	/**
+	 * Prepare suspended subagent work to continue: reopen its child's log and
+	 * runtime under its id, clamped to the conversation's tool policy as a new
+	 * start is. The returned executor prompts the child to finish its task.
+	 */
+	private async prepareResume(item: WorkRecord, signal: AbortSignal): Promise<WorkExecutor> {
+		const { agent, task } = readSubagentWorkInput(item.input);
+		const definition = this.getDefinition(agent);
+		const ref = item.child?.ref;
+		if (!ref) throw new Error("its conversation was not persisted");
+		if (signal.aborted) throw new Error("Operation aborted");
+		let sessionManager: SessionManager;
+		try {
+			sessionManager = await SessionManager.open(ref);
+		} catch (error) {
+			if (error instanceof ConversationLockedError) throw error;
+			throw new Error("its conversation's log no longer exists");
+		}
+		// The locator must name a subagent log this conversation created.
+		const header = sessionManager.getHeader();
+		const parentId = this.parentSessionManager?.getSessionId();
+		if (header?.origin !== "subagent" || parentId === undefined || header.parentSession?.sessionId !== parentId) {
+			await sessionManager.closePersistence().catch(() => undefined);
+			throw new Error("its log is not a subagent conversation of this conversation");
+		}
+		const allowedTools = this.workBinding?.allowedTools();
+		const handle = await this.startNamed(
+			agent,
+			{ sessionManager, ...(allowedTools === undefined ? {} : { allowedTools }) },
+			{ detached: true, resume: { item, ...(task === undefined ? {} : { task }) } },
+		);
+		// The record runs again before its work does, so a follow waits for the resumed run.
+		this.getRegistry().resumed({
+			id: item.workId,
+			...(this.subagentContext ? { parentId: this.subagentContext.subagentId } : {}),
+			agent: { name: definition.name, source: definition.source },
+			path: [...(this.subagentContext?.path ?? []), definition.name],
+			...(task === undefined ? {} : { task }),
+		});
+		const runWork = handle.runWork;
+		if (!runWork) throw new Error("its runtime did not start");
+		// A child stopped before it took its task is given the task, as far as its work kept it.
+		const started = handle.conversation.session.messages.some((message) => message.role === "user");
+		const continuation = started || task === undefined ? SUBAGENT_RESUME_PROMPT : task;
+		return (ctx) => runWork(ctx, continuation);
 	}
 
 	private async notifyRuntimeCreated(options: {

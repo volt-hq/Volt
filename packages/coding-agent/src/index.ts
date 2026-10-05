@@ -724,7 +724,7 @@ export {
 	serializeSessionJsonlSnapshot,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
-export type { LogWriter, SessionWriter, SubagentSpawnInput } from "./core/session-writer.ts";
+export type { LogWriter, SessionWriter } from "./core/session-writer.ts";
 export {
 	type CompactionSettings,
 	type DefaultProjectTrust,
@@ -760,7 +760,6 @@ export {
 	type SubagentActivity,
 	type SubagentActivityEvent,
 	type SubagentActivityListener,
-	type SubagentActivityStatus,
 	type SubagentCallerDepthCapacitySnapshot,
 	type SubagentCapacityLimitSnapshot,
 	type SubagentDefinition,
@@ -780,6 +779,8 @@ export {
 	SubagentManager,
 	type SubagentManagerOptions,
 	type SubagentResult,
+	type SubagentResultStatus,
+	type SubagentRunStatus,
 	type SubagentRuntimeCreatedEvent,
 	type SubagentRuntimeRegistration,
 	type SubagentSpawnAdmissionResult,
@@ -795,6 +796,7 @@ export {
 	type SubagentTreeCapacitySnapshot,
 	type SubagentTurnBudgetEvent,
 	type SubagentTurnLimits,
+	type SubagentWorkBinding,
 } from "./core/subagents/index.ts";
 // Theme utilities for custom tools and extensions
 export {
@@ -894,7 +896,6 @@ export {
 	type SubagentToolInput,
 	type SubagentToolManager,
 	type SubagentToolOptions,
-	type SubagentToolStatus,
 	type SubagentToolUsageDetails,
 	type ToolDiagnosticsProvider,
 	type ToolsOptions,

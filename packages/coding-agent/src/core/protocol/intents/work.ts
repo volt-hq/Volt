@@ -2,9 +2,10 @@
  * Work intents (RFC §7, §6.3): cancel, open, and resume a work item of the
  * conversation by its id, and start a subagent. Each acts through the
  * conversation's work registry, whose kinds decide what cancelling, opening,
- * and resuming do.
+ * and resuming do, and what of it a paired remote device may do.
  */
 
+import type { WorkRecord } from "@hansjm10/volt-agent-core";
 import type { RejectionCode } from "@hansjm10/volt-protocol";
 import { WorkError, type WorkErrorCode, type WorkRegistry } from "../../work/registry.ts";
 import { targetOf } from "./conversation.ts";
@@ -44,6 +45,31 @@ async function workOperation<T>(ctx: IntentContext, operation: (work: WorkRegist
 	}
 }
 
+/** Refuses a remote device what `record`'s kind keeps from remote devices. */
+function remoteAvailability(
+	view: Pick<IntentView, "profile">,
+	work: WorkRegistry,
+	record: WorkRecord,
+	operation: "cancel" | "resume",
+): IntentAvailability {
+	return view.profile.name === "remote" && !work.remoteAllows(record, operation)
+		? {
+				enabled: false,
+				code: "not_allowed",
+				reason: `A remote client cannot ${operation} ${record.kind} work`,
+			}
+		: INTENT_ENABLED;
+}
+
+/** Recheck `remoteAvailability` when the intent runs: the record is read again. */
+function assertRemoteAllows(ctx: IntentContext, workId: string, operation: "cancel" | "resume"): void {
+	const work = targetOf(ctx).conversation.work;
+	const record = work.get(workId);
+	if (!record) return;
+	const availability = remoteAvailability(ctx, work, record, operation);
+	if (!availability.enabled) throw new IntentRejectedError("not_allowed", availability.reason);
+}
+
 /** Whether the conversation holds `workId` as open work; the intent's own checks follow. */
 function openWorkAvailability(view: IntentView, workId: string | undefined): IntentAvailability {
 	if (workId === undefined || !view.target) return INTENT_ENABLED;
@@ -69,11 +95,14 @@ export const cancelWorkIntent = defineIntent({
 		if (!availability.enabled || input === undefined || !view.target) return availability;
 		const { work } = view.target.conversation;
 		const record = work.get(input.workId);
-		return record && !work.cancellable(record)
-			? { enabled: false, code: "not_allowed", reason: `Work ${input.workId} cannot be cancelled` }
-			: INTENT_ENABLED;
+		if (!record) return INTENT_ENABLED;
+		if (!work.cancellable(record)) {
+			return { enabled: false, code: "not_allowed", reason: `Work ${input.workId} cannot be cancelled` };
+		}
+		return remoteAvailability(view, work, record, "cancel");
 	},
 	async run(ctx, input) {
+		assertRemoteAllows(ctx, input.workId, "cancel");
 		await workOperation(ctx, (work) => work.cancel(input.workId));
 	},
 });
@@ -116,8 +145,15 @@ export const resumeWorkIntent = defineIntent({
 	remote: "safe",
 	requires: control,
 	whileBusy: "run",
-	available: (view, input) => openWorkAvailability(view, input?.workId),
+	available(view, input) {
+		const availability = openWorkAvailability(view, input?.workId);
+		if (!availability.enabled || input === undefined || !view.target) return availability;
+		const { work } = view.target.conversation;
+		const record = work.get(input.workId);
+		return record ? remoteAvailability(view, work, record, "resume") : INTENT_ENABLED;
+	},
 	async run(ctx, input) {
+		assertRemoteAllows(ctx, input.workId, "resume");
 		await workOperation(ctx, (work) => work.resume(input.workId));
 	},
 });
@@ -134,8 +170,8 @@ export const startSubagentIntent = defineIntent({
 	async run(ctx, input) {
 		const subagents = ctx.services.subagents;
 		if (!subagents) throw new IntentRejectedError("unavailable", "Subagents are not available in this host");
-		const started = await subagents.start(input.agent, input.prompt);
-		return { workId: started.subagentId, conversation: started.sessionId };
+		// The subagent is work of the conversation: cancel_work stops it, and closing the conversation suspends it.
+		return await workOperation(ctx, () => subagents.start(input.agent, input.prompt));
 	},
 	accept: (result) => ({ result }),
 });

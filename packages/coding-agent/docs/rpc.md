@@ -77,7 +77,7 @@ A subscription streams one conversation's projected log and, unless `live: false
 | `lost` | The conversation lost its log. |
 | `shutdown` | The host is shutting down. |
 
-A client may subscribe to the conversation it is on, to another open conversation of the host, or to the conversation of a subagent it started (`subagent_start`).
+A client may subscribe to the conversation it is on, to another open conversation of the host, or, observe-only, to the open conversation of a subagent its conversation links by `subagent` work (`work_started.child.conversation`), directly or through linked children.
 
 ### Entries and positions
 
@@ -85,7 +85,7 @@ Each committed log entry the profile shows arrives once as `entry{subscriptionId
 
 A projected entry is `{ordinal, id, parentId, type, timestamp, payload?, view?}`:
 
-- `type` is a core entry type: `message`, `client_input_receipt`, `client_input_queued`, `client_input_state`, `thinking_level_change`, `fast_mode_change`, `model_change`, `planning_state_change`, `compaction`, `branch_summary`, `custom`, `custom_message`, `label`, `session_info`, `leaf`, `subagent_spawn`, or `forked_from`. Host product records (the starting Git context, PR review bindings) are never projected.
+- `type` is a core entry type: `message`, `client_input_receipt`, `client_input_queued`, `client_input_state`, `thinking_level_change`, `fast_mode_change`, `model_change`, `planning_state_change`, `compaction`, `branch_summary`, `custom`, `custom_message`, `label`, `session_info`, `leaf`, `forked_from`, `work_started`, `work_checkpoint`, or `work_finished`. Host product records (the starting Git context, PR review bindings) are never projected.
 - `payload` is the entry's payload; the local profile sends it whole. A message entry's payload is `{message, clientMessageId?}`.
 - `view` is the transcript item of a message-like entry (`message`, `compaction`, `branch_summary`, `custom_message`): `{role: user|assistant|system|tool, text, truncated, …}`, with tool calls' bounded arguments, summaries, output, and diff and patch previews. Text is bounded per entry (16,000 Unicode scalars on the local profile); `truncated` says the `content` query has the rest.
 - `parentId`, and a `leaf` entry's `targetId`, name the nearest ancestor the profile shows.
@@ -131,7 +131,6 @@ Keyed values (`value.kind` is the key's family):
 | `intents` | `{availability: [{name, enabled, reason?, state?}]}`: the intents whose availability and state follow the conversation (`set_fast_mode`, `set_agent_mode`, `set_auto_compaction`, `set_compaction_threshold`). |
 | `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs, such as a background job, set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
 | `workflow/<id>` | `{event, activeTools}`: a detached review workflow's latest event and running tools; cleared after its end. |
-| `subagent/<id>` | `{subagentId, conversation, agent?, status, error?}`: a subagent this client started. Subscribe to `conversation` for its log. |
 | `host_request/<id>` | `{requestId, request}`: a pending host request (below). |
 | `host_action/<id>` | `{action, status, message?, exitCode?}`: an approved host action's progress, shown to clients that accept `approval`. |
 | `ext_status/<key>`, `ext_widget/<key>`, `ext_title` | Extension status lines, string widgets (`{lines, placement}`), and the window title. |
@@ -171,7 +170,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 |---|---|---|
 | `prompt` | `{message, images?, streamingBehavior?: steer|followUp}` | |
 | `steer`, `follow_up` | `{message, images?}` | |
-| `abort` | `{}`: abort the run and cancel running work; queued input is delivered | |
+| `abort` | `{}`: abort the run and cancel running work (a subagent runs on until `cancel_work`); queued input is delivered | |
 | `abort_retry`, `abort_bash` | `{}` | |
 | `bash` | `{command, excludeFromContext?}` | `{output, exitCode?, cancelled, truncated, fullOutputPath?}` |
 | `compact` | `{customInstructions?}` | the compaction result |
@@ -187,9 +186,10 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `fork` | `{entryId}`: fork before a user message | `{text}` (the message, for the editor) or `{cancelled: true}` |
 | `clone` | `{}` | `{cancelled: true}` when cancelled |
 | `export_html` | `{outputPath?}` | `{path}` |
-| `cancel_work` | `{workId}`: cancel open work, such as a background job | |
-| `subagent_start` | `{agent, prompt}` | `{subagentId, conversation}` |
-| `subagent_abort`, `subagent_dispose` | `{subagentId}` | |
+| `cancel_work` | `{workId}`: cancel open work, such as a background job or a subagent | |
+| `open_work` | `{workId}`: a subagent's open conversation, to subscribe to | `{conversation}` |
+| `resume_work` | `{workId}`: continue a subagent suspended since a restart | |
+| `start_subagent` | `{agent, prompt}`: start a subagent as work of the conversation | `{workId, conversation}` |
 | `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls | `{workflowId}` |
 | `review_rerun`, `review_cancel_workflow`, `review_open_session`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_export_feedback`, `review_start_discussions`, `review_reset_discussion` | see the contract | |
 | `set_default_model` | `{provider, modelId}`: the default for new conversations | |

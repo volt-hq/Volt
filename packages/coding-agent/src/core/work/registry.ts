@@ -137,6 +137,14 @@ export interface WorkKindDefinition {
 	readonly delivery: WorkDelivery;
 	/** Whether a client may cancel the kind's work. */
 	readonly cancellable: boolean;
+	/** `false`: a stop of the conversation (`abort`) leaves the kind's running work alone. */
+	readonly cancelOnAbort?: false;
+	/**
+	 * What a paired remote device may do to the kind's work besides observing
+	 * it; by default whatever the work intents allow. A kind this host has not
+	 * registered allows a remote device neither.
+	 */
+	readonly remote?: { readonly cancel: boolean; readonly resume: boolean };
 	/** The kind's work starts awaiting approval instead of running. */
 	readonly approval?: boolean;
 	/** `tool_grant`: the kind's work starts only from a tool call, under that call's grant. */
@@ -150,10 +158,15 @@ export interface WorkKindDefinition {
 	/** Open the conversation an item runs in or produced. */
 	open?(item: WorkRecord, ctx: WorkOpenContext): Promise<WorkOpened>;
 	/**
-	 * Continue suspended work. A kind that declares it is resumable: its open
-	 * work survives a restart suspended instead of interrupted.
+	 * Prepare suspended work to continue: the executor that continues it, once
+	 * what it runs in is ready. A kind that declares it is resumable: its open
+	 * work survives a restart suspended instead of interrupted. The registry
+	 * writes the `running` checkpoint after the preparation; a preparation that
+	 * fails leaves the work suspended. `signal` aborts when the work is
+	 * cancelled or the conversation closes meanwhile: the executor then still
+	 * runs, with its signal aborted, to release what was prepared.
 	 */
-	resume?(item: WorkRecord): WorkExecutor;
+	resume?(item: WorkRecord, signal: AbortSignal): WorkExecutor | Promise<WorkExecutor>;
 	/** Output of running work the kind keeps itself, such as a tool's latest tail, instead of reporting it through `output`. */
 	output?(workId: string): { readonly text: string; readonly truncated: boolean } | undefined;
 }
@@ -505,6 +518,16 @@ export class WorkRegistry {
 		return !this.active.has(record.workId) && !this.resumable(record);
 	}
 
+	/**
+	 * Whether a paired remote device may cancel or resume `record`: as its
+	 * kind's remote policy allows, and never for a kind this host has not
+	 * registered.
+	 */
+	remoteAllows(record: WorkRecord, operation: "cancel" | "resume"): boolean {
+		const definition = this.kinds.get(record.kind);
+		return definition !== undefined && (definition.remote?.[operation] ?? true);
+	}
+
 	/** Let work awaiting approval run: a `running` checkpoint, then its executor. */
 	async approve(workId: string): Promise<WorkRecord> {
 		this.assertOpen();
@@ -520,7 +543,9 @@ export class WorkRegistry {
 
 	/**
 	 * Continue suspended work: open running work of a resumable kind that no
-	 * executor runs. A `running` checkpoint records that it runs again.
+	 * executor runs. Its kind prepares it first; a `running` checkpoint then
+	 * records that it runs again. A preparation that fails leaves the work
+	 * suspended, unless it was cancelled meanwhile.
 	 */
 	async resume(workId: string): Promise<WorkRecord> {
 		this.assertOpen();
@@ -535,12 +560,6 @@ export class WorkRegistry {
 		if (!definition?.resume) {
 			throw new WorkError("unavailable", `Work of kind ${record.kind} cannot resume in this host`);
 		}
-		let execute: WorkExecutor;
-		try {
-			execute = definition.resume(record);
-		} catch (error) {
-			throw new WorkError("unavailable", `Work ${workId} cannot resume: ${errorMessage(error)}`);
-		}
 		this.reserve(definition);
 		let active: ActiveWork;
 		try {
@@ -548,13 +567,31 @@ export class WorkRegistry {
 		} finally {
 			this.release(definition);
 		}
+		let execute: WorkExecutor;
 		try {
-			await this.write(active, () => this.host.work().checkpoint(workId, { state: "running" }));
+			execute = await definition.resume(record, active.controller.signal);
 		} catch (error) {
-			active.detached = true;
 			EXECUTING.delete(this.executingKey(workId));
-			this.detach(active);
-			throw error;
+			// A cancel or close meanwhile ends the work as it does running work.
+			if (active.cancelling || active.closing) {
+				await this.settle(active, { outcome: "cancelled" });
+			} else {
+				active.detached = true;
+				this.detach(active);
+			}
+			if (error instanceof WorkError) throw error;
+			throw new WorkError("unavailable", `Work ${workId} cannot resume: ${errorMessage(error)}`);
+		}
+		if (!active.controller.signal.aborted) {
+			try {
+				await this.write(active, () => this.host.work().checkpoint(workId, { state: "running" }));
+			} catch (error) {
+				// The prepared executor still runs, stopped, to release what it holds; the work stays suspended.
+				active.closing = true;
+				active.controller.abort(error);
+				this.run(active, execute);
+				throw error;
+			}
 		}
 		this.run(active, execute);
 		return this.get(workId) ?? record;
@@ -659,8 +696,10 @@ export class WorkRegistry {
 	}
 
 	/**
-	 * Stop every executor. `cancelled` cancels each cancellable running item
-	 * as `cancel` does and resolves once their executors stopped. `closed` (the conversation closes; no work starts
+	 * Stop every executor. `cancelled` (a stop of the conversation) cancels
+	 * each cancellable running item of a kind that does not opt out
+	 * (`cancelOnAbort: false`) as `cancel` does, and resolves once their
+	 * executors stopped. `closed` (the conversation closes; no work starts
 	 * afterwards) aborts every executor and waits up to
 	 * {@link WORK_CLOSE_GRACE_MS}: resumable work stays open, suspended on
 	 * the next open, and other work finishes `interrupted` unless it completed
@@ -668,7 +707,9 @@ export class WorkRegistry {
 	 */
 	async cancelAll(reason: "cancelled" | "closed"): Promise<void> {
 		if (reason === "cancelled") {
-			const cancellable = [...this.active.values()].filter((active) => active.definition.cancellable);
+			const cancellable = [...this.active.values()].filter(
+				(active) => active.definition.cancellable && active.definition.cancelOnAbort !== false,
+			);
 			await Promise.allSettled(cancellable.map((active) => this.cancel(active.workId)));
 			await Promise.all(cancellable.map((active) => active.done.promise));
 			return;

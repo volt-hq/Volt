@@ -734,7 +734,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "list",
 					status: "completed",
-					summary: { total: 3, completed: 0, failed: 0, aborted: 0, running: 3 },
+					summary: { total: 3, completed: 0, failed: 0, cancelled: 0, running: 3 },
 				} satisfies SubagentToolDetails,
 				isError: false,
 			},
@@ -762,7 +762,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "list",
 					status: "completed",
-					summary: { total: 2, completed: 1, failed: 0, aborted: 0, running: 1, returned: 2 },
+					summary: { total: 2, completed: 1, failed: 0, cancelled: 0, running: 1, returned: 2 },
 				} satisfies SubagentToolDetails,
 				isError: false,
 			},
@@ -926,7 +926,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "parallel",
 					status: "partial",
-					summary: { total: 2, completed: 1, failed: 1, aborted: 0, maxTasks: 8, maxConcurrency: 4 },
+					summary: { total: 2, completed: 1, failed: 1, cancelled: 0, maxTasks: 8, maxConcurrency: 4 },
 					tasks: [
 						{
 							index: 0,
@@ -991,7 +991,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "parallel",
 					status: "running",
-					summary: { total: 2, completed: 0, failed: 0, aborted: 0, running: 2, maxTasks: 8, maxConcurrency: 4 },
+					summary: { total: 2, completed: 0, failed: 0, cancelled: 0, running: 2, maxTasks: 8, maxConcurrency: 4 },
 					startedAt: Date.now() - 65_000,
 					tasks: [
 						{
@@ -1054,7 +1054,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "parallel",
 					status: "running",
-					summary: { total: taskCount, completed: 30, failed: 0, aborted: 0, running: 10 },
+					summary: { total: taskCount, completed: 30, failed: 0, cancelled: 0, running: 10 },
 					tasks: Array.from({ length: taskCount }, (_v, index) => ({
 						index,
 						subagentId: `sa_${index}`,
@@ -1184,7 +1184,7 @@ describe("ToolExecutionComponent parity", () => {
 				details: {
 					mode: "chain",
 					status: "completed",
-					summary: { total: 2, completed: 2, failed: 0, aborted: 0 },
+					summary: { total: 2, completed: 2, failed: 0, cancelled: 0 },
 					steps: [
 						{
 							index: 0,

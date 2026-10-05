@@ -68,7 +68,7 @@ prepareDelivery?: (
 Runs for each delivery, after `messageEnd`, with `{ kind, clientMessageId?, origin?, messages }`. `kind` is `prompt`, `steer`, `followUp`, or `policy`; `origin` is `client` or `host` for a durable input. Return `undefined` to commit the messages as they are, or `{ messages, entries? }`:
 
 - `messages` must not be empty and must keep the client input's user message.
-- `entries` are committed in the delivery's batch before its messages: registered product types, or core `custom`, `custom_message`, `message`, `subagent_spawn`, or `planning_state_change`. Payloads are checked against their types.
+- `entries` are committed in the delivery's batch before its messages: registered product types, or core `custom`, `custom_message`, `message`, or `planning_state_change`. Payloads are checked against their types.
 
 The delivery commits as one batch: a client input's `started` transition, the prepared entries, then the messages. A host-origin input, which has no user message of its own, also records `completed`. A batch that rolls back leaves the delivery queued.
 

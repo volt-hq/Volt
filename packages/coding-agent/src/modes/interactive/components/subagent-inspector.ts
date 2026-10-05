@@ -9,7 +9,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
-import type { SubagentActivity, SubagentActivityEvent, SubagentActivityStatus } from "../../../core/subagents/index.ts";
+import type { SubagentActivity, SubagentActivityEvent, SubagentRunStatus } from "../../../core/subagents/index.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -106,7 +106,7 @@ function formatDuration(activity: SubagentActivity): string {
 	return remaining > 0 ? `${minutes}m ${remaining}s` : `${minutes}m`;
 }
 
-function statusGlyph(status: SubagentActivityStatus): string {
+function statusGlyph(status: SubagentRunStatus): string {
 	switch (status) {
 		case "running":
 			return theme.fg("accent", "●");
@@ -114,15 +114,18 @@ function statusGlyph(status: SubagentActivityStatus): string {
 			return theme.fg("success", "✓");
 		case "failed":
 			return theme.fg("error", "✗");
-		case "aborted":
+		case "cancelled":
+		case "interrupted":
 			return theme.fg("warning", "○");
+		case "suspended":
+			return theme.fg("warning", "‖");
 	}
 }
 
-function statusLabel(status: SubagentActivityStatus): string {
+function statusLabel(status: SubagentRunStatus): string {
 	const color =
-		status === "completed" ? "success" : status === "failed" ? "error" : status === "aborted" ? "warning" : "accent";
-	const label = status === "completed" ? "done" : status === "aborted" ? "stopped" : status;
+		status === "completed" ? "success" : status === "failed" ? "error" : status === "running" ? "accent" : "warning";
+	const label = status === "completed" ? "done" : status === "cancelled" ? "stopped" : status;
 	return theme.fg(color, label);
 }
 

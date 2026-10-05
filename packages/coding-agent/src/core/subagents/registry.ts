@@ -1,8 +1,14 @@
 import { randomUUID } from "node:crypto";
-import type { SessionReference } from "../session-manager.ts";
+import type { WorkRecord } from "@hansjm10/volt-agent-core";
+import type { WorkOutcome } from "@hansjm10/volt-protocol/work";
 import type { SubagentDefinitionSource } from "./index.ts";
 
-export type SubagentRegistryStatus = "running" | "completed" | "failed" | "aborted";
+/**
+ * A delegated run's status in work terms (RFC §7): running, suspended (its
+ * work is open without an executor since a restart, until it is resumed or
+ * cancelled), or the outcome its work ended with.
+ */
+export type SubagentRunStatus = "running" | "suspended" | WorkOutcome;
 
 export type SubagentRegistryFollowability = "followable" | "current" | "ancestor" | "dependency-cycle";
 
@@ -21,15 +27,9 @@ export interface SubagentRegistryRecord {
 	path: string[];
 	/** Bounded task prompt this run was started with. */
 	task?: string;
-	status: SubagentRegistryStatus;
+	status: SubagentRunStatus;
 	/** Caller-relative follow safety. Present on records returned for a specific runtime. */
 	followability?: SubagentRegistryFollowability;
-	/** True for runs recovered from persisted transcripts rather than started by this process. */
-	hydrated?: true;
-	/** True once a hydrated run's result has been delivered through follow (issue #129 §4). */
-	claimed?: true;
-	/** True for a hydrated edge whose toolCall is absent from its transcript; never offered by the §4 notice. */
-	stranded?: true;
 	startedAt: number;
 	finishedAt?: number;
 	error?: string;
@@ -41,12 +41,12 @@ export interface SubagentRegistrySnapshot {
 	total: number;
 }
 
-/** Terminal outcome of a followed run, including its bounded final output. */
+/** Where a followed run is: its outcome with its bounded final output, or suspended. */
 export interface SubagentFollowResult {
 	id: string;
 	agent: SubagentRegistryRecord["agent"];
 	task?: string;
-	status: Exclude<SubagentRegistryStatus, "running">;
+	status: Exclude<SubagentRunStatus, "running">;
 	output?: string;
 	error?: string;
 	startedAt: number;
@@ -61,7 +61,7 @@ export interface SubagentSpawnConfirmationPreflight {
 	/** Full registry size when records is a bounded first page. */
 	total?: number;
 	/** Full-registry status counts when records is bounded. */
-	statusCounts?: Record<SubagentRegistryStatus, number>;
+	statusCounts?: Record<SubagentRunStatus, number>;
 	status: SubagentSpawnConfirmationStatus;
 	expiresAt?: number;
 	/** Present only when this call created the reservation. */
@@ -73,13 +73,20 @@ export interface SubagentSpawnConfirmationLease {
 	release(): void;
 }
 
-/** An interrupted recovered run claimed for resume (issue #129 §5). */
-export interface SubagentResumeClaim {
-	agentName: string;
-	childSessionRef: SessionReference;
+/** A run as the registry learns it from its work: its work record names its status, output, and error. */
+export interface SubagentHydratedRun {
+	id: string;
+	parentId?: string;
+	agent: SubagentRegistryRecord["agent"];
+	path: string[];
 	task?: string;
-	/** Restore the interrupted record when the resume fails to start. */
-	rollback(): void;
+	status: Exclude<SubagentRunStatus, "running">;
+	output?: string;
+	error?: string;
+	startedAt: number;
+	finishedAt?: number;
+	/** The run's current work record, read again while it is suspended: a cancel finishes it. */
+	source?: () => WorkRecord | undefined;
 }
 
 interface SubagentRegistryEntry {
@@ -92,12 +99,9 @@ interface SubagentRegistryEntry {
 	agent: SubagentRegistryRecord["agent"];
 	path: string[];
 	task: string | undefined;
-	status: SubagentRegistryStatus;
-	hydrated: boolean;
-	claimed: boolean;
-	stranded: boolean;
-	/** Hydrated runs only: the child session reference a §5 resume reloads. Never exposed on records. */
-	childSessionRef: SessionReference | undefined;
+	status: SubagentRunStatus;
+	/** A suspended run's work record, read again until it finishes. */
+	source: (() => WorkRecord | undefined) | undefined;
 	startedAt: number;
 	finishedAt: number | undefined;
 	error: string | undefined;
@@ -131,14 +135,18 @@ function boundText(text: string, limit: number): string {
 }
 
 /**
- * Session-wide index of every delegated subagent run in one runtime tree.
+ * Session-wide index of every delegated subagent run in one runtime tree: an
+ * index over the tree's `subagent` work (RFC §7).
  *
  * The root session's manager owns one registry for its lifetime and every
  * descendant runtime shares it through its subagent context, so any branch can
  * discover sibling/cousin runs and follow their results instead of duplicating
- * work. Completed outputs are retained bounded; waiting on a running run is
+ * work. Runs this process starts register as they publish and complete with
+ * their work; runs of earlier processes are hydrated from the `work_*`
+ * entries of the root log and, through each child's locator, of the child
+ * logs. Completed outputs are retained bounded; waiting on a running run is
  * cycle-checked against parent-awaits-child and active follow edges so a
- * follow can never deadlock the tree.
+ * follow can never deadlock the tree. A suspended run is not waited on.
  */
 export class SubagentRegistry {
 	private readonly entries = new Map<string, SubagentRegistryEntry>();
@@ -153,7 +161,7 @@ export class SubagentRegistry {
 	register(options: { id: string; parentId?: string; agent: SubagentRegistryRecord["agent"]; path: string[] }): void {
 		if (this.entries.has(options.id)) {
 			// Re-registering a live id would corrupt the running list and orphan
-			// waiters; §5 resume upholds this by claiming the record first.
+			// waiters; a resume replaces its suspended record through `resumed`.
 			throw new Error(`Subagent run "${options.id}" is already registered`);
 		}
 		const entry: SubagentRegistryEntry = {
@@ -166,10 +174,7 @@ export class SubagentRegistry {
 			path: [...options.path],
 			task: undefined,
 			status: "running",
-			hydrated: false,
-			claimed: false,
-			stranded: false,
-			childSessionRef: undefined,
+			source: undefined,
 			startedAt: Date.now(),
 			finishedAt: undefined,
 			error: undefined,
@@ -182,88 +187,60 @@ export class SubagentRegistry {
 	}
 
 	/**
-	 * Register a run recovered from persisted transcripts in a terminal state
-	 * (issue #129). Hydrated entries behave like ordinary terminal records —
-	 * follow returns them immediately — but keep their historical timestamps
-	 * and are marked so consumers can tell recovered pre-restart work from
-	 * runs started by this process. No-op when the id is already known.
+	 * Register a run of an earlier process from its work record: finished, or
+	 * suspended. Hydrated entries behave like terminal records (follow returns
+	 * them at once) and keep their recorded timestamps. A suspended run's
+	 * `source` is read again until its work finishes. No-op when the id is
+	 * already known.
 	 */
-	hydrate(options: {
-		id: string;
-		parentId?: string;
-		agent: SubagentRegistryRecord["agent"];
-		path: string[];
-		task?: string;
-		status: Exclude<SubagentRegistryStatus, "running">;
-		output?: string;
-		error?: string;
-		/** The edge's toolCall is absent from its transcript (design §3 stranded case). */
-		stranded?: boolean;
-		/** Child session reference enabling a §5 resume of interrupted runs. */
-		childSessionRef?: SessionReference;
-		startedAt: number;
-		finishedAt: number;
-	}): void {
-		if (this.entries.has(options.id)) {
+	hydrate(run: SubagentHydratedRun): void {
+		if (this.entries.has(run.id)) {
 			return;
 		}
 		const entry: SubagentRegistryEntry = {
-			id: options.id,
+			id: run.id,
 			sequence: this.nextSequence++,
 			previousRunning: undefined,
 			nextRunning: undefined,
-			parentId: options.parentId,
-			agent: { ...options.agent },
-			path: [...options.path],
-			task: options.task === undefined ? undefined : boundText(options.task, REGISTRY_TASK_LIMIT_CHARS),
-			status: options.status,
-			hydrated: true,
-			claimed: false,
-			stranded: options.stranded === true,
-			childSessionRef: options.childSessionRef,
-			startedAt: options.startedAt,
-			finishedAt: options.finishedAt,
-			error: options.error === undefined ? undefined : boundText(options.error, REGISTRY_ERROR_LIMIT_CHARS),
-			output: options.output === undefined ? undefined : boundText(options.output, REGISTRY_OUTPUT_LIMIT_CHARS),
+			parentId: run.parentId,
+			agent: { ...run.agent },
+			path: [...run.path],
+			task: run.task === undefined ? undefined : boundText(run.task, REGISTRY_TASK_LIMIT_CHARS),
+			status: run.status,
+			source: run.status === "suspended" ? run.source : undefined,
+			startedAt: run.startedAt,
+			finishedAt: run.finishedAt,
+			error: run.error === undefined ? undefined : boundText(run.error, REGISTRY_ERROR_LIMIT_CHARS),
+			output: run.output === undefined ? undefined : boundText(run.output, REGISTRY_OUTPUT_LIMIT_CHARS),
 			waiters: [],
 		};
-		this.entries.set(options.id, entry);
+		this.entries.set(run.id, entry);
 		this.insertTerminal(entry);
 		this.evictOldestTerminal();
 	}
 
 	/**
-	 * Atomically claim an interrupted recovered run for a §5 resume: the
-	 * terminal hydrated record is removed so the resumed run can re-register
-	 * under its original id through the ordinary live pipeline. Only hydrated
-	 * `aborted` records with a known child session reference qualify — completed
-	 * recoveries are followed, not resumed. No dedup preflight applies:
-	 * claiming an existing record by id cannot duplicate work.
+	 * A suspended run runs again under its id: its record re-enters the running
+	 * list, so a follow waits for it. An unknown id registers as a new run; a
+	 * running one is left as it is.
 	 */
-	claimResume(id: string): SubagentResumeClaim | undefined {
-		const entry = this.entries.get(id);
-		if (!entry || !entry.hydrated || entry.status !== "aborted" || entry.childSessionRef === undefined) {
-			return undefined;
+	resumed(options: {
+		id: string;
+		parentId?: string;
+		agent: SubagentRegistryRecord["agent"];
+		path: string[];
+		task?: string;
+	}): void {
+		const existing = this.entries.get(options.id);
+		if (existing?.status === "running") return;
+		if (existing) {
+			this.entries.delete(options.id);
+			const terminalIndex = this.terminalEntries.indexOf(existing);
+			if (terminalIndex !== -1) this.terminalEntries.splice(terminalIndex, 1);
 		}
-		this.entries.delete(id);
-		const terminalIndex = this.terminalEntries.indexOf(entry);
-		if (terminalIndex !== -1) {
-			this.terminalEntries.splice(terminalIndex, 1);
-		}
-		let rolledBack = false;
-		return {
-			agentName: entry.agent.name,
-			childSessionRef: entry.childSessionRef,
-			...(entry.task !== undefined ? { task: entry.task } : {}),
-			rollback: () => {
-				if (rolledBack || this.entries.has(id)) {
-					return;
-				}
-				rolledBack = true;
-				this.entries.set(id, entry);
-				this.insertTerminal(entry);
-			},
-		};
+		this.register(options);
+		const task = options.task ?? existing?.task;
+		if (task !== undefined) this.setTask(options.id, task);
 	}
 
 	setTask(id: string, task: string): void {
@@ -276,7 +253,7 @@ export class SubagentRegistry {
 
 	complete(
 		id: string,
-		status: Exclude<SubagentRegistryStatus, "running">,
+		status: Exclude<SubagentRunStatus, "running" | "suspended">,
 		result: { output?: string; error?: string } = {},
 	): void {
 		const entry = this.entries.get(id);
@@ -330,6 +307,7 @@ export class SubagentRegistry {
 
 	get(id: string): SubagentRegistryRecord | undefined {
 		const entry = this.entries.get(id);
+		if (entry) this.refresh(entry);
 		return entry ? this.toRecord(entry) : undefined;
 	}
 
@@ -458,12 +436,9 @@ export class SubagentRegistry {
 					: `Subagent run "${targetPreview}" is not in the delegation registry. No runs have been recorded yet.`,
 			);
 		}
+		this.refresh(entry);
 		if (entry.status !== "running") {
-			// Delivering a recovered result claims it: the §4 recovery notice
-			// stops offering runs whose reports already reached a conversation.
-			if (entry.hydrated) {
-				entry.claimed = true;
-			}
+			// A finished run answers at once; a suspended one is not waited on.
 			return this.toFollowResult(entry);
 		}
 		if (signal?.aborted) {
@@ -610,9 +585,6 @@ export class SubagentRegistry {
 			path: [...entry.path],
 			...(entry.task !== undefined ? { task: entry.task } : {}),
 			status: entry.status,
-			...(entry.hydrated ? { hydrated: true as const } : {}),
-			...(entry.claimed ? { claimed: true as const } : {}),
-			...(entry.stranded ? { stranded: true as const } : {}),
 			startedAt: entry.startedAt,
 			...(entry.finishedAt !== undefined ? { finishedAt: entry.finishedAt } : {}),
 			...(entry.error !== undefined ? { error: entry.error } : {}),
@@ -635,12 +607,15 @@ export class SubagentRegistry {
 		};
 	}
 
-	private getStatusCounts(): Record<SubagentRegistryStatus, number> {
-		const counts: Record<SubagentRegistryStatus, number> = {
+	private getStatusCounts(): Record<SubagentRunStatus, number> {
+		this.refreshSuspended();
+		const counts: Record<SubagentRunStatus, number> = {
 			running: this.entries.size - this.terminalEntries.length,
+			suspended: 0,
 			completed: 0,
 			failed: 0,
-			aborted: 0,
+			cancelled: 0,
+			interrupted: 0,
 		};
 		for (const entry of this.terminalEntries) {
 			counts[entry.status] += 1;
@@ -648,7 +623,30 @@ export class SubagentRegistry {
 		return counts;
 	}
 
+	/** Read a suspended run's work again: a cancel or a resume elsewhere finished it. */
+	private refresh(entry: SubagentRegistryEntry): void {
+		if (entry.status !== "suspended" || !entry.source) return;
+		let record: WorkRecord | undefined;
+		try {
+			record = entry.source();
+		} catch {
+			return;
+		}
+		if (record?.outcome === undefined) return;
+		entry.status = record.outcome;
+		entry.source = undefined;
+		entry.finishedAt = Date.now();
+		if (record.error !== undefined) entry.error = boundText(record.error, REGISTRY_ERROR_LIMIT_CHARS);
+		const output = record.result?.output?.text;
+		if (output !== undefined) entry.output = boundText(output, REGISTRY_OUTPUT_LIMIT_CHARS);
+	}
+
+	private refreshSuspended(): void {
+		for (const entry of this.terminalEntries) this.refresh(entry);
+	}
+
 	private collectRecords(limit: number): SubagentRegistryRecord[] {
+		this.refreshSuspended();
 		const records: SubagentRegistryRecord[] = [];
 		let running = this.runningTail;
 		while (running && records.length < limit) {

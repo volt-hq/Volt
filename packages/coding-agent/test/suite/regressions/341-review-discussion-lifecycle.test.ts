@@ -724,8 +724,8 @@ describe("Regression #341 host sibling lifecycle", () => {
 			expect(() => intentRegistry.prepareFrame(contextOf(source), name, input)).not.toThrow();
 		}
 		for (const [name, input] of [
-			["subagent_start", { agent: "general", prompt: "fix" }],
-			["subagent_abort", { subagentId: "sa_1" }],
+			["start_subagent", { agent: "general", prompt: "fix" }],
+			["open_work", { workId: "sa_1" }],
 			["mcp.connect", { server: "x" }],
 			["bash", { command: "echo allowed" }],
 			["plan_execute", { planId: "p", expectedRevision: 1, strategy: "retain_context" }],
