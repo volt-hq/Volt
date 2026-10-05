@@ -1,6 +1,6 @@
 {
 	"name": "volt-terminal-bench-harbor",
-	"version": "0.3.1",
+	"version": "0.4.0",
 	"description": "Run Volt on Terminal-Bench through Harbor.",
 	"type": "module",
 	"keywords": [
@@ -17,8 +17,14 @@
 		"volt_tbench_harbor"
 	],
 	"volt": {
-		"extensions": [
-			"extensions/terminal-bench-harbor.ts"
+		"id": "terminal-bench-harbor",
+		"displayName": "Terminal-Bench Harbor",
+		"description": "Runs Volt on Terminal-Bench through Harbor.",
+		"entry": "extensions/terminal-bench-harbor.ts",
+		"permissions": [
+			"exec",
+			"network",
+			"fs-write"
 		]
 	}
 }
