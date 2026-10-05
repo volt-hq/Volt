@@ -101,13 +101,28 @@ function openConversationView(title: string, child: HostedConversation): WorkCon
 	};
 }
 
-/** A closed conversation's log, read once without taking its lock. */
-async function closedConversationView(title: string, record: WorkRecord): Promise<WorkConversation> {
+/**
+ * A closed conversation's log, read once without taking its lock: the
+ * subagent conversation of `parent` that `record` links.
+ */
+async function closedConversationView(
+	title: string,
+	record: WorkRecord,
+	parent: HostedConversation,
+): Promise<WorkConversation> {
 	const ref = record.child?.ref;
 	if (!ref) throw new Error("The conversation of this work was not kept");
 	const manager = await SessionManager.openReadOnly(ref);
 	let messages: unknown[];
 	try {
+		const header = manager.getHeader();
+		if (
+			header?.origin !== "subagent" ||
+			header.parentSession?.sessionId !== parent.id ||
+			manager.getSessionId() !== record.child?.conversation
+		) {
+			throw new Error("The log of this work is not its subagent conversation");
+		}
 		messages = manager.getBranch().flatMap((entry) => (isMessageEntry(entry) ? [entry.message] : []));
 	} finally {
 		await manager.closePersistence();
@@ -232,7 +247,7 @@ export class TuiWorkSource implements WorkSource {
 		if (!record || record.child?.conversation !== outcome.conversation) {
 			throw new Error("The conversation of this work is not open");
 		}
-		return { kind: "view", conversation: await closedConversationView(title, record) };
+		return { kind: "view", conversation: await closedConversationView(title, record, conversation) };
 	}
 
 	private changed(): void {

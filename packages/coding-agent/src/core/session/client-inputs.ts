@@ -46,6 +46,18 @@ export function createLocalClientInputId(): string {
 	return `${LOCAL_CLIENT_INPUT_ID_PREFIX}${randomUUID()}`;
 }
 
+/** Whether `details` describe a work notice's work: other messages of its type are not notices. */
+function isWorkNoticeDetails(details: unknown): details is WorkNoticeDetails {
+	if (typeof details !== "object" || details === null) return false;
+	const { workId, kind, title, outcome } = details as Record<string, unknown>;
+	return (
+		typeof workId === "string" &&
+		typeof kind === "string" &&
+		typeof title === "string" &&
+		(outcome === "completed" || outcome === "failed")
+	);
+}
+
 function isLocalClientInputId(clientMessageId: string): boolean {
 	return clientMessageId.startsWith(LOCAL_CLIENT_INPUT_ID_PREFIX);
 }
@@ -205,8 +217,12 @@ export class SessionClientInputs {
 		const state = this.host.conversation().state;
 		const queue = this.host.conversation().queue;
 		for (const message of [...queue.steer, ...queue.followUp]) {
-			if (message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE) {
-				notices.push(structuredClone(message.details as WorkNoticeDetails));
+			if (
+				message.role === "custom" &&
+				message.customType === WORK_NOTICE_CUSTOM_TYPE &&
+				isWorkNoticeDetails(message.details)
+			) {
+				notices.push(structuredClone(message.details));
 			}
 		}
 		const held = new Set([...queue.steer, ...queue.followUp].flatMap((message) => getClientMessageId(message) ?? []));

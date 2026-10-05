@@ -78,8 +78,11 @@ export class WorkNoticeComponent extends Container {
 			return;
 		}
 		this.addChild(new Text(theme.fg("customMessageText", workDisplayText(noticeHeading(details))), 1, 0));
+		// Markdown of the kind's own text, without terminal controls.
 		this.addChild(
-			new Markdown(own, 1, 0, markdownTheme, { color: (value: string) => theme.fg("customMessageText", value) }),
+			new Markdown(workDisplayText(own), 1, 0, markdownTheme, {
+				color: (value: string) => theme.fg("customMessageText", value),
+			}),
 		);
 	}
 }

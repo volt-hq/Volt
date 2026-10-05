@@ -367,5 +367,29 @@ describe("protocol subagents", () => {
 		});
 		expect(parent.work.running().map((record) => record.workId)).toEqual([workId]);
 		await parent.work.cancel(workId);
+		await vi.waitFor(() => expect(parent.work.get(workId)?.outcome).toBe("cancelled"));
+		await vi.waitFor(() =>
+			expect(parent.session.getSubagentToolManager()?.childConversation?.(conversation)).toBeUndefined(),
+		);
+		// The closed child stays readable, as a snapshot of its log.
+		await expect(remote.subscribe(conversation, "closed-child")).resolves.toMatchObject({
+			type: "snapshot",
+			conversation,
+		});
+		// A read costs its log's length in snapshot tails: a device short of reads is cut off before it gets one.
+		const tight = await connect(
+			harness,
+			parent,
+			remoteProfile({
+				grant: GRANT,
+				redaction: { workspacePath: tmpdir(), remoteWorkspacePath: "/workspace" },
+				bound: parent.id,
+				limits: { snapshotTail: 1, readBurst: 2 },
+			}),
+		);
+		cleanups.push(() => tight.close());
+		void tight.subscribe(conversation, "tight").catch(() => undefined);
+		await vi.waitFor(() => expect(tight.frames.some((frame) => frame.type === "fatal")).toBe(true));
+		expect(tight.frames.some((frame) => frame.type === "snapshot")).toBe(false);
 	});
 });

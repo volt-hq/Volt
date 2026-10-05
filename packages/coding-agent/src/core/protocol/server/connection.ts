@@ -943,7 +943,9 @@ export function serveConnection(
 	/**
 	 * A closed subagent child, read-only: its log as a snapshot from its last
 	 * position, then `ended{closed}`. The log must be the subagent conversation
-	 * of the conversation whose work links it.
+	 * of the conversation whose work links it. A read costs one read up front
+	 * and, once the log is loaded, one more per snapshot tail of entries it
+	 * holds, as a replay that long does.
 	 */
 	const subscribeClosedChild = async (
 		frame: Static<typeof SubscribeFrameSchema>,
@@ -964,13 +966,18 @@ export function serveConnection(
 			return;
 		}
 		try {
+			const ordinal = manager.getOrdinal();
+			if (closing) return;
+			if (!reads.take(Math.max(0, Math.ceil(ordinal / profile.limits.snapshotTail) - 1))) {
+				void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
+				return;
+			}
 			const header = manager.getHeader();
 			if (
 				header?.origin === "subagent" &&
 				header.parentSession?.sessionId === linking.parent.id &&
 				manager.getSessionId() === frame.conversation
 			) {
-				const ordinal = manager.getOrdinal();
 				write({
 					type: "snapshot",
 					subscriptionId: frame.subscriptionId,
@@ -979,6 +986,8 @@ export function serveConnection(
 					state: logSnapshot(manager, profile, ordinal),
 				});
 			}
+		} catch {
+			// A log that cannot be read ends the subscription like one that does not exist.
 		} finally {
 			await manager.closePersistence().catch(() => undefined);
 		}

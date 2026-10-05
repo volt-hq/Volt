@@ -19,7 +19,7 @@
 
 import { basename, dirname } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
-import type { HostRequest, HostResponse } from "@hansjm10/volt-protocol";
+import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../agent-session.ts";
 import {
 	type ExtensionCommandContextActions,
@@ -48,6 +48,13 @@ import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
 import type { ModelSettings } from "./model-settings.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
+
+/** The error of an extension message of a type only the host sends (work notices); none for others. */
+function reservedCustomType(message: { readonly customType?: unknown }): Error | undefined {
+	return message.customType === WORK_NOTICE_CUSTOM_TYPE
+		? new Error(`Custom messages of type ${WORK_NOTICE_CUSTOM_TYPE} are the host's`)
+		: undefined;
+}
 
 /** The session's public API, as extension actions drive it. */
 export type ExtensionBindingSession = Pick<
@@ -685,7 +692,11 @@ export class SessionExtensionBinding {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
-					this.host.sendCustomMessage(message, options, this.host.extensionCommandRunning()).catch((err) => {
+					const reserved = reservedCustomType(message);
+					const sending = reserved
+						? Promise.reject(reserved)
+						: this.host.sendCustomMessage(message, options, this.host.extensionCommandRunning());
+					sending.catch((err) => {
 						runner.emitError({
 							extensionPath: "<runtime>",
 							event: "send_message",
@@ -828,7 +839,10 @@ export class SessionExtensionBinding {
 				this.extensionRunner.createCommandContext(undefined, this.host.lifetimeSignal),
 			),
 		) as ReplacedSessionContext;
-		context.sendMessage = (message, options) => this.host.sendCustomMessage(message, options, true);
+		context.sendMessage = (message, options) => {
+			const reserved = reservedCustomType(message);
+			return reserved ? Promise.reject(reserved) : this.host.sendCustomMessage(message, options, true);
+		};
 		context.sendUserMessage = (content, options) => this.host.session.sendUserMessage(content, options);
 		return context;
 	}

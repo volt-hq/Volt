@@ -432,6 +432,7 @@ describe("work in hosted conversations", () => {
 		};
 		const text = cutText("p".repeat(40));
 		const label = cutText("s".repeat(20));
+		const key = cutText("k".repeat(10));
 		// Detail within the checkpoint bound on the host, past it once its paths are rewritten longer.
 		const items = Array.from({ length: 12 }, (_, index) => ({
 			key: `path-${index}`,
@@ -457,7 +458,14 @@ describe("work in hosted conversations", () => {
 		const running = held();
 		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
 			ctx.checkpoint(
-				{ text, steps: [{ key: "step", label, status: "active" }] },
+				{
+					text,
+					steps: [
+						{ key, label, status: "active" },
+						// A key the remote workspace path lengthens past the key bound.
+						{ key: `${workspace}/k`, label: "Other", status: "pending" },
+					],
+				},
 				{ type: "keyValue", key: "paths", items },
 			);
 			return await running.execute(ctx);
@@ -475,9 +483,13 @@ describe("work in hosted conversations", () => {
 		await conversation.work.waitForIdle();
 		// The host kept the detail: it fit the bound before redaction.
 		expect(conversation.work.get(record.workId)?.detail).toBeDefined();
-		const payload = checkpoint.entry.payload as { progress?: { text?: string; steps?: Array<{ label: string }> } };
+		const payload = checkpoint.entry.payload as {
+			progress?: { text?: string; steps?: Array<{ key: string; label: string }> };
+		};
 		expect(payload.progress?.text).toBe(`${"p".repeat(40)} …`);
-		expect(payload.progress?.steps?.[0]?.label).toBe(`${"s".repeat(20)} …`);
+		expect(payload.progress?.steps?.[0]).toMatchObject({ key: `${"k".repeat(10)} …`, label: `${"s".repeat(20)} …` });
+		expect(payload.progress?.steps?.[1]?.key.length).toBeLessThanOrEqual(256);
+		expect(payload.progress?.steps?.[1]?.key.startsWith("/www")).toBe(true);
 		// Redaction lengthened the detail past the checkpoint bound: the device gets the progress without it.
 		expect(payload).not.toHaveProperty("detail");
 		expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(WORK_CHECKPOINT_MAX_SERIALIZED_BYTES);

@@ -467,6 +467,11 @@ describe("work notices", () => {
 		expect(rendered).not.toContain("**High:**");
 		expect(rendered).not.toContain("## Findings");
 
+		// The kind's text loses terminal controls before it renders.
+		const escaped = new WorkNoticeComponent(notice(`${heading}\nReport \x1b[31mred\x1b[0m done \x07`));
+		expect(escaped.render(80).lines.join("\n")).not.toMatch(/\x1b\[31m|\x07/);
+		expect(text(escaped)).toContain("Report red done");
+
 		// A notice whose text does not start with its heading stays literal.
 		const forged = text(new WorkNoticeComponent(notice("**not** the heading")));
 		expect(forged).toContain("**not** the heading");

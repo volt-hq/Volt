@@ -5,7 +5,7 @@
  * since redaction can lengthen text.
  */
 
-import { type UiNode, WORK_TEXT_MAX_CHARS, type WorkProgress } from "@hansjm10/volt-protocol";
+import { UI_NODE_KEY_MAX_CHARS, type UiNode, WORK_TEXT_MAX_CHARS, type WorkProgress } from "@hansjm10/volt-protocol";
 
 interface WorkPhase {
 	readonly progress?: WorkProgress;
@@ -16,10 +16,10 @@ function serializedBytes(value: unknown): number {
 	return Buffer.byteLength(JSON.stringify(value) ?? "", "utf8");
 }
 
-/** `text` within {@link WORK_TEXT_MAX_CHARS} UTF-16 code units, an ellipsis marking a cut. */
-function boundText(text: string): string {
-	if (text.length <= WORK_TEXT_MAX_CHARS) return text;
-	let end = WORK_TEXT_MAX_CHARS - 1;
+/** `text` within `max` UTF-16 code units, an ellipsis marking a cut. */
+function boundText(text: string, max = WORK_TEXT_MAX_CHARS): string {
+	if (text.length <= max) return text;
+	let end = max - 1;
 	const last = text.charCodeAt(end - 1);
 	if (last >= 0xd800 && last <= 0xdbff) end--;
 	return `${text.slice(0, end)}…`;
@@ -44,10 +44,10 @@ export function boundedWorkPhase<T extends WorkPhase>(value: T, maxBytes: number
 
 /**
  * `value` (a checkpoint payload or a live work value) as a profile that
- * redacts sends it: `redact` redacts it; its progress text and step labels,
- * which the host may have cut to their bound, go through `cut`, which also
- * drops the start of a root a cut left; text that redaction lengthened is
- * bounded again, and the whole value to `maxBytes`.
+ * redacts sends it: `redact` redacts it; its progress text, step labels, and
+ * step keys, which the host may have cut to their bound, go through `cut`,
+ * which also drops the start of a root a cut left; text that redaction
+ * lengthened is bounded again, and the whole value to `maxBytes`.
  */
 export function redactedWorkPhase<T extends WorkPhase>(
 	value: T,
@@ -60,13 +60,13 @@ export function redactedWorkPhase<T extends WorkPhase>(
 	if (progress === undefined) return boundedWorkPhase(redacted as T, maxBytes);
 	const { text, steps, ...numbers } = progress;
 	const kept: WorkProgress = {
-		...numbers,
+		...redact(numbers),
 		...(text === undefined ? {} : { text: boundText(cut(text)) }),
 		...(steps === undefined
 			? {}
 			: {
 					steps: steps.map((step) => ({
-						key: redact(step.key),
+						key: boundText(cut(step.key), UI_NODE_KEY_MAX_CHARS) || "step",
 						label: boundText(cut(step.label)),
 						status: step.status,
 					})),
