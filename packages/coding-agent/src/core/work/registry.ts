@@ -323,7 +323,6 @@ class OutputTail {
 
 const RESULT_NOT_RECORDED = "The work's result could not be recorded";
 
-/** Whether stopping the conversation's run cancels a kind's running work. */
 /**
  * Whether stopping the conversation's run cancels a kind's running work. A
  * stop can come from a remote client, so a kind that keeps its work from
