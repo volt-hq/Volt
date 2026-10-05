@@ -124,6 +124,7 @@ describe("background jobs on the protocol", () => {
 			WORK_NOTICE_CUSTOM_TYPE,
 			`/repo/test (job ${job.id}) completed.`,
 			true,
+			{ workId: job.id, kind: "job", title: "/repo/test", outcome: "completed" },
 		);
 		const profile = remoteProfile({
 			grant: createIrohRemotePresetAccess("coding").rpcGrant,
