@@ -38,7 +38,7 @@ volt install git:https://github.com/volt-hq/Volt@store/build-ios-apps
 - `xcodebuild`, `xcrun`, and relevant simulator runtimes installed.
 - Node.js available for the bundled native extension and helper scripts.
 - Optional workflow tools such as `serve-sim`, ETTrace, Instruments, and `leaks`, depending on the selected skill.
-- Optional: set `VOLT_XCODEBUILDMCP_WORKFLOWS` to override the extension default of `simulator,ui-automation,debugging`.
+- Optional: set the `workflows` setting (from `/extensions`, or `extensions.build-ios-apps.settings.workflows` in `settings.json`) to the comma-separated XcodeBuildMCP workflows to enable. Unset uses `XCODEBUILDMCP_ENABLED_WORKFLOWS`, else `simulator,ui-automation,debugging`; a change applies after `/reload`.
 
 ## Package Structure
 
