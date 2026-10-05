@@ -169,6 +169,7 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	StartWorkOptions,
 	TerminalInputHandler,
 	// Events - Tool
 	ToolCallEvent,
@@ -197,6 +198,10 @@ export type {
 	WebSearchToolResultEvent,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
+	WorkKindDeclaration,
+	WorkRun,
+	WorkRunContext,
+	WorkRunResult,
 	WriteToolCallEvent,
 	WriteToolResultEvent,
 } from "./types.ts";

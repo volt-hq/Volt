@@ -45,6 +45,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [ExtensionContext](#extensioncontext)
 - [ExtensionCommandContext](#extensioncommandcontext)
 - [ExtensionAPI Methods](#extensionapi-methods)
+  - [Background work](#voltregisterworkkindname-kind)
 - [State Management](#state-management)
 - [Custom Tools](#custom-tools)
 - [Custom UI](#custom-ui)
@@ -1079,6 +1080,10 @@ volt.on("before_agent_start", (event, ctx) => {
 });
 ```
 
+### ctx.startWork(kind, options, run)
+
+Starts background work of a kind the extension registered with [`volt.registerWorkKind()`](#voltregisterworkkindname-kind). Resolves with `{ workId }` once the work is recorded; `run` then executes in the background. An extension starts only its own kinds: `kind` is the name it registered, and another extension's kind (or a built-in kind such as `job`) is never found. The context of a `ctx.newSession()`/`ctx.fork()`/`ctx.switchSession()` `withSession` callback cannot start work.
+
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
@@ -1634,6 +1639,47 @@ Use `sourceInfo` as the canonical provenance field. Do not infer ownership from 
 
 Built-in interactive commands (like `/model` and `/settings`) are not included here. They are handled only in interactive
 mode and would not execute if sent via `prompt`.
+
+### volt.registerWorkKind(name, kind?)
+
+Register a kind of background work. Its work is recorded in the conversation log, so every client (the TUI, RPC, and paired devices) sees it with its title, progress, and outcome, and can cancel it. Start work with [`ctx.startWork()`](#ctxstartworkkind-options-run):
+
+```typescript
+volt.registerWorkKind("scan", { delivery: "message" });
+
+volt.registerCommand("scan", {
+  handler: async (_args, ctx) => {
+    await ctx.startWork("scan", { title: "Scan dependencies", input: { root: "." } }, async (work) => {
+      work.checkpoint({ text: "Resolving", steps: [{ key: "resolve", label: "Resolve", status: "active" }] });
+      const found = await scan(work.signal); // stop when the signal aborts
+      work.output(found.join("\n"));
+      return {
+        outcome: "completed",
+        result: { summary: `${found.length} outdated packages` },
+        notice: `Outdated packages:\n${found.join("\n")}`,
+      };
+    });
+  },
+});
+```
+
+The kind's id is `ext:<extension>/<name>`. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. The extension id is provisional until extensions declare manifest ids: a slug of the extension's file name, or of its directory for an `index.ts`. The first extension in load order with an id owns it; another extension with the same id registers no kinds and reports a `register_work_kind` error. An extension registers at most 16 kinds.
+
+The declaration (all optional):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `delivery` | `"none"` | What a completed or failed result does: `"message"` queues a notice the model sees with its next turn, without starting one; `"wake"` also starts a turn when the conversation is idle. |
+| `cancellable` | `true` | Whether a client may cancel the work (`cancel_work`). |
+| `cancelOnAbort` | (cancels) | `false` keeps the work running when the conversation's run stops (Escape, the `abort` intent). |
+| `maxActive` | `1` | Most items of the kind running at once, at most 8. |
+| `requires` | `[]` | Remote capabilities a paired device needs, beyond the intent's own, to cancel the work or read its output. |
+
+`run` receives only the work's context: `workId`, `signal` (aborted when the work is cancelled, the extensions reload, or the conversation closes), `progress(progress)` for live progress, `checkpoint(progress)` for a phase that is also recorded in the log (at most every 10 seconds), and `output(text)` (the newest 50 KB are kept). Progress is `{ text?, value?, max?, steps? }`, with steps `{ key, label, status }` and status `pending`, `active`, `done`, `failed`, or `skipped`; text is shown without control sequences.
+
+`run` returns `{ outcome, result?, error?, notice? }` with outcome `completed`, `failed`, or `cancelled`; a run that throws fails, or is cancelled when its signal aborted. `result` keeps a `summary` (at most 2,000 characters), an `output` that replaces the reported output, and JSON `data` (at most 64 KB). `notice` is the notice text the model sees instead of the title and summary; paired devices see the title and summary, and read the output with `work_output`. The title is one line of at most 200 characters, and the input is JSON of at most 16 KB.
+
+Reloading the extensions removes their kinds: `/reload` is refused while work runs, and work still running when the kinds are removed (for example, started by a `session_shutdown` handler) ends `interrupted`; whatever its `run` reports or returns afterwards is ignored. Extension work does not survive a restart: work open when the conversation reopens ends `interrupted`.
 
 ### volt.registerMessageRenderer(customType, renderer)
 

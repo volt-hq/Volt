@@ -177,6 +177,7 @@ export type {
 	SlashCommandInfo,
 	SlashCommandSource,
 	SourceInfo,
+	StartWorkOptions,
 	TerminalInputHandler,
 	ToolCallEvent,
 	ToolCallEventResult,
@@ -195,6 +196,10 @@ export type {
 	WebSearchToolResultEvent,
 	WidgetPlacement,
 	WorkingIndicatorOptions,
+	WorkKindDeclaration,
+	WorkRun,
+	WorkRunContext,
+	WorkRunResult,
 	WriteToolCallEvent,
 } from "./core/extensions/index.ts";
 export {

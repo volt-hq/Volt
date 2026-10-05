@@ -677,6 +677,8 @@ export class InteractiveMode {
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
+	/** The progress of running extension work, by work id, shown above the editor after the widgets. */
+	private extensionWorkWidgets = new Map<string, Component>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 
@@ -2553,7 +2555,7 @@ export class InteractiveMode {
 		if (shortcuts.size === 0) return;
 
 		// Create a context for shortcut handlers. Its UI is the extensions' own: dialogs and status reach every client.
-		const createContext = (): ExtensionContext => ({
+		const createContext = (extensionPath: string): ExtensionContext => ({
 			ui: extensionRunner.getUIContext(),
 			mode: "tui",
 			hasUI: true,
@@ -2586,6 +2588,7 @@ export class InteractiveMode {
 				})();
 			},
 			getSystemPrompt: () => this.session.systemPrompt,
+			startWork: (kind, options, run) => extensionRunner.createContext(extensionPath).startWork(kind, options, run),
 		});
 
 		// Set up the extension shortcut handler on the default editor
@@ -2594,7 +2597,7 @@ export class InteractiveMode {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext())).catch((err) => {
+					Promise.resolve(shortcut.handler(createContext(shortcut.extensionPath))).catch((err) => {
 						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
 					});
 					return true;
@@ -2894,20 +2897,25 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(this.widgetContainerAbove, this.extensionWidgetsAbove, true, true);
-		this.renderWidgetContainer(this.widgetContainerBelow, this.extensionWidgetsBelow, false, false);
+		this.renderWidgetContainer(
+			this.widgetContainerAbove,
+			[...this.extensionWidgetsAbove.values(), ...this.extensionWorkWidgets.values()],
+			true,
+			true,
+		);
+		this.renderWidgetContainer(this.widgetContainerBelow, [...this.extensionWidgetsBelow.values()], false, false);
 		this.ui.requestRender();
 	}
 
 	private renderWidgetContainer(
 		container: Container,
-		widgets: Map<string, Component & { dispose?(): void }>,
+		widgets: readonly Component[],
 		spacerWhenEmpty: boolean,
 		leadingSpacer: boolean,
 	): void {
 		container.clear();
 
-		if (widgets.size === 0) {
+		if (widgets.length === 0) {
 			if (spacerWhenEmpty) {
 				container.addChild(new Spacer(1));
 			}
@@ -2917,7 +2925,7 @@ export class InteractiveMode {
 		if (leadingSpacer) {
 			container.addChild(new Spacer(1));
 		}
-		for (const component of widgets.values()) {
+		for (const component of widgets) {
 			container.addChild(component);
 		}
 	}
@@ -3046,7 +3054,10 @@ export class InteractiveMode {
 			},
 			notify: (level, message) => this.showExtensionNotify(message, level),
 			setEditorText: (text) => this.editor.setText(text),
-			showWork: (workId, value) => this.showHostActionProgress(workId, value),
+			showWork: (workId, value) => {
+				this.showHostActionProgress(workId, value);
+				this.showExtensionWorkProgress(workId, value);
+			},
 		});
 	}
 
@@ -3119,6 +3130,42 @@ export class InteractiveMode {
 		} else if (record.outcome === "cancelled") {
 			this.showStatus(record.result?.summary ?? "Host action cancelled");
 		}
+	}
+
+	/**
+	 * Extension work's progress while it runs, as a widget above the editor,
+	 * then how it ended as a status line. Stopping the run (Escape) cancels
+	 * the work of kinds that cancel with it. Other work has its own views.
+	 */
+	private showExtensionWorkProgress(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void {
+		const record = this.session.work.get(workId);
+		if (!value) {
+			if (!this.extensionWorkWidgets.delete(workId)) return;
+			this.renderWidgets();
+			if (record?.outcome === "completed") {
+				const summary = record.result?.summary?.split("\n")[0];
+				this.showStatus(summary ? `${record.title} completed: ${summary}` : `${record.title} completed`);
+			} else if (record?.outcome === "failed") {
+				this.showWarning(record.error ? `${record.title} failed: ${record.error}` : `${record.title} failed`);
+			} else if (record?.outcome !== undefined) {
+				this.showStatus(`${record.title} ${record.outcome}`);
+			}
+			return;
+		}
+		if (!record?.kind.startsWith("ext:")) return;
+		const cancel = this.session.work.cancelsWithRun(workId) ? ` (${keyText("app.interrupt")} to cancel)` : "";
+		const lines = [theme.fg("accent", record.title) + theme.fg("dim", cancel)];
+		if (value.progress?.text) lines.push(theme.fg("muted", value.progress.text));
+		for (const step of value.progress?.steps ?? []) {
+			const mark = { pending: "○", active: "●", done: "✓", failed: "✗", skipped: "–" }[step.status];
+			const color = step.status === "active" ? "accent" : step.status === "failed" ? "error" : "dim";
+			lines.push(theme.fg(color, `  ${mark} ${step.label}`));
+		}
+		const widget = new Container();
+		for (const line of lines.slice(0, InteractiveMode.MAX_WIDGET_LINES))
+			widget.addChild(new TruncatedText(line, 1, 0));
+		this.extensionWorkWidgets.set(workId, widget);
+		this.renderWidgets();
 	}
 
 	/** The TUI's terminal for the extensions; dialogs, status, string widgets, and title come from the live view. */

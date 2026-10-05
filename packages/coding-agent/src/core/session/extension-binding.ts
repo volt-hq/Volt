@@ -43,6 +43,7 @@ import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { theme } from "../theme/runtime.ts";
+import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
 import type { ModelSettings } from "./model-settings.ts";
@@ -97,6 +98,11 @@ function buildExtensionResourcePaths(entries: Array<{ path: string; extensionPat
 	});
 }
 
+/** A work kind the session refused to register, as an extension error. */
+function refusedKind(refusal: WorkKindRefusal): ExtensionError {
+	return { extensionPath: refusal.extensionPath, event: "register_work_kind", error: refusal.error };
+}
+
 export interface SessionExtensionBindingHost {
 	readonly session: ExtensionBindingSession;
 	readonly sessionManager: SessionManager;
@@ -113,6 +119,8 @@ export interface SessionExtensionBindingHost {
 	conversation(): Conversation<AgentTool>;
 	tools(): SessionToolRuntime;
 	extensionServices(): SessionExtensionServices;
+	/** The work kinds the extensions declared, registered in the conversation's work registry. */
+	extensionKinds(): ExtensionKinds;
 	jobs(): SessionJobs;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */
@@ -203,6 +211,8 @@ export class SessionExtensionBinding {
 	private readonly uiRouter: ExtensionUIContext = this.createUIRouter();
 	private readonly commandActions: ExtensionCommandContextActions = this.createCommandActions();
 	private extensionErrorUnsubscriber?: () => void;
+	/** Work kinds refused before any client listened for extension errors. */
+	private refusedKinds: ExtensionError[] = [];
 	/** Fences session replacement and fresh mutations across asynchronous runtime reload. */
 	private reloadInProgress = false;
 
@@ -548,6 +558,14 @@ export class SessionExtensionBinding {
 
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = runner.onError((error) => this.reportError(error));
+		for (const error of this.refusedKinds.splice(0)) runner.emitError(error);
+	}
+
+	/** Report the work kinds the session refused to register: at once, or once clients listen. */
+	private refuseKinds(runner: ExtensionRunner, refusals: readonly WorkKindRefusal[]): void {
+		const errors = refusals.map(refusedKind);
+		if (this.bound) for (const error of errors) runner.emitError(error);
+		else this.refusedKinds.push(...errors);
 	}
 
 	/** Detach every client of a disposed session: nothing reaches them or is replayed to them afterwards. */
@@ -616,12 +634,21 @@ export class SessionExtensionBinding {
 		// runtime (project-trust rebuild), so live generations are unaffected.
 		previousRunner?.invalidateStaleGeneration(extensionsResult.runtime);
 		this.bindExtensionCore(this.extensionRunner);
+		// The previous generation's work kinds go with it, interrupting their work; this generation's replace them.
+		// Its refusals reach the clients once they listen to it.
+		const kinds = this.host.extensionKinds();
+		void this.host.trackAncillaryWork(kinds.clear());
+		this.refusedKinds = kinds
+			.bind(this.extensionRunner.getExtensionPaths(), this.extensionRunner.getWorkKinds())
+			.map(refusedKind);
 		if (this.bound) this.applyExtensionBindings(this.extensionRunner);
 	}
 
 	private bindExtensionCore(runner: ExtensionRunner): void {
 		const session = this.host.session;
 		runner.bindServices(this.host.extensionServices().servicesManager);
+		const kinds = this.host.extensionKinds();
+		runner.bindWork(kinds.start, () => this.refuseKinds(runner, kinds.sync(runner.getWorkKinds())));
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -761,6 +788,9 @@ export class SessionExtensionBinding {
 		await this.host.extensionServices().reopen();
 		const previousFlagValues = this.extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this.extensionRunner, { type: "session_shutdown", reason: "reload" });
+		this.host.assertActive();
+		// The shut-down extensions' work kinds go with them, interrupting the work they still run.
+		await this.host.extensionKinds().clear();
 		this.host.assertActive();
 		await this.host.settingsManager.reload();
 		this.host.assertActive();

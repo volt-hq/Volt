@@ -536,4 +536,111 @@ describe("work registry", () => {
 		const checkpoints = workEntries(await entriesOf(log)).filter((entry) => entry.type === "work_checkpoint");
 		expect(checkpoints).toHaveLength(1);
 	});
+
+	it("removing a kind interrupts its work at once and ignores what the executor returns or reports afterwards", async () => {
+		const { registry, log, live } = await setup();
+		const remove = registry.register(kind());
+		const lingering = Promise.withResolvers<WorkExecution>();
+		let ctx: Parameters<WorkExecutor>[0] | undefined;
+		const record = await registry.start("ext:test/run", null, async (context) => {
+			ctx = context;
+			return await lingering.promise;
+		});
+		await vi.waitFor(() => expect(ctx).toBeDefined());
+		ctx?.output("before");
+		await remove();
+		expect(ctx?.signal.aborted).toBe(true);
+		expect(registry.get(record.workId)).toMatchObject({ outcome: "interrupted" });
+		expect(registry.running()).toEqual([]);
+		expect(live.at(-1)).toEqual({ type: "clear", key: `work/${record.workId}` });
+		const before = await entriesOf(log);
+		ctx?.output("after");
+		ctx?.progress({ text: "after" });
+		ctx?.checkpoint({ text: "after" });
+		lingering.resolve({ outcome: "completed", result: { summary: "too late" } });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(await entriesOf(log)).toEqual(before);
+		expect(registry.get(record.workId)?.result).toBeUndefined();
+		await expect(registry.start("ext:test/run", null, held().execute)).rejects.toMatchObject({
+			code: "unknown_kind",
+		});
+		// The kind registers again, and a second removal does nothing more.
+		registry.register(kind());
+		await remove();
+		expect((await registry.start("ext:test/run", null, async () => ({ outcome: "completed" }))).kind).toBe(
+			"ext:test/run",
+		);
+		await registry.waitForIdle();
+	});
+
+	it("runs none of the work of a kind removed while the work started", async () => {
+		const { registry } = await setup();
+		const remove = registry.register(kind());
+		const execute = vi.fn<WorkExecutor>(async () => ({ outcome: "completed" }));
+		const starting = registry.start("ext:test/run", null, execute);
+		await remove();
+		const record = await starting;
+		await registry.waitForIdle();
+		expect(execute).not.toHaveBeenCalled();
+		expect(registry.get(record.workId)?.outcome).toBe("interrupted");
+	});
+
+	it("titles an item as its start names it, and queues the notice text its execution gives", async () => {
+		const { registry, conversation } = await setup();
+		registry.register(kind({ delivery: "message" }));
+		const record = await registry.start(
+			"ext:test/run",
+			{ n: 1 },
+			async () => ({
+				outcome: "completed",
+				result: { summary: "short" },
+				deliver: { text: "The whole \u001b[1mreport\u001b[0m\nline two" },
+			}),
+			{ title: "Custom\ntitle" },
+		);
+		expect(record.title).toBe("Custom title");
+		await registry.waitForIdle();
+		expect(conversation.queue.steer).toEqual([
+			expect.objectContaining({ customType: "work_notice", content: "The whole report\nline two" }),
+		]);
+		// Blank text falls back to the title and summary.
+		const blank = await registry.start("ext:test/run", null, async () => ({
+			outcome: "completed",
+			deliver: { text: " \n" },
+		}));
+		await registry.waitForIdle();
+		expect(conversation.queue.steer.at(-1)).toMatchObject({
+			content: `Run null (ext:test/run ${blank.workId}) completed.`,
+		});
+	});
+
+	it("tells what remote clients need for work of known kinds, and refuses work of an extension kind it does not know", async () => {
+		const { registry } = await setup();
+		const remove = registry.register(kind({ requires: ["host.manage.v1"] }));
+		registry.register(kind({ kind: "job" }));
+		const extension = await registry.start("ext:test/run", null, async () => ({ outcome: "completed" }));
+		const job = await registry.start("job", null, async () => ({ outcome: "completed" }));
+		await registry.waitForIdle();
+		expect(registry.requires(extension.workId)).toEqual(["host.manage.v1"]);
+		expect(registry.requires(job.workId)).toEqual([]);
+		await remove();
+		expect(registry.requires(extension.workId)).toBeUndefined();
+		expect(registry.requires("missing")).toEqual([]);
+	});
+
+	it("tells which running work stopping the run cancels", async () => {
+		const { registry } = await setup();
+		registry.register(kind());
+		registry.register(kind({ kind: "ext:test/kept", cancelOnAbort: false }));
+		const cancels = held();
+		const keeps = held();
+		const first = await registry.start("ext:test/run", null, cancels.execute);
+		const second = await registry.start("ext:test/kept", null, keeps.execute);
+		expect(registry.cancelsWithRun(first.workId)).toBe(true);
+		expect(registry.cancelsWithRun(second.workId)).toBe(false);
+		cancels.release();
+		keeps.release();
+		await registry.waitForIdle();
+		expect(registry.cancelsWithRun(first.workId)).toBe(false);
+	});
 });

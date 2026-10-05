@@ -33,6 +33,8 @@ export class TuiLiveView implements LiveClient {
 	private readonly host: LiveViewHost;
 	private readonly statuses = new Set<string>();
 	private readonly widgets = new Set<string>();
+	/** Work whose progress shows. */
+	private readonly works = new Set<string>();
 	private titled = false;
 	/** Pending requests in the order they were asked; the first shows. */
 	private readonly requests = new Map<string, HostRequest>();
@@ -96,6 +98,7 @@ export class TuiLiveView implements LiveClient {
 				this.requests.set(value.requestId, value.request);
 				return;
 			case "work":
+				this.works.add(value.workId);
 				this.host.showWork(value.workId, value);
 				return;
 			default:
@@ -125,6 +128,7 @@ export class TuiLiveView implements LiveClient {
 				if (this.showing?.requestId === id) this.closeShowing();
 				return;
 			case "work":
+				this.works.delete(id);
 				this.host.showWork(id, undefined);
 				return;
 			default:
@@ -137,6 +141,8 @@ export class TuiLiveView implements LiveClient {
 		this.statuses.clear();
 		for (const key of this.widgets) this.host.setWidget(key, undefined, "aboveEditor");
 		this.widgets.clear();
+		for (const workId of this.works) this.host.showWork(workId, undefined);
+		this.works.clear();
 		if (this.titled) {
 			this.titled = false;
 			this.host.setTitle(undefined);

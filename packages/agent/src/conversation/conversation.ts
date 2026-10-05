@@ -502,6 +502,14 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		return { prompt: messages("prompt"), steer: messages("steer"), followUp: messages("followUp") };
 	}
 
+	/**
+	 * Whether queued steering or follow-up input would start a turn: quiet host
+	 * input (a `message` work notice) alone never does.
+	 */
+	get queueWakes(): boolean {
+		return this.hasWakingInput("steer") || this.hasWakingInput("followUp");
+	}
+
 	get activeTools(): readonly TTool[] {
 		return [...this.tools];
 	}

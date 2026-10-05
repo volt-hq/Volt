@@ -34,6 +34,7 @@ import type {
 	TextContent,
 	ToolResultMessage,
 } from "@hansjm10/volt-ai";
+import type { RemoteCapability, WorkDelivery, WorkProgress, WorkResult } from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -367,7 +368,72 @@ export interface ExtensionContext {
 	compact(options?: CompactOptions): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string;
+	/**
+	 * Start work of a kind this extension registered with `volt.registerWorkKind`:
+	 * `run` executes in the background, and its progress, cancellation, and
+	 * result reach every client. Resolves with the work id once the work is
+	 * recorded. An extension starts only its own kinds.
+	 */
+	startWork(kind: string, options: StartWorkOptions, run: WorkRun): Promise<{ readonly workId: string }>;
 }
+
+// ============================================================================
+// Work
+// ============================================================================
+
+/** A kind of work an extension runs (RFC §7): `volt.registerWorkKind(name, kind)`. */
+export interface WorkKindDeclaration {
+	/**
+	 * What a completed or failed result does: `none` (the default), `message`
+	 * (a notice the model sees with its next turn), or `wake` (the notice, and
+	 * a turn when the conversation is idle).
+	 */
+	readonly delivery?: WorkDelivery;
+	/** Whether a client may cancel the kind's work. Defaults to true. */
+	readonly cancellable?: boolean;
+	/** `false`: stopping the conversation's run (Escape, the `abort` intent) leaves the kind's work running. */
+	readonly cancelOnAbort?: false;
+	/** Most items of the kind running at once in the conversation: 1 by default, at most 8. */
+	readonly maxActive?: number;
+	/** Remote capabilities a paired device needs, beyond the intent's or query's own, to cancel the kind's work or read its output. */
+	readonly requires?: readonly RemoteCapability[];
+}
+
+/** Work to start: its one-line title, and the input the log keeps (JSON, at most 16 KB; `null` by default). */
+export interface StartWorkOptions {
+	readonly title: string;
+	readonly input?: JsonValue;
+}
+
+/** What extension work reports through. Nothing else of the host reaches it. */
+export interface WorkRunContext {
+	readonly workId: string;
+	/** Aborted when the work is cancelled, its extension reloads, or the conversation closes. */
+	readonly signal: AbortSignal;
+	/** Fine-grained progress, which clients see live. */
+	progress(progress: WorkProgress): void;
+	/** A phase: live at once, and durable in the log as a coarse checkpoint at most every 10 seconds. */
+	checkpoint(progress: WorkProgress): void;
+	/** Output: its newest 50 KB become the result's output unless the result names its own. */
+	output(text: string): void;
+}
+
+/** How extension work ended. A run that throws fails, or is cancelled when its signal aborted. */
+export interface WorkRunResult {
+	readonly outcome: "completed" | "failed" | "cancelled";
+	/** A summary (at most 2,000 characters) the notice carries, output, and kind-specific data (JSON, at most 64 KB). */
+	readonly result?: Omit<WorkResult, "child">;
+	readonly error?: string;
+	/**
+	 * The notice text the model sees, instead of the title and summary, when a
+	 * `message` or `wake` kind completes or fails. Paired devices see the title
+	 * and summary.
+	 */
+	readonly notice?: string;
+}
+
+/** Extension work: runs in the background until it returns how it ended. */
+export type WorkRun = (ctx: WorkRunContext) => Promise<WorkRunResult>;
 
 /**
  * Extended context for command handlers.
@@ -1232,6 +1298,8 @@ export interface RegisteredCommand {
 
 export interface ResolvedCommand extends RegisteredCommand {
 	invocationName: string;
+	/** The extension that registered the command: its handler's `ctx` belongs to it. */
+	extensionPath: string;
 }
 
 // ============================================================================
@@ -1338,6 +1406,20 @@ export interface ExtensionAPI {
 
 	/** Get the value of a registered CLI flag. */
 	getFlag(name: string): boolean | string | undefined;
+
+	// =========================================================================
+	// Work
+	// =========================================================================
+
+	/**
+	 * Register a kind of work (RFC §7) as `ext:<extension>/<name>`: `name` is
+	 * lowercase letters, digits, `-`, and `_`, starting with a letter or digit.
+	 * The extension id is derived from the extension's path (its directory for
+	 * an index file) until extensions declare manifest ids. Start the kind's
+	 * work with `ctx.startWork(name, ...)`. Reloading the extensions removes the
+	 * kind and interrupts the work it runs.
+	 */
+	registerWorkKind(name: string, kind?: WorkKindDeclaration): void;
 
 	// =========================================================================
 	// Message Rendering
@@ -1579,6 +1661,8 @@ export type ExtensionFactory = (volt: ExtensionAPI) => void | Promise<void>;
 export interface RegisteredTool {
 	definition: ToolDefinition;
 	sourceInfo: SourceInfo;
+	/** The extension that registered the tool: its executions' `ctx` belongs to it. */
+	extensionPath?: string;
 }
 
 export interface ExtensionFlag {
@@ -1644,6 +1728,8 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
+	/** Registers the work kinds declared since the runner bound; does nothing before. */
+	refreshWorkKinds: () => void;
 	/** Throws when this extension instance is stale after runtime replacement. */
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
@@ -1740,6 +1826,8 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** The work kinds the extension declared, by name. */
+	workKinds: Map<string, WorkKindDeclaration>;
 }
 
 /** Result of loading extensions. */

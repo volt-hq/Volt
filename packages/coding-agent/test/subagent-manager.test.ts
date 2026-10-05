@@ -797,6 +797,7 @@ describe("SubagentManager", () => {
 						? {
 								name,
 								invocationName: name,
+								extensionPath: "<inline:1>",
 								description: "Trigger a custom child turn",
 								sourceInfo: createSyntheticSourceInfo("<test-command>", { source: "sdk" }),
 								handler: async (_args, ctx) => {

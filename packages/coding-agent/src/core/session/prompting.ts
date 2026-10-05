@@ -581,7 +581,7 @@ export class SessionPrompting {
 		// waitForIdle still waits for active runs and non-command prompt work.
 		const ctx = this.host
 			.extensionRunner()
-			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal);
+			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal, command.extensionPath);
 
 		const releaseActivity = this.host.conversation().beginActivity("extension_command");
 		this.activeExtensionCommandHandlers++;

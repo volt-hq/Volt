@@ -24,7 +24,7 @@ export function wrapRegisteredTool(
 	runner: ExtensionRunner,
 	lostSignal?: AbortSignal,
 ): AgentTool {
-	const tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext());
+	const tool = wrapToolDefinition(registeredTool.definition, () => runner.createContext(registeredTool.extensionPath));
 	if (!lostSignal) return tool;
 	return {
 		...tool,
