@@ -1,8 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { DynamicBorder, defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
-import { Container, Text } from "@hansjm10/volt-tui";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
+import type { UiNode } from "@hansjm10/volt-protocol";
 
 const PR_PROMPT_PATTERN = /^\s*You are given one or more GitHub PR URLs:\s*(\S+)/im;
 const ISSUE_PROMPT_PATTERN = /^\s*Analyze GitHub issue\(s\):\s*(\S+)/im;
@@ -177,24 +177,20 @@ export const manifest = defineManifest({
 });
 
 export default function promptUrlWidgetExtension(volt: ExtensionAPI) {
-	const setWidget = (ctx: ExtensionContext, match: PromptMatch, metadata?: GhMetadata) => {
-		ctx.ui.setWidget("prompt-url", (_tui, thm) => {
-			const displayTarget = metadata?.displayUrl ?? match.target;
-			const titleText = metadata?.title
-				? thm.fg("accent", metadata.title)
-				: thm.fg("accent", displayTarget);
-			const detailText = metadata?.detail ?? formatAuthor(metadata?.author);
-			const detailLine = detailText ? thm.fg("muted", detailText) : undefined;
-			const urlLine = thm.fg("dim", displayTarget);
-
-			const lines = [titleText];
-			if (detailLine) lines.push(detailLine);
-			lines.push(urlLine);
-
-			const container = new Container();
-			container.addChild(new DynamicBorder((s: string) => thm.fg("muted", s)));
-			container.addChild(new Text(lines.join("\n"), 1, 0));
-			return container;
+	/** The linked pull request, issue, or advisory as a card above the editor: its title, author or detail, and URL. */
+	const showPanel = (ctx: ExtensionContext, match: PromptMatch, metadata?: GhMetadata) => {
+		const displayTarget = metadata?.displayUrl ?? match.target;
+		const detailText = metadata?.detail ?? formatAuthor(metadata?.author);
+		const lines: UiNode[] = [];
+		if (detailText) lines.push({ type: "text", key: "detail", text: detailText, token: "muted" });
+		lines.push({ type: "text", key: "url", text: displayTarget, token: "muted" });
+		ctx.ui.setPanel("prompt-url", {
+			node: {
+				type: "card",
+				title: [{ text: metadata?.title ?? displayTarget, token: "accent" }],
+				badges: [{ label: getPromptLabel(match.kind) }],
+				sections: [{ key: "link", children: lines }],
+			},
 		});
 	};
 
@@ -216,10 +212,10 @@ export default function promptUrlWidgetExtension(volt: ExtensionAPI) {
 	};
 
 	const updatePromptContext = (ctx: ExtensionContext, match: PromptMatch) => {
-		setWidget(ctx, match);
+		showPanel(ctx, match);
 		applySessionName(ctx, match);
 		void fetchGhMetadata(volt, match.kind, match.target, ctx.cwd).then((meta) => {
-			setWidget(ctx, match, meta);
+			showPanel(ctx, match, meta);
 			applySessionName(ctx, match, meta);
 		});
 	};
@@ -260,7 +256,7 @@ export default function promptUrlWidgetExtension(volt: ExtensionAPI) {
 		const text = getUserText(content);
 		const match = text ? extractPromptMatch(text) : undefined;
 		if (!match) {
-			ctx.ui.setWidget("prompt-url", undefined);
+			ctx.ui.setPanel("prompt-url", undefined);
 			return;
 		}
 

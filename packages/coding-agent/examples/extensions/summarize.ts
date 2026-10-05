@@ -1,12 +1,12 @@
+/**
+ * Summarize Extension
+ *
+ * /summarize asks GPT-5.2 for a summary of the conversation and shows it in a
+ * dialog: Markdown as UI data that every client renders, closed with a button.
+ */
+
 import { getModel } from "@hansjm10/volt-ai";
-import {
-	DynamicBorder,
-	defineManifest,
-	type ExtensionAPI,
-	type ExtensionCommandContext,
-	getMarkdownTheme,
-} from "@hansjm10/volt-coding-agent";
-import { Container, Markdown, matchesKey, Text } from "@hansjm10/volt-tui";
+import { defineManifest, type ExtensionAPI, type ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 
 type ContentBlock = {
 	type?: string;
@@ -120,30 +120,14 @@ const buildSummaryPrompt = (conversationText: string): string =>
 	].join("\n");
 
 const showSummaryUi = async (summary: string, ctx: ExtensionCommandContext) => {
-	if (ctx.mode !== "tui") {
+	if (!ctx.hasUI) {
 		return;
 	}
 
-	await ctx.ui.custom((_tui, theme, _kb, done) => {
-		const container = new Container();
-		const border = new DynamicBorder((s: string) => theme.fg("accent", s));
-		const mdTheme = getMarkdownTheme();
-
-		container.addChild(border);
-		container.addChild(new Text(theme.fg("accent", theme.bold("Conversation Summary")), 1, 0));
-		container.addChild(new Markdown(summary, 1, 1, mdTheme));
-		container.addChild(new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0));
-		container.addChild(border);
-
-		return {
-			render: (width: number) => container.render(width),
-			invalidate: () => container.invalidate(),
-			handleInput: (data: string) => {
-				if (matchesKey(data, "enter") || matchesKey(data, "escape")) {
-					done(undefined);
-				}
-			},
-		};
+	await ctx.ui.dialog({
+		title: "Conversation Summary",
+		body: [{ type: "markdown", markdown: summary }],
+		actions: [{ id: "close", label: "Close" }],
 	});
 };
 
@@ -151,7 +135,7 @@ export const manifest = defineManifest({ id: "summarize", displayName: "Summariz
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("summarize", {
-		description: "Summarize the current conversation in a custom UI",
+		description: "Summarize the current conversation in a dialog",
 		handler: async (_args, ctx) => {
 			const branch = ctx.sessionManager.getBranch();
 			const conversationText = buildConversationText(branch);

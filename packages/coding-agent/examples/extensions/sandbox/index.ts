@@ -273,10 +273,9 @@ export default function (volt: ExtensionAPI) {
 
 			const networkCount = config.network?.allowedDomains?.length ?? 0;
 			const writeCount = config.filesystem?.allowWrite?.length ?? 0;
-			ctx.ui.setStatus(
-				"sandbox",
-				ctx.ui.theme.fg("accent", `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`),
-			);
+			ctx.ui.setStatus("sandbox", [
+				{ text: `🔒 Sandbox: ${networkCount} domains, ${writeCount} write paths`, token: "accent" },
+			]);
 			ctx.ui.notify("Sandbox initialized", "info");
 		} catch (err) {
 			sandboxEnabled = false;

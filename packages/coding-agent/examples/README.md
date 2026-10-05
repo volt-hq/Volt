@@ -12,7 +12,8 @@ Example extensions demonstrating:
 - Lifecycle event handlers (tool interception, safety gates, context modifications)
 - Custom tools (todo lists, questions, output truncation)
 - Commands and keyboard shortcuts
-- Custom UI (footers, headers, editors, widgets)
+- UI as data (tool and message presentation, panels, dialogs, forms, completions)
+- Typed settings declared in the manifest
 - Git integration (checkpoints, auto-commit)
 - System prompt modifications and custom compaction
 - External integrations (SSH, file watchers, system theme sync)

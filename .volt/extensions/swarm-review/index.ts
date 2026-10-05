@@ -13,8 +13,8 @@
  * throwaway checkout, so edits made during the review do not affect it.
  *
  * A review runs in the background as `ext:swarm-review/run` work: every client sees its progress (a step per wave
- * and for verification) and can cancel it (`cancel_work`; Escape in the TUI). Its report rides the next turn as the
- * work's notice, and is the work's output.
+ * and for verification) and its detail (the target and models, as UI data) and can cancel it (`cancel_work`; Escape
+ * in the TUI). Its report rides the next turn as the work's notice, and is the work's output.
  */
 
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
@@ -30,7 +30,7 @@ import {
 import { clusterWave } from "./cluster.ts";
 import { loadContextFiles, resolveTarget } from "./git.ts";
 import { type Dismissal, loadDismissals, recordDismissals } from "./memory.ts";
-import { buildReport, modelRef, reportSummary, workProgress } from "./report.ts";
+import { buildReport, modelRef, reportSummary, runDetail, workProgress } from "./report.ts";
 import type { ReviewTarget, SwarmOptions, SwarmSetup, SwarmState, TargetSpec } from "./types.ts";
 import { errorText, SwarmCancelled } from "./util.ts";
 import { verifyClusters } from "./verify.ts";
@@ -388,7 +388,7 @@ export const manifest = defineManifest({
 });
 
 export default function swarmReview(volt: ExtensionAPI) {
-	volt.registerWorkKind("run", { delivery: "message" });
+	volt.registerWorkKind("run", { delivery: "message", detail: runDetail });
 	volt.registerCommand("swarm-review", {
 		description:
 			"Review with waves of cheap workers, cluster their claims, and verify each cluster with two independent verifiers",

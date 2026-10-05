@@ -1,10 +1,10 @@
-import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
 /**
  * Todo Extension - Demonstrates state management via session entries
  *
  * This extension:
- * - Registers a `todo` tool for the LLM to manage todos
- * - Registers a `/todos` command for users to view the list
+ * - Registers a `todo` tool for the LLM to manage todos, presented with present()
+ * - Registers a `/todos` command that shows or hides a panel with the list,
+ *   kept current while the agent changes it
  *
  * State is stored in tool result details (not external files), which allows
  * proper branching - when you branch, the todo state is automatically
@@ -12,8 +12,8 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  */
 
 import { StringEnum } from "@hansjm10/volt-ai";
-import { defineManifest, type ExtensionAPI, type ExtensionContext, type Theme } from "@hansjm10/volt-coding-agent";
-import { matchesKey, Text, truncateToWidth } from "@hansjm10/volt-tui";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
+import type { ToolPresentation, UiNode, UiNodeStyledText } from "@hansjm10/volt-protocol";
 import { Type } from "typebox";
 
 interface Todo {
@@ -35,72 +35,35 @@ const TodoParams = Type.Object({
 	id: Type.Optional(Type.Number({ description: "Todo ID (for toggle)" })),
 });
 
-/**
- * UI component for the /todos command
- */
-class TodoListComponent {
-	private todos: Todo[];
-	private theme: Theme;
-	private onClose: () => void;
-	private cachedWidth?: number;
-	private cachedLines?: string[];
+/** One todo as a styled line: a check, its id, and its text. */
+function todoLine(todo: Todo): UiNodeStyledText {
+	return [
+		todo.done ? { text: "✓ ", token: "success" } : { text: "○ ", token: "muted" },
+		{ text: `#${todo.id} `, token: "accent" },
+		{ text: todo.text, token: todo.done ? "muted" : "text" },
+	];
+}
 
-	constructor(todos: Todo[], theme: Theme, onClose: () => void) {
-		this.todos = todos;
-		this.theme = theme;
-		this.onClose = onClose;
+/** The todo list as UI data: progress, then one line per todo. */
+function todoList(todos: Todo[]): UiNode {
+	if (todos.length === 0) {
+		return { type: "text", text: "No todos yet. Ask the agent to add some!", token: "muted" };
 	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
-			this.onClose();
-		}
-	}
-
-	render(width: number): RenderFrame {
-		if (this.cachedLines && this.cachedWidth === width) {
-			return createRenderFrame(this.cachedLines);
-		}
-
-		const lines: string[] = [];
-		const th = this.theme;
-
-		lines.push("");
-		const title = th.fg("accent", " Todos ");
-		const headerLine =
-			th.fg("borderMuted", "─".repeat(3)) + title + th.fg("borderMuted", "─".repeat(Math.max(0, width - 10)));
-		lines.push(truncateToWidth(headerLine, width));
-		lines.push("");
-
-		if (this.todos.length === 0) {
-			lines.push(truncateToWidth(`  ${th.fg("dim", "No todos yet. Ask the agent to add some!")}`, width));
-		} else {
-			const done = this.todos.filter((t) => t.done).length;
-			const total = this.todos.length;
-			lines.push(truncateToWidth(`  ${th.fg("muted", `${done}/${total} completed`)}`, width));
-			lines.push("");
-
-			for (const todo of this.todos) {
-				const check = todo.done ? th.fg("success", "✓") : th.fg("dim", "○");
-				const id = th.fg("accent", `#${todo.id}`);
-				const text = todo.done ? th.fg("dim", todo.text) : th.fg("text", todo.text);
-				lines.push(truncateToWidth(`  ${check} ${id} ${text}`, width));
-			}
-		}
-
-		lines.push("");
-		lines.push(truncateToWidth(`  ${th.fg("dim", "Press Escape to close")}`, width));
-		lines.push("");
-
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return createRenderFrame(lines);
-	}
-
-	invalidate(): void {
-		this.cachedWidth = undefined;
-		this.cachedLines = undefined;
-	}
+	const done = todos.filter((t) => t.done).length;
+	return {
+		type: "list",
+		items: [
+			{
+				type: "progress",
+				key: "progress",
+				kind: "determinate",
+				value: done,
+				max: todos.length,
+				label: `${done}/${todos.length} completed`,
+			},
+			...todos.map((todo): UiNode => ({ type: "text", key: `todo-${todo.id}`, text: todoLine(todo) })),
+		],
+	};
 }
 
 export const manifest = defineManifest({
@@ -113,6 +76,15 @@ export default function (volt: ExtensionAPI) {
 	// In-memory state (reconstructed from session on load)
 	let todos: Todo[] = [];
 	let nextId = 1;
+	let panelShown = false;
+
+	/** Show the list in a panel (the sidebar in fullscreen, above the editor elsewhere), or remove it. */
+	const showPanel = (ctx: ExtensionContext) => {
+		ctx.ui.setPanel(
+			"todos",
+			panelShown ? { title: "Todos", placement: "sidebar", node: todoList(todos) } : undefined,
+		);
+	};
 
 	/**
 	 * Reconstruct state from session entries.
@@ -136,8 +108,19 @@ export default function (volt: ExtensionAPI) {
 	};
 
 	// Reconstruct state on session events
-	volt.on("session_start", async (_event, ctx) => reconstructState(ctx));
-	volt.on("session_tree", async (_event, ctx) => reconstructState(ctx));
+	volt.on("session_start", async (_event, ctx) => {
+		reconstructState(ctx);
+		showPanel(ctx);
+	});
+	volt.on("session_tree", async (_event, ctx) => {
+		reconstructState(ctx);
+		showPanel(ctx);
+	});
+
+	// Keep the panel current while the agent changes the list
+	volt.on("tool_execution_end", async (event, ctx) => {
+		if (event.toolName === "todo" && panelShown) showPanel(ctx);
+	});
 
 	// Register the todo tool for the LLM
 	volt.registerTool({
@@ -225,80 +208,99 @@ export default function (volt: ExtensionAPI) {
 			}
 		},
 
-		renderCall(args, theme, _context) {
-			let text = theme.fg("toolTitle", theme.bold("todo ")) + theme.fg("muted", args.action);
-			if (args.text) text += ` ${theme.fg("dim", `"${args.text}"`)}`;
-			if (args.id !== undefined) text += ` ${theme.fg("accent", `#${args.id}`)}`;
-			return new Text(text, 0, 0);
-		},
-
-		renderResult(result, { expanded }, theme, _context) {
-			const details = result.details as TodoDetails | undefined;
-			if (!details) {
-				const text = result.content[0];
-				return new Text(text?.type === "text" ? text.text : "", 0, 0);
-			}
-
+		present({ args, state, result }): ToolPresentation {
+			const title: UiNodeStyledText = [
+				{ text: "todo ", bold: true },
+				{ text: args.action ?? "…", token: "muted" },
+				...(args.text ? [{ text: ` "${args.text}"`, token: "muted" as const }] : []),
+				...(args.id !== undefined ? [{ text: ` #${args.id}`, token: "accent" as const }] : []),
+			];
+			const details = result?.details as TodoDetails | undefined;
+			if (state !== "done" || !details) return { title };
 			if (details.error) {
-				return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+				return { title, summary: [{ type: "text", text: `Error: ${details.error}`, token: "error" }] };
 			}
 
-			const todoList = details.todos;
-
+			const list = details.todos;
 			switch (details.action) {
 				case "list": {
-					if (todoList.length === 0) {
-						return new Text(theme.fg("dim", "No todos"), 0, 0);
-					}
-					let listText = theme.fg("muted", `${todoList.length} todo(s):`);
-					const display = expanded ? todoList : todoList.slice(0, 5);
-					for (const t of display) {
-						const check = t.done ? theme.fg("success", "✓") : theme.fg("dim", "○");
-						const itemText = t.done ? theme.fg("dim", t.text) : theme.fg("muted", t.text);
-						listText += `\n${check} ${theme.fg("accent", `#${t.id}`)} ${itemText}`;
-					}
-					if (!expanded && todoList.length > 5) {
-						listText += `\n${theme.fg("dim", `... ${todoList.length - 5} more`)}`;
-					}
-					return new Text(listText, 0, 0);
+					if (list.length === 0) return { title, summary: [{ type: "text", text: "No todos", token: "muted" }] };
+					const lines = (todos: Todo[]): UiNode[] =>
+						todos.map((todo) => ({ type: "text", key: `todo-${todo.id}`, text: todoLine(todo) }));
+					const count: UiNode = { type: "text", key: "count", text: `${list.length} todo(s):`, token: "muted" };
+					return {
+						title,
+						summary: [
+							count,
+							...lines(list.slice(0, 5)),
+							...(list.length > 5
+								? [
+										{
+											type: "text" as const,
+											key: "more",
+											text: `... ${list.length - 5} more`,
+											token: "muted" as const,
+										},
+									]
+								: []),
+						],
+						...(list.length > 5 ? { body: [count, ...lines(list)] } : {}),
+					};
 				}
-
 				case "add": {
-					const added = todoList[todoList.length - 1];
-					return new Text(
-						theme.fg("success", "✓ Added ") +
-							theme.fg("accent", `#${added.id}`) +
-							" " +
-							theme.fg("muted", added.text),
-						0,
-						0,
-					);
+					const added = list[list.length - 1];
+					return {
+						title,
+						summary: [
+							{
+								type: "text",
+								text: [
+									{ text: "✓ Added ", token: "success" },
+									{ text: `#${added.id} `, token: "accent" },
+									{ text: added.text, token: "muted" },
+								],
+							},
+						],
+					};
 				}
-
 				case "toggle": {
-					const text = result.content[0];
-					const msg = text?.type === "text" ? text.text : "";
-					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", msg), 0, 0);
+					const message = (result?.content ?? []).map((part) => (part.type === "text" ? part.text : "")).join("");
+					return {
+						title,
+						summary: [
+							{
+								type: "text",
+								text: [
+									{ text: "✓ ", token: "success" },
+									{ text: message, token: "muted" },
+								],
+							},
+						],
+					};
 				}
-
 				case "clear":
-					return new Text(theme.fg("success", "✓ ") + theme.fg("muted", "Cleared all todos"), 0, 0);
+					return {
+						title,
+						summary: [
+							{
+								type: "text",
+								text: [
+									{ text: "✓ ", token: "success" },
+									{ text: "Cleared all todos", token: "muted" },
+								],
+							},
+						],
+					};
 			}
 		},
 	});
 
-	// Register the /todos command for users
+	// Register the /todos command for users: it shows or hides the list beside the conversation
 	volt.registerCommand("todos", {
-		description: "Show all todos on the current branch",
+		description: "Show or hide the todos on the current branch",
 		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/todos requires interactive mode", "error");
-				return;
-			}
-
-			await ctx.ui.custom<void>((_tui, theme, _kb, done) => {
-				return new TodoListComponent(todos, theme, () => done());
-			});
+			panelShown = !panelShown;
+			showPanel(ctx);
 		},
 	});
 }
