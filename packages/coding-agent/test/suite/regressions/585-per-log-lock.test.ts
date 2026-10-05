@@ -101,24 +101,28 @@ async function openConversation(
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					testExtension("test-extension-1", (volt: ExtensionAPI) => {
-						volt.registerProvider(faux.getModel().provider, {
-							baseUrl: faux.getModel().baseUrl,
-							apiKey: "faux-key",
-							api: faux.api,
-							streamSimple: faux.streamSimple,
-							models: faux.models.map((model) => ({
-								id: model.id,
-								name: model.name,
-								api: model.api,
-								reasoning: model.reasoning,
-								input: model.input,
-								cost: model.cost,
-								contextWindow: model.contextWindow,
-								maxTokens: model.maxTokens,
-							})),
-						});
-					}),
+					testExtension(
+						"test-extension-1",
+						(volt: ExtensionAPI) => {
+							volt.registerProvider(faux.getModel().provider, {
+								baseUrl: faux.getModel().baseUrl,
+								apiKey: "faux-key",
+								api: faux.api,
+								streamSimple: faux.streamSimple,
+								models: faux.models.map((model) => ({
+									id: model.id,
+									name: model.name,
+									api: model.api,
+									reasoning: model.reasoning,
+									input: model.input,
+									cost: model.cost,
+									contextWindow: model.contextWindow,
+									maxTokens: model.maxTokens,
+								})),
+							});
+						},
+						["providers"],
+					),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

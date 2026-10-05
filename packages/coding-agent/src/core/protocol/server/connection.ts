@@ -99,6 +99,7 @@ const SETTINGS_INTENTS: ReadonlySet<string> = new Set([
 	"set_auto_compaction",
 	"set_auto_retry",
 	"set_compaction_threshold",
+	"set_extension_settings",
 ]);
 
 /** Intents whose acceptance changes the `host` catalog. */
@@ -537,10 +538,15 @@ export function serveConnection(
 						}
 					})
 				: () => {};
+		// Extension settings saved by any client, an extension, or another conversation.
+		const unsubscribeExtensionSettings = session.settingsManager.subscribeExtensionSettings(() => {
+			write({ type: "changed", catalog: "settings" });
+		});
 		unsubscribeHome = () => {
 			unsubscribeEvents();
 			unsubscribeReloads();
 			unsubscribeBackpressure();
+			unsubscribeExtensionSettings();
 		};
 	};
 

@@ -71,7 +71,7 @@ describe("SettingsManager", () => {
 			// User adds custom settings externally
 			const currentSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			currentSettings.shellPath = "/bin/zsh";
-			currentSettings.extensions = ["/path/to/extension.ts"];
+			currentSettings.extensionPaths = ["/path/to/extension.ts"];
 			writeFileSync(settingsPath, JSON.stringify(currentSettings, null, 2));
 
 			// User changes theme
@@ -81,7 +81,7 @@ describe("SettingsManager", () => {
 			// Verify all settings preserved
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.shellPath).toBe("/bin/zsh");
-			expect(savedSettings.extensions).toEqual(["/path/to/extension.ts"]);
+			expect(savedSettings.extensionPaths).toEqual(["/path/to/extension.ts"]);
 			expect(savedSettings.theme).toBe("light");
 		});
 
@@ -167,12 +167,12 @@ describe("SettingsManager", () => {
 	});
 
 	describe("packages migration", () => {
-		it("should keep local-only extensions in extensions array", () => {
+		it("should keep local-only extensions in the extensionPaths array", () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(
 				settingsPath,
 				JSON.stringify({
-					extensions: ["/local/ext.ts", "./relative/ext.ts"],
+					extensionPaths: ["/local/ext.ts", "./relative/ext.ts"],
 				}),
 			);
 
@@ -638,7 +638,7 @@ describe("SettingsManager", () => {
 				settingsPath,
 				JSON.stringify({
 					theme: "dark",
-					extensions: ["/before.ts"],
+					extensionPaths: ["/before.ts"],
 				}),
 			);
 
@@ -648,7 +648,7 @@ describe("SettingsManager", () => {
 				settingsPath,
 				JSON.stringify({
 					theme: "light",
-					extensions: ["/after.ts"],
+					extensionPaths: ["/after.ts"],
 					defaultModel: "claude-sonnet",
 				}),
 			);

@@ -8,6 +8,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import type { ExtensionPermission, ExtensionSettings } from "@hansjm10/volt-protocol";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type {
@@ -25,7 +26,6 @@ import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
-import { testExtension } from "../utilities.ts";
 
 /** A lifecycle event an extension instance saw, tagged with the session it belongs to. */
 export type RecordedLifecycleEvent = (
@@ -52,6 +52,10 @@ export interface HostHarnessOptions {
 	responses?: string[];
 	/** Give each session a subagent manager over these definitions; children open through the same factory. */
 	subagents?: readonly SubagentDefinition[];
+	/** Permissions the recording extension declares besides `providers`, which it registers the faux provider with. */
+	permissions?: ExtensionPermission[];
+	/** The settings the recording extension declares. */
+	settings?: ExtensionSettings;
 }
 
 export interface HostHarness {
@@ -84,32 +88,40 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					testExtension("test-extension", (volt: ExtensionAPI) => {
-						volt.registerProvider(faux.getModel().provider, {
-							baseUrl: faux.getModel().baseUrl,
-							apiKey: "faux-key",
-							api: faux.api,
-							streamSimple: faux.streamSimple,
-							models: faux.models.map((model) => ({
-								id: model.id,
-								name: model.name,
-								api: model.api,
-								reasoning: model.reasoning,
-								input: model.input,
-								cost: model.cost,
-								contextWindow: model.contextWindow,
-								maxTokens: model.maxTokens,
-							})),
-						});
-						const record = (event: Omit<RecordedLifecycleEvent, "sessionId">, sessionId: string): void => {
-							events.push({ ...event, sessionId } as RecordedLifecycleEvent);
-						};
-						volt.on("session_start", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
-						volt.on("session_before_switch", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
-						volt.on("session_before_fork", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
-						volt.on("session_shutdown", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
-						options.extension?.(volt);
-					}),
+					{
+						manifest: {
+							id: "test-extension",
+							displayName: "test-extension",
+							permissions: ["providers", ...(options.permissions ?? [])],
+							...(options.settings === undefined ? {} : { settings: options.settings }),
+						},
+						factory: (volt: ExtensionAPI) => {
+							volt.registerProvider(faux.getModel().provider, {
+								baseUrl: faux.getModel().baseUrl,
+								apiKey: "faux-key",
+								api: faux.api,
+								streamSimple: faux.streamSimple,
+								models: faux.models.map((model) => ({
+									id: model.id,
+									name: model.name,
+									api: model.api,
+									reasoning: model.reasoning,
+									input: model.input,
+									cost: model.cost,
+									contextWindow: model.contextWindow,
+									maxTokens: model.maxTokens,
+								})),
+							});
+							const record = (event: Omit<RecordedLifecycleEvent, "sessionId">, sessionId: string): void => {
+								events.push({ ...event, sessionId } as RecordedLifecycleEvent);
+							};
+							volt.on("session_start", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
+							volt.on("session_before_switch", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
+							volt.on("session_before_fork", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
+							volt.on("session_shutdown", (event, ctx) => record(event, ctx.sessionManager.getSessionId()));
+							options.extension?.(volt);
+						},
+					},
 				],
 				noSkills: true,
 				noPromptTemplates: true,

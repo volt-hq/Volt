@@ -231,6 +231,7 @@ describe("model catalog watcher", () => {
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 			subscribeReloads: vi.fn(() => () => {}),
+			settingsManager: { subscribeExtensionSettings: vi.fn(() => () => {}) },
 			modelRegistry: registry,
 			sessionId: "session-1",
 		};

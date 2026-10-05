@@ -206,6 +206,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `set_auto_retry` | `{enabled}` | |
 | `set_auto_compaction` | `{enabled, provider?, modelId?, expectedProfile?}` | |
 | `set_compaction_threshold` | `{tokens, provider, modelId, expectedProfile}` | |
+| `set_extension_settings` | `{id, scope: global|project, values}`: replace what the scope stores for the extension with manifest id `id`; values are checked against its settings, and `project` needs a trusted project | |
 | `mcp.connect`, `mcp.disconnect`, `mcp.refresh` | `{server}` | the server |
 | `mcp.set_enabled` | `{server, enabled}` | the server |
 | `mcp.auth_start_device`, `mcp.auth_start_browser`, `mcp.auth_complete`, `mcp.auth_poll`, `mcp.auth_cancel`, `mcp.logout` | `{server, …}` | the authorization state |
@@ -230,6 +231,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `sessions` | `{limit?, cursor?}` | The workspace's stored sessions, newest first; `cursor` is the `nextCursor` of the previous page. |
 | `settings` | | `{steeringMode, followUpMode, autoCompaction, autoRetry, profile}`; `profile` is the active settings profile (`""` without one), which the compaction intents name as `expectedProfile`. |
 | `subscription_usage` | | Subscription quota usage of stored logins. |
+| `extension_settings` | `{id}` | `{form, values: {global, project?}, projectTrusted}`: the extension's settings as form fields (each `value` its default) and the values each scope stores; `project` only for a trusted project. |
 | `subagent_definitions` | | Discovered subagent definitions. |
 | `work_output` | `{workId, offset?}` | A work item's output, such as a background job's: what it produced so far, or what its result kept, in chunks. |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |

@@ -10,7 +10,8 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
 import { createExtensionRuntime, type ExtensionSource, loadExtensions } from "./extensions/loader.ts";
-import type { Extension, ExtensionDefinition, LoadExtensionsResult } from "./extensions/types.ts";
+import { ExtensionSettingsRuntime } from "./extensions/settings.ts";
+import type { Extension, ExtensionDefinition, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
@@ -508,7 +509,13 @@ export class DefaultResourceLoader implements ResourceLoader {
 			],
 			this.cwd,
 			this.eventBus,
+			this.createRuntime(),
 		);
+	}
+
+	/** A runtime whose extensions read and write their settings through this loader's settings. */
+	private createRuntime(): ExtensionRuntime {
+		return createExtensionRuntime(new ExtensionSettingsRuntime(this.settingsManager));
 	}
 
 	/**
@@ -529,6 +536,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				path: resolvedPath,
 				scope: metadata.scope,
 				installed: metadata.origin === "package" && !isLocalPath(metadata.source),
+				...(metadata.origin === "package" ? { packageSource: metadata.source } : {}),
 			});
 		}
 		return sources;
@@ -556,6 +564,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 				[...extensionSources, ...this.inlineExtensionSources()],
 				this.cwd,
 				this.eventBus,
+				this.createRuntime(),
 			);
 			this.addExtensionConflictDiagnostics(extensionsResult);
 			return extensionsResult;

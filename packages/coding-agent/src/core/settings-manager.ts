@@ -155,7 +155,9 @@ export interface Settings {
 	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
-	extensions?: string[]; // Array of local extension file paths or directories
+	extensionPaths?: string[]; // Array of local extension file paths or directories
+	/** Per-extension state by manifest id: its settings (and, reserved, whether it is enabled). */
+	extensions?: Record<string, ExtensionEntrySettings>;
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
 	themes?: string[]; // Array of local theme file paths or directories
@@ -186,6 +188,14 @@ export interface Settings {
 	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular mode
 }
 
+/** What settings hold for one extension, by manifest id, under `extensions.<id>`. */
+export interface ExtensionEntrySettings {
+	/** Reserved for the runtime toggle: whether the extension loads. */
+	enabled?: boolean;
+	/** Setting values by name, checked against the extension's manifest when read. */
+	settings?: Record<string, string | boolean | number | null>;
+}
+
 export interface RemoteSettings {
 	/** Auto-spawn the voltd daemon at startup. Supported TUIs join any running daemon. Default: false. */
 	background?: boolean;
@@ -210,12 +220,15 @@ function deepMergeRecord(base: Record<string, unknown>, overrides: Record<string
 			continue;
 		}
 
-		const baseValue = base[key];
-		if (isSettingsRecord(baseValue) && isSettingsRecord(overrideValue)) {
-			result[key] = deepMergeRecord(baseValue, overrideValue);
-		} else {
-			result[key] = overrideValue;
-		}
+		const baseValue = Object.hasOwn(base, key) ? base[key] : undefined;
+		// Defined, not assigned: a `__proto__` key from a settings file stays a plain property.
+		defineOwnEnumerableProperty(
+			result,
+			key,
+			isSettingsRecord(baseValue) && isSettingsRecord(overrideValue)
+				? deepMergeRecord(baseValue, overrideValue)
+				: overrideValue,
+		);
 	}
 
 	return result;
@@ -498,6 +511,10 @@ export class SettingsManager {
 	private sessionOverrides: Settings = {}; // Runtime overrides (e.g. CLI flags), reapplied on every re-merge
 	private readonly compactionListeners = new Set<() => void>();
 	private compactionFingerprint = "";
+	private readonly extensionSettingsListeners = new Set<() => void>();
+	private extensionSettingsFingerprint = "";
+	private extensionSettingsRevision = 0;
+	private notifiedExtensionSettingsRevision = 0;
 
 	private constructor(
 		storage: SettingsStorage,
@@ -567,7 +584,28 @@ export class SettingsManager {
 		if (profileName) {
 			this.reportMissingProfile(profileName);
 		}
-		if (notifyCompaction) this.notifyCompactionSettingsChanged();
+		const extensionSettings = JSON.stringify([
+			this.globalEffectiveSettings.extensions ?? null,
+			this.projectEffectiveSettings.extensions ?? null,
+		]);
+		if (extensionSettings !== this.extensionSettingsFingerprint) {
+			this.extensionSettingsFingerprint = extensionSettings;
+			this.extensionSettingsRevision++;
+		}
+		if (notifyCompaction) this.notifySettingsObservers();
+	}
+
+	private notifySettingsObservers(): void {
+		this.notifyCompactionSettingsChanged();
+		if (this.notifiedExtensionSettingsRevision === this.extensionSettingsRevision) return;
+		this.notifiedExtensionSettingsRevision = this.extensionSettingsRevision;
+		for (const listener of this.extensionSettingsListeners) {
+			try {
+				listener();
+			} catch {
+				// Observers must not affect settings persistence.
+			}
+		}
 	}
 
 	/** Observe effective compaction preferences and their scope; saves notify after durability. */
@@ -645,6 +683,13 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			initialErrors.push({ scope: "project", error: projectLoad.error });
 		}
+		for (const [scope, load] of [
+			["global", globalLoad],
+			["project", projectLoad],
+		] as const) {
+			const shapeError = SettingsManager.extensionsShapeError(load.settings);
+			if (shapeError) initialErrors.push({ scope, error: shapeError });
+		}
 
 		return new SettingsManager(
 			storage,
@@ -694,6 +739,13 @@ export class SettingsManager {
 		} catch (error) {
 			return { settings: {}, error: error as Error };
 		}
+	}
+
+	/** Why loaded settings' `extensions` is ignored: it holds a list of paths, which `extensionPaths` now holds. */
+	private static extensionsShapeError(settings: Settings): Error | undefined {
+		return Array.isArray(settings.extensions)
+			? new Error('"extensions" holds a list of paths and is ignored; rename it to "extensionPaths"')
+			: undefined;
 	}
 
 	/** Migrate old settings format to new format */
@@ -875,6 +927,8 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
+		const shapeError = SettingsManager.extensionsShapeError(projectLoad.settings);
+		if (shapeError) this.recordError("project", shapeError);
 		this.mergeEffectiveSettings();
 	}
 
@@ -906,6 +960,13 @@ export class SettingsManager {
 		} else {
 			this.projectSettingsLoadError = projectLoad.error;
 			this.recordError("project", projectLoad.error);
+		}
+		for (const [scope, settings] of [
+			["global", this.globalSettings],
+			["project", this.projectSettings],
+		] as const) {
+			const shapeError = SettingsManager.extensionsShapeError(settings);
+			if (shapeError) this.recordError(scope, shapeError);
 		}
 
 		this.mergeEffectiveSettings();
@@ -1016,7 +1077,7 @@ export class SettingsManager {
 			this.clearModifiedScope(scope);
 			// A later accepted write may already have changed the effective values.
 			// Publish only once the latest snapshot is durable, not after an older write.
-			if (this.writeWatermark === write) this.notifyCompactionSettingsChanged();
+			if (this.writeWatermark === write) this.notifySettingsObservers();
 		});
 		this.writeQueue = write.catch((error) => {
 			this.recordError(scope, error);
@@ -1627,19 +1688,85 @@ export class SettingsManager {
 	}
 
 	getExtensionPaths(): string[] {
-		return [...(this.settings.extensions ?? [])];
+		return [...(this.settings.extensionPaths ?? [])];
 	}
 
 	setExtensionPaths(paths: string[]): void {
-		this.updateGlobalSettings("extensions", (settings) => {
-			settings.extensions = paths;
+		this.updateGlobalSettings("extensionPaths", (settings) => {
+			settings.extensionPaths = paths;
 		});
 	}
 
 	setProjectExtensionPaths(paths: string[]): void {
-		this.updateProjectSettings("extensions", (settings) => {
-			settings.extensions = paths;
+		this.updateProjectSettings("extensionPaths", (settings) => {
+			settings.extensionPaths = paths;
 		});
+	}
+
+	/**
+	 * The setting values `scope` stores for the extension `id`, unchecked: the
+	 * global ones (with the active profile's), or a trusted project's. A
+	 * `null` value is one a profile cleared.
+	 */
+	getExtensionSettings(id: string, scope: SettingsScope): Record<string, unknown> | undefined {
+		const extensions = (scope === "global" ? this.globalEffectiveSettings : this.projectEffectiveSettings).extensions;
+		if (!isSettingsRecord(extensions) || !Object.hasOwn(extensions, id)) return undefined;
+		const entry: unknown = extensions[id];
+		if (!isSettingsRecord(entry) || !Object.hasOwn(entry, "settings")) return undefined;
+		return isSettingsRecord(entry.settings) ? structuredClone(entry.settings) : undefined;
+	}
+
+	/**
+	 * Replace what `scope` stores as the extension `id`'s settings; undefined
+	 * clears them. `enabled` is kept. Values must be checked first. A project
+	 * write needs a trusted project, and neither scope is written while its
+	 * settings file failed to load.
+	 */
+	setExtensionSettings(
+		id: string,
+		scope: SettingsScope,
+		values: Readonly<Record<string, string | boolean | number>> | undefined,
+	): void {
+		if (scope === "global" ? this.globalSettingsLoadError : this.projectSettingsLoadError) {
+			throw new Error(`Host ${scope} settings could not be loaded; repair them and reload`);
+		}
+		// A profile overlays the base settings, so it clears the base values it leaves out.
+		const base = scope === "global" ? this.globalSettings : this.projectSettings;
+		const baseEntry =
+			isSettingsRecord(base.extensions) && Object.hasOwn(base.extensions, id) ? base.extensions[id] : undefined;
+		const cleared =
+			this.activeProfile && isSettingsRecord(baseEntry?.settings) ? Object.keys(baseEntry.settings) : [];
+		const update = (settings: Settings): void => {
+			if (Array.isArray(settings.extensions)) {
+				throw new Error('"extensions" holds a list of paths; rename it to "extensionPaths"');
+			}
+			const extensions: Record<string, ExtensionEntrySettings> = {};
+			for (const [key, entry] of Object.entries(isSettingsRecord(settings.extensions) ? settings.extensions : {})) {
+				defineOwnEnumerableProperty(extensions, key, entry);
+			}
+			const current = Object.hasOwn(extensions, id) ? extensions[id] : undefined;
+			const entry: ExtensionEntrySettings = isSettingsRecord(current) ? { ...current } : {};
+			const next: Record<string, string | boolean | number | null> = {};
+			for (const name of cleared) defineOwnEnumerableProperty(next, name, undefined);
+			for (const [name, value] of Object.entries(values ?? {})) defineOwnEnumerableProperty(next, name, value);
+			if (Object.keys(next).length > 0) entry.settings = next;
+			else delete entry.settings;
+			defineOwnEnumerableProperty(extensions, id, Object.keys(entry).length > 0 ? entry : undefined);
+			settings.extensions = extensions;
+		};
+		if (scope === "project") this.updateProjectSettings("extensions", update, id);
+		else this.updateGlobalSettings("extensions", update, id);
+	}
+
+	/** Changes whenever any extension's stored settings (or `enabled`) change in effect. */
+	getExtensionSettingsRevision(): number {
+		return this.extensionSettingsRevision;
+	}
+
+	/** Observe changes to the extensions' stored settings; saves notify once they are durable. */
+	subscribeExtensionSettings(listener: () => void): () => void {
+		this.extensionSettingsListeners.add(listener);
+		return () => this.extensionSettingsListeners.delete(listener);
 	}
 
 	getSkillPaths(): string[] {

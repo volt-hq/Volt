@@ -70,7 +70,11 @@ function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
 	return lines.join("\n");
 }
 
-export const manifest = defineManifest({ id: "git-merge-and-resolve", displayName: "Git Merge and Resolve" });
+export const manifest = defineManifest({
+	id: "git-merge-and-resolve",
+	displayName: "Git Merge and Resolve",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("agent_end", async (_event, ctx) => {

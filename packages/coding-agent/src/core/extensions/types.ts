@@ -36,6 +36,7 @@ import type {
 } from "@hansjm10/volt-ai";
 import type {
 	ExtensionManifest,
+	ExtensionSettingsScope,
 	RemoteCapability,
 	WorkDelivery,
 	WorkProgress,
@@ -96,6 +97,7 @@ import type {
 } from "../tools/index.ts";
 
 import type { ExtensionHandlerRegistry, PolicyRegistration } from "./policy-registration.ts";
+import type { ExtensionSettingsRuntime, ExtensionSettingValue } from "./settings.ts";
 
 export type { PolicyRegistration } from "./policy-registration.ts";
 
@@ -1181,6 +1183,25 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 	return event.toolName === toolName;
 }
 
+// ============================================================================
+// Settings Events
+// ============================================================================
+
+/** Settings as `volt.settings` holds them: values by setting name. */
+export type ExtensionSettingsShape = { readonly [name: string]: ExtensionSettingValue | undefined };
+
+/**
+ * Fired to one extension when its effective settings change: through
+ * `volt.updateSettings`, the `set_extension_settings` intent from any client,
+ * or a settings reload. `scope` is where the stored values changed.
+ */
+export interface SettingsChangedEvent<TSettings extends ExtensionSettingsShape = ExtensionSettingsShape> {
+	type: "settings_changed";
+	settings: TSettings;
+	previous: TSettings;
+	scope: ExtensionSettingsScope;
+}
+
 /** Union of all event types */
 export type ExtensionEvent =
 	| RequestBoundaryEvent
@@ -1207,7 +1228,8 @@ export type ExtensionEvent =
 	| UserBashEvent
 	| InputEvent
 	| ToolCallEvent
-	| ToolResultEvent;
+	| ToolResultEvent
+	| SettingsChangedEvent;
 
 /** Keyed by `ExtensionEvent["type"]`, so a name missing from or added beyond the union fails to compile. */
 const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
@@ -1243,6 +1265,7 @@ const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
 	input: true,
 	tool_call: true,
 	tool_result: true,
+	settings_changed: true,
 };
 
 /** Every event `volt.on()` subscribes to. It throws for any other name. */
@@ -1362,9 +1385,32 @@ export interface ResolvedCommand extends RegisteredCommand {
 export type ExtensionHandler<E, R = undefined> = (event: E, ctx: ExtensionContext) => Promise<R | void> | R | void;
 
 /**
- * ExtensionAPI passed to extension factory functions.
+ * ExtensionAPI passed to extension factory functions. `TSettings` types
+ * `settings`: `ExtensionAPI<ExtensionSettingsOf<typeof manifest>>`.
  */
-export interface ExtensionAPI {
+export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = ExtensionSettingsShape> {
+	// =========================================================================
+	// Settings
+	// =========================================================================
+
+	/**
+	 * The extension's effective settings, frozen: each declared default, then
+	 * the user's global values, then a trusted project's values. Reading it
+	 * again after `settings_changed` gives the new values.
+	 */
+	readonly settings: TSettings;
+
+	/**
+	 * Merge `values` over what `scope` (default `global`) stores for this
+	 * extension; an `undefined` value clears that setting there. Rejects
+	 * values the manifest does not declare or allow, and project writes in an
+	 * untrusted project. Resolves once the settings are saved.
+	 */
+	updateSettings(
+		values: { readonly [K in keyof TSettings]?: TSettings[K] | undefined },
+		options?: { readonly scope?: ExtensionSettingsScope },
+	): Promise<void>;
+
 	// =========================================================================
 	// Event Subscription
 	// =========================================================================
@@ -1419,6 +1465,8 @@ export interface ExtensionAPI {
 	): PolicyRegistration<ExtensionHandler<ToolResultEvent, ToolResultEventResult>>;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
+	/** This extension's settings changed. */
+	on(event: "settings_changed", handler: ExtensionHandler<SettingsChangedEvent<TSettings>>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -1526,7 +1574,7 @@ export interface ExtensionAPI {
 	/** Bounded metadata for this extension's managed tasks; does not grant execution authority. */
 	getServicesStatus(): ExtensionServicesStatus;
 
-	/** Execute a shell command. */
+	/** Execute a shell command. Needs the `exec` permission. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
 
 	/** Get the list of currently active tool names. */
@@ -1545,7 +1593,7 @@ export interface ExtensionAPI {
 	// Model and Thinking Level
 	// =========================================================================
 
-	/** Set the current model. Returns false if no API key available. */
+	/** Set the current model: the catalog's model with this provider and id. Returns false if there is none or no API key is available. */
 	setModel(model: Model<any>): Promise<boolean>;
 
 	/** Get current thinking level. */
@@ -1559,7 +1607,7 @@ export interface ExtensionAPI {
 	// =========================================================================
 
 	/**
-	 * Register or override a model provider.
+	 * Register or override a model provider. Needs the `providers` permission.
 	 *
 	 * If `models` is provided: replaces all existing models for this provider.
 	 * If only `baseUrl` is provided: overrides the URL for existing models.
@@ -1613,7 +1661,7 @@ export interface ExtensionAPI {
 	registerProvider(name: string, config: ProviderConfig): void;
 
 	/**
-	 * Unregister a previously registered provider.
+	 * Unregister a previously registered provider. Needs the `providers` permission.
 	 *
 	 * Removes all models belonging to the named provider and restores any
 	 * built-in models that were overridden by it. Has no effect if the provider
@@ -1706,15 +1754,17 @@ export interface ProviderModelConfig {
 }
 
 /** Extension factory function type. Supports both sync and async initialization. */
-export type ExtensionFactory = (volt: ExtensionAPI) => void | Promise<void>;
+export type ExtensionFactory<TSettings extends ExtensionSettingsShape = ExtensionSettingsShape> = (
+	volt: ExtensionAPI<TSettings>,
+) => void | Promise<void>;
 
 /**
  * An extension given to the SDK (`extensionFactories`): its manifest, without
- * `entry`, and its factory.
+ * `entry`, and its factory, which may type its settings.
  */
 export interface ExtensionDefinition {
 	readonly manifest: ExtensionManifest;
-	readonly factory: ExtensionFactory;
+	factory(volt: ExtensionAPI): void | Promise<void>;
 }
 
 // ============================================================================
@@ -1789,6 +1839,8 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => Pr
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	/** The extensions' settings: `volt.settings` and `volt.updateSettings` go through it. */
+	readonly settings: ExtensionSettingsRuntime;
 	/** The managed-services status of the extension with manifest id `owner`. */
 	getServicesStatus(owner: string): ExtensionServicesStatus;
 	flagValues: Map<string, boolean | string>;
@@ -1893,6 +1945,12 @@ export interface Extension {
 	resolvedPath: string;
 	/** Where the extension was found: its scope (user, project, or temporary), origin, and path. */
 	sourceInfo: SourceInfo;
+	/**
+	 * Where its code came from and which revision (`npm:<name>@<version>`,
+	 * `git:<repo>@<commit>`, `local:<path hash>`, `sdk:<id>`): permission
+	 * acknowledgments are bound to it.
+	 */
+	readonly fingerprint: string;
 	readonly handlers: ExtensionHandlerRegistry;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;

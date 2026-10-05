@@ -193,26 +193,30 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			model,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					testExtension("test-extension-1", (volt: ExtensionAPI) => {
-						volt.registerProvider(model.provider, {
-							baseUrl: model.baseUrl,
-							apiKey: "faux-key",
-							api: faux.api,
-							streamSimple: faux.streamSimple,
-							models: faux.models.map((registeredModel) => ({
-								id: registeredModel.id,
-								name: registeredModel.name,
-								api: registeredModel.api,
-								reasoning: registeredModel.reasoning,
-								input: registeredModel.input,
-								cost: registeredModel.cost,
-								contextWindow: registeredModel.contextWindow,
-								maxTokens: registeredModel.maxTokens,
-							})),
-						});
-						volt.on("session_before_switch", replacementHook);
-						volt.on("session_shutdown", replacementHook);
-					}),
+					testExtension(
+						"test-extension-1",
+						(volt: ExtensionAPI) => {
+							volt.registerProvider(model.provider, {
+								baseUrl: model.baseUrl,
+								apiKey: "faux-key",
+								api: faux.api,
+								streamSimple: faux.streamSimple,
+								models: faux.models.map((registeredModel) => ({
+									id: registeredModel.id,
+									name: registeredModel.name,
+									api: registeredModel.api,
+									reasoning: registeredModel.reasoning,
+									input: registeredModel.input,
+									cost: registeredModel.cost,
+									contextWindow: registeredModel.contextWindow,
+									maxTokens: registeredModel.maxTokens,
+								})),
+							});
+							volt.on("session_before_switch", replacementHook);
+							volt.on("session_shutdown", replacementHook);
+						},
+						["providers"],
+					),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

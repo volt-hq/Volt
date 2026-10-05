@@ -133,7 +133,7 @@ export default function (volt) {
 		mkdirSync(join(agentDir, "extensions"), { recursive: true });
 		writeFileSync(
 			join(agentDir, "extensions", "broken-provider.ts"),
-			`export const manifest = { id: "broken-provider", displayName: "broken-provider" };
+			`export const manifest = { id: "broken-provider", displayName: "broken-provider", permissions: ["providers"] };
 export default function (volt) {
 	volt.registerProvider("broken-provider", {
 		streamSimple: () => {
