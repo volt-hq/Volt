@@ -64,6 +64,12 @@ function ran(item: ReturnType<typeof fixture>): string[][] {
 	return item.host.finished.map((record) => [record.state, record.outcome ?? "open"]);
 }
 
+/** Whether the one install action ran (it reported progress), then ended cancelled, however the cancel reached it. */
+function cancelledAfterRunning(item: ReturnType<typeof fixture>): boolean {
+	const [record, ...rest] = item.host.finished;
+	return rest.length === 0 && record?.outcome === "cancelled" && record.progress !== undefined;
+}
+
 /** The last finished install action's report: its summary, or its error. */
 function report(item: ReturnType<typeof fixture>): string | undefined {
 	const record = item.host.finished.at(-1);
@@ -312,7 +318,7 @@ describe("LSP install readiness (#399)", () => {
 			item.manager[lifecycle]();
 		}
 		expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
-		await vi.waitFor(() => expect(ran(item)).toEqual([["running", "cancelled"]]));
+		await vi.waitFor(() => expect(cancelledAfterRunning(item)).toBe(true));
 		expect(item.host.finished[0]).toMatchObject({ kind: "host_action", input: { action: "lsp.install_server" } });
 		expect(start).not.toHaveBeenCalled();
 		const status = item.manager.getStatus().find((entry) => entry.name === "rust");
@@ -364,7 +370,7 @@ describe("LSP install readiness (#399)", () => {
 			return startup;
 		});
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "cancelled" });
-		await vi.waitFor(() => expect(ran(item)).toEqual([["running", "cancelled"]]));
+		await vi.waitFor(() => expect(cancelledAfterRunning(item)).toBe(true));
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
 			state: "ready",

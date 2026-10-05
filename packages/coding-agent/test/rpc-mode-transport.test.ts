@@ -742,11 +742,30 @@ describe("host requests on the remote profile", () => {
 			"conversation.control.v1",
 			"host.manage.v1",
 		]);
+		const observer = await phone(harness, conversation, ["conversation.observe.v1"]);
+		const output = conversation.session.hostActions.run({ action: "test.action", title: "Output" }, async (ctx) => {
+			ctx.output("installed test-tool\n");
+			return { outcome: "completed" };
+		});
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(1));
+		const outputId = hostRequests(manager)[0]!.requestId;
+		manager.send({ type: "host_response", requestId: outputId, response: { decision: "approved" } });
+		await expect(output).resolves.toMatchObject({ status: "ran" });
+		// A host action's output takes host management to read.
+		expect(await observer.query("work_output", { workId: outputId })).toMatchObject({
+			type: "query_error",
+			reason: { code: "not_allowed", requiredCapability: "host.manage.v1" },
+		});
+		expect(await manager.query("work_output", { workId: outputId })).toMatchObject({
+			type: "result",
+			data: { text: "installed test-tool\n" },
+		});
+
 		const pending = conversation.session.hostActions.run({ action: "test.action", title: "Pending" }, async () => ({
 			outcome: "completed",
 		}));
-		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(1));
-		const pendingId = hostRequests(manager)[0]!.requestId;
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(2));
+		const pendingId = hostRequests(manager)[1]!.requestId;
 		expect(await manager.intent("cancel_work", { workId: pendingId })).toMatchObject({ type: "accepted" });
 		await expect(pending).resolves.toEqual({ status: "declined", message: "Host action cancelled" });
 		expect(conversation.liveState.pendingRequest(pendingId)).toBeUndefined();
@@ -758,8 +777,8 @@ describe("host requests on the remote profile", () => {
 			await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
 			return { outcome: "cancelled" };
 		});
-		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(2));
-		const runningId = hostRequests(manager)[1]!.requestId;
+		await vi.waitFor(() => expect(hostRequests(manager)).toHaveLength(3));
+		const runningId = hostRequests(manager)[2]!.requestId;
 		manager.send({ type: "host_response", requestId: runningId, response: { decision: "approved" } });
 		await started.promise;
 		expect(await manager.intent("cancel_work", { workId: runningId })).toMatchObject({ type: "accepted" });

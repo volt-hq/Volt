@@ -28,6 +28,7 @@ import {
 	type WorkExecutor,
 	type WorkKindDefinition,
 	type WorkRegistry,
+	workText,
 } from "../work/registry.ts";
 
 /** The approval a host action asks: an `approval` host request without its kind. */
@@ -46,7 +47,8 @@ export type HostActionOutcome =
 export interface HostActions {
 	/**
 	 * Ask the attached clients to approve `request`, then run `execute` as
-	 * the action. Resolves once the action's work finished; `signal` cancels it.
+	 * the action. Resolves once the action's work finished; `signal` cancels
+	 * it, before it runs or while it runs.
 	 */
 	run(
 		request: HostActionRequest,
@@ -59,6 +61,8 @@ export interface HostActions {
 export const HOST_ACTIONS_MAX_ACTIVE = 4;
 
 const CANCELLED = "Host action cancelled";
+/** Longest message of a client's answer passed on, in characters: it may reach the model. */
+const ANSWER_MESSAGE_MAX_CHARS = 500;
 const DECLINED_MESSAGES: Record<Exclude<HostRequestCancelReason, "unavailable">, string> = {
 	aborted: CANCELLED,
 	timeout: "Host action timed out",
@@ -117,10 +121,9 @@ export class SessionHostActions implements HostActions {
 		execute: WorkExecutor,
 		options: { signal?: AbortSignal } = {},
 	): Promise<HostActionOutcome> {
-		const { liveState } = this.host;
 		const work = this.host.work();
 		if (options.signal?.aborted) return { status: "declined", message: CANCELLED };
-		if (!liveState.accepts("approval")) return { status: "unavailable" };
+		if (!this.host.liveState.accepts("approval")) return { status: "unavailable" };
 		const ran = Promise.withResolvers<WorkExecution>();
 		const executor = async (ctx: WorkContext): Promise<WorkExecution> => {
 			try {
@@ -146,13 +149,38 @@ export class SessionHostActions implements HostActions {
 			throw error;
 		}
 		const { workId } = record;
-		const signals = [work.signal(workId), options.signal].filter((signal) => signal !== undefined);
+		// The caller's abort cancels the work, awaiting approval or running.
+		const cancel = (): void => {
+			void work.cancel(workId).catch(() => undefined);
+		};
+		options.signal?.addEventListener("abort", cancel, { once: true });
+		try {
+			return await this.ask(work, workId, request, ran.promise, options.signal);
+		} finally {
+			options.signal?.removeEventListener("abort", cancel);
+		}
+	}
+
+	/** Ask for the approval of started work `workId`, then let it run or finish it unrun. */
+	private async ask(
+		work: WorkRegistry,
+		workId: string,
+		request: HostActionRequest,
+		ran: Promise<WorkExecution>,
+		callerSignal: AbortSignal | undefined,
+	): Promise<HostActionOutcome> {
+		const workSignal = work.signal(workId);
+		if (workSignal === undefined || workSignal.aborted || callerSignal?.aborted) {
+			// Stopped before it was asked: nothing is shown.
+			await this.stop(work, workId);
+			return { status: "declined", message: CANCELLED };
+		}
 		const { timeoutMs, ...approval } = request;
 		let outcome: HostRequestOutcome;
 		try {
-			outcome = await liveState.request(
+			outcome = await this.host.liveState.request(
 				{ kind: "approval", ...approval, ...hostRequestTimeout(timeoutMs) },
-				{ id: workId, ...(signals.length === 0 ? {} : { signal: AbortSignal.any(signals) }) },
+				{ id: workId, signal: workSignal },
 			);
 		} catch (error) {
 			await this.stop(work, workId);
@@ -164,13 +192,18 @@ export class SessionHostActions implements HostActions {
 				? { status: "unavailable" }
 				: { status: "declined", message: DECLINED_MESSAGES[outcome.reason] };
 		}
+		if (callerSignal?.aborted) {
+			await this.stop(work, workId);
+			return { status: "declined", message: CANCELLED };
+		}
 		const response = outcome.response;
 		if (!("decision" in response) || response.decision !== "approved") {
 			await this.stop(work, workId);
-			return {
-				status: "declined",
-				...("decision" in response && response.message !== undefined ? { message: response.message } : {}),
-			};
+			const message =
+				"decision" in response && response.message !== undefined
+					? workText(response.message, ANSWER_MESSAGE_MAX_CHARS)
+					: undefined;
+			return { status: "declined", ...(message ? { message } : {}) };
 		}
 		try {
 			await work.approve(workId);
@@ -179,7 +212,7 @@ export class SessionHostActions implements HostActions {
 			await this.stop(work, workId);
 			return { status: "declined", message: error instanceof WorkError ? CANCELLED : errorMessage(error) };
 		}
-		const execution = await ran.promise;
+		const execution = await ran;
 		await work.settled(workId);
 		return { status: "ran", execution };
 	}

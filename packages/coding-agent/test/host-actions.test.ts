@@ -309,6 +309,44 @@ describe("host actions", () => {
 		await host.registry.cancelAll("closed");
 	});
 
+	it("cancels a running action when the caller's signal aborts", async () => {
+		const host = await setup();
+		approver(host);
+		const started = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		const pending = host.actions.run(
+			REQUEST,
+			async (ctx) => {
+				started.resolve();
+				await new Promise((resolve) => ctx.signal.addEventListener("abort", resolve, { once: true }));
+				return { outcome: "cancelled" };
+			},
+			{ signal: controller.signal },
+		);
+		await started.promise;
+		controller.abort();
+		expect(await pending).toEqual({ status: "ran", execution: { outcome: "cancelled" } });
+		expect(host.registry.list()[0]).toMatchObject({ state: "cancelling", outcome: "cancelled" });
+	});
+
+	it("passes on a bounded, plain denial message", async () => {
+		const host = await setup();
+		approver(host, () => ({ decision: "denied", message: `\u001b[31mno${"!".repeat(2_000)}` }));
+		const outcome = await host.actions.run(REQUEST, counting().execute);
+		expect(outcome.status).toBe("declined");
+		const message = outcome.status === "declined" ? (outcome.message ?? "") : "";
+		expect(message.startsWith("no!")).toBe(true);
+		expect(message.length).toBeLessThanOrEqual(500);
+	});
+
+	it("never starts host action work running without an approval", async () => {
+		const host = await setup();
+		await expect(
+			host.registry.start("host_action", null, counting().execute, { state: "running" }),
+		).rejects.toMatchObject({ code: "invalid" });
+		expect(host.registry.list()).toEqual([]);
+	});
+
 	it("reports an executor that throws as its failed execution", async () => {
 		const host = await setup();
 		approver(host);
