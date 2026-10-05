@@ -10,7 +10,7 @@
  *   3. Restart Volt or run /reload.
  */
 
-import type { BashToolCallEvent, ExecResult, ExtensionAPI, ToolCallEvent } from "@earendil-works/volt-coding-agent";
+import type { BashToolCallEvent, ExecResult, ExtensionAPI, ToolCallEvent } from "@hansjm10/volt-coding-agent";
 
 const REWRITE_TIMEOUT_MS = 2_000;
 const MIN_SUPPORTED_RTK_MINOR = 23;
