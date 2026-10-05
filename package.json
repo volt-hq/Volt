@@ -1,6 +1,6 @@
 {
 	"name": "volt-azure-devops",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Azure DevOps integration tools for Volt.",
 	"type": "module",
 	"keywords": ["volt-package", "volt-extension", "volt", "azure-devops", "ado"],
@@ -11,7 +11,44 @@
 		"displayName": "Azure DevOps",
 		"description": "Azure DevOps integration tools for Volt.",
 		"entry": "extensions/azure-devops.ts",
-		"permissions": ["network", "fs-write", "secrets"]
+		"settings": {
+			"type": "object",
+			"properties": {
+				"organization": {
+					"type": "string",
+					"title": "Organization",
+					"description": "Azure DevOps organization (dev.azure.com/<organization>): letters, digits, and hyphens. VOLT_ADO_ORG and /ado-config for the session override it.",
+					"maxLength": 50,
+					"pattern": "[A-Za-z0-9][A-Za-z0-9-]*"
+				},
+				"project": {
+					"type": "string",
+					"title": "Project",
+					"description": "Default project name or ID for tools that take a project.",
+					"maxLength": 256
+				},
+				"authMode": {
+					"type": "string",
+					"title": "Authentication",
+					"description": "device-code signs in in a browser; pat reads VOLT_ADO_PAT or AZURE_DEVOPS_EXT_PAT; bearer reads VOLT_ADO_TOKEN. Unset: pat or bearer when its variable is set, else device-code.",
+					"enum": ["device-code", "pat", "bearer"]
+				},
+				"tenantId": {
+					"type": "string",
+					"title": "Tenant ID",
+					"description": "Azure tenant for device-code sign-in. Unset: the Azure SDK default.",
+					"maxLength": 256
+				},
+				"clientId": {
+					"type": "string",
+					"title": "App client ID",
+					"description": "App registration (client ID, a GUID) for device-code sign-in. Unset: the Azure SDK default.",
+					"maxLength": 36,
+					"pattern": "[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}"
+				}
+			}
+		},
+		"permissions": ["network", "secrets"]
 	},
 	"dependencies": {
 		"@azure/identity": "4.13.1",
