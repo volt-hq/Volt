@@ -13,7 +13,7 @@ From the Volt store:
 Or install the package source directly:
 
 ```bash
-volt install git:https://github.com/hansjm10/Volt@store/review-loop
+volt install git:https://github.com/volt-hq/Volt@store/review-loop
 ```
 
 ## Usage

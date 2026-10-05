@@ -11,7 +11,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/volt-coding-agent";
+import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 
 const DEFAULT_MAX_LOOPS = 5;
 const MAX_REVIEW_DIFF_CHARS = 150_000;
