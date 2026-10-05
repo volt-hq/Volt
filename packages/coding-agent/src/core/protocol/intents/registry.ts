@@ -7,7 +7,8 @@
  * dynamic catalog), the profile (remote safety, then each required
  * capability), the input schema and the byte budgets it annotates, the branch
  * fence, the review-discussion boundary, and availability. Only then does the
- * definition run.
+ * definition run. An extension intent's input is checked against the schema
+ * its extension registered.
  */
 
 import {
@@ -21,14 +22,19 @@ import {
 } from "@hansjm10/volt-protocol";
 import type { Static, TObject } from "typebox";
 import { Compile, type Validator } from "typebox/compile";
+import type { RegisteredIntent } from "../../extensions/types.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../review-discussion-policy.ts";
 import { formatSchemaBoundError, formatSchemaError } from "../schema-errors.ts";
 import {
 	completeDynamicIntentArguments,
 	type DynamicIntent,
+	describedInputSchema,
 	dynamicIntentPromptText,
+	type ExtensionIntent,
 	findDynamicIntent,
+	findExtensionIntent,
 	listDynamicIntents,
+	listExtensionIntents,
 } from "./dynamic.ts";
 import { type BuiltinIntentDefinitions, type IntentOutcome, isBuiltinIntentName } from "./outcomes.ts";
 import { intentStateOf } from "./state.ts";
@@ -65,7 +71,7 @@ export interface PreparedIntent<O> {
 	run(): Promise<IntentInvocation<O>>;
 }
 
-/** The outcome of a dynamic intent: how its prompt was taken. */
+/** The outcome of a dynamic intent: how its prompt was taken, or that an extension intent's handler ran. */
 export interface DynamicIntentOutcome {
 	readonly source: DynamicIntent["source"];
 	/** Prompt templates and skills sent while the agent streams are queued as steering or follow-up input. */
@@ -74,13 +80,34 @@ export interface DynamicIntentOutcome {
 
 type AnyIntentDefinition = IntentDefinition<BuiltinIntentName, unknown>;
 
-/** A built-in or dynamic intent a name resolved to. */
+/** A built-in, dynamic, or extension intent a name resolved to. */
 export type ResolvedIntent =
 	| { readonly kind: "builtin"; readonly definition: AnyIntentDefinition }
-	| { readonly kind: "dynamic"; readonly intent: DynamicIntent };
+	| { readonly kind: "dynamic"; readonly intent: DynamicIntent }
+	| { readonly kind: "extension"; readonly intent: ExtensionIntent };
 
 const DYNAMIC_INPUT_VALIDATOR = Compile(DynamicIntentInputSchema);
 const DYNAMIC_INTENT_NAME = new RegExp(DYNAMIC_INTENT_PATTERN);
+const EXTENSION_INTENT_PREFIX = "extension.intent.";
+/** Largest input of an extension intent, in characters of JSON. */
+export const EXTENSION_INTENT_INPUT_MAX_CHARS = 64 * 1024;
+
+/** Compiled input schemas of extension intents. */
+const extensionValidators = new WeakMap<RegisteredIntent, Validator>();
+
+function extensionValidator(intent: RegisteredIntent): Validator {
+	let validator = extensionValidators.get(intent);
+	if (validator === undefined) {
+		validator = Compile(intent.input);
+		extensionValidators.set(intent, validator);
+	}
+	return validator;
+}
+
+/** The name of a resolved intent. */
+function nameOf(resolved: ResolvedIntent): string {
+	return resolved.kind === "builtin" ? resolved.definition.name : resolved.intent.name;
+}
 
 interface LoadedIntents {
 	readonly definitions: BuiltinIntentDefinitions;
@@ -142,10 +169,15 @@ export class IntentRegistry {
 		return this.definitions[name];
 	}
 
-	/** A built-in intent by name, or a dynamic one from the target session's catalog. */
+	/** A built-in intent by name, or a dynamic or extension one from the target session's catalog. */
 	resolve(name: string, target?: IntentTarget): ResolvedIntent | undefined {
 		if (isBuiltinIntentName(name)) return { kind: "builtin", definition: this.definitions[name] };
-		const intent = target && DYNAMIC_INTENT_NAME.test(name) ? findDynamicIntent(target.session, name) : undefined;
+		if (!target || !DYNAMIC_INTENT_NAME.test(name)) return undefined;
+		if (name.startsWith(EXTENSION_INTENT_PREFIX)) {
+			const intent = findExtensionIntent(target.session, name);
+			return intent ? { kind: "extension", intent } : undefined;
+		}
+		const intent = findDynamicIntent(target.session, name);
 		return intent ? { kind: "dynamic", intent } : undefined;
 	}
 
@@ -163,6 +195,18 @@ export class IntentRegistry {
 	}
 
 	descriptor(resolved: ResolvedIntent, view: IntentView): IntentDescriptor {
+		if (resolved.kind === "extension") {
+			const { intent } = resolved;
+			return {
+				...metadataDescriptor(intent, view),
+				name: intent.name,
+				source: intent.source,
+				sourceLabel: intent.sourceLabel,
+				// The registered schema, what a client fills a form from, its descriptive text redacted.
+				input: describedInputSchema(intent.registered.input),
+				enabled: true,
+			};
+		}
 		if (resolved.kind === "dynamic") {
 			const { intent } = resolved;
 			return {
@@ -201,6 +245,9 @@ export class IntentRegistry {
 			...(target ? listDynamicIntents(target.session) : []).map(
 				(intent): ResolvedIntent => ({ kind: "dynamic", intent }),
 			),
+			...(target ? listExtensionIntents(target.session) : []).map(
+				(intent): ResolvedIntent => ({ kind: "extension", intent }),
+			),
 		];
 		return resolved
 			.filter((intent) => view.profile.name === "local" || metadataOf(intent).remote === "safe")
@@ -220,6 +267,7 @@ export class IntentRegistry {
 		}
 		if (!(metadataOf(resolved).completions ?? []).includes(field)) return [];
 		if (resolved.kind === "dynamic") return completeDynamicIntentArguments(resolved.intent, prefix);
+		if (resolved.kind === "extension") return [];
 		return (await resolved.definition.complete?.(ctx, field, prefix)) ?? [];
 	}
 
@@ -278,13 +326,31 @@ export class IntentRegistry {
 		options: IntentInvokeOptions,
 	): PreparedIntent<unknown> {
 		const metadata = metadataOf(resolved);
-		const name = resolved.kind === "builtin" ? resolved.definition.name : resolved.intent.name;
+		const name = nameOf(resolved);
 		assertProfileAllows(metadata, ctx, name);
 		const admittedInput = input ?? {};
+		// An extension's schema checks the input's shape; the host bounds its size before testing it.
+		if (
+			resolved.kind === "extension" &&
+			(JSON.stringify(admittedInput) ?? "").length > EXTENSION_INTENT_INPUT_MAX_CHARS
+		) {
+			throw new IntentRejectedError(
+				"invalid_input",
+				`Invalid ${name} input: larger than ${EXTENSION_INTENT_INPUT_MAX_CHARS} characters of JSON`,
+			);
+		}
 		const validator =
-			resolved.kind === "builtin" ? this.validator(resolved.definition.name) : DYNAMIC_INPUT_VALIDATOR;
+			resolved.kind === "builtin"
+				? this.validator(resolved.definition.name)
+				: resolved.kind === "extension"
+					? extensionValidator(resolved.intent.registered)
+					: DYNAMIC_INPUT_VALIDATOR;
 		const schema = (
-			resolved.kind === "builtin" ? INTENT_SCHEMAS[resolved.definition.name].input : DynamicIntentInputSchema
+			resolved.kind === "builtin"
+				? INTENT_SCHEMAS[resolved.definition.name].input
+				: resolved.kind === "extension"
+					? resolved.intent.registered.input
+					: DynamicIntentInputSchema
 		) as TObject;
 		const invalid = validator.Check(admittedInput)
 			? formatSchemaBoundError(schema, admittedInput)
@@ -313,6 +379,21 @@ export class IntentRegistry {
 				assertCurrent: () => {
 					outer?.();
 					assertBranch();
+				},
+			};
+		}
+		if (resolved.kind === "extension") {
+			const session = (target as IntentTarget).session;
+			const { registered } = resolved.intent;
+			return {
+				run: async () => {
+					const before = logPosition(target);
+					try {
+						await session.runExtensionIntent(registered, admittedInput);
+					} catch (error) {
+						throw new IntentRejectedError("failed", error instanceof Error ? error.message : String(error));
+					}
+					return { ordinals: committedSince(target, before), outcome: { source: "extension" } };
 				},
 			};
 		}

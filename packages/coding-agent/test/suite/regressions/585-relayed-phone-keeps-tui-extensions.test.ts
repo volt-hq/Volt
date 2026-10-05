@@ -183,8 +183,8 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			["info", "asked"],
 		]);
 		expect(tuiLive.statuses()).toEqual([
-			["ext", "ready:startup"],
-			["ext", "ready:new"],
+			["test-extension/ext", "ready:startup"],
+			["test-extension/ext", "ready:new"],
 		]);
 		expect(starts).toHaveLength(2);
 	});

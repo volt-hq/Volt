@@ -86,6 +86,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			commands: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
+			intents: new Map(),
+			completionProviders: new Map(),
 			workKinds: new Map(),
 		};
 	}
@@ -261,6 +263,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			commands: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
+			intents: new Map(),
+			completionProviders: new Map(),
 			workKinds: new Map(),
 		};
 
@@ -315,6 +319,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			commands: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
+			intents: new Map(),
+			completionProviders: new Map(),
 			workKinds: new Map(),
 		};
 
@@ -351,6 +357,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			commands: new Map(),
 			flags: new Map(),
 			shortcuts: new Map(),
+			intents: new Map(),
+			completionProviders: new Map(),
 			workKinds: new Map(),
 		};
 

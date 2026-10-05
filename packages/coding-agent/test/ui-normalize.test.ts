@@ -204,7 +204,23 @@ describe("normalizeUiNode", () => {
 		if (node?.type !== "terminal") throw new Error("expected a terminal node");
 		expect(node.lines).toHaveLength(UI_NODE_TERMINAL_MAX_LINES);
 		expect(node.omittedLines).toBe(2 + 7);
-		expect(node.lines.at(-1)).toBe("x".repeat(UI_NODE_LINE_MAX_CHARS));
+		expect(node.lines.at(-1)).toBe(`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 1)}…`);
+		// A styled line cut at a span boundary ends in "…" too.
+		const spans = normalizeUiNode(
+			{
+				type: "terminal",
+				lines: [
+					[
+						{ text: "a".repeat(UI_NODE_LINE_MAX_CHARS - 1), token: "muted" },
+						{ text: "bb", token: "error" },
+					],
+				],
+			},
+			{ policy: { owner: "host" }, maxBytes: 64 * 1024 },
+		);
+		expect(spans?.type === "terminal" && spans.lines[0]).toEqual([
+			{ text: `${"a".repeat(UI_NODE_LINE_MAX_CHARS - 1)}…`, token: "muted" },
+		]);
 		expect(node.lines.at(-2)).toBe(`line ${UI_NODE_TERMINAL_MAX_LINES + 3}`);
 
 		const short = normalizeUiNode({ type: "terminal", lines: ["\x1b[31ma\nb", [{ text: "c\x1b[1m\nd" }]] }, HOST);

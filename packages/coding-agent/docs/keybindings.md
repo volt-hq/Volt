@@ -8,6 +8,8 @@ Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are m
 
 After editing `keybindings.json`, run `/reload` in volt to apply the changes without restarting the session.
 
+Extension shortcuts are actions too: each is named after the intent it invokes, such as `extension.intent.presets.cycle`, with the extension's key as its default. Bind that id to other keys, or to `[]` to turn the shortcut off. `/hotkeys` lists them under Extensions.
+
 ## Key Format
 
 `modifier+key` where modifiers are `ctrl`, `shift`, `alt` (combinable) and keys are:

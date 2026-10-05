@@ -29,8 +29,6 @@ function createTerminal() {
 		setFooter: vi.fn(),
 		setHeader: vi.fn(),
 		custom: vi.fn(async () => undefined as never),
-		pasteToEditor: vi.fn(),
-		getEditorText: vi.fn(() => "terminal text"),
 		addAutocompleteProvider: vi.fn(),
 		setEditorComponent: vi.fn(),
 		getEditorComponent: vi.fn(() => undefined),
@@ -92,20 +90,27 @@ describe("the extensions' UI through the live state", () => {
 		ui.setStatus("build", undefined);
 		ui.setWidget("lines", undefined);
 		ui.setWorkingMessage("thinking");
-		expect(ui.getEditorText()).toBe("terminal text");
+		ui.pasteToEditor("pasted\u001b[201~\r");
 
+		const extension = "test-extension";
 		expect(live.uiItems()).toEqual([
-			{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "building" } },
 			{
 				type: "set",
-				key: "ext_widget/lines",
-				value: { kind: "ext_widget", lines: ["one", "two"], placement: "belowEditor" },
+				key: `ext_status/${extension}/build`,
+				value: { kind: "ext_status", extension, text: "building" },
 			},
-			{ type: "set", key: "ext_title", value: { kind: "ext_title", title: "volt: building" } },
-			{ type: "notice", level: "warning", message: "careful" },
+			{
+				type: "set",
+				key: `ext_panel/${extension}/lines`,
+				value: { kind: "ext_panel", extension, placement: "belowEditor", node: { type: "text", text: "one\ntwo" } },
+			},
+			{ type: "set", key: "ext_title", value: { kind: "ext_title", extension, title: "volt: building" } },
+			{ type: "notice", level: "warning", message: "careful", source: extension },
 			{ type: "directive", directive: "set_editor_text", text: "draft" },
-			{ type: "clear", key: "ext_status/build" },
-			{ type: "clear", key: "ext_widget/lines" },
+			{ type: "clear", key: `ext_status/${extension}/build` },
+			{ type: "clear", key: `ext_panel/${extension}/lines` },
+			// Pasted text never carries terminal controls into the editor.
+			{ type: "directive", directive: "insert_editor_text", text: "pasted" },
 		]);
 		// The component widget and the removal of the string widget reach the terminal.
 		expect(terminal.setWidget.mock.calls).toEqual([
@@ -221,16 +226,16 @@ describe("the extensions' UI through the live state", () => {
 		await expect(asked[0]).resolves.toBeUndefined();
 		expect(starts).toEqual(["startup", "reload"]);
 		expect(live.statuses()).toEqual([
-			["ext", "ready:startup"],
-			["ext", undefined],
-			["ext", "ready:reload"],
+			["test-extension/ext", "ready:startup"],
+			["test-extension/ext", undefined],
+			["test-extension/ext", "ready:reload"],
 		]);
 		expect(
 			fixture.conversation.liveState
 				.entries()
 				.map(([key]) => key)
 				.filter((key) => !SESSION_FED_LIVE_KEYS.has(key)),
-		).toEqual(["host_request/approval", "ext_status/ext", "ext_title"]);
+		).toEqual(["host_request/approval", "ext_status/test-extension/ext", "ext_title"]);
 		fixture.conversation.liveState.close();
 		await expect(approval).resolves.toEqual({ status: "cancelled", reason: "closed" });
 	});

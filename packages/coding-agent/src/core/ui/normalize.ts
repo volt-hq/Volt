@@ -129,11 +129,14 @@ function assertSize(value: unknown, maxBytes: number): void {
 // Conversion: text fields of untrusted JSON, before validation
 // ============================================================================
 
-/** At most `max` UTF-16 units, without splitting a surrogate pair. */
+/**
+ * At most `max` UTF-16 units, without splitting a surrogate pair; cut text
+ * ends in "…", so a remote profile's redaction drops a root the cut split.
+ */
 function cutChars(text: string, max: number): string {
 	if (text.length <= max) return text;
-	const end = /[\ud800-\udbff]/.test(text.charAt(max - 1)) ? max - 1 : max;
-	return text.slice(0, end);
+	const end = /[\ud800-\udbff]/.test(text.charAt(max - 2)) ? max - 2 : max - 1;
+	return `${text.slice(0, end)}…`;
 }
 
 function styled(value: unknown): unknown {
@@ -155,17 +158,27 @@ function plainLine(value: unknown): unknown {
 		: value;
 }
 
-/** A styled line cut to the line bound across its spans. */
+/** A styled line cut to the line bound across its spans; a cut line ends in "…". */
 function cutLine(line: UiStyledLine): UiStyledLine {
 	if (typeof line === "string") return cutChars(line, UI_NODE_LINE_MAX_CHARS);
+	if (line.reduce((length, span) => length + span.text.length, 0) <= UI_NODE_LINE_MAX_CHARS) return line;
 	const spans: Exclude<UiStyledLine, string> = [];
-	let room = UI_NODE_LINE_MAX_CHARS;
+	let room = UI_NODE_LINE_MAX_CHARS - 1;
 	for (const span of line) {
 		if (room <= 0) break;
-		const text = cutChars(span.text, room);
+		const end =
+			span.text.length <= room
+				? span.text.length
+				: /[\ud800-\udbff]/.test(span.text.charAt(room - 1))
+					? room - 1
+					: room;
+		const text = span.text.slice(0, end);
 		room -= text.length;
-		spans.push({ ...span, text });
+		if (text.length > 0) spans.push({ ...span, text });
 	}
+	const last = spans.at(-1);
+	if (last) spans[spans.length - 1] = { ...last, text: `${last.text}…` };
+	else spans.push({ text: "…" });
 	return spans;
 }
 

@@ -229,6 +229,11 @@ export class ExtensionKinds {
 		return refusals;
 	}
 
+	/** Whether work `workId` is of a kind of the extension with manifest id `extensionId`. */
+	owns(extensionId: string, workId: string): boolean {
+		return this.work().get(workId)?.kind.startsWith(`ext:${extensionId}/`) === true;
+	}
+
 	/** Remove every kind, interrupting the work they run. Resolves once that work finished. */
 	clear(): Promise<void> {
 		const removed = [...this.kinds.values()];

@@ -3,7 +3,9 @@
  * its live items, on the host that publishes them and on every client that
  * receives them, so both hold the same state.
  *
- * Keyed values (`set`, `clear`) persist until cleared or reset. Streaming
+ * Keyed values (`set`, `clear`) persist until cleared or reset; a `patch`
+ * changes a panel's node or a work item's detail in place, so a reset carries
+ * the patched value. Streaming
  * items (the streaming assistant message and running tools) build on the
  * frame's `basedOn` ordinal: a client discards them when a frame arrives with
  * another `basedOn`, or when it applies the entry that commits them. A host
@@ -13,7 +15,14 @@
  */
 
 import { type AssistantMessage, type JsonObject, parseStreamingJson, type ToolCall } from "@hansjm10/volt-ai";
-import type { LiveItem, LiveValue, ProjectedEntry } from "@hansjm10/volt-protocol";
+import {
+	applyUiPatch,
+	type LiveItem,
+	type LiveValue,
+	type ProjectedEntry,
+	type UiNode,
+	type UiPatchOp,
+} from "@hansjm10/volt-protocol";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 type LiveToolItem = Extract<LiveItem, { type: "tool" }>;
@@ -50,6 +59,41 @@ export interface LiveFoldState {
 const NO_TOOLS: ReadonlyMap<string, LiveStreamingTool> = new Map();
 const NO_VALUES: ReadonlyMap<string, LiveValue> = new Map();
 
+/** A `patch` item that does not apply to the value the fold holds: the holder's state diverged. */
+export class LivePatchError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "LivePatchError";
+	}
+}
+
+/**
+ * `value` with `ops` applied to its node: a panel's `node`, which stays one
+ * node, or a work item's `detail` (the empty tree without one), which stays
+ * at most one node. Throws {@link LivePatchError} when they do not apply.
+ */
+export function patchLiveValue(value: LiveValue, ops: readonly UiPatchOp[]): LiveValue {
+	const apply = (tree: readonly UiNode[]): UiNode[] => {
+		try {
+			return applyUiPatch(tree, ops);
+		} catch (error) {
+			throw new LivePatchError(error instanceof Error ? error.message : String(error));
+		}
+	};
+	if (value.kind === "ext_panel") {
+		const [node, ...rest] = apply([value.node]);
+		if (node === undefined || rest.length > 0) throw new LivePatchError("A panel keeps exactly one node");
+		return { ...value, node };
+	}
+	if (value.kind === "work") {
+		const { detail: _detail, ...work } = value;
+		const [detail, ...rest] = apply(value.detail === undefined ? [] : [value.detail]);
+		if (rest.length > 0) throw new LivePatchError("Work detail is at most one node");
+		return detail === undefined ? work : { ...work, detail };
+	}
+	throw new LivePatchError(`A ${value.kind} value has no node to patch`);
+}
+
 /** Nothing live, building on `basedOn`. */
 export function emptyLiveFold(basedOn = 0): LiveFoldState {
 	return { basedOn, values: NO_VALUES, assistant: undefined, tools: NO_TOOLS };
@@ -65,7 +109,11 @@ function withoutStreaming(state: LiveFoldState, basedOn: number): LiveFoldState 
 	return { basedOn, values: state.values, assistant: undefined, tools: NO_TOOLS };
 }
 
-/** Apply `items` in order; `basedOn` does not change. */
+/**
+ * Apply `items` in order; `basedOn` does not change. Throws
+ * {@link LivePatchError} for a patch of a value the state does not hold, or
+ * one that does not apply to it.
+ */
 export function foldLiveItems(state: LiveFoldState, items: readonly LiveItem[]): LiveFoldState {
 	let values = state.values;
 	let ownsValues = false;
@@ -94,6 +142,12 @@ export function foldLiveItems(state: LiveFoldState, items: readonly LiveItem[]):
 			case "clear":
 				if (values.has(item.key)) writableValues().delete(item.key);
 				break;
+			case "patch": {
+				const value = values.get(item.key);
+				if (value === undefined) throw new LivePatchError(`No live value under ${item.key} to patch`);
+				writableValues().set(item.key, patchLiveValue(value, item.ops));
+				break;
+			}
 			case "assistant_start":
 				assistant = { message: item.message, ended: false, argsText: new Map() };
 				break;

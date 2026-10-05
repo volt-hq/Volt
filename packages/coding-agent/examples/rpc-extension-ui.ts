@@ -66,9 +66,17 @@ interface LiveItem {
 	op?: string;
 	toolName?: string;
 	level?: string;
-	message?: string;
+	message?: StyledText;
 	directive?: string;
 	text?: string;
+}
+
+/** Text the host styled with semantic tokens: a string, or spans. */
+type StyledText = string | Array<{ text: string }>;
+
+function plain(text: unknown): string {
+	if (typeof text === "string") return text;
+	return Array.isArray(text) ? text.map((span: { text?: unknown }) => String(span.text ?? "")).join("") : "";
 }
 
 // ============================================================================
@@ -442,11 +450,15 @@ async function main() {
 		}
 		if (item.type === "notice") {
 			const color = item.level === "error" ? RED : item.level === "warning" ? YELLOW : MAGENTA;
-			outputLog.append(`${color}${BOLD}Notification:${RESET} ${item.message}`);
+			outputLog.append(`${color}${BOLD}Notification:${RESET} ${plain(item.message)}`);
 			return;
 		}
 		if (item.type === "directive" && item.directive === "set_editor_text") {
 			promptInput.input.setValue(item.text ?? "");
+			return;
+		}
+		if (item.type === "directive" && item.directive === "insert_editor_text") {
+			promptInput.input.setValue(`${promptInput.input.getValue()}${item.text ?? ""}`);
 			return;
 		}
 		if (item.type === "clear" && item.key?.startsWith("ext_status/")) {
@@ -471,13 +483,17 @@ async function main() {
 				return;
 			case "ext_status":
 				outputLog.append(
-					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} ${value.text}`,
+					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} ${plain(value.text)}`,
 				);
 				return;
-			case "ext_widget":
-				outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[widget: ${item.key.slice(11)}]${RESET}`);
-				for (const line of value.lines as string[]) outputLog.append(`  ${DIM}${line}${RESET}`);
+			case "ext_panel": {
+				// A panel is UiNode data; this client shows a text node's lines and names other nodes.
+				const node = value.node as { type?: string; text?: unknown } | undefined;
+				outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[panel: ${item.key.slice(10)}]${RESET}`);
+				const lines = node?.type === "text" ? plain(node.text).split("\n") : [`(${node?.type ?? "unknown"} node)`];
+				for (const line of lines) outputLog.append(`  ${DIM}${line}${RESET}`);
 				return;
+			}
 			default:
 				return;
 		}

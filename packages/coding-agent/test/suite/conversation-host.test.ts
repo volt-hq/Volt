@@ -4,9 +4,15 @@ import type { HostedConversation } from "../../src/core/host/hosted-conversation
 import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { findSessionInfoById, SessionManager } from "../../src/core/session-manager.ts";
+import { plainText } from "../utilities/live-recorder.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions, moved } from "./host-harness.ts";
 
-/** A live view that keeps the extension statuses it is shown in `statuses`. */
+/** The name of an extension status item from its key, `ext_status/<extension id>/<name>`. */
+function statusName(key: string): string {
+	return key.slice(key.indexOf("/", "ext_status/".length) + 1);
+}
+
+/** A live view that keeps the extension statuses it is shown in `statuses`, by name. */
 function statusLive(statuses: Map<string, string>): LiveClient {
 	return {
 		acceptsHostRequest: () => false,
@@ -14,9 +20,9 @@ function statusLive(statuses: Map<string, string>): LiveClient {
 			if (update.reset) statuses.clear();
 			for (const item of update.items) {
 				if (item.type === "set" && item.value.kind === "ext_status") {
-					statuses.set(item.key.slice("ext_status/".length), item.value.text);
+					statuses.set(statusName(item.key), plainText(item.value.text));
 				} else if (item.type === "clear" && item.key.startsWith("ext_status/")) {
-					statuses.delete(item.key.slice("ext_status/".length));
+					statuses.delete(statusName(item.key));
 				}
 			}
 		},

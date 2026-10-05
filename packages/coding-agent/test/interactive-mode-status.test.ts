@@ -623,6 +623,7 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			defaultEditor,
 			editor: customEditor,
 			autocompleteProviderWrappers: [wrap1, wrap2],
+			session: { extensionRunner: { getCompletionProviders: () => [] } },
 		};
 
 		(InteractiveMode as any).prototype.setupAutocompleteProvider.call(fakeThis);
@@ -653,6 +654,8 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 			defaultEditor,
 			editor: customEditor,
 			autocompleteProviderWrappers: [passThrough(["$"]), passThrough(["!"])],
+			session: { extensionRunner: { getCompletionProviders: () => [{ trigger: "#issue" }] } },
+			intentContext: () => ({}),
 		};
 
 		(
@@ -662,7 +665,8 @@ describe("InteractiveMode.setupAutocompleteProvider", () => {
 		).prototype.setupAutocompleteProvider.call(fakeThis);
 
 		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
-		expect(provider.triggerCharacters).toEqual(["$", "!"]);
+		// The extensions' completion providers trigger on the first character of their triggers.
+		expect(provider.triggerCharacters).toEqual(["$", "!", "#"]);
 	});
 });
 

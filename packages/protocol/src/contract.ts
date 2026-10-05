@@ -133,6 +133,9 @@ import {
 	DynamicIntentInputSchema,
 	DynamicIntentNameSchema,
 	EmptyInputSchema,
+	ExtensionIntentFrameSchema,
+	ExtensionIntentInputSchema,
+	ExtensionIntentNameSchema,
 	INTENT_FRAME_SCHEMAS,
 	INTENT_SCHEMAS,
 	IntentAvailabilitySchema,
@@ -660,8 +663,10 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	ReviewStarted: ReviewStartedSchema,
 	BuiltinIntentName: BuiltinIntentNameSchema,
 	DynamicIntentName: DynamicIntentNameSchema,
+	ExtensionIntentName: ExtensionIntentNameSchema,
 	IntentName: IntentNameSchema,
 	DynamicIntentInput: DynamicIntentInputSchema,
+	ExtensionIntentInput: ExtensionIntentInputSchema,
 	IntentCategory: IntentCategorySchema,
 	IntentScope: IntentScopeSchema,
 	IntentFence: IntentFenceSchema,
@@ -758,6 +763,7 @@ export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	for (const [type, schema] of Object.entries(CLIENT_FRAME_SCHEMAS)) registry.set(`Frame.${type}`, schema);
 	for (const name of BUILTIN_INTENT_NAMES) registry.set(`Frame.intent.${name}`, INTENT_FRAME_SCHEMAS[name]);
 	registry.set("Frame.intent.dynamic", DynamicIntentFrameSchema);
+	registry.set("Frame.intent.extension", ExtensionIntentFrameSchema);
 	registry.set("Frame.intent", IntentFrameSchema);
 	for (const name of QUERY_NAMES) registry.set(`Frame.query.${name}`, QUERY_FRAME_SCHEMAS[name]);
 	registry.set("Frame.query", QueryFrameSchema);

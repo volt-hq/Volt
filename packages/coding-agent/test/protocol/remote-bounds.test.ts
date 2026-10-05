@@ -412,11 +412,12 @@ describe("remote profile bounds", () => {
 				},
 			},
 		]);
-		live.set("ext_status/big", { kind: "ext_status", text: "s".repeat(200_000) });
-		live.set("ext_widget/huge", {
-			kind: "ext_widget",
-			lines: Array.from({ length: 20_000 }, () => "w".repeat(40)),
+		live.set("ext_status/ci/big", { kind: "ext_status", extension: "ci", text: "s".repeat(200_000) });
+		live.set("ext_panel/ci/huge", {
+			kind: "ext_panel",
+			extension: "ci",
 			placement: "aboveEditor",
+			node: { type: "list", items: Array.from({ length: 20_000 }, () => ({ type: "text", text: "w".repeat(40) })) },
 		});
 		live.notice("info", "after");
 		await phone.waitFor(
@@ -435,12 +436,12 @@ describe("remote profile bounds", () => {
 		expect(update.partial.content).toEqual([{ type: "text", text: `${"o".repeat(97)}END` }]);
 		expect(jsonBytes(update.partial.details)).toBeLessThanOrEqual(20 * 1024);
 
-		const status = items.find((item) => item.type === "set" && item.key === "ext_status/big");
+		const status = items.find((item) => item.type === "set" && item.key === "ext_status/ci/big");
 		if (status?.type !== "set" || status.value.kind !== "ext_status") throw new Error("Expected the status");
 		expect(jsonBytes(status.value)).toBeLessThanOrEqual(64 * 1024);
-		expect(status.value.text.startsWith("sss")).toBe(true);
+		expect(typeof status.value.text === "string" && status.value.text.startsWith("sss")).toBe(true);
 		// A value that cannot be bounded is not sent at all.
-		expect(items.some((item) => item.type === "set" && item.key === "ext_widget/huge")).toBe(false);
+		expect(items.some((item) => item.type === "set" && item.key === "ext_panel/ci/huge")).toBe(false);
 	});
 
 	it("drops queued live frames past the live queue bound and resets from the live state, never dropping entries", async () => {
@@ -481,7 +482,11 @@ describe("remote profile bounds", () => {
 					flooded = true;
 					for (let index = 0; index < count; index++)
 						conversation.liveState.notice("info", `${index}`.padEnd(200, "n"));
-					conversation.liveState.set("ext_status/final", { kind: "ext_status", text: "final" });
+					conversation.liveState.set("ext_status/ci/final", {
+						kind: "ext_status",
+						extension: "ci",
+						text: "final",
+					});
 				},
 			},
 			live: true,
@@ -510,7 +515,7 @@ describe("remote profile bounds", () => {
 			fold = foldLiveFrame(fold, frame);
 		}
 		expect([...fold.values]).toEqual([...conversation.liveState.snapshot().values]);
-		expect(fold.values.get("ext_status/final")).toEqual({ kind: "ext_status", text: "final" });
+		expect(fold.values.get("ext_status/ci/final")).toEqual({ kind: "ext_status", extension: "ci", text: "final" });
 	});
 
 	it("projects subagent tool details within their array and node budgets, never reading past them", () => {

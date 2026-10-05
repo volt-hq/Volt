@@ -414,7 +414,9 @@ describe("extension manifests", () => {
 					(volt) => {
 						volt.registerCommand("ship", { handler: async () => {} });
 						volt.registerFlag("dry-run", { type: "boolean" });
-						volt.registerShortcut("ctrl+shift+d", { handler: () => {} });
+						volt.registerShortcut("ctrl+shift+d", {
+							intent: volt.registerIntent("ship-now", { label: "Ship", handler: () => {} }),
+						});
 						volt.registerProvider("deploy-ai", { baseUrl: "https://example.com" });
 						volt.on("context", () => {
 							throw new Error("boom");
@@ -440,7 +442,12 @@ describe("extension manifests", () => {
 
 			expect(runner.getRegisteredCommands().map((command) => command.extensionId)).toEqual(["deploy"]);
 			expect(runner.getFlags().get("dry-run")?.extensionId).toBe("deploy");
-			expect([...extension.shortcuts.values()].map((shortcut) => shortcut.extensionId)).toEqual(["deploy"]);
+			expect([...extension.shortcuts.values()].map((shortcut) => [shortcut.extensionId, shortcut.intent])).toEqual([
+				["deploy", "extension.intent.deploy.ship-now"],
+			]);
+			expect(runner.getRegisteredIntents().map((intent) => intent.intent)).toEqual([
+				"extension.intent.deploy.ship-now",
+			]);
 			expect(runtime.pendingProviderRegistrations.map((registration) => registration.extensionId)).toEqual([
 				"deploy",
 			]);

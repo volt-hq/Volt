@@ -35,6 +35,7 @@ import {
 	type ControlRelayOutcome,
 	DYNAMIC_INTENT_PATTERN,
 	DynamicIntentFrameSchema,
+	ExtensionIntentFrameSchema,
 	type FatalCode,
 	HelloFrameSchema,
 	type HostFrame,
@@ -110,6 +111,7 @@ const ENDING_INTENTS: ReadonlyMap<string, FatalCode> = new Map([["unregister_wor
 
 const INPUT_INTENTS: ReadonlySet<string> = new Set(INPUT_INTENT_NAMES);
 const DYNAMIC_INTENT = new RegExp(DYNAMIC_INTENT_PATTERN);
+const EXTENSION_INTENT_PREFIX = "extension.intent.";
 const RESERVED: ReadonlySet<string> = new Set(RESERVED_FRAME_TYPES);
 const RELAY_INTENTS: ReadonlySet<string> = new Set(RELAY_INTENT_NAMES);
 const RELAY_QUERIES: ReadonlySet<string> = new Set(RELAY_QUERY_NAMES);
@@ -346,6 +348,14 @@ function intentEnvelopeValidator(type: string): FrameValidator {
 			);
 		});
 	}
+	if (type.startsWith(EXTENSION_INTENT_PREFIX)) {
+		return validator("intent:extension", () =>
+			Type.Object(
+				{ ...ExtensionIntentFrameSchema.properties, input: Type.Optional(Type.Unknown()) },
+				{ additionalProperties: false },
+			),
+		);
+	}
 	if (DYNAMIC_INTENT.test(type)) {
 		return validator("intent:dynamic", () =>
 			Type.Object(
@@ -357,9 +367,14 @@ function intentEnvelopeValidator(type: string): FrameValidator {
 	return validator("intent:unknown", () => UnknownIntentEnvelopeSchema);
 }
 
-/** Whether intent `type` is fenced to the client's branch position. Dynamic intents send prompts: fenced. */
+/**
+ * Whether intent `type` is fenced to the client's branch position. Extension
+ * commands, prompt templates, and skills send prompts: fenced. Extension
+ * intents run their handler: not fenced.
+ */
 function isBranchFenced(type: string): boolean {
-	return isBuiltinIntentName(type) ? intentRegistry.get(type).fence === "branch" : true;
+	if (isBuiltinIntentName(type)) return intentRegistry.get(type).fence === "branch";
+	return !type.startsWith(EXTENSION_INTENT_PREFIX);
 }
 
 /**
@@ -1023,6 +1038,7 @@ export function serveConnection(
 		const subscription = new Subscription({
 			subscriptionId: frame.subscriptionId,
 			liveClientId: `${connectionId}:${frame.subscriptionId}`,
+			liveOwner: connectionId,
 			conversation,
 			profile,
 			sink,

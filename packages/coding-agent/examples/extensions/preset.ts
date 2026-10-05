@@ -356,12 +356,13 @@ export default function presetExtension(volt: ExtensionAPI) {
 		updateStatus(ctx);
 	}
 
-	volt.registerShortcut(Key.ctrlShift("u"), {
-		description: "Cycle presets",
-		handler: async (ctx) => {
+	const cycle = volt.registerIntent("cycle", {
+		label: "Cycle presets",
+		handler: async (_input, ctx) => {
 			await cyclePreset(ctx);
 		},
 	});
+	volt.registerShortcut(Key.ctrlShift("u"), { description: "Cycle presets", intent: cycle });
 
 	// Register /preset command
 	volt.registerCommand("preset", {

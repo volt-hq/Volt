@@ -9,10 +9,18 @@
 
 import { resolve, sep } from "node:path";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
-import { type HostFrame, REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
+import {
+	type HostFrame,
+	type LiveItem,
+	PANEL_MAX_SERIALIZED_BYTES,
+	REMOTE_CAPABILITIES,
+	UI_NODE_LINE_MAX_CHARS,
+} from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
+import { emptyLiveFold, foldLiveFrame } from "../src/core/protocol/live-fold.ts";
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
+import { normalizeUiNode } from "../src/core/ui/normalize.ts";
 
 const workspacePath = resolve("/Users/jordan/secret-project");
 const hostFile = `${workspacePath}${sep}notes.md`;
@@ -219,14 +227,20 @@ describe("remote frame redactor", () => {
 				subscriptionId: "s1",
 				basedOn: 0,
 				seq: 1,
-				items: [{ type: "set", key: `ext_status/${hostFile}`, value: { kind: "ext_status", text: hostFile } }],
+				items: [
+					{
+						type: "set",
+						key: `ext_status/ci/${hostFile}`,
+						value: { kind: "ext_status", extension: "ci", text: hostFile },
+					},
+				],
 			}),
 		).toMatchObject({
 			items: [
 				{
 					type: "set",
-					key: "ext_status//workspace/notes.md",
-					value: { kind: "ext_status", text: "/workspace/notes.md" },
+					key: "ext_status/ci//workspace/notes.md",
+					value: { kind: "ext_status", extension: "ci", text: "/workspace/notes.md" },
 				},
 			],
 		});
@@ -237,9 +251,9 @@ describe("remote frame redactor", () => {
 				subscriptionId: "s1",
 				basedOn: 0,
 				seq: 2,
-				items: [{ type: "clear", key: `ext_status/${hostFile}` }],
+				items: [{ type: "clear", key: `ext_status/ci/${hostFile}` }],
 			}),
-		).toMatchObject({ items: [{ type: "clear", key: "ext_status//workspace/notes.md" }] });
+		).toMatchObject({ items: [{ type: "clear", key: "ext_status/ci//workspace/notes.md" }] });
 		// A key without a root is opaque.
 		expect(
 			redactor.redact({
@@ -247,9 +261,11 @@ describe("remote frame redactor", () => {
 				subscriptionId: "s1",
 				basedOn: 0,
 				seq: 3,
-				items: [{ type: "set", key: "ext_status/~lint", value: { kind: "ext_status", text: "ok" } }],
+				items: [
+					{ type: "set", key: "ext_status/ci/~lint", value: { kind: "ext_status", extension: "ci", text: "ok" } },
+				],
 			}),
-		).toMatchObject({ items: [{ type: "set", key: "ext_status/~lint" }] });
+		).toMatchObject({ items: [{ type: "set", key: "ext_status/ci/~lint" }] });
 	});
 
 	it.skipIf(sep !== "/")("never streams the start of a root, even one with spaces and parentheses in it", () => {
@@ -295,8 +311,8 @@ describe("remote frame redactor", () => {
 				items: [
 					{
 						type: "set",
-						key: `ext_status/${workspacePath}/lint`,
-						value: { kind: "ext_status", text: "checking" },
+						key: `ext_status/ci/${workspacePath}/lint`,
+						value: { kind: "ext_status", extension: "ci", text: "checking" },
 					},
 					{
 						type: "tool",
@@ -317,5 +333,165 @@ describe("remote frame redactor", () => {
 		);
 		expect(sent).not.toContain(workspacePath);
 		expect(sent).toContain('"toolCallId":"t1"');
+	});
+});
+
+describe("remote redaction of patched panels", () => {
+	const key = "ext_panel/ci/log";
+	const panel = (lines: string[]) => ({
+		kind: "ext_panel" as const,
+		extension: "ci",
+		placement: "sidebar" as const,
+		node: { type: "terminal" as const, key: "out", lines },
+	});
+	const live = (seq: number, items: LiveItem[], reset = false): HostFrame => ({
+		type: "live",
+		subscriptionId: "s1",
+		basedOn: 1,
+		seq,
+		...(reset ? { reset: true } : {}),
+		items,
+	});
+	const append = (lines: string[]): LiveItem => ({
+		type: "patch",
+		key,
+		ops: [{ op: "append_lines", path: ["out"], lines }],
+	});
+
+	it("sends a patch as the patch between the redacted values, so patched lines are redacted as set ones are", () => {
+		const redactor = redactorFor(workspacePath);
+		const sent: HostFrame[] = [];
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted) sent.push(redacted);
+		};
+		send(live(1, [{ type: "set", key, value: panel([`open ${hostFile}`]) }], true));
+		send(live(2, [append([`saved ${hostFile}`])]));
+		send(live(3, [append(["done"])]));
+		const wire = JSON.stringify(sent);
+		expect(wire).not.toContain(workspacePath);
+		const items = sent.flatMap((frame) => (frame.type === "live" ? frame.items : []));
+		expect(items.map((item) => item.type)).toEqual(["set", "patch", "patch"]);
+		expect(items[1]).toEqual(append(["saved /workspace/notes.md"]));
+		let fold = emptyLiveFold();
+		for (const frame of sent) if (frame.type === "live") fold = foldLiveFrame(fold, frame);
+		expect(fold.values.get(key)).toEqual(panel(["open /workspace/notes.md", "saved /workspace/notes.md", "done"]));
+	});
+
+	it("starts a later patch from what the client holds when the frame could not carry one", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 2_000 },
+		}).redactor();
+		const sent: HostFrame[] = [];
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted) sent.push(redacted);
+		};
+		const holds = (): unknown => {
+			let fold = emptyLiveFold();
+			for (const frame of sent) if (frame.type === "live") fold = foldLiveFrame(fold, frame);
+			return fold.values.get(key);
+		};
+		send(live(1, [{ type: "set", key, value: panel(["start"]) }], true));
+		// Too large for the frame: left out, and the small patch of the same panel after it with it.
+		send(live(2, [append(["x".repeat(3_000)]), append(["small"])]));
+		expect(holds()).toEqual(panel(["start"]));
+		// The next change is sent from what the client holds.
+		send(live(3, [{ type: "patch", key, ops: [{ op: "replace", path: ["out"], node: panel(["end"]).node }] }]));
+		expect(holds()).toEqual(panel(["end"]));
+		const last = sent.at(-1);
+		expect(last?.type === "live" && last.items.map((item) => item.type)).toEqual(["patch"]);
+	});
+
+	it("withdraws a panel the host cleared after a patch the frame could not carry", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 2_000 },
+		}).redactor();
+		let fold = emptyLiveFold();
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted?.type === "live") fold = foldLiveFrame(fold, redacted);
+		};
+		send(live(1, [{ type: "set", key, value: panel(["token=abc"]) }], true));
+		send(live(2, [append(["x".repeat(3_000)]), { type: "clear", key }]));
+		expect(fold.values.has(key)).toBe(false);
+	});
+
+	it("drops the start of a root a host cut left at the end of a line", () => {
+		const redactor = redactorFor(workspacePath);
+		// A line the host normalized: cut inside the root, ending in "…".
+		const node = normalizeUiNode(
+			{ type: "terminal", key: "out", lines: [`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 12)}${hostFile}`] },
+			{ policy: { owner: "host" }, maxBytes: PANEL_MAX_SERIALIZED_BYTES },
+		);
+		if (node?.type !== "terminal") throw new Error("Expected a terminal node");
+		const line = node.lines[0];
+		expect(typeof line === "string" && line.endsWith("…")).toBe(true);
+		expect(workspacePath.startsWith(String(line).slice(UI_NODE_LINE_MAX_CHARS - 12, -1))).toBe(true);
+		const value = { ...panel([]), node };
+		const sent = JSON.stringify([
+			redactor.redact(live(1, [{ type: "set", key, value }], true)),
+			redactor.redact(
+				live(2, [{ type: "notice", level: "info", message: `${"y".repeat(20)}${workspacePath.slice(0, 9)}…` }]),
+			),
+		]);
+		expect(sent).not.toContain(workspacePath.slice(0, 9));
+		expect(sent).toContain(`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 12)}…`);
+	});
+
+	it("redacts a root that styling split across spans", () => {
+		const redactor = redactorFor(workspacePath);
+		// As ANSI styling converts: a dimmed directory, then a bold file name.
+		const text = [
+			{ text: "see " },
+			{ text: workspacePath.slice(0, 10), token: "muted" as const },
+			{ text: `${workspacePath.slice(10)}/a.ts`, bold: true },
+		];
+		const sent = JSON.stringify([
+			redactor.redact(
+				live(
+					1,
+					[{ type: "set", key: "ext_status/ci/s", value: { kind: "ext_status", extension: "ci", text } }],
+					true,
+				),
+			),
+			redactor.redact(
+				live(2, [
+					{ type: "set", key, value: { ...panel([]), node: { type: "terminal", key: "out", lines: [text] } } },
+				]),
+			),
+		]);
+		expect(sent).not.toContain(workspacePath.slice(10));
+		expect(sent).toContain("see /workspace/a.ts");
+	});
+
+	it("sends a later whole value of a panel after a patch the frame could not carry", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 2_000 },
+		}).redactor();
+		let fold = emptyLiveFold();
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted?.type === "live") fold = foldLiveFrame(fold, redacted);
+		};
+		send(live(1, [{ type: "set", key, value: panel(["start"]) }], true));
+		send(live(2, [append(["x".repeat(3_000)]), { type: "set", key, value: panel(["fresh"]) }]));
+		expect(fold.values.get(key)).toEqual(panel(["fresh"]));
+		send(live(3, [append(["next"])]));
+		expect(fold.values.get(key)).toEqual(panel(["fresh", "next"]));
+	});
+
+	it("never replays a value from before its patches on a reset", () => {
+		const redactor = redactorFor(workspacePath);
+		redactor.redact(live(1, [{ type: "set", key, value: panel(["one"]) }], true));
+		redactor.redact(live(2, [append(["two"])]));
+		const reset = redactor.redact(live(1, [{ type: "set", key, value: panel(["one", "two"]) }], true));
+		expect(reset?.type === "live" && reset.items).toEqual([{ type: "set", key, value: panel(["one", "two"]) }]);
 	});
 });

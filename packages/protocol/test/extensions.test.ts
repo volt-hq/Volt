@@ -212,15 +212,24 @@ describe("extension UI on the live lane", () => {
 		expect(Check(LiveKeySchema, "ext_panel/prompt-url-widget/pr")).toBe(true);
 		expect(live([{ type: "set", key: "ext_panel/prompt-url-widget/pr", value: panel }])).toBe(true);
 		expect(Check(LiveValueSchema, { kind: "ext_status", extension: "tps", text: "42 tok/s" })).toBe(true);
-		expect(Check(LiveValueSchema, { kind: "ext_status", text: "42 tok/s" })).toBe(true);
+		expect(
+			Check(LiveValueSchema, { kind: "ext_status", extension: "tps", text: [{ text: "42", token: "accent" }] }),
+		).toBe(true);
+		expect(Check(LiveValueSchema, { kind: "ext_status", text: "42 tok/s" })).toBe(false);
 		expect(Check(LiveValueSchema, { kind: "ext_status", extension: "Bad Id", text: "x" })).toBe(false);
+		expect(Check(LiveValueSchema, { kind: "ext_status", extension: "tps", text: "\u001b[31mred" })).toBe(false);
+		expect(Check(LiveValueSchema, { kind: "ext_title", extension: "tps", title: "volt" })).toBe(true);
+		expect(Check(LiveValueSchema, { kind: "ext_title", title: "volt" })).toBe(false);
+		expect(Check(LiveValueSchema, { kind: "ext_title", extension: "tps", title: "a\nb" })).toBe(false);
+		expect(Check(LiveValueSchema, { kind: "ext_widget", lines: [], placement: "aboveEditor" })).toBe(false);
 	});
 
 	it("patches the node of a panel or work item", () => {
 		const append = { op: "append_lines", path: ["pr", "body", "log"], lines: ["checks passed"] };
 		expect(live([{ type: "patch", key: "ext_panel/prompt-url-widget/pr", ops: [append] }])).toBe(true);
 		expect(live([{ type: "patch", key: "work/w1", ops: [{ op: "remove", path: [] }] }])).toBe(true);
-		expect(live([{ type: "patch", key: "ext_status/tps", ops: [{ op: "remove", path: [] }] }])).toBe(false);
+		expect(live([{ type: "patch", key: "ext_status/tps/rate", ops: [{ op: "remove", path: [] }] }])).toBe(false);
+		expect(live([{ type: "patch", key: "ext_panel/pr", ops: [{ op: "remove", path: [] }] }])).toBe(false);
 		expect(live([{ type: "patch", key: "phase", ops: [{ op: "remove", path: [] }] }])).toBe(false);
 		expect(live([{ type: "patch", key: "work/w1", ops: [] }])).toBe(false);
 	});

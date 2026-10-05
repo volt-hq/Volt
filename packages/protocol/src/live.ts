@@ -13,9 +13,10 @@
  *
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
- * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
+ * `host_request/<requestId>`, `ext_status/<extension>/<name>`,
  * `ext_panel/<extension>/<name>`, `work/<workId>`. A value's `kind` is its
- * key's family. A `patch` item updates the node of an `ext_panel` or `work`
+ * key's family, and an extension's status items and panels are keyed by its
+ * manifest id. A `patch` item updates the node of an `ext_panel` or `work`
  * value in place (ui-patch.ts); a client that cannot apply it resubscribes
  * after its position.
  *
@@ -32,7 +33,7 @@ import {
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
 import { LogEntryIdSchema } from "./entries.ts";
-import { ExtensionIdSchema } from "./extensions.ts";
+import { ExtensionIdSchema, RESERVED_EXTENSION_IDS } from "./extensions.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
@@ -45,6 +46,7 @@ import {
 	RpcPromptCacheStatusSchema,
 } from "./session.ts";
 import {
+	UI_NODE_LINE_PATTERN,
 	UiNodeActionSchema,
 	UiNodeFormFieldSchema,
 	UiNodeSchema,
@@ -260,19 +262,14 @@ export const LiveHostRequestValueSchema = Type.Object(
 	closed,
 );
 
-/** An extension status line, and the extension that set it. */
-export const LiveExtensionStatusValueSchema = Type.Object(
-	{ kind: Type.Literal("ext_status"), extension: Type.Optional(ExtensionIdSchema), text: Type.String() },
-	closed,
-);
+/** Largest extension status text, as serialized JSON in UTF-8 bytes. */
+export const EXTENSION_STATUS_MAX_SERIALIZED_BYTES = 1024;
+/** Longest extension window title, in characters. */
+export const EXTENSION_TITLE_MAX_CHARS = 256;
 
-/** An extension widget: plain lines above or below the editor. */
-export const LiveExtensionWidgetValueSchema = Type.Object(
-	{
-		kind: Type.Literal("ext_widget"),
-		lines: Type.Array(Type.String()),
-		placement: stringEnum(["aboveEditor", "belowEditor"]),
-	},
+/** An extension status item, and the extension that set it. */
+export const LiveExtensionStatusValueSchema = Type.Object(
+	{ kind: Type.Literal("ext_status"), extension: ExtensionIdSchema, text: UiNodeStyledTextSchema },
 	closed,
 );
 
@@ -291,9 +288,13 @@ export const LiveExtensionPanelValueSchema = Type.Object(
 	closed,
 );
 
-/** A title an extension set for the conversation's window. */
+/** A title an extension set for the conversation's window, and the extension that set it. */
 export const LiveExtensionTitleValueSchema = Type.Object(
-	{ kind: Type.Literal("ext_title"), title: Type.String() },
+	{
+		kind: Type.Literal("ext_title"),
+		extension: ExtensionIdSchema,
+		title: Type.String({ maxLength: EXTENSION_TITLE_MAX_CHARS, pattern: UI_NODE_LINE_PATTERN }),
+	},
 	closed,
 );
 
@@ -324,7 +325,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	intents: LiveIntentsValueSchema,
 	host_request: LiveHostRequestValueSchema,
 	ext_status: LiveExtensionStatusValueSchema,
-	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_panel: LiveExtensionPanelValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
@@ -340,7 +340,6 @@ export const LiveValueSchema = Type.Union([
 	LiveIntentsValueSchema,
 	LiveHostRequestValueSchema,
 	LiveExtensionStatusValueSchema,
-	LiveExtensionWidgetValueSchema,
 	LiveExtensionPanelValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
@@ -361,16 +360,32 @@ export const LIVE_SINGLETON_KINDS = [
 export const LIVE_KEYED_KINDS = [
 	"host_request",
 	"ext_status",
-	"ext_widget",
 	"ext_panel",
 	"work",
 ] as const satisfies readonly LiveValueKind[];
 
+/** Keyed families an extension declares: the id is `<extension id>/<name>`, and the value names the extension. */
+export const LIVE_EXTENSION_KINDS = [
+	"ext_status",
+	"ext_panel",
+] as const satisfies readonly (typeof LIVE_KEYED_KINDS)[number][];
+
 /** Longest id in a keyed live key, in characters. */
 export const LIVE_KEY_ID_MAX_CHARS = 256;
 
+/** Longest name of an extension's status item or panel, in characters. */
+export const LIVE_EXTENSION_NAME_MAX_CHARS = 128;
+
+const KEY_ID = `[^\\u0000-\\u001f\\u007f]{1,${LIVE_KEY_ID_MAX_CHARS}}`;
+/** An extension id followed by `/`, without the id pattern's anchors. */
+const EXTENSION_ID_PREFIX = `(?!(?:${RESERVED_EXTENSION_IDS.join("|")})/)[a-z0-9][a-z0-9-]{0,63}/`;
+const EXTENSION_KEY_ID = `${EXTENSION_ID_PREFIX}[^\\u0000-\\u001f\\u007f]{1,${LIVE_EXTENSION_NAME_MAX_CHARS}}`;
+const GENERIC_KEYED_KINDS = LIVE_KEYED_KINDS.filter(
+	(kind) => !(LIVE_EXTENSION_KINDS as readonly string[]).includes(kind),
+);
+
 export const LiveKeySchema = Type.String({
-	pattern: `^(?:(?:${LIVE_SINGLETON_KINDS.join("|")})|(?:${LIVE_KEYED_KINDS.join("|")})/[^\\u0000-\\u001f\\u007f]{1,${LIVE_KEY_ID_MAX_CHARS}})$`,
+	pattern: `^(?:(?:${LIVE_SINGLETON_KINDS.join("|")})|(?:${GENERIC_KEYED_KINDS.join("|")})/${KEY_ID}|(?:${LIVE_EXTENSION_KINDS.join("|")})/${EXTENSION_KEY_ID})$`,
 	"x-volt-expected": "be a live key",
 });
 
@@ -470,7 +485,7 @@ export const LiveClearItemSchema = Type.Object({ type: Type.Literal("clear"), ke
 export const LIVE_PATCHABLE_KINDS = ["ext_panel", "work"] as const satisfies readonly LiveValueKind[];
 
 export const LivePatchKeySchema = Type.String({
-	pattern: `^(?:${LIVE_PATCHABLE_KINDS.join("|")})/[^\\u0000-\\u001f\\u007f]{1,${LIVE_KEY_ID_MAX_CHARS}}$`,
+	pattern: `^(?:work/${KEY_ID}|ext_panel/${EXTENSION_KEY_ID})$`,
 	"x-volt-expected": "be the live key of a panel or work item",
 });
 
@@ -490,16 +505,23 @@ export const LiveNoticeItemSchema = Type.Object(
 	{
 		type: Type.Literal("notice"),
 		level: stringEnum(["info", "warning", "error"]),
-		message: Type.String(),
+		message: UiNodeStyledTextSchema,
 		/** What raised it, such as an extension. */
 		source: Type.Optional(Type.String()),
 	},
 	closed,
 );
 
-/** A one-shot instruction for an interactive client. */
+/**
+ * A one-shot instruction for an interactive client: `set_editor_text`
+ * replaces its editor text, `insert_editor_text` pastes at the cursor.
+ */
 export const LiveDirectiveItemSchema = Type.Object(
-	{ type: Type.Literal("directive"), directive: Type.Literal("set_editor_text"), text: Type.String() },
+	{
+		type: Type.Literal("directive"),
+		directive: stringEnum(["set_editor_text", "insert_editor_text"]),
+		text: Type.String(),
+	},
 	closed,
 );
 

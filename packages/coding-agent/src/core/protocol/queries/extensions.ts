@@ -3,11 +3,15 @@
  * settings, and editor completions from extension completion providers.
  * `extension_settings` returns an extension's settings form and the values
  * stored in each scope; remote clients need `host.manage.v1`. Hosts do not
- * list extensions by id or serve completion providers yet, so `extensions`
- * and `editor_completions` are unavailable everywhere.
+ * list extensions by id yet, so `extensions` is unavailable everywhere.
+ * Editor completions ask the conversation's completion providers
+ * (core/extensions/completions.ts); a remote client asks only those whose
+ * extension opted in.
  */
 
+import { completeEditorText } from "../../extensions/completions.ts";
 import { extensionSettingsView } from "../../extensions/settings.ts";
+import type { IntentTarget } from "../intents/types.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
 
 function unavailable(): never {
@@ -41,5 +45,10 @@ export const editorCompletionsQuery = defineQuery({
 	scope: "conversation",
 	remote: "safe",
 	requires: ["conversation.control.v1"],
-	run: async () => unavailable(),
+	run: async (ctx, { text, cursor }) => {
+		const runner = (ctx.target as IntentTarget).session.extensionRunner;
+		const remote = ctx.profile.name === "remote";
+		const providers = runner.getCompletionProviders().filter((provider) => !remote || provider.remote);
+		return completeEditorText(providers, text, cursor, { onError: (error) => runner.emitError(error) });
+	},
 });

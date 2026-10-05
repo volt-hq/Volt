@@ -25,7 +25,12 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import { type Static, type TObject, type TSchema, type TString, type TUnion, Type } from "typebox";
 import { RpcAgentOptionsModelSelectionSchema } from "./agent-options.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
-import { ExtensionIdSchema, ExtensionSettingsScopeSchema, ExtensionSettingsValuesSchema } from "./extensions.ts";
+import {
+	ExtensionIdSchema,
+	ExtensionSettingsScopeSchema,
+	ExtensionSettingsValuesSchema,
+	RESERVED_EXTENSION_IDS,
+} from "./extensions.ts";
 import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcMcpAuthResponseSchema, RpcMcpServerResponseSchema } from "./mcp.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
@@ -56,14 +61,24 @@ export const INTENT_OUTCOME_WINDOW = 256;
 /** Longest intent name, in characters. */
 export const INTENT_NAME_MAX_CHARS = 160;
 
-/** Id prefixes of dynamic intents: extension commands, prompt templates, and skills. */
-export const DYNAMIC_INTENT_PATTERN = "^(extension\\.command|prompt\\.template|skill)\\.";
+/** Id prefixes of dynamic intents: extension commands and intents, prompt templates, and skills. */
+export const DYNAMIC_INTENT_PATTERN = "^(extension\\.command|extension\\.intent|prompt\\.template|skill)\\.";
 
 /** A dynamic intent name: a dynamic prefix followed by the host-assigned id. */
 export const DynamicIntentNameSchema = Type.String({
 	maxLength: INTENT_NAME_MAX_CHARS,
-	pattern: "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
+	pattern: "^(?:extension\\.command|extension\\.intent|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
 	"x-volt-expected": "be a dynamic intent name",
+});
+
+/** The name an extension gives an intent it registers: the last part of `extension.intent.<manifest id>.<name>`. */
+export const EXTENSION_INTENT_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$";
+
+/** An intent an extension registered: `extension.intent.<manifest id>.<name>`. */
+export const ExtensionIntentNameSchema = Type.String({
+	maxLength: INTENT_NAME_MAX_CHARS,
+	pattern: `^extension\\.intent\\.(?!(?:${RESERVED_EXTENSION_IDS.join("|")})\\.)[a-z0-9][a-z0-9-]{0,63}\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`,
+	"x-volt-expected": "be an extension intent name",
 });
 
 /** The input of an intent that takes none. */
@@ -540,17 +555,40 @@ export const INTENT_FRAME_SCHEMAS: Readonly<Record<BuiltinIntentName, TObject>> 
 	return frames;
 })();
 
-/** The frame of an extension command, prompt template, or skill. */
+/** The frame of an extension command, prompt template, or skill: a dynamic intent that sends a prompt. */
 export const DynamicIntentFrameSchema = intentFrameSchema(
-	DynamicIntentNameSchema,
+	Type.String({
+		maxLength: INTENT_NAME_MAX_CHARS,
+		pattern: "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
+		"x-volt-expected": "be the name of an extension command, prompt template, or skill",
+	}),
 	DynamicIntentInputSchema,
 	RpcConversationIdentifierSchema,
+);
+
+/**
+ * The input of an extension intent: a JSON object the host validates against
+ * the input schema the extension registered, which its descriptor carries.
+ */
+export const ExtensionIntentInputSchema = Type.Record(Type.String(), Type.Unknown());
+
+/** The frame of an intent an extension registered. */
+export const ExtensionIntentFrameSchema = Type.Object(
+	{
+		type: ExtensionIntentNameSchema,
+		intentId: RpcConversationIdentifierSchema,
+		conversation: Type.Optional(LogSessionIdSchema),
+		expectedOrdinal: Type.Optional(RpcSafeNonNegativeIntegerSchema),
+		input: Type.Optional(ExtensionIntentInputSchema),
+	},
+	closed,
 );
 
 /** Every intent frame a client may send. */
 export const IntentFrameSchema: TUnion<TSchema[]> = Type.Union([
 	...BUILTIN_INTENT_NAMES.map((name): TSchema => INTENT_FRAME_SCHEMAS[name]),
 	DynamicIntentFrameSchema,
+	ExtensionIntentFrameSchema,
 ]);
 
 export interface IntentFrameEnvelope {
@@ -563,7 +601,8 @@ export type IntentFrame =
 	| {
 			[K in BuiltinIntentName]: IntentFrameEnvelope & { type: K; input?: IntentInput<K> };
 	  }[BuiltinIntentName]
-	| (IntentFrameEnvelope & { type: string; input?: Static<typeof DynamicIntentInputSchema> });
+	| (IntentFrameEnvelope & { type: string; input?: Static<typeof DynamicIntentInputSchema> })
+	| (IntentFrameEnvelope & { type: string; input?: Static<typeof ExtensionIntentInputSchema> });
 
 // ============================================================================
 // Descriptors

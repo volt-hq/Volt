@@ -146,7 +146,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+c", {
 						description: "Conflicts with built-in",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -186,7 +186,7 @@ export default function(volt) {
 export default function(volt) {
 	volt.registerShortcut("${shortcut}", {
 		description: "Conflicts with global plan-pane toggle",
-		handler: async () => {},
+		intent: "noop",
 	});
 }`,
 			);
@@ -216,7 +216,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+p", {
 						description: "Uses freed default",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -244,7 +244,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("${pasteImageKey}", {
 						description: "Overrides non-reserved",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -270,7 +270,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+x", {
 						description: "Conflicts with rebound reserved",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -295,7 +295,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+p", {
 						description: "Conflicts with shared reserved default",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -319,7 +319,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+y", {
 						description: "Conflicts with multi-key reserved",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -344,7 +344,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+y", {
 						description: "Overrides multi-key non-reserved",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -372,7 +372,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+shift+x", {
 						description: "First extension",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;
@@ -381,7 +381,7 @@ export default function(volt) {
 				export default function(volt) {
 					volt.registerShortcut("ctrl+shift+x", {
 						description: "Second extension",
-						handler: async () => {},
+						intent: "noop",
 					});
 				}
 			`;

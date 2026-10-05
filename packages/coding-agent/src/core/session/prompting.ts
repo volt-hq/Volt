@@ -22,7 +22,7 @@ import { stripFrontmatter } from "../../utils/frontmatter.ts";
 import type { AgentSessionEvent, PromptOptions } from "../agent-session.ts";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "../auth-guidance.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
-import { type ExtensionRunner, ExtensionUIDismissedError } from "../extensions/index.ts";
+import { type ExtensionRunner, ExtensionUIDismissedError, type RegisteredIntent } from "../extensions/index.ts";
 import type { CustomMessage, CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { expandPromptTemplate } from "../prompt-templates.ts";
@@ -610,6 +610,37 @@ export class SessionPrompting {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return true;
+		} finally {
+			this.activeExtensionCommandHandlers--;
+			releaseActivity();
+			this.host.activityChanged();
+		}
+	}
+
+	/**
+	 * Run an extension intent's handler with checked input, as a command
+	 * handler runs: in its extension's command context, counted as an
+	 * extension command. A failure is reported as the extension's error and
+	 * rethrown.
+	 */
+	async runExtensionIntent(intent: RegisteredIntent, input: unknown): Promise<void> {
+		const ctx = this.host
+			.extensionRunner()
+			.createCommandContext(() => this.host.waitForIdle(), this.host.lifetimeSignal, intent.extensionId);
+		const releaseActivity = this.host.conversation().beginActivity("extension_command");
+		this.activeExtensionCommandHandlers++;
+		try {
+			const handler = Promise.resolve(intent.handler(input, ctx));
+			// After the session lost its log, stop awaiting a handler that may never settle.
+			const abandoned = await Promise.race([handler.then(() => false), this.host.lost.then(() => true)]);
+			if (abandoned) void handler.catch(() => undefined);
+		} catch (err) {
+			this.host.extensionRunner().emitError({
+				extensionId: intent.extensionId,
+				event: "intent",
+				error: err instanceof Error ? err.message : String(err),
+			});
+			throw err;
 		} finally {
 			this.activeExtensionCommandHandlers--;
 			releaseActivity();

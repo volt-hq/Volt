@@ -6,15 +6,18 @@
  *
  * The extensions are bound once: the first client to attach fixes the mode and
  * `session_start` fires. Later clients only add their surface. The data-only
- * UI calls (dialogs, notifications, status, string widgets, title, and editor
- * text) write the conversation's live state, which every attached client that
- * accepts them sees; the first answer to a dialog wins. The terminal-only UI
- * calls go to the last attached client with a terminal, which receives the
- * latest component widgets when it starts showing UI. Errors go to every
- * client. Command context actions, abort, and shutdown go to the client the
- * call runs for (its client scope); calls outside any client scope go to the
- * anchor, the oldest attached client, and calls for a client that has left go
- * nowhere.
+ * UI calls (dialogs, forms, notifications, status, panels, string widgets,
+ * title, and editor text) write the conversation's live state, which every
+ * attached client that accepts them sees; the first answer to a dialog wins.
+ * Each extension's `ctx.ui` is its own: its status items and panels are keyed
+ * by its manifest id (core/ui/extension-ui.ts). Reading the editor text asks
+ * only the client the call runs for, or the anchor outside any client's call.
+ * The terminal-only UI calls go to the last attached client with a terminal,
+ * which receives the latest component widgets when it starts showing UI.
+ * Errors go to every client. Command context actions, abort, and shutdown go
+ * to the client the call runs for (its client scope); calls outside any
+ * client scope go to the anchor, the oldest attached client, and calls for a
+ * client that has left go nowhere.
  */
 
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
@@ -33,7 +36,7 @@ import {
 } from "../extensions/index.ts";
 import { type DiscoveredResourcePath, emitSessionShutdownEvent } from "../extensions/runner.ts";
 import { ClientScope } from "../host/client-scope.ts";
-import { hostRequestTimeout, type LiveState, liveKey } from "../host/live-state.ts";
+import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
@@ -42,6 +45,17 @@ import { type ExtensionSessionWriter, extensionSessionWriter, type SessionWriter
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { theme } from "../theme/runtime.ts";
+import { stripTerminalControls } from "../ui/ansi-tokens.ts";
+import {
+	dialogRequest,
+	EDITOR_TEXT_TIMEOUT_MS,
+	type ExtensionUiHost,
+	formRequest,
+	notificationText,
+	setExtensionPanel,
+	setExtensionStatus,
+	setExtensionTitle,
+} from "../ui/extension-ui.ts";
 import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
@@ -134,13 +148,26 @@ export interface SessionExtensionBindingHost {
 }
 
 /** The `ctx.ui` members the conversation's live state carries. */
-type LiveUIMember = "select" | "confirm" | "input" | "editor" | "notify" | "setStatus" | "setTitle" | "setEditorText";
+type LiveUIMember =
+	| "select"
+	| "confirm"
+	| "input"
+	| "editor"
+	| "form"
+	| "dialog"
+	| "notify"
+	| "setStatus"
+	| "setPanel"
+	| "setTitle"
+	| "setEditorText"
+	| "getEditorText"
+	| "pasteToEditor";
 
 /**
  * A client's terminal: the `ctx.ui` members that need one (custom components,
  * header, footer, editor components, terminal input, working indicators,
- * themes, editor paste, and component widgets) until extensions declare their
- * UI as data. Dialogs, notifications, status, string widgets, title, and
+ * themes, and component widgets) until extensions declare their UI as data.
+ * Dialogs, forms, notifications, status, panels, string widgets, title, and
  * editor text reach every client through the conversation's live state.
  */
 export type ExtensionTerminalUI = Omit<ExtensionUIContext, LiveUIMember>;
@@ -202,7 +229,19 @@ export class SessionExtensionBinding {
 	private readonly widgets = new Map<string, (ui: ExtensionTerminalUI) => void>();
 	/** Dialogs the extensions asked, ended when the extensions reload. */
 	private readonly extensionRequests = new Set<AbortController>();
-	private readonly uiRouter: ExtensionUIContext = this.createUIRouter();
+	/** Each extension's `ctx.ui`, by manifest id; `undefined` for contexts no extension owns. */
+	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
+	private readonly uiHost: ExtensionUiHost = {
+		// Read when a call runs: the routers are built before the binding's host is set.
+		live: () => this.host.liveState,
+		ownsWork: (extensionId, workId) => this.host.extensionKinds().owns(extensionId, workId),
+		droppedIntent: (extensionId, intent) =>
+			this.extensionRunner.emitError({
+				extensionId,
+				event: "ui",
+				error: `Left out an action that sends ${intent.type}: an extension's UI sends only its own intents and commands, and opens or cancels only its own work`,
+			}),
+	};
 	private readonly commandActions: ExtensionCommandContextActions = this.createCommandActions();
 	private extensionErrorUnsubscriber?: () => void;
 	/** Stops sending the extensions `settings_changed`. */
@@ -228,9 +267,9 @@ export class SessionExtensionBinding {
 		return this.extensionRunnerRef;
 	}
 
-	/** The UI extensions see, while an attached client shows a terminal. */
+	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
 	get uiContext(): ExtensionUIContext | undefined {
-		return this.uiClient() ? this.uiRouter : undefined;
+		return this.uiClient() ? this.uiFor(undefined) : undefined;
 	}
 
 	/** The mode the first attached client fixed. */
@@ -342,36 +381,65 @@ export class SessionExtensionBinding {
 		}
 	}
 
-	/** Forget what the extensions declared: their component widgets and their live status, widgets, and title. */
+	/** Forget what the extensions declared: their component widgets and their live status, panels, and title. */
 	private clearDeclaredUI(): void {
 		this.widgets.clear();
-		this.host.liveState.clearMatching(["ext_status/", "ext_widget/", "ext_title"]);
+		this.host.liveState.clearMatching(["ext_status/", "ext_panel/", "ext_title"]);
 	}
 
 	/** Whether an attached client answers dialogs. */
 	private acceptsDialogs(): boolean {
 		const live = this.host.liveState;
-		return live.accepts("select") || live.accepts("confirm") || live.accepts("input") || live.accepts("editor");
+		return (["select", "confirm", "input", "editor", "form", "dialog"] as const).some((kind) => live.accepts(kind));
 	}
 
 	/**
-	 * Ask the attached clients through the live state. Resolves with the first
-	 * answer, or undefined when the request ended without one: `signal`
-	 * aborted, it timed out, no client takes dialogs, or the extensions reloaded.
+	 * Ask the attached clients through the live state (only the views of
+	 * `options.client`, when given). Resolves with the first answer, or
+	 * undefined when the request ended without one: `signal` aborted, it timed
+	 * out, no client takes it, or the extensions reloaded.
 	 */
-	private async ask(request: HostRequest, signal?: AbortSignal): Promise<HostResponse | undefined> {
+	private async ask(
+		request: HostRequest,
+		signal?: AbortSignal,
+		options: Pick<HostRequestOptions, "client"> = {},
+	): Promise<HostResponse | undefined> {
 		const controller = new AbortController();
 		const abort = (): void => controller.abort();
 		if (signal?.aborted) abort();
 		else signal?.addEventListener("abort", abort, { once: true });
 		this.extensionRequests.add(controller);
 		try {
-			const outcome = await this.host.liveState.request(request, { signal: controller.signal });
+			const outcome = await this.host.liveState.request(request, { ...options, signal: controller.signal });
 			return outcome.status === "answered" ? outcome.response : undefined;
 		} finally {
 			this.extensionRequests.delete(controller);
 			signal?.removeEventListener("abort", abort);
 		}
+	}
+
+	/**
+	 * The editor text of the client the call runs for, or of the anchor outside
+	 * any client's call: undefined when that client has left, shows no editor,
+	 * or does not answer within {@link EDITOR_TEXT_TIMEOUT_MS}.
+	 */
+	private async editorText(): Promise<string | undefined> {
+		const client = this.actionClient();
+		if (!client) return undefined;
+		const response = await this.ask({ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS }, undefined, {
+			client: client.id,
+		});
+		return response !== undefined && "value" in response ? response.value : undefined;
+	}
+
+	/** The `ctx.ui` of the extension with manifest id `owner`, or of contexts no extension owns. */
+	private uiFor(owner: string | undefined): ExtensionUIContext {
+		let router = this.uiRouters.get(owner);
+		if (!router) {
+			router = this.createUIRouter(owner);
+			this.uiRouters.set(owner, router);
+		}
+		return router;
 	}
 
 	/** Every attached client hears every extension error; one failing listener cannot silence the others. */
@@ -422,14 +490,20 @@ export class SessionExtensionBinding {
 	}
 
 	/**
-	 * The UI extensions see. Data-only calls write the live state; terminal-only
-	 * calls go to the terminal client with their arguments as given, and no-op
-	 * without one.
+	 * The UI one extension sees (`owner`, its manifest id), or contexts no
+	 * extension owns (`undefined`). Data-only calls write the live state;
+	 * status items, panels, string widgets, and the title need an owner.
+	 * Terminal-only calls go to the terminal client with their arguments as
+	 * given, and no-op without one.
 	 */
-	private createUIRouter(): ExtensionUIContext {
+	private createUIRouter(owner: string | undefined): ExtensionUIContext {
 		const ui = () => this.uiClient()?.ui;
 		// The router is built before the binding's host is set.
 		const live = () => this.host.liveState;
+		const owned = (member: string): string => {
+			if (owner === undefined) throw new Error(`ctx.ui.${member} is available only in an extension's own context`);
+			return owner;
+		};
 		type UI = ExtensionUIContext;
 		return {
 			select: (title, options, opts) => {
@@ -464,34 +538,53 @@ export class SessionExtensionBinding {
 				this.ask({ kind: "editor", title, ...(prefill === undefined ? {} : { prefill }) }).then((response) =>
 					response !== undefined && "value" in response ? response.value : undefined,
 				),
-			notify: (message, type) => live().notice(type === "warning" || type === "error" ? type : "info", message),
-			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => ui()?.onTerminalInput(...args) ?? (() => {}),
-			setStatus: (key, text) => {
-				const statusKey = liveKey("ext_status", key);
-				if (text === undefined) live().clear(statusKey);
-				else live().set(statusKey, { kind: "ext_status", text });
+			form: (form, opts) => {
+				let request: HostRequest;
+				try {
+					request = formRequest(form, opts?.timeout);
+				} catch (error) {
+					return Promise.reject(error);
+				}
+				return this.ask(request, opts?.signal).then((response) =>
+					response !== undefined && "values" in response ? response.values : undefined,
+				);
 			},
+			dialog: (dialog, opts) => {
+				let request: HostRequest;
+				try {
+					request = dialogRequest(this.uiHost, owner, dialog, opts?.timeout);
+				} catch (error) {
+					return Promise.reject(error);
+				}
+				return this.ask(request, opts?.signal).then((response) =>
+					response !== undefined && "value" in response ? response.value : undefined,
+				);
+			},
+			notify: (message, type) =>
+				live().notice(type === "warning" || type === "error" ? type : "info", notificationText(message), owner),
+			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => ui()?.onTerminalInput(...args) ?? (() => {}),
+			setStatus: (key, text) => setExtensionStatus(this.uiHost, owned("setStatus"), key, text),
+			setPanel: (name, panel) => setExtensionPanel(this.uiHost, owned("setPanel"), name, panel),
 			setWorkingMessage: (...args: Parameters<UI["setWorkingMessage"]>) => ui()?.setWorkingMessage(...args),
 			setWorkingVisible: (...args: Parameters<UI["setWorkingVisible"]>) => ui()?.setWorkingVisible(...args),
 			setWorkingIndicator: (...args: Parameters<UI["setWorkingIndicator"]>) => ui()?.setWorkingIndicator(...args),
 			setHiddenThinkingLabel: (...args: Parameters<UI["setHiddenThinkingLabel"]>) =>
 				ui()?.setHiddenThinkingLabel(...args),
 			setWidget: (key, content, options) => {
-				const widgetKey = liveKey("ext_widget", key);
+				// A string widget is the panel `key`; a component widget is the terminal's.
 				if (content === undefined) {
 					this.widgets.delete(key);
-					live().clear(widgetKey);
+					setExtensionPanel(this.uiHost, owned("setWidget"), key, undefined);
 					ui()?.setWidget(key, undefined, options);
 				} else if (Array.isArray(content)) {
-					live().set(widgetKey, {
-						kind: "ext_widget",
-						lines: [...content],
+					setExtensionPanel(this.uiHost, owned("setWidget"), key, {
 						placement: options?.placement ?? "aboveEditor",
+						node: { type: "text", text: content.join("\n") },
 					});
 					// The lines replace a component widget under the key, which no terminal shows again.
-					this.widgets.delete(key);
+					if (this.widgets.delete(key)) ui()?.setWidget(key, undefined, options);
 				} else {
-					live().clear(widgetKey);
+					setExtensionPanel(this.uiHost, owned("setWidget"), key, undefined);
 					const show = (target: ExtensionTerminalUI): void => target.setWidget(key, content, options);
 					this.widgets.set(key, show);
 					const target = ui();
@@ -500,11 +593,11 @@ export class SessionExtensionBinding {
 			},
 			setFooter: (...args: Parameters<UI["setFooter"]>) => ui()?.setFooter(...args),
 			setHeader: (...args: Parameters<UI["setHeader"]>) => ui()?.setHeader(...args),
-			setTitle: (title) => live().set("ext_title", { kind: "ext_title", title }),
+			setTitle: (title) => setExtensionTitle(this.uiHost, owned("setTitle"), title),
 			custom: (factory, options) => ui()?.custom(factory, options) ?? Promise.resolve(undefined as never),
-			pasteToEditor: (...args: Parameters<UI["pasteToEditor"]>) => ui()?.pasteToEditor(...args),
-			setEditorText: (text) => live().setEditorText(text),
-			getEditorText: () => ui()?.getEditorText() ?? "",
+			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
+			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
+			getEditorText: () => this.editorText(),
 			addAutocompleteProvider: (...args: Parameters<UI["addAutocompleteProvider"]>) =>
 				ui()?.addAutocompleteProvider(...args),
 			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) => ui()?.setEditorComponent(...args),
@@ -550,7 +643,7 @@ export class SessionExtensionBinding {
 	private applyExtensionBindings(runner: ExtensionRunner): void {
 		// TUI and RPC sessions keep UI while no client shows it: dialogs then resolve to their defaults.
 		runner.setUIContext(
-			this.uiRouter,
+			(owner) => this.uiFor(owner),
 			this.extensionMode,
 			() =>
 				this.uiClient() !== undefined ||

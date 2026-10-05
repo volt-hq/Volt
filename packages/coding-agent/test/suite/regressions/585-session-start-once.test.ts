@@ -52,7 +52,7 @@ function liveItems(frames: HostFrame[]): LiveItem[] {
 /** Every time the client was told the extension status `key`. */
 function statusSets(frames: HostFrame[], key: string): LiveValue[] {
 	return liveItems(frames).flatMap((item) =>
-		item.type === "set" && item.key === `ext_status/${key}` ? [item.value] : [],
+		item.type === "set" && item.key === `ext_status/test-extension/${key}` ? [item.value] : [],
 	);
 }
 
@@ -146,8 +146,9 @@ describe("regression #585: a session's extensions are bound once", () => {
 
 		// session_start ran while only the first client was attached; the second one received the status on attach.
 		for (const client of [first, second]) {
-			expect(statusSets(client.frames, "ext")).toEqual([{ kind: "ext_status", text: "ready:startup" }]);
-			expect(client.client.live.values.get("ext_status/ext")).toEqual({ kind: "ext_status", text: "ready:startup" });
+			const status = { kind: "ext_status", extension: "test-extension", text: "ready:startup" };
+			expect(statusSets(client.frames, "ext")).toEqual([status]);
+			expect(client.client.live.values.get("ext_status/test-extension/ext")).toEqual(status);
 		}
 
 		await first.client.prompt("/ping");
