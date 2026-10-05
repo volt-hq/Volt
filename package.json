@@ -1,6 +1,6 @@
 {
 	"name": "volt-review-loop",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Run isolated review/fix loops for a branch until findings are resolved.",
 	"type": "module",
 	"keywords": [
@@ -16,8 +16,13 @@
 		"extensions"
 	],
 	"volt": {
-		"extensions": [
-			"extensions/review-loop.ts"
+		"id": "review-loop",
+		"displayName": "Review Loop",
+		"description": "Runs isolated review/fix loops for a branch until findings are resolved.",
+		"entry": "extensions/review-loop.ts",
+		"permissions": [
+			"exec",
+			"fs-write"
 		]
 	}
 }
