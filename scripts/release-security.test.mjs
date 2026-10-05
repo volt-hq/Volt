@@ -1001,6 +1001,7 @@ test("npm policy requires the exact Iroh wrapper while quarantining third-party 
 		".github/workflows/ci.yml",
 		".github/workflows/npm-audit.yml",
 		".github/workflows/prepare-release.yml",
+		".github/workflows/store-catalog.yml",
 	]) {
 		const workflow = readFileSync(path, "utf8");
 		const npmPin = "npm install -g npm@11.17.0 --ignore-scripts";
@@ -1541,6 +1542,23 @@ test("binary license collection fails closed and records exact copied license by
 	} finally {
 		rmSync(directory, { force: true, recursive: true });
 	}
+});
+
+test("the store catalog check runs read-only on pull requests and never sees secrets", () => {
+	const workflow = readFileSync(".github/workflows/store-catalog.yml", "utf8");
+	const triggers = workflow.slice(workflow.indexOf("\non:"), workflow.indexOf("\nconcurrency:"));
+
+	assert.match(triggers, /^  pull_request:\s+branches: \[main\]\s+paths:/m);
+	assert.doesNotMatch(triggers, /pull_request_target|workflow_run|workflow_dispatch|workflow_call|push:|schedule:/);
+	assert.match(workflow, /^permissions: \{\}$/m);
+	assert.deepEqual(
+		[...workflow.matchAll(/^ {4}permissions:\n((?: {6}\S+: \S+\n)+)/gm)].map((match) => match[1].trim()),
+		["contents: read"],
+	);
+	assert.doesNotMatch(workflow, /secrets\.|GITHUB_TOKEN|github\.token|id-token/);
+	assert.match(workflow, /persist-credentials: false/);
+	assert.match(workflow, /npm ci --ignore-scripts/);
+	assert.match(workflow, /node --conditions=volt-source scripts\/validate-store-catalog\.mjs --base-ref HEAD\^1/);
 });
 
 test("release preparation is owner-triggered and can only open a reviewed release pull request", () => {

@@ -5,8 +5,7 @@
  * as JSON: the host never runs package code to learn a package's id or
  * permissions. `entry` names the module the package loads, inside the
  * package. The field may also list the package's `skills`, `prompts`, and
- * `themes`, and carry `image` and `video` previews; a field with only those
- * declares no extension.
+ * `themes`; a field with only those declares no extension.
  *
  * A single-file extension exports `manifest`. Reading it evaluates the
  * module, so single-file extensions load only from trusted locations: the
@@ -30,8 +29,8 @@ export type { ExtensionManifest } from "@hansjm10/volt-protocol";
 /** The version of an extension without a package version: a single file, an SDK extension, or an unversioned package. */
 export const LOCAL_EXTENSION_VERSION = "local";
 
-/** Keys of a package's `volt` field that list resources or carry previews instead of declaring an extension. */
-const PACKAGE_RESOURCE_KEYS: ReadonlySet<string> = new Set(["skills", "prompts", "themes", "image", "video"]);
+/** Keys of a package's `volt` field that list resources instead of declaring an extension. */
+const PACKAGE_RESOURCE_KEYS: ReadonlySet<string> = new Set(["skills", "prompts", "themes"]);
 
 /** Longest package version kept, in characters. */
 const VERSION_MAX_CHARS = 256;
@@ -137,8 +136,8 @@ function readVoltField(root: string): { readonly volt: unknown; readonly version
 
 /**
  * Whether `root/package.json` declares an extension: its `volt` field has a
- * key besides `skills`, `prompts`, `themes`, `image`, and `video`. Such a
- * package loads only through its manifest.
+ * key besides `skills`, `prompts`, and `themes`. Such a package loads only
+ * through its manifest.
  */
 export function declaresPackageExtension(root: string): boolean {
 	const field = readVoltField(root);
@@ -193,25 +192,37 @@ function packageVersion(version: unknown): string {
 }
 
 /**
+ * The manifest a package's `volt` field declares, checked as data; undefined
+ * when the field declares no extension. Throws an
+ * {@link ExtensionManifestError} when the declaration is invalid. It does not
+ * look for the entry module; {@link readPackageManifest} does.
+ */
+export function readVoltFieldManifest(volt: unknown): ExtensionManifest | undefined {
+	if (!isRecord(volt)) {
+		throw new ExtensionManifestError(`The "volt" field of package.json must be an object`);
+	}
+	// Own data properties only, so a `__proto__` key is a field the schema refuses.
+	const declared = Object.fromEntries(Object.entries(volt).filter(([key]) => !PACKAGE_RESOURCE_KEYS.has(key)));
+	if (Object.keys(declared).length === 0) return undefined;
+	if (declared.extensions !== undefined) {
+		throw new ExtensionManifestError(
+			`"volt.extensions" is replaced by the manifest: declare the package's one extension with "id", "displayName", and "entry"`,
+		);
+	}
+	return validateManifest(declared, { package: true });
+}
+
+/**
  * The extension the package at `root` declares in package.json, read as JSON
  * without running package code; undefined when it declares none. Throws an
  * {@link ExtensionManifestError} when the declaration is invalid or its entry
  * is not a file inside the package.
  */
 export function readPackageManifest(root: string): PackageExtension | undefined {
-	if (!declaresPackageExtension(root)) return undefined;
 	const field = readVoltField(root);
-	if (field === undefined || !isRecord(field.volt)) {
-		throw new ExtensionManifestError(`The "volt" field of package.json must be an object`);
-	}
-	// Own data properties only, so a `__proto__` key is a field the schema refuses.
-	const declared = Object.fromEntries(Object.entries(field.volt).filter(([key]) => !PACKAGE_RESOURCE_KEYS.has(key)));
-	if (declared.extensions !== undefined) {
-		throw new ExtensionManifestError(
-			`"volt.extensions" is replaced by the manifest: declare the package's one extension with "id", "displayName", and "entry"`,
-		);
-	}
-	const manifest = validateManifest(declared, { package: true });
+	if (field === undefined) return undefined;
+	const manifest = readVoltFieldManifest(field.volt);
+	if (manifest === undefined) return undefined;
 	const entryPath = resolvePackageEntry(root, manifest.entry ?? "");
 	return { manifest, version: packageVersion(field.version), entryPath };
 }

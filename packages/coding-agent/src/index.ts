@@ -1015,9 +1015,11 @@ export {
 	type LoadStoreCatalogResult,
 	loadDefaultStoreCatalog,
 	parseStoreCatalogJson,
+	STORE_CATALOG_SCHEMA_VERSION,
 	type StoreCatalog,
 	type StoreCatalogFetcher,
 	type StoreCatalogPackage,
+	type StoreCatalogReview,
 	type StoreCatalogValidationResult,
 	type StoreResourceType,
 	searchCatalogPackages,
@@ -1029,7 +1031,7 @@ export {
 	inspectPackageDirectory,
 	inspectStorePackage,
 	type StorePackageInspection,
-	type StoreVoltManifest,
+	type StoreVoltField,
 } from "./store/inspector.ts";
 export {
 	type BuildStoreInstallPlanOptions,
