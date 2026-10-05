@@ -38,6 +38,8 @@ volt update --extension npm:@foo/bar
 
 These commands manage volt packages, not the volt CLI installation. To uninstall volt itself, see [Quickstart](quickstart.md#uninstall).
 
+When an installed package's extension declares [permissions](extensions.md#permissions) you have not acknowledged, `volt install` lists them and asks; declining removes the package. `volt update` asks again only when an update adds a permission or the package changes source. Without a terminal, the permissions are listed and left unacknowledged.
+
 By default, `install` and `remove` write to user settings (`~/.volt/agent/settings.json`). Use `-l` to write to project settings (`.volt/settings.json`) instead. Project settings can be shared with your team, and volt installs any missing packages automatically on startup after the project is trusted.
 
 To try a package without installing it, use `--extension` or `-e`. This installs to a temporary directory for the current run only:
@@ -220,7 +222,7 @@ Filter what a package loads using the object form in settings:
 
 ## Enable and Disable Resources
 
-Use `volt config` to enable or disable extensions, skills, prompt templates, and themes from installed packages and local directories. Works for both global (`~/.volt/agent`) and project (`.volt/`) scopes.
+Use `volt config` to enable or disable extensions, skills, prompt templates, and themes from installed packages and local directories. Works for both global (`~/.volt/agent`) and project (`.volt/`) scopes. Press Enter on an extension that shows "settings" to edit its [settings](extensions.md#settings).
 
 ## Scope and Deduplication
 

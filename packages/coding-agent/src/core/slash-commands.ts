@@ -62,7 +62,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "trust", description: "Save project trust decision for future sessions" },
 	{ name: "worktree", description: "Open a new session in a daemon-managed git worktree (/worktree new [name])" },
 	{ name: "store", description: "Search, inspect, install, remove, and update extension store packages" },
-	{ name: "extensions", description: "Manage installed extension packages" },
+	{ name: "extensions", description: "Show extensions and their settings, and manage installed packages" },
 	{ name: "login", description: "Configure provider authentication" },
 	{ name: "logout", description: "Remove provider authentication" },
 	intentSlashCommand("clear"),

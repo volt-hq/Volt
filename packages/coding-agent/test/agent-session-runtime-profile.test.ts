@@ -68,24 +68,28 @@ describe("conversation host profile propagation", () => {
 				settingsManager,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						testExtension("test-extension-1", (volt) => {
-							volt.registerProvider(faux.getModel().provider, {
-								baseUrl: faux.getModel().baseUrl,
-								apiKey: "faux-key",
-								api: faux.api,
-								streamSimple: faux.streamSimple,
-								models: faux.models.map((registeredModel) => ({
-									id: registeredModel.id,
-									name: registeredModel.name,
-									api: registeredModel.api,
-									reasoning: registeredModel.reasoning,
-									input: registeredModel.input,
-									cost: registeredModel.cost,
-									contextWindow: registeredModel.contextWindow,
-									maxTokens: registeredModel.maxTokens,
-								})),
-							});
-						}),
+						testExtension(
+							"test-extension-1",
+							(volt) => {
+								volt.registerProvider(faux.getModel().provider, {
+									baseUrl: faux.getModel().baseUrl,
+									apiKey: "faux-key",
+									api: faux.api,
+									streamSimple: faux.streamSimple,
+									models: faux.models.map((registeredModel) => ({
+										id: registeredModel.id,
+										name: registeredModel.name,
+										api: registeredModel.api,
+										reasoning: registeredModel.reasoning,
+										input: registeredModel.input,
+										cost: registeredModel.cost,
+										contextWindow: registeredModel.contextWindow,
+										maxTokens: registeredModel.maxTokens,
+									})),
+								});
+							},
+							["providers"],
+						),
 					],
 					noSkills: true,
 					noPromptTemplates: true,
@@ -184,23 +188,26 @@ describe("conversation host profile propagation", () => {
 		const providerName = "profile-extension-provider";
 		const providerModelId = "profile-only-model";
 		let currentExtensionsResult = await createTestExtensionsResult([
-			(volt) => {
-				volt.registerProvider(providerName, {
-					baseUrl: "http://localhost:0/profile-extension",
-					apiKey: "profile-extension-key",
-					api: "profile-extension-api",
-					models: [
-						{
-							id: providerModelId,
-							name: "Profile-only model",
-							reasoning: false,
-							input: ["text"],
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-							contextWindow: 128000,
-							maxTokens: 16384,
-						},
-					],
-				});
+			{
+				permissions: ["providers"],
+				factory: (volt) => {
+					volt.registerProvider(providerName, {
+						baseUrl: "http://localhost:0/profile-extension",
+						apiKey: "profile-extension-key",
+						api: "profile-extension-api",
+						models: [
+							{
+								id: providerModelId,
+								name: "Profile-only model",
+								reasoning: false,
+								input: ["text"],
+								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+								contextWindow: 128000,
+								maxTokens: 16384,
+							},
+						],
+					});
+				},
 			},
 		]);
 		const resourceLoader = createTestResourceLoader({ extensionsResult: currentExtensionsResult });
@@ -246,39 +253,18 @@ describe("conversation host profile propagation", () => {
 		const fallbackProviderName = "reload-fallback-provider";
 		const fallbackModelId = "reload-fallback-model";
 		let currentExtensionsResult = await createTestExtensionsResult([
-			(volt) => {
-				volt.registerProvider(providerName, {
-					baseUrl: "http://localhost:0/removed-extension",
-					apiKey: "removed-extension-key",
-					api: "removed-extension-api",
-					models: [
-						{
-							id: providerModelId,
-							name: "Removed extension model",
-							reasoning: true,
-							input: ["text"],
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-							contextWindow: 128000,
-							maxTokens: 16384,
-						},
-					],
-				});
-			},
-		]);
-		const resourceLoader = createTestResourceLoader({ extensionsResult: currentExtensionsResult });
-		resourceLoader.getExtensions = () => currentExtensionsResult;
-		resourceLoader.reload = async () => {
-			currentExtensionsResult = await createTestExtensionsResult([
-				(volt) => {
-					volt.registerProvider(fallbackProviderName, {
-						baseUrl: "http://localhost:0/reload-fallback",
-						apiKey: "reload-fallback-key",
-						api: "reload-fallback-api",
+			{
+				permissions: ["providers"],
+				factory: (volt) => {
+					volt.registerProvider(providerName, {
+						baseUrl: "http://localhost:0/removed-extension",
+						apiKey: "removed-extension-key",
+						api: "removed-extension-api",
 						models: [
 							{
-								id: fallbackModelId,
-								name: "Reload fallback model",
-								reasoning: false,
+								id: providerModelId,
+								name: "Removed extension model",
+								reasoning: true,
 								input: ["text"],
 								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 								contextWindow: 128000,
@@ -286,6 +272,33 @@ describe("conversation host profile propagation", () => {
 							},
 						],
 					});
+				},
+			},
+		]);
+		const resourceLoader = createTestResourceLoader({ extensionsResult: currentExtensionsResult });
+		resourceLoader.getExtensions = () => currentExtensionsResult;
+		resourceLoader.reload = async () => {
+			currentExtensionsResult = await createTestExtensionsResult([
+				{
+					permissions: ["providers"],
+					factory: (volt) => {
+						volt.registerProvider(fallbackProviderName, {
+							baseUrl: "http://localhost:0/reload-fallback",
+							apiKey: "reload-fallback-key",
+							api: "reload-fallback-api",
+							models: [
+								{
+									id: fallbackModelId,
+									name: "Reload fallback model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 128000,
+									maxTokens: 16384,
+								},
+							],
+						});
+					},
 				},
 			]);
 		};

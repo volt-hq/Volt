@@ -205,6 +205,8 @@ export class SessionExtensionBinding {
 	private readonly uiRouter: ExtensionUIContext = this.createUIRouter();
 	private readonly commandActions: ExtensionCommandContextActions = this.createCommandActions();
 	private extensionErrorUnsubscriber?: () => void;
+	/** Stops sending the extensions `settings_changed`. */
+	private settingsUnsubscriber?: () => void;
 	/** Work kinds refused before any client listened for extension errors. */
 	private refusedKinds: ExtensionError[] = [];
 	/** Fences session replacement and fresh mutations across asynchronous runtime reload. */
@@ -561,6 +563,7 @@ export class SessionExtensionBinding {
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = runner.onError((error) => this.reportError(error));
 		for (const error of this.refusedKinds.splice(0)) runner.emitError(error);
+		runner.reportDroppedSettings();
 	}
 
 	/** Report the work kinds the session refused to register: at once, or once clients listen. */
@@ -574,6 +577,8 @@ export class SessionExtensionBinding {
 	releaseClients(): void {
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = undefined;
+		this.settingsUnsubscriber?.();
+		this.settingsUnsubscriber = undefined;
 		this.clients.length = 0;
 	}
 
@@ -635,6 +640,12 @@ export class SessionExtensionBinding {
 		// not be used after reload. No-ops when the new runner shares the old
 		// runtime (project-trust rebuild), so live generations are unaffected.
 		previousRunner?.invalidateStaleGeneration(extensionsResult.runtime);
+		// The extensions read and write the session's settings; their changes reach them as `settings_changed`.
+		extensionsResult.runtime.settings.bind(this.host.settingsManager);
+		this.extensionRunner.trackSettings();
+		this.settingsUnsubscriber ??= this.host.settingsManager.subscribeExtensionSettings(() => {
+			this.extensionRunner.emitSettingsChanged().catch(() => {});
+		});
 		this.bindExtensionCore(this.extensionRunner);
 		// The previous generation's work kinds go with it, interrupting their work; this generation's replace them.
 		// Its refusals reach the clients once they listen to it.

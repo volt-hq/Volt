@@ -22,6 +22,17 @@ export {
 	readPackageManifest,
 	validateManifest,
 } from "./manifest.ts";
+export {
+	describePermissions,
+	EXTENSION_PERMISSION_DESCRIPTIONS,
+	ExtensionPermissionError,
+	ExtensionPermissionStore,
+	extensionFingerprint,
+	type PermissionAcknowledgment,
+	type PermissionReview,
+	type PermissionSubject,
+	permissionSubject,
+} from "./permissions.ts";
 export type {
 	DiscoveredResourcePath,
 	ExtensionErrorListener,
@@ -63,6 +74,12 @@ export type {
 	ExtensionServicesTaskSummary,
 	RequestBoundaryEvent,
 } from "./services-types.ts";
+export {
+	ExtensionSettingsError,
+	type ExtensionSettingsOf,
+	type ExtensionSettingValue,
+	settingsFormFields,
+} from "./settings.ts";
 export type {
 	AfterProviderResponseEvent,
 	AgentEndEvent,
@@ -114,6 +131,7 @@ export type {
 	ExtensionMode,
 	// Runtime
 	ExtensionRuntime,
+	ExtensionSettingsShape,
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -183,6 +201,7 @@ export type {
 	SetLabelHandler,
 	SetModelHandler,
 	SetThinkingLevelHandler,
+	SettingsChangedEvent,
 	StartWorkOptions,
 	TerminalInputHandler,
 	// Events - Tool

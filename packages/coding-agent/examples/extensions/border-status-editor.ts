@@ -75,7 +75,11 @@ class EmptyFooter implements Component {
 	invalidate(): void {}
 }
 
-export const manifest = defineManifest({ id: "border-status-editor", displayName: "Border Status Editor" });
+export const manifest = defineManifest({
+	id: "border-status-editor",
+	displayName: "Border Status Editor",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI) {
 	let isWorking = false;

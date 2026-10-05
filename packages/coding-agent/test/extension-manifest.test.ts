@@ -391,15 +391,19 @@ describe("extension manifests", () => {
 		it("attributes contributions, errors, and command intents to the manifest id", async () => {
 			const runtime = createExtensionRuntime();
 			const extension = await loadExtensionFromFactory(
-				testExtension("deploy", (volt) => {
-					volt.registerCommand("ship", { handler: async () => {} });
-					volt.registerFlag("dry-run", { type: "boolean" });
-					volt.registerShortcut("ctrl+shift+d", { handler: () => {} });
-					volt.registerProvider("deploy-ai", { baseUrl: "https://example.com" });
-					volt.on("context", () => {
-						throw new Error("boom");
-					});
-				}),
+				testExtension(
+					"deploy",
+					(volt) => {
+						volt.registerCommand("ship", { handler: async () => {} });
+						volt.registerFlag("dry-run", { type: "boolean" });
+						volt.registerShortcut("ctrl+shift+d", { handler: () => {} });
+						volt.registerProvider("deploy-ai", { baseUrl: "https://example.com" });
+						volt.on("context", () => {
+							throw new Error("boom");
+						});
+					},
+					["providers"],
+				),
 				tempDir,
 				createEventBus(),
 				runtime,

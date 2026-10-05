@@ -39,7 +39,7 @@ describe("AgentSession dynamic provider registration", () => {
 			agentDir,
 			settingsManager,
 			extensionFactories: extensionFactories.map((factory, index) =>
-				testExtension(`test-extension-${index + 1}`, factory),
+				testExtension(`test-extension-${index + 1}`, factory, ["providers"]),
 			),
 		});
 		await resourceLoader.reload();
@@ -94,29 +94,33 @@ describe("AgentSession dynamic provider registration", () => {
 			agentDir,
 			settingsManager,
 			extensionFactories: [
-				testExtension("test-extension-1", (volt) => {
-					volt.registerProvider("invalid-extension-provider", {
-						streamSimple: () => {
-							throw new Error("should not run");
-						},
-					});
-					volt.registerProvider(provider, {
-						baseUrl: "http://localhost:8080/initial",
-						apiKey: "extension-key",
-						api: "openai-completions",
-						models: [
-							{
-								id: modelId,
-								name: "Initial Extension Model",
-								reasoning: false,
-								input: ["text"],
-								cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-								contextWindow: 4096,
-								maxTokens: 1024,
+				testExtension(
+					"test-extension-1",
+					(volt) => {
+						volt.registerProvider("invalid-extension-provider", {
+							streamSimple: () => {
+								throw new Error("should not run");
 							},
-						],
-					});
-				}),
+						});
+						volt.registerProvider(provider, {
+							baseUrl: "http://localhost:8080/initial",
+							apiKey: "extension-key",
+							api: "openai-completions",
+							models: [
+								{
+									id: modelId,
+									name: "Initial Extension Model",
+									reasoning: false,
+									input: ["text"],
+									cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+									contextWindow: 4096,
+									maxTokens: 1024,
+								},
+							],
+						});
+					},
+					["providers"],
+				),
 			],
 		});
 		await resourceLoader.reload();

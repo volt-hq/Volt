@@ -405,7 +405,8 @@ class CardView extends Card {
 	}
 }
 
-function formField(field: UiNodeFormField): FormField {
+/** A `UiNode` form field as the TUI form takes it. */
+export function formField(field: UiNodeFormField): FormField {
 	const base = { id: field.id, label: field.label, description: field.description };
 	switch (field.kind) {
 		case "string":

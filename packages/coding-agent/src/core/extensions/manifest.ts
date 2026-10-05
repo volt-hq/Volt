@@ -23,6 +23,7 @@ import { type ExtensionManifest, ExtensionManifestSchema, UI_NODE_LINE_PATTERN }
 import { Compile, type Validator } from "typebox/compile";
 import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import { formatSchemaError } from "../protocol/schema-errors.ts";
+import { checkSettingsSchema, ExtensionSettingsError, normalizeSettingsSchema } from "./settings.ts";
 
 export type { ExtensionManifest } from "@hansjm10/volt-protocol";
 
@@ -66,16 +67,34 @@ function deepFreeze<T>(value: T): T {
 	return value;
 }
 
+/** `value` with TypeBox settings output read as the settings schema (see {@link normalizeSettingsSchema}). */
+function withNormalizedSettings(value: unknown): unknown {
+	if (!isRecord(value) || !Object.hasOwn(value, "settings")) return value;
+	const normalized: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		Object.defineProperty(normalized, key, {
+			value: key === "settings" ? normalizeSettingsSchema(child) : child,
+			enumerable: true,
+			configurable: true,
+			writable: true,
+		});
+	}
+	return normalized;
+}
+
 /**
  * Check a manifest and return a frozen copy of it. A package's manifest names
- * its `entry`; a single-file or SDK extension's has none. Throws an
+ * its `entry`; a single-file or SDK extension's has none. Settings written as
+ * TypeBox output are accepted (string literal unions read as string enums),
+ * and must hold together: valid defaults, ordered bounds, safe patterns,
+ * declared `required` names, and no credentials. Throws an
  * {@link ExtensionManifestError} naming the first problem.
  */
 export function validateManifest(value: unknown, options: { readonly package: boolean }): ExtensionManifest {
 	let manifest: unknown;
 	try {
 		// Read once: what is checked is what is kept.
-		manifest = cloneCanonicalData(value, "The manifest");
+		manifest = cloneCanonicalData(withNormalizedSettings(value), "The manifest");
 	} catch (error) {
 		throw new ExtensionManifestError(error instanceof CanonicalDataError ? error.message : String(error));
 	}
@@ -90,7 +109,16 @@ export function validateManifest(value: unknown, options: { readonly package: bo
 	if (!options.package && manifest.entry !== undefined) {
 		throw new ExtensionManifestError(`"entry" names a package's module; a single-file extension has none`);
 	}
-	return deepFreeze(manifest as ExtensionManifest);
+	const checked = manifest as ExtensionManifest;
+	if (checked.settings !== undefined) {
+		try {
+			checkSettingsSchema(checked.settings);
+		} catch (error) {
+			if (error instanceof ExtensionSettingsError) throw new ExtensionManifestError(error.message);
+			throw error;
+		}
+	}
+	return deepFreeze(checked);
 }
 
 /** The `volt` field of `root/package.json`; undefined when there is none or the file cannot be read. */

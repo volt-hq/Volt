@@ -44,7 +44,11 @@ async function checkDirtyRepo(
 	}
 }
 
-export const manifest = defineManifest({ id: "dirty-repo-guard", displayName: "Dirty Repo Guard" });
+export const manifest = defineManifest({
+	id: "dirty-repo-guard",
+	displayName: "Dirty Repo Guard",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_switch", async (event, ctx) => {

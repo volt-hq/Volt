@@ -40,6 +40,7 @@ import {
 	type NewSessionOptions,
 	SessionManager,
 } from "../session-manager.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import { ClientScope } from "./client-scope.ts";
 import {
 	type ConversationFactory,
@@ -213,12 +214,46 @@ export class ConversationHost {
 	private readonly anchorsLeaving = new Set<HostedConversation>();
 	private readonly openedListeners = new Set<(conversation: HostedConversation) => void>();
 	private readonly closedListeners = new Set<(conversation: HostedConversation) => void>();
+	/** Each open conversation's watch on its extensions' settings. */
+	private readonly settingsWatches = new Map<HostedConversation, () => void>();
+	/** Set while other conversations reload a change, so their reloads do not spread it again. */
+	private spreadingSettings = false;
 
 	constructor(options: ConversationHostOptions) {
 		this.factory = options.factory;
 		this.agentDir = options.agentDir;
 		this.extensionMode = options.extensionMode;
 		this.whenUnattached = options.whenUnattached ?? "close";
+		this.onOpened((conversation) => this.watchSettings(conversation));
+		this.onClosed((conversation) => {
+			this.settingsWatches.get(conversation)?.();
+			this.settingsWatches.delete(conversation);
+		});
+	}
+
+	/**
+	 * Extension settings one conversation saves reach every other open one:
+	 * each reloads its settings, so its extensions see `settings_changed`.
+	 * Conversations sharing a settings manager see the change already.
+	 */
+	private watchSettings(conversation: HostedConversation): void {
+		const manager = conversation.session.settingsManager;
+		const unsubscribe = manager.subscribeExtensionSettings(() => {
+			if (!this.spreadingSettings) void this.spreadSettings(manager);
+		});
+		this.settingsWatches.set(conversation, unsubscribe);
+	}
+
+	private async spreadSettings(origin: SettingsManager): Promise<void> {
+		const managers = new Set(this.list().map((conversation) => conversation.session.settingsManager));
+		managers.delete(origin);
+		if (managers.size === 0) return;
+		this.spreadingSettings = true;
+		try {
+			await Promise.allSettled([...managers].map((manager) => manager.reload()));
+		} finally {
+			this.spreadingSettings = false;
+		}
 	}
 
 	/** The open conversation of `sessionId`, if any. */

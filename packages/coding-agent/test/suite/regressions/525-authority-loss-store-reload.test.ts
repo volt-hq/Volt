@@ -90,25 +90,29 @@ describe("regression #525: ending a session whose saved state could not be confi
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						testExtension("test-extension-1", (volt: ExtensionAPI) => {
-							volt.registerProvider(faux.getModel().provider, {
-								baseUrl: faux.getModel().baseUrl,
-								apiKey: "faux-key",
-								api: faux.api,
-								streamSimple: faux.streamSimple,
-								models: faux.models.map((registeredModel) => ({
-									id: registeredModel.id,
-									name: registeredModel.name,
-									api: registeredModel.api,
-									reasoning: registeredModel.reasoning,
-									input: registeredModel.input,
-									cost: registeredModel.cost,
-									contextWindow: registeredModel.contextWindow,
-									maxTokens: registeredModel.maxTokens,
-								})),
-							});
-							options.extensionFactory?.(volt);
-						}),
+						testExtension(
+							"test-extension-1",
+							(volt: ExtensionAPI) => {
+								volt.registerProvider(faux.getModel().provider, {
+									baseUrl: faux.getModel().baseUrl,
+									apiKey: "faux-key",
+									api: faux.api,
+									streamSimple: faux.streamSimple,
+									models: faux.models.map((registeredModel) => ({
+										id: registeredModel.id,
+										name: registeredModel.name,
+										api: registeredModel.api,
+										reasoning: registeredModel.reasoning,
+										input: registeredModel.input,
+										cost: registeredModel.cost,
+										contextWindow: registeredModel.contextWindow,
+										maxTokens: registeredModel.maxTokens,
+									})),
+								});
+								options.extensionFactory?.(volt);
+							},
+							["providers"],
+						),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

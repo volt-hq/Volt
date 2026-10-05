@@ -35,7 +35,7 @@ Global and project profiles follow the normal settings precedence and trust mode
   "profiles": {
     "development": {
       "packages": ["npm:@me/dev-tools"],
-      "extensions": ["./extensions/dev.ts"],
+      "extensionPaths": ["./extensions/dev.ts"],
       "enabledModels": ["anthropic/*", "openai/*"]
     },
     "work": {
@@ -393,7 +393,7 @@ Paths in `~/.volt/agent/settings.json` resolve relative to `~/.volt/agent`. Path
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `packages` | array | `[]` | npm/git packages to load resources from |
-| `extensions` | string[] | `[]` | Local extension file paths or directories |
+| `extensionPaths` | string[] | `[]` | Local extension file paths or directories |
 | `skills` | string[] | `[]` | Local skill file paths or directories |
 | `prompts` | string[] | `[]` | Local prompt template paths or directories |
 | `themes` | string[] | `[]` | Local theme file paths or directories |
@@ -426,6 +426,20 @@ Object form filters which resources to load:
 ```
 
 See [packages.md](packages.md) for package management details.
+
+### Extension settings
+
+`extensions.<id>.settings` holds the settings of the extension whose manifest id is `<id>`, checked against the settings its manifest declares. Global values apply everywhere; a trusted project's values override them. Edit them with `/extensions` (pick an extension, or `/extensions <id>`) or `volt config` (Enter on an extension row that shows "settings"); paired clients with `host.manage.v1` edit them too.
+
+```json
+{
+  "extensions": {
+    "review-loop": { "settings": { "baseBranch": "main", "maxLoops": 5 } }
+  }
+}
+```
+
+Values an extension does not declare, or that its schema does not allow, are ignored with a warning. Settings never hold credentials. See [extensions.md](extensions.md#settings).
 
 ## Example
 

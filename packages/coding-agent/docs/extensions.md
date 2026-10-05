@@ -33,6 +33,8 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [Extension Locations](#extension-locations)
 - [Available Imports](#available-imports)
 - [Writing an Extension](#writing-an-extension)
+  - [Settings](#settings)
+  - [Permissions](#permissions)
   - [Extension Styles](#extension-styles)
 - [JSON Data Boundary](#json-data-boundary)
 - [Events](#events)
@@ -129,7 +131,7 @@ Additional paths via `settings.json`:
     "npm:@foo/bar@1.0.0",
     "git:github.com/user/repo@v1"
   ],
-  "extensions": [
+  "extensionPaths": [
     "/path/to/local/extension.ts",
     "/path/to/local/extension/dir"
   ]
@@ -202,6 +204,55 @@ A single-file extension (a `.ts` or `.js` file, or a directory's `index.ts`) exp
 The id names everything the extension contributes: errors, work kinds (`ext:<id>/<kind>`), and command intents (`extension.command.<id>.<command>`). Two extensions cannot share an id. A user or `-e` extension beats a project extension with the same id; otherwise the one loaded first wins. The other is not loaded and is reported.
 
 An SDK host passes each extension with its manifest: `extensionFactories: [{ manifest, factory }]` (see [sdk.md](sdk.md)).
+
+### Settings
+
+`settings` declares what users configure, as a flat object of string, string enum, boolean, and integer settings with `title`, `description`, and `default`. Volt renders it as a form in `/extensions` and `volt config`, and remote clients render the same form. TypeBox output works as written; a union of string literals is a string enum:
+
+```typescript
+import { defineManifest, type ExtensionAPI, type ExtensionSettingsOf } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+  id: "review-loop",
+  displayName: "Review Loop",
+  settings: {
+    type: "object",
+    properties: {
+      baseBranch: { type: "string", title: "Base branch", default: "main", pattern: "[A-Za-z0-9._/-]+" },
+      maxLoops: { type: "integer", title: "Most loops", minimum: 1, maximum: 10, default: 3 },
+      mode: { type: "string", enum: ["fast", "careful"], default: "fast" },
+    },
+  },
+});
+
+export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>>) {
+  volt.on("session_start", () => {
+    const loops: number = volt.settings.maxLoops;
+  });
+  volt.on("settings_changed", (event) => {
+    // event.settings, event.previous, event.scope ("global" or "project")
+  });
+}
+```
+
+- **Stored values** live under `extensions.<id>.settings` in `~/.volt/agent/settings.json` and, for a trusted project, `.volt/settings.json`. `volt.settings` is each default, then the global value, then the project value, frozen. A stored value the manifest does not declare or allow is ignored and reported. One extension's values in one scope hold at most 16 KB.
+- **Changes** reach the extension as `settings_changed`, in every open conversation, whether a client saved them or the extension called `volt.updateSettings(values, { scope })` (an `undefined` value clears a setting; the default scope is `global`). Project writes need a trusted project.
+- **Checks**: each default must be a valid value, `minLength`/`maximum` bounds must be ordered, a `pattern` must be cheap for every client to test (no backreferences, lookarounds, or nested repetition; values it tests hold at most 256 characters), and names in `required` must be declared. String values are one line.
+- **No credentials**: settings are plain JSON, and project settings are often committed. A string setting whose name reads as a credential (`apiKey`, `token`, `password`, `clientSecret`, ...) is refused; keep credentials in the auth storage (the `secrets` permission).
+
+### Permissions
+
+`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `/store install`) or updated and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks.
+
+| Permission | Allows | Enforced |
+|------------|--------|----------|
+| `exec` | `volt.exec` | Yes: `volt.exec` rejects without it |
+| `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and provider registration through `ctx.modelRegistry` | Yes |
+| `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, and `login` | Yes |
+| `network` | Network access | No: declared and shown only |
+| `fs-write` | Writing files | No: declared and shown only |
+
+Permissions are advisory: extensions run in your process and can reach Node's own modules, so a missing permission only stops the volt APIs above. Install only extensions you trust.
 
 ### Async factory functions
 
@@ -1747,7 +1798,7 @@ if (volt.getFlag("focus-mode")) {
 
 ### volt.exec(command, args, options?)
 
-Execute a shell command.
+Execute a shell command. Needs the `exec` [permission](#permissions).
 
 ```typescript
 const result = await volt.exec("git", ["status"], { signal, timeout: 5000 });
@@ -1815,7 +1866,7 @@ volt.events.emit("my:event", { ... });
 
 ### volt.registerProvider(name, config)
 
-Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations.
+Register or override a model provider dynamically. Useful for proxies, custom endpoints, or team-wide model configurations. Needs the `providers` [permission](#permissions).
 
 Calls made during the extension factory function are queued and applied once the runner initialises. Calls made after that — for example from a command handler following a user setup flow — take effect immediately without requiring a `/reload`.
 
