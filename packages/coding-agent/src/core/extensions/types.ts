@@ -1203,6 +1203,45 @@ export type ExtensionEvent =
 	| ToolCallEvent
 	| ToolResultEvent;
 
+/** Keyed by `ExtensionEvent["type"]`, so a name missing from or added beyond the union fails to compile. */
+const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
+	request_boundary: true,
+	extension_operation: true,
+	project_trust: true,
+	resources_discover: true,
+	session_start: true,
+	session_before_switch: true,
+	session_before_fork: true,
+	session_before_compact: true,
+	session_compact: true,
+	session_shutdown: true,
+	session_before_tree: true,
+	session_tree: true,
+	context: true,
+	before_provider_request: true,
+	after_provider_response: true,
+	before_agent_start: true,
+	agent_start: true,
+	agent_end: true,
+	turn_start: true,
+	turn_end: true,
+	message_start: true,
+	message_update: true,
+	message_end: true,
+	tool_execution_start: true,
+	tool_execution_update: true,
+	tool_execution_end: true,
+	model_select: true,
+	thinking_level_select: true,
+	user_bash: true,
+	input: true,
+	tool_call: true,
+	tool_result: true,
+};
+
+/** Every event `volt.on()` subscribes to. It throws for any other name. */
+export const EXTENSION_EVENT_NAMES = Object.freeze(Object.keys(EXTENSION_EVENTS) as ExtensionEvent["type"][]);
+
 // ============================================================================
 // Event Results
 // ============================================================================
