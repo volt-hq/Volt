@@ -7,8 +7,9 @@
  *   volt -e ./bash-spawn-hook.ts
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
-import { createBashTool } from "@hansjm10/volt-coding-agent";
+import { createBashTool, defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "bash-spawn-hook", displayName: "Bash Spawn Hook" });
 
 export default function (volt: ExtensionAPI) {
 	const cwd = process.cwd();

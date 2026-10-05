@@ -9,8 +9,8 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
-import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from "./extensions/loader.ts";
-import type { Extension, ExtensionFactory, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
+import { createExtensionRuntime, type ExtensionSource, loadExtensions } from "./extensions/loader.ts";
+import type { Extension, ExtensionDefinition, LoadExtensionsResult } from "./extensions/types.ts";
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
@@ -129,7 +129,8 @@ export interface DefaultResourceLoaderOptions {
 	additionalSkillPaths?: string[];
 	additionalPromptTemplatePaths?: string[];
 	additionalThemePaths?: string[];
-	extensionFactories?: ExtensionFactory[];
+	/** SDK extensions, each with its manifest; they load after the discovered ones. */
+	extensionFactories?: ExtensionDefinition[];
 	noExtensions?: boolean;
 	noSkills?: boolean;
 	noPromptTemplates?: boolean;
@@ -167,7 +168,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private additionalSkillPaths: string[];
 	private additionalPromptTemplatePaths: string[];
 	private additionalThemePaths: string[];
-	private extensionFactories: ExtensionFactory[];
+	private extensionFactories: ExtensionDefinition[];
 	private noExtensions: boolean;
 	private noSkills: boolean;
 	private noPromptTemplates: boolean;
@@ -339,7 +340,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 		// extensions/packages out while still loading user/global and temporary CLI extensions.
 		this.settingsManager.setProjectTrusted(false);
 		await this.settingsManager.reload();
-		return this.loadCurrentExtensionSet({ includeInlineFactories: true });
+		return this.loadCurrentExtensionSet();
 	}
 
 	async reload(options?: ResourceLoaderReloadOptions): Promise<void> {
@@ -374,7 +375,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 
 		const getEnabledPaths = (resources: ResolvedResource[]): string[] =>
 			getEnabledResources(resources).map((r) => r.path);
-		const enabledExtensions = getEnabledPaths(resolvedPaths.extensions);
+		getEnabledResources(resolvedPaths.extensions);
 		const enabledSkillResources = getEnabledResources(resolvedPaths.skills);
 		const enabledPrompts = getEnabledPaths(resolvedPaths.prompts);
 		const enabledThemes = getEnabledPaths(resolvedPaths.themes);
@@ -393,16 +394,14 @@ export class DefaultResourceLoader implements ResourceLoader {
 			}
 		}
 
-		const cliEnabledExtensions = getEnabledPaths(cliExtensionPaths.extensions);
 		const cliEnabledSkills = getEnabledPaths(cliExtensionPaths.skills);
 		const cliEnabledPrompts = getEnabledPaths(cliExtensionPaths.prompts);
 		const cliEnabledThemes = getEnabledPaths(cliExtensionPaths.themes);
 
-		const extensionPaths = this.noExtensions
-			? cliEnabledExtensions
-			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
-
-		const extensionsResult = await this.loadFinalExtensionSet(extensionPaths, preTrustExtensions);
+		const extensionsResult = await this.loadFinalExtensionSet(
+			this.extensionSources(cliExtensionPaths.extensions, resolvedPaths.extensions),
+			preTrustExtensions,
+		);
 		for (const p of this.additionalExtensionPaths) {
 			if (isLocalPath(p)) {
 				const resolved = this.resolveResourcePath(p);
@@ -497,25 +496,51 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: baseAppend;
 	}
 
-	private async loadCurrentExtensionSet(options: { includeInlineFactories: boolean }): Promise<LoadExtensionsResult> {
+	private async loadCurrentExtensionSet(): Promise<LoadExtensionsResult> {
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
 			temporary: true,
 		});
-		const enabledExtensions = resolvedPaths.extensions.filter((r) => r.enabled).map((r) => r.path);
-		const cliEnabledExtensions = cliExtensionPaths.extensions.filter((r) => r.enabled).map((r) => r.path);
-		const extensionPaths = this.noExtensions
-			? cliEnabledExtensions
-			: this.mergePaths(cliEnabledExtensions, enabledExtensions);
-		const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
-		if (!options.includeInlineFactories) {
-			return extensionsResult;
-		}
+		return loadExtensions(
+			[
+				...this.extensionSources(cliExtensionPaths.extensions, resolvedPaths.extensions),
+				...this.inlineExtensionSources(),
+			],
+			this.cwd,
+			this.eventBus,
+		);
+	}
 
-		const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
-		extensionsResult.extensions.push(...inlineExtensions.extensions);
-		extensionsResult.errors.push(...inlineExtensions.errors);
-		return extensionsResult;
+	/**
+	 * The enabled extensions to load, the ones given for this run first, each
+	 * path once. Each keeps its scope, and one installed from npm or git loads
+	 * only through its package manifest.
+	 */
+	private extensionSources(cli: ResolvedResource[], resolved: ResolvedResource[]): ExtensionSource[] {
+		const sources: ExtensionSource[] = [];
+		const seen = new Set<string>();
+		for (const { path, enabled, metadata } of this.noExtensions ? cli : [...cli, ...resolved]) {
+			if (!enabled) continue;
+			const resolvedPath = this.resolveResourcePath(path);
+			const canonicalPath = canonicalizePath(resolvedPath);
+			if (seen.has(canonicalPath)) continue;
+			seen.add(canonicalPath);
+			sources.push({
+				path: resolvedPath,
+				scope: metadata.scope,
+				installed: metadata.origin === "package" && !isLocalPath(metadata.source),
+			});
+		}
+		return sources;
+	}
+
+	/** The SDK extensions, labeled `<inline:N>`, after the discovered ones. */
+	private inlineExtensionSources(): ExtensionSource[] {
+		return this.extensionFactories.map((definition, index) => ({
+			path: `<inline:${index + 1}>`,
+			scope: "temporary",
+			definition,
+		}));
 	}
 
 	private resolveExtensionLoadPath(path: string): string {
@@ -523,48 +548,60 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private async loadFinalExtensionSet(
-		extensionPaths: string[],
+		extensionSources: ExtensionSource[],
 		preTrustExtensions: LoadExtensionsResult | undefined,
 	): Promise<LoadExtensionsResult> {
 		if (!preTrustExtensions) {
-			const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
-			const inlineExtensions = await this.loadExtensionFactories(extensionsResult.runtime);
-			extensionsResult.extensions.push(...inlineExtensions.extensions);
-			extensionsResult.errors.push(...inlineExtensions.errors);
+			const extensionsResult = await loadExtensions(
+				[...extensionSources, ...this.inlineExtensionSources()],
+				this.cwd,
+				this.eventBus,
+			);
 			this.addExtensionConflictDiagnostics(extensionsResult);
 			return extensionsResult;
 		}
 
+		const finalPaths = new Set(extensionSources.map((source) => this.resolveExtensionLoadPath(source.path)));
+		const inlineExtensions = preTrustExtensions.extensions.filter((extension) =>
+			extension.path.startsWith("<inline:"),
+		);
+		// A preloaded extension the final set no longer names (its package or path is now the
+		// project's copy) is dropped, and its id is free for that copy.
 		const preloadedByPath = new Map(
 			preTrustExtensions.extensions
-				.filter((extension) => !extension.path.startsWith("<inline:"))
+				.filter((extension) => !extension.path.startsWith("<inline:") && finalPaths.has(extension.resolvedPath))
 				.map((extension) => [extension.resolvedPath, extension]),
 		);
 		const failedPreloadPaths = new Set(
 			preTrustExtensions.errors.map((error) => this.resolveExtensionLoadPath(error.path)),
 		);
-		const remainingPaths = extensionPaths.filter((path) => {
-			const resolvedPath = this.resolveExtensionLoadPath(path);
+		const remainingSources = extensionSources.filter((source) => {
+			const resolvedPath = this.resolveExtensionLoadPath(source.path);
 			return !preloadedByPath.has(resolvedPath) && !failedPreloadPaths.has(resolvedPath);
 		});
+		// The kept preloaded extensions are the user's and temporary ones: a project extension never takes their ids.
 		const remainingExtensions = await loadExtensions(
-			remainingPaths,
+			remainingSources,
 			this.cwd,
 			this.eventBus,
 			preTrustExtensions.runtime,
+			[...preloadedByPath.values(), ...inlineExtensions],
 		);
 		const loadedByPath = new Map(preloadedByPath);
 		for (const extension of remainingExtensions.extensions) {
 			loadedByPath.set(extension.resolvedPath, extension);
 		}
 
-		const inlineExtensions = preTrustExtensions.extensions.filter((extension) =>
-			extension.path.startsWith("<inline:"),
-		);
-		const orderedExtensions = extensionPaths
-			.map((path) => loadedByPath.get(this.resolveExtensionLoadPath(path)))
+		const orderedExtensions = extensionSources
+			.map((source) => loadedByPath.get(this.resolveExtensionLoadPath(source.path)))
 			.filter((extension): extension is Extension => extension !== undefined);
 		orderedExtensions.push(...inlineExtensions);
+		// Providers a dropped preloaded extension queued go with it.
+		const loadedIds = new Set(orderedExtensions.map((extension) => extension.id));
+		const runtime = preTrustExtensions.runtime;
+		runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((registration) =>
+			loadedIds.has(registration.extensionId),
+		);
 
 		const extensionsResult: LoadExtensionsResult = {
 			extensions: orderedExtensions,
@@ -899,27 +936,6 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 	}
 
-	private async loadExtensionFactories(runtime: ExtensionRuntime): Promise<{
-		extensions: Extension[];
-		errors: Array<{ path: string; error: string }>;
-	}> {
-		const extensions: Extension[] = [];
-		const errors: Array<{ path: string; error: string }> = [];
-
-		for (const [index, factory] of this.extensionFactories.entries()) {
-			const extensionPath = `<inline:${index + 1}>`;
-			try {
-				const extension = await loadExtensionFromFactory(factory, this.cwd, this.eventBus, runtime, extensionPath);
-				extensions.push(extension);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : "failed to load extension";
-				errors.push({ path: extensionPath, error: message });
-			}
-		}
-
-		return { extensions, errors };
-	}
-
 	private dedupePrompts(prompts: PromptTemplate[]): { prompts: PromptTemplate[]; diagnostics: ResourceDiagnostic[] } {
 		const seen = new Map<string, PromptTemplate>();
 		const diagnostics: ResourceDiagnostic[] = [];
@@ -1013,7 +1029,7 @@ export class DefaultResourceLoader implements ResourceLoader {
 	private detectExtensionConflicts(extensions: Extension[]): Array<{ path: string; message: string }> {
 		const conflicts: Array<{ path: string; message: string }> = [];
 
-		// Track which extension registered each tool and flag
+		// Track which extension registered each tool and flag, by manifest id
 		const toolOwners = new Map<string, string>();
 		const flagOwners = new Map<string, string>();
 
@@ -1021,26 +1037,26 @@ export class DefaultResourceLoader implements ResourceLoader {
 			// Check tools
 			for (const toolName of ext.tools.keys()) {
 				const existingOwner = toolOwners.get(toolName);
-				if (existingOwner && existingOwner !== ext.path) {
+				if (existingOwner && existingOwner !== ext.id) {
 					conflicts.push({
 						path: ext.path,
-						message: `Tool "${toolName}" conflicts with ${existingOwner}`,
+						message: `Tool "${toolName}" from extension ${ext.id} conflicts with extension ${existingOwner}`,
 					});
 				} else {
-					toolOwners.set(toolName, ext.path);
+					toolOwners.set(toolName, ext.id);
 				}
 			}
 
 			// Check flags
 			for (const flagName of ext.flags.keys()) {
 				const existingOwner = flagOwners.get(flagName);
-				if (existingOwner && existingOwner !== ext.path) {
+				if (existingOwner && existingOwner !== ext.id) {
 					conflicts.push({
 						path: ext.path,
-						message: `Flag "--${flagName}" conflicts with ${existingOwner}`,
+						message: `Flag "--${flagName}" from extension ${ext.id} conflicts with extension ${existingOwner}`,
 					});
 				} else {
-					flagOwners.set(flagName, ext.path);
+					flagOwners.set(flagName, ext.id);
 				}
 			}
 		}

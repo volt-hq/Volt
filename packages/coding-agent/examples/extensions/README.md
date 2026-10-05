@@ -135,9 +135,9 @@ For an SDK host, inject the factory and explicitly allow a bounded wait (adjust 
 
 ```typescript
 import { createAgentSession, DefaultResourceLoader, SessionManager } from "@hansjm10/volt-coding-agent";
-import contextPreparation from "./examples/extensions/context-preparation.ts";
+import contextPreparation, { manifest } from "./examples/extensions/context-preparation.ts";
 
-const resourceLoader = new DefaultResourceLoader({ extensionFactories: [contextPreparation] });
+const resourceLoader = new DefaultResourceLoader({ extensionFactories: [{ manifest, factory: contextPreparation }] });
 await resourceLoader.reload();
 const { session } = await createAgentSession({
   resourceLoader,
@@ -183,9 +183,13 @@ Before adding auxiliary inference, evaluate representative tasks with the same m
 
 See [docs/extensions.md](../../docs/extensions.md) for full documentation.
 
+Every extension declares a manifest. Its `id` is the extension's identity.
+
 ```typescript
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+
+export const manifest = defineManifest({ id: "greeter", displayName: "Greeter" });
 
 export default function (volt: ExtensionAPI) {
   // Subscribe to lifecycle events

@@ -1,6 +1,8 @@
 import { appendFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "provider-payload", displayName: "Provider Payload" });
 
 export default function (volt: ExtensionAPI) {
 	const logFile = join(process.cwd(), ".volt", "provider-payload.log");

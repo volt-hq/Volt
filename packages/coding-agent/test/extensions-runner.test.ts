@@ -104,13 +104,15 @@ describe("ExtensionRunner", () => {
 			const decidedPath = path.join(extensionsDir, "decided.ts");
 			fs.writeFileSync(
 				undecidedPath,
-				`export default function(volt) {
+				`export const manifest = { id: "undecided", displayName: "undecided" };
+export default function(volt) {
 	volt.on("project_trust", () => ({ trusted: "undecided", remember: true }));
 }`,
 			);
 			fs.writeFileSync(
 				decidedPath,
-				`export default function(volt) {
+				`export const manifest = { id: "decided", displayName: "decided" };
+export default function(volt) {
 	volt.on("project_trust", () => ({ trusted: "no", remember: true }));
 }`,
 			);
@@ -140,6 +142,7 @@ describe("ExtensionRunner", () => {
 	describe("shortcut conflicts", () => {
 		it("warns when extension shortcut conflicts with built-in", async () => {
 			const extCode = `
+				export const manifest = { id: "conflict", displayName: "conflict" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+c", {
 						description: "Conflicts with built-in",
@@ -179,7 +182,8 @@ describe("ExtensionRunner", () => {
 			const extensionPath = path.join(extensionsDir, "plan-pane-conflict.ts");
 			fs.writeFileSync(
 				extensionPath,
-				`export default function(volt) {
+				`export const manifest = { id: "plan-pane-conflict", displayName: "plan-pane-conflict" };
+export default function(volt) {
 	volt.registerShortcut("${shortcut}", {
 		description: "Conflicts with global plan-pane toggle",
 		handler: async () => {},
@@ -191,7 +195,7 @@ describe("ExtensionRunner", () => {
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
 			const shortcuts = runner.getShortcuts(keybindings);
-			const message = `Extension shortcut '${shortcut}' from ${extensionPath} conflicts with built-in shortcut. Skipping.`;
+			const message = `Extension shortcut '${shortcut}' from extension plan-pane-conflict conflicts with built-in shortcut. Skipping.`;
 
 			expect(shortcuts.has(shortcut)).toBe(false);
 			expect(runner.getShortcutDiagnostics()).toEqual([
@@ -208,6 +212,7 @@ describe("ExtensionRunner", () => {
 
 		it("allows a shortcut when the reserved set no longer contains the default key", async () => {
 			const extCode = `
+				export const manifest = { id: "rebinding", displayName: "rebinding" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+p", {
 						description: "Uses freed default",
@@ -235,6 +240,7 @@ describe("ExtensionRunner", () => {
 				? (defaultKeybindings["app.clipboard.pasteImage"][0] ?? "")
 				: defaultKeybindings["app.clipboard.pasteImage"];
 			const extCode = `
+				export const manifest = { id: "non-reserved", displayName: "non-reserved" };
 				export default function(volt) {
 					volt.registerShortcut("${pasteImageKey}", {
 						description: "Overrides non-reserved",
@@ -260,6 +266,7 @@ describe("ExtensionRunner", () => {
 
 		it("blocks shortcuts for reserved actions even when rebound", async () => {
 			const extCode = `
+				export const manifest = { id: "rebound-reserved", displayName: "rebound-reserved" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+x", {
 						description: "Conflicts with rebound reserved",
@@ -284,6 +291,7 @@ describe("ExtensionRunner", () => {
 
 		it("blocks shortcuts when reserved key is also bound to non-reserved actions", async () => {
 			const extCode = `
+				export const manifest = { id: "shared-reserved", displayName: "shared-reserved" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+p", {
 						description: "Conflicts with shared reserved default",
@@ -307,6 +315,7 @@ describe("ExtensionRunner", () => {
 
 		it("blocks shortcuts when reserved action has multiple keys", async () => {
 			const extCode = `
+				export const manifest = { id: "multi-reserved", displayName: "multi-reserved" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+y", {
 						description: "Conflicts with multi-key reserved",
@@ -331,6 +340,7 @@ describe("ExtensionRunner", () => {
 
 		it("warns but allows when non-reserved action has multiple keys", async () => {
 			const extCode = `
+				export const manifest = { id: "multi-non-reserved", displayName: "multi-non-reserved" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+y", {
 						description: "Overrides multi-key non-reserved",
@@ -358,6 +368,7 @@ describe("ExtensionRunner", () => {
 		it("warns when two extensions register same shortcut", async () => {
 			// Use a non-reserved shortcut
 			const extCode1 = `
+				export const manifest = { id: "ext1", displayName: "ext1" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+shift+x", {
 						description: "First extension",
@@ -366,6 +377,7 @@ describe("ExtensionRunner", () => {
 				}
 			`;
 			const extCode2 = `
+				export const manifest = { id: "ext2-2", displayName: "ext2-2" };
 				export default function(volt) {
 					volt.registerShortcut("ctrl+shift+x", {
 						description: "Second extension",
@@ -394,6 +406,7 @@ describe("ExtensionRunner", () => {
 		it("collects tools from multiple extensions", async () => {
 			const toolCode = (name: string) => `
 				import { Type } from "typebox";
+				export const manifest = { id: "${name.replace("_", "-")}", displayName: "${name}" };
 				export default function(volt) {
 					volt.registerTool({
 						name: "${name}",
@@ -418,6 +431,7 @@ describe("ExtensionRunner", () => {
 		it("keeps first tool when two extensions register the same name", async () => {
 			const first = `
 				import { Type } from "typebox";
+				export const manifest = { id: "a-first", displayName: "a-first" };
 				export default function(volt) {
 					volt.registerTool({
 						name: "shared",
@@ -430,6 +444,7 @@ describe("ExtensionRunner", () => {
 			`;
 			const second = `
 				import { Type } from "typebox";
+				export const manifest = { id: "b-second-2", displayName: "b-second-2" };
 				export default function(volt) {
 					volt.registerTool({
 						name: "shared",
@@ -455,6 +470,7 @@ describe("ExtensionRunner", () => {
 	describe("command collection", () => {
 		it("collects commands from multiple extensions", async () => {
 			const cmdCode = (name: string) => `
+				export const manifest = { id: "${name}", displayName: "${name}" };
 				export default function(volt) {
 					volt.registerCommand("${name}", {
 						description: "Test command",
@@ -476,6 +492,7 @@ describe("ExtensionRunner", () => {
 
 		it("gets command by invocation name", async () => {
 			const cmdCode = `
+				export const manifest = { id: "cmd", displayName: "cmd" };
 				export default function(volt) {
 					volt.registerCommand("my-cmd", {
 						description: "My command",
@@ -498,8 +515,9 @@ describe("ExtensionRunner", () => {
 			expect(missing).toBeUndefined();
 		});
 
-		it("suffixes duplicate extension commands in insertion order", async () => {
-			const cmdCode = (description: string) => `
+		it("gives a later extension's command with a taken name an alias under its id", async () => {
+			const cmdCode = (id: string, description: string) => `
+				export const manifest = { id: "${id}", displayName: "${id}" };
 				export default function(volt) {
 					volt.registerCommand("shared-cmd", {
 						description: "${description}",
@@ -507,8 +525,8 @@ describe("ExtensionRunner", () => {
 					});
 				}
 			`;
-			fs.writeFileSync(path.join(extensionsDir, "cmd-a.ts"), cmdCode("First command"));
-			fs.writeFileSync(path.join(extensionsDir, "cmd-b.ts"), cmdCode("Second command"));
+			fs.writeFileSync(path.join(extensionsDir, "cmd-a.ts"), cmdCode("cmd-a", "First command"));
+			fs.writeFileSync(path.join(extensionsDir, "cmd-b.ts"), cmdCode("cmd-b", "Second command"));
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
@@ -517,11 +535,47 @@ describe("ExtensionRunner", () => {
 
 			expect(commands).toHaveLength(2);
 			expect(commands.map((command) => command.name)).toEqual(["shared-cmd", "shared-cmd"]);
-			expect(commands.map((command) => command.invocationName)).toEqual(["shared-cmd:1", "shared-cmd:2"]);
+			expect(commands.map((command) => command.invocationName)).toEqual(["shared-cmd", "cmd-b:shared-cmd"]);
+			expect(commands.map((command) => command.extensionId)).toEqual(["cmd-a", "cmd-b"]);
 			expect(commands.map((command) => command.description)).toEqual(["First command", "Second command"]);
-			expect(diagnostics).toEqual([]);
-			expect(runner.getCommand("shared-cmd:1")?.description).toBe("First command");
-			expect(runner.getCommand("shared-cmd:2")?.description).toBe("Second command");
+			expect(diagnostics).toEqual([
+				{
+					type: "warning",
+					message:
+						"Extension command '/shared-cmd' from extension cmd-b conflicts with extension cmd-a. Available as '/cmd-b:shared-cmd'.",
+					path: path.join(extensionsDir, "cmd-b.ts"),
+				},
+			]);
+			expect(runner.getCommand("shared-cmd")?.description).toBe("First command");
+			expect(runner.getCommand("cmd-b:shared-cmd")?.description).toBe("Second command");
+		});
+
+		it("refuses a command name that would take another extension's alias", async () => {
+			const cmdCode = (id: string, name: string) => `
+				export const manifest = { id: "${id}", displayName: "${id}" };
+				export default function(volt) {
+					volt.registerCommand("${name}", { handler: async () => {} });
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "a.ts"), cmdCode("squatter", "go"));
+			fs.writeFileSync(path.join(extensionsDir, "b.ts"), cmdCode("squatter-2", "victim:go"));
+			fs.writeFileSync(path.join(extensionsDir, "c.ts"), cmdCode("victim", "go"));
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([
+				{
+					path: path.join(extensionsDir, "b.ts"),
+					error: expect.stringContaining('Invalid extension command name "victim:go"'),
+				},
+			]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const commands = runner.getRegisteredCommands();
+
+			expect(commands.map((command) => [command.extensionId, command.invocationName])).toEqual([
+				["squatter", "go"],
+				["victim", "victim:go"],
+			]);
+			expect(runner.getCommand("victim:go")?.extensionId).toBe("victim");
 		});
 	});
 
@@ -592,6 +646,7 @@ describe("ExtensionRunner", () => {
 	describe("error handling", () => {
 		it("calls error listeners when handler throws", async () => {
 			const extCode = `
+				export const manifest = { id: "throws", displayName: "throws" };
 				export default function(volt) {
 					volt.on("context", async () => {
 						throw new Error("Handler error!");
@@ -603,7 +658,7 @@ describe("ExtensionRunner", () => {
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
 
-			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			const errors: Array<{ extensionId: string; event: string; error: string }> = [];
 			runner.onError((err) => {
 				errors.push(err);
 			});
@@ -620,7 +675,8 @@ describe("ExtensionRunner", () => {
 			const extensionPath = path.join(extensionsDir, "role-change.ts");
 			fs.writeFileSync(
 				extensionPath,
-				`export default function(volt) {
+				`export const manifest = { id: "role-change", displayName: "role-change" };
+export default function(volt) {
 	volt.on("message_end", () => ({
 		message: { role: "assistant", content: [], timestamp: Date.now() },
 	}));
@@ -629,7 +685,7 @@ describe("ExtensionRunner", () => {
 
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const errors: Array<{ extensionPath: string; event: string; error: string }> = [];
+			const errors: Array<{ extensionId: string; event: string; error: string }> = [];
 			runner.onError((error) => errors.push(error));
 			const original = {
 				role: "user" as const,
@@ -639,7 +695,7 @@ describe("ExtensionRunner", () => {
 
 			await expect(runner.emitMessageEnd({ type: "message_end", message: original })).rejects.toMatchObject({
 				code: "extension_message_role_mismatch",
-				extensionPath,
+				extensionId: "role-change",
 				expectedRole: "user",
 				receivedRole: "assistant",
 			});
@@ -650,13 +706,14 @@ describe("ExtensionRunner", () => {
 				ExtensionMessageRoleMismatchError,
 			);
 			expect(errors).toHaveLength(2);
-			expect(errors[0]).toMatchObject({ extensionPath, event: "message_end" });
+			expect(errors[0]).toMatchObject({ extensionId: "role-change", event: "message_end" });
 		});
 	});
 
 	describe("message renderers", () => {
 		it("gets message renderer by type", async () => {
 			const extCode = `
+				export const manifest = { id: "renderer", displayName: "renderer" };
 				export default function(volt) {
 					volt.registerMessageRenderer("my-type", (message, options, theme) => null);
 				}
@@ -677,6 +734,7 @@ describe("ExtensionRunner", () => {
 	describe("flags", () => {
 		it("collects flags from extensions", async () => {
 			const extCode = `
+				export const manifest = { id: "with-flag", displayName: "with-flag" };
 				export default function(volt) {
 					volt.registerFlag("my-flag", {
 						description: "My flag",
@@ -695,6 +753,7 @@ describe("ExtensionRunner", () => {
 
 		it("keeps first flag when two extensions register the same name", async () => {
 			const first = `
+				export const manifest = { id: "a-first", displayName: "a-first" };
 				export default function(volt) {
 					volt.registerFlag("shared-flag", {
 						description: "first",
@@ -704,6 +763,7 @@ describe("ExtensionRunner", () => {
 				}
 			`;
 			const second = `
+				export const manifest = { id: "b-second", displayName: "b-second" };
 				export default function(volt) {
 					volt.registerFlag("shared-flag", {
 						description: "second",
@@ -725,6 +785,7 @@ describe("ExtensionRunner", () => {
 
 		it("can set flag values", async () => {
 			const extCode = `
+				export const manifest = { id: "flag", displayName: "flag" };
 				export default function(volt) {
 					volt.registerFlag("test-flag", {
 						description: "Test flag",
@@ -748,6 +809,7 @@ describe("ExtensionRunner", () => {
 	describe("before_agent_start", () => {
 		it("keeps ctx.getSystemPrompt() in sync with chained system prompt updates", async () => {
 			const extCode1 = `
+				export const manifest = { id: "before-agent-start-1", displayName: "before-agent-start-1" };
 				export default function(volt) {
 					volt.on("before_agent_start", async (_event, ctx) => {
 						return {
@@ -757,6 +819,7 @@ describe("ExtensionRunner", () => {
 				}
 			`;
 			const extCode2 = `
+				export const manifest = { id: "before-agent-start-2", displayName: "before-agent-start-2" };
 				export default function(volt) {
 					volt.on("before_agent_start", async (_event, ctx) => {
 						return {
@@ -792,6 +855,7 @@ describe("ExtensionRunner", () => {
 	describe("tool_result chaining", () => {
 		it("chains content modifications across handlers", async () => {
 			const extCode1 = `
+				export const manifest = { id: "tool-result-1", displayName: "tool-result-1" };
 				export default function(volt) {
 					volt.on("tool_result", async (event) => {
 						return {
@@ -801,6 +865,7 @@ describe("ExtensionRunner", () => {
 				}
 			`;
 			const extCode2 = `
+				export const manifest = { id: "tool-result-2", displayName: "tool-result-2" };
 				export default function(volt) {
 					volt.on("tool_result", async (event) => {
 						return {
@@ -839,6 +904,7 @@ describe("ExtensionRunner", () => {
 
 		it("preserves previous modifications when later handlers return partial patches", async () => {
 			const extCode1 = `
+				export const manifest = { id: "tool-result-partial-1", displayName: "tool-result-partial-1" };
 				export default function(volt) {
 					volt.on("tool_result", async () => {
 						return {
@@ -849,6 +915,7 @@ describe("ExtensionRunner", () => {
 				}
 			`;
 			const extCode2 = `
+				export const manifest = { id: "tool-result-partial-2", displayName: "tool-result-partial-2" };
 				export default function(volt) {
 					volt.on("tool_result", async () => {
 						return {
@@ -891,16 +958,16 @@ describe("ExtensionRunner", () => {
 						throw new Error("should not run");
 					}) as any,
 				},
-				"/tmp/broken-extension.ts",
+				"broken-extension",
 			);
 
 			const runner = new ExtensionRunner([], runtime, tempDir, sessionManager, modelRegistry);
 			const errors: string[] = [];
-			runner.onError((error) => errors.push(`${error.extensionPath}: ${error.error}`));
+			runner.onError((error) => errors.push(`${error.extensionId}: ${error.error}`));
 
 			expect(() => runner.bindCore(extensionActions, extensionContextActions)).not.toThrow();
 			expect(errors).toEqual([
-				'/tmp/broken-extension.ts: Provider broken-provider: "api" is required when registering streamSimple.',
+				'broken-extension: Provider broken-provider: "api" is required when registering streamSimple.',
 			]);
 			expect(() => modelRegistry.refresh()).not.toThrow();
 		});
@@ -978,6 +1045,7 @@ describe("ExtensionRunner", () => {
 	describe("hasHandlers", () => {
 		it("returns true when handlers exist for event type", async () => {
 			const extCode = `
+				export const manifest = { id: "handler", displayName: "handler" };
 				export default function(volt) {
 					volt.on("tool_call", async () => undefined);
 				}

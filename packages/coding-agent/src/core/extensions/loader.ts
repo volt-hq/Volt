@@ -1,6 +1,14 @@
 /**
- * Extension loader - loads TypeScript extension modules using jiti.
+ * Extension loader: reads each extension's manifest, settles which extension
+ * owns each manifest id, and runs the owners' factories. Modules load through
+ * jiti.
  *
+ * A package's manifest is read from package.json without running its code. A
+ * single-file extension's module is evaluated to read its exported manifest,
+ * which only paths from trusted locations get: a path installed from npm or
+ * git must be a package with a manifest. Two extensions never share an id: a
+ * user's or temporary extension beats a project's, and otherwise the earlier
+ * one in load order wins. The later one is not loaded and is reported.
  */
 
 import * as fs from "node:fs";
@@ -13,7 +21,6 @@ import * as _bundledVoltAi from "@hansjm10/volt-ai";
 import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
 import * as _bundledVoltProtocol from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
-import * as _bundledVoltTui from "@hansjm10/volt-tui";
 import { createJiti } from "jiti/static";
 // Static imports of packages that extensions may use.
 // These MUST be static so the standalone bundler includes them.
@@ -30,13 +37,24 @@ import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
-import { createSyntheticSourceInfo } from "../source-info.ts";
+import { createSyntheticSourceInfo, type SourceScope } from "../source-info.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
+import {
+	declaresPackageExtension,
+	type ExtensionManifest,
+	ExtensionManifestError,
+	LOCAL_EXTENSION_VERSION,
+	readModuleManifest,
+	readPackageManifest,
+	validateManifest,
+} from "./manifest.ts";
 import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
 import {
 	EXTENSION_EVENT_NAMES,
 	type Extension,
 	type ExtensionAPI,
+	type ExtensionContext,
+	type ExtensionDefinition,
 	type ExtensionFactory,
 	type ExtensionRuntime,
 	type LoadExtensionsResult,
@@ -58,7 +76,6 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@sinclair/typebox/compile": _bundledTypeboxCompile,
 	"@sinclair/typebox/value": _bundledTypeboxValue,
 	"@hansjm10/volt-agent-core": _bundledVoltAgentCore,
-	"@hansjm10/volt-tui": _bundledVoltTui,
 	"@hansjm10/volt-ai": _bundledVoltAi,
 	"@hansjm10/volt-ai/oauth": _bundledVoltAiOauth,
 	"@hansjm10/volt-protocol": _bundledVoltProtocol,
@@ -121,7 +138,6 @@ function getAliases(): Record<string, string> {
 		"agent/src/index.ts",
 		"@hansjm10/volt-agent-core",
 	);
-	const voltTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "tui/src/index.ts", "@hansjm10/volt-tui");
 	const voltAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "ai/src/index.ts", "@hansjm10/volt-ai");
 	const voltAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "ai/src/oauth.ts", "@hansjm10/volt-ai/oauth");
 	const voltProtocolEntry = resolveWorkspaceOrImport(
@@ -133,7 +149,6 @@ function getAliases(): Record<string, string> {
 	_aliases = {
 		"@hansjm10/volt-coding-agent": voltCodingAgentEntry,
 		"@hansjm10/volt-agent-core": voltAgentCoreEntry,
-		"@hansjm10/volt-tui": voltTuiEntry,
 		"@hansjm10/volt-ai": voltAiEntry,
 		"@hansjm10/volt-ai/oauth": voltAiOauthEntry,
 		"@hansjm10/volt-protocol": voltProtocolEntry,
@@ -148,9 +163,18 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
+/**
+ * An extension command's name, the last part of its intent
+ * `extension.command.<id>.<name>`. It has no `:`, which only the host's
+ * `<id>:<name>` aliases and `skill:` commands contain.
+ */
+const EXTENSION_COMMAND_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
 export function validateExtensionCommandName(name: string): void {
-	if (typeof name !== "string" || name.length === 0 || /[\s/]/u.test(name)) {
-		throw new Error("Extension command name must be non-empty and must not contain whitespace or '/'");
+	if (typeof name !== "string" || !EXTENSION_COMMAND_NAME_PATTERN.test(name)) {
+		throw new Error(
+			`Invalid extension command name ${JSON.stringify(name)}: use a letter or digit, then at most 63 letters, digits, "_", and "-"`,
+		);
 	}
 }
 
@@ -198,8 +222,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		},
 		// Pre-bind: queue registrations so bindCore() can flush them once the
 		// model registry is available. bindCore() replaces both with direct calls.
-		registerProvider: (name, config, extensionPath = "<unknown>") => {
-			runtime.pendingProviderRegistrations.push({ name, config, extensionPath });
+		registerProvider: (name, config, extensionId = "<unknown>") => {
+			runtime.pendingProviderRegistrations.push({ name, config, extensionId });
 		},
 		unregisterProvider: (name) => {
 			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
@@ -224,7 +248,7 @@ function createExtensionAPI(
 		// Registration methods - write to extension
 		on(event: string, handler: ExtensionHandlerFn) {
 			if (!EXTENSION_EVENTS.has(event)) {
-				throw new Error(`Extension '${extension.path}' subscribes to unknown event '${event}'`);
+				throw new Error(`Extension '${extension.id}' subscribes to unknown event '${event}'`);
 			}
 			return extension.handlers.register(event, handler, runtime.assertActive);
 		},
@@ -237,7 +261,7 @@ function createExtensionAPI(
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
-				extensionPath: extension.path,
+				extensionId: extension.id,
 			});
 			runtime.refreshTools();
 		},
@@ -249,9 +273,9 @@ function createExtensionAPI(
 				throw new Error(`Extension command '/${name}' is reserved by native Plan mode`);
 			}
 			extension.commands.set(name, {
+				...options,
 				name,
 				sourceInfo: extension.sourceInfo,
-				...options,
 			});
 		},
 
@@ -259,12 +283,12 @@ function createExtensionAPI(
 			shortcut: KeyId,
 			options: {
 				description?: string;
-				handler: (ctx: import("./types.ts").ExtensionContext) => Promise<void> | void;
+				handler: (ctx: ExtensionContext) => Promise<void> | void;
 			},
 		): void {
 			runtime.assertActive();
-			// The extension path comes last: it names the extension a shortcut's ctx belongs to.
-			extension.shortcuts.set(shortcut, { ...options, shortcut, extensionPath: extension.path });
+			// The extension id comes last: it names the extension a shortcut's ctx belongs to.
+			extension.shortcuts.set(shortcut, { ...options, shortcut, extensionId: extension.id });
 		},
 
 		registerFlag(
@@ -272,7 +296,7 @@ function createExtensionAPI(
 			options: { description?: string; type: "boolean" | "string"; default?: boolean | string },
 		): void {
 			runtime.assertActive();
-			extension.flags.set(name, { name, extensionPath: extension.path, ...options });
+			extension.flags.set(name, { ...options, name, extensionId: extension.id });
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
 				runtime.flagValues.set(name, options.default);
 			}
@@ -334,7 +358,7 @@ function createExtensionAPI(
 
 		getServicesStatus() {
 			runtime.assertActive();
-			return runtime.getServicesStatus(extension.path);
+			return runtime.getServicesStatus(extension.id);
 		},
 
 		exec(command: string, args: string[], options?: ExecOptions) {
@@ -379,12 +403,12 @@ function createExtensionAPI(
 
 		registerProvider(name: string, config: ProviderConfig) {
 			runtime.assertActive();
-			runtime.registerProvider(name, config, extension.path);
+			runtime.registerProvider(name, config, extension.id);
 		},
 
 		unregisterProvider(name: string) {
 			runtime.assertActive();
-			runtime.unregisterProvider(name, extension.path);
+			runtime.unregisterProvider(name, extension.id);
 		},
 
 		events: {
@@ -410,7 +434,8 @@ function createExtensionAPI(
 	return api;
 }
 
-async function loadExtensionModule(extensionPath: string) {
+/** Evaluate a module: its namespace, whose default export is the factory and whose `manifest` is a single file's manifest. */
+async function importModule(modulePath: string): Promise<unknown> {
 	const jiti = createJiti(moduleUrl || pathToFileURL(process.execPath).href, {
 		moduleCache: false,
 		// Serve Volt packages and typebox from the host's loaded instances. Without this, a source
@@ -420,26 +445,139 @@ async function loadExtensionModule(extensionPath: string) {
 		// In Node.js/dev: aliases resolve package subpaths the virtual module map does not cover
 		...(isStandaloneBinary || isBundledCli ? { tryNative: false } : { alias: getAliases() }),
 	});
-
-	const module = await jiti.import(extensionPath, { default: true });
-	const factory = module as ExtensionFactory;
-	return typeof factory !== "function" ? undefined : factory;
+	return jiti.import(modulePath);
 }
 
-/**
- * Create an Extension object with empty collections.
- */
-function createExtension(extensionPath: string, resolvedPath: string): Extension {
-	const source =
-		extensionPath.startsWith("<") && extensionPath.endsWith(">")
-			? extensionPath.slice(1, -1).split(":")[0] || "temporary"
-			: "local";
-	const baseDir = extensionPath.startsWith("<") ? undefined : path.dirname(resolvedPath);
+/** A module's default export when it is a function; a CommonJS module may export the function itself. */
+function moduleFactory(module: unknown): ExtensionFactory | undefined {
+	const exported =
+		(typeof module === "object" && module !== null) || typeof module === "function"
+			? (Reflect.get(module, "default") ?? module)
+			: module;
+	return typeof exported === "function" ? (exported as ExtensionFactory) : undefined;
+}
+
+/** A module without a default-exported factory; its message is reported as is. */
+class MissingFactoryError extends Error {}
+
+/** Something to load an extension from, and where it was found. */
+export interface ExtensionSource {
+	/** A module, a directory, or a package root; for an SDK extension, its label (`<inline:1>`). */
+	readonly path: string;
+	/**
+	 * Where it was found: a user's or temporary extension beats a project's
+	 * with the same id. Defaults to `temporary`.
+	 */
+	readonly scope?: SourceScope;
+	/**
+	 * Installed from npm or git: it loads only as a package whose package.json
+	 * declares its manifest, and no module code runs to find one.
+	 */
+	readonly installed?: boolean;
+	/** An SDK extension, loaded instead of `path`. */
+	readonly definition?: ExtensionDefinition;
+}
+
+/** An extension whose manifest was read, before its factory runs. */
+interface Candidate {
+	readonly path: string;
+	readonly resolvedPath: string;
+	readonly scope: SourceScope;
+	readonly manifest: ExtensionManifest;
+	readonly version: string;
+	readonly baseDir: string | undefined;
+	/** The factory; a package's entry module is imported only once the package owns its id. */
+	readonly factory: () => Promise<ExtensionFactory>;
+}
+
+function isDirectory(target: string): boolean {
+	try {
+		return fs.statSync(target).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** An SDK extension: its manifest checked and its factory taken, each read once. */
+function definitionCandidate(definition: ExtensionDefinition, label: string, scope: SourceScope): Candidate {
+	const { manifest, factory } = definition;
+	if (typeof factory !== "function") throw new MissingFactoryError(`Extension ${label} has no factory function`);
+	return {
+		path: label,
+		resolvedPath: label,
+		scope,
+		manifest: validateManifest(manifest, { package: false }),
+		version: LOCAL_EXTENSION_VERSION,
+		baseDir: undefined,
+		factory: async () => factory,
+	};
+}
+
+/** Read what `source` declares: a package's manifest without running its code, or a trusted module's export. */
+async function prepareExtension(source: ExtensionSource, cwd: string): Promise<Candidate> {
+	const scope = source.scope ?? "temporary";
+	if (source.definition !== undefined) return definitionCandidate(source.definition, source.path, scope);
+	const resolvedPath = resolvePath(source.path, cwd, { normalizeUnicodeSpaces: true });
+	const base = { path: source.path, resolvedPath, scope };
+	if (isDirectory(resolvedPath) && declaresPackageExtension(resolvedPath)) {
+		const declared = readPackageManifest(resolvedPath);
+		if (declared === undefined) throw new ExtensionManifestError("package.json declares no extension");
+		return {
+			...base,
+			manifest: declared.manifest,
+			version: declared.version,
+			baseDir: resolvedPath,
+			factory: async () => {
+				const factory = moduleFactory(await importModule(declared.entryPath));
+				if (!factory) {
+					throw new MissingFactoryError(
+						`Extension does not export a valid factory function: ${declared.entryPath}`,
+					);
+				}
+				return factory;
+			},
+		};
+	}
+	if (source.installed) {
+		throw new ExtensionManifestError(
+			`An extension installed from npm or git must be a package that declares its manifest in the "volt" field of package.json ("id", "displayName", and "entry")`,
+		);
+	}
+	const module = await importModule(resolvedPath);
+	const manifest = readModuleManifest(module);
+	const factory = moduleFactory(module);
+	if (!factory) throw new MissingFactoryError(`Extension does not export a valid factory function: ${source.path}`);
+	return {
+		...base,
+		manifest,
+		version: LOCAL_EXTENSION_VERSION,
+		baseDir: path.dirname(resolvedPath),
+		factory: async () => factory,
+	};
+}
+
+function loadError(error: unknown): string {
+	if (error instanceof ExtensionManifestError) return `Invalid extension manifest: ${error.message}`;
+	if (error instanceof MissingFactoryError) return error.message;
+	return `Failed to load extension: ${error instanceof Error ? error.message : String(error)}`;
+}
+
+/** Create an Extension object with empty collections. */
+function createExtension(candidate: Candidate): Extension {
+	const label = candidate.path.startsWith("<") && candidate.path.endsWith(">");
+	const source = label ? candidate.path.slice(1, -1).split(":")[0] || "temporary" : "local";
 
 	return {
-		path: extensionPath,
-		resolvedPath,
-		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
+		id: candidate.manifest.id,
+		manifest: candidate.manifest,
+		version: candidate.version,
+		path: candidate.path,
+		resolvedPath: candidate.resolvedPath,
+		sourceInfo: createSyntheticSourceInfo(candidate.path, {
+			source,
+			scope: candidate.scope,
+			baseDir: candidate.baseDir,
+		}),
 		handlers: new ExtensionHandlerRegistry(),
 		tools: new Map(),
 		messageRenderers: new Map(),
@@ -450,73 +588,101 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
-async function loadExtension(
-	extensionPath: string,
-	cwd: string,
-	eventBus: EventBus,
-	runtime: ExtensionRuntime,
-): Promise<{ extension: Extension | null; error: string | null }> {
-	const resolvedPath = resolvePath(extensionPath, cwd, { normalizeUnicodeSpaces: true });
-
-	try {
-		const factory = await loadExtensionModule(resolvedPath);
-		if (!factory) {
-			return { extension: null, error: `Extension does not export a valid factory function: ${extensionPath}` };
+/**
+ * The candidates that own their manifest ids, in load order. An id an
+ * already loaded extension has stays its. Otherwise a user's or temporary
+ * extension beats a project's, and the earlier one beats the later. Each
+ * extension that loses is reported.
+ */
+function settleIds(
+	candidates: readonly Candidate[],
+	loaded: readonly Extension[],
+	errors: LoadExtensionsResult["errors"],
+): Candidate[] {
+	const taken = new Map(loaded.map((extension) => [extension.id, extension.path]));
+	const owners = new Map<string, Candidate>();
+	const reject = (candidate: Candidate, ownerPath: string): void => {
+		errors.push({
+			path: candidate.path,
+			error: `Extension id "${candidate.manifest.id}" is already used by ${ownerPath}; ${candidate.path} is not loaded`,
+		});
+	};
+	for (const candidate of candidates) {
+		const id = candidate.manifest.id;
+		const loadedPath = taken.get(id);
+		if (loadedPath !== undefined) {
+			reject(candidate, loadedPath);
+			continue;
 		}
-
-		const extension = createExtension(extensionPath, resolvedPath);
-		const api = createExtensionAPI(extension, runtime, cwd, eventBus);
-		await factory(api);
-
-		return { extension, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { extension: null, error: `Failed to load extension: ${message}` };
+		const owner = owners.get(id);
+		if (owner === undefined) {
+			owners.set(id, candidate);
+		} else if (owner.scope === "project" && candidate.scope !== "project") {
+			reject(owner, candidate.path);
+			owners.set(id, candidate);
+		} else {
+			reject(candidate, owner.path);
+		}
 	}
+	const winners = new Set(owners.values());
+	return candidates.filter((candidate) => winners.has(candidate));
 }
 
 /**
- * Create an Extension from an inline factory function.
+ * Load an SDK extension. Throws when its manifest is invalid or its factory
+ * fails; it is not checked against other extensions' ids.
  */
 export async function loadExtensionFromFactory(
-	factory: ExtensionFactory,
+	definition: ExtensionDefinition,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: ExtensionRuntime,
-	extensionPath = "<inline>",
+	label = "<inline>",
 ): Promise<Extension> {
-	const extension = createExtension(extensionPath, extensionPath);
-	const resolvedCwd = resolvePath(cwd);
-	const api = createExtensionAPI(extension, runtime, resolvedCwd, eventBus);
-	await factory(api);
+	const candidate = definitionCandidate(definition, label, "temporary");
+	const extension = createExtension(candidate);
+	const api = createExtensionAPI(extension, runtime, resolvePath(cwd), eventBus);
+	await (await candidate.factory())(api);
 	return extension;
 }
 
 /**
- * Load extensions from paths.
+ * Load extensions from paths and SDK definitions, in order. Each manifest is
+ * read first; then the extensions that own their ids run their factories.
+ * `loaded` are extensions already loaded into the same runtime, whose ids
+ * stay theirs.
  */
 export async function loadExtensions(
-	paths: string[],
+	sources: ReadonlyArray<string | ExtensionSource>,
 	cwd: string,
 	eventBus?: EventBus,
 	runtime?: ExtensionRuntime,
+	loaded: readonly Extension[] = [],
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
-	const errors: Array<{ path: string; error: string }> = [];
+	const errors: LoadExtensionsResult["errors"] = [];
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
 	const resolvedRuntime = runtime ?? createExtensionRuntime();
 
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, resolvedCwd, resolvedEventBus, resolvedRuntime);
-
-		if (error) {
-			errors.push({ path: extPath, error });
-			continue;
+	const candidates: Candidate[] = [];
+	for (const entry of sources) {
+		const source = typeof entry === "string" ? { path: entry } : entry;
+		try {
+			candidates.push(await prepareExtension(source, resolvedCwd));
+		} catch (error) {
+			errors.push({ path: source.path, error: loadError(error) });
 		}
+	}
 
-		if (extension) {
+	for (const candidate of settleIds(candidates, loaded, errors)) {
+		try {
+			const factory = await candidate.factory();
+			const extension = createExtension(candidate);
+			await factory(createExtensionAPI(extension, resolvedRuntime, resolvedCwd, resolvedEventBus));
 			extensions.push(extension);
+		} catch (error) {
+			errors.push({ path: candidate.path, error: loadError(error) });
 		}
 	}
 
@@ -527,26 +693,6 @@ export async function loadExtensions(
 	};
 }
 
-interface VoltManifest {
-	extensions?: string[];
-	themes?: string[];
-	skills?: string[];
-	prompts?: string[];
-}
-
-function readVoltManifest(packageJsonPath: string): VoltManifest | null {
-	try {
-		const content = fs.readFileSync(packageJsonPath, "utf-8");
-		const pkg = JSON.parse(content) as { volt?: unknown };
-		if (pkg.volt && typeof pkg.volt === "object") {
-			return pkg.volt as VoltManifest;
-		}
-		return null;
-	} catch {
-		return null;
-	}
-}
-
 function isExtensionFile(name: string): boolean {
 	return name.endsWith(".ts") || name.endsWith(".js");
 }
@@ -555,28 +701,14 @@ function isExtensionFile(name: string): boolean {
  * Resolve extension entry points from a directory.
  *
  * Checks for:
- * 1. package.json with "volt.extensions" field -> returns declared paths
- * 2. index.ts or index.js -> returns the index file
+ * 1. package.json whose "volt" field declares an extension -> the directory, a package
+ * 2. index.ts or index.js -> the index file, a single-file extension
  *
  * Returns resolved paths or null if no entry points found.
  */
 function resolveExtensionEntries(dir: string): string[] | null {
-	// Check for package.json with a "volt" field
-	const packageJsonPath = path.join(dir, "package.json");
-	if (fs.existsSync(packageJsonPath)) {
-		const manifest = readVoltManifest(packageJsonPath);
-		if (manifest?.extensions?.length) {
-			const entries: string[] = [];
-			for (const extPath of manifest.extensions) {
-				const resolvedExtPath = path.resolve(dir, extPath);
-				if (fs.existsSync(resolvedExtPath)) {
-					entries.push(resolvedExtPath);
-				}
-			}
-			if (entries.length > 0) {
-				return entries;
-			}
-		}
+	if (declaresPackageExtension(dir)) {
+		return [dir];
 	}
 
 	// Check for index.ts or index.js
@@ -598,7 +730,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
  * Discovery rules:
  * 1. Direct files: `extensions/*.ts` or `*.js` → load
  * 2. Subdirectory with index: `extensions/* /index.ts` or `index.js` → load
- * 3. Subdirectory with package.json: `extensions/* /package.json` with a "volt" field → load what it declares
+ * 3. Subdirectory with package.json: `extensions/* /package.json` declaring an extension → load the package
  *
  * No recursion beyond one level. Complex packages must use package.json manifest.
  */
@@ -637,7 +769,10 @@ function discoverExtensionsInDir(dir: string): string[] {
 }
 
 /**
- * Discover and load extensions from standard locations.
+ * Discover and load extensions from standard locations: the project's
+ * (scope `project`), the user's (scope `user`), then `configuredPaths`
+ * (scope `temporary`). It does not check project trust: the caller decides
+ * whether `cwd`'s extensions may run. Volt's own resource loading checks it.
  */
 export async function discoverAndLoadExtensions(
 	configuredPaths: string[],
@@ -647,44 +782,44 @@ export async function discoverAndLoadExtensions(
 ): Promise<LoadExtensionsResult> {
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedAgentDir = resolvePath(agentDir);
-	const allPaths: string[] = [];
+	const sources: ExtensionSource[] = [];
 	const seen = new Set<string>();
 
-	const addPaths = (paths: string[]) => {
+	const addPaths = (paths: string[], scope: SourceScope) => {
 		for (const p of paths) {
 			const resolved = path.resolve(p);
 			if (!seen.has(resolved)) {
 				seen.add(resolved);
-				allPaths.push(p);
+				sources.push({ path: p, scope });
 			}
 		}
 	};
 
 	// 1. Project-local extensions: cwd/${CONFIG_DIR_NAME}/extensions/
 	const localExtDir = path.join(resolvedCwd, CONFIG_DIR_NAME, "extensions");
-	addPaths(discoverExtensionsInDir(localExtDir));
+	addPaths(discoverExtensionsInDir(localExtDir), "project");
 
 	// 2. Global extensions: agentDir/extensions/
 	const globalExtDir = path.join(resolvedAgentDir, "extensions");
-	addPaths(discoverExtensionsInDir(globalExtDir));
+	addPaths(discoverExtensionsInDir(globalExtDir), "user");
 
 	// 3. Explicitly configured paths
 	for (const p of configuredPaths) {
 		const resolved = resolvePath(p, resolvedCwd, { normalizeUnicodeSpaces: true });
 		if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-			// Check for package.json with a volt manifest or index.ts
+			// Check for a package manifest or index.ts
 			const entries = resolveExtensionEntries(resolved);
 			if (entries) {
-				addPaths(entries);
+				addPaths(entries, "temporary");
 				continue;
 			}
 			// No explicit entries - discover individual files in directory
-			addPaths(discoverExtensionsInDir(resolved));
+			addPaths(discoverExtensionsInDir(resolved), "temporary");
 			continue;
 		}
 
-		addPaths([resolved]);
+		addPaths([resolved], "temporary");
 	}
 
-	return loadExtensions(allPaths, resolvedCwd, eventBus);
+	return loadExtensions(sources, resolvedCwd, eventBus);
 }

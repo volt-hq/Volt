@@ -24,6 +24,7 @@ import type { ConversationFactory } from "../src/core/host/hosted-conversation.t
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../src/index.ts";
 import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
+import { testExtension } from "./utilities.ts";
 
 describe("AgentSession reload invalidates the previous extension generation", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -80,7 +81,7 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt: ExtensionAPI) => {
+						testExtension("test-extension-1", (volt: ExtensionAPI) => {
 							voltGenerations.push(volt);
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
@@ -98,7 +99,7 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 									maxTokens: registeredModel.maxTokens,
 								})),
 							});
-						},
+						}),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

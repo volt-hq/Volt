@@ -265,38 +265,28 @@ Content`,
 			expect(result.prompts.some((r) => r.path === promptPath && !r.enabled)).toBe(true);
 		});
 
-		it("should resolve directory with package.json volt.extensions in extensions setting", async () => {
-			// Create a package with volt.extensions in package.json
+		it("should resolve a directory whose package.json declares an extension in extensions setting to the package", async () => {
 			const pkgDir = join(tempDir, "my-extensions-pkg");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
 			writeFileSync(
 				join(pkgDir, "package.json"),
 				JSON.stringify({
 					name: "my-extensions-pkg",
-					volt: {
-						extensions: ["./extensions/clip.ts", "./extensions/cost.ts"],
-					},
+					volt: { id: "my-extensions-pkg", displayName: "My Extensions", entry: "extensions/clip.ts" },
 				}),
 			);
 			writeFileSync(join(pkgDir, "extensions", "clip.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "cost.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "helper.ts"), "export const x = 1;"); // Not in manifest, shouldn't be loaded
+			writeFileSync(join(pkgDir, "extensions", "helper.ts"), "export const x = 1;");
 
 			// Add the directory to extensions setting (not packages setting)
 			settingsManager.setExtensionPaths([pkgDir]);
 
 			const result = await packageManager.resolve();
 
-			// Should find the extensions declared in package.json volt.extensions
-			expect(result.extensions.some((r) => r.path === join(pkgDir, "extensions", "clip.ts") && r.enabled)).toBe(
-				true,
-			);
-			expect(result.extensions.some((r) => r.path === join(pkgDir, "extensions", "cost.ts") && r.enabled)).toBe(
-				true,
-			);
-
-			// Should NOT find helper.ts (not declared in manifest)
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "helper.ts"))).toBe(false);
+			// The package is the extension: the loader reads its manifest and entry.
+			expect(result.extensions.filter((r) => r.path.startsWith(pkgDir)).map((r) => [r.path, r.enabled])).toEqual([
+				[pkgDir, true],
+			]);
 		});
 	});
 
@@ -578,7 +568,9 @@ Content`,
 				JSON.stringify({
 					name: "my-package",
 					volt: {
-						extensions: ["./src/index.ts"],
+						id: "my-package",
+						displayName: "My Package",
+						entry: "src/index.ts",
 						skills: ["./skills"],
 					},
 				}),
@@ -592,14 +584,14 @@ Content`,
 			);
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.extensions.some((r) => r.path === join(pkgDir, "src", "index.ts") && r.enabled)).toBe(true);
+			expect(result.extensions.map((r) => [r.path, r.enabled])).toEqual([[pkgDir, true]]);
 			// Skills with SKILL.md are returned as file paths
 			expect(result.skills.some((r) => r.path === join(pkgDir, "skills", "my-skill", "SKILL.md") && r.enabled)).toBe(
 				true,
 			);
 		});
 
-		it("should keep volt manifest entries with leading tilde package-relative", async () => {
+		it("should keep volt manifest skill entries with leading tilde package-relative", async () => {
 			const pkgDir = join(tempDir, "tilde-manifest-package");
 			const directExtensionPath = join(pkgDir, "~extensions", "main.ts");
 			const slashExtensionPath = join(pkgDir, "~", "extensions", "alt.ts");
@@ -619,7 +611,6 @@ Content`,
 				JSON.stringify({
 					name: "tilde-manifest-package",
 					volt: {
-						extensions: ["~extensions/main.ts", "~/extensions/alt.ts"],
 						skills: ["~skills", "~/skills"],
 					},
 				}),
@@ -627,8 +618,8 @@ Content`,
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			expect(result.extensions.some((r) => r.path === directExtensionPath && r.enabled)).toBe(true);
-			expect(result.extensions.some((r) => r.path === slashExtensionPath && r.enabled)).toBe(true);
+			// A skills-only manifest declares no extension, and its module files are not extensions.
+			expect(result.extensions).toEqual([]);
 			expect(result.skills.some((r) => r.path === directSkillPath && r.enabled)).toBe(true);
 			expect(result.skills.some((r) => r.path === slashSkillPath && r.enabled)).toBe(true);
 		});
@@ -1471,27 +1462,22 @@ Content`,
 	});
 
 	describe("pattern filtering in volt manifest", () => {
-		it("should support glob patterns in manifest extensions", async () => {
+		it("should resolve a package with the old extensions list to the package, whose load reports it", async () => {
 			const pkgDir = join(tempDir, "manifest-pkg");
 			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			mkdirSync(join(pkgDir, "node_modules/dep/extensions"), { recursive: true });
 			writeFileSync(join(pkgDir, "extensions", "local.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "node_modules/dep/extensions", "remote.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "node_modules/dep/extensions", "skip.ts"), "export default function() {}");
 			writeFileSync(
 				join(pkgDir, "package.json"),
 				JSON.stringify({
 					name: "manifest-pkg",
 					volt: {
-						extensions: ["extensions", "node_modules/dep/extensions", "!**/skip.ts"],
+						extensions: ["extensions", "!**/skip.ts"],
 					},
 				}),
 			);
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.extensions.some((r) => isEnabled(r, "local.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "remote.ts"))).toBe(true);
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "skip.ts"))).toBe(false);
+			expect(result.extensions.map((r) => [r.path, r.enabled])).toEqual([[pkgDir, true]]);
 		});
 
 		it("should support glob patterns in manifest skills", async () => {
@@ -1551,41 +1537,58 @@ Content`,
 
 	describe("pattern filtering in package filters", () => {
 		it("should apply user filters on top of manifest filters (not replace)", async () => {
-			// Manifest excludes baz.ts, user excludes bar.ts
+			// Manifest excludes baz, user excludes bar
 			// Result should exclude BOTH
 			const pkgDir = join(tempDir, "layered-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "foo.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "bar.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "baz.ts"), "export default function() {}");
+			for (const name of ["foo", "bar", "baz"]) {
+				mkdirSync(join(pkgDir, "skills", name), { recursive: true });
+				writeFileSync(join(pkgDir, "skills", name, "SKILL.md"), `---\nname: ${name}\ndescription: ${name}\n---\n`);
+			}
 			writeFileSync(
 				join(pkgDir, "package.json"),
 				JSON.stringify({
 					name: "layered-pkg",
 					volt: {
-						extensions: ["extensions", "!**/baz.ts"],
+						skills: ["skills", "!**/baz"],
 					},
 				}),
 			);
 
-			// User filter adds exclusion for bar.ts
+			// User filter adds exclusion for bar
 			settingsManager.setPackages([
 				{
 					source: pkgDir,
-					extensions: ["!**/bar.ts"],
-					skills: [],
+					extensions: [],
+					skills: ["!**/bar"],
 					prompts: [],
 					themes: [],
 				},
 			]);
 
 			const result = await packageManager.resolve();
-			// foo.ts should be included (not excluded by anyone)
-			expect(result.extensions.some((r) => isEnabled(r, "foo.ts"))).toBe(true);
-			// bar.ts should be excluded (by user)
-			expect(result.extensions.some((r) => isDisabled(r, "bar.ts"))).toBe(true);
-			// baz.ts should be excluded (by manifest)
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "baz.ts"))).toBe(false);
+			// foo should be included (not excluded by anyone)
+			expect(result.skills.some((r) => isEnabled(r, "foo/SKILL.md"))).toBe(true);
+			// bar should be excluded (by user)
+			expect(result.skills.some((r) => isDisabled(r, "bar/SKILL.md"))).toBe(true);
+			// baz should be excluded (by manifest)
+			expect(result.skills.some((r) => pathEndsWith(r.path, "baz/SKILL.md"))).toBe(false);
+		});
+
+		it("should turn a package's extension off with an empty extensions filter", async () => {
+			const pkgDir = join(tempDir, "filtered-ext-pkg");
+			mkdirSync(pkgDir, { recursive: true });
+			writeFileSync(join(pkgDir, "index.ts"), "export default function() {}");
+			writeFileSync(
+				join(pkgDir, "package.json"),
+				JSON.stringify({
+					name: "filtered-ext-pkg",
+					volt: { id: "filtered", displayName: "Filtered", entry: "index.ts" },
+				}),
+			);
+			settingsManager.setPackages([{ source: pkgDir, extensions: [] }]);
+
+			const result = await packageManager.resolve();
+			expect(result.extensions.filter((r) => r.path === pkgDir).map((r) => r.enabled)).toEqual([false]);
 		});
 
 		it("should exclude extensions from package with ! pattern", async () => {
@@ -1758,24 +1761,24 @@ Content`,
 
 		it("should handle force-include in manifest patterns", async () => {
 			const pkgDir = join(tempDir, "manifest-force-pkg");
-			mkdirSync(join(pkgDir, "extensions"), { recursive: true });
-			writeFileSync(join(pkgDir, "extensions", "one.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "two.ts"), "export default function() {}");
-			writeFileSync(join(pkgDir, "extensions", "three.ts"), "export default function() {}");
+			mkdirSync(join(pkgDir, "prompts"), { recursive: true });
+			writeFileSync(join(pkgDir, "prompts", "one.md"), "One");
+			writeFileSync(join(pkgDir, "prompts", "two.md"), "Two");
+			writeFileSync(join(pkgDir, "prompts", "three.md"), "Three");
 			writeFileSync(
 				join(pkgDir, "package.json"),
 				JSON.stringify({
 					name: "manifest-force-pkg",
 					volt: {
-						extensions: ["extensions", "!**/two.ts", "+extensions/two.ts"],
+						prompts: ["prompts", "!**/two.md", "+prompts/two.md"],
 					},
 				}),
 			);
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
-			expect(result.extensions.some((r) => isEnabled(r, "one.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "two.ts"))).toBe(true);
-			expect(result.extensions.some((r) => isEnabled(r, "three.ts"))).toBe(true);
+			expect(result.prompts.some((r) => isEnabled(r, "one.md"))).toBe(true);
+			expect(result.prompts.some((r) => isEnabled(r, "two.md"))).toBe(true);
+			expect(result.prompts.some((r) => isEnabled(r, "three.md"))).toBe(true);
 		});
 
 		it("should force-include themes", async () => {
@@ -1988,29 +1991,24 @@ export default function(api) { api.registerTool({ name: "test", description: "te
 			expect(result.extensions.some((r) => pathEndsWith(r.path, "agents.ts"))).toBe(false);
 		});
 
-		it("should respect package.json volt.extensions manifest in subdirectories", async () => {
+		it("should resolve a subdirectory whose package.json declares an extension to that package", async () => {
 			const pkgDir = join(tempDir, "manifest-subdir-pkg");
 			mkdirSync(join(pkgDir, "extensions", "custom"), { recursive: true });
 
 			// Subdirectory with its own manifest
 			writeFileSync(
 				join(pkgDir, "extensions", "custom", "package.json"),
-				JSON.stringify({
-					volt: {
-						extensions: ["./main.ts"],
-					},
-				}),
+				JSON.stringify({ volt: { id: "custom", displayName: "Custom", entry: "main.ts" } }),
 			);
 			writeFileSync(join(pkgDir, "extensions", "custom", "main.ts"), "export default function(api) {}");
 			writeFileSync(join(pkgDir, "extensions", "custom", "utils.ts"), "export const util = 1;");
 
 			const result = await packageManager.resolveExtensionSources([pkgDir]);
 
-			// Should find main.ts declared in manifest
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "custom/main.ts") && r.enabled)).toBe(true);
-
-			// Should NOT find utils.ts (not declared in manifest)
-			expect(result.extensions.some((r) => pathEndsWith(r.path, "utils.ts"))).toBe(false);
+			// The subdirectory is the extension; its manifest names the entry
+			expect(result.extensions.map((r) => [r.path, r.enabled])).toEqual([
+				[join(pkgDir, "extensions", "custom"), true],
+			]);
 		});
 
 		it("should handle mixed top-level files and subdirectories", async () => {

@@ -37,7 +37,7 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { ConversationLockedError } from "./core/conversation-log/conversation-lock.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
-import type { ExtensionFactory, ExtensionMode } from "./core/extensions/types.ts";
+import type { ExtensionDefinition, ExtensionMode } from "./core/extensions/types.ts";
 import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
 import { ConversationHost } from "./core/host/conversation-host.ts";
 import type { ConversationFactory } from "./core/host/hosted-conversation.ts";
@@ -776,7 +776,7 @@ async function runWithOwnedConversationHost(
 }
 
 export interface MainOptions {
-	extensionFactories?: ExtensionFactory[];
+	extensionFactories?: ExtensionDefinition[];
 }
 
 export async function main(args: string[], options?: MainOptions) {

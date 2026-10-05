@@ -397,7 +397,17 @@ describe("DefaultPackageManager git update", () => {
 			mkdirSync(join(cachedDir, "volt-extensions"), { recursive: true });
 			writeFileSync(
 				join(cachedDir, "package.json"),
-				JSON.stringify({ volt: { extensions: ["./volt-extensions"] } }, null, 2),
+				JSON.stringify(
+					{
+						volt: {
+							id: "session-breakdown",
+							displayName: "Session Breakdown",
+							entry: "volt-extensions/session-breakdown.ts",
+						},
+					},
+					null,
+					2,
+				),
 			);
 			writeFileSync(extensionFile, "// stale");
 
@@ -442,7 +452,17 @@ describe("DefaultPackageManager git update", () => {
 			mkdirSync(join(cachedDir, "volt-extensions"), { recursive: true });
 			writeFileSync(
 				join(cachedDir, "package.json"),
-				JSON.stringify({ volt: { extensions: ["./volt-extensions"] } }, null, 2),
+				JSON.stringify(
+					{
+						volt: {
+							id: "session-breakdown",
+							displayName: "Session Breakdown",
+							entry: "volt-extensions/session-breakdown.ts",
+						},
+					},
+					null,
+					2,
+				),
 			);
 			writeFileSync(extensionFile, "// pinned");
 

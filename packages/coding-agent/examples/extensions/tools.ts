@@ -10,14 +10,21 @@ import { createRenderFrame } from "@hansjm10/volt-tui";
  * 2. Use /tools to open the tool selector
  */
 
-import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@hansjm10/volt-coding-agent";
-import { getSettingsListTheme } from "@hansjm10/volt-coding-agent";
+import {
+	defineManifest,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getSettingsListTheme,
+	type ToolInfo,
+} from "@hansjm10/volt-coding-agent";
 import { Container, type SettingItem, SettingsList } from "@hansjm10/volt-tui";
 
 // State persisted to session
 interface ToolsState {
 	enabledTools: string[];
 }
+
+export const manifest = defineManifest({ id: "tools", displayName: "Tools" });
 
 export default function toolsExtension(volt: ExtensionAPI) {
 	// Track enabled tools

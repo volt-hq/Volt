@@ -5,7 +5,7 @@
  * without paying for an extra follow-up LLM turn.
  */
 
-import { defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Text } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
@@ -59,6 +59,8 @@ const structuredOutputTool = defineTool({
 		return new Text(lines.join("\n"), 0, 0);
 	},
 });
+
+export const manifest = defineManifest({ id: "structured-output", displayName: "Structured Output" });
 
 export default function (volt: ExtensionAPI) {
 	volt.registerTool(structuredOutputTool);

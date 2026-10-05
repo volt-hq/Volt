@@ -26,7 +26,10 @@ describe("Input Event", () => {
 		// Clear and recreate extensions dir for clean state
 		fs.rmSync(extensionsDir, { recursive: true, force: true });
 		fs.mkdirSync(extensionsDir);
-		for (let i = 0; i < extensions.length; i++) fs.writeFileSync(path.join(extensionsDir, `e${i}.ts`), extensions[i]);
+		for (let i = 0; i < extensions.length; i++) {
+			const manifest = `export const manifest = { id: "e${i}", displayName: "e${i}" };\n`;
+			fs.writeFileSync(path.join(extensionsDir, `e${i}.ts`), manifest + extensions[i]);
+		}
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 		const sm = SessionManager.inMemory();
 		const mr = ModelRegistry.create(AuthStorage.create(path.join(tempDir, "auth.json")));

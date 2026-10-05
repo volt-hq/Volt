@@ -9,7 +9,13 @@
  *   ping                        → "pong" (instant, no LLM)
  *   time                        → current time (instant, no LLM)
  */
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "input-transform",
+	displayName: "Input Transform",
+	description: "Demonstrates the `input` event for intercepting user input.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("input", async (event, ctx) => {

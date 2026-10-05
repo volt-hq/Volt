@@ -98,7 +98,7 @@ describe("extension work kinds", () => {
 		expect(harness.session.getQueuedWorkNotices()).toEqual([]);
 	});
 
-	it("starts only the owning extension's kinds, and registers none for an extension whose id another owns", async () => {
+	it("starts only the owning extension's kinds", async () => {
 		const outcomes: string[] = [];
 		const attempt = (ctx: ExtensionCommandContext, kind: string) =>
 			ctx
@@ -117,19 +117,10 @@ describe("extension work kinds", () => {
 				},
 			});
 		};
-		const twin: ExtensionFactory = (volt) => {
-			volt.registerWorkKind("audit");
-			volt.registerCommand("audit", {
-				handler: async (_args, ctx) => {
-					outcomes.push(await attempt(ctx, "audit"));
-				},
-			});
-		};
 		const harness = await createHarness({
 			extensionFactories: [
-				{ factory: owner, path: "/repo/.volt/extensions/sweeper/index.ts" },
-				{ factory: intruder, path: "/repo/.volt/extensions/intruder.ts" },
-				{ factory: twin, path: "/home/me/.volt/agent/extensions/sweeper.ts" },
+				{ factory: owner, id: "sweeper" },
+				{ factory: intruder, id: "intruder" },
 			],
 		});
 		harnesses.push(harness);
@@ -139,20 +130,12 @@ describe("extension work kinds", () => {
 			mode: "print",
 			onError: (error) => errors.push(error),
 		}).ready;
-		expect(errors).toEqual([
-			{
-				extensionPath: "/home/me/.volt/agent/extensions/sweeper.ts",
-				event: "register_work_kind",
-				error: expect.stringContaining("ext:sweeper/audit is not registered"),
-			},
-		]);
+		expect(errors).toEqual([]);
 		await harness.session.prompt("/steal sweep");
 		await harness.session.prompt("/steal ext:sweeper/sweep");
-		await harness.session.prompt("/audit");
 		expect(outcomes).toEqual([
 			expect.stringContaining('Unknown work kind "sweep"'),
 			expect.stringContaining('Unknown work kind "ext:sweeper/sweep"'),
-			expect.stringContaining('Unknown work kind "audit"'),
 		]);
 		expect(harness.session.work.list()).toEqual([]);
 	});
@@ -230,7 +213,7 @@ describe("extension work kinds", () => {
 
 		await session.reload();
 		const interrupted = session.work.list().find((record) => record.title === "Started as the extensions reload");
-		expect(interrupted).toMatchObject({ kind: "ext:inline-1/sweep", outcome: "interrupted" });
+		expect(interrupted).toMatchObject({ kind: "ext:test-extension/sweep", outcome: "interrupted" });
 		expect(session.work.running()).toEqual([]);
 		const entries = session.sessionManager.committedEntriesAfter(0).length;
 		late?.();

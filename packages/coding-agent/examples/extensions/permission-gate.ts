@@ -5,7 +5,9 @@
  * Patterns checked: rm -rf, sudo, chmod/chown 777
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "permission-gate", displayName: "Permission Gate" });
 
 export default function (volt: ExtensionAPI) {
 	const dangerousPatterns = [/\brm\s+(-rf?|--recursive)/i, /\bsudo\b/i, /\b(chmod|chown)\b.*777/i];

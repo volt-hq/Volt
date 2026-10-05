@@ -17,7 +17,6 @@
  * nowhere.
  */
 
-import { basename, dirname } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../agent-session.ts";
@@ -32,7 +31,7 @@ import {
 	type SessionStartEvent,
 	type ShutdownHandler,
 } from "../extensions/index.ts";
-import { emitSessionShutdownEvent } from "../extensions/runner.ts";
+import { type DiscoveredResourcePath, emitSessionShutdownEvent } from "../extensions/runner.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { hostRequestTimeout, type LiveState, liveKey } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
@@ -77,37 +76,25 @@ export type ExtensionBindingSession = Pick<
 	| "promptTemplates"
 >;
 
-function getExtensionSourceLabel(extensionPath: string): string {
-	if (extensionPath.startsWith("<")) {
-		return `extension:${extensionPath.replace(/[<>]/g, "")}`;
-	}
-	const base = basename(extensionPath);
-	const name = base.replace(/\.(ts|js)$/, "");
-	return `extension:${name}`;
-}
-
-function buildExtensionResourcePaths(entries: Array<{ path: string; extensionPath: string }>): Array<{
+/** Resources an extension discovered, attributed to it as `extension:<manifest id>`. */
+function buildExtensionResourcePaths(entries: readonly DiscoveredResourcePath[]): Array<{
 	path: string;
 	metadata: { source: string; scope: "temporary"; origin: "top-level"; baseDir?: string };
 }> {
-	return entries.map((entry) => {
-		const source = getExtensionSourceLabel(entry.extensionPath);
-		const baseDir = entry.extensionPath.startsWith("<") ? undefined : dirname(entry.extensionPath);
-		return {
-			path: entry.path,
-			metadata: {
-				source,
-				scope: "temporary",
-				origin: "top-level",
-				baseDir,
-			},
-		};
-	});
+	return entries.map((entry) => ({
+		path: entry.path,
+		metadata: {
+			source: `extension:${entry.extensionId}`,
+			scope: "temporary",
+			origin: "top-level",
+			baseDir: entry.baseDir,
+		},
+	}));
 }
 
 /** A work kind the session refused to register, as an extension error. */
 function refusedKind(refusal: WorkKindRefusal): ExtensionError {
-	return { extensionPath: refusal.extensionPath, event: "register_work_kind", error: refusal.error };
+	return { extensionId: refusal.extensionId, event: "register_work_kind", error: refusal.error };
 }
 
 export interface SessionExtensionBindingHost {
@@ -345,7 +332,7 @@ export class SessionExtensionBinding {
 				replay(ui);
 			} catch (error) {
 				this.extensionRunner.emitError({
-					extensionPath: "<runtime>",
+					extensionId: "<runtime>",
 					event: "ui_replay",
 					error: error instanceof Error ? error.message : String(error),
 				});
@@ -616,7 +603,7 @@ export class SessionExtensionBinding {
 	private refreshModelAfterProviderChange(): void {
 		void this.host.trackAncillaryWork(this.host.modelSettings.refreshFromRegistry()).catch((error: unknown) => {
 			this.extensionRunner.emitError({
-				extensionPath: "<runtime>",
+				extensionId: "<runtime>",
 				event: "register_provider",
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -653,9 +640,7 @@ export class SessionExtensionBinding {
 		// Its refusals reach the clients once they listen to it.
 		const kinds = this.host.extensionKinds();
 		void this.host.trackAncillaryWork(kinds.clear());
-		this.refusedKinds = kinds
-			.bind(this.extensionRunner.getExtensionPaths(), this.extensionRunner.getWorkKinds())
-			.map(refusedKind);
+		this.refusedKinds = kinds.bind(this.extensionRunner.getWorkKinds()).map(refusedKind);
 		if (this.bound) this.applyExtensionBindings(this.extensionRunner);
 	}
 
@@ -698,7 +683,7 @@ export class SessionExtensionBinding {
 						: this.host.sendCustomMessage(message, options, this.host.extensionCommandRunning());
 					sending.catch((err) => {
 						runner.emitError({
-							extensionPath: "<runtime>",
+							extensionId: "<runtime>",
 							event: "send_message",
 							error: err instanceof Error ? err.message : String(err),
 						});
@@ -707,7 +692,7 @@ export class SessionExtensionBinding {
 				sendUserMessage: (content, options) => {
 					session.sendUserMessage(content, options).catch((err) => {
 						runner.emitError({
-							extensionPath: "<runtime>",
+							extensionId: "<runtime>",
 							event: "send_user_message",
 							error: err instanceof Error ? err.message : String(err),
 						});

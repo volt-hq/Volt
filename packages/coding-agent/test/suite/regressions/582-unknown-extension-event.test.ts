@@ -12,17 +12,19 @@ import {
 import { EXTENSION_EVENT_NAMES, type ExtensionAPI } from "../../../src/core/extensions/types.ts";
 import { DefaultResourceLoader } from "../../../src/core/resource-loader.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
-import { createTestResourceLoader } from "../../utilities.ts";
+import { createTestResourceLoader, testExtension } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 /** Subscribes the way `.volt/extensions/prompt-url-widget.ts` did: `session_switch` is not an event. */
-const SWITCH_LISTENER = `export default function (volt) {
+const SWITCH_LISTENER = `export const manifest = { id: "prompt-url-widget", displayName: "Prompt URL Widget" };
+export default function (volt) {
 	volt.on("session_start", () => {});
 	volt.on("session_switch", () => {});
 }
 `;
 
-const PROMPT_PROBE = `export default function (volt) {
+const PROMPT_PROBE = `export const manifest = { id: "prompt-probe", displayName: "Prompt Probe" };
+export default function (volt) {
 	volt.on("before_agent_start", (event) => {
 		volt.events.emit("probe", event.prompt);
 	});
@@ -58,7 +60,7 @@ describe("regression #582: on() rejects unknown event names at load", () => {
 		return { cwd, agentDir, paths };
 	}
 
-	it("fails a project extension's load with an error naming the extension and the event", async () => {
+	it("fails a project extension's load with an error naming the extension's manifest id and the event", async () => {
 		const { cwd, agentDir, paths } = project({ "prompt-url-widget.ts": SWITCH_LISTENER });
 
 		const result = await discoverAndLoadExtensions([], cwd, agentDir);
@@ -67,7 +69,7 @@ describe("regression #582: on() rejects unknown event names at load", () => {
 		expect(result.errors).toEqual([
 			{
 				path: paths[0],
-				error: `Failed to load extension: Extension '${paths[0]}' subscribes to unknown event 'session_switch'`,
+				error: "Failed to load extension: Extension 'prompt-url-widget' subscribes to unknown event 'session_switch'",
 			},
 		]);
 	});
@@ -82,9 +84,9 @@ describe("regression #582: on() rejects unknown event names at load", () => {
 			noPromptTemplates: true,
 			noThemes: true,
 			extensionFactories: [
-				(volt) => {
+				testExtension("switch-listener", (volt) => {
 					untypedOn(volt)("session_switch", () => {});
-				},
+				}),
 			],
 		});
 
@@ -92,16 +94,19 @@ describe("regression #582: on() rejects unknown event names at load", () => {
 
 		expect(loader.getExtensions().extensions).toEqual([]);
 		expect(loader.getExtensions().errors).toEqual([
-			{ path: "<inline:1>", error: "Extension '<inline:1>' subscribes to unknown event 'session_switch'" },
+			{
+				path: "<inline:1>",
+				error: "Failed to load extension: Extension 'switch-listener' subscribes to unknown event 'session_switch'",
+			},
 		]);
 	});
 
 	it("subscribes to every event the API defines", async () => {
 		const { cwd } = project({});
 		const extension = await loadExtensionFromFactory(
-			(volt) => {
+			testExtension("every-event", (volt) => {
 				for (const event of EXTENSION_EVENT_NAMES) untypedOn(volt)(event, () => {});
-			},
+			}),
 			cwd,
 			createEventBus(),
 			createExtensionRuntime(),

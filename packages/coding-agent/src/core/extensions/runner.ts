@@ -4,6 +4,7 @@
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
+import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
 import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -52,7 +53,6 @@ import type {
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
 	ProviderConfig,
-	RegisteredCommand,
 	RegisteredTool,
 	ReplacedSessionContext,
 	ResolvedCommand,
@@ -173,6 +173,15 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+/** A resource path an extension's `resources_discover` handler returned. */
+export interface DiscoveredResourcePath {
+	readonly path: string;
+	/** The manifest id of the extension that returned it. */
+	readonly extensionId: string;
+	/** The extension's directory, when it has one. */
+	readonly baseDir?: string;
+}
+
 /**
  * An extension attempted to replace a finalized message with a different role.
  * Role changes would let extension output cross a trust and persistence boundary,
@@ -181,16 +190,16 @@ export type ExtensionErrorListener = (error: ExtensionError) => void;
  */
 export class ExtensionMessageRoleMismatchError extends Error {
 	readonly code = "extension_message_role_mismatch";
-	readonly extensionPath: string;
+	readonly extensionId: string;
 	readonly expectedRole: AgentMessage["role"];
 	readonly receivedRole: AgentMessage["role"];
 
-	constructor(extensionPath: string, expectedRole: AgentMessage["role"], receivedRole: AgentMessage["role"]) {
+	constructor(extensionId: string, expectedRole: AgentMessage["role"], receivedRole: AgentMessage["role"]) {
 		super(
-			`Extension ${JSON.stringify(extensionPath)} message_end handler cannot change the role from ${JSON.stringify(expectedRole)} to ${JSON.stringify(receivedRole)}`,
+			`Extension ${JSON.stringify(extensionId)} message_end handler cannot change the role from ${JSON.stringify(expectedRole)} to ${JSON.stringify(receivedRole)}`,
 		);
 		this.name = "ExtensionMessageRoleMismatchError";
-		this.extensionPath = extensionPath;
+		this.extensionId = extensionId;
 		this.expectedRole = expectedRole;
 		this.receivedRole = receivedRole;
 	}
@@ -257,7 +266,7 @@ export async function emitProjectTrustEvent(
 				return { result: handlerResult, errors };
 			} catch (error) {
 				errors.push({
-					extensionPath: ext.path,
+					extensionId: ext.id,
 					event: event.type,
 					error: error instanceof Error ? error.message : String(error),
 					stack: error instanceof Error ? error.stack : undefined,
@@ -335,6 +344,7 @@ export class ExtensionRunner {
 	private servicesManager: ExtensionServicesManager | undefined;
 	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
 
+	/** @throws when an extension's id is not a manifest id or two extensions share one: ownership is by id. */
 	constructor(
 		extensions: Extension[],
 		runtime: ExtensionRuntime,
@@ -342,6 +352,13 @@ export class ExtensionRunner {
 		sessionManager: SessionManager,
 		modelRegistry: ModelRegistry,
 	) {
+		const idPattern = new RegExp(EXTENSION_ID_PATTERN);
+		const ids = new Set<string>();
+		for (const extension of extensions) {
+			if (!idPattern.test(extension.id)) throw new Error(`Invalid extension id ${JSON.stringify(extension.id)}`);
+			if (ids.has(extension.id)) throw new Error(`Two extensions have the id ${JSON.stringify(extension.id)}`);
+			ids.add(extension.id);
+		}
 		this.extensions = extensions;
 		this.runtime = runtime;
 		this.uiContext = noOpUIContext;
@@ -378,17 +395,16 @@ export class ExtensionRunner {
 	private emitServicesObservation(event: RequestBoundaryEvent | ExtensionOperationEvent): void {
 		if (this.isInert) return;
 		for (const ext of this.extensions) {
-			if (event.type === "extension_operation" && this.servicesManager?.isOwner(ext.path, event.extensionId))
-				continue;
+			if (event.type === "extension_operation" && this.servicesManager?.isOwner(ext.id, event.extensionId)) continue;
 			for (const handler of ext.handlers.get(event.type) ?? []) {
 				const report = () =>
 					this.emitErrorContained({
-						extensionPath: "<extension-services>",
+						extensionId: "<extension-services>",
 						event: event.type,
 						error: "Extension services observer failed",
 					});
 				try {
-					const ctx = this.createContext(ext.path, event.type === "request_boundary");
+					const ctx = this.createContext(ext.id, event.type === "request_boundary");
 					void Promise.resolve(handler(cloneCanonicalData(event, "Extension services observation"), ctx)).catch(
 						report,
 					);
@@ -437,7 +453,7 @@ export class ExtensionRunner {
 		this.getSystemPromptOptionsFn = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.cwd }));
 
 		// Flush provider registrations queued during extension loading
-		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
+		for (const { name, config, extensionId } of this.runtime.pendingProviderRegistrations) {
 			try {
 				if (providerActions?.registerProvider) {
 					providerActions.registerProvider(name, config);
@@ -446,7 +462,7 @@ export class ExtensionRunner {
 				}
 			} catch (err) {
 				this.emitError({
-					extensionPath,
+					extensionId,
 					event: "register_provider",
 					error: err instanceof Error ? err.message : String(err),
 					stack: err instanceof Error ? err.stack : undefined,
@@ -507,10 +523,6 @@ export class ExtensionRunner {
 		return this.hasUIFn();
 	}
 
-	getExtensionPaths(): string[] {
-		return this.extensions.map((e) => e.path);
-	}
-
 	/** Get all registered tools from all extensions (first registration per name wins). */
 	getAllRegisteredTools(): RegisteredTool[] {
 		const toolsByName = new Map<string, RegisteredTool>();
@@ -538,7 +550,7 @@ export class ExtensionRunner {
 	/** The work kinds every extension declared, in load order. */
 	getWorkKinds(): DeclaredWorkKind[] {
 		return this.extensions.flatMap((ext) =>
-			[...ext.workKinds].map(([name, kind]) => ({ extensionPath: ext.path, name, kind })),
+			[...ext.workKinds].map(([name, kind]) => ({ extensionId: ext.id, name, kind })),
 		);
 	}
 
@@ -567,8 +579,8 @@ export class ExtensionRunner {
 		const builtinKeybindings = buildBuiltinKeybindings(resolvedKeybindings);
 		const extensionShortcuts = new Map<KeyId, ExtensionShortcut>();
 
-		const addDiagnostic = (message: string, extensionPath: string) => {
-			this.shortcutDiagnostics.push({ type: "warning", message, path: extensionPath });
+		const addDiagnostic = (message: string, path: string) => {
+			this.shortcutDiagnostics.push({ type: "warning", message, path });
 			if (!this.hasUI()) {
 				console.warn(message);
 			}
@@ -581,24 +593,24 @@ export class ExtensionRunner {
 				const builtInKeybinding = builtinKeybindings[normalizedKey];
 				if (builtInKeybinding?.restrictOverride === true) {
 					addDiagnostic(
-						`Extension shortcut '${key}' from ${shortcut.extensionPath} conflicts with built-in shortcut. Skipping.`,
-						shortcut.extensionPath,
+						`Extension shortcut '${key}' from extension ${ext.id} conflicts with built-in shortcut. Skipping.`,
+						ext.path,
 					);
 					continue;
 				}
 
 				if (builtInKeybinding?.restrictOverride === false) {
 					addDiagnostic(
-						`Extension shortcut conflict: '${key}' is built-in shortcut for ${builtInKeybinding.keybinding} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`,
-						shortcut.extensionPath,
+						`Extension shortcut conflict: '${key}' is built-in shortcut for ${builtInKeybinding.keybinding} and extension ${ext.id}. Using extension ${ext.id}.`,
+						ext.path,
 					);
 				}
 
 				const existingExtensionShortcut = extensionShortcuts.get(normalizedKey);
 				if (existingExtensionShortcut) {
 					addDiagnostic(
-						`Extension shortcut conflict: '${key}' registered by both ${existingExtensionShortcut.extensionPath} and ${shortcut.extensionPath}. Using ${shortcut.extensionPath}.`,
-						shortcut.extensionPath,
+						`Extension shortcut conflict: '${key}' registered by both extensions ${existingExtensionShortcut.extensionId} and ${ext.id}. Using extension ${ext.id}.`,
+						ext.path,
 					);
 				}
 				extensionShortcuts.set(normalizedKey, shortcut);
@@ -701,46 +713,49 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	private resolveRegisteredCommands(): ResolvedCommand[] {
-		const commands: Array<{ command: RegisteredCommand; extensionPath: string }> = [];
-		const counts = new Map<string, number>();
+	/**
+	 * Every extension's commands in load order, with their slash names. The
+	 * first command with a name takes it; a later one is `/<extension id>:<name>`,
+	 * with a diagnostic. Registered names have no `:`, so no command takes an
+	 * alias; the check that one is taken only guards against that.
+	 */
+	private resolveRegisteredCommands(): { commands: ResolvedCommand[]; diagnostics: ResourceDiagnostic[] } {
+		const commands: ResolvedCommand[] = [];
+		const diagnostics: ResourceDiagnostic[] = [];
+		const owners = new Map<string, string>();
 
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
-				commands.push({ command, extensionPath: ext.path });
-				counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
+				let invocationName = command.name;
+				const owner = owners.get(invocationName);
+				if (owner !== undefined) {
+					invocationName = `${ext.id}:${command.name}`;
+					const aliasOwner = owners.get(invocationName);
+					if (aliasOwner !== undefined) {
+						diagnostics.push({
+							type: "warning",
+							message: `Extension command '/${command.name}' from extension ${ext.id} conflicts with extension ${owner}, and '/${invocationName}' with extension ${aliasOwner}. Skipping.`,
+							path: ext.path,
+						});
+						continue;
+					}
+					diagnostics.push({
+						type: "warning",
+						message: `Extension command '/${command.name}' from extension ${ext.id} conflicts with extension ${owner}. Available as '/${invocationName}'.`,
+						path: ext.path,
+					});
+				}
+				owners.set(invocationName, ext.id);
+				commands.push({ ...command, invocationName, extensionId: ext.id });
 			}
 		}
-
-		const seen = new Map<string, number>();
-		const takenInvocationNames = new Set<string>();
-
-		return commands.map(({ command, extensionPath }) => {
-			const occurrence = (seen.get(command.name) ?? 0) + 1;
-			seen.set(command.name, occurrence);
-
-			let invocationName = (counts.get(command.name) ?? 0) > 1 ? `${command.name}:${occurrence}` : command.name;
-
-			if (takenInvocationNames.has(invocationName)) {
-				let suffix = occurrence;
-				do {
-					suffix++;
-					invocationName = `${command.name}:${suffix}`;
-				} while (takenInvocationNames.has(invocationName));
-			}
-
-			takenInvocationNames.add(invocationName);
-			return {
-				...command,
-				invocationName,
-				extensionPath,
-			};
-		});
+		return { commands, diagnostics };
 	}
 
 	getRegisteredCommands(): ResolvedCommand[] {
-		this.commandDiagnostics = [];
-		return this.resolveRegisteredCommands();
+		const { commands, diagnostics } = this.resolveRegisteredCommands();
+		this.commandDiagnostics = diagnostics;
+		return commands;
 	}
 
 	getCommandDiagnostics(): ResourceDiagnostic[] {
@@ -748,7 +763,7 @@ export class ExtensionRunner {
 	}
 
 	getCommand(name: string): ResolvedCommand | undefined {
-		return this.resolveRegisteredCommands().find((command) => command.invocationName === name);
+		return this.resolveRegisteredCommands().commands.find((command) => command.invocationName === name);
 	}
 
 	/**
@@ -796,7 +811,8 @@ export class ExtensionRunner {
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
 	 *
-	 * @param owner The path of the extension the context belongs to: `startWork` starts only its kinds.
+	 * @param owner The manifest id of the extension the context belongs to: `startWork` starts only its
+	 *   kinds, and `services` are its own.
 	 * @param services Whether the owner's managed services are part of the context.
 	 */
 	createContext(owner?: string, services = false): ExtensionContext {
@@ -882,7 +898,7 @@ export class ExtensionRunner {
 	/**
 	 * @param signal Session-lifetime signal exposed as the command's `ctx.signal`. The owning
 	 *   session aborts it when it loses its log or is disposed.
-	 * @param owner The path of the extension whose command runs.
+	 * @param owner The manifest id of the extension whose command runs.
 	 */
 	createCommandContext(
 		waitForIdle: () => Promise<void> = this.waitForIdleFn,
@@ -956,13 +972,13 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const ctx = this.createContext(ext.path, event.type === "tool_execution_end");
+					const ctx = this.createContext(ext.id, event.type === "tool_execution_end");
 					const handlerResult = await handler(event, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
 						result = cloneCanonicalData(
 							handlerResult,
-							`Extension ${event.type} output from ${ext.path}`,
+							`Extension ${event.type} output from ${ext.id}`,
 						) as SessionBeforeEventResult;
 						if (result.cancel) {
 							return result as RunnerEmitResult<TEvent>;
@@ -972,7 +988,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitErrorContained({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: event.type,
 						error: message,
 						...(stack === undefined ? {} : { stack }),
@@ -1000,31 +1016,31 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("message_end");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 
 			for (const handler of handlers) {
 				try {
 					const currentEvent: MessageEndEvent = {
 						...event,
-						message: cloneCanonicalData(currentMessage, `Extension message_end input for ${ext.path}`),
+						message: cloneCanonicalData(currentMessage, `Extension message_end input for ${ext.id}`),
 					};
 					const rawHandlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
 					if (rawHandlerResult === undefined) continue;
 					const handlerResult = cloneCanonicalData(
 						rawHandlerResult,
-						`Extension message_end output from ${ext.path}`,
+						`Extension message_end output from ${ext.id}`,
 					);
 					if (!handlerResult.message) continue;
 
 					if (handlerResult.message.role !== currentMessage.role) {
 						const error = new ExtensionMessageRoleMismatchError(
-							ext.path,
+							ext.id,
 							currentMessage.role,
 							handlerResult.message.role,
 						);
 						try {
 							this.emitError({
-								extensionPath: ext.path,
+								extensionId: ext.id,
 								event: "message_end",
 								error: error.message,
 							});
@@ -1037,7 +1053,7 @@ export class ExtensionRunner {
 
 					currentMessage = cloneCanonicalData(
 						handlerResult.message,
-						`Extension message_end replacement from ${ext.path}`,
+						`Extension message_end replacement from ${ext.id}`,
 					);
 					modified = true;
 				} catch (err) {
@@ -1045,7 +1061,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitErrorContained({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "message_end",
 						error: message,
 						...(stack === undefined ? {} : { stack }),
@@ -1090,16 +1106,16 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 			if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 
 			for (const handler of handlers) {
 				try {
-					const handlerEvent = cloneCanonicalData(currentEvent, `Extension tool_result input for ${ext.path}`);
+					const handlerEvent = cloneCanonicalData(currentEvent, `Extension tool_result input for ${ext.id}`);
 					const rawHandlerResult = (await withoutExtensionServices(() => handler(handlerEvent, ctx))) as
 						| ToolResultEventResult
 						| undefined;
-					const description = `Extension tool_result output from ${ext.path}`;
+					const description = `Extension tool_result output from ${ext.id}`;
 					const ownedEvent = cloneCanonicalData(handlerEvent, description);
 					const handlerResult =
 						rawHandlerResult === undefined ? undefined : cloneCanonicalData(rawHandlerResult, description);
@@ -1126,7 +1142,7 @@ export class ExtensionRunner {
 					const stack = err instanceof Error ? err.stack : undefined;
 					if (options?.strict) throw err;
 					this.emitErrorContained({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "tool_result",
 						error: message,
 						...(stack === undefined ? {} : { stack }),
@@ -1164,7 +1180,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 			if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 
 			for (const handler of handlers) {
@@ -1189,7 +1205,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("user_bash");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 
 			for (const handler of handlers) {
 				try {
@@ -1201,7 +1217,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "user_bash",
 						error: message,
 						stack,
@@ -1222,7 +1238,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 
 			for (const handler of handlers) {
 				try {
@@ -1236,7 +1252,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "context",
 						error: message,
 						stack,
@@ -1257,7 +1273,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 
 			for (const handler of handlers) {
 				try {
@@ -1273,7 +1289,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "before_provider_request",
 						error: message,
 						stack,
@@ -1303,7 +1319,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 			const ctx = Object.defineProperties(
 				{},
-				Object.getOwnPropertyDescriptors(this.createContext(ext.path)),
+				Object.getOwnPropertyDescriptors(this.createContext(ext.id)),
 			) as ExtensionContext;
 			ctx.getSystemPrompt = () => {
 				this.assertActive();
@@ -1324,7 +1340,7 @@ export class ExtensionRunner {
 					if (handlerResult) {
 						const result = cloneCanonicalData(
 							handlerResult as BeforeAgentStartEventResult,
-							`Extension before_agent_start output from ${ext.path}`,
+							`Extension before_agent_start output from ${ext.id}`,
 						);
 						if (result.message) {
 							messages.push(result.message);
@@ -1338,7 +1354,7 @@ export class ExtensionRunner {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitErrorContained({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "before_agent_start",
 						error: message,
 						...(stack === undefined ? {} : { stack }),
@@ -1361,21 +1377,26 @@ export class ExtensionRunner {
 		cwd: string,
 		reason: ResourcesDiscoverEvent["reason"],
 	): Promise<{
-		skillPaths: Array<{ path: string; extensionPath: string }>;
-		promptPaths: Array<{ path: string; extensionPath: string }>;
-		themePaths: Array<{ path: string; extensionPath: string }>;
+		skillPaths: DiscoveredResourcePath[];
+		promptPaths: DiscoveredResourcePath[];
+		themePaths: DiscoveredResourcePath[];
 	}> {
 		if (this.isInert) {
 			return { skillPaths: [], promptPaths: [], themePaths: [] };
 		}
-		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
-		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
-		const themePaths: Array<{ path: string; extensionPath: string }> = [];
+		const skillPaths: DiscoveredResourcePath[] = [];
+		const promptPaths: DiscoveredResourcePath[] = [];
+		const themePaths: DiscoveredResourcePath[] = [];
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("resources_discover");
 			if (!handlers || handlers.length === 0) continue;
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
+			const discovered = (path: string): DiscoveredResourcePath => ({
+				path,
+				extensionId: ext.id,
+				...(ext.sourceInfo.baseDir === undefined ? {} : { baseDir: ext.sourceInfo.baseDir }),
+			});
 
 			for (const handler of handlers) {
 				try {
@@ -1384,19 +1405,19 @@ export class ExtensionRunner {
 					const result = handlerResult as ResourcesDiscoverResult | undefined;
 
 					if (result?.skillPaths?.length) {
-						skillPaths.push(...result.skillPaths.map((path) => ({ path, extensionPath: ext.path })));
+						skillPaths.push(...result.skillPaths.map(discovered));
 					}
 					if (result?.promptPaths?.length) {
-						promptPaths.push(...result.promptPaths.map((path) => ({ path, extensionPath: ext.path })));
+						promptPaths.push(...result.promptPaths.map(discovered));
 					}
 					if (result?.themePaths?.length) {
-						themePaths.push(...result.themePaths.map((path) => ({ path, extensionPath: ext.path })));
+						themePaths.push(...result.themePaths.map(discovered));
 					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
 					this.emitError({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "resources_discover",
 						error: message,
 						stack,
@@ -1422,7 +1443,7 @@ export class ExtensionRunner {
 		let currentImages = images;
 
 		for (const ext of this.extensions) {
-			const ctx = this.createContext(ext.path);
+			const ctx = this.createContext(ext.id);
 			for (const handler of ext.handlers.get("input") ?? []) {
 				try {
 					const event: InputEvent = {
@@ -1440,7 +1461,7 @@ export class ExtensionRunner {
 					}
 				} catch (err) {
 					this.emitError({
-						extensionPath: ext.path,
+						extensionId: ext.id,
 						event: "input",
 						error: err instanceof Error ? err.message : String(err),
 						stack: err instanceof Error ? err.stack : undefined,

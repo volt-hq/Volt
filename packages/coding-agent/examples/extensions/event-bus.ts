@@ -7,7 +7,13 @@
  * Usage: /emit [event-name] [data] - emit an event on the bus
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "event-bus",
+	displayName: "Event Bus",
+	description: "Inter-extension event bus example.",
+});
 
 export default function (volt: ExtensionAPI) {
 	// Store ctx for use in event handler

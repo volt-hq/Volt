@@ -85,7 +85,7 @@ describe("ExtensionRunner stale-generation inertness", () => {
 		expect(errors).toEqual([]);
 		expect(runner.hasHandlers("before_provider_request")).toBe(true);
 
-		runner.emitError({ extensionPath: "x", event: "test", error: "boom" });
+		runner.emitError({ extensionId: "x", event: "test", error: "boom" });
 		expect(errors).toHaveLength(1);
 	});
 
@@ -125,7 +125,7 @@ describe("ExtensionRunner stale-generation inertness", () => {
 		const { runner, errors } = await createRunner();
 
 		runner.invalidate();
-		runner.emitError({ extensionPath: "x", event: "test", error: "boom" });
+		runner.emitError({ extensionId: "x", event: "test", error: "boom" });
 
 		expect(errors).toEqual([]);
 	});

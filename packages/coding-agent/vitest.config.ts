@@ -11,6 +11,8 @@ const aiSrcSchemas = fileURLToPath(new URL("../ai/src/schemas.ts", import.meta.u
 const protocolSrc = fileURLToPath(new URL("../protocol/src/", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
+// Examples import the package's runtime values (defineManifest); tests that load them resolve it to the source.
+const codingAgentSrcIndex = fileURLToPath(new URL("./src/index.ts", import.meta.url));
 
 export default defineConfig({
 	test: {
@@ -48,6 +50,7 @@ export default defineConfig({
 			},
 			{ find: /^@hansjm10\/volt-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@hansjm10\/volt-tui$/, replacement: tuiSrcIndex },
+			{ find: /^@hansjm10\/volt-coding-agent$/, replacement: codingAgentSrcIndex },
 		],
 	},
 });

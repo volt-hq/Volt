@@ -9,7 +9,9 @@
  */
 
 import * as fs from "node:fs";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "file-trigger", displayName: "File Trigger" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_start", async (_event, ctx) => {

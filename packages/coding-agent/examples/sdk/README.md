@@ -77,7 +77,7 @@ const customRegistry = ModelRegistry.create(customAuth);
 
 const resourceLoader = new DefaultResourceLoader({
   systemPromptOverride: () => "You are helpful.",
-  extensionFactories: [myExtension],
+  extensionFactories: [{ manifest: { id: "my-extension", displayName: "My Extension" }, factory: myExtension }],
   skillsOverride: () => ({ skills: [], diagnostics: [] }),
   agentsFilesOverride: () => ({ agentsFiles: [] }),
   promptsOverride: () => ({ prompts: [], diagnostics: [] }),

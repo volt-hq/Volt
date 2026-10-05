@@ -9,11 +9,21 @@
  * - <cwd>/.volt/extensions/
  * - Paths specified in settings.json "extensions" array
  *
- * An extension is a TypeScript file that exports a default function:
+ * An extension is a TypeScript file that exports its manifest and a default function:
+ *   export const manifest = defineManifest({ id: "my-extension", displayName: "My Extension" });
  *   export default function (volt: ExtensionAPI) { ... }
+ *
+ * The manifest id is the extension's identity. An extension passed to the SDK
+ * gives its manifest alongside its factory.
  */
 
-import { createAgentSession, DefaultResourceLoader, getAgentDir, SessionManager } from "@hansjm10/volt-coding-agent";
+import {
+	createAgentSession,
+	DefaultResourceLoader,
+	defineManifest,
+	getAgentDir,
+	SessionManager,
+} from "@hansjm10/volt-coding-agent";
 
 // Extensions are discovered automatically from standard locations.
 // You can also add paths via settings.json or DefaultResourceLoader options.
@@ -23,10 +33,13 @@ const resourceLoader = new DefaultResourceLoader({
 	agentDir: getAgentDir(),
 	additionalExtensionPaths: ["./my-logging-extension.ts", "./my-safety-extension.ts"],
 	extensionFactories: [
-		(volt) => {
-			volt.on("agent_start", () => {
-				console.log("[Inline Extension] Agent starting");
-			});
+		{
+			manifest: defineManifest({ id: "inline-logger", displayName: "Inline Logger" }),
+			factory: (volt) => {
+				volt.on("agent_start", () => {
+					console.log("[Inline Extension] Agent starting");
+				});
+			},
 		},
 	],
 });
@@ -52,7 +65,9 @@ try {
 
 // Example extension file (./my-logging-extension.ts):
 /*
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "my-logging-extension", displayName: "My Logging Extension" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("agent_start", async () => {

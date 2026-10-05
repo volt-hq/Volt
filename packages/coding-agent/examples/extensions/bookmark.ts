@@ -7,7 +7,13 @@
  * Usage: /bookmark [label] - bookmark the last assistant message
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({
+	id: "bookmark",
+	displayName: "Bookmark",
+	description: "Entry bookmarking example.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("bookmark", {

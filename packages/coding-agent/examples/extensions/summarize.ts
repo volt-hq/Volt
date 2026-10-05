@@ -1,6 +1,11 @@
 import { getModel } from "@hansjm10/volt-ai";
-import type { ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
-import { DynamicBorder, getMarkdownTheme } from "@hansjm10/volt-coding-agent";
+import {
+	DynamicBorder,
+	defineManifest,
+	type ExtensionAPI,
+	type ExtensionCommandContext,
+	getMarkdownTheme,
+} from "@hansjm10/volt-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@hansjm10/volt-tui";
 
 type ContentBlock = {
@@ -141,6 +146,8 @@ const showSummaryUi = async (summary: string, ctx: ExtensionCommandContext) => {
 		};
 	});
 };
+
+export const manifest = defineManifest({ id: "summarize", displayName: "Summarize" });
 
 export default function (volt: ExtensionAPI) {
 	volt.registerCommand("summarize", {

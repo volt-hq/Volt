@@ -1244,7 +1244,7 @@ export class AgentSession {
 		const work = this._conversation.continue().catch((error: unknown) => {
 			if (this._disposed) return;
 			this.extensionRunner.emitError({
-				extensionPath: "<runtime>",
+				extensionId: "<runtime>",
 				event: "queued_message_delivery",
 				error: error instanceof Error ? error.message : String(error),
 			});

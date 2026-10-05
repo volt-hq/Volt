@@ -12,7 +12,7 @@
  * 2. Use the extension — it automatically adapts to your active tools and skills
  */
 
-import type { BuildSystemPromptOptions, ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { type BuildSystemPromptOptions, defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 /**
  * Adds tool-specific guidance that adapts to the active tool set.
@@ -82,6 +82,8 @@ If you have additional requirements, configure them via --append-system-prompt o
 
 	return extensionSpecific;
 }
+
+export const manifest = defineManifest({ id: "prompt-customizer", displayName: "Prompt Customizer" });
 
 export default function promptCustomizer(volt: ExtensionAPI) {
 	volt.on("before_agent_start", async (event) => {

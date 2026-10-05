@@ -201,14 +201,14 @@ export async function createAgentSessionServices(
 	try {
 		const diagnostics: AgentSessionDiagnostic[] = [];
 		const extensionsResult = resourceLoader.getExtensions();
-		for (const { name, config, extensionPath } of extensionsResult.runtime.pendingProviderRegistrations) {
+		for (const { name, config, extensionId } of extensionsResult.runtime.pendingProviderRegistrations) {
 			try {
 				modelRegistry.registerProvider(name, config);
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				diagnostics.push({
 					type: "error",
-					message: `Extension "${extensionPath}" error: ${message}`,
+					message: `Extension "${extensionId}" error: ${message}`,
 				});
 			}
 		}

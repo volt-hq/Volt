@@ -163,7 +163,8 @@ Project skill`,
 			mkdirSync(sharedExtDir, { recursive: true });
 			writeFileSync(
 				join(sharedExtDir, "shared.ts"),
-				`export default function(volt) {
+				`export const manifest = { id: "shared", displayName: "shared" };
+export default function(volt) {
 	volt.registerCommand("shared", {
 		description: "shared command",
 		handler: async () => {},
@@ -199,6 +200,7 @@ Project skill`,
 			writeFileSync(
 				join(userExtDir, "user.ts"),
 				`globalThis[${JSON.stringify(loadCountKey)}] = (globalThis[${JSON.stringify(loadCountKey)}] ?? 0) + 1;
+export const manifest = { id: "user", displayName: "user" };
 export default function(volt) {
 	volt.on("project_trust", () => ({ trusted: "yes" }));
 	volt.registerCommand("user-trust", {
@@ -209,7 +211,8 @@ export default function(volt) {
 			);
 			writeFileSync(
 				join(projectExtDir, "project.ts"),
-				`export default function(volt) {
+				`export const manifest = { id: "project", displayName: "project" };
+export default function(volt) {
 	volt.registerCommand("project-trusted", {
 		description: "project trusted",
 		handler: async () => {},
@@ -243,7 +246,8 @@ export default function(volt) {
 
 			writeFileSync(
 				join(projectExtDir, "project.ts"),
-				`export default function(volt) {
+				`export const manifest = { id: "project", displayName: "project" };
+export default function(volt) {
 	volt.registerCommand("deploy", {
 		description: "project deploy",
 		handler: async () => {},
@@ -257,7 +261,8 @@ export default function(volt) {
 
 			writeFileSync(
 				join(userExtDir, "user.ts"),
-				`export default function(volt) {
+				`export const manifest = { id: "user", displayName: "user" };
+export default function(volt) {
 	volt.registerCommand("deploy", {
 		description: "user deploy",
 		handler: async () => {},
@@ -287,16 +292,16 @@ export default function(volt) {
 				modelRegistry,
 			);
 
-			expect(runner.getCommand("deploy:1")?.description).toBe("project deploy");
-			expect(runner.getCommand("deploy:2")?.description).toBe("user deploy");
+			expect(runner.getCommand("deploy")?.description).toBe("project deploy");
+			expect(runner.getCommand("user:deploy")?.description).toBe("user deploy");
 			expect(runner.getCommand("project-only")?.description).toBe("project only");
 			expect(runner.getCommand("user-only")?.description).toBe("user only");
 
 			const commands = runner.getRegisteredCommands();
 			expect(commands.map((command) => command.invocationName)).toEqual([
-				"deploy:1",
+				"deploy",
 				"project-only",
-				"deploy:2",
+				"user:deploy",
 				"user-only",
 			]);
 		});
@@ -305,7 +310,8 @@ export default function(volt) {
 			const profileExtensionPath = join(tempDir, "profile-extension.ts");
 			writeFileSync(
 				profileExtensionPath,
-				`export default function(volt) {
+				`export const manifest = { id: "profile-extension", displayName: "profile-extension" };
+export default function(volt) {
 	volt.registerCommand("profile-command", {
 		description: "profile command",
 		handler: async () => {},
@@ -683,6 +689,7 @@ Content`,
 				`
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+export const manifest = { id: "ext1", displayName: "ext1" };
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
     name: "duplicate-tool",
@@ -698,6 +705,7 @@ export default function(volt: ExtensionAPI) {
 				`
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+export const manifest = { id: "ext2", displayName: "ext2" };
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
     name: "duplicate-tool",
@@ -725,6 +733,7 @@ export default function(volt: ExtensionAPI) {
 				`
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+export const manifest = { id: "global", displayName: "global" };
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
     name: "duplicate-tool",
@@ -744,6 +753,7 @@ export default function(volt: ExtensionAPI) {
 				`
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+export const manifest = { id: "explicit", displayName: "explicit" };
 export default function(volt: ExtensionAPI) {
   volt.registerTool({
     name: "duplicate-tool",
@@ -779,9 +789,162 @@ export default function(volt: ExtensionAPI) {
 				modelRegistry,
 			);
 
-			expect(runner.getCommand("deploy:1")?.description).toBe("explicit command");
-			expect(runner.getCommand("deploy:2")?.description).toBe("global command");
+			expect(runner.getCommand("deploy")?.description).toBe("explicit command");
+			expect(runner.getCommand("global:deploy")?.description).toBe("global command");
 			expect(runner.getToolDefinition("duplicate-tool")?.description).toBe("explicit tool");
+		});
+	});
+
+	describe("extension ids", () => {
+		const factoryRunsKey = `__voltManifestFactoryRuns_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+		const globalState = globalThis as typeof globalThis & Record<string, string[] | undefined>;
+
+		afterEach(() => {
+			delete globalState[factoryRunsKey];
+		});
+
+		/** An extension with manifest id `id` whose factory records `label` when it runs. */
+		const source = (id: string, label: string) => `export const manifest = { id: "${id}", displayName: "${id}" };
+export default function() {
+	(globalThis[${JSON.stringify(factoryRunsKey)}] ??= []).push(${JSON.stringify(label)});
+}`;
+
+		function writeScopes(): { userPath: string; projectPath: string } {
+			const userExtDir = join(agentDir, "extensions");
+			const projectExtDir = join(cwd, ".volt", "extensions");
+			mkdirSync(userExtDir, { recursive: true });
+			mkdirSync(projectExtDir, { recursive: true });
+			const userPath = join(userExtDir, "dup.ts");
+			const projectPath = join(projectExtDir, "dup.ts");
+			writeFileSync(userPath, source("dup", "user"));
+			writeFileSync(projectPath, source("dup", "project"));
+			return { userPath, projectPath };
+		}
+
+		it("keeps a user extension over a project extension with the same id, though the project loads first", async () => {
+			const { userPath, projectPath } = writeScopes();
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const { extensions, errors } = loader.getExtensions();
+			expect(extensions.map((extension) => [extension.id, extension.path])).toEqual([["dup", userPath]]);
+			expect(errors).toEqual([
+				{
+					path: projectPath,
+					error: `Extension id "dup" is already used by ${userPath}; ${projectPath} is not loaded`,
+				},
+			]);
+			expect(globalState[factoryRunsKey]).toEqual(["user"]);
+		});
+
+		it("keeps a user extension over a project extension with the same id when trust resolves", async () => {
+			const { userPath, projectPath } = writeScopes();
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload({ resolveProjectTrust: async () => true });
+
+			const { extensions, errors } = loader.getExtensions();
+			expect(extensions.map((extension) => [extension.id, extension.path])).toEqual([["dup", userPath]]);
+			expect(errors.map((error) => error.path)).toEqual([projectPath]);
+			expect(globalState[factoryRunsKey]).toEqual(["user"]);
+		});
+
+		it("loads the project's copy of a package both scopes configure when trust resolves", async () => {
+			const writePackage = (root: string, label: string) => {
+				mkdirSync(root, { recursive: true });
+				writeFileSync(
+					join(root, "package.json"),
+					JSON.stringify({
+						name: "dupe-pkg",
+						version: "1.0.0",
+						volt: { id: "guard", displayName: "Guard", entry: "index.js" },
+					}),
+				);
+				writeFileSync(
+					join(root, "index.js"),
+					`module.exports = function (volt) {
+	volt.registerProvider("guard-ai", { baseUrl: "http://${label}.localhost", apiKey: "k", api: "openai-completions", models: [] });
+};`,
+				);
+			};
+			mkdirSync(agentDir, { recursive: true });
+			mkdirSync(join(cwd, ".volt"), { recursive: true });
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:dupe-pkg"] }));
+			writeFileSync(join(cwd, ".volt", "settings.json"), JSON.stringify({ packages: ["npm:dupe-pkg"] }));
+			writePackage(join(agentDir, "npm", "node_modules", "dupe-pkg"), "user");
+			const projectCopy = join(cwd, ".volt", "npm", "node_modules", "dupe-pkg");
+			writePackage(projectCopy, "project");
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload({ resolveProjectTrust: async () => true });
+
+			const { extensions, errors, runtime } = loader.getExtensions();
+			expect(extensions.map((extension) => [extension.id, extension.path])).toEqual([["guard", projectCopy]]);
+			expect(errors).toEqual([]);
+			// The user copy loaded before trust resolved; the project copy's registration of the same provider comes last.
+			expect(runtime.pendingProviderRegistrations.at(-1)?.config.baseUrl).toBe("http://project.localhost");
+		});
+
+		it("keeps the earlier of two project extensions with the same id", async () => {
+			const projectExtDir = join(cwd, ".volt", "extensions");
+			mkdirSync(projectExtDir, { recursive: true });
+			writeFileSync(join(projectExtDir, "a.ts"), source("same", "a"));
+			writeFileSync(join(projectExtDir, "b.ts"), source("same", "b"));
+
+			const loader = new DefaultResourceLoader({ cwd, agentDir });
+			await loader.reload();
+
+			const { extensions, errors } = loader.getExtensions();
+			expect(extensions.map((extension) => extension.path)).toEqual([join(projectExtDir, "a.ts")]);
+			expect(errors.map((error) => error.path)).toEqual([join(projectExtDir, "b.ts")]);
+			expect(globalState[factoryRunsKey]).toEqual(["a"]);
+		});
+
+		it("keeps an SDK extension over a project extension with the same id, and a user extension over an SDK one", async () => {
+			const { userPath, projectPath } = writeScopes();
+			const record = (label: string) => () => {
+				globalState[factoryRunsKey] = [...(globalState[factoryRunsKey] ?? []), label];
+			};
+
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				extensionFactories: [
+					{ manifest: { id: "dup", displayName: "SDK dup" }, factory: record("sdk-dup") },
+					{ manifest: { id: "solo", displayName: "SDK solo" }, factory: record("sdk-solo") },
+				],
+			});
+			await loader.reload();
+			expect(loader.getExtensions().extensions.map((extension) => extension.path)).toEqual([userPath, "<inline:2>"]);
+			expect(loader.getExtensions().errors.map((error) => error.path)).toEqual([projectPath, "<inline:1>"]);
+
+			rmSync(userPath);
+			delete globalState[factoryRunsKey];
+			await loader.reload();
+			expect(loader.getExtensions().extensions.map((extension) => extension.path)).toEqual([
+				"<inline:1>",
+				"<inline:2>",
+			]);
+			expect(loader.getExtensions().errors.map((error) => error.path)).toEqual([projectPath]);
+			expect(globalState[factoryRunsKey]).toEqual(["sdk-dup", "sdk-solo"]);
+		});
+
+		it("reports an SDK extension whose manifest is invalid", async () => {
+			const loader = new DefaultResourceLoader({
+				cwd,
+				agentDir,
+				extensionFactories: [{ manifest: { id: "host", displayName: "Host" }, factory: () => {} }],
+			});
+			await loader.reload();
+
+			expect(loader.getExtensions().extensions).toEqual([]);
+			expect(loader.getExtensions().errors).toEqual([
+				{
+					path: "<inline:1>",
+					error: 'Invalid extension manifest: "id" must be a lowercase extension id that is not reserved',
+				},
+			]);
 		});
 	});
 });

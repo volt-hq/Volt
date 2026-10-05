@@ -19,6 +19,7 @@
 
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
 import {
+	defineManifest,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	getAgentDir,
@@ -378,6 +379,12 @@ async function runWork(work: WorkRunContext, run: SwarmRun): Promise<WorkRunResu
 
 // ---------------------------------------------------------------------------
 // Command
+
+export const manifest = defineManifest({
+	id: "swarm-review",
+	displayName: "Swarm Review",
+	description: "Reviews changes with many inexpensive reviewers in waves and verifies the clustered findings.",
+});
 
 export default function swarmReview(volt: ExtensionAPI) {
 	volt.registerWorkKind("run", { delivery: "message" });

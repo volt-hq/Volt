@@ -17,7 +17,9 @@
  * - setEditorText() - via /rpc-prefill command
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "rpc-demo", displayName: "RPC Extension UI Demo" });
 
 export default function (volt: ExtensionAPI) {
 	let turnCount = 0;

@@ -9,9 +9,10 @@
     "check": "echo 'nothing to check'"
   },
   "volt": {
-    "extensions": [
-      "./index.ts"
-    ]
+    "id": "custom-provider-anthropic",
+    "displayName": "Custom Anthropic Provider",
+    "description": "Registers a custom Anthropic provider with OAuth login.",
+    "entry": "index.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.52.0"

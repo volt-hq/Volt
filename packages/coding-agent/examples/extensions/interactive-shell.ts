@@ -22,7 +22,7 @@ import { createRenderFrame } from "@hansjm10/volt-tui";
  */
 
 import { spawnSync } from "node:child_process";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 // Default interactive commands - editors, pagers, git ops, TUIs
 const DEFAULT_INTERACTIVE_COMMANDS = [
@@ -128,6 +128,8 @@ function isInteractiveCommand(command: string): boolean {
 	}
 	return false;
 }
+
+export const manifest = defineManifest({ id: "interactive-shell", displayName: "Interactive Shell" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("user_bash", async (event, ctx) => {

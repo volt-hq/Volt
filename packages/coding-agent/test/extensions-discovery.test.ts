@@ -21,16 +21,23 @@ describe("extensions discovery", () => {
 		fs.rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	const extensionCode = `
+	const extensionCode = (id: string) => `
+		export const manifest = { id: "${id}", displayName: "${id}" };
 		export default function(volt) {
 			volt.registerCommand("test", { handler: async () => {} });
 		}
 	`;
 
+	const writePackage = (dir: string, volt: unknown, extra: Record<string, unknown> = {}) => {
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify({ name: path.basename(dir), ...extra, volt }));
+	};
+
 	it("rejects a remote-safe command name that would resolve to a different slash command", async () => {
 		fs.writeFileSync(
 			path.join(extensionsDir, "collision.ts"),
-			`export default function(volt) {
+			`export const manifest = { id: "collision", displayName: "collision" };
+export default function(volt) {
 				volt.registerCommand("deploy", { handler: async () => {} });
 				volt.registerCommand("deploy now", { remoteSafe: true, handler: async () => {} });
 			}`,
@@ -39,21 +46,34 @@ describe("extensions discovery", () => {
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 		expect(result.extensions).toEqual([]);
 		expect(result.errors).toEqual([
-			expect.objectContaining({ error: expect.stringContaining("must not contain whitespace or '/'") }),
+			expect.objectContaining({ error: expect.stringContaining('Invalid extension command name "deploy now"') }),
 		]);
 	});
 
-	it.each(["/deploy", "deploy/now", "deploy now", "deploy\tnow", ""])(
-		"rejects invalid slash-command registration name %j",
-		(name) => {
-			expect(() => validateExtensionCommandName(name)).toThrow("must not contain whitespace or '/'");
-		},
-	);
+	it.each([
+		"/deploy",
+		"deploy/now",
+		"deploy now",
+		"deploy\tnow",
+		"",
+		"deploy.now",
+		"-deploy",
+		"a".repeat(65),
+		"other:deploy",
+		"skill:debugger",
+	])("rejects invalid slash-command registration name %j", (name) => {
+		expect(() => validateExtensionCommandName(name)).toThrow("Invalid extension command name");
+	});
+
+	it.each(["deploy", "Deploy_2", "review-fix", "a".repeat(64)])("accepts command name %j", (name) => {
+		expect(() => validateExtensionCommandName(name)).not.toThrow();
+	});
 
 	it.each(["plan", "build"])("reserves native /%s commands", async (name) => {
 		fs.writeFileSync(
 			path.join(extensionsDir, `${name}.ts`),
-			`export default function(volt) {
+			`export const manifest = { id: "${name}-ext", displayName: "ext" };
+export default function(volt) {
 				volt.registerCommand("${name}", { handler: async () => {} });
 			}`,
 		);
@@ -67,6 +87,7 @@ describe("extensions discovery", () => {
 
 	const extensionCodeWithTool = (toolName: string) => `
 		import { Type } from "typebox";
+		export const manifest = { id: "${toolName.replaceAll("_", "-")}", displayName: "${toolName}" };
 		export default function(volt) {
 			volt.registerTool({
 				name: "${toolName}",
@@ -92,18 +113,22 @@ describe("extensions discovery", () => {
 	);
 
 	it("discovers direct .ts files in extensions/", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "foo.ts"), extensionCode);
-		fs.writeFileSync(path.join(extensionsDir, "bar.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "foo.ts"), extensionCode("foo"));
+		fs.writeFileSync(path.join(extensionsDir, "bar.ts"), extensionCode("bar"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(2);
 		expect(result.extensions.map((e) => path.basename(e.path)).sort()).toEqual(["bar.ts", "foo.ts"]);
+		expect(result.extensions.map((e) => [e.id, e.version, e.sourceInfo.scope]).sort()).toEqual([
+			["bar", "local", "user"],
+			["foo", "local", "user"],
+		]);
 	});
 
 	it("discovers direct .js files in extensions/", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "foo.js"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "foo.js"), extensionCode("foo"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -115,7 +140,7 @@ describe("extensions discovery", () => {
 	it("discovers subdirectory with index.ts", async () => {
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode("my-extension"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -128,7 +153,7 @@ describe("extensions discovery", () => {
 	it("discovers subdirectory with index.js", async () => {
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode("my-extension"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -140,8 +165,8 @@ describe("extensions discovery", () => {
 	it("prefers index.ts over index.js", async () => {
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
-		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode("my-extension"));
+		fs.writeFileSync(path.join(subdir, "index.js"), extensionCode("my-extension"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -150,74 +175,54 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].path).toContain("index.ts");
 	});
 
-	it("discovers subdirectory with package.json volt field", async () => {
+	it("loads a package from its package.json manifest without a module manifest", async () => {
 		const subdir = path.join(extensionsDir, "my-package");
-		const srcDir = path.join(subdir, "src");
-		fs.mkdirSync(subdir);
-		fs.mkdirSync(srcDir);
-		fs.writeFileSync(path.join(srcDir, "main.ts"), extensionCode);
+		fs.mkdirSync(path.join(subdir, "src"), { recursive: true });
 		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				name: "my-package",
-				volt: {
-					extensions: ["./src/main.ts"],
-				},
-			}),
+			path.join(subdir, "src", "main.ts"),
+			`export default function(volt) { volt.registerCommand("test", { handler: async () => {} }); }`,
 		);
+		writePackage(subdir, { id: "my-package", displayName: "My Package", entry: "src/main.ts" }, { version: "1.2.3" });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain("src");
-		expect(result.extensions[0].path).toContain("main.ts");
+		const [extension] = result.extensions;
+		expect(extension.path).toBe(subdir);
+		expect(extension.id).toBe("my-package");
+		expect(extension.version).toBe("1.2.3");
+		expect(extension.manifest).toEqual({ id: "my-package", displayName: "My Package", entry: "src/main.ts" });
+		expect(extension.commands.has("test")).toBe(true);
 	});
 
-	it("keeps package.json volt extension entries with leading tilde package-relative", async () => {
+	it("keeps a package entry with a leading tilde package-relative", async () => {
 		const subdir = path.join(extensionsDir, "tilde-package");
-		const directExtensionPath = path.join(subdir, "~entry.ts");
-		const slashExtensionPath = path.join(subdir, "~", "entry.ts");
 		fs.mkdirSync(path.join(subdir, "~"), { recursive: true });
-		fs.writeFileSync(directExtensionPath, extensionCode);
-		fs.writeFileSync(slashExtensionPath, extensionCode);
-		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				name: "tilde-package",
-				volt: {
-					extensions: ["~entry.ts", "~/entry.ts"],
-				},
-			}),
-		);
+		fs.writeFileSync(path.join(subdir, "~", "entry.ts"), extensionCode("ignored"));
+		writePackage(subdir, { id: "tilde-package", displayName: "Tilde", entry: "~/entry.ts" });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
-		expect(result.extensions.map((extension) => extension.path).sort()).toEqual(
-			[directExtensionPath, slashExtensionPath].sort(),
-		);
+		expect(result.extensions.map((extension) => extension.id)).toEqual(["tilde-package"]);
 	});
 
-	it("package.json can declare multiple extensions", async () => {
-		const subdir = path.join(extensionsDir, "my-package");
+	it("rejects the old volt.extensions list with a clear manifest error", async () => {
+		const subdir = path.join(extensionsDir, "old-package");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "ext1.ts"), extensionCode);
-		fs.writeFileSync(path.join(subdir, "ext2.ts"), extensionCode);
-		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				name: "my-package",
-				volt: {
-					extensions: ["./ext1.ts", "./ext2.ts"],
-				},
-			}),
-		);
+		fs.writeFileSync(path.join(subdir, "ext1.ts"), extensionCode("ext-1"));
+		writePackage(subdir, { extensions: ["./ext1.ts"] });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(2);
+		expect(result.extensions).toHaveLength(0);
+		expect(result.errors).toEqual([
+			{
+				path: subdir,
+				error: expect.stringMatching(/^Invalid extension manifest: "volt.extensions" is replaced by the manifest/),
+			},
+		]);
 	});
 
 	it("package.json with volt field takes precedence over index.ts", async () => {
@@ -225,21 +230,13 @@ describe("extensions discovery", () => {
 		fs.mkdirSync(subdir);
 		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCodeWithTool("from-index"));
 		fs.writeFileSync(path.join(subdir, "custom.ts"), extensionCodeWithTool("from-custom"));
-		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				name: "my-package",
-				volt: {
-					extensions: ["./custom.ts"],
-				},
-			}),
-		);
+		writePackage(subdir, { id: "my-package", displayName: "My Package", entry: "custom.ts" });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain("custom.ts");
+		expect(result.extensions[0].id).toBe("my-package");
 		// Verify the right tool was registered
 		expect(result.extensions[0].tools.has("from-custom")).toBe(true);
 		expect(result.extensions[0].tools.has("from-index")).toBe(false);
@@ -248,7 +245,7 @@ describe("extensions discovery", () => {
 	it("ignores package.json without volt field, falls back to index.ts", async () => {
 		const subdir = path.join(extensionsDir, "my-package");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCode("my-package"));
 		fs.writeFileSync(
 			path.join(subdir, "package.json"),
 			JSON.stringify({
@@ -267,8 +264,8 @@ describe("extensions discovery", () => {
 	it("ignores subdirectory without index or package.json", async () => {
 		const subdir = path.join(extensionsDir, "not-an-extension");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "helper.ts"), extensionCode);
-		fs.writeFileSync(path.join(subdir, "utils.ts"), extensionCode);
+		fs.writeFileSync(path.join(subdir, "helper.ts"), extensionCode("helper"));
+		fs.writeFileSync(path.join(subdir, "utils.ts"), extensionCode("utils"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -281,7 +278,7 @@ describe("extensions discovery", () => {
 		const nested = path.join(subdir, "nested");
 		fs.mkdirSync(subdir);
 		fs.mkdirSync(nested);
-		fs.writeFileSync(path.join(nested, "index.ts"), extensionCode);
+		fs.writeFileSync(path.join(nested, "index.ts"), extensionCode("nested"));
 		// No index.ts or package.json in container/
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
@@ -292,18 +289,18 @@ describe("extensions discovery", () => {
 
 	it("handles mixed direct files and subdirectories", async () => {
 		// Direct file
-		fs.writeFileSync(path.join(extensionsDir, "direct.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "direct.ts"), extensionCode("direct"));
 
 		// Subdirectory with index
 		const subdir1 = path.join(extensionsDir, "with-index");
 		fs.mkdirSync(subdir1);
-		fs.writeFileSync(path.join(subdir1, "index.ts"), extensionCode);
+		fs.writeFileSync(path.join(subdir1, "index.ts"), extensionCode("with-index"));
 
 		// Subdirectory with package.json
 		const subdir2 = path.join(extensionsDir, "with-manifest");
 		fs.mkdirSync(subdir2);
-		fs.writeFileSync(path.join(subdir2, "entry.ts"), extensionCode);
-		fs.writeFileSync(path.join(subdir2, "package.json"), JSON.stringify({ volt: { extensions: ["./entry.ts"] } }));
+		fs.writeFileSync(path.join(subdir2, "entry.ts"), extensionCode("unused"));
+		writePackage(subdir2, { id: "with-manifest", displayName: "With Manifest", entry: "entry.ts" });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -311,28 +308,20 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(3);
 	});
 
-	it("skips non-existent paths declared in package.json", async () => {
+	it("reports a package whose entry does not exist", async () => {
 		const subdir = path.join(extensionsDir, "my-package");
-		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "exists.ts"), extensionCode);
-		fs.writeFileSync(
-			path.join(subdir, "package.json"),
-			JSON.stringify({
-				volt: {
-					extensions: ["./exists.ts", "./missing.ts"],
-				},
-			}),
-		);
+		writePackage(subdir, { id: "my-package", displayName: "My Package", entry: "missing.ts" });
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
-		expect(result.errors).toHaveLength(0);
-		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].path).toContain("exists.ts");
+		expect(result.extensions).toHaveLength(0);
+		expect(result.errors).toEqual([
+			{ path: subdir, error: 'Invalid extension manifest: "entry" "missing.ts" does not exist in the package' },
+		]);
 	});
 
 	it("loads extensions and registers commands", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "with-command.ts"), extensionCode("with-command"));
 
 		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 
@@ -364,13 +353,14 @@ describe("extensions discovery", () => {
 	it("handles explicitly configured paths", async () => {
 		const customPath = path.join(tempDir, "custom-location", "my-ext.ts");
 		fs.mkdirSync(path.dirname(customPath), { recursive: true });
-		fs.writeFileSync(customPath, extensionCode);
+		fs.writeFileSync(customPath, extensionCode("my-ext"));
 
 		const result = await discoverAndLoadExtensions([customPath], tempDir, tempDir);
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("my-ext.ts");
+		expect(result.extensions[0].sourceInfo.scope).toBe("temporary");
 	});
 
 	it("resolves dependencies from extension's own node_modules", async () => {
@@ -382,12 +372,15 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("with-deps");
+		expect(result.extensions[0].id).toBe("with-deps");
+		expect(result.extensions[0].version).toBe("0.2.3");
 		// The extension registers a 'parse_duration' tool
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
 
 	it("registers message renderers", async () => {
 		const extCode = `
+			export const manifest = { id: "with-renderer", displayName: "with-renderer" };
 			export default function(volt) {
 				volt.registerMessageRenderer("my-custom-type", (message, options, theme) => {
 					return null; // Use default rendering
@@ -405,6 +398,7 @@ describe("extensions discovery", () => {
 
 	it("reports error when extension throws during initialization", async () => {
 		const extCode = `
+			export const manifest = { id: "throws", displayName: "throws" };
 			export default function(volt) {
 				throw new Error("Initialization failed!");
 			}
@@ -420,6 +414,7 @@ describe("extensions discovery", () => {
 
 	it("reports error when extension has no default export", async () => {
 		const extCode = `
+			export const manifest = { id: "no-default", displayName: "no-default" };
 			export function notDefault(volt) {
 				volt.registerCommand("test", { handler: async () => {} });
 			}
@@ -454,6 +449,7 @@ describe("extensions discovery", () => {
 
 	it("loads extension with event handlers", async () => {
 		const extCode = `
+			export const manifest = { id: "with-handlers", displayName: "with-handlers" };
 			export default function(volt) {
 				volt.on("agent_start", async () => {});
 				volt.on("tool_call", async (event) => undefined);
@@ -473,6 +469,7 @@ describe("extensions discovery", () => {
 
 	it("loads extension with shortcuts", async () => {
 		const extCode = `
+			export const manifest = { id: "with-shortcut", displayName: "with-shortcut" };
 			export default function(volt) {
 				volt.registerShortcut("ctrl+t", {
 					description: "Test shortcut",
@@ -491,6 +488,7 @@ describe("extensions discovery", () => {
 
 	it("loads extension with flags", async () => {
 		const extCode = `
+			export const manifest = { id: "with-flag", displayName: "with-flag" };
 			export default function(volt) {
 				volt.registerFlag("my-flag", {
 					description: "My custom flag",
@@ -527,7 +525,7 @@ describe("extensions discovery", () => {
 
 	it("loadExtensions with no paths loads nothing", async () => {
 		// Create discoverable extensions (would be found by discoverAndLoadExtensions)
-		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCode("discovered"));
 
 		// Use loadExtensions directly with empty paths
 		const { loadExtensions } = await import("../src/core/extensions/loader.ts");

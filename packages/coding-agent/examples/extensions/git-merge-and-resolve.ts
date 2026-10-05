@@ -14,7 +14,7 @@
 import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 interface ConflictBlock {
 	file: string;
@@ -69,6 +69,8 @@ function formatConflicts(ref: string, blocks: ConflictBlock[]): string {
 	lines.push("", "Resolve these conflicts.");
 	return lines.join("\n");
 }
+
+export const manifest = defineManifest({ id: "git-merge-and-resolve", displayName: "Git Merge and Resolve" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("agent_end", async (_event, ctx) => {

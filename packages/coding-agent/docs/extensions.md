@@ -58,8 +58,10 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 Create `~/.volt/agent/extensions/my-extension.ts`:
 
 ```typescript
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+
+export const manifest = defineManifest({ id: "my-extension", displayName: "My Extension" });
 
 export default function (volt: ExtensionAPI) {
   // React to events
@@ -144,7 +146,6 @@ To share extensions via npm or git as volt packages, see [packages.md](packages.
 | `typebox` | Schema definitions for tool parameters |
 | `@hansjm10/volt-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
 | `@hansjm10/volt-protocol` | Protocol schemas: log entries, wire frames, and `UiNode` |
-| `@hansjm10/volt-tui` | TUI components for custom rendering |
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
 
@@ -154,10 +155,12 @@ Node.js built-ins (`node:fs`, `node:path`, etc.) are also available.
 
 ## Writing an Extension
 
-An extension exports a default factory function that receives `ExtensionAPI`. The factory can be synchronous or asynchronous:
+An extension declares a [manifest](#manifest) and exports a default factory function that receives `ExtensionAPI`. The factory can be synchronous or asynchronous:
 
 ```typescript
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "my-extension", displayName: "My Extension" });
 
 export default function (volt: ExtensionAPI) {
   // Subscribe to events
@@ -180,6 +183,25 @@ export default function (volt: ExtensionAPI) {
 Extensions are loaded via [jiti](https://github.com/unjs/jiti), so TypeScript works without compilation.
 
 If the factory returns a `Promise`, volt awaits it before continuing startup. That means async initialization completes before `session_start`, before `resources_discover`, and before provider registrations queued via `volt.registerProvider()` are flushed.
+
+### Manifest
+
+Every extension declares a manifest. Volt does not load an extension without one.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `id` | Yes | The extension's identity: lowercase letters, digits, and `-`, at most 64 characters. `volt`, `core`, `builtin`, `host`, and `ext` are reserved. |
+| `displayName` | Yes | One line, at most 80 characters. |
+| `description` | No | At most 240 characters. |
+| `entry` | Packages only | The module a package loads, relative to and inside the package root. |
+| `settings` | No | A flat object schema of string, string enum, boolean, and integer settings. |
+| `permissions` | No | Any of `exec`, `network`, `fs-write`, `secrets`, and `providers`. |
+
+A single-file extension (a `.ts` or `.js` file, or a directory's `index.ts`) exports its manifest as `manifest`, as above. Reading it evaluates the module, so single-file extensions load only from locations you control: your and a trusted project's extension directories, paths in settings, and `-e` paths. A package declares its manifest in the `volt` field of `package.json` (see [Extension Styles](#extension-styles)), which volt reads without running package code. Packages installed from npm or git load only through that manifest.
+
+The id names everything the extension contributes: errors, work kinds (`ext:<id>/<kind>`), and command intents (`extension.command.<id>.<command>`). Two extensions cannot share an id. A user or `-e` extension beats a project extension with the same id; otherwise the one loaded first wins. The other is not loaded and is reported.
+
+An SDK host passes each extension with its manifest: `extensionFactories: [{ manifest, factory }]` (see [sdk.md](sdk.md)).
 
 ### Async factory functions
 
@@ -226,7 +248,7 @@ Defer background resource startup until `session_start` or the command/tool/even
 
 ### Extension Styles
 
-**Single file** - simplest, for small extensions:
+**Single file** - simplest, for small extensions. The file exports `manifest`:
 
 ```
 ~/.volt/agent/extensions/
@@ -238,7 +260,7 @@ Defer background resource startup until `session_start` or the command/tool/even
 ```
 ~/.volt/agent/extensions/
 └── my-extension/
-    ├── index.ts        # Entry point (exports default function)
+    ├── index.ts        # Entry point (exports manifest and default function)
     ├── tools.ts        # Helper module
     └── utils.ts        # Helper module
 ```
@@ -248,7 +270,7 @@ Defer background resource startup until `session_start` or the command/tool/even
 ```
 ~/.volt/agent/extensions/
 └── my-extension/
-    ├── package.json    # Declares dependencies and entry points
+    ├── package.json    # Declares dependencies and the manifest
     ├── package-lock.json
     ├── node_modules/   # After npm install
     └── src/
@@ -264,10 +286,14 @@ Defer background resource startup until `session_start` or the command/tool/even
     "chalk": "^5.0.0"
   },
   "volt": {
-    "extensions": ["./src/index.ts"]
+    "id": "my-extension",
+    "displayName": "My Extension",
+    "entry": "src/index.ts"
   }
 }
 ```
+
+A package declares one extension. Its version is the package's `version`.
 
 Run `npm install` in the extension directory, then imports from `node_modules/` work automatically.
 
@@ -1547,7 +1573,9 @@ Labels persist in the session and survive restarts. Use them to mark important p
 
 ### volt.registerCommand(name, options)
 
-Register a command. `name` is the slash-command token without the leading `/`. It must be non-empty and cannot contain whitespace or `/`; invalid names are rejected while the extension loads. For example, use `deploy`, not `/deploy` or `deploy now`.
+Register a command. `name` is the slash-command token without the leading `/`: a letter or digit, then at most 63 letters, digits, `_`, and `-`. Invalid names are rejected while the extension loads. For example, use `deploy`, not `/deploy` or `deploy now`.
+
+Clients invoke the command as the intent `extension.command.<id>.<name>`, where `<id>` is the extension's manifest id. When an extension loaded earlier registered the same name, the command is `/<id>:<name>` instead, and volt reports the conflict.
 
 Commands are local-only by default. Set `remoteSafe: true` only after auditing the handler and its argument-completion callback for invocation by a paired remote client:
 
@@ -1563,7 +1591,7 @@ volt.registerCommand("status", {
 
 `remoteSafe: true` lets paired remote clients invoke the command's intent and send its slash text; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
 
-If multiple extensions register the same command name, volt keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
+If multiple extensions register the same command name, volt keeps them all: the first in load order is `/review`, and each later one is `/<id>:review` under its extension's manifest id.
 
 ```typescript
 volt.registerCommand("stats", {
@@ -1594,7 +1622,7 @@ volt.registerCommand("deploy", {
 });
 ```
 
-Intents: protocol clients see each extension command as a dynamic intent named `extension.command.<id>` (see [rpc.md](rpc.md#dynamic-intents)). The `intents` query lists it with an opaque id that is stable while the session's commands, prompt templates, and skills stay the same, the command's label and description, `presentation.kind: "palette"`, its slash alias, and the input `{arguments?, streamingBehavior?}`. If the command defines `getArgumentCompletions`, the descriptor lists `completions: ["arguments"]`, and clients read the same completions with the `intent_completions` query.
+Intents: protocol clients see each extension command as a dynamic intent named `extension.command.<id>.<name>`, where `<id>` is the extension's manifest id (see [rpc.md](rpc.md#dynamic-intents)). The `intents` query lists it with the command's label and description, `presentation.kind: "palette"`, its slash alias, and the input `{arguments?, streamingBehavior?}`. If the command defines `getArgumentCompletions`, the descriptor lists `completions: ["arguments"]`, and clients read the same completions with the `intent_completions` query.
 
 The intent is a presentation layer over the command handler:
 
@@ -1663,7 +1691,7 @@ volt.registerCommand("scan", {
 });
 ```
 
-The kind's id is `ext:<extension>/<name>`. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. The extension id is provisional until extensions declare manifest ids: a slug of the extension's file name, or of its directory for an `index.ts`. The first extension in load order with an id owns it; another extension with the same id registers no kinds and reports a `register_work_kind` error. An extension registers at most 16 kinds.
+The kind's id is `ext:<id>/<name>`, where `<id>` is the extension's manifest id. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. An extension registers at most 16 kinds.
 
 The declaration (all optional):
 

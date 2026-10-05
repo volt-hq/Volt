@@ -5,7 +5,9 @@
  * When forking, offers to restore code to that point in history.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "git-checkpoint", displayName: "Git Checkpoint" });
 
 export default function (volt: ExtensionAPI) {
 	const checkpoints = new Map<string, string>();

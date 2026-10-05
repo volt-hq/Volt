@@ -118,9 +118,13 @@ Add a `volt` manifest to `package.json` or use conventional directories. Include
 ```json
 {
   "name": "my-package",
+  "version": "1.0.0",
   "keywords": ["volt-package"],
   "volt": {
-    "extensions": ["./extensions"],
+    "id": "my-package",
+    "displayName": "My Package",
+    "description": "What the extension does.",
+    "entry": "extensions/index.ts",
     "skills": ["./skills"],
     "prompts": ["./prompts"],
     "themes": ["./themes"]
@@ -128,7 +132,9 @@ Add a `volt` manifest to `package.json` or use conventional directories. Include
 }
 ```
 
-Paths are relative to the package root. Arrays support glob patterns and `!exclusions`.
+A package declares at most one extension: `id`, `displayName`, and `entry` (the module it loads) are its [manifest](extensions.md#manifest), which may also declare `description`, `settings`, and `permissions`. Volt reads the manifest from `package.json` without running package code. `entry` is a path inside the package; a path that leaves it, directly or through a symbolic link, is refused. The extension's version is the package's `version`. A package with only skills, prompts, or themes leaves the manifest fields out.
+
+Skill, prompt, and theme paths are relative to the package root. Their arrays support glob patterns and `!exclusions`.
 
 ### Package Metadata
 
@@ -139,7 +145,7 @@ Packages can include `video` or `image` fields for tools that render package pre
   "name": "my-package",
   "keywords": ["volt-package"],
   "volt": {
-    "extensions": ["./extensions"],
+    "skills": ["./skills"],
     "video": "https://example.com/demo.mp4",
     "image": "https://example.com/screenshot.png"
   }
@@ -157,7 +163,7 @@ If both are set, video takes precedence.
 
 If no `volt` manifest is present, volt auto-discovers resources from these directories:
 
-- `extensions/` loads `.ts` and `.js` files
+- `extensions/` loads `.ts` and `.js` files from local packages only; each exports its manifest. A package installed from npm or git loads an extension only through its `volt` manifest.
 - `skills/` recursively finds `SKILL.md` folders and loads top-level `.md` files as skills
 - `prompts/` loads `.md` files
 - `themes/` loads `.json` files
@@ -166,9 +172,9 @@ If no `volt` manifest is present, volt auto-discovers resources from these direc
 
 Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When volt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
 
-Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@hansjm10/volt-ai`, `@hansjm10/volt-protocol`, `@hansjm10/volt-agent-core`, `@hansjm10/volt-coding-agent`, `@hansjm10/volt-tui`, `typebox`.
+Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@hansjm10/volt-ai`, `@hansjm10/volt-protocol`, `@hansjm10/volt-agent-core`, `@hansjm10/volt-coding-agent`, `typebox`.
 
-Other volt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Volt loads packages with separate module roots, so separate installs do not collide or share modules.
+Other volt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their skills, prompts, and themes through `node_modules/` paths. Volt loads packages with separate module roots, so separate installs do not collide or share modules.
 
 Example:
 
@@ -179,7 +185,6 @@ Example:
   },
   "bundledDependencies": ["shitty-extensions"],
   "volt": {
-    "extensions": ["extensions", "node_modules/shitty-extensions/extensions"],
     "skills": ["skills", "node_modules/shitty-extensions/skills"]
   }
 }
@@ -195,7 +200,7 @@ Filter what a package loads using the object form in settings:
     "npm:simple-pkg",
     {
       "source": "npm:my-package",
-      "extensions": ["extensions/*.ts", "!extensions/legacy.ts"],
+      "extensions": [],
       "skills": [],
       "prompts": ["prompts/review.md"],
       "themes": ["+themes/legacy.json"]
@@ -204,7 +209,7 @@ Filter what a package loads using the object form in settings:
 }
 ```
 
-`+path` and `-path` are exact paths relative to the package root.
+`+path` and `-path` are exact paths relative to the package root. A package has one extension, so `"extensions": []` turns it off and omitting the key keeps it.
 
 - Omit a key to load all of that type.
 - Use `[]` to load none of that type.

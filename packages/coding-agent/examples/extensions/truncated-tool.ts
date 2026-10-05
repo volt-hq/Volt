@@ -15,10 +15,11 @@
  */
 
 import { mkdtemp, writeFile } from "node:fs/promises";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
+	defineManifest,
+	type ExtensionAPI,
 	formatSize,
 	type TruncationResult,
 	truncateHead,
@@ -44,6 +45,12 @@ interface RgDetails {
 	truncation?: TruncationResult;
 	fullOutputPath?: string;
 }
+
+export const manifest = defineManifest({
+	id: "truncated-tool",
+	displayName: "Truncated Tool",
+	description: "Demonstrates proper output truncation for custom tools.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.registerTool({

@@ -186,7 +186,7 @@ export class SessionEvents {
 	private reportProjectionFailure(eventType: AgentSessionEvent["type"], error: unknown): void {
 		try {
 			this.host.extensionRunner()?.emitError({
-				extensionPath: "<runtime>",
+				extensionId: "<runtime>",
 				event: "session_event_projection",
 				error: `Could not project AgentSession ${eventType} event: ${error instanceof Error ? error.message : String(error)}`,
 				...(error instanceof Error && error.stack ? { stack: error.stack } : {}),

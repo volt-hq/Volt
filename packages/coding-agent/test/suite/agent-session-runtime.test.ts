@@ -29,6 +29,7 @@ import {
 	type TestClient,
 	type TestClientOptions,
 } from "../utilities/host-client.ts";
+import { testExtension } from "../utilities.ts";
 
 /** Open a conversation in a host of its own and attach an in-place anchor client to it. */
 async function openRuntime(
@@ -87,7 +88,7 @@ describe("conversation host client characterization", () => {
 			thinkingLevel: options?.bootstrapThinkingLevel === false ? undefined : undefined,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-1", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -105,7 +106,7 @@ describe("conversation host client characterization", () => {
 							})),
 						});
 						extensionFactory(volt);
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,
@@ -942,7 +943,7 @@ describe("conversation host client characterization", () => {
 			model: faux.getModel(),
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-2", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -959,7 +960,7 @@ describe("conversation host client characterization", () => {
 								maxTokens: registeredModel.maxTokens,
 							})),
 						});
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,
@@ -1051,7 +1052,7 @@ describe("conversation host client characterization", () => {
 			authStorage: otherAuthStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-3", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -1068,7 +1069,7 @@ describe("conversation host client characterization", () => {
 								maxTokens: registeredModel.maxTokens,
 							})),
 						});
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,
@@ -1123,7 +1124,7 @@ describe("conversation host client characterization", () => {
 			authStorage: otherAuthStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					(volt: ExtensionAPI) => {
+					testExtension("test-extension-4", (volt: ExtensionAPI) => {
 						volt.registerProvider(faux.getModel().provider, {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
@@ -1140,7 +1141,7 @@ describe("conversation host client characterization", () => {
 								maxTokens: registeredModel.maxTokens,
 							})),
 						});
-					},
+					}),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

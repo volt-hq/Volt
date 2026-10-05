@@ -16,6 +16,7 @@ import {
 	createTestAgentSessionRuntimeConfig,
 	createTestExtensionsResult,
 	createTestResourceLoader,
+	testExtension,
 } from "./utilities.ts";
 
 function getRuntimeProfile(options: Parameters<ConversationFactory>[0]): string | undefined {
@@ -67,7 +68,7 @@ describe("conversation host profile propagation", () => {
 				settingsManager,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt) => {
+						testExtension("test-extension-1", (volt) => {
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
@@ -84,7 +85,7 @@ describe("conversation host profile propagation", () => {
 									maxTokens: registeredModel.maxTokens,
 								})),
 							});
-						},
+						}),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

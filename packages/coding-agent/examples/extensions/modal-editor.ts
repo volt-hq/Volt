@@ -10,7 +10,7 @@ import { mapRenderFrameLines, type RenderFrame } from "@hansjm10/volt-tui";
  * - ctrl+c, ctrl+d, etc. work in both modes
  */
 
-import { CustomEditor, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { CustomEditor, defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
 
 // Normal mode key mappings: key -> escape sequence (or null for mode switch)
@@ -79,6 +79,12 @@ class ModalEditor extends CustomEditor {
 		);
 	}
 }
+
+export const manifest = defineManifest({
+	id: "modal-editor",
+	displayName: "Modal Editor",
+	description: "Vim-like modal editing example.",
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_start", (_event, ctx) => {

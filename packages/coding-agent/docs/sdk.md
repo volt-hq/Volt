@@ -804,15 +804,18 @@ If you pass `tools`, include each custom or extension tool name you want enabled
 Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.volt/agent/extensions/`, `.volt/extensions/`, and settings.json extension sources.
 
 ```typescript
-import { createAgentSession, DefaultResourceLoader } from "@hansjm10/volt-coding-agent";
+import { createAgentSession, DefaultResourceLoader, defineManifest } from "@hansjm10/volt-coding-agent";
 
 const loader = new DefaultResourceLoader({
   additionalExtensionPaths: ["/path/to/my-extension.ts"],
   extensionFactories: [
-    (volt) => {
-      volt.on("agent_start", () => {
-        console.log("[Inline Extension] Agent starting");
-      });
+    {
+      manifest: defineManifest({ id: "inline-logger", displayName: "Inline Logger" }),
+      factory: (volt) => {
+        volt.on("agent_start", () => {
+          console.log("[Inline Extension] Agent starting");
+        });
+      },
     },
   ],
 });
@@ -821,7 +824,7 @@ await loader.reload();
 const { session } = await createAgentSession({ resourceLoader: loader });
 ```
 
-Extensions can register tools, subscribe to events, add commands, and more. See [extensions.md](extensions.md) for the full API.
+Each entry of `extensionFactories` is an extension's [manifest](extensions.md#manifest) (without `entry`) and its factory; they load after the discovered extensions, and one whose id another extension already has is not loaded. Extensions can register tools, subscribe to events, add commands, and more. See [extensions.md](extensions.md) for the full API.
 
 **Event Bus:** Extensions can communicate via `volt.events`. Pass a shared `eventBus` to `DefaultResourceLoader` if you need to emit or listen from outside:
 

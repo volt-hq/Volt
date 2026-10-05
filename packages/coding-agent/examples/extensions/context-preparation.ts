@@ -3,11 +3,12 @@
  * See the Context preparation section in this directory's README for SDK configuration
  * and limitations. Loading this example does not raise the host's default zero wait.
  */
-import type {
-	ExtensionAPI,
-	ExtensionServicesReadResult,
-	ExtensionServicesSkill,
-	ExtensionServicesTaskContext,
+import {
+	defineManifest,
+	type ExtensionAPI,
+	type ExtensionServicesReadResult,
+	type ExtensionServicesSkill,
+	type ExtensionServicesTaskContext,
 } from "@hansjm10/volt-coding-agent";
 
 const WAIT_MS = 100;
@@ -157,6 +158,12 @@ async function prepareSource(
 		result,
 	);
 }
+
+export const manifest = defineManifest({
+	id: "context-preparation",
+	displayName: "Context Preparation",
+	description: "Opt-in deterministic preparation; no auxiliary inference, raw filesystem access, or cache.",
+});
 
 export default function contextPreparation(volt: ExtensionAPI): void {
 	volt.on("request_boundary", (event, ctx) => {

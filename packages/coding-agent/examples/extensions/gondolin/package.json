@@ -9,9 +9,10 @@
 		"check": "echo 'nothing to check'"
 	},
 	"volt": {
-		"extensions": [
-			"./index.ts"
-		]
+		"id": "gondolin",
+		"displayName": "Gondolin Tool Routing",
+		"description": "Routes tools through a Gondolin sandbox VM.",
+		"entry": "index.ts"
 	},
 	"dependencies": {
 		"@earendil-works/gondolin": "0.12.0"

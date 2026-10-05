@@ -5,7 +5,14 @@
  * Demonstrates how to cancel session events using the before_* events.
  */
 
-import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionMessageEntry } from "@hansjm10/volt-coding-agent";
+import {
+	defineManifest,
+	type ExtensionAPI,
+	type SessionBeforeSwitchEvent,
+	type SessionMessageEntry,
+} from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "confirm-destructive", displayName: "Confirm Destructive" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_switch", async (event: SessionBeforeSwitchEvent, ctx) => {

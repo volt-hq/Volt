@@ -5,6 +5,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import { minimatch } from "minimatch";
+import { declaresPackageExtension } from "../core/extensions/manifest.ts";
 import { spawnProcess } from "../utils/child-process.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
@@ -296,24 +297,10 @@ function collectResourceFiles(
 	return files;
 }
 
-function readVoltManifestFile(packageJsonPath: string): StoreVoltManifest | undefined {
-	try {
-		return readPackageJsonFile(packageJsonPath).voltManifest;
-	} catch {
-		return undefined;
-	}
-}
-
+/** A directory's extension, as the runtime finds it: the package when package.json declares one, else its index module. */
 function resolveConventionalExtensionEntries(dir: string): string[] | undefined {
-	const packageJsonPath = join(dir, "package.json");
-	if (existsSync(packageJsonPath)) {
-		const manifest = readVoltManifestFile(packageJsonPath);
-		if (manifest?.extensions?.length) {
-			const entries = manifest.extensions.map((entry) => resolve(dir, entry)).filter((entry) => existsSync(entry));
-			if (entries.length > 0) {
-				return entries;
-			}
-		}
+	if (declaresPackageExtension(dir)) {
+		return [dir];
 	}
 
 	const indexTs = join(dir, "index.ts");
@@ -510,7 +497,13 @@ function discoverResources(
 	const discovered = structuredClone(EMPTY_RESOURCES);
 	if (voltManifest) {
 		for (const resourceType of RESOURCE_TYPES) {
-			const entries = voltManifest[resourceType];
+			// A package's extension is the package itself, when its manifest declares one.
+			const entries =
+				resourceType === "extensions"
+					? declaresPackageExtension(root)
+						? ["."]
+						: undefined
+					: voltManifest[resourceType];
 			discovered[resourceType] = entries
 				? collectManifestFiles(root, entries, resourceType).map((path) => toRelativeResourcePath(root, path))
 				: [];

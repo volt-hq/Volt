@@ -5,7 +5,9 @@
  * Useful for preventing accidental modifications to sensitive files.
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "protected-paths", displayName: "Protected Paths" });
 
 export default function (volt: ExtensionAPI) {
 	const protectedPaths = [".env", ".git/", "node_modules/"];

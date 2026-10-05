@@ -27,6 +27,7 @@ import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestHost } from "../../utilities/host-client.ts";
 import { createLiveRecorder } from "../../utilities/live-recorder.ts";
+import { testExtension } from "../../utilities.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -89,7 +90,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 				authStorage,
 				resourceLoaderOptions: {
 					extensionFactories: [
-						(volt: ExtensionAPI) => {
+						testExtension("test-extension-1", (volt: ExtensionAPI) => {
 							volt.registerProvider(faux.getModel().provider, {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
@@ -107,7 +108,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 								})),
 							});
 							options.extensionFactory?.(volt);
-						},
+						}),
 					],
 					noSkills: true,
 					noPromptTemplates: true,

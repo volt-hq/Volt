@@ -18,7 +18,15 @@ async function setup(factories: ExtensionFactory[]) {
 	const runtime = createExtensionRuntime();
 	const bus = createEventBus();
 	const extensions = await Promise.all(
-		factories.map((factory, index) => loadExtensionFromFactory(factory, "/repo", bus, runtime, `<test:${index}>`)),
+		factories.map((factory, index) =>
+			loadExtensionFromFactory(
+				{ manifest: { id: `test-${index}`, displayName: `Test ${index}` }, factory },
+				"/repo",
+				bus,
+				runtime,
+				`<test:${index}>`,
+			),
+		),
 	);
 	const session = SessionManager.inMemory("/repo");
 	const runner = new ExtensionRunner(
@@ -112,7 +120,7 @@ describe("extension services API binding", () => {
 		await pending;
 		await Promise.resolve();
 		expect(report).toHaveBeenCalledWith({
-			extensionPath: "<extension-services>",
+			extensionId: "<extension-services>",
 			event: "request_boundary",
 			error: "Extension services observer failed",
 		});

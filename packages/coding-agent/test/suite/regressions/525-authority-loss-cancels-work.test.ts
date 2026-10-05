@@ -202,7 +202,7 @@ describe("regression #525: a session that loses its log cancels its own work", (
 
 		await harness.session.prompt("/broken");
 		expect(extensionErrors).toEqual([
-			expect.objectContaining({ extensionPath: "command:broken", event: "command", error: "broken command" }),
+			expect.objectContaining({ extensionId: "inline-1", event: "command", error: "broken command" }),
 		]);
 	});
 });

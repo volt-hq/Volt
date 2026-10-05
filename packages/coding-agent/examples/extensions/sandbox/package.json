@@ -9,9 +9,10 @@
 		"check": "echo 'nothing to check'"
 	},
 	"volt": {
-		"extensions": [
-			"./index.ts"
-		]
+		"id": "sandbox",
+		"displayName": "Sandbox",
+		"description": "Runs bash commands in an OS-level sandbox.",
+		"entry": "index.ts"
 	},
 	"dependencies": {
 		"@anthropic-ai/sandbox-runtime": "0.0.26"

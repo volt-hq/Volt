@@ -21,7 +21,7 @@
  */
 
 import type { TextContent } from "@hansjm10/volt-ai";
-import { type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, getAgentDir, withFileMutationQueue } from "@hansjm10/volt-coding-agent";
 import { constants, readFileSync } from "fs";
 import { access, appendFile, readFile } from "fs/promises";
 import { join, resolve } from "path";
@@ -63,6 +63,12 @@ const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+});
+
+export const manifest = defineManifest({
+	id: "tool-override",
+	displayName: "Tool Override",
+	description: "Demonstrates overriding built-in tools.",
 });
 
 export default function (volt: ExtensionAPI) {

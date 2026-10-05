@@ -18,9 +18,11 @@
  *   /thinking-label          Reset to the default label
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 const DEFAULT_LABEL = "Pondering...";
+
+export const manifest = defineManifest({ id: "hidden-thinking-label", displayName: "Hidden Thinking Label" });
 
 export default function (volt: ExtensionAPI) {
 	let label = DEFAULT_LABEL;

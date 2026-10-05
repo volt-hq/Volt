@@ -41,8 +41,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
-import { DynamicBorder, getAgentDir } from "@hansjm10/volt-coding-agent";
+import {
+	DynamicBorder,
+	defineManifest,
+	type ExtensionAPI,
+	type ExtensionContext,
+	getAgentDir,
+} from "@hansjm10/volt-coding-agent";
 import { Container, Key, type SelectItem, SelectList, Text } from "@hansjm10/volt-tui";
 
 // Preset configuration
@@ -103,6 +108,8 @@ interface OriginalState {
 	thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	tools: string[];
 }
+
+export const manifest = defineManifest({ id: "preset", displayName: "Preset" });
 
 export default function presetExtension(volt: ExtensionAPI) {
 	let presets: PresetsConfig = {};

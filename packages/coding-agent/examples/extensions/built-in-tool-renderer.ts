@@ -25,9 +25,24 @@
  *   volt -e ./built-in-tool-renderer.ts
  */
 
-import type { BashToolDetails, EditToolDetails, ExtensionAPI, ReadToolDetails } from "@hansjm10/volt-coding-agent";
-import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@hansjm10/volt-coding-agent";
+import {
+	type BashToolDetails,
+	createBashTool,
+	createEditTool,
+	createReadTool,
+	createWriteTool,
+	defineManifest,
+	type EditToolDetails,
+	type ExtensionAPI,
+	type ReadToolDetails,
+} from "@hansjm10/volt-coding-agent";
 import { Text } from "@hansjm10/volt-tui";
+
+export const manifest = defineManifest({
+	id: "built-in-tool-renderer",
+	displayName: "Built-in Tool Renderer",
+	description: "Custom rendering for built-in tools.",
+});
 
 export default function (volt: ExtensionAPI) {
 	const cwd = process.cwd();

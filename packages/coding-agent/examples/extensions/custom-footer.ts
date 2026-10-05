@@ -10,8 +10,14 @@ import { createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
  */
 
 import type { AssistantMessage } from "@hansjm10/volt-ai";
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
+
+export const manifest = defineManifest({
+	id: "custom-footer",
+	displayName: "Custom Footer",
+	description: "Demonstrates ctx.ui.setFooter().",
+});
 
 export default function (volt: ExtensionAPI) {
 	let enabled = false;

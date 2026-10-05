@@ -5,7 +5,7 @@
  * Useful to ensure work is committed before switching context.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
 
 async function checkDirtyRepo(
 	volt: ExtensionAPI,
@@ -43,6 +43,8 @@ async function checkDirtyRepo(
 		return { cancel: true };
 	}
 }
+
+export const manifest = defineManifest({ id: "dirty-repo-guard", displayName: "Dirty Repo Guard" });
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_before_switch", async (event, ctx) => {

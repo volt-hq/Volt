@@ -11,7 +11,9 @@
  *   /followup And then?   - Sends while streaming with followUp delivery
  */
 
-import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+
+export const manifest = defineManifest({ id: "send-user-message", displayName: "Send User Message" });
 
 export default function (volt: ExtensionAPI) {
 	// Simple command that sends a user message

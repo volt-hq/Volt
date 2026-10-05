@@ -34,7 +34,7 @@ describe("store inspector and install plan", () => {
 					peerDependencies: { "@hansjm10/volt-coding-agent": "*" },
 					optionalDependencies: { optional: "2.0.0" },
 					scripts: { postinstall: "node build.js" },
-					volt: { extensions: ["extensions/*.ts"] },
+					volt: { id: "volt-example", displayName: "Volt Example", entry: "extensions/example.ts" },
 				},
 				null,
 				2,
@@ -83,8 +83,9 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 
 		expect(inspection.packageName).toBe("volt-example");
 		expect(inspection.packageVersion).toBe("1.2.3");
-		expect(inspection.voltManifest?.extensions).toEqual(["extensions/*.ts"]);
-		expect(inspection.discoveredResources.extensions).toEqual(["extensions/example.ts"]);
+		// The package is its extension: its manifest names the entry.
+		expect(inspection.discoveredResources.extensions).toEqual(["."]);
+		expect(inspection.discoveredResources.extensions).toEqual((await resolveRuntimeResources(packageDir)).extensions);
 		expect(inspection.dependencies).toEqual({ leftpad: "1.0.0" });
 		expect(inspection.peerDependencies).toEqual({ "@hansjm10/volt-coding-agent": "*" });
 		expect(inspection.optionalDependencies).toEqual({ optional: "2.0.0" });
@@ -92,29 +93,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(existsSync(sentinelPath)).toBe(false);
 	});
 
-	it("reports explicit manifest extension files that runtime loading accepts", async () => {
-		mkdirSync(join(packageDir, "dist"), { recursive: true });
-		writeFileSync(join(packageDir, "dist", "index.mjs"), "export default function extension() {}\n");
-		writeFileSync(
-			join(packageDir, "package.json"),
-			JSON.stringify(
-				{
-					name: "volt-example",
-					version: "1.2.3",
-					volt: { extensions: ["dist/index.mjs"] },
-				},
-				null,
-				2,
-			),
-		);
-
-		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
-
-		expect(inspection.discoveredResources.extensions).toEqual(["dist/index.mjs"]);
-	});
-
-	it("applies manifest override patterns when discovering resources", async () => {
-		writeFileSync(join(packageDir, "extensions", "dev.ts"), "export default function dev() {}\n");
+	it("reports a package with the old extensions list as its one extension, as runtime loading does", async () => {
 		writeFileSync(
 			join(packageDir, "package.json"),
 			JSON.stringify(
@@ -131,8 +110,8 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 
 		expect(inspection.voltManifest?.extensions).toEqual(["extensions/*.ts", "!extensions/dev.ts"]);
-		expect(inspection.discoveredResources.extensions).toContain("extensions/example.ts");
-		expect(inspection.discoveredResources.extensions).not.toContain("extensions/dev.ts");
+		expect(inspection.discoveredResources.extensions).toEqual(["."]);
+		expect(inspection.discoveredResources.extensions).toEqual((await resolveRuntimeResources(packageDir)).extensions);
 	});
 
 	it("discovers resources from manifest directory entries", async () => {
@@ -148,7 +127,9 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 					name: "volt-example",
 					version: "1.2.3",
 					volt: {
-						extensions: ["./extensions", "!extensions/dev.ts"],
+						id: "volt-example",
+						displayName: "Volt Example",
+						entry: "extensions/example.ts",
 						skills: ["./skills"],
 						prompts: ["./prompts"],
 						themes: ["./themes"],
@@ -161,7 +142,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 
-		expect(inspection.discoveredResources.extensions).toEqual(["extensions/example.ts"]);
+		expect(inspection.discoveredResources.extensions).toEqual(["."]);
 		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
 		expect(inspection.discoveredResources.prompts).toEqual(["prompts/summary.md"]);
 		expect(inspection.discoveredResources.themes).toEqual(["themes/dark.json"]);
@@ -204,7 +185,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		writeFileSync(join(packageDir, "extensions", "with-index", "index.ts"), "export default function indexed() {}\n");
 		writeFileSync(
 			join(packageDir, "extensions", "with-manifest", "package.json"),
-			JSON.stringify({ volt: { extensions: ["./src/main.ts"] } }, null, 2),
+			JSON.stringify({ volt: { id: "with-manifest", displayName: "With Manifest", entry: "src/main.ts" } }, null, 2),
 		);
 		writeFileSync(
 			join(packageDir, "extensions", "with-manifest", "src", "main.ts"),
@@ -220,7 +201,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect([...inspection.discoveredResources.extensions].sort()).toEqual([
 			"extensions/example.ts",
 			"extensions/with-index/index.ts",
-			"extensions/with-manifest/src/main.ts",
+			"extensions/with-manifest",
 		]);
 		expect(inspection.discoveredResources.skills).toEqual(["skills/helper/SKILL.md"]);
 	});
@@ -282,7 +263,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(inspection.discoveredResources.skills).toEqual([]);
 	});
 
-	it("treats truthy non-object volt manifests as manifest-present to match runtime loading", async () => {
+	it("treats a truthy non-object volt manifest as declaring the package's extension, as runtime loading does", async () => {
 		const invalidManifestPackageDir = join(tempDir, "invalid-manifest");
 		mkdirSync(join(invalidManifestPackageDir, "extensions"), { recursive: true });
 		writeFileSync(
@@ -297,7 +278,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const inspection = await inspectStorePackage({ source: invalidManifestPackageDir, cwd: tempDir });
 		const runtimeResources = await resolveRuntimeResources(invalidManifestPackageDir);
 
-		expect(runtimeResources.extensions).toEqual([]);
+		expect(runtimeResources.extensions).toEqual(["."]);
 		expect(inspection.voltManifest).toEqual({});
 		expect(inspection.discoveredResources).toEqual(runtimeResources);
 	});
