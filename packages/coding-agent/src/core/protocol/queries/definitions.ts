@@ -5,8 +5,8 @@ import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
 import { getReviewGeneral } from "../../review-general.ts";
 import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalReviewRuns } from "../../review-state.ts";
+import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-target-metadata.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "../../review-usage.ts";
-import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-workflows.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
 import { targetOf } from "../intents/conversation.ts";
 import { mcpManagerOf, workspaceService } from "../intents/host.ts";
@@ -434,7 +434,7 @@ export function projectReviewRun(record: HydratedReviewRunRecord, includeResult:
 		workflowAction: record.workflowAction,
 		status: record.status,
 		startedAt: record.startedAt,
-		...(record.endedAt === undefined ? {} : { endedAt: record.endedAt }),
+		endedAt: record.endedAt,
 		usage: record.usage?.summary ?? UNAVAILABLE_REVIEW_USAGE,
 		...(record.usage
 			? {
@@ -501,18 +501,16 @@ export const reviewResultQuery = defineQuery({
 	},
 });
 
-export const reviewWorkflowsQuery = defineQuery({
+export const reviewRunsQuery = defineQuery({
 	...review,
 	name: "review.workflows",
 	async run(ctx, params) {
-		const { session, conversation } = targetOf(ctx);
-		const page = await listCanonicalReviewRuns(session.sessionManager, {
+		const page = await listCanonicalReviewRuns(targetOf(ctx).session.sessionManager, {
 			cursor: params.cursor,
 			limit: params.limit,
 		});
 		return {
 			runs: page.runs.map((run) => projectReviewRun(run, false)),
-			activeWorkflows: conversation.reviewWorkflows.list().filter((workflow) => workflow.status === "running"),
 			...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
 		} as QueryResult<"review.workflows">;
 	},
@@ -551,5 +549,5 @@ export const BUILTIN_QUERIES = {
 	"review.discussion_source": reviewDiscussionSourceQuery,
 	"review.general": reviewGeneralQuery,
 	"review.result": reviewResultQuery,
-	"review.workflows": reviewWorkflowsQuery,
+	"review.workflows": reviewRunsQuery,
 } as const satisfies { readonly [N in QueryName]: QueryDefinition<N> };

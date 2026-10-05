@@ -203,9 +203,7 @@ describe("intent admission", () => {
 			intentRegistry.prepareFrame(ctx, "set_agent_mode", { mode: "plan" }, { expectedOrdinal: 7 }),
 		).toHaveProperty("run");
 		// Unfenced intents ignore the position.
-		expect(
-			intentRegistry.prepareFrame(ctx, "review_cancel_workflow", { workflowId: "w" }, { expectedOrdinal: 1 }),
-		).toHaveProperty("run");
+		expect(intentRegistry.prepareFrame(ctx, "abort_retry", {}, { expectedOrdinal: 1 })).toHaveProperty("run");
 	});
 
 	it("leaves source-owned lifecycle operations to a review discussion's source", () => {
@@ -226,6 +224,25 @@ describe("intent admission", () => {
 			"run",
 		);
 		expect(intentRegistry.prepareFrame(ctx, "set_agent_mode", { mode: "plan" })).toHaveProperty("run");
+	});
+
+	it("leaves opening a review's work to its source, and opens other work in a review discussion", () => {
+		const kinds: Record<string, string> = { "review:run": "review", "job-1": "job" };
+		const target = {
+			...fakeTarget({ isReviewDiscussion: true } as Partial<AgentSession>),
+			conversation: { work: { get: (workId: string) => ({ workId, kind: kinds[workId] }) } },
+		} as unknown as IntentTarget;
+		const ctx: IntentContext = { target, services: {}, profile: LOCAL_INTENT_PROFILE };
+		expect(rejection(() => intentRegistry.prepareFrame(ctx, "open_work", { workId: "review:run" }))).toMatchObject({
+			code: "unavailable",
+			message: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE,
+		});
+		expect(intentRegistry.prepareFrame(ctx, "open_work", { workId: "job-1" })).toHaveProperty("run");
+		const source: IntentContext = {
+			...ctx,
+			target: { ...target, session: { ...target.session, isReviewDiscussion: false } } as IntentTarget,
+		};
+		expect(intentRegistry.prepareFrame(source, "open_work", { workId: "review:run" })).toHaveProperty("run");
 	});
 
 	it("applies the intent's availability to the invocation's input", () => {

@@ -33,7 +33,7 @@ export interface FakeConversation {
 
 /**
  * A fake hosted conversation over `session`. `members` adds or replaces
- * conversation members (`listSessions`, `reviewWorkflows`, `services`, ...).
+ * conversation members (`listSessions`, `work`, `services`, ...).
  * Its live state is the session's `liveState`, or its own.
  */
 export function createFakeConversation(session: object, members: Record<string, unknown> = {}): FakeConversation {

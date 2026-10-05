@@ -14,9 +14,9 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`. A
- * value's `kind` is its key's family. `workflow` and `subagent` are interim
- * values until work items replace them (Phase 4).
+ * `work/<workId>`, `subagent/<subagentId>`. A value's `kind` is its key's
+ * family. `subagent` is an interim value until work items replace it
+ * (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
  * until answered; any client that accepts the request's kind may answer with
@@ -35,7 +35,6 @@ import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
-import { RpcWorkflowEventSchema, RpcWorkflowToolEventSchema } from "./projections.ts";
 import {
 	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
@@ -254,16 +253,6 @@ export const LiveWorkValueSchema = Type.Object(
 	closed,
 );
 
-/** A review workflow's latest event and running tools (interim until work items). */
-export const LiveWorkflowValueSchema = Type.Object(
-	{
-		kind: Type.Literal("workflow"),
-		event: RpcWorkflowEventSchema,
-		activeTools: Type.Array(RpcWorkflowToolEventSchema),
-	},
-	closed,
-);
-
 /** A subagent child conversation's run status (interim until work items). Subscribe to `conversation` for its log. */
 export const LiveSubagentValueSchema = Type.Object(
 	{
@@ -289,7 +278,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
-	workflow: LiveWorkflowValueSchema,
 	subagent: LiveSubagentValueSchema,
 } as const;
 
@@ -306,7 +294,6 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionWidgetValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
-	LiveWorkflowValueSchema,
 	LiveSubagentValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
@@ -327,7 +314,6 @@ export const LIVE_KEYED_KINDS = [
 	"ext_status",
 	"ext_widget",
 	"work",
-	"workflow",
 	"subagent",
 ] as const satisfies readonly LiveValueKind[];
 

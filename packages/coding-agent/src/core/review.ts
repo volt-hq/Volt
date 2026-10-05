@@ -27,7 +27,7 @@ import {
 	readPrReviewBinding,
 } from "./pr-review-binding.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
+import { reviewUsageDetail, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
 	buildParsedReview,
@@ -59,7 +59,6 @@ import {
 } from "./review-snapshot.ts";
 import {
 	appendReviewRunDurably,
-	appendReviewUsageCheckpoint,
 	assertReviewControlsPersistLosslessly,
 	createReviewRunRecord,
 	planCanonicalIncrementalReview,
@@ -74,12 +73,13 @@ import {
 	reviewSnapshotToolGuidelines,
 } from "./review-tools.ts";
 import { createEmptyReviewUsage, type ReviewUsageAttempt, ReviewUsageCollector } from "./review-usage.ts";
-import type { ReviewPullRequestReference, ReviewWorkflowManager } from "./review-workflows.ts";
+import { type ReviewWorkData, reviewWorkInput } from "./review-work.ts";
 import { createAgentSession } from "./sdk.ts";
 import { SessionManager } from "./session-manager.ts";
 import type { SessionUsageProjection, SessionUsageTotals } from "./session-usage.ts";
 import type { SessionWriter } from "./session-writer.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import type { WorkContext, WorkExecution, WorkRegistry } from "./work/registry.ts";
 
 export { createReviewSeedMessage } from "./review-presentation.ts";
 export type { ParsedReview, ReviewCoverage, ReviewFinding, ReviewTarget };
@@ -133,11 +133,6 @@ const MAX_PULL_REQUEST_NUMBER_TEXT = String(MAX_PULL_REQUEST_NUMBER);
 const CURRENT_PR_PROBE_TIMEOUT_MS = 1_500;
 const CURRENT_PR_TITLE_MAX_BYTES = 160;
 const MUTABLE_WORKSPACE_REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
-const REVIEW_REPORT_TOOL_NAMES = new Set([
-	"report_review_candidates",
-	"report_review_verification",
-	"report_review_presentations",
-]);
 
 interface CommandResult {
 	ok: boolean;
@@ -745,7 +740,8 @@ export interface RunReviewOptions {
 	tools?: readonly string[];
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
-	onEvent?: (event: ReviewWorkflowToolEvent) => void;
+	/** A pass of round `round` starts. */
+	onPass?: (pass: ReviewPass, round: number) => void;
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	/** Local-only observer; never forward this warning into review/session/protocol data. */
@@ -782,67 +778,10 @@ export interface ReviewWorkflowSession {
 	): Promise<void>;
 }
 
-export type ReviewWorkflowEvent =
-	| {
-			type: "workflow_start";
-			workflowId: string;
-			kind: "review";
-			action: string;
-			title: string;
-			message: string;
-			status: "running";
-			startedAt: number;
-			pullRequest?: ReviewPullRequestReference;
-	  }
-	| {
-			type: "workflow_update";
-			workflowId: string;
-			kind: "review";
-			action: string;
-			title: string;
-			message: string;
-			status: "running" | "finalizing";
-			startedAt: number;
-			pullRequest?: ReviewPullRequestReference;
-	  }
-	| {
-			type: "workflow_end";
-			workflowId: string;
-			kind: "review";
-			action: string;
-			title: string;
-			message: string;
-			status: "completed" | "cancelled" | "failed";
-			startedAt: number;
-			endedAt: number;
-			pullRequest?: ReviewPullRequestReference;
-	  };
-
-export type ReviewWorkflowToolEvent =
-	| {
-			type: "tool_execution_start";
-			workflowId: string;
-			workflowKind: "review";
-			workflowAction: string;
-			toolCallId: string;
-			toolName: string;
-			args?: Record<string, unknown>;
-	  }
-	| {
-			type: "tool_execution_end";
-			workflowId: string;
-			workflowKind: "review";
-			workflowAction: string;
-			toolCallId: string;
-			toolName: string;
-			isError: boolean;
-	  };
-
 export interface ReviewWorkflowHooks {
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
 	onPrepared?: (resolution: ResolvedReview, model: Model<Api>) => Promise<void> | void;
-	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	cleanup?: () => void;
@@ -870,13 +809,12 @@ export interface ReviewWorkflowOptions {
 	createHooks?: () => Promise<ReviewWorkflowHooks> | ReviewWorkflowHooks;
 	onReviewModelWarning?: (message: string) => void;
 	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
-	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
-	/** Runtime-scoped registry used to expose a local TUI review to attached RPC clients. */
-	workflowManager?: ReviewWorkflowManager;
+	/** The conversation's work: the review runs as its `review` work, which other clients see and may cancel. */
+	work: WorkRegistry;
 }
 
 export type ReviewWorkflowResult =
-	| { status: "accepted"; workflowId: string; message?: string }
+	| { status: "accepted"; workId: string; message?: string }
 	| { status: "cancelled"; resolution?: ResolvedReview }
 	| {
 			status: "completed";
@@ -935,10 +873,11 @@ export interface ExecuteReviewWorkflowOptions {
 	skipWorkingTreeGuard?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
-	onEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void;
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
+	/** The review's work: its stage and accounting so far, live and as a checkpoint per pass. */
+	work?: Pick<WorkContext, "progress" | "checkpoint">;
 }
 
 export type ExecuteReviewWorkflowResult =
@@ -951,8 +890,6 @@ export type ExecuteReviewWorkflowResult =
 			findingsCount: number;
 			completionStatus: ParsedReview["completionStatus"];
 			record?: ReviewRunRecord;
-			/** The terminal record crossed the SessionManager durability boundary. */
-			durableRecordCommitted?: true;
 	  };
 
 export function createReviewConfirmationMessage(resolution: ResolvedReview): string {
@@ -1024,16 +961,26 @@ function createReviewWorkflowId(): string {
 	return `review:${randomUUID()}`;
 }
 
-function provisionalReviewWorkflowTarget(target: ReviewTarget): { description: string; diffCommand: string } {
-	const description =
-		target.kind === "uncommitted"
-			? "Preparing uncommitted review"
-			: target.kind === "branch"
-				? "Preparing branch review"
-				: target.kind === "pr"
-					? "Preparing pull request review"
-					: "Preparing commit review";
-	return { description, diffCommand: "Snapshot resolution pending." };
+/**
+ * What a review of `target` reviews, before its snapshot is resolved: the
+ * target's kind only, since a ref or number is not validated yet.
+ */
+function provisionalReviewTarget(target: ReviewTarget): string {
+	switch (target.kind) {
+		case "uncommitted":
+			return "uncommitted changes";
+		case "branch":
+			return "branch changes";
+		case "pr":
+			return "pull request";
+		case "commit":
+			return "commit";
+	}
+}
+
+/** What a review of `resolution` reviews, as its work names it. */
+export function reviewWorkTarget(resolution: Pick<ResolvedReview, "description" | "workflowDescription">): string {
+	return resolution.workflowDescription ?? resolution.description;
 }
 
 class ReviewPreparationCancelledError extends Error {
@@ -1144,75 +1091,6 @@ function summarizeToolArgs(args: unknown): string | undefined {
 	return undefined;
 }
 
-function sanitizeReviewWorkflowToolArgs(
-	toolName: string,
-	args: unknown,
-	includeStrings: boolean,
-): Record<string, unknown> | undefined {
-	if (typeof args !== "object" || args === null || Array.isArray(args) || REVIEW_REPORT_TOOL_NAMES.has(toolName))
-		return undefined;
-	const record = args as Record<string, unknown>;
-	const allowed = new Set([
-		"action",
-		"command",
-		"cursor",
-		"glob",
-		"ignoreCase",
-		"limit",
-		"line",
-		"maxBytes",
-		"offset",
-		"path",
-		"pattern",
-		"prefix",
-		"query",
-		"revision",
-		"startLine",
-		"symbol",
-	]);
-	const result: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(record)) {
-		if (!allowed.has(key)) continue;
-		if (typeof value === "string") {
-			if (!includeStrings) continue;
-			const normalized = value.replace(/\s+/g, " ").trim();
-			if (normalized) result[key] = normalized.length > 240 ? `${normalized.slice(0, 239)}…` : normalized;
-		} else if (typeof value === "number" && Number.isFinite(value)) result[key] = value;
-		else if (typeof value === "boolean") result[key] = value;
-	}
-	return Object.keys(result).length > 0 ? result : undefined;
-}
-
-function emitReviewWorkflowToolEvent(
-	emit: ((event: ReviewWorkflowToolEvent) => void) | undefined,
-	options: Pick<RunReviewOptions, "workflowId" | "workflowAction">,
-	event: Extract<AgentSessionEvent, { type: "tool_execution_start" | "tool_execution_end" }>,
-): void {
-	if (!emit || !options.workflowId || !options.workflowAction) return;
-	const toolCallId = `${options.workflowId}:${event.toolCallId}`;
-	if (event.type === "tool_execution_start") {
-		emit({
-			type: "tool_execution_start",
-			workflowId: options.workflowId,
-			workflowKind: "review",
-			workflowAction: options.workflowAction,
-			toolCallId,
-			toolName: event.toolName,
-			args: sanitizeReviewWorkflowToolArgs(event.toolName, event.args, options.workflowAction !== "review.pr"),
-		});
-	} else {
-		emit({
-			type: "tool_execution_end",
-			workflowId: options.workflowId,
-			workflowKind: "review",
-			workflowAction: options.workflowAction,
-			toolCallId,
-			toolName: event.toolName,
-			isError: event.isError,
-		});
-	}
-}
-
 const THINKING_ORDER: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function effortThinkingLevel(level: ThinkingLevel | undefined, effort: ReviewEffort): ThinkingLevel | undefined {
@@ -1292,6 +1170,7 @@ interface ReviewPassOptions<TReport> {
 	repair: (report: TReport | undefined) => Promise<string[]> | string[];
 	priorUsage: SessionUsageTotals;
 	signal?: AbortSignal;
+	onPass?: RunReviewOptions["onPass"];
 	onEvent: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 }
@@ -1314,6 +1193,11 @@ interface ReviewPassResult<TReport> {
 }
 
 async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Promise<ReviewPassResult<TReport>> {
+	try {
+		options.onPass?.(options.name, options.identity.round);
+	} catch {
+		// Pass observers are passive and cannot fail an isolated review pass.
+	}
 	const sessionManager = SessionManager.inMemory(options.cwd);
 	await sessionManager.logWriter.appendSessionInfo(`Review ${options.name} ${options.identity.passId}`);
 	let currentAttempt = 1;
@@ -1474,7 +1358,6 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				) {
 					pendingCommands.set(event.toolCallId, event.args.command.replace(/\s+/g, " ").trim().slice(0, 500));
 				}
-				emitReviewWorkflowToolEvent(options.onEvent, options, event);
 			} else if (event.type === "tool_execution_end") {
 				const command = pendingCommands.get(event.toolCallId);
 				if (command && !event.isError) commandRuns.push(command);
@@ -1487,7 +1370,6 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					});
 				}
 				pendingCommands.delete(event.toolCallId);
-				emitReviewWorkflowToolEvent(options.onEvent, options, event);
 			}
 		};
 		let candidateReport: ReviewCandidateReport | undefined;
@@ -1572,6 +1454,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					},
 					priorUsage: usage,
 					signal: options.signal,
+					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("discovery", event),
 					onUsage,
 				});
@@ -1624,6 +1507,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					},
 					priorUsage: usage,
 					signal: options.signal,
+					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("verification", event),
 					onUsage,
 				});
@@ -1687,6 +1571,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 						: ["report_review_presentations was not called with a valid payload"],
 				priorUsage: usage,
 				signal: options.signal,
+				onPass: options.onPass,
 				onEvent: (event) => onSessionEvent("presentation", event),
 				onUsage,
 			});
@@ -1725,6 +1610,7 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 							: ["Missing challenge presentation report"],
 					priorUsage: usage,
 					signal: options.signal,
+					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("presentation", event),
 					onUsage,
 				});
@@ -1831,20 +1717,16 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 	}
 }
 
+/** The stage a pass of round `round` puts a review in, as its work progress names it. */
+function reviewPassStage(pass: ReviewPass, round: number): string {
+	const stage = pass === "discovery" ? "Discovery" : pass === "verification" ? "Verification" : "Presentation";
+	return round > 1 ? `Follow-up ${stage.toLowerCase()} pass` : `${stage} pass`;
+}
+
 export async function executeReviewWorkflow(
 	options: ExecuteReviewWorkflowOptions,
 ): Promise<ExecuteReviewWorkflowResult> {
-	const { prepared } = options;
-	options.onEvent?.({
-		type: "workflow_start",
-		workflowId: prepared.workflowId,
-		kind: "review",
-		action: prepared.action,
-		title: "Review",
-		message: `Reviewing ${prepared.resolution.workflowDescription ?? prepared.resolution.description}.`,
-		status: "running",
-		startedAt: prepared.startedAt,
-	});
+	const { prepared, work } = options;
 	const source = options.sessionWriter;
 	const sessionId = source?.sessionManager.getSessionId();
 	const generation = source?.sessionManager.getSessionRef()?.sessionGeneration;
@@ -1856,15 +1738,20 @@ export async function executeReviewWorkflow(
 		)
 			throw new Error("Review accounting source changed");
 	};
-	const accounting = new ReviewUsageCollector(
-		source
-			? async (usage) => {
-					assertSource();
-					await appendReviewUsageCheckpoint(source, prepared.workflowId, usage);
-					assertSource();
-				}
-			: undefined,
-	);
+	let stage = `Reviewing ${reviewWorkTarget(prepared.resolution)}`;
+	// Accounting reaches clients as the work's detail: live as it changes, durable once per pass. A
+	// changed source stops further inference; the run's record could no longer be written.
+	const accounting = new ReviewUsageCollector(async (usage) => {
+		assertSource();
+		work?.progress({ text: stage }, reviewUsageDetail(usage));
+	});
+	const report = (text: string, durable: boolean): void => {
+		if (!work) return;
+		const detail = reviewUsageDetail(accounting.snapshot());
+		if (durable) work.checkpoint({ text }, detail);
+		else work.progress({ text }, detail);
+	};
+	report(stage, false);
 	try {
 		if (prepared.target.kind === "pr" && !options.signal?.aborted) {
 			const binding = await readPrReviewBinding(
@@ -1882,23 +1769,8 @@ export async function executeReviewWorkflow(
 				assertSource();
 			}
 		}
-		if (source) {
-			await appendReviewRunDurably(
-				source,
-				createReviewRunRecord({
-					workflowId: prepared.workflowId,
-					workflowAction: prepared.action,
-					startedAt: prepared.startedAt,
-					snapshot: prepared.resolution,
-					controls: prepared.controls,
-					status: "unfinished",
-					incrementalPlan: prepared.incrementalPlan,
-				}),
-			);
-			assertSource();
-		}
 	} catch (error) {
-		// runReview normally owns cleanup, but initial durability precedes it.
+		// runReview normally owns cleanup, but the binding check precedes it.
 		await prepared.resolution.dispose();
 		throw error;
 	}
@@ -1919,8 +1791,15 @@ export async function executeReviewWorkflow(
 		tools: options.tools,
 		signal: options.signal,
 		onProgress: options.onProgress,
-		onEvent: options.onEvent,
-		onSessionEvent: options.onSessionEvent,
+		onPass: (pass, round) => {
+			stage = reviewPassStage(pass, round);
+			report(stage, true);
+		},
+		onSessionEvent: (event) => {
+			options.onSessionEvent?.(event);
+			// Tool names only: a tool's arguments can carry private pull request context.
+			if (event.type === "tool_execution_start") report(`${stage}: ${event.toolName}`, false);
+		},
 		onUsage: options.onUsage,
 		onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
 		workflowId: prepared.workflowId,
@@ -1965,16 +1844,7 @@ export async function executeReviewWorkflow(
 		if (options.sessionWriter) await appendReviewRunDurably(options.sessionWriter, record);
 		return { status: "failed", errorMessage, record };
 	}
-	options.onEvent?.({
-		type: "workflow_update",
-		workflowId: prepared.workflowId,
-		kind: "review",
-		action: prepared.action,
-		title: "Review",
-		message: "Finalizing verified findings.",
-		status: "finalizing",
-		startedAt: prepared.startedAt,
-	});
+	report("Finalizing verified findings", false);
 	const record = createReviewRunRecord({
 		workflowId: prepared.workflowId,
 		workflowAction: prepared.action,
@@ -1994,8 +1864,32 @@ export async function executeReviewWorkflow(
 		findingsCount: result.parsed.findings.length,
 		completionStatus: result.parsed.completionStatus,
 		record,
-		...(options.sessionWriter ? { durableRecordCommitted: true as const } : {}),
 	};
+}
+
+/**
+ * How review work of `target` ends for `result`: a completed review with
+ * its summary and finding counts, a failed one with `result`'s error.
+ */
+export function reviewWorkExecution(result: ExecuteReviewWorkflowResult, target: string): WorkExecution {
+	switch (result.status) {
+		case "completed":
+			return {
+				outcome: "completed",
+				result: {
+					summary: formatReviewWorkflowSummary(result),
+					data: {
+						target,
+						findingsCount: result.findingsCount,
+						completionStatus: result.completionStatus,
+					} satisfies ReviewWorkData,
+				},
+			};
+		case "failed":
+			return { outcome: "failed", error: result.errorMessage };
+		case "cancelled":
+			return { outcome: "cancelled" };
+	}
 }
 
 async function promoteCompletedReview(
@@ -2055,315 +1949,185 @@ async function awaitReviewAdmissionStep<T>(
 	});
 }
 
+/** How an interactive review's work ended, for the caller waiting on it. */
+type ReviewWorkflowEnd =
+	| { status: "cancelled"; resolution?: ResolvedReview }
+	| { status: "failed"; error: Error }
+	| {
+			status: "completed";
+			resolution: ResolvedReview;
+			result: Extract<ExecuteReviewWorkflowResult, { status: "completed" }>;
+	  };
+
+/**
+ * Run a review as the conversation's `review` work and promote its findings
+ * to a new session. The work starts before the snapshot is resolved, so
+ * every client sees and may cancel the review while it prepares; the
+ * caller's hooks signal (the local UI) cancels it too. Preparation,
+ * confirmation, and execution run in the work's executor; a completed
+ * review is promoted once its work finished.
+ */
 export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise<ReviewWorkflowResult> {
 	assertReviewCanStart(options.session);
 	let hooks: ReviewWorkflowHooks | undefined;
 	let prepared: PreparedReviewWorkflow | undefined;
-	let registeredWorkflow: ReturnType<ReviewWorkflowManager["start"]> | undefined;
-	let detachRegisteredForwarder: (() => void) | undefined;
-	let cancelRegisteredFromLocalUi: (() => void) | undefined;
-	let managedExecutionResult: ExecuteReviewWorkflowResult | undefined;
-	type ManagedReviewAdmission = "execute" | "cancelled" | "failed";
-	let resolveManagedAdmission: ((admission: ManagedReviewAdmission) => void) | undefined;
-	let managedAdmissionSettled = false;
-	const settleManagedAdmission = (admission: ManagedReviewAdmission): void => {
-		if (!resolveManagedAdmission || managedAdmissionSettled) return;
-		managedAdmissionSettled = true;
-		resolveManagedAdmission(admission);
-	};
-	const settleRegisteredFailure = async (): Promise<void> => {
-		if (!registeredWorkflow || !options.workflowManager) return;
-		if (options.workflowManager.get(registeredWorkflow.descriptor.workflowId)?.status !== "running") return;
-		settleManagedAdmission("failed");
-		await registeredWorkflow.finished;
-	};
+	let cancelFromLocalUi: (() => void) | undefined;
 	try {
 		hooks = await options.createHooks?.();
 		if (hooks?.signal?.aborted) return { status: "cancelled" };
-		if (options.workflowManager) {
-			const workflowId = createReviewWorkflowId();
-			const action = reviewActionIdForTarget(options.target);
-			const startedAt = Date.now();
-			const managedAdmission = new Promise<ManagedReviewAdmission>((resolve) => {
-				resolveManagedAdmission = resolve;
-			});
-			registeredWorkflow = options.workflowManager.start({
-				provisional: true,
-				prepared: {
-					workflowId,
-					action,
+		const admitted = hooks;
+		const workId = createReviewWorkflowId();
+		const startedAt = Date.now();
+		const ended = Promise.withResolvers<ReviewWorkflowEnd>();
+		const execute = async (ctx: WorkContext): Promise<WorkExecution> => {
+			const signal = ctx.signal;
+			ctx.progress({ text: "Preparing review" });
+			let executable: PreparedReviewWorkflow;
+			try {
+				executable = await prepareReviewWorkflow({
+					target: options.target,
+					controls: options.controls,
+					...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
+					workflowId: workId,
 					startedAt,
-					resolution: provisionalReviewWorkflowTarget(options.target),
-				},
-				fastModeEnabled: options.session.fastModeEnabled,
-				execute: async (managedHooks) => {
-					const admission = await managedAdmission;
-					if (admission === "cancelled") return { status: "cancelled" };
-					const executable = prepared;
-					if (admission === "failed" || !executable) {
-						return { status: "failed", errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
-					}
-					managedExecutionResult = await executeReviewWorkflow({
-						prepared: executable,
-						cwd: options.cwd,
-						agentDir: options.agentDir,
-						authStorage: options.authStorage,
-						modelRegistry: options.session.modelRegistry,
-						settingsManager: options.settingsManager,
-						sessionWriter: options.session.sessionWriter,
-						thinkingLevel: options.session.thinkingLevel,
-						fastModeEnabled: options.session.fastModeEnabled,
-						parentResourceLoader: options.session.resourceLoader,
-						tools: options.tools,
-						signal: managedHooks.signal,
-						onProgress: hooks?.onProgress,
-						onSessionEvent: hooks?.onSessionEvent,
-						onUsage: hooks?.onUsage,
-						onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
-						onEvent: managedHooks.onEvent,
-					});
-					return managedExecutionResult.status === "failed"
-						? {
-								...managedExecutionResult,
-								status: "failed",
-								errorMessage: managedExecutionResult.record?.errorMessage ?? REMOTE_REVIEW_FAILURE_MESSAGE,
-							}
-						: managedExecutionResult;
-				},
-			});
-			detachRegisteredForwarder = options.workflowManager.attachSink((event) => {
-				if (event.workflowId !== workflowId) return;
-				options.onEvent?.(event);
-				hooks?.onEvent?.(event);
-			});
-			cancelRegisteredFromLocalUi = (): void => {
-				if (options.workflowManager?.get(workflowId)?.status !== "running") return;
-				options.workflowManager.cancel(workflowId);
-			};
-			hooks?.signal?.addEventListener("abort", cancelRegisteredFromLocalUi, { once: true });
-			if (hooks?.signal?.aborted) cancelRegisteredFromLocalUi();
-			registeredWorkflow.launch();
-		}
-		try {
-			prepared = await prepareReviewWorkflow({
-				target: options.target,
-				controls: options.controls,
-				...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
-				...(registeredWorkflow
-					? {
-							workflowId: registeredWorkflow.descriptor.workflowId,
-							startedAt: registeredWorkflow.descriptor.startedAt,
-						}
-					: {}),
-				cwd: options.cwd,
-				settingsManager: options.settingsManager,
-				modelRegistry: options.session.modelRegistry,
-				currentModel: options.session.model,
-				sessionManager: options.session.sessionWriter?.sessionManager,
-				requireProjectTrust: options.requireProjectTrust,
-				signal: registeredWorkflow?.signal ?? hooks?.signal,
-				onProgress: hooks?.onProgress,
-			});
-		} catch (error) {
-			if (
-				error instanceof ReviewPreparationCancelledError ||
-				registeredWorkflow?.signal.aborted ||
-				hooks?.signal?.aborted
-			) {
-				if (
-					registeredWorkflow &&
-					options.workflowManager?.get(registeredWorkflow.descriptor.workflowId)?.status === "running"
-				) {
-					options.workflowManager.cancel(registeredWorkflow.descriptor.workflowId);
+					cwd: options.cwd,
+					settingsManager: options.settingsManager,
+					modelRegistry: options.session.modelRegistry,
+					currentModel: options.session.model,
+					sessionManager: options.session.sessionWriter?.sessionManager,
+					requireProjectTrust: options.requireProjectTrust,
+					signal,
+					onProgress: admitted?.onProgress,
+				});
+			} catch (error) {
+				if (error instanceof ReviewPreparationCancelledError || signal.aborted) {
+					ended.resolve({ status: "cancelled" });
+					return { outcome: "cancelled" };
 				}
-				settleManagedAdmission("cancelled");
-				if (registeredWorkflow) await registeredWorkflow.finished;
-				return { status: "cancelled" };
+				ended.resolve({ status: "failed", error: error instanceof Error ? error : new Error(String(error)) });
+				return { outcome: "failed", error: REMOTE_REVIEW_FAILURE_MESSAGE };
 			}
-			throw error;
-		}
-		registeredWorkflow?.updatePrepared(prepared);
-
-		const { resolution, workflowId, action, startedAt, controls, incrementalPlan, model } = prepared;
-		const admissionSignal = registeredWorkflow?.signal ?? hooks?.signal;
-		const persistPreparedCancellation = async (): Promise<ReviewWorkflowResult> => {
-			const record = createReviewRunRecord({
-				workflowId,
-				workflowAction: action,
-				startedAt,
-				snapshot: resolution,
-				controls,
-				status: "cancelled",
-				usage: createEmptyReviewUsage(),
-				incrementalPlan,
-			});
-			if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
-			if (
-				registeredWorkflow &&
-				options.workflowManager?.get(registeredWorkflow.descriptor.workflowId)?.status === "running"
-			) {
-				options.workflowManager.cancel(registeredWorkflow.descriptor.workflowId);
-			}
-			settleManagedAdmission("cancelled");
-			if (registeredWorkflow) await registeredWorkflow.finished;
-			return { status: "cancelled", resolution };
-		};
-
-		if (registeredWorkflow?.signal.aborted || hooks?.signal?.aborted) return await persistPreparedCancellation();
-		if (options.requireConfirmation) {
-			const confirmation = await awaitReviewAdmissionStep(admissionSignal, () =>
-				options.confirm?.({
-					title: "Review changes",
-					message: createReviewConfirmationMessage(resolution),
-					resolution,
-					...(admissionSignal ? { signal: admissionSignal } : {}),
-				}),
-			);
-			if (confirmation.status === "cancelled" || !confirmation.value) return await persistPreparedCancellation();
-		}
-		if (registeredWorkflow?.signal.aborted || hooks?.signal?.aborted) return await persistPreparedCancellation();
-		if (prepared.modelWarning) options.onReviewModelWarning?.(prepared.modelWarning);
-		if (prepared.verifierModelWarning) options.onReviewModelWarning?.(prepared.verifierModelWarning);
-		try {
-			assertReviewCanStart(options.session);
-			const preparation = await awaitReviewAdmissionStep(admissionSignal, () =>
-				hooks?.onPrepared?.(resolution, model),
-			);
-			if (preparation.status === "cancelled") return await persistPreparedCancellation();
-			if (registeredWorkflow?.signal.aborted || hooks?.signal?.aborted) return await persistPreparedCancellation();
-		} catch (error) {
-			if (registeredWorkflow?.signal.aborted || hooks?.signal?.aborted) return await persistPreparedCancellation();
-			const record = createReviewRunRecord({
-				workflowId,
-				workflowAction: action,
-				startedAt: prepared.startedAt,
-				snapshot: resolution,
-				controls: prepared.controls,
-				status: "failed",
-				usage: createEmptyReviewUsage(),
-				errorMessage: resolution.codeHostContext
-					? REMOTE_REVIEW_FAILURE_MESSAGE
-					: error instanceof Error
-						? error.message
-						: String(error),
-				incrementalPlan: prepared.incrementalPlan,
-			});
-			if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
-			throw error;
-		}
-
-		if (registeredWorkflow) {
-			settleManagedAdmission("execute");
-			const terminalRecord = await registeredWorkflow.finished;
-			if (terminalRecord.status === "cancelled") return { status: "cancelled", resolution };
-			if (terminalRecord.status === "failed") {
-				const message =
-					managedExecutionResult?.status === "failed"
-						? managedExecutionResult.errorMessage
-						: terminalRecord.errorMessage;
-				throw new Error(`Review failed: ${message ?? REMOTE_REVIEW_FAILURE_MESSAGE}`);
-			}
-			if (managedExecutionResult?.status !== "completed") {
-				throw new Error("Review completed without a structured execution result.");
-			}
-			return await promoteCompletedReview(options, resolution, managedExecutionResult);
-		}
-
-		const emit = (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent): void => {
-			options.onEvent?.(event);
-			hooks?.onEvent?.(event);
-		};
-		let terminalEmitted = false;
-		const terminal = (event: Extract<ReviewWorkflowEvent, { type: "workflow_end" }>): void => {
-			terminalEmitted = true;
-			emit(event);
-		};
-		try {
-			const result = await executeReviewWorkflow({
-				prepared,
-				cwd: options.cwd,
-				agentDir: options.agentDir,
-				authStorage: options.authStorage,
-				modelRegistry: options.session.modelRegistry,
-				settingsManager: options.settingsManager,
-				sessionWriter: options.session.sessionWriter,
-				thinkingLevel: options.session.thinkingLevel,
-				fastModeEnabled: options.session.fastModeEnabled,
-				parentResourceLoader: options.session.resourceLoader,
-				tools: options.tools,
-				signal: hooks?.signal,
-				onProgress: hooks?.onProgress,
-				onSessionEvent: hooks?.onSessionEvent,
-				onUsage: hooks?.onUsage,
-				onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
-				onEvent: emit,
-			});
-			if (result.status === "cancelled") {
-				terminal({
-					type: "workflow_end",
-					workflowId,
-					kind: "review",
-					action,
-					title: "Review",
-					message: "Review cancelled.",
+			prepared = executable;
+			const { resolution, controls, incrementalPlan, model } = executable;
+			const cancelPrepared = async (): Promise<WorkExecution> => {
+				const record = createReviewRunRecord({
+					workflowId: workId,
+					workflowAction: executable.action,
+					startedAt,
+					snapshot: resolution,
+					controls,
 					status: "cancelled",
-					startedAt: prepared.startedAt,
-					endedAt: result.record?.endedAt ?? Date.now(),
+					usage: createEmptyReviewUsage(),
+					incrementalPlan,
 				});
-				return { status: "cancelled", resolution };
+				if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
+				ended.resolve({ status: "cancelled", resolution });
+				return { outcome: "cancelled" };
+			};
+			if (signal.aborted) return await cancelPrepared();
+			if (options.requireConfirmation) {
+				const confirmation = await awaitReviewAdmissionStep(signal, () =>
+					options.confirm?.({
+						title: "Review changes",
+						message: createReviewConfirmationMessage(resolution),
+						resolution,
+						signal,
+					}),
+				);
+				if (confirmation.status === "cancelled" || !confirmation.value) return await cancelPrepared();
 			}
-			if (result.status === "failed") {
-				terminal({
-					type: "workflow_end",
-					workflowId,
-					kind: "review",
-					action,
-					title: "Review",
-					message: `Review failed: ${result.errorMessage}`,
+			if (signal.aborted) return await cancelPrepared();
+			if (executable.modelWarning) options.onReviewModelWarning?.(executable.modelWarning);
+			if (executable.verifierModelWarning) options.onReviewModelWarning?.(executable.verifierModelWarning);
+			try {
+				assertReviewCanStart(options.session);
+				const preparation = await awaitReviewAdmissionStep(signal, () => admitted?.onPrepared?.(resolution, model));
+				if (preparation.status === "cancelled" || signal.aborted) return await cancelPrepared();
+			} catch (error) {
+				if (signal.aborted) return await cancelPrepared();
+				const record = createReviewRunRecord({
+					workflowId: workId,
+					workflowAction: executable.action,
+					startedAt,
+					snapshot: resolution,
+					controls,
 					status: "failed",
-					startedAt: prepared.startedAt,
-					endedAt: result.record?.endedAt ?? Date.now(),
+					usage: createEmptyReviewUsage(),
+					errorMessage: resolution.codeHostContext
+						? REMOTE_REVIEW_FAILURE_MESSAGE
+						: error instanceof Error
+							? error.message
+							: String(error),
+					incrementalPlan,
 				});
-				throw new Error(`Review failed: ${result.errorMessage}`);
+				if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
+				ended.resolve({ status: "failed", error: error instanceof Error ? error : new Error(String(error)) });
+				return { outcome: "failed", error: record.errorMessage ?? REMOTE_REVIEW_FAILURE_MESSAGE };
 			}
-			const completed = await promoteCompletedReview(options, resolution, result);
-			terminal({
-				type: "workflow_end",
-				workflowId,
-				kind: "review",
-				action,
-				title: "Review",
-				message: completed.sessionSwitchCancelled
-					? `${formatReviewWorkflowSummary(completed)} Findings were added to the current session.`
-					: `${formatReviewWorkflowSummary(completed)} Opening review session.`,
-				status: "completed",
-				startedAt: prepared.startedAt,
-				endedAt: result.record?.endedAt ?? Date.now(),
-			});
-			return completed;
-		} catch (error) {
-			if (!terminalEmitted)
-				terminal({
-					type: "workflow_end",
-					workflowId,
-					kind: "review",
-					action,
-					title: "Review",
-					message: "Review failed.",
-					status: "failed",
-					startedAt: prepared.startedAt,
-					endedAt: Date.now(),
+			let result: ExecuteReviewWorkflowResult;
+			try {
+				result = await executeReviewWorkflow({
+					prepared: executable,
+					cwd: options.cwd,
+					agentDir: options.agentDir,
+					authStorage: options.authStorage,
+					modelRegistry: options.session.modelRegistry,
+					settingsManager: options.settingsManager,
+					sessionWriter: options.session.sessionWriter,
+					thinkingLevel: options.session.thinkingLevel,
+					fastModeEnabled: options.session.fastModeEnabled,
+					parentResourceLoader: options.session.resourceLoader,
+					tools: options.tools,
+					signal,
+					onProgress: admitted?.onProgress,
+					onSessionEvent: admitted?.onSessionEvent,
+					onUsage: admitted?.onUsage,
+					onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
+					work: ctx,
 				});
-			throw error;
-		}
-	} catch (error) {
-		await settleRegisteredFailure();
-		throw error;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				ended.resolve({ status: "failed", error: new Error(`Review failed: ${message}`) });
+				return { outcome: "failed", error: message };
+			}
+			if (result.status === "cancelled") {
+				ended.resolve({ status: "cancelled", resolution });
+			} else if (result.status === "failed") {
+				ended.resolve({ status: "failed", error: new Error(`Review failed: ${result.errorMessage}`) });
+				return { outcome: "failed", error: result.record?.errorMessage ?? REMOTE_REVIEW_FAILURE_MESSAGE };
+			} else {
+				ended.resolve({ status: "completed", resolution, result });
+			}
+			return reviewWorkExecution(result, reviewWorkTarget(resolution));
+		};
+		await options.work.start(
+			"review",
+			reviewWorkInput(reviewActionIdForTarget(options.target), provisionalReviewTarget(options.target)),
+			async (ctx) => {
+				try {
+					return await execute(ctx);
+				} catch (error) {
+					// A failure that escaped the stages above still ends the review for its caller.
+					ended.resolve({ status: "failed", error: error instanceof Error ? error : new Error(String(error)) });
+					throw error;
+				}
+			},
+			{ workId },
+		);
+		const cancel = (): void => {
+			void options.work.cancel(workId).catch(() => undefined);
+		};
+		cancelFromLocalUi = cancel;
+		hooks?.signal?.addEventListener("abort", cancel, { once: true });
+		if (hooks?.signal?.aborted) cancel();
+		const end = await ended.promise;
+		// The review's finish is written before its findings leave this conversation.
+		await options.work.settled(workId);
+		if (end.status === "cancelled") return end;
+		if (end.status === "failed") throw end.error;
+		return await promoteCompletedReview(options, end.resolution, end.result);
 	} finally {
-		if (cancelRegisteredFromLocalUi) {
-			hooks?.signal?.removeEventListener("abort", cancelRegisteredFromLocalUi);
-		}
-		detachRegisteredForwarder?.();
+		if (cancelFromLocalUi) hooks?.signal?.removeEventListener("abort", cancelFromLocalUi);
 		try {
 			hooks?.cleanup?.();
 		} finally {

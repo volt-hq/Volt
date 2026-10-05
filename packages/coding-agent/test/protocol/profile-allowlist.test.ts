@@ -360,7 +360,7 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	reset_review_discussion: intents("review_reset_discussion"),
 	get_review_discussion_source: queries("review.discussion_source"),
 	get_review_general: queries("review.general"),
-	cancel_workflow: intents("review_cancel_workflow"),
+	cancel_workflow: intents("cancel_work"),
 	get_review_result: queries("review.result"),
 	list_review_workflows: queries("review.workflows"),
 	open_review_session: intents("review_open_session"),
@@ -805,7 +805,6 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 describe("work intents and queries keep the authorization of the paths they replace", () => {
 	/** Each work intent or query, and the intent or query of the path it replaces (Phase 4 plan §4). */
 	const REPLACED: ReadonlyArray<{ readonly work: Mapping; readonly replaced: Mapping }> = [
-		{ work: intents("cancel_work"), replaced: intents("review_cancel_workflow") },
 		{ work: intents("resume_work"), replaced: intents("cancel_work") },
 		{ work: intents("open_work"), replaced: intents("review_open_session") },
 		{ work: intents("start_subagent"), replaced: intents("subagent_start") },

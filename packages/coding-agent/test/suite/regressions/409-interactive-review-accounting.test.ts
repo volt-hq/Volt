@@ -9,7 +9,6 @@ import { describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import type { ReviewWorkflowResult } from "../../../src/core/review.ts";
 import { listReviewRuns } from "../../../src/core/review-state.ts";
-import { ReviewWorkflowManager } from "../../../src/core/review-workflows.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { BorderedLoader } from "../../../src/modes/interactive/components/bordered-loader.ts";
@@ -72,7 +71,7 @@ describe("#409 interactive terminal review accounting", () => {
 					conversation: {
 						session: h.session,
 						services: { agentDir: h.tempDir },
-						reviewWorkflows: new ReviewWorkflowManager(),
+						work: h.session.work,
 					},
 					ui: {
 						terminal: { rows: 24, columns: 120 },
@@ -141,6 +140,13 @@ describe("#409 interactive terminal review accounting", () => {
 				const rendered = chatContainer.render(120).lines.map(stripAnsi).join("\n");
 				expect(record?.status, rendered).toBe(status);
 				expect(record?.usage?.summary.tokens?.input).toBeGreaterThanOrEqual(10);
+				// The review ran as the conversation's work and ended as its run did.
+				expect(h.session.work.get(record.runId)).toMatchObject({ kind: "review", outcome: status });
+				expect(
+					manager
+						.getEntries()
+						.some((entry) => entry.type === "custom" && entry.customType === "volt.review.usage"),
+				).toBe(false);
 				expect(h.faux.state.callCount).toBe(2);
 				expect(newSession).not.toHaveBeenCalled();
 				expect(footer.setTransientUsage.mock.calls.some(([value]) => value !== undefined)).toBe(true);

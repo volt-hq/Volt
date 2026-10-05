@@ -156,7 +156,7 @@ export class IntentRegistry {
 
 	/** Availability for a view: the review-discussion boundary, then the definition's own. */
 	availability(definition: AnyIntentDefinition, view: IntentView, input?: unknown): IntentAvailability {
-		if (view.state.isReviewDiscussion && isSourceOwned(definition, input)) {
+		if (view.state.isReviewDiscussion && isSourceOwned(definition, input, view)) {
 			return { enabled: false, reason: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE };
 		}
 		return definition.available?.(view, input as never) ?? INTENT_ENABLED;
@@ -366,9 +366,9 @@ function metadataOf(resolved: ResolvedIntent): IntentMetadata {
 	return resolved.kind === "builtin" ? resolved.definition : resolved.intent;
 }
 
-function isSourceOwned(definition: AnyIntentDefinition, input: unknown): boolean {
+function isSourceOwned(definition: AnyIntentDefinition, input: unknown, view: IntentView): boolean {
 	const owned = definition.sourceOwned;
-	if (typeof owned === "function") return input !== undefined && owned(input as never);
+	if (typeof owned === "function") return input !== undefined && owned(input as never, view);
 	return owned === true;
 }
 

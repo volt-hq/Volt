@@ -1,9 +1,8 @@
 /**
  * One conversation a `ConversationHost` opened. It serves one log for its
  * whole life: its session, the cwd-bound services the session was created
- * with, its live state, its work registry, its detached reviews, the
- * one-shot recovery of durable queued input, and its managed-worktree pin
- * are fixed until it closes.
+ * with, its live state, its work registry, the one-shot recovery of durable
+ * queued input, and its managed-worktree pin are fixed until it closes.
  */
 
 import { releaseLocalSessionWorktree } from "../../daemon/session-worktree.ts";
@@ -11,7 +10,6 @@ import type { AgentSession } from "../agent-session.ts";
 import type { AgentSessionDiagnostic, AgentSessionServices } from "../agent-session-services.ts";
 import type { ProjectTrustContext, SessionShutdownEvent, SessionStartEvent } from "../extensions/index.ts";
 import { emitSessionShutdownEvent } from "../extensions/runner.ts";
-import { ReviewWorkflowManager } from "../review-workflows.ts";
 import type { CreateAgentSessionResult } from "../sdk.ts";
 import { wakingInputRecovery } from "../session/client-inputs.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -137,13 +135,12 @@ export class HostedConversation {
 	/**
 	 * Resolves once, when the conversation's session loses its log while the
 	 * conversation is open: a commit it could not confirm means it may no
-	 * longer be the log's only writer. Its detached reviews are aborted; the
-	 * host closes the conversation, which releases the lock. Never rejects.
+	 * longer be the log's only writer. Its session stops its work; the host
+	 * closes the conversation, which releases the lock. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
 	/** Feeds the live state from the session until the conversation closes. */
 	private readonly liveFeed: LiveFeed;
-	private _reviewWorkflows?: ReviewWorkflowManager;
 	private recovery?: RecoveredClientInputsTask;
 	/** Operations the conversation stays open for: closing waits for them. */
 	private readonly holds = new Set<Promise<void>>();
@@ -160,16 +157,14 @@ export class HostedConversation {
 		this.liveFeed = feedLiveState(this.session);
 		void this.session.lost.then((error) => {
 			if (this.closePromise) return;
-			// Reviews persist through the lost session's manager and cannot finish; the session stops its work.
-			void this._reviewWorkflows?.abortAll().catch(() => undefined);
 			this.lostSignal.resolve(error);
 		});
 	}
 
 	/**
-	 * The conversation's work (RFC §7): its session's work registry. The host
-	 * reconciles the work a previous runtime left when it opens the
-	 * conversation; closing stops every executor.
+	 * The conversation's work (RFC §7): its session's work registry, its
+	 * reviews included. The host reconciles the work a previous runtime left
+	 * when it opens the conversation; closing stops every executor.
 	 */
 	get work(): WorkRegistry {
 		return this.session.work;
@@ -179,8 +174,8 @@ export class HostedConversation {
 	 * The conversation's live state: extension status, widgets, and title,
 	 * dialogs, approvals, MCP authorization flows, the run phase, Git and
 	 * prompt-cache status, token use, intent availability, work progress,
-	 * review workflows, and what streams. The host attaches each client's
-	 * `live` view when the client joins; it closes with the session.
+	 * and what streams. The host attaches each client's `live` view when the
+	 * client joins; it closes with the session.
 	 */
 	get liveState(): LiveState {
 		return this.session.liveState;
@@ -198,18 +193,6 @@ export class HostedConversation {
 	/** Whether the conversation is closing or closed. */
 	get closed(): boolean {
 		return this.closePromise !== undefined;
-	}
-
-	/**
-	 * Detached review workflows of this conversation. Their progress is the
-	 * live state's `workflow/<id>` value, so it survives client detach and
-	 * reattach; closing the conversation aborts every active review.
-	 */
-	get reviewWorkflows(): ReviewWorkflowManager {
-		this._reviewWorkflows ??= new ReviewWorkflowManager({
-			publishEvent: (event) => this.liveFeed.workflowEvent(event),
-		});
-		return this._reviewWorkflows;
 	}
 
 	/**
@@ -306,13 +289,13 @@ export class HostedConversation {
 
 	/**
 	 * Throws when a client may not leave the conversation for another one: a
-	 * turn, bash run, or session mutation is active, a detached review runs, or
-	 * durable queued input is still to be delivered or has an ambiguous outcome.
+	 * turn, bash run, or session mutation is active, a review runs, or durable
+	 * queued input is still to be delivered or has an ambiguous outcome.
 	 */
 	assertCanLeave(): void {
 		this.assertNotBusy();
 		const session = this.session;
-		if (this._reviewWorkflows?.hasActiveWorkflows) {
+		if (this.work.running().some((record) => record.kind === "review")) {
 			throw new Error("Cannot change sessions while a detached review is active; cancel or wait for it to finish");
 		}
 		const recovery = wakingInputRecovery(session.sessionManager.getConversationState());
@@ -337,11 +320,11 @@ export class HostedConversation {
 
 	/**
 	 * Close the conversation: wait for the operations it stays open for, stop
-	 * its work, abort its detached reviews and input recovery, emit
-	 * `session_shutdown`, then dispose its session, which releases the log's
-	 * lock. A conversation its clients moved away from (`reason` other than
-	 * quit) does not wait for the session's admitted prompt work, which may be
-	 * the extension command that moved them. Every caller joins one close.
+	 * its work, abort its input recovery, emit `session_shutdown`, then
+	 * dispose its session, which releases the log's lock. A conversation its
+	 * clients moved away from (`reason` other than quit) does not wait for the
+	 * session's admitted prompt work, which may be the extension command that
+	 * moved them. Every caller joins one close.
 	 */
 	close(event: {
 		reason: SessionShutdownEvent["reason"];
@@ -361,7 +344,6 @@ export class HostedConversation {
 		const moved = event.reason !== "quit";
 		await this.waitForHolds();
 		await this.work.cancelAll("closed").catch(() => undefined);
-		await this._reviewWorkflows?.abortAll().catch(() => undefined);
 		await this.abortRecovery(moved ? "session_replacement" : "disposal");
 		this.liveFeed.close();
 		const shutdownErrors: unknown[] = [];

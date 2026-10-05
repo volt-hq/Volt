@@ -23,9 +23,9 @@ The function remains publicly invokable because an unattached iOS app must reach
 - `POST /v1/push-targets`: mobile app registration with `X-Firebase-AppCheck`; body `{ provider:"fcm", platform:"ios", token, enabled }`; returns `{ pushTargetId, pushTargetAuthToken, relayUrl, tokenHash, expiresAtEpochSeconds }`.
 - `POST /v1/push-targets/revoke`: app or host cleanup with `{ pushTargetId, pushTargetAuthToken }`; returns `revoked` or idempotent `already_revoked`.
 - `POST /v1/push-targets/status`: credential-authenticated cache validation; returns `{ status:"active", expiresAtEpochSeconds }`, or `401`/`404`/`410` when the cached credential must be replaced.
-- `POST /v1/notifications`: desktop delivery with a current managed-relay host JWT in `Authorization: Bearer …` and `{ pushTargetId, pushTargetAuthToken, eventId, hostNodeId, kind, title, body, workspaceName?, planId?, workflowId?, data }`.
+- `POST /v1/notifications`: desktop delivery with a current managed-relay host JWT in `Authorization: Bearer …` and `{ pushTargetId, pushTargetAuthToken, eventId, hostNodeId, kind, title, body, workspaceName?, planId?, workId?, workKind?, data }`.
 
-Notification delivery accepts `conversation_completed`, `plan_ready`, `review_completed`, `action_completed`, and `host_notice`. `plan_ready` requires `planId`; `review_completed` requires `workflowId`; the navigation fields are mutually exclusive and forbidden on other kinds. Top-level and `data` values must agree. The bounded FCM data shape is forwarded unchanged:
+Notification delivery accepts `conversation_completed`, `plan_ready`, `work_finished`, and `host_notice`. `plan_ready` requires `planId`; `work_finished` requires `workId` and `workKind` (a built-in work kind or `ext:<extension>/<kind>`); the navigation fields are mutually exclusive and forbidden on other kinds. Top-level and `data` values must agree. The bounded FCM data shape is forwarded unchanged:
 
 ```json
 {
@@ -38,7 +38,7 @@ Notification delivery accepts `conversation_completed`, `plan_ready`, `review_co
 }
 ```
 
-`hostNodeId` is required at both the top level and in FCM `data`, must be the canonical lowercase 64-hex Iroh host identity, and must match exactly. `workflowId` replaces `planId` for review completion. Notification titles are limited to 128 UTF-8 bytes, bodies to 512, workspace/session/navigation values to 128, event IDs to 512, and kinds to 64. Unknown fields, mismatched metadata, unsafe characters, whitespace in identifiers, and path separators are rejected.
+`hostNodeId` is required at both the top level and in FCM `data`, must be the canonical lowercase 64-hex Iroh host identity, and must match exactly. `workId` and `workKind` replace `planId` for finished work. Notification titles are limited to 128 UTF-8 bytes, bodies to 512, workspace/session/navigation values to 128, event IDs to 512, and kinds to 64. Unknown fields, mismatched metadata, unsafe characters, whitespace in identifiers, and path separators (outside an extension `workKind`) are rejected.
 
 Volt host state stores only the opaque relay target id, target-scoped credential, and optional FCM token hash.
 

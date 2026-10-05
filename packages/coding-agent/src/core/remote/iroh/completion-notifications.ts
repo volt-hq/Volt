@@ -1,18 +1,19 @@
 /**
  * Completion notifications for paired devices: when a run a device's own
- * prompt started settles, or a review it can see completes, the host pushes a
+ * prompt started settles, or a review of a conversation it attached to
+ * completes (its `review` work finishes `completed`), the host pushes a
  * notification through the device's push target. Delivery history is kept per
  * conversation and device, so one device's streams to a conversation share
  * it: an event is pushed at most once, and an event whose push failed is
  * retried when the device reconnects.
  */
 
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AgentMessage, WorkRecord } from "@hansjm10/volt-agent-core";
 import { MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES } from "@hansjm10/volt-protocol/push";
 import type { AgentSession } from "../../agent-session.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import type { AgentMode, PlanPhase } from "../../planning.ts";
-import type { ReviewWorkflowResultRecord } from "../../review-workflows.ts";
+import { reviewWorkData } from "../../review-work.ts";
 import {
 	type IrohRemotePushNotificationDelivery,
 	type IrohRemotePushNotificationIntent,
@@ -23,7 +24,7 @@ import {
 	sanitizeIrohRemotePushNotificationIntent,
 } from "./push.ts";
 
-export type IrohRemoteNotificationKind = "conversation_completed" | "plan_ready" | "review_completed" | "host_notice";
+export type IrohRemoteNotificationKind = "conversation_completed" | "plan_ready" | "work_finished" | "host_notice";
 
 type RunTerminalOutcome = "completed" | "failed" | "aborted";
 
@@ -73,16 +74,18 @@ class NotificationReconciler {
 	private workspaceName: string | undefined;
 	private queue: Promise<void> = Promise.resolve();
 
+	/**
+	 * How far the log was looked at for finished reviews: reviews that
+	 * finished before the device first attached are not pushed.
+	 */
+	private reviewedOrdinal: number;
+
 	constructor(conversation: HostedConversation, hostNodeId: string) {
 		this.conversation = conversation;
 		this.hostNodeId = hostNodeId;
-		conversation.reviewWorkflows.attachSink((event) => {
-			if (event.type !== "workflow_end" || event.kind !== "review" || event.status !== "completed") return;
-			const record = conversation.reviewWorkflows.get(event.workflowId);
-			if (record?.status !== "completed") return;
-			const notification = reviewCompletion(record, conversation.session.sessionId, hostNodeId, this.workspaceName);
-			if (notification) void this.deliver(notification);
-		});
+		const sessionManager = conversation.session.sessionManager;
+		this.reviewedOrdinal = sessionManager.getOrdinal();
+		sessionManager.subscribeOrdinal((ordinal) => this.reviewsFinished(ordinal));
 	}
 
 	attach(options: CompletionNotificationsOptions): void {
@@ -91,19 +94,24 @@ class NotificationReconciler {
 		}
 		this.workspaceName = options.workspaceName;
 		this.delivery = options.delivery;
-		for (const descriptor of this.conversation.reviewWorkflows.list()) {
-			if (descriptor.status !== "completed") continue;
-			const record = this.conversation.reviewWorkflows.get(descriptor.workflowId);
-			if (record?.status !== "completed") continue;
+		void this.flushLater();
+	}
+
+	/** Push the reviews that completed in the entries up to `ordinal`. */
+	private reviewsFinished(ordinal: number): void {
+		const after = this.reviewedOrdinal;
+		if (ordinal <= after) return;
+		this.reviewedOrdinal = ordinal;
+		for (const record of this.conversation.work.list()) {
+			if (record.kind !== "review" || (record.finishedOrdinal ?? 0) <= after) continue;
 			const notification = reviewCompletion(
 				record,
 				this.conversation.session.sessionId,
 				this.hostNodeId,
 				this.workspaceName,
 			);
-			if (notification) this.enqueue(notification);
+			if (notification) void this.deliver(notification);
 		}
-		void this.flushLater();
 	}
 
 	deliver(notification: IrohRemotePushNotificationIntent): Promise<void> {
@@ -276,37 +284,35 @@ export function runCompletion(
 	}
 }
 
+/** The notification for completed review work; none for other work, or work whose id cannot be pushed. */
 function reviewCompletion(
-	record: ReviewWorkflowResultRecord,
+	record: WorkRecord,
 	sessionId: string,
 	hostNodeId: string,
 	workspaceName: string | undefined,
 ): IrohRemotePushNotificationIntent | undefined {
-	const workflowId = sanitizeIrohRemoteNotificationMetadata(record.workflowId);
-	if (!workflowId) return undefined;
-	const target = sanitizeIrohRemoteNotificationTarget(record.target.description) ?? "Review";
-	const findingsCount =
-		Number.isSafeInteger(record.findingsCount) && (record.findingsCount ?? -1) >= 0
-			? record.findingsCount
-			: undefined;
+	const data = reviewWorkData(record);
+	const workId = sanitizeIrohRemoteNotificationMetadata(record.workId);
+	if (!data || !workId) return undefined;
+	const target = sanitizeIrohRemoteNotificationTarget(data.target) ?? "Review";
+	const findingsCount = data.findingsCount;
 	const body =
-		record.completionStatus === "incomplete"
+		data.completionStatus === "incomplete"
 			? findingsCount
 				? `${target} review is incomplete with ${findingsCount} verified finding${findingsCount === 1 ? "" : "s"}.`
 				: `${target} review is incomplete.`
-			: findingsCount === undefined
-				? `${target} completed. Open Volt to see the findings.`
-				: findingsCount === 0
-					? `${target} completed with no issues found.`
-					: `${target} completed with ${findingsCount} finding${findingsCount === 1 ? "" : "s"}.`;
+			: findingsCount === 0
+				? `${target} completed with no issues found.`
+				: `${target} completed with ${findingsCount} finding${findingsCount === 1 ? "" : "s"}.`;
 	return {
-		eventId: `${workflowId}:completed`,
+		eventId: `${workId}:completed`,
 		hostNodeId,
-		kind: "review_completed",
+		kind: "work_finished",
 		title: "Your review is ready",
 		body,
 		sessionId,
 		...(workspaceName === undefined ? {} : { workspaceName }),
-		workflowId,
+		workId,
+		workKind: record.kind,
 	};
 }

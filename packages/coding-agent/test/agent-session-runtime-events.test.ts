@@ -12,6 +12,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
+import { reviewWorkExecution } from "../src/core/review.ts";
 import {
 	acknowledgeReviewRun,
 	appendReviewFindingTransition,
@@ -21,6 +22,7 @@ import {
 	listReviewRuns,
 	type ReviewRunRecord,
 } from "../src/core/review-state.ts";
+import { reviewWorkInput } from "../src/core/review-work.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import type {
@@ -337,13 +339,6 @@ describe("conversation host client session lifecycle events", () => {
 		const originatingManager = originatingSession.sessionManager;
 		const originatingRef = originatingSession.sessionRef;
 		expect(originatingRef).toBeDefined();
-		const originatingEntries = originatingManager.getEntries();
-		const originatingLeaf = originatingManager.getLeafId();
-		const originatingSessionFiles = readdirSync(originatingManager.getSessionDir()).sort();
-		const forkEntry = originatingEntries.find(
-			(entry) => entry.type === "message" && entry.message.role === "assistant",
-		);
-		expect(forkEntry).toBeDefined();
 		const dispose = vi.spyOn(originatingSession, "dispose");
 		const record: ReviewRunRecord = {
 			schemaVersion: 1,
@@ -382,30 +377,35 @@ describe("conversation host client session lifecycle events", () => {
 		const reviewGate = new Promise<void>((resolve) => {
 			releaseReview = resolve;
 		});
-		const workflow = runtimeHost.conversation.reviewWorkflows.start({
-			prepared: {
-				workflowId: record.runId,
-				action: record.workflowAction,
-				startedAt: record.startedAt,
-				resolution: {
-					description: record.target.description,
-					diffCommand: record.target.diffCommand,
-				},
-			},
-			execute: async () => {
+		const work = runtimeHost.conversation.work;
+		await work.start(
+			"review",
+			reviewWorkInput(record.workflowAction, record.target.description),
+			async () => {
 				await reviewGate;
 				await appendReviewRun(originatingSession.sessionWriter, record);
-				return {
-					status: "completed",
-					raw: record.result!.summary,
-					parsed: record.result!,
-					findingsCount: record.result!.findings.length,
-					completionStatus: record.result!.completionStatus,
-					record,
-				};
+				return reviewWorkExecution(
+					{
+						status: "completed",
+						raw: record.result!.summary,
+						parsed: record.result!,
+						findingsCount: record.result!.findings.length,
+						completionStatus: record.result!.completionStatus,
+						record,
+					},
+					record.target.description,
+				);
 			},
-		});
-		workflow.launch();
+			{ workId: record.runId },
+		);
+		// The running review's work_started entry is part of the log that must stay as it is.
+		const originatingEntries = originatingManager.getEntries();
+		const originatingLeaf = originatingManager.getLeafId();
+		const originatingSessionFiles = readdirSync(originatingManager.getSessionDir()).sort();
+		const forkEntry = originatingEntries.find(
+			(entry) => entry.type === "message" && entry.message.role === "assistant",
+		);
+		expect(forkEntry).toBeDefined();
 
 		await expect(runtimeHost.switchSession(originatingRef!)).resolves.toEqual({
 			cancelled: false,
@@ -423,7 +423,8 @@ describe("conversation host client session lifecycle events", () => {
 		expect(readdirSync(originatingManager.getSessionDir()).sort()).toEqual(originatingSessionFiles);
 
 		releaseReview();
-		await runtimeHost.conversation.reviewWorkflows.waitForIdle();
+		await work.settled(record.runId);
+		expect(work.get(record.runId)?.outcome).toBe("completed");
 		const opened = await runtimeHost.newSession();
 		expect(opened).toEqual({ cancelled: false, sessionId: runtimeHost.session.sessionId, seeded: false });
 		// The conversation the client left closes without waiting for its own admitted prompt work.

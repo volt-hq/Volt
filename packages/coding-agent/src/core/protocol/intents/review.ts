@@ -1,5 +1,5 @@
 /**
- * Review intents: starting reviews (detached workflows on hosts that run
+ * Review intents: starting reviews (`review` work items on hosts that run
  * them detached), lifecycle operations on durable review runs, and review
  * discussions. A review discussion's source owns the lifecycle operations.
  */
@@ -7,8 +7,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { IntentOption } from "@hansjm10/volt-protocol";
-import { createReviewFixHandoff } from "../../host/review-handoff.ts";
-import { openNewSession } from "../../host/session-intents.ts";
+import { openReviewFindings } from "../../host/review-handoff.ts";
 import { listBaseBranches, type ReviewTarget, reviewTargetForRerun } from "../../review.ts";
 import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../review-discussions.ts";
 import { publishReviewRun } from "../../review-publish.ts";
@@ -95,9 +94,9 @@ function runReview(ctx: IntentContext, target: ReviewTarget, options: IntentRevi
 	return run(target, options);
 }
 
-/** A started review answers its workflow id; a review a host runs to completion answers nothing. */
+/** A started review answers its work id; a review a host runs to completion answers nothing. */
 function acceptReview(outcome: Awaited<ReturnType<typeof runReview>>) {
-	return outcome.status === "accepted" ? { result: { workflowId: outcome.workflowId } } : {};
+	return outcome.status === "accepted" ? { result: { workId: outcome.workId } } : {};
 }
 
 const reviewStart = {
@@ -217,21 +216,6 @@ export const reviewRerunIntent = defineIntent({
 	accept: acceptReview,
 });
 
-export const reviewCancelWorkflowIntent = defineIntent({
-	name: "review_cancel_workflow",
-	label: "Cancel review",
-	description: "Cancel a running review workflow",
-	category: "review",
-	scope: "conversation",
-	fence: "none",
-	remote: "safe",
-	requires: control,
-	whileBusy: "run",
-	async run(ctx, input) {
-		targetOf(ctx).conversation.reviewWorkflows.cancel(input.workflowId);
-	},
-});
-
 export const reviewOpenSessionIntent = defineIntent({
 	name: "review_open_session",
 	label: "Fix review findings",
@@ -245,24 +229,15 @@ export const reviewOpenSessionIntent = defineIntent({
 	presentation: { kind: "detail", group: "Review", priority: 60 },
 	sourceOwned: true,
 	async run(ctx, input) {
-		const { host, client } = targetOf(ctx);
-		const record = await durableReviewRun(ctx, input.runId);
-		const result = record.result;
-		if (!result) throw new Error(`Review run has no findings result: ${input.runId}`);
-		const requestedIds = input.findingIds ?? result.findings.map((finding) => finding.id);
-		const unknownIds = [...new Set(requestedIds)].filter(
-			(findingId) => !result.findings.some((finding) => finding.id === findingId),
+		const { host, client, session } = targetOf(ctx);
+		return await openReviewFindings(
+			{ host, client, sessionManager: session.sessionManager },
+			input.runId,
+			input.findingIds,
+			ctx.assertCurrent,
 		);
-		if (unknownIds.length > 0) throw new Error(`Unknown finding ids: ${unknownIds.join(", ")}`);
-		const handoff = createReviewFixHandoff(record, input.findingIds);
-		const opened = await openNewSession(host, client, {
-			setup: (writer) => handoff.setup(writer),
-			beforeMove: (source) => handoff.beforeMove(source),
-			...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
-		});
-		return { opened, selectedCount: new Set(requestedIds).size };
 	},
-	accept: ({ opened }) =>
+	accept: (opened) =>
 		opened.cancelled ? { result: { cancelled: true as const } } : { conversation: opened.sessionId },
 });
 

@@ -21,10 +21,12 @@ const NOTIFICATION_HOST_NODE_ID = /^[0-9a-f]{64}$/u;
 const NOTIFICATION_KINDS = new Set([
 	"conversation_completed",
 	"plan_ready",
-	"review_completed",
-	"action_completed",
+	"work_finished",
 	"host_notice",
 ]);
+/** A built-in work kind, or an extension's `ext:<extension>/<kind>`. */
+const NOTIFICATION_WORK_KIND =
+	/^(?:job|subagent|review|host_action|ext:[a-z0-9][a-z0-9-]{0,63}\/[a-z0-9][a-z0-9_-]{0,63})$/u;
 const FORBIDDEN_OBJECT_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 
 class RequestError extends Error {
@@ -171,7 +173,8 @@ function parseNotification(body) {
 			"body",
 			"workspaceName",
 			"planId",
-			"workflowId",
+			"workId",
+			"workKind",
 			"data",
 		],
 		"notification",
@@ -188,22 +191,21 @@ function parseNotification(body) {
 		MAX_NOTIFICATION_WORKSPACE_UTF8_BYTES,
 	);
 	const planId = expectOptionalNotificationMetadata(body.planId, "planId", MAX_NOTIFICATION_METADATA_UTF8_BYTES);
-	const workflowId = expectOptionalNotificationMetadata(
-		body.workflowId,
-		"workflowId",
-		MAX_NOTIFICATION_METADATA_UTF8_BYTES,
-	);
+	const workId = expectOptionalNotificationMetadata(body.workId, "workId", MAX_NOTIFICATION_METADATA_UTF8_BYTES);
+	const workKind = expectOptionalNotificationWorkKind(body.workKind, "workKind");
 	if (
-		(kind === "plan_ready" && (planId === undefined || workflowId !== undefined)) ||
-		(kind === "review_completed" && (workflowId === undefined || planId !== undefined)) ||
-		(kind !== "plan_ready" && kind !== "review_completed" && (planId !== undefined || workflowId !== undefined))
+		(kind === "plan_ready" && (planId === undefined || workId !== undefined || workKind !== undefined)) ||
+		(kind === "work_finished" && (workId === undefined || workKind === undefined || planId !== undefined)) ||
+		(kind !== "plan_ready" &&
+			kind !== "work_finished" &&
+			(planId !== undefined || workId !== undefined || workKind !== undefined))
 	) {
 		throw new RequestError(400, "notification_navigation_metadata_mismatch");
 	}
 	const data = expectStringRecord(body.data, "data", { maxEntries: 9, maxKeyLength: 64, maxValueLength: 512 });
 	expectAllowedKeys(
 		data,
-		["eventId", "hostNodeId", "kind", "sessionId", "workspaceName", "planId", "workflowId"],
+		["eventId", "hostNodeId", "kind", "sessionId", "workspaceName", "planId", "workId", "workKind"],
 		"data",
 	);
 	const dataHostNodeId = expectNotificationHostNodeId(data.hostNodeId, "data_hostNodeId");
@@ -222,18 +224,20 @@ function parseNotification(body) {
 		"data_planId",
 		MAX_NOTIFICATION_METADATA_UTF8_BYTES,
 	);
-	const dataWorkflowId = expectOptionalNotificationMetadata(
-		data.workflowId,
-		"data_workflowId",
+	const dataWorkId = expectOptionalNotificationMetadata(
+		data.workId,
+		"data_workId",
 		MAX_NOTIFICATION_METADATA_UTF8_BYTES,
 	);
+	const dataWorkKind = expectOptionalNotificationWorkKind(data.workKind, "data_workKind");
 	if (
 		data.eventId !== eventId ||
 		dataHostNodeId !== hostNodeId ||
 		data.kind !== kind ||
 		dataWorkspaceName !== workspaceName ||
 		dataPlanId !== planId ||
-		dataWorkflowId !== workflowId
+		dataWorkId !== workId ||
+		dataWorkKind !== workKind
 	) {
 		throw new RequestError(400, "notification_data_mismatch");
 	}
@@ -246,7 +250,8 @@ function parseNotification(body) {
 			...(sessionId === undefined ? {} : { sessionId }),
 			...(workspaceName === undefined ? {} : { workspaceName }),
 			...(planId === undefined ? {} : { planId }),
-			...(workflowId === undefined ? {} : { workflowId }),
+			...(workId === undefined ? {} : { workId }),
+			...(workKind === undefined ? {} : { workKind }),
 		},
 		eventId,
 		hostNodeId,
@@ -256,7 +261,8 @@ function parseNotification(body) {
 		title: expectNotificationText(body.title, "title", MAX_NOTIFICATION_TITLE_UTF8_BYTES),
 		...(workspaceName === undefined ? {} : { workspaceName }),
 		...(planId === undefined ? {} : { planId }),
-		...(workflowId === undefined ? {} : { workflowId }),
+		...(workId === undefined ? {} : { workId }),
+		...(workKind === undefined ? {} : { workKind }),
 	};
 }
 
@@ -444,6 +450,14 @@ function expectNotificationMetadata(value, label, maximumByteLength) {
 function expectOptionalNotificationMetadata(value, label, maximumByteLength) {
 	if (value === undefined) return undefined;
 	return expectNotificationMetadata(value, label, maximumByteLength);
+}
+
+function expectOptionalNotificationWorkKind(value, label) {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !NOTIFICATION_WORK_KIND.test(value)) {
+		throw new RequestError(400, `${label}_has_invalid_work_kind`);
+	}
+	return value;
 }
 
 function expectNotificationHostNodeId(value, label) {

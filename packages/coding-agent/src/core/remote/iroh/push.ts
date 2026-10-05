@@ -10,6 +10,7 @@ import {
 	MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
 	MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES,
 } from "@hansjm10/volt-protocol/push";
+import { BUILTIN_WORK_KINDS, EXTENSION_WORK_KIND_PATTERN } from "@hansjm10/volt-protocol/work";
 import type { IrohRemoteAuditEventInput, IrohRemoteAuditLogger } from "./audit.ts";
 import type {
 	IrohRemoteClient,
@@ -31,6 +32,8 @@ const NOTIFICATION_UNSAFE_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const NOTIFICATION_PATH_SEPARATOR = /[/\\]/u;
 const IROH_REMOTE_NOTIFICATION_HOST_NODE_ID = /^[0-9a-f]{64}$/u;
 const IROH_REMOTE_NOTIFICATION_KIND_SET = new Set<string>(IROH_REMOTE_NOTIFICATION_KINDS);
+const BUILTIN_WORK_KIND_SET = new Set<string>(BUILTIN_WORK_KINDS);
+const EXTENSION_WORK_KIND = new RegExp(EXTENSION_WORK_KIND_PATTERN, "u");
 
 export type { IrohRemotePushNotificationDeliveryStatus } from "@hansjm10/volt-protocol/push";
 
@@ -46,7 +49,9 @@ export interface IrohRemotePushNotificationIntent {
 	sessionId?: string;
 	workspaceName?: string;
 	planId?: string;
-	workflowId?: string;
+	/** A `work_finished` notification's work item and its kind. */
+	workId?: string;
+	workKind?: string;
 }
 
 function boundNotificationUtf8(value: string, maxBytes: number): string {
@@ -133,7 +138,12 @@ export function sanitizeIrohRemotePushNotificationIntent(
 	const sessionId = sanitizeIrohRemoteNotificationMetadata(value.sessionId);
 	const workspaceName = sanitizeIrohRemoteNotificationWorkspace(value.workspaceName);
 	const planId = sanitizeIrohRemoteNotificationMetadata(value.planId);
-	const workflowId = sanitizeIrohRemoteNotificationMetadata(value.workflowId);
+	const workId = sanitizeIrohRemoteNotificationMetadata(value.workId);
+	const workKind =
+		value.workKind !== undefined &&
+		(BUILTIN_WORK_KIND_SET.has(value.workKind) || EXTENSION_WORK_KIND.test(value.workKind))
+			? value.workKind
+			: undefined;
 	if (
 		!eventId ||
 		!hostNodeId ||
@@ -144,10 +154,13 @@ export function sanitizeIrohRemotePushNotificationIntent(
 		(value.sessionId !== undefined && sessionId === undefined) ||
 		(value.workspaceName !== undefined && workspaceName === undefined) ||
 		(value.planId !== undefined && planId === undefined) ||
-		(value.workflowId !== undefined && workflowId === undefined) ||
-		(kind === "plan_ready" && (planId === undefined || workflowId !== undefined)) ||
-		(kind === "review_completed" && (workflowId === undefined || planId !== undefined)) ||
-		(kind !== "plan_ready" && kind !== "review_completed" && (planId !== undefined || workflowId !== undefined))
+		(value.workId !== undefined && workId === undefined) ||
+		(value.workKind !== undefined && workKind === undefined) ||
+		(kind === "plan_ready" && (planId === undefined || workId !== undefined || workKind !== undefined)) ||
+		(kind === "work_finished" && (workId === undefined || workKind === undefined || planId !== undefined)) ||
+		(kind !== "plan_ready" &&
+			kind !== "work_finished" &&
+			(planId !== undefined || workId !== undefined || workKind !== undefined))
 	) {
 		return undefined;
 	}
@@ -160,7 +173,8 @@ export function sanitizeIrohRemotePushNotificationIntent(
 		...(sessionId === undefined ? {} : { sessionId }),
 		...(workspaceName === undefined ? {} : { workspaceName }),
 		...(planId === undefined ? {} : { planId }),
-		...(workflowId === undefined ? {} : { workflowId }),
+		...(workId === undefined ? {} : { workId }),
+		...(workKind === undefined ? {} : { workKind }),
 	};
 }
 
@@ -174,7 +188,8 @@ export interface IrohRemotePushRelayNotificationRequest {
 	body: string;
 	workspaceName?: string;
 	planId?: string;
-	workflowId?: string;
+	workId?: string;
+	workKind?: string;
 	data: {
 		eventId: string;
 		hostNodeId: string;
@@ -182,7 +197,8 @@ export interface IrohRemotePushRelayNotificationRequest {
 		sessionId?: string;
 		workspaceName?: string;
 		planId?: string;
-		workflowId?: string;
+		workId?: string;
+		workKind?: string;
 	};
 }
 
@@ -399,7 +415,8 @@ function createRelayNotificationBody(
 		body: request.body,
 		...(request.workspaceName === undefined ? {} : { workspaceName: request.workspaceName }),
 		...(request.planId === undefined ? {} : { planId: request.planId }),
-		...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
+		...(request.workId === undefined ? {} : { workId: request.workId }),
+		...(request.workKind === undefined ? {} : { workKind: request.workKind }),
 		data: request.data,
 	};
 }
@@ -745,7 +762,8 @@ function createRelayNotificationRequest(
 		body: notification.body,
 		...(notification.workspaceName === undefined ? {} : { workspaceName: notification.workspaceName }),
 		...(notification.planId === undefined ? {} : { planId: notification.planId }),
-		...(notification.workflowId === undefined ? {} : { workflowId: notification.workflowId }),
+		...(notification.workId === undefined ? {} : { workId: notification.workId }),
+		...(notification.workKind === undefined ? {} : { workKind: notification.workKind }),
 		data: {
 			eventId: notification.eventId,
 			hostNodeId: notification.hostNodeId,
@@ -753,7 +771,8 @@ function createRelayNotificationRequest(
 			...(notification.sessionId === undefined ? {} : { sessionId: notification.sessionId }),
 			...(notification.workspaceName === undefined ? {} : { workspaceName: notification.workspaceName }),
 			...(notification.planId === undefined ? {} : { planId: notification.planId }),
-			...(notification.workflowId === undefined ? {} : { workflowId: notification.workflowId }),
+			...(notification.workId === undefined ? {} : { workId: notification.workId }),
+			...(notification.workKind === undefined ? {} : { workKind: notification.workKind }),
 		},
 	};
 }
