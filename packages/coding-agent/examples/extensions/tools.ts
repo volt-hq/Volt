@@ -1,8 +1,8 @@
-import { createRenderFrame } from "@hansjm10/volt-tui";
 /**
  * Tools Extension
  *
- * Provides a /tools command to enable/disable tools interactively.
+ * Provides a /tools command to enable/disable tools with a form: one switch
+ * per tool, which every client renders.
  * Tool selection persists across session reloads and respects branch navigation.
  *
  * Usage:
@@ -10,14 +10,7 @@ import { createRenderFrame } from "@hansjm10/volt-tui";
  * 2. Use /tools to open the tool selector
  */
 
-import {
-	defineManifest,
-	type ExtensionAPI,
-	type ExtensionContext,
-	getSettingsListTheme,
-	type ToolInfo,
-} from "@hansjm10/volt-coding-agent";
-import { Container, type SettingItem, SettingsList } from "@hansjm10/volt-tui";
+import { defineManifest, type ExtensionAPI, type ExtensionContext, type ToolInfo } from "@hansjm10/volt-coding-agent";
 
 // State persisted to session
 interface ToolsState {
@@ -77,70 +70,35 @@ export default function toolsExtension(volt: ExtensionAPI) {
 	volt.registerCommand("tools", {
 		description: "Enable/disable tools",
 		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("/tools requires TUI mode", "error");
+			if (!ctx.hasUI) {
+				ctx.ui.notify("/tools needs a client that shows forms", "error");
 				return;
 			}
 
 			// Refresh tool list
 			allTools = volt.getAllTools();
 
-			await ctx.ui.custom((tui, theme, _kb, done) => {
-				// Build settings items for each tool
-				const items: SettingItem[] = allTools.map((tool) => ({
-					id: tool.name,
+			// One switch per tool; field ids are positions, so any tool name works
+			const values = await ctx.ui.form({
+				title: "Tool Configuration",
+				fields: allTools.map((tool, index) => ({
+					kind: "boolean" as const,
+					id: `tool-${index}`,
 					label: tool.name,
-					currentValue: enabledTools.has(tool.name) ? "enabled" : "disabled",
-					values: ["enabled", "disabled"],
-				}));
-
-				const container = new Container();
-				container.addChild(
-					new (class {
-						render(_width: number) {
-							return createRenderFrame([theme.fg("accent", theme.bold("Tool Configuration")), ""]);
-						}
-						invalidate() {}
-					})(),
-				);
-
-				const settingsList = new SettingsList(
-					items,
-					Math.min(items.length + 2, 15),
-					getSettingsListTheme(),
-					(id, newValue) => {
-						// Update enabled state and apply immediately
-						if (newValue === "enabled") {
-							enabledTools.add(id);
-						} else {
-							enabledTools.delete(id);
-						}
-						applyTools();
-						persistState(ctx);
-					},
-					() => {
-						// Close dialog
-						done(undefined);
-					},
-				);
-
-				container.addChild(settingsList);
-
-				const component = {
-					render(width: number) {
-						return container.render(width);
-					},
-					invalidate() {
-						container.invalidate();
-					},
-					handleInput(data: string) {
-						settingsList.handleInput?.(data);
-						tui.requestRender();
-					},
-				};
-
-				return component;
+					value: enabledTools.has(tool.name),
+				})),
 			});
+			if (values === undefined) return;
+
+			// Apply the selection and persist it; a switch the client left out keeps its state
+			enabledTools = new Set(
+				allTools
+					.filter((tool, index) => (values[`tool-${index}`] ?? enabledTools.has(tool.name)) === true)
+					.map((tool) => tool.name),
+			);
+			applyTools();
+			persistState(ctx);
+			ctx.ui.notify(`${enabledTools.size} of ${allTools.length} tools enabled`, "info");
 		},
 	});
 

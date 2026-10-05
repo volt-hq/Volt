@@ -197,7 +197,7 @@ export default function (volt: ExtensionAPI) {
 				const pwd = (await sshExec(remote, "pwd")).toString().trim();
 				resolvedSsh = { remote, remoteCwd: pwd };
 			}
-			ctx.ui.setStatus("ssh", ctx.ui.theme.fg("accent", `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`));
+			ctx.ui.setStatus("ssh", [{ text: `SSH: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, token: "accent" }]);
 			ctx.ui.notify(`SSH mode: ${resolvedSsh.remote}:${resolvedSsh.remoteCwd}`, "info");
 		}
 	});

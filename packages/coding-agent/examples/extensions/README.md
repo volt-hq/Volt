@@ -30,15 +30,13 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `todo.ts` | Todo list tool + `/todos` command with custom rendering and state persistence |
+| `todo.ts` | Todo list tool with `present()` + `/todos` panel and state persistence |
 | `hello.ts` | Minimal custom tool example |
-| `question.ts` | Demonstrates `ctx.ui.select()` for asking the user questions with custom UI |
-| `questionnaire.ts` | Multi-question input with tab bar navigation between questions |
+| `questionnaire.ts` | Asks one or more questions with a form via `ctx.ui.form()` |
 | `tool-override.ts` | Override built-in tools (e.g., add logging/access control to `read`) |
 | `dynamic-tools.ts` | Register tools after startup (`session_start`) and at runtime via command, with prompt snippets and tool-specific prompt guidelines |
 | `structured-output.ts` | Final structured-output tool that returns `disposition: "stop"` so the agent can end on the tool call |
-| `built-in-tool-renderer.ts` | Custom compact rendering for built-in tools (read, bash, edit, write) while keeping original behavior |
-| `minimal-mode.ts` | Override built-in tool rendering for minimal display (only tool calls, no output in collapsed mode) |
+| `tool-presentation.ts` | Compact `present()` for built-in tools (read, bash, edit, write) while keeping original behavior |
 | `truncated-tool.ts` | Wraps ripgrep with proper output truncation (50KB/2000 lines) |
 | `ssh.ts` | Delegate all tools to a remote machine via SSH using pluggable operations |
 
@@ -47,27 +45,22 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `preset.ts` | Named presets for model, thinking level, tools, and instructions via `--preset` flag and `/preset` command |
-| `tools.ts` | Interactive `/tools` command to enable/disable tools with session persistence |
+| `tools.ts` | `/tools` form to enable/disable tools with session persistence |
 | `handoff.ts` | Transfer context to a new focused session via `/handoff <goal>` |
 | `qna.ts` | Extracts questions from last response into editor via `ctx.ui.setEditorText()` |
-| `status-line.ts` | Shows turn progress in footer via `ctx.ui.setStatus()` with themed colors |
-| `github-issue-autocomplete.ts` | Adds `#1234` issue completions by stacking a custom autocomplete provider that preloads open issues from `gh issue list` |
-| `widget-placement.ts` | Shows widgets above and below the editor via `ctx.ui.setWidget()` placement |
-| `hidden-thinking-label.ts` | Customizes the collapsed thinking label via `ctx.ui.setHiddenThinkingLabel()` |
-| `working-indicator.ts` | Customizes the streaming working indicator via `ctx.ui.setWorkingIndicator()` |
+| `status-line.ts` | Shows turn progress in footer via `ctx.ui.setStatus()` styled with semantic tokens |
+| `github-issue-autocomplete.ts` | Adds `#1234` issue completions with `volt.registerCompletionProvider()`, preloading open issues from `gh issue list` |
+| `widget-placement.ts` | Shows panels above and below the editor and in the sidebar via `ctx.ui.setPanel()` placement |
+| `settings.ts` | Typed settings declared in the manifest, edited as a form from `/extensions` |
 | `model-status.ts` | Shows model changes in status bar via `model_select` hook |
 | `send-user-message.ts` | Demonstrates `volt.sendUserMessage()` for sending user messages from extensions |
 | `timed-confirm.ts` | Demonstrates AbortSignal for auto-dismissing `ctx.ui.confirm()` and `ctx.ui.select()` dialogs |
-| `rpc-demo.ts` | Exercises all RPC-supported extension UI methods; pair with [`examples/rpc-extension-ui.ts`](../rpc-extension-ui.ts) |
-| `modal-editor.ts` | Custom vim-like modal editor via `ctx.ui.setEditorComponent()` |
+| `rpc-demo.ts` | Exercises the extension UI methods (dialogs, forms, panels, status, editor text) over RPC; pair with [`examples/rpc-extension-ui.ts`](../rpc-extension-ui.ts) |
 | `notify.ts` | Desktop notifications via OSC 777 when agent finishes (Ghostty, iTerm2, WezTerm) |
 | `titlebar-spinner.ts` | Braille spinner animation in terminal title while the agent is working |
-| `summarize.ts` | Summarize conversation with GPT-5.2 and show in transient UI |
-| `custom-footer.ts` | Custom footer with git branch and token stats via `ctx.ui.setFooter()` |
-| `custom-header.ts` | Custom header via `ctx.ui.setHeader()` |
+| `summarize.ts` | Summarize conversation with GPT-5.2 and show it in a dialog via `ctx.ui.dialog()` |
 | `shutdown-command.ts` | Adds `/quit` command demonstrating `ctx.shutdown()` |
 | `reload-runtime.ts` | Adds `/reload-runtime` and `reload_runtime` tool showing safe reload flow |
-| `interactive-shell.ts` | Run interactive commands (vim, htop) with full terminal via `user_bash` hook |
 | `inline-bash.ts` | Expands `!{command}` patterns in prompts via `input` event transformation |
 | `input-transform-streaming.ts` | Skips expensive input preprocessing for mid-stream steering via `streamingBehavior` |
 
@@ -103,7 +96,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 
 | Extension | Description |
 |-----------|-------------|
-| `message-renderer.ts` | Custom message rendering with colors and expandable details via `registerMessageRenderer` |
+| `message-presenter.ts` | Custom message presentation with semantic tokens and expandable details via `registerMessagePresenter` |
 | `event-bus.ts` | Inter-extension communication via `volt.events` |
 
 ### Session Metadata
@@ -227,6 +220,19 @@ export default function (volt: ExtensionAPI) {
 ```
 
 ## Key Patterns
+
+**UI is data:** a tool's `present()`, a message presenter, panels, dialogs, and forms return `UiNode` trees that every client (the TUI, RPC clients, the phone) renders. Style text with semantic tokens, never ANSI:
+```typescript
+volt.registerTool({
+  // ...name, parameters, execute
+  present: ({ args, state, result }) => ({
+    title: [{ text: "greet ", bold: true }, { text: args.name ?? "…", token: "accent" }],
+    ...(state === "done" ? { summary: [{ type: "text", text: "Greeted", token: "success" }] } : { activity: "Greeting…" }),
+  }),
+});
+
+ctx.ui.setPanel("progress", { title: "Build", node: { type: "progress", kind: "determinate", value: 3, max: 10 } });
+```
 
 **Use StringEnum for string parameters** (required for Google API compatibility):
 ```typescript

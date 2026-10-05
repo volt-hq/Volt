@@ -6,7 +6,6 @@
  */
 
 import { defineManifest, defineTool, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
-import { Text } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 
 interface StructuredOutputDetails {
@@ -43,20 +42,31 @@ const structuredOutputTool = defineTool({
 		};
 	},
 
-	renderResult(result, _options, theme) {
-		const details = result.details as StructuredOutputDetails | undefined;
-		if (!details) {
-			const text = result.content[0];
-			return new Text(text?.type === "text" ? text.text : "", 0, 0);
-		}
-
-		const lines = [
-			theme.fg("toolTitle", theme.bold(details.headline)),
-			theme.fg("text", details.summary),
-			"",
-			...details.actionItems.map((item, index) => theme.fg("muted", `${index + 1}. ${item}`)),
+	present({ args, state, result }) {
+		const title = [
+			{ text: "structured_output ", bold: true },
+			{ text: args.headline ?? "…", token: "accent" as const },
 		];
-		return new Text(lines.join("\n"), 0, 0);
+		const details = result?.details;
+		if (state !== "done" || !details) return { title };
+		return {
+			title,
+			summary: [{ type: "text", key: "summary", text: details.summary }],
+			body: [
+				{ type: "text", key: "summary", text: details.summary },
+				{
+					type: "list",
+					key: "actions",
+					ordered: true,
+					items: details.actionItems.map((item, index) => ({
+						type: "text" as const,
+						key: `item-${index}`,
+						text: item,
+						token: "muted" as const,
+					})),
+				},
+			],
+		};
 	},
 });
 

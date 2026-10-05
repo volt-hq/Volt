@@ -1,20 +1,18 @@
-import { concatRenderFrames, createRenderFrame, type RenderFrame } from "@hansjm10/volt-tui";
 /**
- * RPC Extension UI Example (TUI)
+ * RPC Extension UI Example
  *
- * A lightweight TUI chat client that spawns the agent in RPC mode.
- * Demonstrates how to build a custom UI on the RPC protocol's frames:
- * hello, a snapshot subscription, the live lane (streaming text, tools, the
- * run phase, extension status and widgets), prompt intents, and answering the
- * host requests extensions ask (select, confirm, input, editor).
+ * A line-based chat client that spawns the agent in RPC mode. Demonstrates
+ * how to build a client on the RPC protocol's frames: hello, a snapshot
+ * subscription, the live lane (streaming text, tools, the run phase,
+ * extension status, panels, and title), prompt intents, and answering the
+ * host requests extensions ask (select, confirm, input, editor, dialog, form,
+ * and editor_text). Extension UI arrives as data: styled text and `UiNode`
+ * trees, which this client prints as plain lines.
  *
  * Usage: npx tsx examples/rpc-extension-ui.ts
  *
- * Slash commands:
- *   /select  - demo select dialog
- *   /confirm - demo confirm dialog
- *   /input   - demo input dialog
- *   /editor  - demo editor dialog
+ * Try the rpc-demo extension's commands: /rpc-input, /rpc-editor, /rpc-dialog,
+ * /rpc-form, /rpc-prefill, /rpc-editor-text. Type /quit or press Ctrl+D to exit.
  */
 
 import { spawn } from "node:child_process";
@@ -23,20 +21,21 @@ import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
 import {
-	type Component,
-	Container,
-	Input,
-	matchesKey,
-	ProcessTerminal,
-	SelectList,
-	type TUI,
-	TuiMainScreen,
-} from "@hansjm10/volt-tui";
+	applyUiPatch,
+	type HostRequest,
+	type HostResponse,
+	type LiveItem,
+	type LiveValue,
+	type UiNode,
+	type UiNodeFormField,
+	type UiNodeStyledText,
+	type UiTreeItem,
+} from "@hansjm10/volt-protocol";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ============================================================================
-// ANSI helpers
+// Output
 // ============================================================================
 
 const GREEN = "\x1b[32m";
@@ -48,218 +47,70 @@ const DIM = "\x1b[2m";
 const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 
-// ============================================================================
-// Host requests and live items (subset of @hansjm10/volt-protocol)
-// ============================================================================
-
-type HostRequest =
-	| { kind: "select"; title: string; options: string[] }
-	| { kind: "confirm"; title: string; message: string }
-	| { kind: "input"; title: string; placeholder?: string }
-	| { kind: "editor"; title: string; prefill?: string };
-
-interface LiveItem {
-	type: string;
-	key?: string;
-	value?: Record<string, unknown> & { kind: string };
-	event?: { type: string; delta?: string };
-	op?: string;
-	toolName?: string;
-	level?: string;
-	message?: StyledText;
-	directive?: string;
-	text?: string;
+/** Styled text as plain text: this client shows tokens as plain text. */
+function plain(text: UiNodeStyledText | undefined): string {
+	if (text === undefined) return "";
+	return typeof text === "string" ? text : text.map((span) => span.text).join("");
 }
 
-/** Text the host styled with semantic tokens: a string, or spans. */
-type StyledText = string | Array<{ text: string }>;
-
-function plain(text: unknown): string {
-	if (typeof text === "string") return text;
-	return Array.isArray(text) ? text.map((span: { text?: unknown }) => String(span.text ?? "")).join("") : "";
-}
-
-// ============================================================================
-// Output log: accumulates styled lines, renders the tail that fits
-// ============================================================================
-
-class OutputLog implements Component {
-	private lines: string[] = [];
-	private maxLines = 1000;
-	private visibleLines = 0;
-
-	setVisibleLines(n: number): void {
-		this.visibleLines = n;
-	}
-
-	append(line: string): void {
-		this.lines.push(line);
-		if (this.lines.length > this.maxLines) {
-			this.lines = this.lines.slice(-this.maxLines);
-		}
-	}
-
-	appendRaw(text: string): void {
-		if (this.lines.length === 0) {
-			this.lines.push(text);
-		} else {
-			this.lines[this.lines.length - 1] += text;
-		}
-	}
-
-	invalidate(): void {}
-
-	render(width: number): RenderFrame {
-		if (this.lines.length === 0) return createRenderFrame([""]);
-		const n = this.visibleLines > 0 ? this.visibleLines : this.lines.length;
-		return createRenderFrame(this.lines.slice(-n).map((l) => l.slice(0, width)));
+/** A `UiNode` as indented plain lines. */
+function nodeLines(node: UiNode, indent = ""): string[] {
+	const lines = (text: string) => text.split("\n").map((line) => `${indent}${line}`);
+	switch (node.type) {
+		case "text":
+			return lines(plain(node.text));
+		case "markdown":
+			return lines(node.markdown);
+		case "code":
+			return [...(node.title ? lines(plain(node.title)) : []), ...lines(node.code)];
+		case "terminal":
+			return [
+				...(node.omittedLines ? lines(`… ${node.omittedLines} earlier lines`) : []),
+				...node.lines.flatMap((line) => lines(plain(line))),
+			];
+		case "diff":
+			return node.lines.flatMap((line) =>
+				lines(`${line.kind === "add" ? "+" : line.kind === "remove" ? "-" : " "} ${line.text}`),
+			);
+		case "list":
+			return node.items.flatMap((item, index) => {
+				const [first = "", ...rest] = nodeLines(item);
+				return [
+					`${indent}${node.ordered ? `${index + 1}.` : "-"} ${first}`,
+					...rest.map((line) => `${indent}  ${line}`),
+				];
+			});
+		case "keyValue":
+			return node.items.flatMap((item) => lines(`${plain(item.label)}: ${plain(item.value)}`));
+		case "table":
+			return [
+				lines(node.columns.map((column) => plain(column.header)).join(" | ")),
+				...node.rows.map((row) => lines(row.cells.map(plain).join(" | "))),
+			].flat();
+		case "progress":
+			return node.kind === "determinate"
+				? lines(`${plain(node.label)} ${node.value}/${node.max ?? 1}`.trim())
+				: node.steps.flatMap((step) => lines(`[${step.status}] ${plain(step.label)}`));
+		case "card":
+			return [
+				...lines(`${plain(node.title)}${(node.badges ?? []).map((badge) => ` [${badge.label}]`).join("")}`),
+				...(node.sections ?? []).flatMap((section) => [
+					...(section.title ? lines(plain(section.title)) : []),
+					...section.children.flatMap((child) => nodeLines(child, `${indent}  `)),
+				]),
+			];
+		case "tree":
+			return treeLines(node.items, indent);
+		default:
+			return lines(`(${node.type})`);
 	}
 }
 
-// ============================================================================
-// Loading indicator: "Agent: Working." -> ".." -> "..." -> "."
-// ============================================================================
-
-class LoadingIndicator implements Component {
-	private dots = 1;
-	private intervalId: NodeJS.Timeout | null = null;
-	private tui: TUI | null = null;
-
-	start(tui: TUI): void {
-		this.tui = tui;
-		this.dots = 1;
-		this.intervalId = setInterval(() => {
-			this.dots = (this.dots % 3) + 1;
-			this.tui?.requestRender();
-		}, 400);
-	}
-
-	stop(): void {
-		if (this.intervalId) {
-			clearInterval(this.intervalId);
-			this.intervalId = null;
-		}
-	}
-
-	invalidate(): void {}
-
-	render(_width: number): RenderFrame {
-		return createRenderFrame([`${BLUE}${BOLD}Agent:${RESET} ${DIM}Working${".".repeat(this.dots)}${RESET}`]);
-	}
-}
-
-// ============================================================================
-// Prompt input: label + single-line input
-// ============================================================================
-
-class PromptInput implements Component {
-	readonly input: Input;
-	onCtrlD?: () => void;
-
-	constructor() {
-		this.input = new Input();
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "ctrl+d")) {
-			this.onCtrlD?.();
-			return;
-		}
-		this.input.handleInput(data);
-	}
-
-	invalidate(): void {
-		this.input.invalidate();
-	}
-
-	render(width: number): RenderFrame {
-		return concatRenderFrames([createRenderFrame([`${GREEN}${BOLD}You:${RESET}`]), this.input.render(width)]);
-	}
-}
-
-// ============================================================================
-// Dialog components: replace the prompt input during interactive requests
-// ============================================================================
-
-class SelectDialog implements Component {
-	private list: SelectList;
-	private title: string;
-	onSelect?: (value: string) => void;
-	onCancel?: () => void;
-
-	constructor(title: string, options: string[]) {
-		this.title = title;
-		const items = options.map((o) => ({ value: o, label: o }));
-		this.list = new SelectList(items, Math.min(items.length, 8), {
-			selectedPrefix: (t) => `${MAGENTA}${t}${RESET}`,
-			selectedText: (t) => `${MAGENTA}${t}${RESET}`,
-			description: (t) => `${DIM}${t}${RESET}`,
-			scrollInfo: (t) => `${DIM}${t}${RESET}`,
-			noMatch: (t) => `${YELLOW}${t}${RESET}`,
-		});
-		this.list.onSelect = (item) => this.onSelect?.(item.value);
-		this.list.onCancel = () => this.onCancel?.();
-	}
-
-	handleInput(data: string): void {
-		this.list.handleInput(data);
-	}
-
-	invalidate(): void {
-		this.list.invalidate();
-	}
-
-	render(width: number): RenderFrame {
-		return concatRenderFrames([
-			createRenderFrame([`${MAGENTA}${BOLD}${this.title}${RESET}`]),
-			this.list.render(width),
-			createRenderFrame([`${DIM}Up/Down, Enter to select, Esc to cancel${RESET}`]),
-		]);
-	}
-}
-
-class InputDialog implements Component {
-	private dialogInput: Input;
-	private title: string;
-	onCtrlD?: () => void;
-
-	constructor(title: string, prefill?: string) {
-		this.title = title;
-		this.dialogInput = new Input();
-		if (prefill) this.dialogInput.setValue(prefill);
-	}
-
-	set onSubmit(fn: ((value: string) => void) | undefined) {
-		this.dialogInput.onSubmit = fn;
-	}
-
-	set onEscape(fn: (() => void) | undefined) {
-		this.dialogInput.onEscape = fn;
-	}
-
-	get inputComponent(): Input {
-		return this.dialogInput;
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, "ctrl+d")) {
-			this.onCtrlD?.();
-			return;
-		}
-		this.dialogInput.handleInput(data);
-	}
-
-	invalidate(): void {
-		this.dialogInput.invalidate();
-	}
-
-	render(width: number): RenderFrame {
-		return concatRenderFrames([
-			createRenderFrame([`${MAGENTA}${BOLD}${this.title}${RESET}`]),
-			this.dialogInput.render(width),
-			createRenderFrame([`${DIM}Enter to submit, Esc to cancel${RESET}`]),
-		]);
-	}
+function treeLines(items: readonly UiTreeItem[], indent: string): string[] {
+	return items.flatMap((item) => [
+		`${indent}- ${plain(item.label)}`,
+		...treeLines(item.children ?? [], `${indent}  `),
+	]);
 }
 
 // ============================================================================
@@ -272,7 +123,7 @@ async function main() {
 
 	const agent = spawn(
 		"node",
-		[cliPath, "--mode", "rpc", "--no-session", "--no-extension", "--extension", extensionPath],
+		[cliPath, "--mode", "rpc", "--no-session", "--no-extensions", "--extension", extensionPath],
 		{ stdio: ["pipe", "pipe", "pipe"] },
 	);
 
@@ -287,265 +138,224 @@ async function main() {
 		process.exit(1);
 	}
 
-	// -- TUI setup --
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	rl.setPrompt(`${GREEN}${BOLD}You:${RESET} `);
 
-	const terminal = new ProcessTerminal();
-	const tui = new TuiMainScreen(terminal);
-
-	const outputLog = new OutputLog();
-	const loadingIndicator = new LoadingIndicator();
-	const promptInput = new PromptInput();
-
-	const root = new Container();
-	root.addChild(outputLog);
-	root.addChild(promptInput);
-
-	tui.addChild(root);
-	tui.setFocus(promptInput.input);
-
-	// -- Agent communication --
-
-	function send(obj: Record<string, unknown>): void {
-		agent.stdin!.write(`${JSON.stringify(obj)}\n`);
+	/** Print a line above the prompt, keeping what the user is typing. */
+	function print(line: string): void {
+		readline.clearLine(process.stdout, 0);
+		readline.cursorTo(process.stdout, 0);
+		console.log(line);
+		rl.prompt(true);
 	}
 
-	let isStreaming = false;
-	let hasTextOutput = false;
+	function send(frame: Record<string, unknown>): void {
+		agent.stdin!.write(`${JSON.stringify(frame)}\n`);
+	}
 
+	let exiting = false;
 	function exit(): void {
-		tui.stop();
+		if (exiting) return;
+		exiting = true;
+		rl.close();
 		agent.kill("SIGTERM");
 		process.exit(0);
 	}
 
-	// -- Bottom area management --
-	// The bottom of the screen is either the prompt input or a dialog.
-	// These helpers swap between them.
+	// -- Questions: while one is asked, the next line the user types answers it --
 
-	let activeDialog: Component | null = null;
+	let answerLine: ((line: string) => void) | undefined;
+	let questions = Promise.resolve();
+	/** Host requests a question is pending for, so a request answered elsewhere stops it. */
+	const pending = new Map<string, () => void>();
 
-	function setBottomComponent(component: Component): void {
-		root.clear();
-		root.addChild(outputLog);
-		if (isStreaming) root.addChild(loadingIndicator);
-		root.addChild(component);
-		tui.setFocus(component);
-		tui.requestRender();
+	function ask(prompt: string): Promise<string> {
+		print(`${MAGENTA}${BOLD}${prompt}${RESET}`);
+		return new Promise((resolve) => {
+			answerLine = resolve;
+		});
 	}
 
-	function showPrompt(): void {
-		activeDialog = null;
-		setBottomComponent(promptInput);
-		tui.setFocus(promptInput.input);
+	async function choose(title: string, options: string[]): Promise<number | undefined> {
+		const list = options.map((option, index) => `  ${index + 1}. ${option}`).join("\n");
+		const answer = await ask(`${title}\n${list}\n${DIM}Number to choose, empty to cancel${RESET}`);
+		const index = Number.parseInt(answer, 10) - 1;
+		return index >= 0 && index < options.length ? index : undefined;
 	}
 
-	function showDialog(dialog: Component): void {
-		activeDialog = dialog;
-		setBottomComponent(dialog);
-	}
-
-	function showLoading(): void {
-		if (!isStreaming) {
-			isStreaming = true;
-			hasTextOutput = false;
-			root.clear();
-			root.addChild(outputLog);
-			root.addChild(loadingIndicator);
-			root.addChild(activeDialog ?? promptInput);
-			if (!activeDialog) tui.setFocus(promptInput.input);
-			loadingIndicator.start(tui);
-			tui.requestRender();
+	async function askField(field: UiNodeFormField): Promise<string | boolean | number | undefined> {
+		const label = `${field.label}${field.description ? ` (${plain(field.description)})` : ""}`;
+		switch (field.kind) {
+			case "boolean":
+				return (await ask(`${label} [y/N]`)).trim().toLowerCase() === "y";
+			case "enum": {
+				const index = await choose(
+					label,
+					field.options.map((option) => option.label ?? option.value),
+				);
+				return index === undefined ? undefined : field.options[index]?.value;
+			}
+			case "integer": {
+				const value = Number.parseInt(await ask(label), 10);
+				return Number.isSafeInteger(value) ? value : undefined;
+			}
+			default:
+				return (await ask(label)) || undefined;
 		}
 	}
 
-	function hideLoading(): void {
-		loadingIndicator.stop();
-		root.clear();
-		root.addChild(outputLog);
-		root.addChild(activeDialog ?? promptInput);
-		if (!activeDialog) tui.setFocus(promptInput.input);
-		tui.requestRender();
-	}
-
-	// -- Extension UI dialog handling --
-
-	function showSelectDialog(title: string, options: string[], onDone: (value: string | undefined) => void): void {
-		const dialog = new SelectDialog(title, options);
-		dialog.onSelect = (value) => {
-			showPrompt();
-			onDone(value);
-		};
-		dialog.onCancel = () => {
-			showPrompt();
-			onDone(undefined);
-		};
-		showDialog(dialog);
-	}
-
-	function showInputDialog(title: string, prefill?: string, onDone?: (value: string | undefined) => void): void {
-		const dialog = new InputDialog(title, prefill);
-		dialog.onSubmit = (value) => {
-			showPrompt();
-			onDone?.(value.trim() || undefined);
-		};
-		dialog.onEscape = () => {
-			showPrompt();
-			onDone?.(undefined);
-		};
-		dialog.onCtrlD = exit;
-		showDialog(dialog);
-		tui.setFocus(dialog.inputComponent);
-	}
-
-	/** Answer a host request; the first answer of any client wins. */
-	function answer(requestId: string, response: Record<string, unknown>): void {
-		send({ type: "host_response", requestId, response });
+	async function answerRequest(request: HostRequest): Promise<HostResponse> {
+		switch (request.kind) {
+			case "select": {
+				const index = await choose(request.title, request.options);
+				return index === undefined ? { cancelled: true } : { value: request.options[index]! };
+			}
+			case "confirm":
+				return {
+					confirmed: (await ask(`${request.title}: ${request.message} [y/N]`)).trim().toLowerCase() === "y",
+				};
+			case "input":
+			case "editor": {
+				const hint = request.kind === "input" ? request.placeholder : request.prefill;
+				const value = await ask(`${request.title}${hint ? ` (${hint.replace(/\n/g, " ")})` : ""}`);
+				return value ? { value } : { cancelled: true };
+			}
+			case "dialog": {
+				for (const line of request.body.flatMap((node) => nodeLines(node, "  "))) print(line);
+				const index = await choose(
+					request.title,
+					request.actions.map((action) => action.label),
+				);
+				return index === undefined ? { cancelled: true } : { value: request.actions[index]!.id };
+			}
+			case "form": {
+				print(`${MAGENTA}${BOLD}${request.title}${RESET}`);
+				const values: Record<string, string | boolean | number> = {};
+				for (const field of request.fields) {
+					const value = await askField(field);
+					if (value !== undefined) values[field.id] = value;
+				}
+				return { values };
+			}
+			default:
+				return { cancelled: true };
+		}
 	}
 
 	function showHostRequest(requestId: string, request: HostRequest): void {
-		switch (request.kind) {
-			case "select":
-				showSelectDialog(request.title, request.options, (value) => {
-					answer(requestId, value !== undefined ? { value } : { cancelled: true });
-				});
-				break;
-			case "confirm":
-				showSelectDialog(`${request.title}: ${request.message}`, ["Yes", "No"], (value) => {
-					answer(requestId, { confirmed: value === "Yes" });
-				});
-				break;
-			case "input": {
-				const title = request.placeholder ? `${request.title} (${request.placeholder})` : request.title;
-				showInputDialog(title, undefined, (value) => {
-					answer(requestId, value !== undefined ? { value } : { cancelled: true });
-				});
-				break;
-			}
-			case "editor":
-				showInputDialog(request.title, request.prefill?.replace(/\n/g, " "), (value) => {
-					answer(requestId, value !== undefined ? { value } : { cancelled: true });
-				});
-				break;
+		// The client's editor text: what the user has typed so far, without asking.
+		if (request.kind === "editor_text") {
+			send({ type: "host_response", requestId, response: { value: rl.line } });
+			return;
 		}
+		questions = questions.then(async () => {
+			let answered = false;
+			const stop = new Promise<HostResponse | undefined>((resolve) =>
+				pending.set(requestId, () => {
+					answered = true;
+					resolve(undefined);
+				}),
+			);
+			const response = await Promise.race([answerRequest(request), stop]);
+			pending.delete(requestId);
+			answerLine = undefined;
+			// The first answer of any client wins; this one is sent only if the request is still open.
+			if (!answered && response) send({ type: "host_response", requestId, response });
+		});
 	}
 
-	/** One live item: streaming text and tools, the run phase, extension UI, notices. */
-	function handleLiveItem(item: LiveItem): void {
-		if (item.type === "assistant_delta" && item.event?.type === "text_delta") {
-			if (!hasTextOutput) {
-				hasTextOutput = true;
-				outputLog.append("");
-				outputLog.append(`${BLUE}${BOLD}Agent:${RESET}`);
-			}
-			const parts = (item.event.delta ?? "").split("\n");
-			for (let i = 0; i < parts.length; i++) {
-				if (i > 0) outputLog.append("");
-				if (parts[i]) outputLog.appendRaw(parts[i]);
-			}
-			return;
-		}
-		if (item.type === "tool" && item.op === "start") {
-			outputLog.append(`${DIM}[tool: ${item.toolName}]${RESET}`);
-			return;
-		}
-		if (item.type === "notice") {
-			const color = item.level === "error" ? RED : item.level === "warning" ? YELLOW : MAGENTA;
-			outputLog.append(`${color}${BOLD}Notification:${RESET} ${plain(item.message)}`);
-			return;
-		}
-		if (item.type === "directive" && item.directive === "set_editor_text") {
-			promptInput.input.setValue(item.text ?? "");
-			return;
-		}
-		if (item.type === "directive" && item.directive === "insert_editor_text") {
-			promptInput.input.setValue(`${promptInput.input.getValue()}${item.text ?? ""}`);
-			return;
-		}
-		if (item.type === "clear" && item.key?.startsWith("ext_status/")) {
-			outputLog.append(
-				`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} (cleared)`,
-			);
-			return;
-		}
-		if (item.type !== "set" || !item.key || !item.value) return;
-		const value = item.value;
+	// -- Live lane --
+
+	const panels = new Map<string, Extract<LiveValue, { kind: "ext_panel" }>>();
+	let isStreaming = false;
+	let hasTextOutput = false;
+	let assistantLine = "";
+
+	function showPanel(key: string): void {
+		const panel = panels.get(key);
+		if (!panel) return;
+		print(`${MAGENTA}${BOLD}[panel ${key.slice("ext_panel/".length)}]${RESET} ${plain(panel.title)}`);
+		for (const line of nodeLines(panel.node, "  ")) print(`${DIM}${line}${RESET}`);
+	}
+
+	function handleSet(key: string, value: LiveValue): void {
 		switch (value.kind) {
 			case "phase":
-				if (value.busy === true) showLoading();
-				else if (isStreaming) {
+				if (value.busy && !isStreaming) {
+					isStreaming = true;
+					hasTextOutput = false;
+					print(`${DIM}Agent: working...${RESET}`);
+				} else if (!value.busy && isStreaming) {
 					isStreaming = false;
-					hideLoading();
-					outputLog.append("");
+					if (assistantLine) print(assistantLine);
+					assistantLine = "";
 				}
 				return;
 			case "host_request":
-				showHostRequest(value.requestId as string, value.request as HostRequest);
+				showHostRequest(value.requestId, value.request);
 				return;
 			case "ext_status":
-				outputLog.append(
-					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} ${plain(value.text)}`,
-				);
+				print(`${MAGENTA}[status ${key.slice("ext_status/".length)}]${RESET} ${plain(value.text)}`);
 				return;
-			case "ext_panel": {
-				// A panel is UiNode data; this client shows a text node's lines and names other nodes.
-				const node = value.node as { type?: string; text?: unknown } | undefined;
-				outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[panel: ${item.key.slice(10)}]${RESET}`);
-				const lines = node?.type === "text" ? plain(node.text).split("\n") : [`(${node?.type ?? "unknown"} node)`];
-				for (const line of lines) outputLog.append(`  ${DIM}${line}${RESET}`);
+			case "ext_panel":
+				panels.set(key, value);
+				showPanel(key);
 				return;
-			}
+			case "ext_title":
+				print(`${MAGENTA}[title]${RESET} ${value.title}`);
+				return;
 			default:
 				return;
 		}
 	}
 
-	// -- Slash commands (local, not sent to agent) --
-
-	function handleSlashCommand(cmd: string): boolean {
-		switch (cmd) {
-			case "/select":
-				showSelectDialog("Pick a color", ["Red", "Green", "Blue", "Yellow"], (value) => {
-					if (value) {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} You picked: ${value}`);
-					} else {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} Selection cancelled`);
-					}
-					tui.requestRender();
-				});
-				return true;
-
-			case "/confirm":
-				showSelectDialog("Are you sure?", ["Yes", "No"], (value) => {
-					const confirmed = value === "Yes";
-					outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} Confirmed: ${confirmed}`);
-					tui.requestRender();
-				});
-				return true;
-
-			case "/input":
-				showInputDialog("Enter your name", undefined, (value) => {
-					if (value) {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} You entered: ${value}`);
-					} else {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} Input cancelled`);
-					}
-					tui.requestRender();
-				});
-				return true;
-
-			case "/editor":
-				showInputDialog("Edit text", "Hello, world!", (value) => {
-					if (value) {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} Submitted: ${value}`);
-					} else {
-						outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} Editor cancelled`);
-					}
-					tui.requestRender();
-				});
-				return true;
-
+	function handleLiveItem(item: LiveItem): void {
+		switch (item.type) {
+			case "assistant_delta": {
+				if (item.event.type !== "text_delta") return;
+				if (!hasTextOutput) {
+					hasTextOutput = true;
+					print(`${BLUE}${BOLD}Agent:${RESET}`);
+				}
+				const parts = `${assistantLine}${item.event.delta}`.split("\n");
+				assistantLine = parts.pop() ?? "";
+				for (const part of parts) print(part);
+				return;
+			}
+			case "tool":
+				if (item.op === "start") print(`${DIM}[tool: ${item.toolName}]${RESET}`);
+				return;
+			case "notice": {
+				const color = item.level === "error" ? RED : item.level === "warning" ? YELLOW : MAGENTA;
+				print(`${color}${BOLD}Notification:${RESET} ${plain(item.message)}`);
+				return;
+			}
+			case "directive":
+				// set_editor_text replaces the line being typed (Ctrl+E, Ctrl+U), insert_editor_text types at the cursor
+				if (item.directive === "set_editor_text") {
+					rl.write(null, { ctrl: true, name: "e" });
+					rl.write(null, { ctrl: true, name: "u" });
+				}
+				rl.write(item.text.replace(/\n/g, " "));
+				return;
+			case "set":
+				handleSet(item.key, item.value);
+				return;
+			case "patch": {
+				const panel = panels.get(item.key);
+				if (!panel) return;
+				const [node] = applyUiPatch([panel.node], item.ops);
+				if (node) panels.set(item.key, { ...panel, node });
+				showPanel(item.key);
+				return;
+			}
+			case "clear":
+				if (item.key.startsWith("host_request/")) pending.get(item.key.slice("host_request/".length))?.();
+				if (item.key.startsWith("ext_status/")) print(`${MAGENTA}[status ${item.key.slice(11)}]${RESET} (cleared)`);
+				if (panels.delete(item.key)) print(`${MAGENTA}[panel ${item.key.slice(10)}]${RESET} (removed)`);
+				return;
 			default:
-				return false;
+				return;
 		}
 	}
 
@@ -568,78 +378,64 @@ async function main() {
 				return;
 			case "live":
 				for (const item of frame.items as LiveItem[]) handleLiveItem(item);
-				tui.requestRender();
 				return;
 			case "rejected":
-				outputLog.append(`${RED}[rejected]${RESET} ${(frame.reason as { message: string }).message}`);
-				tui.requestRender();
+				print(`${RED}[rejected]${RESET} ${(frame.reason as { message: string }).message}`);
 				return;
 			case "fatal":
-				outputLog.append(`${RED}[fatal]${RESET} ${frame.code}`);
-				tui.requestRender();
+				print(`${RED}[fatal]${RESET} ${frame.code}`);
 				return;
 			default:
 				return;
 		}
 	});
 
-	// Say hello: this client answers dialogs.
+	// Say hello: this client answers dialogs, forms, and editor text requests.
 	send({
 		type: "hello",
 		protocol: 1,
 		client: { name: "rpc-extension-ui-example", version: "1" },
-		accepts: { hostRequests: ["select", "confirm", "input", "editor"] },
+		accepts: { hostRequests: ["select", "confirm", "input", "editor", "dialog", "form", "editor_text"] },
 	});
 
 	// -- User input --
 
-	promptInput.input.onSubmit = (value) => {
-		const trimmed = value.trim();
-		if (!trimmed) return;
-
-		promptInput.input.setValue("");
-
-		if (handleSlashCommand(trimmed)) {
-			outputLog.append(`${GREEN}${BOLD}You:${RESET} ${trimmed}`);
-			tui.requestRender();
+	rl.on("line", (line) => {
+		if (answerLine) {
+			const answer = answerLine;
+			answerLine = undefined;
+			answer(line.trim());
 			return;
 		}
-
-		outputLog.append(`${GREEN}${BOLD}You:${RESET} ${trimmed}`);
-		// A prompt's intent id is its durable client message id.
-		send({ type: "prompt", intentId: randomUUID(), input: { message: trimmed } });
-		tui.requestRender();
-	};
-
-	promptInput.onCtrlD = exit;
-
-	promptInput.input.onEscape = () => {
-		if (isStreaming) {
-			send({ type: "abort", intentId: randomUUID() });
-			outputLog.append(`${YELLOW}[aborted]${RESET}`);
-			tui.requestRender();
-		} else {
-			exit();
+		const trimmed = line.trim();
+		if (trimmed === "/quit") exit();
+		if (trimmed) {
+			// A prompt's intent id is its durable client message id.
+			send({ type: "prompt", intentId: randomUUID(), input: { message: trimmed } });
 		}
-	};
+		rl.prompt();
+	});
 
-	// -- Agent exit --
+	// Ctrl+C aborts a run, or exits when idle; Ctrl+D exits.
+	rl.on("SIGINT", () => {
+		if (!isStreaming) exit();
+		send({ type: "abort", intentId: randomUUID() });
+		print(`${YELLOW}[aborted]${RESET}`);
+	});
+	rl.on("close", exit);
 
 	agent.on("exit", (code) => {
-		tui.stop();
+		exiting = true;
+		rl.close();
 		if (stderr) console.error(stderr);
 		console.log(`Agent exited with code ${code}`);
 		process.exit(code ?? 0);
 	});
 
-	// -- Start --
-
-	outputLog.append(`${BOLD}RPC Chat${RESET}`);
-	outputLog.append(`${DIM}Type a message and press Enter. Esc to abort or exit. Ctrl+D to quit.${RESET}`);
-	outputLog.append(`${DIM}Slash commands: /select /confirm /input /editor${RESET}`);
-	outputLog.append("");
-
-	tui.start();
+	console.log(`${BOLD}RPC Chat${RESET}`);
+	console.log(`${DIM}Type a message and press Enter. Ctrl+C aborts a run. /quit or Ctrl+D to exit.${RESET}`);
+	console.log(`${DIM}Try /rpc-input, /rpc-editor, /rpc-dialog, /rpc-form, /rpc-prefill, /rpc-editor-text${RESET}`);
+	rl.prompt();
 }
 
 main().catch((err) => {

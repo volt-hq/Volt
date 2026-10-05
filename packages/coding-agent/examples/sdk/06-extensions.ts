@@ -7,14 +7,16 @@
  * By default, extension files are discovered from:
  * - ~/.volt/agent/extensions/
  * - <cwd>/.volt/extensions/
- * - Paths specified in settings.json "extensions" array
+ * - Paths specified in settings.json "extensionPaths" array
  *
  * An extension is a TypeScript file that exports its manifest and a default function:
  *   export const manifest = defineManifest({ id: "my-extension", displayName: "My Extension" });
  *   export default function (volt: ExtensionAPI) { ... }
  *
- * The manifest id is the extension's identity. An extension passed to the SDK
- * gives its manifest alongside its factory.
+ * The manifest id is the extension's identity: settings.json keeps whether it
+ * is enabled and its settings under "extensions" by that id
+ * ({ "extensions": { "my-extension": { "enabled": false } } }). An extension
+ * passed to the SDK gives its manifest alongside its factory.
  */
 
 import {
@@ -65,19 +67,25 @@ try {
 
 // Example extension file (./my-logging-extension.ts):
 /*
-import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionSettingsOf } from "@hansjm10/volt-coding-agent";
+import { Type } from "typebox";
 
-export const manifest = defineManifest({ id: "my-logging-extension", displayName: "My Logging Extension" });
+export const manifest = defineManifest({
+	id: "my-logging-extension",
+	displayName: "My Logging Extension",
+	// Settings every client edits as a form: settings.json "extensions"."my-logging-extension"."settings"
+	settings: { type: "object", properties: { verbose: { type: "boolean", title: "Verbose", default: false } } },
+});
 
-export default function (volt: ExtensionAPI) {
-	volt.on("agent_start", async () => {
-		console.log("[Extension] Agent starting");
-	});
-
+export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>>) {
 	volt.on("tool_call", async (event) => {
-		console.log(\`[Extension] Tool: \${event.toolName}\`);
+		if (volt.settings.verbose) console.log(\`[Extension] Tool: \${event.toolName}\`);
 		// Return { block: true, reason: "..." } to block execution
 		return undefined;
+	});
+
+	volt.on("agent_start", async () => {
+		console.log("[Extension] Agent starting");
 	});
 
 	volt.on("agent_end", async (event) => {
@@ -95,6 +103,11 @@ export default function (volt: ExtensionAPI) {
 		execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => ({
 			content: [{ type: "text", text: \`Processed: \${params.input}\` }],
 			details: {},
+		}),
+		// How a call looks on every client, as UI data
+		present: ({ args, state }) => ({
+			title: [{ text: "my_tool ", bold: true }, { text: args.input ?? "…", token: "accent" }],
+			...(state === "done" ? {} : { activity: "Processing…" }),
 		}),
 	});
 

@@ -9,16 +9,17 @@
  *   /handoff execute phase one of the plan
  *   /handoff check other places that need this fix
  *
- * The generated prompt appears as a draft in the editor for review/editing.
+ * A dialog shows while the prompt is generated (Cancel stops it); the
+ * generated prompt appears as a draft in the editor for review/editing.
  */
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
 import {
-	BorderedLoader,
 	convertToLlm,
 	defineManifest,
 	type ExtensionAPI,
+	type ExtensionCommandContext,
 	type SessionEntry,
 	serializeConversation,
 } from "@hansjm10/volt-coding-agent";
@@ -83,6 +84,33 @@ function getHandoffMessages(branch: SessionEntry[]): AgentMessage[] {
 	return compactedBranch.map(entryToMessage).filter((message) => message !== undefined);
 }
 
+/**
+ * Run `work` while a dialog says what is happening: choosing Cancel or
+ * dismissing the dialog aborts it, and the dialog closes once it settles.
+ */
+async function withProgressDialog<T>(
+	ctx: ExtensionCommandContext,
+	title: string,
+	text: string,
+	work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const cancel = new AbortController();
+	const close = new AbortController();
+	void ctx.ui
+		.dialog(
+			{ title, body: [{ type: "text", text, token: "muted" }], actions: [{ id: "cancel", label: "Cancel" }] },
+			{ signal: close.signal },
+		)
+		.then(() => {
+			if (!close.signal.aborted) cancel.abort();
+		});
+	try {
+		return await work(AbortSignal.any([cancel.signal, ctx.signal]));
+	} finally {
+		close.abort();
+	}
+}
+
 export const manifest = defineManifest({
 	id: "handoff",
 	displayName: "Handoff",
@@ -93,8 +121,8 @@ export default function (volt: ExtensionAPI) {
 	volt.registerCommand("handoff", {
 		description: "Transfer context to a new focused session",
 		handler: async (args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("handoff requires interactive mode", "error");
+			if (!ctx.hasUI) {
+				ctx.ui.notify("handoff requires a client that shows dialogs", "error");
 				return;
 			}
 
@@ -123,12 +151,10 @@ export default function (volt: ExtensionAPI) {
 			const conversationText = serializeConversation(llmMessages);
 			const currentSessionRef = ctx.sessionManager.getSessionRef();
 
-			// Generate the handoff prompt with loader UI
-			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Generating handoff prompt...`);
-				loader.onAbort = () => done(null);
-
-				const doGenerate = async () => {
+			// Generate the handoff prompt while a dialog shows progress
+			let result: string | null;
+			try {
+				result = await withProgressDialog(ctx, "Handoff", "Generating handoff prompt...", async (signal) => {
 					const userMessage: Message = {
 						role: "user",
 						content: [
@@ -144,7 +170,7 @@ export default function (volt: ExtensionAPI) {
 					const response = await ctx.modelRegistry.client.complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ signal: loader.signal },
+						{ signal },
 					);
 
 					if (response.stopReason === "aborted") {
@@ -158,17 +184,14 @@ export default function (volt: ExtensionAPI) {
 						.filter((c): c is { type: "text"; text: string } => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
-				};
-
-				doGenerate()
-					.then(done)
-					.catch((err) => {
-						console.error("Handoff generation failed:", err);
-						done(null);
-					});
-
-				return loader;
-			});
+				});
+			} catch (error) {
+				ctx.ui.notify(
+					`Handoff generation failed: ${error instanceof Error ? error.message : String(error)}`,
+					"error",
+				);
+				return;
+			}
 
 			if (result === null) {
 				ctx.ui.notify("Cancelled", "info");

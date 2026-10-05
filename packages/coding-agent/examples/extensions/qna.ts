@@ -3,12 +3,12 @@
  *
  * Demonstrates the "prompt generator" pattern:
  * 1. /qna command gets the last assistant message
- * 2. Shows a spinner while extracting (hides editor)
+ * 2. Shows a dialog while extracting (Cancel stops it)
  * 3. Loads the result into the editor for user to fill in answers
  */
 
 import type { UserMessage } from "@hansjm10/volt-ai";
-import { BorderedLoader, defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { defineManifest, type ExtensionAPI, type ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
 
@@ -26,6 +26,33 @@ A:
 
 Keep questions in the order they appeared. Be concise.`;
 
+/**
+ * Run `work` while a dialog says what is happening: choosing Cancel or
+ * dismissing the dialog aborts it, and the dialog closes once it settles.
+ */
+async function withProgressDialog<T>(
+	ctx: ExtensionCommandContext,
+	title: string,
+	text: string,
+	work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+	const cancel = new AbortController();
+	const close = new AbortController();
+	void ctx.ui
+		.dialog(
+			{ title, body: [{ type: "text", text, token: "muted" }], actions: [{ id: "cancel", label: "Cancel" }] },
+			{ signal: close.signal },
+		)
+		.then(() => {
+			if (!close.signal.aborted) cancel.abort();
+		});
+	try {
+		return await work(AbortSignal.any([cancel.signal, ctx.signal]));
+	} finally {
+		close.abort();
+	}
+}
+
 export const manifest = defineManifest({
 	id: "qna",
 	displayName: "Q&A",
@@ -36,8 +63,8 @@ export default function (volt: ExtensionAPI) {
 	volt.registerCommand("qna", {
 		description: "Extract questions from last assistant message into editor",
 		handler: async (_args, ctx) => {
-			if (ctx.mode !== "tui") {
-				ctx.ui.notify("qna requires interactive mode", "error");
+			if (!ctx.hasUI) {
+				ctx.ui.notify("qna requires a client that shows dialogs", "error");
 				return;
 			}
 
@@ -75,16 +102,16 @@ export default function (volt: ExtensionAPI) {
 				return;
 			}
 
-			// Run extraction with loader UI
-			const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Extracting questions using ${ctx.model!.id}...`);
-				loader.onAbort = () => done(null);
-
-				// Do the work
-				const doExtract = async () => {
+			// Run the extraction while a dialog shows progress
+			const text = lastAssistantText;
+			const result = await withProgressDialog(
+				ctx,
+				"Q&A",
+				`Extracting questions using ${ctx.model.id}...`,
+				async (signal) => {
 					const userMessage: UserMessage = {
 						role: "user",
-						content: [{ type: "text", text: lastAssistantText! }],
+						content: [{ type: "text", text }],
 						timestamp: Date.now(),
 					};
 
@@ -92,28 +119,19 @@ export default function (volt: ExtensionAPI) {
 					const response = await ctx.modelRegistry.client.complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ signal: loader.signal },
+						{ signal },
 					);
 
-					if (response.stopReason === "aborted") {
+					if (response.stopReason === "aborted" || response.stopReason === "error") {
 						return null;
-					}
-					if (response.stopReason === "error") {
-						throw new Error(response.error?.message ?? "Question extraction failed");
 					}
 
 					return response.content
 						.filter((c): c is { type: "text"; text: string } => c.type === "text")
 						.map((c) => c.text)
 						.join("\n");
-				};
-
-				doExtract()
-					.then(done)
-					.catch(() => done(null));
-
-				return loader;
-			});
+				},
+			);
 
 			if (result === null) {
 				ctx.ui.notify("Cancelled", "info");

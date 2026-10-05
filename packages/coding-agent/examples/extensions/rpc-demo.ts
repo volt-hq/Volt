@@ -10,11 +10,14 @@
  * - confirm() - on session_before_switch
  * - input() - via /rpc-input command
  * - editor() - via /rpc-editor command
+ * - dialog() - via /rpc-dialog command
+ * - form() - via /rpc-form command
  * - notify() - after each dialog completes
  * - setStatus() - on turn_start/turn_end
- * - setWidget() - on session_start
+ * - setPanel() - on session_start
  * - setTitle() - on session_start
  * - setEditorText() - via /rpc-prefill command
+ * - getEditorText() - via /rpc-editor-text command
  */
 
 import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
@@ -24,11 +27,14 @@ export const manifest = defineManifest({ id: "rpc-demo", displayName: "RPC Exten
 export default function (volt: ExtensionAPI) {
 	let turnCount = 0;
 
-	// -- setTitle, setWidget, setStatus on session lifecycle --
+	// -- setTitle, setPanel, setStatus on session lifecycle --
 
 	volt.on("session_start", async (event, ctx) => {
 		ctx.ui.setTitle(event.reason === "new" ? "volt RPC Demo (new session)" : "volt RPC Demo");
-		ctx.ui.setWidget("rpc-demo", ["--- RPC Extension UI Demo ---", "Loaded and ready."]);
+		ctx.ui.setPanel("rpc-demo", {
+			title: "RPC Extension UI Demo",
+			node: { type: "text", text: "Loaded and ready." },
+		});
 		ctx.ui.setStatus("rpc-demo", `Turns: ${turnCount}`);
 	});
 
@@ -115,6 +121,53 @@ export default function (volt: ExtensionAPI) {
 		handler: async (_args, ctx) => {
 			ctx.ui.setEditorText("This text was set by the rpc-demo extension.");
 			ctx.ui.notify("Editor prefilled", "info");
+		},
+	});
+
+	// -- dialog via command --
+
+	volt.registerCommand("rpc-dialog", {
+		description: "Show a dialog of UI data (demonstrates ctx.ui.dialog in RPC)",
+		handler: async (_args, ctx) => {
+			const choice = await ctx.ui.dialog({
+				title: "Deploy?",
+				body: [{ type: "markdown", markdown: "This would deploy **main** to staging." }],
+				actions: [
+					{ id: "deploy", label: "Deploy", token: "accent" },
+					{ id: "cancel", label: "Cancel" },
+				],
+			});
+			ctx.ui.notify(choice ? `Dialog answered: ${choice}` : "Dialog dismissed", "info");
+		},
+	});
+
+	// -- form via command --
+
+	volt.registerCommand("rpc-form", {
+		description: "Show a form (demonstrates ctx.ui.form in RPC)",
+		handler: async (_args, ctx) => {
+			const values = await ctx.ui.form({
+				title: "Release",
+				fields: [
+					{ kind: "string", id: "tag", label: "Tag", required: true, pattern: "v[0-9]+" },
+					{ kind: "enum", id: "channel", label: "Channel", options: [{ value: "beta" }, { value: "stable" }] },
+					{ kind: "boolean", id: "notes", label: "Write notes" },
+				],
+			});
+			ctx.ui.notify(values ? `Form submitted: ${JSON.stringify(values)}` : "Form dismissed", "info");
+		},
+	});
+
+	// -- getEditorText via command --
+
+	volt.registerCommand("rpc-editor-text", {
+		description: "Read the client's editor text (demonstrates ctx.ui.getEditorText in RPC)",
+		handler: async (_args, ctx) => {
+			const text = await ctx.ui.getEditorText();
+			ctx.ui.notify(
+				text === undefined ? "The client did not answer" : `Editor text: ${JSON.stringify(text)}`,
+				"info",
+			);
 		},
 	});
 }

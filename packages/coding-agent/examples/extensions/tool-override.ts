@@ -13,8 +13,8 @@
  * 2. Block access to sensitive paths (e.g., .env files)
  * 3. Delegate to the original read implementation for allowed files
  *
- * Since no custom renderCall/renderResult are provided, the built-in renderer
- * is used automatically (syntax highlighting, line numbers, truncation warnings).
+ * Since it has no present(), calls of it present as the built-in read tool's
+ * do (the path, the range, and the file's first lines).
  *
  * Usage:
  *   volt -e ./tool-override.ts
@@ -130,8 +130,7 @@ export default function (volt: ExtensionAPI) {
 			}
 		},
 
-		// No renderCall/renderResult - uses built-in renderer automatically
-		// (syntax highlighting, line numbers, truncation warnings, etc.)
+		// No present(): calls present as the built-in read tool's do.
 	});
 
 	// Also register a command to view the access log

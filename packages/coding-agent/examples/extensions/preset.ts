@@ -41,14 +41,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import {
-	DynamicBorder,
-	defineManifest,
-	type ExtensionAPI,
-	type ExtensionContext,
-	getAgentDir,
-} from "@hansjm10/volt-coding-agent";
-import { Container, Key, type SelectItem, SelectList, Text } from "@hansjm10/volt-tui";
+import { defineManifest, type ExtensionAPI, type ExtensionContext, getAgentDir } from "@hansjm10/volt-coding-agent";
 
 // Preset configuration
 interface Preset {
@@ -201,7 +194,7 @@ export default function presetExtension(volt: ExtensionAPI) {
 	}
 
 	/**
-	 * Show preset selector UI using custom SelectList component.
+	 * Show the preset selector: a form with one choice field, which every client renders.
 	 */
 	async function showPresetSelector(ctx: ExtensionContext): Promise<void> {
 		const presetNames = Object.keys(presets);
@@ -214,65 +207,29 @@ export default function presetExtension(volt: ExtensionAPI) {
 			return;
 		}
 
-		// Build select items with descriptions
-		const items: SelectItem[] = presetNames.map((name) => {
-			const preset = presets[name];
-			const isActive = name === activePresetName;
-			return {
-				value: name,
-				label: isActive ? `${name} (active)` : name,
-				description: buildPresetDescription(preset),
-			};
-		});
+		// Options with descriptions, plus "(none)" to clear the preset
+		const options = presetNames.map((name) => ({
+			value: name,
+			label: name === activePresetName ? `${name} (active)` : name,
+			description: buildPresetDescription(presets[name]),
+		}));
+		options.push({ value: "(none)", label: "(none)", description: "Clear active preset, restore defaults" });
 
-		// Add "None" option to clear preset
-		items.push({
-			value: "(none)",
-			label: "(none)",
-			description: "Clear active preset, restore defaults",
-		});
-
-		const result = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-			const container = new Container();
-			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-			// Header
-			container.addChild(new Text(theme.fg("accent", theme.bold("Select Preset"))));
-
-			// SelectList with themed styling
-			const selectList = new SelectList(items, Math.min(items.length, 10), {
-				selectedPrefix: (text) => theme.fg("accent", text),
-				selectedText: (text) => theme.fg("accent", text),
-				description: (text) => theme.fg("muted", text),
-				scrollInfo: (text) => theme.fg("dim", text),
-				noMatch: (text) => theme.fg("warning", text),
-			});
-
-			selectList.onSelect = (item) => done(item.value);
-			selectList.onCancel = () => done(null);
-
-			container.addChild(selectList);
-
-			// Footer hint
-			container.addChild(new Text(theme.fg("dim", "↑↓ navigate • enter select • esc cancel")));
-
-			container.addChild(new DynamicBorder((str) => theme.fg("accent", str)));
-
-			return {
-				render(width: number) {
-					return container.render(width);
+		const values = await ctx.ui.form({
+			title: "Select Preset",
+			fields: [
+				{
+					kind: "enum",
+					id: "preset",
+					label: "Preset",
+					options,
+					value: activePresetName ?? "(none)",
+					required: true,
 				},
-				invalidate() {
-					container.invalidate();
-				},
-				handleInput(data: string) {
-					selectList.handleInput(data);
-					tui.requestRender();
-				},
-			};
+			],
 		});
-
-		if (!result) return;
+		const result = values?.preset;
+		if (typeof result !== "string") return;
 
 		if (result === "(none)") {
 			// Clear preset and restore original state
@@ -305,7 +262,7 @@ export default function presetExtension(volt: ExtensionAPI) {
 	 */
 	function updateStatus(ctx: ExtensionContext) {
 		if (activePresetName) {
-			ctx.ui.setStatus("preset", ctx.ui.theme.fg("accent", `preset:${activePresetName}`));
+			ctx.ui.setStatus("preset", [{ text: `preset:${activePresetName}`, token: "accent" }]);
 		} else {
 			ctx.ui.setStatus("preset", undefined);
 		}
@@ -362,7 +319,7 @@ export default function presetExtension(volt: ExtensionAPI) {
 			await cyclePreset(ctx);
 		},
 	});
-	volt.registerShortcut(Key.ctrlShift("u"), { description: "Cycle presets", intent: cycle });
+	volt.registerShortcut("ctrl+shift+u", { description: "Cycle presets", intent: cycle });
 
 	// Register /preset command
 	volt.registerCommand("preset", {
