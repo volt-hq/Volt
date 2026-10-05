@@ -96,7 +96,7 @@ vi.mock("../src/utils/child-process.ts", () => {
 });
 
 const originalEnv = { ...process.env };
-const catalog: StoreCatalog = { schemaVersion: 1, packages: [] };
+const catalog: StoreCatalog = { schemaVersion: 2, packages: [] };
 
 afterEach(() => {
 	process.env = { ...originalEnv };

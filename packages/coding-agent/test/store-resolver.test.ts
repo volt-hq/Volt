@@ -1,33 +1,52 @@
 import { describe, expect, it } from "vitest";
-import type { StoreCatalog } from "../src/store/catalog.ts";
 import { resolveStoreSource } from "../src/store/resolver.ts";
+import {
+	NEXT_TEST_STORE_COMMIT,
+	TEST_STORE_COMMIT,
+	testCatalog,
+	testCatalogEntry,
+	testStoreSource,
+} from "./store-catalog-fixtures.ts";
 
-const catalog: StoreCatalog = {
-	schemaVersion: 1,
-	packages: [
-		{
-			id: "rtk",
-			name: "RTK",
-			description: "Token optimized shell output",
-			source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
-		},
-		{
-			id: "theme",
-			name: "Theme",
-			description: "Theme package",
-			source: "npm:@scope/theme@1.0.0",
-		},
-	],
-};
+const catalog = testCatalog(testCatalogEntry("rtk"));
 
 describe("store resolver", () => {
-	it("maps catalog IDs to sources and preserves catalog metadata", async () => {
-		const resolved = await resolveStoreSource({ input: "rtk", catalog });
+	it("maps catalog IDs to their reviewed pins and preserves catalog metadata", async () => {
+		const resolved = await resolveStoreSource({
+			input: "rtk",
+			catalog,
+			gitLsRemote: () => {
+				throw new Error("a catalog pin needs no ls-remote");
+			},
+		});
 
 		expect(resolved.kind).toBe("catalog");
-		expect(resolved.source).toBe("git:github.com/hansjm10/volt-rtk@v0.1.0");
+		expect(resolved.source).toBe(testStoreSource());
 		expect(resolved.catalogPackage?.id).toBe("rtk");
 		expect(resolved.pinned).toBe(true);
+		expect(resolved.tracking).toBe(false);
+		expect(resolved.warnings).toEqual([]);
+	});
+
+	it.each([
+		[{ ref: "main" }, "--ref does not apply to catalog package rtk"],
+		[{ track: true }, "--track does not apply to catalog package rtk"],
+	])("refuses to move a catalog package off its reviewed pin (%j)", async (options, message) => {
+		await expect(resolveStoreSource({ input: "rtk", catalog, ...options })).rejects.toThrow(message);
+	});
+
+	it("refuses a catalog package whose host is not allowlisted or whose review is for another commit", async () => {
+		const offHost = testCatalog(
+			testCatalogEntry("rtk", { source: `git:https://example.com/volt-hq/Volt@${TEST_STORE_COMMIT}` }),
+		);
+		const unreviewed = testCatalog(testCatalogEntry("rtk", { source: testStoreSource(NEXT_TEST_STORE_COMMIT) }));
+
+		await expect(resolveStoreSource({ input: "rtk", catalog: offHost })).rejects.toThrow(
+			"Catalog package rtk is not installable: source host example.com is not allowed",
+		);
+		await expect(resolveStoreSource({ input: "rtk", catalog: unreviewed })).rejects.toThrow(
+			`Catalog package rtk is not installable: review.commit ${TEST_STORE_COMMIT} is not the pinned commit`,
+		);
 	});
 
 	it("rejects unknown bare IDs with suggestions", async () => {
@@ -45,27 +64,9 @@ describe("store resolver", () => {
 		expect(unpinned.warnings).toContain("npm package @scope/pkg is not pinned to an exact version.");
 	});
 
-	it("marks non-exact npm catalog sources as tracking", async () => {
-		const rangedCatalog: StoreCatalog = {
-			schemaVersion: 1,
-			packages: [
-				...catalog.packages,
-				{
-					id: "ranged-theme",
-					name: "Ranged Theme",
-					description: "Theme package",
-					source: "npm:@scope/ranged-theme@^1.0.0",
-				},
-				{
-					id: "latest-theme",
-					name: "Latest Theme",
-					description: "Theme package",
-					source: "npm:@scope/latest-theme@latest",
-				},
-			],
-		};
-		const ranged = await resolveStoreSource({ input: "ranged-theme", catalog: rangedCatalog });
-		const latest = await resolveStoreSource({ input: "latest-theme", catalog: rangedCatalog });
+	it("marks non-exact npm specs as tracking", async () => {
+		const ranged = await resolveStoreSource({ input: "npm:@scope/ranged-theme@^1.0.0", catalog });
+		const latest = await resolveStoreSource({ input: "npm:@scope/latest-theme@latest", catalog });
 
 		expect(ranged.pinned).toBe(false);
 		expect(ranged.tracking).toBe(true);

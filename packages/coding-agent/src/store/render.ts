@@ -1,14 +1,24 @@
 import chalk from "chalk";
+import { stripTerminalControls } from "../core/ui/ansi-tokens.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import type { StoreCatalogPackage, StoreResourceType } from "./catalog.ts";
-import type { StorePackageInspection, StoreVoltManifest } from "./inspector.ts";
+import type { StorePackageInspection, StoreVoltField } from "./inspector.ts";
 import type { StoreInstallPlan } from "./install-plan.ts";
 import type { StoreResolvedSource } from "./resolver.ts";
 
 const RESOURCE_TYPES: StoreResourceType[] = ["extensions", "skills", "prompts", "themes"];
 
+/**
+ * Text from a catalog or an inspected package, safe to print on one line: a
+ * package is shown before the user agrees to install it, so it must not write
+ * terminal sequences or forge lines of the plan.
+ */
+function printable(text: string): string {
+	return stripTerminalControls(text).replaceAll("\n", " ");
+}
+
 function formatList(values: readonly string[] | undefined): string {
-	return values && values.length > 0 ? values.join(", ") : "none";
+	return values && values.length > 0 ? values.map(printable).join(", ") : "none";
 }
 
 export function formatStoreSourceSummary(source: string): string {
@@ -31,7 +41,7 @@ export function formatStoreSourceSummary(source: string): string {
 export function formatStoreInstallPlanTarget(plan: StoreInstallPlan): string {
 	const catalogPackage = plan.resolved.catalogPackage;
 	if (catalogPackage) {
-		return `${catalogPackage.id} - ${catalogPackage.name}`;
+		return `${catalogPackage.id} - ${printable(catalogPackage.name)}`;
 	}
 	return formatStoreSourceSummary(plan.resolved.source);
 }
@@ -45,27 +55,51 @@ function renderRecord(title: string, values: Record<string, string>): string[] {
 	if (entries.length === 0) {
 		return [`${title}: none`];
 	}
-	return [`${title}:`, ...entries.map(([name, version]) => `  - ${name}: ${version}`)];
+	return [`${title}:`, ...entries.map(([name, version]) => `  - ${printable(name)}: ${printable(version)}`)];
 }
 
-function renderVoltManifest(manifest: StoreVoltManifest | undefined): string[] {
-	if (!manifest) {
+function renderVoltField(volt: StoreVoltField | undefined): string[] {
+	if (!volt) {
 		return ["Volt manifest: none"];
 	}
 	const lines = ["Volt manifest:"];
-	for (const resourceType of RESOURCE_TYPES) {
-		const entries = manifest[resourceType];
+	const manifest = volt.manifest;
+	if (manifest) {
+		lines.push(`  id: ${manifest.id}`);
+		lines.push(`  display name: ${printable(manifest.displayName)}`);
+		if (manifest.description) lines.push(`  description: ${printable(manifest.description)}`);
+		lines.push(`  entry: ${printable(manifest.entry ?? "none")}`);
+		lines.push(`  permissions: ${formatList(manifest.permissions)}`);
+		if (manifest.settings) lines.push(`  settings: ${formatList(Object.keys(manifest.settings.properties))}`);
+	} else {
+		lines.push("  extension: none");
+	}
+	for (const resourceType of ["skills", "prompts", "themes"] as const) {
+		const entries = volt[resourceType];
 		if (entries !== undefined) {
 			lines.push(`  ${resourceType}: ${formatList(entries)}`);
 		}
 	}
-	if (manifest.image) {
-		lines.push(`  image: ${manifest.image}`);
-	}
-	if (manifest.video) {
-		lines.push(`  video: ${manifest.video}`);
-	}
 	return lines;
+}
+
+/** The catalog's review record and declared permissions for a catalog package. */
+function renderCatalogReview(pkg: StoreCatalogPackage): string[] {
+	return [
+		`Permissions: ${formatList(pkg.permissions)}`,
+		`Reviewed: ${pkg.review.commit.slice(0, 12)} by ${printable(pkg.review.reviewer)} on ${pkg.review.date}`,
+		`Review notes: ${printable(pkg.review.notes)}`,
+	];
+}
+
+function renderPackageMetadata(inspection: StorePackageInspection): string[] {
+	return [
+		`Name: ${printable(inspection.packageName ?? "unknown")}`,
+		`Version: ${printable(inspection.packageVersion ?? "unknown")}`,
+		`Description: ${printable(inspection.packageDescription ?? "unknown")}`,
+		`License: ${printable(inspection.packageLicense ?? "unknown")}`,
+		`Repository: ${printable(inspection.packageRepository ?? "unknown")}`,
+	];
 }
 
 function renderDiscoveredResources(inspection: StorePackageInspection): string[] {
@@ -80,7 +114,7 @@ function renderWarnings(warnings: readonly string[]): string[] {
 	if (warnings.length === 0) {
 		return [];
 	}
-	return ["Warnings:", ...warnings.map((warning) => `  - ${warning}`)];
+	return ["Warnings:", ...warnings.map((warning) => `  - ${printable(warning)}`)];
 }
 
 export function renderCatalogSearch(packages: readonly StoreCatalogPackage[], query?: string): string {
@@ -90,10 +124,10 @@ export function renderCatalogSearch(packages: readonly StoreCatalogPackage[], qu
 
 	const lines = [chalk.bold("Store packages:")];
 	for (const pkg of packages) {
-		const verified = pkg.verified ? " verified" : "";
-		const categories = pkg.categories && pkg.categories.length > 0 ? ` [${pkg.categories.join(", ")}]` : "";
-		lines.push(`${pkg.id} - ${pkg.name}${verified}${categories}`);
-		lines.push(chalk.dim(`  ${pkg.description}`));
+		const categories = pkg.categories.length > 0 ? ` [${pkg.categories.join(", ")}]` : "";
+		lines.push(`${pkg.id} - ${printable(pkg.name)} ${pkg.version}${categories}`);
+		lines.push(chalk.dim(`  ${printable(pkg.description)}`));
+		lines.push(chalk.dim(`  Permissions: ${formatList(pkg.permissions)}`));
 		lines.push(chalk.dim(`  Source: ${formatStoreSourceSummary(pkg.source)}`));
 	}
 	return lines.join("\n");
@@ -103,30 +137,29 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 	const lines: string[] = [];
 	const catalogPackage = resolved.catalogPackage;
 	if (catalogPackage) {
-		lines.push(chalk.bold(catalogPackage.name));
+		lines.push(chalk.bold(printable(catalogPackage.name)));
 		lines.push(`ID: ${catalogPackage.id}`);
-		lines.push(`Description: ${catalogPackage.description}`);
+		lines.push(`Description: ${printable(catalogPackage.description)}`);
+		lines.push(`Version: ${catalogPackage.version}`);
 		lines.push(`Source: ${formatStoreSourceSummary(catalogPackage.source)}`);
-		lines.push(`Verified: ${catalogPackage.verified === true ? "yes" : "no"}`);
-		if (catalogPackage.repo) lines.push(`Repo: ${catalogPackage.repo}`);
-		if (catalogPackage.author) lines.push(`Author: ${catalogPackage.author}`);
-		if (catalogPackage.license) lines.push(`License: ${catalogPackage.license}`);
-		if (catalogPackage.resources) lines.push(`Catalog resources: ${formatList(catalogPackage.resources)}`);
-		if (catalogPackage.compatibility?.volt) lines.push(`Volt compatibility: ${catalogPackage.compatibility.volt}`);
+		lines.push(...renderCatalogReview(catalogPackage));
+		lines.push(`Repo: ${printable(catalogPackage.repo)}`);
+		lines.push(`Author: ${printable(catalogPackage.author)}`);
+		lines.push(`License: ${printable(catalogPackage.license)}`);
+		lines.push(`Catalog resources: ${formatList(catalogPackage.resources)}`);
+		if (catalogPackage.compatibility?.volt) {
+			lines.push(`Volt compatibility: ${printable(catalogPackage.compatibility.volt)}`);
+		}
 		lines.push("");
 	} else {
-		lines.push(chalk.bold(resolved.input));
+		lines.push(chalk.bold(printable(resolved.input)));
 		lines.push(`Source: ${formatStoreSourceSummary(resolved.source)}`);
 		lines.push("");
 	}
 
 	lines.push(chalk.bold("Package metadata"));
-	lines.push(`Name: ${inspection.packageName ?? "unknown"}`);
-	lines.push(`Version: ${inspection.packageVersion ?? "unknown"}`);
-	lines.push(`Description: ${inspection.packageDescription ?? "unknown"}`);
-	lines.push(`License: ${inspection.packageLicense ?? "unknown"}`);
-	lines.push(`Repository: ${inspection.packageRepository ?? "unknown"}`);
-	lines.push(...renderVoltManifest(inspection.voltManifest));
+	lines.push(...renderPackageMetadata(inspection));
+	lines.push(...renderVoltField(inspection.volt));
 	lines.push(...renderDiscoveredResources(inspection));
 	lines.push(...renderRecord("Dependencies", inspection.dependencies));
 	lines.push(...renderRecord("Peer dependencies", inspection.peerDependencies));
@@ -139,22 +172,20 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 export function renderStoreInstallPlan(plan: StoreInstallPlan): string {
 	const target = formatStoreInstallPlanTarget(plan);
 	const source = formatStoreSourceSummary(plan.source);
+	const catalogPackage = plan.resolved.catalogPackage;
 	const lines = [
 		chalk.bold("Store install plan"),
 		...(target !== source ? [`Package: ${target}`] : []),
 		`Source: ${source}`,
+		...(catalogPackage ? renderCatalogReview(catalogPackage) : []),
 		`Scope: ${plan.scope}`,
 		`Tracking: ${plan.tracking ? "yes" : "no"}`,
 		`Script policy: ${plan.scriptPolicy}`,
 		`Compatibility: ${plan.compatibility}`,
 		"",
 		chalk.bold("Package metadata"),
-		`Name: ${plan.inspection.packageName ?? "unknown"}`,
-		`Version: ${plan.inspection.packageVersion ?? "unknown"}`,
-		`Description: ${plan.inspection.packageDescription ?? "unknown"}`,
-		`License: ${plan.inspection.packageLicense ?? "unknown"}`,
-		`Repository: ${plan.inspection.packageRepository ?? "unknown"}`,
-		...renderVoltManifest(plan.inspection.voltManifest),
+		...renderPackageMetadata(plan.inspection),
+		...renderVoltField(plan.inspection.volt),
 		...renderDiscoveredResources(plan.inspection),
 		...renderRecord("Dependencies", plan.inspection.dependencies),
 		...renderRecord("Peer dependencies", plan.inspection.peerDependencies),

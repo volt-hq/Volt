@@ -6,6 +6,13 @@ import { ENV_AGENT_DIR } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
 import type { StorePackageInspection } from "../src/store/inspector.ts";
+import {
+	NEXT_TEST_STORE_COMMIT,
+	TEST_STORE_COMMIT,
+	testCatalog,
+	testCatalogEntry,
+	testStoreSource,
+} from "./store-catalog-fixtures.ts";
 
 interface InspectCall {
 	source: string;
@@ -46,20 +53,8 @@ vi.mock("../src/store/inspector.ts", () => ({
 
 const npmCommand = ["custom-npm", "--registry", "https://registry.example.test"];
 
-function createCatalog(source: string): Response {
-	return Response.json({
-		schemaVersion: 1,
-		packages: [
-			{
-				id: "theme",
-				name: "Theme",
-				description: "Theme package",
-				source,
-				verified: true,
-				resources: ["themes"],
-			},
-		],
-	});
+function createCatalog(commit: string): Response {
+	return Response.json(testCatalog(testCatalogEntry("theme", { name: "Theme" }, commit)));
 }
 
 describe("store CLI npm command inspection", () => {
@@ -87,7 +82,7 @@ describe("store CLI npm command inspection", () => {
 		inspectorMock.inspectStorePackage.mockClear();
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => createCatalog("npm:@scope/theme@1.0.0")),
+			vi.fn(async () => createCatalog(TEST_STORE_COMMIT)),
 		);
 	});
 
@@ -182,10 +177,10 @@ describe("store CLI npm command inspection", () => {
 	});
 
 	it("uses npmCommand for store update inspection", async () => {
-		writeSettings({ npmCommand, packages: ["npm:@scope/theme@1.0.0"] });
+		writeSettings({ npmCommand, packages: [testStoreSource()] });
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => createCatalog("npm:@scope/theme@2.0.0")),
+			vi.fn(async () => createCatalog(NEXT_TEST_STORE_COMMIT)),
 		);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
@@ -203,10 +198,10 @@ describe("store CLI npm command inspection", () => {
 	});
 
 	it("refuses non-interactive catalog updates without --yes before package inspection", async () => {
-		writeSettings({ npmCommand, packages: ["npm:@scope/theme@1.0.0"] });
+		writeSettings({ npmCommand, packages: [testStoreSource()] });
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () => createCatalog("npm:@scope/theme@2.0.0")),
+			vi.fn(async () => createCatalog(NEXT_TEST_STORE_COMMIT)),
 		);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

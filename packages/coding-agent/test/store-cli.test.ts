@@ -5,12 +5,39 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CONFIG_DIR_NAME, ENV_AGENT_DIR } from "../src/config.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
+import type { StorePackageInspection } from "../src/store/inspector.ts";
+import { NEXT_TEST_STORE_COMMIT, testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
+
+// Catalog packages are git pins on github.com; inspection would clone them, so it reads no files here.
+const inspectorMock = vi.hoisted(() => ({
+	inspectStorePackage: vi.fn(
+		async (options: { source: string }): Promise<StorePackageInspection> => ({
+			source: options.source,
+			packageName: "volt-rtk-extension",
+			packageVersion: "0.2.0",
+			volt: { manifest: { id: "rtk", displayName: "RTK Output Compression", entry: "extensions/rtk.ts" } },
+			discoveredResources: { extensions: ["."], skills: [], prompts: [], themes: [] },
+			dependencies: {},
+			peerDependencies: {},
+			optionalDependencies: {},
+			scripts: {},
+			warnings: [],
+		}),
+	),
+}));
+
+vi.mock("../src/store/inspector.ts", () => ({
+	inspectStorePackage: inspectorMock.inspectStorePackage,
+}));
+
+function catalogResponse(commit?: string): Response {
+	return Response.json(testCatalog(testCatalogEntry("rtk", {}, commit)));
+}
 
 describe("store CLI", () => {
 	let tempDir: string;
 	let agentDir: string;
 	let projectDir: string;
-	let packageDir: string;
 	let originalCwd: string;
 	let originalAgentDir: string | undefined;
 	let originalExitCode: typeof process.exitCode;
@@ -19,52 +46,24 @@ describe("store CLI", () => {
 		tempDir = join(tmpdir(), `volt-store-cli-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		agentDir = join(tempDir, "agent");
 		projectDir = join(tempDir, "project");
-		packageDir = join(tempDir, "package");
-		mkdirSync(join(packageDir, "extensions"), { recursive: true });
 		mkdirSync(projectDir, { recursive: true });
 		mkdirSync(agentDir, { recursive: true });
-		writeFileSync(
-			join(packageDir, "package.json"),
-			JSON.stringify(
-				{
-					name: "volt-rtk",
-					version: "0.1.0",
-					description: "RTK extension",
-					volt: { id: "rtk", displayName: "RTK", entry: "extensions/rtk.ts" },
-				},
-				null,
-				2,
-			),
-		);
-		writeFileSync(join(packageDir, "extensions", "rtk.ts"), "export default function rtk() {}\n");
 		originalCwd = process.cwd();
 		originalAgentDir = process.env[ENV_AGENT_DIR];
 		originalExitCode = process.exitCode;
 		process.exitCode = undefined;
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.chdir(projectDir);
+		inspectorMock.inspectStorePackage.mockClear();
 		vi.stubGlobal(
 			"fetch",
-			vi.fn(async () =>
-				Response.json({
-					schemaVersion: 1,
-					packages: [
-						{
-							id: "rtk",
-							name: "RTK Output Compression",
-							description: "Token optimized shell output",
-							source: packageDir,
-							verified: true,
-							resources: ["extensions"],
-						},
-					],
-				}),
-			),
+			vi.fn(async () => catalogResponse()),
 		);
 	});
 
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
 		process.chdir(originalCwd);
 		process.exitCode = originalExitCode;
 		if (originalAgentDir === undefined) {
@@ -93,113 +92,59 @@ describe("store CLI", () => {
 		}
 	});
 
-	it("installs a catalog package with --yes and records it in user settings", async () => {
+	it("installs a catalog package at its reviewed pin with --yes", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
 
-		try {
-			await expect(main(["store", "install", "rtk", "--yes"])).resolves.toBeUndefined();
+		await expect(main(["store", "install", "rtk", "--yes"])).resolves.toBeUndefined();
 
-			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as {
-				packages?: Array<string | { source: string; scripts?: string }>;
-			};
-			expect(settings.packages).toHaveLength(1);
-			expect(settings.packages?.[0]).toEqual({ source: expect.stringContaining("package"), scripts: "never" });
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).toContain("Store install plan");
-			expect(stdout).toContain("Script policy: never");
-			expect(stdout).toContain("Installed");
-			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
+		expect(inspectorMock.inspectStorePackage).toHaveBeenCalledWith(
+			expect.objectContaining({ source: testStoreSource() }),
+		);
+		expect(installSpy).toHaveBeenCalledWith(testStoreSource(), { local: false, scripts: "never" });
+		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(stdout).toContain("Store install plan");
+		expect(stdout).toContain("Permissions: exec");
+		expect(stdout).toContain("Reviewed: 0123456789ab by hansjm10 on 2026-10-05");
+		expect(stdout).toContain("Script policy: never");
+		expect(stdout).toContain("Installed rtk - RTK Output Compression");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it.each([
+		["--ref", "main"],
+		["--track", undefined],
+	])("refuses %s for a catalog package", async (option, value) => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+
+		await main(["store", "install", "rtk", option, ...(value ? [value] : []), "--yes"]);
+
+		expect(installSpy).not.toHaveBeenCalled();
+		expect(inspectorMock.inspectStorePackage).not.toHaveBeenCalled();
+		expect(errorSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain(
+			`${option} does not apply to catalog package rtk: it installs at its reviewed commit`,
+		);
+		expect(process.exitCode).toBe(1);
+		expect(logSpy).not.toHaveBeenCalled();
 	});
 
 	it("removes an installed catalog package by catalog ID", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
-		try {
-			await main(["store", "install", "rtk", "--yes"]);
-			await expect(main(["store", "remove", "rtk", "--yes"])).resolves.toBeUndefined();
+		await expect(main(["store", "remove", "rtk", "--yes"])).resolves.toBeUndefined();
 
-			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
-			expect(settings.packages ?? []).toHaveLength(0);
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).toContain("Removed");
-			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
-	});
-
-	it("removes a project-local catalog package stored relative to the project settings directory", async () => {
-		const projectPackageDir = join(projectDir, "pkg");
-		mkdirSync(join(projectPackageDir, "extensions"), { recursive: true });
-		writeFileSync(
-			join(projectPackageDir, "package.json"),
-			JSON.stringify(
-				{
-					name: "project-local-rtk",
-					version: "0.1.0",
-					description: "Project-local RTK extension",
-					volt: { id: "rtk", displayName: "RTK", entry: "extensions/rtk.ts" },
-				},
-				null,
-				2,
-			),
-		);
-		writeFileSync(join(projectPackageDir, "extensions", "rtk.ts"), "export default function rtk() {}\n");
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () =>
-				Response.json({
-					schemaVersion: 1,
-					packages: [
-						{
-							id: "project-local-rtk",
-							name: "Project Local RTK",
-							description: "Project-local token optimized shell output",
-							source: projectPackageDir,
-							verified: true,
-							resources: ["extensions"],
-						},
-					],
-				}),
-			),
-		);
-		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-		try {
-			await main(["store", "install", "project-local-rtk", "--local", "--approve", "--yes"]);
-
-			const settingsPath = join(projectDir, CONFIG_DIR_NAME, "settings.json");
-			const installedSettings = JSON.parse(readFileSync(settingsPath, "utf-8")) as {
-				packages?: Array<string | { source: string; scripts?: string }>;
-			};
-			expect(installedSettings.packages).toEqual([
-				{ source: relative(join(projectDir, CONFIG_DIR_NAME), projectPackageDir), scripts: "never" },
-			]);
-
-			await expect(
-				main(["store", "remove", "project-local-rtk", "--local", "--approve", "--yes"]),
-			).resolves.toBeUndefined();
-
-			const settings = JSON.parse(readFileSync(settingsPath, "utf-8")) as { packages?: string[] };
-			expect(settings.packages ?? []).toHaveLength(0);
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).toContain("Removed");
-			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages ?? []).toHaveLength(0);
+		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(stdout).toContain("Removed");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
 	});
 
 	it("removes a project-local package by its settings-relative source", async () => {
@@ -267,67 +212,67 @@ describe("store CLI", () => {
 		}
 	});
 
-	it("updates an installed catalog package without duplicating the settings entry", async () => {
+	it("reconciles a catalog package already at its reviewed pin without duplicating the settings entry", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
 
-		try {
-			await main(["store", "install", "rtk", "--yes"]);
-			await expect(main(["store", "update", "rtk", "--yes"])).resolves.toBeUndefined();
+		await expect(main(["store", "update", "rtk", "--yes"])).resolves.toBeUndefined();
 
-			const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
-			expect(settings.packages).toHaveLength(1);
-			const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
-			expect(stdout).toContain("Updated");
-			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
-		} finally {
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
+		expect(updateSpy).toHaveBeenCalledWith(testStoreSource(), { local: false, scripts: "never" });
+		expect(installSpy).not.toHaveBeenCalled();
+		const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")) as { packages?: string[] };
+		expect(settings.packages).toEqual([testStoreSource()]);
+		expect(logSpy.mock.calls.map(([message]) => String(message)).join("\n")).toContain("Updated");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
+	});
+
+	it("moves an installed catalog package to the catalog's new reviewed pin", async () => {
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => catalogResponse(NEXT_TEST_STORE_COMMIT)),
+		);
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
+		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+
+		await expect(main(["store", "update", "rtk", "--yes"])).resolves.toBeUndefined();
+
+		expect(updateSpy).not.toHaveBeenCalled();
+		expect(installSpy).toHaveBeenCalledWith(testStoreSource(NEXT_TEST_STORE_COMMIT), {
+			local: false,
+			scripts: "never",
+		});
+		const stdout = logSpy.mock.calls.map(([message]) => String(message)).join("\n");
+		expect(stdout).toContain("Reviewed: 89abcdef0123 by hansjm10 on 2026-10-05");
+		expect(stdout).toContain("to rtk - RTK Output Compression");
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
 	});
 
 	it("updates the project catalog package with --local when the package is installed in both scopes", async () => {
-		vi.stubGlobal(
-			"fetch",
-			vi.fn(async () =>
-				Response.json({
-					schemaVersion: 1,
-					packages: [
-						{
-							id: "rtk",
-							name: "RTK Output Compression",
-							description: "Token optimized shell output",
-							source: "npm:@scope/rtk",
-							verified: true,
-							resources: ["extensions"],
-						},
-					],
-				}),
-			),
-		);
-		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: ["npm:@scope/rtk"] }, null, 2));
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [testStoreSource()] }, null, 2));
 		mkdirSync(join(projectDir, CONFIG_DIR_NAME), { recursive: true });
 		writeFileSync(
 			join(projectDir, CONFIG_DIR_NAME, "settings.json"),
-			JSON.stringify({ packages: ["npm:@scope/rtk"] }, null, 2),
+			JSON.stringify({ packages: [testStoreSource()] }, null, 2),
 		);
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
 
-		try {
-			await expect(main(["store", "update", "rtk", "--local", "--approve", "--yes"])).resolves.toBeUndefined();
+		await expect(main(["store", "update", "rtk", "--local", "--approve", "--yes"])).resolves.toBeUndefined();
 
-			expect(updateSpy).toHaveBeenCalledOnce();
-			expect(updateSpy).toHaveBeenCalledWith("npm:@scope/rtk", { local: true, scripts: "never" });
-			expect(errorSpy).not.toHaveBeenCalled();
-			expect(process.exitCode).toBeUndefined();
-		} finally {
-			updateSpy.mockRestore();
-			logSpy.mockRestore();
-			errorSpy.mockRestore();
-		}
+		expect(updateSpy).toHaveBeenCalledOnce();
+		expect(updateSpy).toHaveBeenCalledWith(testStoreSource(), { local: true, scripts: "never" });
+		expect(logSpy).toHaveBeenCalled();
+		expect(errorSpy).not.toHaveBeenCalled();
+		expect(process.exitCode).toBeUndefined();
 	});
 
 	it("searches without resolving configured packages during project trust bootstrap", async () => {

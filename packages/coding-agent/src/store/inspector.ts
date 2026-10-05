@@ -5,7 +5,12 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import { globSync } from "glob";
 import { minimatch } from "minimatch";
-import { declaresPackageExtension } from "../core/extensions/manifest.ts";
+import {
+	declaresPackageExtension,
+	type ExtensionManifest,
+	readPackageManifest,
+	readVoltFieldManifest,
+} from "../core/extensions/manifest.ts";
 import { spawnProcess } from "../utils/child-process.ts";
 import { parseGitUrl } from "../utils/git.ts";
 import { addIgnoreRules, createIgnoreMatcher, type IgnoreMatcher } from "../utils/ignore-files.ts";
@@ -13,13 +18,13 @@ import { resolvePath } from "../utils/paths.ts";
 import { getSubprocessEnv } from "../utils/process-env.ts";
 import type { StoreResourceType } from "./catalog.ts";
 
-export interface StoreVoltManifest {
-	extensions?: string[];
+/** A package's `volt` field: the extension manifest it declares and the resources it lists. */
+export interface StoreVoltField {
+	/** The extension the package declares, when its manifest is valid; an invalid one is a warning. */
+	manifest?: ExtensionManifest;
 	skills?: string[];
 	prompts?: string[];
 	themes?: string[];
-	image?: string;
-	video?: string;
 }
 
 export interface StorePackageInspection {
@@ -29,7 +34,7 @@ export interface StorePackageInspection {
 	packageDescription?: string;
 	packageLicense?: string;
 	packageRepository?: string;
-	voltManifest?: StoreVoltManifest;
+	volt?: StoreVoltField;
 	discoveredResources: Record<StoreResourceType, string[]>;
 	dependencies: Record<string, string>;
 	peerDependencies: Record<string, string>;
@@ -56,7 +61,8 @@ interface PackageJsonData {
 	description?: string;
 	license?: string;
 	repository?: string;
-	voltManifest?: StoreVoltManifest;
+	/** The raw `volt` field, when package.json has one. */
+	volt?: unknown;
 	dependencies: Record<string, string>;
 	peerDependencies: Record<string, string>;
 	optionalDependencies: Record<string, string>;
@@ -134,27 +140,29 @@ function readLicense(value: unknown): string | undefined {
 	return undefined;
 }
 
-function readVoltManifest(value: unknown): StoreVoltManifest | undefined {
-	if (!value) {
+/**
+ * Read a package's `volt` field as runtime loading does: with the package
+ * root, the manifest must also name an entry module inside the package;
+ * registry metadata has no files, so only the declaration is checked.
+ */
+function readStoreVoltField(volt: unknown, root: string | undefined, warnings: string[]): StoreVoltField | undefined {
+	if (volt === undefined) {
 		return undefined;
 	}
-	if (!isRecord(value)) {
-		return {};
+	const field: StoreVoltField = {};
+	try {
+		const manifest = root === undefined ? readVoltFieldManifest(volt) : readPackageManifest(root)?.manifest;
+		if (manifest !== undefined) field.manifest = manifest;
+	} catch (error: unknown) {
+		warnings.push(`Invalid extension manifest: ${error instanceof Error ? error.message : String(error)}`);
 	}
-	const manifest: StoreVoltManifest = {};
-	const extensions = readStringArray(value.extensions);
-	const skills = readStringArray(value.skills);
-	const prompts = readStringArray(value.prompts);
-	const themes = readStringArray(value.themes);
-	const image = readString(value.image);
-	const video = readString(value.video);
-	if (extensions !== undefined) manifest.extensions = extensions;
-	if (skills !== undefined) manifest.skills = skills;
-	if (prompts !== undefined) manifest.prompts = prompts;
-	if (themes !== undefined) manifest.themes = themes;
-	if (image !== undefined) manifest.image = image;
-	if (video !== undefined) manifest.video = video;
-	return manifest;
+	if (isRecord(volt)) {
+		for (const resourceType of ["skills", "prompts", "themes"] as const) {
+			const entries = readStringArray(volt[resourceType]);
+			if (entries !== undefined) field[resourceType] = entries;
+		}
+	}
+	return field;
 }
 
 function readPackageJsonData(value: unknown): PackageJsonData {
@@ -172,7 +180,7 @@ function readPackageJsonData(value: unknown): PackageJsonData {
 		description: readString(value.description),
 		license: readLicense(value.license),
 		repository: readRepository(value.repository),
-		voltManifest: readVoltManifest(value.volt),
+		volt: value.volt,
 		dependencies: readStringRecord(value.dependencies),
 		peerDependencies: readStringRecord(value.peerDependencies),
 		optionalDependencies: readStringRecord(value.optionalDependencies),
@@ -491,19 +499,15 @@ function toRelativeResourcePath(root: string, path: string): string {
 
 function discoverResources(
 	root: string,
-	voltManifest?: StoreVoltManifest,
+	volt?: StoreVoltField,
 	options: InspectionDiscoveryOptions = {},
 ): Record<StoreResourceType, string[]> {
 	const discovered = structuredClone(EMPTY_RESOURCES);
-	if (voltManifest) {
+	if (volt) {
 		for (const resourceType of RESOURCE_TYPES) {
 			// A package's extension is the package itself, when its manifest declares one.
 			const entries =
-				resourceType === "extensions"
-					? declaresPackageExtension(root)
-						? ["."]
-						: undefined
-					: voltManifest[resourceType];
+				resourceType === "extensions" ? (declaresPackageExtension(root) ? ["."] : undefined) : volt[resourceType];
 			discovered[resourceType] = entries
 				? collectManifestFiles(root, entries, resourceType).map((path) => toRelativeResourcePath(root, path))
 				: [];
@@ -537,6 +541,7 @@ function buildInspection(
 	warnings: string[],
 	discoveryOptions?: InspectionDiscoveryOptions,
 ) {
+	const volt = readStoreVoltField(pkg.volt, root, warnings);
 	const inspection: StorePackageInspection = {
 		source,
 		...(pkg.name !== undefined ? { packageName: pkg.name } : {}),
@@ -544,10 +549,8 @@ function buildInspection(
 		...(pkg.description !== undefined ? { packageDescription: pkg.description } : {}),
 		...(pkg.license !== undefined ? { packageLicense: pkg.license } : {}),
 		...(pkg.repository !== undefined ? { packageRepository: pkg.repository } : {}),
-		...(pkg.voltManifest !== undefined ? { voltManifest: pkg.voltManifest } : {}),
-		discoveredResources: root
-			? discoverResources(root, pkg.voltManifest, discoveryOptions)
-			: structuredClone(EMPTY_RESOURCES),
+		...(volt !== undefined ? { volt } : {}),
+		discoveredResources: root ? discoverResources(root, volt, discoveryOptions) : structuredClone(EMPTY_RESOURCES),
 		dependencies: pkg.dependencies,
 		peerDependencies: pkg.peerDependencies,
 		optionalDependencies: pkg.optionalDependencies,

@@ -19,3 +19,10 @@
 /packages/coding-agent/npm-shrinkwrap.json @hansjm10
 /packages/*/package.json @hansjm10
 /.changeset/config.json @hansjm10
+
+# Store catalog: what Volt offers to install, and the check that guards it
+/site/public/store/ @hansjm10
+/scripts/validate-store-catalog.mjs @hansjm10
+/scripts/validate-store-catalog.test.mjs @hansjm10
+/.github/workflows/store-catalog.yml @hansjm10
+/packages/coding-agent/src/store/ @hansjm10
