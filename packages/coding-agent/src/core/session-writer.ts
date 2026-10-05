@@ -29,6 +29,7 @@ import {
 } from "./messages.ts";
 import { type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
+import type { ReviewLogState } from "./review-log-state.ts";
 import { digestClientInputPayload, parseSessionEntryForAdmission } from "./session-entry-codec.ts";
 import type {
 	BranchSummaryEntry,
@@ -42,6 +43,11 @@ import type {
 	ModelChangeEntry,
 	PlanningStateChangeEntry,
 	PrReviewBindingEntry,
+	ReviewAliasEntry,
+	ReviewDiscussionEntry,
+	ReviewDiscussionLinkEntry,
+	ReviewDiscussionResetEntry,
+	ReviewGeneralEntry,
 	SessionEntry,
 	SessionInfoEntry,
 	SessionManager,
@@ -61,6 +67,22 @@ export interface SubagentSpawnInput {
 	childSessionId: string;
 	childSessionRef?: SessionReference;
 	requestKey: string;
+}
+
+type RecordOf<E extends SessionEntry> = Omit<E, "id" | "parentId" | "timestamp">;
+
+/** A review record (session-entry-types.ts), without its envelope. */
+export type ReviewRecord =
+	| RecordOf<ReviewGeneralEntry>
+	| RecordOf<ReviewAliasEntry>
+	| RecordOf<ReviewDiscussionEntry>
+	| RecordOf<ReviewDiscussionResetEntry>
+	| RecordOf<ReviewDiscussionLinkEntry>;
+
+/** What a review write appends, built from the committed review state, and what it resolves with. */
+export interface ReviewRecords<T> {
+	readonly records: readonly ReviewRecord[];
+	readonly result: T;
 }
 
 /**
@@ -111,6 +133,14 @@ export interface SessionWriter {
 	 * again is a no-op, and a different one is refused.
 	 */
 	recordPrReviewBinding(placement: PrReviewPlacement): Promise<void>;
+	/**
+	 * Append review records, host records that never move the leaf, which
+	 * `build` makes from this session's committed review state; no other
+	 * review record of the session commits between that read and the append,
+	 * so a check `build` makes holds when its records commit. Resolves with
+	 * `build`'s result.
+	 */
+	recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T>;
 }
 
 /** Placeholder envelope of an entry admitted before its writer assigns its id and parent. */
@@ -233,6 +263,10 @@ function prReviewBindingEntry(placement: PrReviewPlacement, sessionManager: Sess
 		throw new Error("PR review binding cwd does not match the session");
 	}
 	return entry;
+}
+
+function reviewEntry(record: ReviewRecord): SessionEntry {
+	return admitEntry({ ...record, ...pendingEnvelope() } as SessionEntry);
 }
 
 /** Whether `existing` already records `entry`'s placement; throws when it records another one. */
@@ -382,6 +416,15 @@ export class LogWriter implements SessionWriter {
 		});
 	}
 
+	async recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T> {
+		// Built on the lane, against the committed view, so earlier writes are in the state it reads.
+		return this.lane.commit((write) => {
+			const { records, result } = build(this.sessionManager.getReviewState());
+			for (const record of records) write.place(reviewEntry(record));
+			return result;
+		}, true);
+	}
+
 	/** Append a compaction summary as a child of the leaf; resolves with its entry id. */
 	async appendCompaction<T = JsonValue>(
 		summary: string,
@@ -488,6 +531,8 @@ export class ConversationSessionWriter implements SessionWriter {
 	private capturesStartingGitContext: boolean;
 	/** PR review bindings record one at a time, so a repeat sees the binding before it. */
 	private bindings: Promise<unknown> = Promise.resolve();
+	/** Review records commit one write at a time, so each write reads the review state the previous one left. */
+	private reviews: Promise<unknown> = Promise.resolve();
 
 	constructor(sessionManager: SessionManager, intents: ConversationWriteIntents) {
 		this.sessionManager = sessionManager;
@@ -576,5 +621,18 @@ export class ConversationSessionWriter implements SessionWriter {
 		});
 		this.bindings = recording.catch(() => undefined);
 		await recording;
+	}
+
+	async recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T> {
+		const recording = this.reviews.then(async () => {
+			const { records, result } = build(this.sessionManager.getReviewState());
+			if (records.length > 0) {
+				const drafts = records.map((record) => toLogEntryDraft(reviewEntry(record)));
+				await this.intents.append(drafts.map((draft) => ({ type: draft.type, payload: draft.payload })));
+			}
+			return result;
+		});
+		this.reviews = recording.catch(() => undefined);
+		return recording;
 	}
 }

@@ -8,12 +8,108 @@
  * so it imports protocol only through its light subpaths.
  */
 
-import { CORE_LOG_ENTRY_TYPES, defineLogEntryType } from "@hansjm10/volt-protocol/entries";
+import type { JsonValue } from "@hansjm10/volt-ai";
+import {
+	CORE_LOG_ENTRY_TYPES,
+	defineLogEntryType,
+	LogEntryIdSchema,
+	LogSessionIdSchema,
+} from "@hansjm10/volt-protocol/entries";
 import { RpcGitContextSchema } from "@hansjm10/volt-protocol/git-context";
 import { Type } from "typebox";
 import { PrReviewPlacementSchema } from "./pr-review-placement.ts";
 
-/** Host-owned product records: the first Git observation and the PR checkout a review session is bound to. */
+const closed = { additionalProperties: false } as const;
+
+/** Most canonical JSON bytes a finding discussion's context snapshot holds. */
+export const REVIEW_DISCUSSION_CONTEXT_MAX_BYTES = 65_536;
+
+/** One exact session incarnation of this store: review records link sessions by id and generation. */
+const ReviewSessionIdentitySchema = Type.Object(
+	{ sessionId: LogSessionIdSchema, sessionGeneration: LogEntryIdSchema },
+	closed,
+);
+
+/** A finding discussion's immutable context: the finding, its review target, and the child's model settings. */
+const ReviewDiscussionContextSchema = Type.Unsafe<JsonValue>(
+	Type.Unknown({ "x-volt-max-serialized-bytes": REVIEW_DISCUSSION_CONTEXT_MAX_BYTES }),
+);
+
+/**
+ * Review state as host records (RFC §14 Q7). A review run is anchored by the
+ * `work_started` of its review work in the conversation that ran it, its
+ * source; each record below names runs, discussions, and sessions by their
+ * exact identities, and only the host writes them. The store keeps derived
+ * indexes of them for cross-session lookups.
+ */
+const REVIEW_SESSION_ENTRY_TYPES = {
+	/** In the source: the run's General discussion moved to `general`. The latest one is current. */
+	review_general: defineLogEntryType(
+		"review_general",
+		"host",
+		Type.Object({ runId: LogEntryIdSchema, general: ReviewSessionIdentitySchema }, closed),
+	),
+	/** In a handoff target: this conversation carries run `runId` of `source`, the run's source. */
+	review_alias: defineLogEntryType(
+		"review_alias",
+		"host",
+		Type.Object({ runId: LogEntryIdSchema, source: ReviewSessionIdentitySchema }, closed),
+	),
+	/** In the source: a finding's discussion and its first child conversation. */
+	review_discussion: defineLogEntryType(
+		"review_discussion",
+		"host",
+		Type.Object(
+			{
+				discussionId: LogEntryIdSchema,
+				runId: LogEntryIdSchema,
+				findingId: LogEntryIdSchema,
+				contextSnapshot: ReviewDiscussionContextSchema,
+				child: ReviewSessionIdentitySchema,
+				requestId: LogEntryIdSchema,
+				kickoffClientMessageId: LogEntryIdSchema,
+			},
+			closed,
+		),
+	),
+	/** In the source: a discussion reset to a new child conversation, which becomes its current child. */
+	review_discussion_reset: defineLogEntryType(
+		"review_discussion_reset",
+		"host",
+		Type.Object(
+			{
+				discussionId: LogEntryIdSchema,
+				child: ReviewSessionIdentitySchema,
+				requestId: LogEntryIdSchema,
+				kickoffClientMessageId: LogEntryIdSchema,
+			},
+			closed,
+		),
+	),
+	/** A discussion child's first entry: the discussion, finding, and source it belongs to, and its context. */
+	review_discussion_link: defineLogEntryType(
+		"review_discussion_link",
+		"host",
+		Type.Object(
+			{
+				discussionId: LogEntryIdSchema,
+				runId: LogEntryIdSchema,
+				findingId: LogEntryIdSchema,
+				source: ReviewSessionIdentitySchema,
+				contextSnapshot: ReviewDiscussionContextSchema,
+			},
+			closed,
+		),
+	),
+} as const;
+
+/** The review record types, for code that handles them together. */
+export const REVIEW_SESSION_ENTRY_TYPE_NAMES: ReadonlySet<string> = new Set(Object.keys(REVIEW_SESSION_ENTRY_TYPES));
+
+/**
+ * Host-owned product records: the first Git observation, the PR checkout a
+ * review session is bound to, and review state.
+ */
 export const PRODUCT_SESSION_ENTRY_TYPES = {
 	session_start_git_context: defineLogEntryType(
 		"session_start_git_context",
@@ -25,6 +121,7 @@ export const PRODUCT_SESSION_ENTRY_TYPES = {
 		"host",
 		Type.Object({ placement: PrReviewPlacementSchema }, { additionalProperties: false }),
 	),
+	...REVIEW_SESSION_ENTRY_TYPES,
 } as const;
 
 /** Every entry type a session log stores, keyed by `type`. */

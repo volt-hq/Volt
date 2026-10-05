@@ -17,7 +17,7 @@ import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../../..
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { prepareReviewWorkflow } from "../../../src/core/review.ts";
-import { getReviewGeneral } from "../../../src/core/review-general.ts";
+import { getReviewGeneral } from "../../../src/core/review-links.ts";
 import { createReviewSeedMessage } from "../../../src/core/review-presentation.ts";
 import {
 	appendReviewRun,
@@ -35,6 +35,7 @@ import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from 
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
+import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -692,6 +693,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		const placement = source.session.sessionManager.getPrReviewBinding()!;
 		const sourceId = source.session.sessionId;
 		const record = reviewRecord(f.source, f.base, f.target);
+		await anchorLiveReviewRun(source.session, record.runId);
 		await appendReviewRunDurably(source.session.sessionWriter, record);
 		// A phone's structural intents redirect it; the daemon hosts each conversation they open.
 		const phoneOn = async (from: IntegratedRuntimeEntry): Promise<HostClient> => {
@@ -719,7 +721,6 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		expect(await getReviewGeneral(general.session.sessionManager, record.runId)).toMatchObject({
 			sourceSessionId: sourceId,
 			generalSessionId: general.session.sessionId,
-			generalRevision: 1,
 		});
 		expect(await readPrReviewBinding(general.session.sessionManager)).toEqual(placement);
 		const generalId = general.session.sessionId;

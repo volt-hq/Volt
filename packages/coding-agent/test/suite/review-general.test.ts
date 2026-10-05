@@ -11,19 +11,23 @@ import { localProfile } from "../../src/core/protocol/profiles.ts";
 import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
 import {
-	registerDurableReviewAnchor,
+	getReviewGeneral,
 	registerReviewHandoffAliases,
 	resolveCanonicalReviewSource,
-} from "../../src/core/review-anchors.ts";
-import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
-import { getReviewGeneral } from "../../src/core/review-general.ts";
+} from "../../src/core/review-links.ts";
 import { appendReviewRunDurably } from "../../src/core/review-state.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
-import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
+import { LogWriter } from "../../src/core/session-writer.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestClientOptions } from "../utilities/host-client.ts";
 import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type QueryOutcome } from "../utilities/remote-phone.ts";
+import {
+	anchorLiveReviewRun,
+	recordReviewDiscussion,
+	resetRecordedReviewDiscussion,
+} from "../utilities/review-runs.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 /** Failures a test injects into how the main client follows a move. */
@@ -98,7 +102,7 @@ async function fixture() {
 	});
 	const source = client.session.sessionManager;
 	await client.session.sessionWriter.appendSessionInfo("Review source");
-	await registerDurableReviewAnchor(source, "run");
+	await anchorLiveReviewRun(client.session, "run");
 	const original = source.getSessionRef()!;
 	const options = { preserveReviewRunId: "run", replaceReviewGeneral: true };
 	return { client, hooks, root, directory, source, original, options, own, managers };
@@ -154,7 +158,7 @@ async function remoteQuery(
 describe("durable review General publication", () => {
 	it("replaces repeatedly, preserves canonical source and does not promote ordinary aliases or reopened history", async () => {
 		const { client, root, directory, source, original, options, managers } = await fixture();
-		for (const revision of [1, 2]) {
+		for (const _ of [1, 2]) {
 			const opened = await client.newSession(options);
 			expect(opened).toEqual({ cancelled: false, sessionId: client.session.sessionId, seeded: false });
 			expect(await getReviewGeneral(client.session.sessionManager, "run")).toEqual({
@@ -162,7 +166,6 @@ describe("durable review General publication", () => {
 				sourceSessionId: original.sessionId,
 				generalSessionId: client.session.sessionId,
 				generalSessionGeneration: client.session.sessionRef!.sessionGeneration,
-				generalRevision: revision,
 				generalAvailable: true,
 			});
 			expect(await resolveCanonicalReviewSource(client.session.sessionManager, "run")).toEqual(original);
@@ -170,7 +173,7 @@ describe("durable review General publication", () => {
 		const final = await getReviewGeneral(client.session.sessionManager, "run");
 		const alias = await SessionManager.create(root, directory);
 		managers.push(alias);
-		await registerReviewHandoffAliases(client.session.sessionManager, alias, ["run"]);
+		await registerReviewHandoffAliases(client.session.sessionManager, alias.logWriter, ["run"]);
 		expect(await getReviewGeneral(alias, "run")).toEqual(final);
 		await client.switchSession(original);
 		expect(await getReviewGeneral(client.session.sessionManager, "run")).toEqual(final);
@@ -208,7 +211,9 @@ describe("durable review General publication", () => {
 			}),
 		).rejects.toThrow("injected failure");
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
-		await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
+		// The General never moved. A candidate whose seed completed carries the run, as any handoff does.
+		if (phase === "setup") await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
+		else expect(await getReviewGeneral(candidate!, "run")).toEqual(initial);
 		expect(frames.filter((frame) => frame.type === "snapshot")).toHaveLength(1);
 		if (phase === "setup" || phase === "prepare") {
 			// The client stays on the source, which stays open and keeps serving its subscribers.
@@ -252,10 +257,7 @@ describe("durable review General publication", () => {
 		// The source's stream never follows the move: it hears nothing of the new conversation.
 		expect(JSON.stringify(frames)).not.toContain(client.session.sessionId);
 		expect(frames.filter((frame) => frame.type === "snapshot")).toHaveLength(1);
-		expect(await getReviewGeneral(source, "run")).toMatchObject({
-			generalSessionId: client.session.sessionId,
-			generalRevision: 1,
-		});
+		expect(await getReviewGeneral(source, "run")).toMatchObject({ generalSessionId: client.session.sessionId });
 		const reattached = observe(client);
 		const snapshot = reattached.frames[0];
 		expect(snapshot).toMatchObject({ type: "snapshot", conversation: client.session.sessionId });
@@ -269,7 +271,6 @@ describe("durable review General publication", () => {
 	it.each([false, true])("keeps General unpublished through the durable commit (reject: %s)", async (rejectCommit) => {
 		const { client, source, original, options, own } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
 		let releaseCommit!: () => void;
 		let markCommitStarted!: () => void;
 		const commitStarted = new Promise<void>((resolve) => {
@@ -278,12 +279,19 @@ describe("durable review General publication", () => {
 		const commitGate = new Promise<void>((resolve) => {
 			releaseCommit = resolve;
 		});
-		const replaceReviewGeneral = lease.client.replaceReviewGeneral.bind(lease.client);
-		const commit = vi.spyOn(lease.client, "replaceReviewGeneral").mockImplementation(async (request) => {
-			markCommitStarted();
-			await commitGate;
-			if (rejectCommit) throw new Error("General commit rejected");
-			return replaceReviewGeneral(request);
+		// The General moves when the source's log records it: the source closed when the client left it,
+		// so the host writes its log by opening it.
+		const recordReviewState = LogWriter.prototype.recordReviewState;
+		const commit = vi.spyOn(LogWriter.prototype, "recordReviewState").mockImplementation(async function (
+			this: LogWriter,
+			build,
+		) {
+			if (this.sessionManager.getSessionId() === original.sessionId) {
+				markCommitStarted();
+				await commitGate;
+				if (rejectCommit) throw new Error("General commit rejected");
+			}
+			return recordReviewState.call(this, build);
 		});
 		try {
 			const replacement = client.newSession(options);
@@ -301,15 +309,11 @@ describe("durable review General publication", () => {
 				await expect(reopened.session.prompt("Resume after rejected General commit")).resolves.toBeUndefined();
 			} else {
 				expect(await result).toBeUndefined();
-				expect(await getReviewGeneral(source, "run")).toMatchObject({
-					generalSessionId: client.session.sessionId,
-					generalRevision: 1,
-				});
+				expect(await getReviewGeneral(source, "run")).toMatchObject({ generalSessionId: client.session.sessionId });
 			}
 		} finally {
 			releaseCommit();
 			commit.mockRestore();
-			await lease.release();
 		}
 	});
 
@@ -335,67 +339,40 @@ describe("durable review General publication", () => {
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 		const results = await Promise.allSettled([client.newSession(options), client.newSession(options)]);
 		expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
-		expect(await getReviewGeneral(client.session.sessionManager, "run")).toMatchObject({ generalRevision: 1 });
+		expect(await getReviewGeneral(client.session.sessionManager, "run")).toMatchObject({
+			generalSessionId: client.session.sessionId,
+		});
 	});
 
 	it("authorizes General lookup from current and historical same-run children without canonical mutation authority", async () => {
-		const { source, root, original, own } = await fixture();
-		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
-		try {
-			const member = { sessionId: original.sessionId, sessionGeneration: original.sessionGeneration, cwd: root };
-			const createdAt = new Date().toISOString();
-			const child = (id: string) => ({
-				id,
-				sessionGeneration: `generation:${id}`,
-				formatVersion: 5,
-				cwd: root,
-				createdAt,
-				parentSessionDirectory: null,
-				parentStoreId: null,
-				parentSessionId: null,
-				parentSessionGeneration: null,
-				origin: null,
-			});
-			const discussion = await lease.client.createOrGetReviewDiscussion({
-				source: member,
-				runId: "run",
-				findingId: "finding",
-				discussionId: "discussion",
-				child: child("child"),
-				contextSnapshot: {},
-				createdAt,
-				requestId: "start",
-				kickoffClientMessageId: "kickoff",
-			});
-			const reset = await lease.client.resetReviewDiscussion({
-				source: member,
-				discussionId: "discussion",
-				expectedChild: discussion.current.child,
-				child: child("next"),
-				createdAt,
-				requestId: "reset",
-				kickoffClientMessageId: "next-kickoff",
-			});
-			await lease.client.registerReviewAnchor({ runId: "foreign", source: member, createdAt });
-			for (const identity of [discussion.current.child, reset.child.child]) {
-				const client = await own(await SessionManager.open({ ...original, ...identity }));
-				const context = contextOf(client);
-				expect(await queryRegistry.run(context, "review.general", { runId: "run" })).toEqual(
-					await getReviewGeneral(source, "run"),
-				);
-				await expect(queryRegistry.run(context, "review.general", { runId: "foreign" })).rejects.toThrow(
-					"exact member",
-				);
-				await expect(
-					intentRegistry.invoke(context, "new_session", {
-						preserveReviewRunId: "run",
-						replaceReviewGeneral: true,
-					}),
-				).rejects.toMatchObject({ code: "unavailable", message: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE });
-				expect(await resolveCanonicalReviewSource(client.session.sessionManager, "run")).toBeUndefined();
-			}
-		} finally {
-			await lease.release();
+		const { client, source, root, directory, original, own, managers } = await fixture();
+		// The discussion is recorded through the source's own log, which the client's live session holds.
+		await client.dispose();
+		const writable = await SessionManager.open(original);
+		const discussion = { discussionId: "discussion", runId: "run", findingId: "finding", contextSnapshot: {} };
+		const first = await recordReviewDiscussion(writable, discussion);
+		const next = await resetRecordedReviewDiscussion(writable, discussion, "reset");
+		await writable.closePersistence();
+		const foreign = await own(await SessionManager.create(root, directory));
+		await anchorLiveReviewRun(foreign.session, "foreign");
+		const reader = await SessionManager.openReadOnly(original);
+		managers.push(reader);
+		const expected = await getReviewGeneral(reader, "run");
+		expect(expected).toMatchObject({ sourceSessionId: source.getSessionId(), generalSessionId: original.sessionId });
+		for (const ref of [first, next]) {
+			const child = await own(await SessionManager.open(ref));
+			const context = contextOf(child);
+			expect(await queryRegistry.run(context, "review.general", { runId: "run" })).toEqual(expected);
+			await expect(queryRegistry.run(context, "review.general", { runId: "foreign" })).rejects.toThrow(
+				"exact member",
+			);
+			await expect(
+				intentRegistry.invoke(context, "new_session", {
+					preserveReviewRunId: "run",
+					replaceReviewGeneral: true,
+				}),
+			).rejects.toMatchObject({ code: "unavailable", message: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE });
+			expect(await resolveCanonicalReviewSource(child.session.sessionManager, "run")).toBeUndefined();
 		}
 	});
 
@@ -438,13 +415,19 @@ describe("durable review General publication", () => {
 		const generalResult = Compile(QUERY_SCHEMAS["review.general"].result);
 		const general = await queryRegistry.run(contextOf(client), "review.general", { runId: "run" });
 		expect(generalResult.Errors(general)).toEqual([]);
-		expect(general).toMatchObject({ sourceSessionId: original.sessionId, generalRevision: 0 });
+		expect(general).toEqual({
+			runId: "run",
+			sourceSessionId: original.sessionId,
+			generalSessionId: original.sessionId,
+			generalSessionGeneration: original.sessionGeneration,
+			generalAvailable: true,
+		});
+		expect(generalResult.Check({ ...general, generalRevision: 0 })).toBe(false);
 		for (const field of [
 			"runId",
 			"sourceSessionId",
 			"generalSessionId",
 			"generalSessionGeneration",
-			"generalRevision",
 			"generalAvailable",
 		]) {
 			const data: Record<string, unknown> = { ...general };
@@ -454,7 +437,7 @@ describe("durable review General publication", () => {
 		// A paired device reads General with observe access alone.
 		expect(await remoteQuery(client, ["conversation.observe.v1"], "review.general", { runId: "run" })).toMatchObject({
 			type: "result",
-			data: { sourceSessionId: original.sessionId, generalRevision: 0 },
+			data: { sourceSessionId: original.sessionId, generalSessionId: original.sessionId },
 		});
 		expect(await remoteQuery(client, [], "review.general", { runId: "run" })).toMatchObject({
 			type: "query_error",
@@ -482,7 +465,7 @@ describe("durable review General publication", () => {
 		expect(replaced.conversation).toBe(client.session.sessionId);
 		expect(replaced.conversation).not.toBe(original.sessionId);
 		expect(await queryRegistry.run(contextOf(client), "review.general", { runId: "run" })).toMatchObject({
-			generalRevision: 1,
+			generalSessionId: client.session.sessionId,
 		});
 		await expect(queryRegistry.run(contextOf(client), "review.general", { runId: "foreign" })).rejects.toThrow(
 			"exact member",

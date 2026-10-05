@@ -57,7 +57,7 @@ export function summarizeOpenSession(session: AgentSession, cwd: string): Worksp
 	const summary = session.sessionManager.getSessionEntrySummary();
 	const discussion = session.sessionManager.getReviewDiscussion();
 	return {
-		...(discussion ? { reviewDiscussion: projectReviewDiscussionLink(discussion) } : {}),
+		...(discussion ? { reviewDiscussion: projectReviewDiscussionLink(discussion, session.sessionId) } : {}),
 		sessionId: session.sessionId,
 		sessionName: session.sessionName,
 		createdAt: toSessionTimestamp(header?.timestamp),

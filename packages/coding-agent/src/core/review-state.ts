@@ -2,11 +2,7 @@ import { Buffer } from "node:buffer";
 import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
-import {
-	ReviewSourceUnavailableError,
-	registerDurableReviewAnchor,
-	resolveCanonicalReviewSource,
-} from "./review-anchors.ts";
+import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
 import { createReviewAccountingMessage } from "./review-presentation.ts";
 import type { ParsedReview, ReviewFinding, ReviewFindingOutcomeReason, ReviewFindingStatus } from "./review-report.ts";
 import type {
@@ -527,7 +523,9 @@ async function readCanonicalReviewState<T>(
 		throw new ReviewSourceUnavailableError(undefined, { cause });
 	}
 	try {
-		if (!getReviewRun(source, runId))
+		// A source reads its own runs: one it no longer holds is unknown. An alias's source must still hold it.
+		const self = manager.getSessionId() === ref.sessionId;
+		if (!self && !getReviewRun(source, runId))
 			throw new ReviewSourceUnavailableError("The canonical review run is no longer retained.");
 		const result = read(source);
 		const current = await resolveCanonicalReviewSource(manager, runId);
@@ -621,13 +619,17 @@ export async function appendReviewRun(writer: SessionWriter, record: ReviewRunRe
 	await writer.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, persistedRecord);
 }
 
+/**
+ * Append the terminal record of a run the conversation executed, with an
+ * accounting notice when it has no result. The run's `work_started` in the
+ * same log anchors it.
+ */
 export async function appendReviewRunDurably(writer: SessionWriter, record: ReviewRunRecord): Promise<void> {
 	await appendReviewRun(writer, record);
 	if (!record.result) {
 		const notice = createReviewAccountingMessage(record);
 		await writer.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
 	}
-	await registerDurableReviewAnchor(writer.sessionManager, record.runId);
 }
 
 export async function acknowledgeReviewRun(

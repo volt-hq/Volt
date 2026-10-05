@@ -63,6 +63,12 @@ import { toLogEntry, toLogEntryDraft, toSessionEntry } from "./conversation-log/
 import { SqliteConversationLog } from "./conversation-log/sqlite-conversation-log.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import {
+	EMPTY_REVIEW_LOG_STATE,
+	foldReviewEntries,
+	type ReviewDiscussionLink,
+	type ReviewLogState,
+} from "./review-log-state.ts";
+import {
 	decodeStoredSessionEntry,
 	digestClientInputPayload,
 	isHostOnlySessionEntryType,
@@ -81,7 +87,6 @@ import {
 	acquireSharedSQLiteSessionStore,
 	SESSION_STORE_DATABASE_FILENAME,
 	SESSION_STORE_READ_ENTRIES_MAX,
-	type SessionStoreReviewDiscussionLookup,
 	type SessionStoreSessionSummary,
 	type SessionStoreSnapshot,
 	type SQLiteSessionStoreClient,
@@ -102,14 +107,6 @@ import {
 	verifySessionStoreProjections,
 } from "./session-store/projection.ts";
 import { LogWriter } from "./session-writer.ts";
-
-function deepFreezeCanonicalData<T>(value: T): T {
-	if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-		for (const nested of Object.values(value as Record<string, unknown>)) deepFreezeCanonicalData(nested);
-		Object.freeze(value);
-	}
-	return value;
-}
 
 export const CURRENT_SESSION_VERSION = 5;
 export const CURRENT_SESSION_SNAPSHOT_VERSION = 1;
@@ -386,6 +383,41 @@ export interface WorkFinishedEntry extends SessionEntryBase, WorkFinishedEntryPa
 	type: "work_finished";
 }
 
+/**
+ * Review state (RFC §14 Q7; see session-entry-types.ts): host records only
+ * the host writes, never part of model context, branch navigation, forks, or
+ * imports.
+ */
+export interface ReviewGeneralEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.review_general.payload> {
+	type: "review_general";
+}
+
+export interface ReviewAliasEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.review_alias.payload> {
+	type: "review_alias";
+}
+
+export interface ReviewDiscussionEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.review_discussion.payload> {
+	type: "review_discussion";
+}
+
+export interface ReviewDiscussionResetEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.review_discussion_reset.payload> {
+	type: "review_discussion_reset";
+}
+
+export interface ReviewDiscussionLinkEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.review_discussion_link.payload> {
+	type: "review_discussion_link";
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -409,7 +441,12 @@ export type SessionEntry =
 	| ForkedFromEntry
 	| WorkStartedEntry
 	| WorkCheckpointEntry
-	| WorkFinishedEntry;
+	| WorkFinishedEntry
+	| ReviewGeneralEntry
+	| ReviewAliasEntry
+	| ReviewDiscussionEntry
+	| ReviewDiscussionResetEntry
+	| ReviewDiscussionLinkEntry;
 
 /** Host-only input admission WAL records. These never participate in the conversation branch or projection. */
 export function isClientInputWalEntry(
@@ -1064,8 +1101,6 @@ export class SessionWrite implements SessionEntryLookup {
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionGeneration: string = "";
-	/** Host-owned exact-identity binding, never reconstructed from transcript data. */
-	private reviewDiscussion: SessionStoreReviewDiscussionLookup | null = null;
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
@@ -1099,6 +1134,9 @@ export class SessionManager {
 	/** The fold of the committed entries through `foldedOrdinal`; `getConversationState()` advances it. */
 	private conversationState: ConversationState = fold([]);
 	private foldedOrdinal = 0;
+	/** The review records of the committed entries through `reviewFoldedOrdinal`; `getReviewState()` advances it. */
+	private reviewState: ReviewLogState = EMPTY_REVIEW_LOG_STATE;
+	private reviewFoldedOrdinal = 0;
 	/** The first loss of this manager's log. The manager accepts no writes after it. */
 	private lostError: ConversationLogLostError | undefined;
 	private readonly lostSignal = Promise.withResolvers<ConversationLogLostError>();
@@ -1226,6 +1264,8 @@ export class SessionManager {
 		this.derivedState = replaySessionEntries(header, validatedEntries);
 		this.conversationState = fold([]);
 		this.foldedOrdinal = 0;
+		this.reviewState = EMPTY_REVIEW_LOG_STATE;
+		this.reviewFoldedOrdinal = 0;
 		this.byId = new Map(validatedEntries.map((entry) => [entry.id, entry]));
 	}
 
@@ -1249,9 +1289,30 @@ export class SessionManager {
 		return this.sessionId;
 	}
 
-	/** Binding loaded before a persisted manager is published; historical children remain source-linked. */
-	getReviewDiscussion(): SessionStoreReviewDiscussionLookup | null {
-		return this.reviewDiscussion;
+	/**
+	 * This session's link when it is a review finding discussion: its first
+	 * entry, written by the host that created it. A child stays linked after
+	 * its discussion is reset.
+	 */
+	getReviewDiscussion(): ReviewDiscussionLink | null {
+		return this.getReviewState().link ?? null;
+	}
+
+	/**
+	 * The review state of the committed entries: the runs this session
+	 * anchors or carries as an alias, their General, the discussions it is the
+	 * source of, and its discussion link. An immutable value; a later commit
+	 * replaces it. Folded on read.
+	 */
+	getReviewState(): ReviewLogState {
+		const ordinal = this.getOrdinal();
+		if (this.reviewFoldedOrdinal < ordinal) {
+			// fileEntries[0] is the header; entry ordinals are their contiguous indexes.
+			const entries = this.fileEntries.slice(this.reviewFoldedOrdinal + 1, ordinal + 1) as SessionEntry[];
+			this.reviewState = foldReviewEntries(this.reviewState, entries);
+			this.reviewFoldedOrdinal = ordinal;
+		}
+		return this.reviewState;
 	}
 
 	getSessionRef(): SessionReference | undefined {
@@ -1870,15 +1931,8 @@ export class SessionManager {
 		const log = await SqliteConversationLog.open(ref);
 		try {
 			const snapshot = log.takeOpenedSnapshot();
-			const discussion = await SessionManager._scopedStore(log.ref.sessionDirectory, (store) =>
-				store.findReviewDiscussionByChild({
-					sessionId: snapshot.session.id,
-					sessionGeneration: snapshot.session.sessionGeneration,
-				}),
-			);
 			const manager = new SessionManager(cwdOverride ?? snapshot.session.cwd, log.ref.sessionDirectory, true);
 			manager._loadStoreSnapshot(snapshot, cwdOverride ?? snapshot.session.cwd);
-			manager.reviewDiscussion = deepFreezeCanonicalData(discussion);
 			manager.storeId = log.ref.storeId;
 			manager._attachLog(log);
 			return manager;
@@ -1900,21 +1954,16 @@ export class SessionManager {
 	static async openReadOnly(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
 		const canonicalRef = parseSessionReference(ref);
 		const dir = resolvePath(canonicalRef.sessionDirectory);
-		const { snapshot, discussion, storeId } = await SessionManager._scopedStore(dir, async (store) => {
+		const { snapshot, storeId } = await SessionManager._scopedStore(dir, async (store) => {
 			if (store.info.storeId !== canonicalRef.storeId) {
 				throw new Error("Session reference belongs to a different store");
 			}
 			const snapshot = await store.loadSession(canonicalRef.sessionId, canonicalRef.sessionGeneration);
 			if (!snapshot) throw new Error(`Session not found: ${canonicalRef.sessionId}`);
-			const discussion = await store.findReviewDiscussionByChild({
-				sessionId: snapshot.session.id,
-				sessionGeneration: snapshot.session.sessionGeneration,
-			});
-			return { snapshot, discussion, storeId: store.info.storeId };
+			return { snapshot, storeId: store.info.storeId };
 		});
 		const manager = new SessionManager(cwdOverride ?? snapshot.session.cwd, dir, true);
 		manager._loadStoreSnapshot(snapshot, cwdOverride ?? snapshot.session.cwd);
-		manager.reviewDiscussion = deepFreezeCanonicalData(discussion);
 		manager.storeId = storeId;
 		manager.readOnly = true;
 		return manager;
@@ -2037,7 +2086,7 @@ export class SessionManager {
 	 */
 	static async createBranched(source: SessionManager, leafId: string | null): Promise<SessionManager> {
 		source._assertNotLost();
-		if (source.reviewDiscussion) {
+		if (source.getReviewDiscussion()) {
 			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
 		}
 		const lineage = source._lineage(leafId);

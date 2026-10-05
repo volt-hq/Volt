@@ -508,6 +508,9 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 	if (entry.type === "forked_from" && entry.ordinal !== 1) {
 		throw new Error(`Lineage entry ${entry.id} must be the first entry of its session`);
 	}
+	if (entry.type === "review_discussion_link" && entry.ordinal !== 1) {
+		throw new Error(`Review discussion link ${entry.id} must be the first entry of its session`);
+	}
 	const nextMessageSummary = { ...state.messageSummary };
 	accumulateMessageSummary(nextMessageSummary, entry);
 	const clientInput = reduceClientInputEntry(state, entry);

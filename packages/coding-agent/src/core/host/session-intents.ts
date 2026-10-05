@@ -11,8 +11,12 @@
 import { resolvePath } from "../../utils/paths.ts";
 import type { ProjectTrustContext, ReplacedSessionContext, SessionIntentResult } from "../extensions/index.ts";
 import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "../pr-review-binding.ts";
-import { registerReviewHandoffAliases } from "../review-anchors.ts";
-import { prepareReviewGeneralReplacement } from "../review-general.ts";
+import {
+	hostReviewSourceWriter,
+	prepareReviewGeneralReplacement,
+	type ReviewSourceWriter,
+	registerReviewHandoffAliases,
+} from "../review-links.ts";
 import { listReviewRuns } from "../review-state.ts";
 import {
 	assertValidSessionId,
@@ -40,6 +44,8 @@ export interface NewSessionIntentOptions {
 	parentSessionRef?: SessionReference;
 	preserveReviewRunId?: string;
 	replaceReviewGeneral?: boolean;
+	/** Writes a review run's source log for `replaceReviewGeneral`; by default through this host or by opening it. */
+	reviewSourceWriter?: ReviewSourceWriter;
 	/** Override the new session's cwd (e.g. a daemon-managed worktree checkout). */
 	cwd?: string;
 	/** Override the session dir (e.g. the parent workspace's default dir for worktree sessions). */
@@ -327,10 +333,10 @@ export async function openStoredSessionById(
 
 /**
  * Move `client` to a new session. Review runs the source's log carries keep
- * their handoff aliases in the new session, which records the source's
- * pull-request review binding before it opens. With `replaceReviewGeneral`,
- * the preserved run's General discussion moves to the new session as the
- * intent's last durable step.
+ * their membership in the new session as handoff aliases, and it records the
+ * source's pull-request review binding before it opens. With
+ * `replaceReviewGeneral`, the preserved run's General discussion moves to the
+ * new session as the intent's last durable step.
  */
 export async function openNewSession(
 	host: ConversationHost,
@@ -344,65 +350,55 @@ export async function openNewSession(
 	const sourceManager = source.conversation.session.sessionManager;
 	const cwd = options?.cwd ?? source.conversation.cwd;
 	let generalReplacement: Awaited<ReturnType<typeof prepareReviewGeneralReplacement>> | undefined;
-	try {
-		return toIntentResult(
-			await moveClient(
-				host,
-				client,
-				source,
-				{
-					kind: "new",
-					cwd,
-					...(options?.sessionDir === undefined ? {} : { sessionDir: options.sessionDir }),
-					...(options?.parentSessionRef === undefined ? {} : { parentSessionRef: options.parentSessionRef }),
-					...(options?.workspaceName === undefined ? {} : { workspaceName: options.workspaceName }),
-					...(options?.baseRef === undefined ? {} : { baseRef: options.baseRef }),
-					seed: async (writer) => {
-						if (options?.replaceReviewGeneral) {
-							generalReplacement = await prepareReviewGeneralReplacement(
-								sourceManager,
-								options.preserveReviewRunId!,
-							);
-						}
-						await options?.setup?.(writer);
-						const targetManager = writer.sessionManager;
-						await registerReviewHandoffAliases(
+	return toIntentResult(
+		await moveClient(
+			host,
+			client,
+			source,
+			{
+				kind: "new",
+				cwd,
+				...(options?.sessionDir === undefined ? {} : { sessionDir: options.sessionDir }),
+				...(options?.parentSessionRef === undefined ? {} : { parentSessionRef: options.parentSessionRef }),
+				...(options?.workspaceName === undefined ? {} : { workspaceName: options.workspaceName }),
+				...(options?.baseRef === undefined ? {} : { baseRef: options.baseRef }),
+				seed: async (writer) => {
+					if (options?.replaceReviewGeneral) {
+						generalReplacement = await prepareReviewGeneralReplacement(
 							sourceManager,
-							targetManager,
-							listReviewRuns(targetManager, { limit: 50 })
-								.runs.map((run) => run.runId)
-								.filter((runId) => !generalReplacement || runId !== options?.preserveReviewRunId),
+							options.preserveReviewRunId!,
+							options.reviewSourceWriter ?? hostReviewSourceWriter(host),
 						);
-						// Persist the trusted handoff's binding before publication: subsequent runs
-						// are canonical here and must not depend on retained aliases for enforcement.
-						// General replacement grants its alias only at publication, so resolve from
-						// the already-authorized source while preparing that replacement.
-						const binding = generalReplacement
-							? await readPrReviewBinding(sourceManager, options?.preserveReviewRunId)
-							: await readPrReviewBinding(targetManager);
-						if (binding) {
-							if (!sameFilesystemLocation(cwd, binding.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
-							await writer.recordPrReviewBinding(binding);
+					}
+					await options?.setup?.(writer);
+					const targetManager = writer.sessionManager;
+					// A new General carries its run whether or not the setup copied the run's record.
+					const runIds = new Set(listReviewRuns(targetManager, { limit: 50 }).runs.map((run) => run.runId));
+					if (generalReplacement && options?.preserveReviewRunId) runIds.add(options.preserveReviewRunId);
+					await registerReviewHandoffAliases(sourceManager, writer, [...runIds]);
+					// Persist the trusted handoff's binding before publication: subsequent runs
+					// are canonical here and must not depend on retained aliases for enforcement.
+					const binding = await readPrReviewBinding(targetManager);
+					if (binding) {
+						if (!sameFilesystemLocation(cwd, binding.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
+						await writer.recordPrReviewBinding(binding);
+					}
+				},
+			},
+			{
+				...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
+				...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
+				...(options?.replaceReviewGeneral
+					? {
+							publish: async (target: SessionManager) => {
+								if (!generalReplacement) throw new Error("Review General replacement was not prepared");
+								await generalReplacement.commit(target);
+							},
 						}
-					},
-				},
-				{
-					...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
-					...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
-					...(options?.replaceReviewGeneral
-						? {
-								publish: async (target: SessionManager) => {
-									if (!generalReplacement) throw new Error("Review General replacement was not prepared");
-									await generalReplacement.commit(target);
-								},
-							}
-						: {}),
-				},
-			),
-		);
-	} finally {
-		await generalReplacement?.dispose();
-	}
+					: {}),
+			},
+		),
+	);
 }
 
 /**

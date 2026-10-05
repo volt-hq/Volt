@@ -18,9 +18,9 @@ import {
 } from "../../../src/core/protocol/intents/index.ts";
 import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
-import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../../src/core/review-discussion-policy.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
+import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-links.ts";
 import { publishReviewRun } from "../../../src/core/review-publish.ts";
 import type { ReviewSnapshot } from "../../../src/core/review-snapshot.ts";
 import {
@@ -41,6 +41,7 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "../../utilities/remote-phone.ts";
+import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 
 /** A conversation this test hosts, with the review discussion service a daemon would give it. */
@@ -202,12 +203,13 @@ async function fixture() {
 		return runtime;
 	}
 	const source = await own(await SessionManager.create(root, directory));
+	await anchorLiveReviewRun(source.session, "review:341");
 	await appendReviewRunDurably(source.session.sessionWriter, review());
 	const aliases: Owned[] = [];
 	for (let index = 0; index < 2; index++) {
 		const manager = await SessionManager.create(root, directory);
 		await appendReviewRun(manager.logWriter, review());
-		await registerReviewHandoffAliases(source.session.sessionManager, manager, ["review:341"]);
+		await registerReviewHandoffAliases(source.session.sessionManager, manager.logWriter, ["review:341"]);
 		aliases.push(await own(manager));
 	}
 	return { root, directory, source, aliases, runtimes, managers, own, harness };
@@ -416,7 +418,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		const copied = await SessionManager.create(root, directory);
 		managers.push(copied);
 		await appendReviewRun(copied.logWriter, review());
-		await registerReviewHandoffAliases(imported, copied, ["review:341"]);
+		await registerReviewHandoffAliases(imported, copied.logWriter, ["review:341"]);
 		expect(await resolveCanonicalReviewSource(copied, "review:341")).toBeUndefined();
 	});
 

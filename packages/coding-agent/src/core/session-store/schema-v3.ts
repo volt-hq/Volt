@@ -1,5 +1,5 @@
-import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
 import { SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL } from "./schema.ts";
+import { SESSION_STORE_V2_REVIEW_SCHEMA_SQL } from "./schema-v2.ts";
 
 // Frozen exact v3 DDL. Used only to validate the supported upgrade.
 export const SESSION_STORE_V3_SCHEMA_ID = "volt-session-store-v3";
@@ -108,5 +108,5 @@ CREATE TABLE search_chunks (
 
 CREATE INDEX search_chunks_entry_idx ON search_chunks (session_id, entry_id);
 
-${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}${REVIEW_DISCUSSION_SCHEMA_SQL}
+${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}${SESSION_STORE_V2_REVIEW_SCHEMA_SQL}
 `;

@@ -12,10 +12,8 @@ import {
 	type SessionStoreWorkerResponseEnvelope,
 } from "./protocol.ts";
 import {
-	SESSION_STORE_REVIEW_LIST_MAX,
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreCommitReconciliation,
-	type SessionStoreCreateReviewDiscussionInput,
 	type SessionStoreCreateSessionInput,
 	type SessionStoreDeleteSessionInput,
 	type SessionStoreDeleteSessionResult,
@@ -26,16 +24,8 @@ import {
 	type SessionStoreReadEntriesInput,
 	type SessionStoreReadEntriesResult,
 	type SessionStoreReconcileCommitInput,
-	type SessionStoreRegisterReviewAnchorInput,
-	type SessionStoreReplaceReviewGeneralInput,
-	type SessionStoreResetReviewDiscussionInput,
-	type SessionStoreResetReviewDiscussionResult,
-	type SessionStoreReviewAnchor,
-	type SessionStoreReviewDiscussion,
 	type SessionStoreReviewDiscussionChild,
-	type SessionStoreReviewDiscussionLookup,
-	type SessionStoreReviewListOptions,
-	type SessionStoreReviewSource,
+	type SessionStoreReviewRun,
 	type SessionStoreSearchResult,
 	type SessionStoreSessionIdentity,
 	type SessionStoreSessionSummary,
@@ -258,101 +248,30 @@ export class SQLiteSessionStoreClient {
 		});
 	}
 
-	/** Host-only authority registration; never reconstructed from portable/fork transcript entries. */
-	async registerReviewAnchor(input: SessionStoreRegisterReviewAnchorInput): Promise<SessionStoreReviewAnchor> {
-		return (await this.call({ kind: "register_review_anchor", input })) as SessionStoreReviewAnchor;
+	/**
+	 * The conversation that anchors review run `runId`, from the store's
+	 * derived index: a lookup that grants no authority by itself.
+	 */
+	async findReviewRun(runId: string): Promise<SessionStoreReviewRun | null> {
+		return (await this.call({ kind: "find_review_run", runId })) as SessionStoreReviewRun | null;
 	}
 
-	/** Host-only handoff membership, authenticated by an existing exact member. */
-	async registerReviewAlias(
-		runId: string,
-		member: SessionStoreReviewSource,
-		alias: SessionStoreReviewSource,
-	): Promise<SessionStoreReviewAnchor> {
-		return (await this.call({ kind: "register_review_alias", runId, member, alias })) as SessionStoreReviewAnchor;
-	}
-
-	async resolveReviewAnchor(
-		runId: string,
-		member: SessionStoreReviewSource,
-	): Promise<SessionStoreReviewAnchor | null> {
-		return (await this.call({ kind: "resolve_review_anchor", runId, member })) as SessionStoreReviewAnchor | null;
-	}
-
-	async resolveReviewGeneral(
-		runId: string,
-		member: SessionStoreReviewSource,
-	): Promise<SessionStoreReviewAnchor | null> {
-		return (await this.call({ kind: "resolve_review_general", runId, member })) as SessionStoreReviewAnchor | null;
-	}
-
-	async replaceReviewGeneral(input: SessionStoreReplaceReviewGeneralInput): Promise<SessionStoreReviewAnchor> {
-		return (await this.call({ kind: "replace_review_general", input })) as SessionStoreReviewAnchor;
-	}
-
-	async findReviewAnchor(runId: string): Promise<SessionStoreReviewAnchor | null> {
-		return (await this.call({ kind: "find_review_anchor", runId })) as SessionStoreReviewAnchor | null;
-	}
-
-	/** Atomically returns the winner or reserves one empty hidden child. Seeding belongs to SessionManager. */
-	async createOrGetReviewDiscussion(
-		input: SessionStoreCreateReviewDiscussionInput,
-	): Promise<SessionStoreReviewDiscussion> {
-		return (await this.call({ kind: "create_review_discussion", input })) as SessionStoreReviewDiscussion;
-	}
-
-	async resetReviewDiscussion(
-		input: SessionStoreResetReviewDiscussionInput,
-	): Promise<SessionStoreResetReviewDiscussionResult> {
-		return (await this.call({ kind: "reset_review_discussion", input })) as SessionStoreResetReviewDiscussionResult;
-	}
-
-	async findReviewDiscussionById(discussionId: string): Promise<SessionStoreReviewDiscussion | null> {
-		return (await this.call({
-			kind: "find_review_discussion_by_id",
-			discussionId,
-		})) as SessionStoreReviewDiscussion | null;
-	}
-
-	async findReviewDiscussion(runId: string, findingId: string): Promise<SessionStoreReviewDiscussion | null> {
+	/** The current child of discussion `discussionId`, from the store's derived index. */
+	async findReviewDiscussion(discussionId: string): Promise<SessionStoreReviewDiscussionChild | null> {
 		return (await this.call({
 			kind: "find_review_discussion",
-			runId,
-			findingId,
-		})) as SessionStoreReviewDiscussion | null;
-	}
-
-	async findReviewDiscussionByChild(
-		child: SessionStoreSessionIdentity,
-	): Promise<SessionStoreReviewDiscussionLookup | null> {
-		return (await this.call({
-			kind: "find_review_discussion_by_child",
-			child,
-		})) as SessionStoreReviewDiscussionLookup | null;
-	}
-
-	async listReviewDiscussions(
-		runId: string,
-		options: SessionStoreReviewListOptions = {},
-	): Promise<SessionStoreReviewDiscussion[]> {
-		return (await this.call({
-			kind: "list_review_discussions",
-			runId,
-			limit: options.limit ?? SESSION_STORE_REVIEW_LIST_MAX,
-			offset: options.offset ?? 0,
-		})) as SessionStoreReviewDiscussion[];
-	}
-
-	async listReviewDiscussionHistory(
-		discussionId: string,
-		options: SessionStoreReviewListOptions = {},
-	): Promise<SessionStoreReviewDiscussionChild[]> {
-		return (await this.call({
-			kind: "list_review_discussion_history",
 			discussionId,
-			limit: options.limit ?? SESSION_STORE_REVIEW_LIST_MAX,
-			offset: options.offset ?? 0,
-		})) as SessionStoreReviewDiscussionChild[];
+		})) as SessionStoreReviewDiscussionChild | null;
+	}
+
+	/** The discussion whose source records session `child` as one of its children, from the derived index. */
+	async findReviewDiscussionChild(
+		child: SessionStoreSessionIdentity,
+	): Promise<SessionStoreReviewDiscussionChild | null> {
+		return (await this.call({
+			kind: "find_review_discussion_child",
+			child,
+		})) as SessionStoreReviewDiscussionChild | null;
 	}
 
 	async verifyForeignKeys(): Promise<SessionStoreForeignKeyVerificationResult> {

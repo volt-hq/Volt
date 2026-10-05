@@ -18,7 +18,7 @@ import {
 	executeReviewWorkflow,
 	prepareReviewWorkflow,
 } from "../../../src/core/review.ts";
-import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
+import { registerReviewHandoffAliases } from "../../../src/core/review-links.ts";
 import {
 	createReviewAccountingMessage,
 	createReviewSeedMessage,
@@ -46,6 +46,7 @@ import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../../../src/modes/interactive/components/custom-message.ts";
+import { anchorReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -332,9 +333,10 @@ describe("#409 initial review accounting", () => {
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(5, "partial"), 1, false, false);
 		const stale = terminal("review:409", "failed", collector.snapshot());
+		await anchorReviewRun(source, stale.runId);
 		await appendReviewRunDurably(source.logWriter, stale);
 		await restoreReviewStateFromHandoff(alias.logWriter, captureReviewStateForHandoff(source));
-		await registerReviewHandoffAliases(source, alias, [stale.runId]);
+		await registerReviewHandoffAliases(source, alias.logWriter, [stale.runId]);
 		await request.observe(usage(10), 2, true, true);
 		const final = { ...stale, endedAt: 3, usage: await collector.finish() };
 		await appendReviewRunDurably(source.logWriter, final);

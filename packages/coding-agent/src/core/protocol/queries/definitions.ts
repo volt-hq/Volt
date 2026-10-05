@@ -3,7 +3,7 @@ import { CONTENT_TEXT_MAX_SCALARS, type QueryName, type QueryResult } from "@han
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
-import { getReviewGeneral } from "../../review-general.ts";
+import { getReviewGeneral } from "../../review-links.ts";
 import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalReviewRuns } from "../../review-state.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-target-metadata.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "../../review-usage.ts";
