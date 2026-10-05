@@ -8,7 +8,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@earendil-works/volt-coding-agent";
+import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 
 const DATASET = "terminal-bench/terminal-bench-2-1";
 const AGENT_IMPORT_PATH = "volt_tbench_harbor.agent:VoltAgent";

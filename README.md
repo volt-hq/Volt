@@ -28,17 +28,17 @@ To make the Harbor-run Volt process inherit your local Volt settings and install
 
 The `/tbench smoke` TUI helper passes these automatically, including the current project's `.volt` directory when one exists.
 
-By default the Harbor wrapper clones and builds Volt from `https://github.com/hansjm10/Volt.git`. Override the source with agent kwargs:
+By default the Harbor wrapper clones and builds Volt from `https://github.com/volt-hq/Volt.git`. Override the source with agent kwargs:
 
 ```bash
---agent-kwarg source_url=https://github.com/hansjm10/Volt.git
+--agent-kwarg source_url=https://github.com/volt-hq/Volt.git
 --agent-kwarg source_ref=main
 ```
 
 If a packaged Volt CLI is available from npm, use the faster install path:
 
 ```bash
---agent-kwarg install_spec=@earendil-works/volt-coding-agent@0.79.1
+--agent-kwarg install_spec=@hansjm10/volt-coding-agent@0.2.3
 ```
 
 ## Usage
