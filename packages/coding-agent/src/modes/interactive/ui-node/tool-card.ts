@@ -1,16 +1,16 @@
 /**
  * The generic tool card (RFC §8.3, Q9): a tool call renders from its
  * presentation, the `UiNode` data its tool presents, inside chrome the client
- * owns: the state badge, elapsed time, collapsed or expanded content, the
- * actions, and the result's images. Collapsed, the card shows the summary;
- * expanded, the body, or the summary when there is no body. A hidden
- * presentation renders nothing.
+ * owns: the state badge, elapsed time (when the presentation `showsDuration`),
+ * collapsed or expanded content, the actions, and the result's images.
+ * Collapsed, the card shows the summary; expanded, the body, or the summary
+ * when there is no body. A hidden presentation renders nothing.
  *
  * A scaffold: tool calls render through `ToolExecutionComponent` until tools
  * present themselves.
  */
 
-import type { UiImageNode, UiNode, UiNodeAction, UiNodeStyledText } from "@hansjm10/volt-protocol";
+import type { ToolPresentation, UiImageNode, UiNode } from "@hansjm10/volt-protocol";
 import {
 	type Component,
 	concatRenderFrames,
@@ -32,37 +32,24 @@ import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
 export type ToolCardState = "pending" | "running" | "done";
 
-/** What a tool presents for one call. */
-export interface ToolCardPresentation {
-	readonly title: UiNodeStyledText;
-	/** What the call is doing now, after the state badge. */
-	readonly activity?: UiNodeStyledText;
-	readonly summary?: readonly UiNode[];
-	readonly body?: readonly UiNode[];
-	readonly actions?: readonly UiNodeAction[];
-	readonly hidden?: boolean;
-	/** The presentation shows its own duration, so the chrome does not. */
-	readonly showsDuration?: boolean;
-}
-
 export interface ToolCardImage {
 	readonly data: string;
 	readonly mimeType: UiImageNode["mimeType"];
 }
 
 export interface ToolCardProps {
-	readonly presentation: ToolCardPresentation;
+	readonly presentation: ToolPresentation;
 	readonly state: ToolCardState;
 	/** The call is done and its result is an error. */
 	readonly isError?: boolean;
 	readonly expanded?: boolean;
-	/** How long the call ran, or runs so far. */
+	/** How long the call ran, or runs so far; shown when the presentation `showsDuration`. */
 	readonly elapsedMs?: number;
 	/** The result's images. */
 	readonly images?: readonly ToolCardImage[];
 }
 
-/** A finished call shows its duration from this long on. */
+/** A finished call whose presentation shows its duration shows it from this long on. */
 const DURATION_DISPLAY_THRESHOLD_MS = 1000;
 
 function stateBadge(state: ToolCardState, isError: boolean): string {
@@ -133,8 +120,8 @@ export class ToolCard implements Component {
 			meta.push(renderStyledText(presentation.activity, TUI_SEMANTIC_THEME, "muted").replace(/\n/g, " "));
 		}
 		const showsElapsed =
+			presentation.showsDuration === true &&
 			elapsedMs !== undefined &&
-			!presentation.showsDuration &&
 			(state === "running" || elapsedMs >= DURATION_DISPLAY_THRESHOLD_MS);
 		if (showsElapsed) meta.push(theme.fg("dim", `(${formatDuration(elapsedMs)})`));
 		const suffix = meta.join(" ");

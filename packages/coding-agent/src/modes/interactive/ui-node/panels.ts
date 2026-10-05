@@ -11,7 +11,7 @@
  * `maxRows` rows: the rest are cut and counted.
  */
 
-import type { UiNode, UiNodeStyledText } from "@hansjm10/volt-protocol";
+import type { ExtensionPanelPlacementSchema, LiveValue, UiNode } from "@hansjm10/volt-protocol";
 import {
 	type Component,
 	concatRenderFrames,
@@ -23,21 +23,18 @@ import {
 	truncateToWidth,
 	type ViewReconciler,
 } from "@hansjm10/volt-tui";
+import type { Static } from "typebox";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createUiNodeView, type UiNodeViewOptions } from "./registry.ts";
 import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
-export type UiPanelPlacement = "aboveEditor" | "belowEditor" | "sidebar";
+export type ExtensionPanelPlacement = Static<typeof ExtensionPanelPlacementSchema>;
 
-/** One panel an extension declares. */
-export interface UiPanel {
-	readonly title?: UiNodeStyledText;
-	readonly placement: UiPanelPlacement;
-	readonly node: UiNode;
-}
+/** One panel an extension declares: an `ext_panel` live value's title, placement, and node. */
+export type UiPanel = Pick<Extract<LiveValue, { kind: "ext_panel" }>, "title" | "placement" | "node">;
 
 /** Where a panel with `placement` renders in screen mode `mode`. */
-export function panelSlot(placement: UiPanelPlacement, mode: TuiMode): UiPanelPlacement {
+export function panelSlot(placement: ExtensionPanelPlacement, mode: TuiMode): ExtensionPanelPlacement {
 	return placement === "sidebar" && mode !== "fullscreen" ? "aboveEditor" : placement;
 }
 
@@ -69,7 +66,7 @@ export class UiPanels {
 	constructor(options: UiPanelsOptions) {
 		this.options = options;
 		// A slot renders its panels in the order they were first set.
-		const slot = (placement: UiPanelPlacement): Component => ({
+		const slot = (placement: ExtensionPanelPlacement): Component => ({
 			invalidate: () => {
 				for (const entry of this.entriesIn(placement)) entry.view.invalidate();
 			},
@@ -122,7 +119,7 @@ export class UiPanels {
 	}
 
 	/** The panels rendering in `slot` now. */
-	private entriesIn(slot: UiPanelPlacement): PanelEntry[] {
+	private entriesIn(slot: ExtensionPanelPlacement): PanelEntry[] {
 		const mode = this.options.mode();
 		return [...this.entries.values()].filter((entry) => panelSlot(entry.panel.placement, mode) === slot);
 	}

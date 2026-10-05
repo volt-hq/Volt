@@ -5,6 +5,8 @@
  */
 
 import {
+	applyUiPatch,
+	PANEL_MAX_SERIALIZED_BYTES,
 	UI_NODE_LINE_MAX_CHARS,
 	UI_NODE_TERMINAL_MAX_LINES,
 	UI_NODE_TEXT_PATTERN,
@@ -21,13 +23,12 @@ import {
 	normalizeUiNode,
 	normalizeUiNodes,
 	UI_MAX_DEPTH,
-	UI_PANEL_MAX_BYTES,
 	type UiActionPolicy,
 	UiNormalizeError,
 	type UiNormalizeOptions,
 } from "../src/core/ui/normalize.ts";
 
-const HOST: UiNormalizeOptions = { policy: { owner: "host" }, maxBytes: UI_PANEL_MAX_BYTES };
+const HOST: UiNormalizeOptions = { policy: { owner: "host" }, maxBytes: PANEL_MAX_SERIALIZED_BYTES };
 
 function plainText(text: UiNodeStyledText): string {
 	return typeof text === "string" ? text : text.map((span) => span.text).join("");
@@ -36,7 +37,7 @@ function plainText(text: UiNodeStyledText): string {
 function extension(owned: readonly string[] = [], dropped: UiNodeIntent[] = []): UiNormalizeOptions {
 	return {
 		policy: { owner: "extension", extensionId: "deploy", ownsWork: (workId) => owned.includes(workId) },
-		maxBytes: UI_PANEL_MAX_BYTES,
+		maxBytes: PANEL_MAX_SERIALIZED_BYTES,
 		onDroppedIntent: (intent) => dropped.push(intent),
 	};
 }
@@ -282,6 +283,26 @@ describe("normalizeUiNode", () => {
 		let deep: unknown = { type: "text", text: "leaf" };
 		for (let depth = 0; depth < UI_MAX_DEPTH; depth++) deep = { type: "list", items: [deep] };
 		expect(invalid(deep)).toThrow(/nest deeper/);
+		// A card's sections count as a level, as patch paths count them: a node at the deepest
+		// level is reachable by a patch path.
+		const cards = (count: number): UiNode => {
+			let node: UiNode = { type: "text", key: "leaf", text: "leaf" };
+			for (let level = 0; level < count; level++) {
+				node = { type: "card", key: `c${level}`, title: "t", sections: [{ key: `s${level}`, children: [node] }] };
+			}
+			return node;
+		};
+		const deepest = (UI_MAX_DEPTH - 1) / 2;
+		const accepted = normalizeUiNode(cards(Math.floor(deepest)), HOST) as UiNode;
+		const path = Array.from({ length: Math.floor(deepest) }, (_, index) => {
+			const level = Math.floor(deepest) - 1 - index;
+			return [`c${level}`, `s${level}`];
+		}).flat();
+		expect(path.length + 1).toBeLessThanOrEqual(UI_MAX_DEPTH);
+		expect(() =>
+			applyUiPatch([accepted], [{ op: "replace", path: [...path, "leaf"], node: { type: "text", text: "x" } }]),
+		).not.toThrow();
+		expect(invalid(cards(Math.floor(deepest) + 1))).toThrow(/nest deeper/);
 		const cyclic: Record<string, unknown> = { type: "list" };
 		cyclic.items = [cyclic];
 		expect(invalid(cyclic)).toThrow(/not JSON/);
@@ -315,6 +336,12 @@ describe("action allowlist", () => {
 		expect(allowed("cancel_work", { workId: "w2" })).toBe(false);
 		expect(allowed("cancel_work")).toBe(false);
 		expect(isAllowedUiIntent({ type: "new_session" }, { owner: "host" })).toBe(true);
+		// An id outside the manifest id pattern binds nothing.
+		for (const extensionId of ["", "Deploy", "a.b", "volt"]) {
+			const invalid: UiActionPolicy = { owner: "extension", extensionId, ownsWork: () => true };
+			expect(isAllowedUiIntent({ type: `extension.command.${extensionId}.ship` }, invalid)).toBe(false);
+			expect(isAllowedUiIntent({ type: "open_work", input: { workId: "w1" } }, invalid)).toBe(false);
+		}
 	});
 
 	it("drops disallowed actions and forms, and reports them", () => {

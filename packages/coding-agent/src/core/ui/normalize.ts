@@ -11,15 +11,19 @@
  *   siblings, ids unique within their node, form patterns that are safe to
  *   test, and nesting at most {@link UI_MAX_DEPTH} levels deep;
  * - drops the actions its producer may not bind ({@link UiActionPolicy});
- * - and bounds the encoded size.
+ * - and bounds the encoded size: callers pass the protocol's bound
+ *   (`PANEL_MAX_SERIALIZED_BYTES`, `PRESENTATION_MAX_SERIALIZED_BYTES`, or
+ *   `PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES`).
  *
  * Data that is invalid or too large throws {@link UiNormalizeError} and never
  * reaches a client.
  */
 
 import {
+	EXTENSION_ID_PATTERN,
 	UI_NODE_LINE_MAX_CHARS,
 	UI_NODE_TERMINAL_MAX_LINES,
+	UI_PATCH_PATH_MAX_KEYS,
 	UiActionsNodeSchema,
 	UiCodeNodeSchema,
 	UiDiffNodeSchema,
@@ -45,14 +49,14 @@ import { Compile, type Validator } from "typebox/compile";
 import { isSafeFormPattern } from "../host/live-state.ts";
 import { ansiToStyledLines, ansiToStyledText, stripTerminalControls, type UiStyledLine } from "./ansi-tokens.ts";
 
-/** Largest extension panel, in UTF-8 bytes of its JSON. */
-export const UI_PANEL_MAX_BYTES = 32 * 1024;
-/** Largest tool or message presentation sent to a local client, in UTF-8 bytes of its JSON. */
-export const UI_PRESENTATION_MAX_BYTES = 64 * 1024;
-/** Largest tool or message presentation sent to a remote client, in UTF-8 bytes of its JSON. */
-export const UI_REMOTE_PRESENTATION_MAX_BYTES = 16 * 1024;
-/** Deepest nesting of nodes (list items, card sections) and of tree items. */
-export const UI_MAX_DEPTH = 32;
+/**
+ * Deepest nesting, counted as patch paths count it: a root node is level 1,
+ * and a list's items, a card's sections, and a section's children are one
+ * level below their parent. Every node of a normalized tree is then within
+ * reach of a patch path. Tree items nest at most as deep.
+ */
+export const UI_MAX_DEPTH = UI_PATCH_PATH_MAX_KEYS;
+const EXTENSION_ID = new RegExp(EXTENSION_ID_PATTERN);
 /** Input this many times over the byte bound is refused before it is converted. */
 const INPUT_BUDGET_FACTOR = 8;
 
@@ -61,6 +65,7 @@ const INPUT_BUDGET_FACTOR = 8;
  * tools, work detail) binds any intent. An extension binds only its own
  * commands and intents (`extension.command.<id>.*`, `extension.intent.<id>.*`)
  * and `open_work` or `cancel_work` for work it owns; other actions are dropped.
+ * An extension id that does not match `EXTENSION_ID_PATTERN` binds nothing.
  */
 export type UiActionPolicy =
 	| { readonly owner: "host" }
@@ -269,7 +274,7 @@ function convertNode(value: unknown, depth: number): void {
 			eachObject(value.badges, (badge) => convertField(badge, "label", plain));
 			eachObject(value.sections, (section) => {
 				convertField(section, "title", styled);
-				if (Array.isArray(section.children)) for (const child of section.children) convertNode(child, depth + 1);
+				if (Array.isArray(section.children)) for (const child of section.children) convertNode(child, depth + 2);
 			});
 			convertActions(value.actions);
 			return;
@@ -377,6 +382,7 @@ function checkNode(node: UiNode, path: string): void {
 export function isAllowedUiIntent(intent: UiNodeIntent, policy: UiActionPolicy): boolean {
 	if (policy.owner === "host") return true;
 	const { extensionId } = policy;
+	if (!EXTENSION_ID.test(extensionId)) return false;
 	for (const prefix of [`extension.command.${extensionId}.`, `extension.intent.${extensionId}.`]) {
 		if (intent.type.startsWith(prefix) && intent.type.length > prefix.length) return true;
 	}

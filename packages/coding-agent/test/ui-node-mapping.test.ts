@@ -411,6 +411,7 @@ describe("tool card", () => {
 			activity: "Executing",
 			summary: [{ type: "terminal", key: "out", lines: ["last line"] }],
 			body: [{ type: "terminal", key: "out", lines: ["first line", "last line"] }],
+			showsDuration: true,
 		},
 		state: "running",
 		elapsedMs: 2500,
@@ -434,15 +435,13 @@ describe("tool card", () => {
 		expect(text(toolCard)).toContain("first line\n last line");
 		expect(text(toolCard)).not.toContain("to expand");
 
+		// A finished call shows its duration from a second on, and only when the presentation asks.
 		toolCard.setProps({ ...base, state: "done", elapsedMs: 400 });
 		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [success] Executing");
-		toolCard.setProps({
-			...base,
-			state: "done",
-			isError: true,
-			presentation: { ...base.presentation, showsDuration: true },
-		});
-		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [failure] Executing");
+		toolCard.setProps({ ...base, state: "done", isError: true });
+		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [failure] Executing (2.5s)");
+		toolCard.setProps({ ...base, presentation: { ...base.presentation, showsDuration: false } });
+		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [running] Executing");
 		toolCard.setProps({ ...base, state: "pending", elapsedMs: undefined });
 		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [pending] Executing");
 		// The title gives way to the chrome first.
