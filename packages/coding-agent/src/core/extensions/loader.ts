@@ -43,6 +43,7 @@ import { execCommand } from "../exec.ts";
 import { isSafeFormPattern } from "../host/live-state.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo, type SourceScope } from "../source-info.ts";
+import type { MessagePresenter } from "../ui/presentation.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
 import {
 	declaresPackageExtension,
@@ -553,6 +554,15 @@ function createExtensionAPI(
 			extension.messageRenderers.set(customType, renderer as MessageRenderer);
 		},
 
+		registerMessagePresenter<T>(customType: string, present: MessagePresenter<T>): void {
+			runtime.assertActive();
+			if (typeof customType !== "string" || customType.length === 0) {
+				throw new TypeError("A message presenter needs the custom type it presents");
+			}
+			if (typeof present !== "function") throw new TypeError(`Message presenter ${customType} must be a function`);
+			extension.messagePresenters.set(customType, present as MessagePresenter);
+		},
+
 		// Flag access - checks extension registered it, reads from runtime
 		getFlag(name: string): boolean | string | undefined {
 			runtime.assertActive();
@@ -858,6 +868,7 @@ function createExtension(candidate: Candidate): Extension {
 		handlers: new ExtensionHandlerRegistry(),
 		tools: new Map(),
 		messageRenderers: new Map(),
+		messagePresenters: new Map(),
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),

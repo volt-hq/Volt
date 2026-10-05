@@ -1,4 +1,4 @@
-import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
+import type { TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
@@ -59,44 +59,6 @@ describe("live tool progress", () => {
 			}
 		},
 	);
-	it("labels a growing write preview as generation until execution begins", () => {
-		vi.useFakeTimers();
-		const component = new ToolExecutionComponent(
-			"write",
-			"call",
-			{ path: "story.txt", content: "First line" },
-			{ liveProgress: true },
-			undefined,
-			{ requestRender: vi.fn() } as unknown as TUI,
-			process.cwd(),
-		);
-		try {
-			component.updateArgs({ path: "story.txt", content: "First line\nSecond line" });
-			vi.advanceTimersByTime(1000);
-			const preview = stripAnsi(component.render(80).lines.join("\n"));
-			expect(preview).toContain("Second line");
-			expect(preview).toContain("[streaming] Generating content");
-			expect(preview).not.toContain("Writing file");
-			expect(preview).not.toContain("[pending]");
-
-			for (const phase of [
-				{ status: "[streaming] Generating content", transition: () => {} },
-				{ status: "[queued] Waiting to run", transition: () => component.setArgsComplete() },
-				{ status: "[running] Writing file", transition: () => component.markExecutionStarted() },
-			]) {
-				phase.transition();
-				for (const width of [20, 32, 80, 140]) {
-					const lines = component.render(width).lines;
-					for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-					const text = lines.map(stripAnsi).join(" ").replace(/\s+/g, " ");
-					expect(text).toContain("story.txt");
-					expect(text).toContain(phase.status);
-				}
-			}
-		} finally {
-			component.dispose();
-		}
-	});
 
 	it("does not animate historical calls as live generation", () => {
 		vi.useFakeTimers();

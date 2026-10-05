@@ -20,6 +20,7 @@ import {
 	jobResult,
 } from "../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
+import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
@@ -221,7 +222,7 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 		isError: false,
 	});
 	access.jobsRenderCoalescer?.flush();
-	const card = access.chatContainer.children.find((child) => child instanceof ToolExecutionComponent);
+	const card = access.chatContainer.children.find((child) => child instanceof PresentedToolComponent);
 	if (!card) throw new Error("Expected the live background launch card");
 	return card;
 }
@@ -418,9 +419,11 @@ describe("interactive background jobs", () => {
 			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: true });
 			await terminal.waitForRender();
 			const collapsed = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(2);
+			// The launch's title and its job's line, and the notice.
+			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(3);
 			expect(collapsed.match(/final output/g)).toHaveLength(1);
-			expect(collapsed).toContain("Bash · background · Failed");
+			expect(collapsed).toContain("$ Run focused integration checks");
+			expect(collapsed).toContain("Failed · Run focused integration checks");
 			expect(collapsed).toContain("jobs wait · 1 failed");
 			expect(collapsed).not.toContain("terminal (any)");
 			const saved = harness.sessionManager.getConversationState().context;
@@ -757,7 +760,7 @@ describe("interactive background jobs", () => {
 			result: jobResult(job),
 			isError: false,
 		});
-		const card = access.chatContainer.children.find((child) => child instanceof ToolExecutionComponent);
+		const card = access.chatContainer.children.find((child) => child instanceof PresentedToolComponent);
 		if (!card) throw new Error("Expected the live background launch card");
 		access.jobsRenderCoalescer?.flush();
 		const invalidate = vi.spyOn(card, "invalidate");
@@ -892,7 +895,7 @@ describe("interactive background jobs", () => {
 			access.renderCurrentSessionState();
 			// A finished job's card shows its recorded outcome, not the running state it captured.
 			const output = stripAnsi(access.chatContainer.render(100).lines.join("\n"));
-			expect(output).toContain("Bash · background · Completed");
+			expect(output).toContain("Completed · Run focused integration checks");
 			expect(output).toContain("final output");
 			expect(output).not.toContain("Running at capture");
 		}

@@ -5,7 +5,9 @@
  *
  * Keyed values (`set`, `clear`) persist until cleared or reset; a `patch`
  * changes a panel's node or a work item's detail in place, so a reset carries
- * the patched value. Streaming
+ * the patched value. A running tool's presentation is replaced by a tool
+ * item's `presentation` and patched by its `patch`, and a reset carries the
+ * patched presentation too. Streaming
  * items (the streaming assistant message and running tools) build on the
  * frame's `basedOn` ordinal: a client discards them when a frame arrives with
  * another `basedOn`, or when it applies the entry that commits them. A host
@@ -20,6 +22,8 @@ import {
 	type LiveItem,
 	type LiveValue,
 	type ProjectedEntry,
+	type ToolPresentation,
+	type ToolPresentationPatch,
 	type UiNode,
 	type UiPatchOp,
 } from "@hansjm10/volt-protocol";
@@ -37,11 +41,12 @@ export interface LiveStreamingAssistant {
 	readonly argsText: ReadonlyMap<number, string>;
 }
 
-/** A running tool: started, with its latest partial result, possibly ended before its result entry. */
+/** A running tool: started, with its latest partial result and presentation, possibly ended before its result entry. */
 export interface LiveStreamingTool {
 	readonly toolName: string;
 	readonly args?: Record<string, unknown>;
 	readonly partial?: LiveToolPartial;
+	readonly presentation?: ToolPresentation;
 	readonly ended: boolean;
 	readonly isError?: boolean;
 }
@@ -92,6 +97,27 @@ export function patchLiveValue(value: LiveValue, ops: readonly UiPatchOp[]): Liv
 		return detail === undefined ? work : { ...work, detail };
 	}
 	throw new LivePatchError(`A ${value.kind} value has no node to patch`);
+}
+
+/**
+ * `presentation` with `patch` applied to its trees: an absent tree is the
+ * empty one, and an emptied one is absent again. Throws
+ * {@link LivePatchError} when the patch does not apply.
+ */
+export function patchToolPresentation(presentation: ToolPresentation, patch: ToolPresentationPatch): ToolPresentation {
+	const apply = (tree: readonly UiNode[] | undefined, ops: readonly UiPatchOp[] | undefined): UiNode[] | undefined => {
+		if (ops === undefined) return tree === undefined ? undefined : [...tree];
+		try {
+			const next = applyUiPatch(tree ?? [], ops);
+			return next.length === 0 ? undefined : next;
+		} catch (error) {
+			throw new LivePatchError(error instanceof Error ? error.message : String(error));
+		}
+	};
+	const { summary: _summary, body: _body, ...rest } = presentation;
+	const summary = apply(presentation.summary, patch.summary);
+	const body = apply(presentation.body, patch.body);
+	return { ...rest, ...(summary === undefined ? {} : { summary }), ...(body === undefined ? {} : { body }) };
 }
 
 /** Nothing live, building on `basedOn`. */
@@ -236,7 +262,12 @@ export function liveStreamingItems(state: LiveFoldState): LiveItem[] {
 	}
 	for (const [toolCallId, tool] of state.tools) {
 		const base = { type: "tool" as const, toolCallId, toolName: tool.toolName };
-		items.push({ ...base, op: "start", ...(tool.args === undefined ? {} : { args: tool.args }) });
+		items.push({
+			...base,
+			op: "start",
+			...(tool.args === undefined ? {} : { args: tool.args }),
+			...(tool.presentation === undefined ? {} : { presentation: tool.presentation }),
+		});
 		if (tool.partial !== undefined) items.push({ ...base, op: "update", partial: tool.partial });
 		if (tool.ended)
 			items.push({ ...base, op: "end", ...(tool.isError === undefined ? {} : { isError: tool.isError }) });
@@ -252,17 +283,34 @@ export function liveResetItems(state: LiveFoldState): LiveItem[] {
 	];
 }
 
+/** The presentation a tool item leaves: its `presentation`, or its `patch` applied to the one held. */
+function presentationAfter(existing: ToolPresentation | undefined, item: LiveToolItem): ToolPresentation | undefined {
+	if (item.presentation !== undefined) return item.presentation;
+	if (item.patch === undefined) return existing;
+	if (existing === undefined) throw new LivePatchError(`No presentation of tool call ${item.toolCallId} to patch`);
+	return patchToolPresentation(existing, item.patch);
+}
+
 function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolItem): LiveStreamingTool {
 	switch (item.op) {
-		case "start":
-			return { toolName: item.toolName, ...(item.args === undefined ? {} : { args: item.args }), ended: false };
+		case "start": {
+			const presentation = presentationAfter(undefined, item);
+			return {
+				toolName: item.toolName,
+				...(item.args === undefined ? {} : { args: item.args }),
+				...(presentation === undefined ? {} : { presentation }),
+				ended: false,
+			};
+		}
 		case "update": {
 			const args = item.args ?? existing?.args;
 			const partial = item.partial ?? existing?.partial;
+			const presentation = presentationAfter(existing?.presentation, item);
 			return {
 				toolName: item.toolName,
 				...(args === undefined ? {} : { args }),
 				...(partial === undefined ? {} : { partial }),
+				...(presentation === undefined ? {} : { presentation }),
 				ended: existing?.ended ?? false,
 				...(existing?.isError === undefined ? {} : { isError: existing.isError }),
 			};
@@ -270,11 +318,13 @@ function applyToolItem(existing: LiveStreamingTool | undefined, item: LiveToolIt
 		case "end": {
 			const args = item.args ?? existing?.args;
 			const partial = item.partial ?? existing?.partial;
+			const presentation = presentationAfter(existing?.presentation, item);
 			const isError = item.isError ?? existing?.isError;
 			return {
 				toolName: item.toolName,
 				...(args === undefined ? {} : { args }),
 				...(partial === undefined ? {} : { partial }),
+				...(presentation === undefined ? {} : { presentation }),
 				ended: true,
 				...(isError === undefined ? {} : { isError }),
 			};

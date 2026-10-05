@@ -1,4 +1,6 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { ToolCall, ToolResultMessage } from "@hansjm10/volt-ai";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
@@ -9,6 +11,9 @@ import type { ToolDefinition } from "../extensions/types.ts";
 import type { SessionEntry, SessionManager } from "../session-manager.ts";
 import { assertCurrentSessionSnapshot, isHostOnlySessionEntry, loadEntriesFromFile } from "../session-manager.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../theme/runtime.ts";
+import { BUILTIN_PRESENTERS } from "../tools/presenters.ts";
+import { type PresenterSet, presentCustomMessage, presentToolCall } from "../ui/presentation.ts";
+import { messagePresentationHtml, type PresentedHtml, toolPresentationHtml } from "./ui-node-html.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -39,6 +44,8 @@ export interface ExportOptions {
 	themeName?: string;
 	/** Optional tool renderer for custom tools */
 	toolRenderer?: ToolHtmlRenderer;
+	/** The presenters tool calls and custom messages export with; the built-in tools' by default. */
+	presenters?: PresenterSet;
 }
 
 /** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
@@ -137,6 +144,10 @@ interface SessionData {
 	tools?: Array<Pick<ToolDefinition, "name" | "description" | "parameters">>;
 	/** Pre-rendered HTML for custom tool calls/results, keyed by tool call ID */
 	renderedTools?: Record<string, RenderedToolHtml>;
+	/** The presentations of tool calls whose tools present themselves, as HTML, by tool call id. */
+	presentedTools?: Record<string, PresentedHtml>;
+	/** The presentations of custom messages whose types have presenters, as HTML, by entry id. */
+	presentedMessages?: Record<string, PresentedHtml>;
 }
 
 /**
@@ -177,7 +188,77 @@ function generateHtml(sessionData: SessionData, themeName?: string): string {
 }
 
 /** Tools rendered directly by the HTML template (not pre-rendered via TUI→ANSI→HTML pipeline) */
-const TEMPLATE_RENDERED_TOOLS = new Set(["bash", "read", "write", "edit", "ls"]);
+const TEMPLATE_RENDERED_TOOLS = new Set(["ls"]);
+
+/**
+ * The presentations of the tool calls and custom messages of `entries`, as
+ * HTML: calls whose tools present themselves, and custom messages whose types
+ * have presenters. A call presents with its result, or as pending.
+ */
+export function presentSessionEntries(
+	entries: readonly SessionEntry[],
+	presenters: PresenterSet,
+	cwd: string,
+): Pick<SessionData, "presentedTools" | "presentedMessages"> {
+	const results = new Map<string, ToolResultMessage>();
+	for (const entry of entries) {
+		if (entry.type === "message" && entry.message.role === "toolResult") {
+			results.set(entry.message.toolCallId, entry.message);
+		}
+	}
+	const presentedTools: Record<string, PresentedHtml> = {};
+	const presentedMessages: Record<string, PresentedHtml> = {};
+	for (const entry of entries) {
+		if (entry.type === "custom_message" && entry.display) {
+			const presentation = presentCustomMessage(
+				presenters.message(entry.customType),
+				{
+					customType: entry.customType,
+					content: entry.content,
+					...(entry.details === undefined ? {} : { details: entry.details }),
+				},
+				PRESENTATION_MAX_SERIALIZED_BYTES,
+			);
+			if (presentation) presentedMessages[entry.id] = messagePresentationHtml(presentation);
+			continue;
+		}
+		if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+		for (const block of entry.message.content) {
+			if (block.type !== "toolCall") continue;
+			const call: ToolCall = block;
+			const presenter = presenters.tool(call.name);
+			if (presenter === undefined) continue;
+			const result = results.get(call.id);
+			const presentation = presentToolCall(
+				presenter,
+				call.name,
+				{
+					args: call.arguments,
+					argsComplete: true,
+					state: result === undefined ? "pending" : "done",
+					...(result === undefined
+						? {}
+						: {
+								result: {
+									content: result.content,
+									...(result.details === undefined ? {} : { details: result.details }),
+									isError: result.isError,
+									partial: false,
+								},
+							}),
+					cwd,
+				},
+				PRESENTATION_MAX_SERIALIZED_BYTES,
+			);
+			const html = toolPresentationHtml(presentation);
+			if (html) presentedTools[call.id] = html;
+		}
+	}
+	return {
+		...(Object.keys(presentedTools).length === 0 ? {} : { presentedTools }),
+		...(Object.keys(presentedMessages).length === 0 ? {} : { presentedMessages }),
+	};
+}
 
 /**
  * Pre-render custom tools to HTML using their TUI renderers.
@@ -266,6 +347,7 @@ export async function exportSessionToHtml(
 		systemPrompt: state?.systemPrompt,
 		tools: state?.tools?.map((t) => ({ name: t.name, description: t.description, parameters: t.parameters })),
 		renderedTools,
+		...presentSessionEntries(entries, opts.presenters ?? BUILTIN_PRESENTERS, sm.getCwd()),
 	};
 
 	const html = generateHtml(sessionData, opts.themeName);
@@ -318,6 +400,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		leafId,
 		systemPrompt: undefined,
 		tools: undefined,
+		...presentSessionEntries(entries, opts.presenters ?? BUILTIN_PRESENTERS, header.cwd),
 	};
 
 	const html = generateHtml(sessionData, opts.themeName);

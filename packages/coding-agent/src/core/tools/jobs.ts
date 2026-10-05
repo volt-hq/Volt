@@ -31,7 +31,14 @@ import type { BackgroundJobDiagnosticEvent } from "../background-job-diagnostics
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { Theme } from "../theme/runtime.ts";
-import type { WorkExecution, WorkExecutor, WorkKindDefinition, WorkRegistry } from "../work/registry.ts";
+import {
+	type WorkContext,
+	type WorkExecution,
+	type WorkExecutor,
+	type WorkKindDefinition,
+	type WorkRegistry,
+	workText,
+} from "../work/registry.ts";
 import { formatDuration, getTextOutput } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "./truncate.ts";
@@ -46,6 +53,8 @@ export const JOB_WAIT_MAX = 64;
 export const JOB_LIST_MAX = 64;
 /** Most output a job keeps: the newest 50 KB or 2000 lines. */
 export const JOB_OUTPUT_MAX_BYTES = DEFAULT_MAX_BYTES;
+/** Longest last output line a running job reports as its progress. */
+const JOB_PROGRESS_MAX_CHARS = 300;
 /** Jobs this runtime ran whose timing it keeps after they ended. */
 const ENDED_RUNS_MAX = 64;
 
@@ -171,6 +180,27 @@ function boundedOutput(result: AgentToolResult<unknown>): { text: string; trunca
 }
 
 /**
+ * Report a running job's newest output to its work item, as a snapshot, and
+ * its last line as the item's progress: clients see both live and read the
+ * output again only when they changed.
+ */
+function report(ctx: WorkContext, run: JobRun, update: AgentToolResult<unknown>): void {
+	const truncation = isRecord(update.details) ? update.details.truncation : undefined;
+	const total = isRecord(truncation) && typeof truncation.totalBytes === "number" ? truncation.totalBytes : undefined;
+	ctx.outputSnapshot({
+		text: run.output,
+		truncated: run.outputTruncated,
+		bytes: total ?? Buffer.byteLength(run.output, "utf-8"),
+	});
+	const last = jobText(run.output)
+		.split("\n")
+		.map((line) => line.trim())
+		.filter(Boolean)
+		.at(-1);
+	if (last !== undefined) ctx.progress({ text: workText(last, JOB_PROGRESS_MAX_CHARS) });
+}
+
+/**
  * The jobs of one conversation: the `job` work kind, the executors of the
  * jobs this runtime runs, and the reads, waits, and cancels the `jobs` tool
  * and clients use. Records come from the conversation's work registry.
@@ -207,10 +237,6 @@ export class JobRuntime {
 			title: (input) => (isRecord(input) && typeof input.label === "string" ? input.label : "Background job"),
 			// The log keeps which tool runs; the command or task is the title.
 			redactInput: (input) => ({ tool: jobTool(input) }),
-			output: (workId) => {
-				const run = this.runs.get(workId);
-				return run ? { text: run.output, truncated: run.outputTruncated } : undefined;
-			},
 		};
 	}
 
@@ -423,7 +449,8 @@ export class JobRuntime {
 				const result = await job.run(controller.signal, (update) => {
 					if (!accepting || invalid) return;
 					try {
-						this.capture(run, cloneCanonicalData(update, "Background job progress"));
+						if (this.capture(run, cloneCanonicalData(update, "Background job progress")))
+							report(ctx, run, update);
 					} catch (error) {
 						invalid = error instanceof Error ? error : new Error(String(error));
 						controller.abort(invalid);
@@ -461,13 +488,15 @@ export class JobRuntime {
 		};
 	}
 
-	private capture(run: JobRun, result: AgentToolResult<unknown>): void {
+	/** Keep a job's newest output; whether it changed. */
+	private capture(run: JobRun, result: AgentToolResult<unknown>): boolean {
 		const { text, truncated } = boundedOutput(result);
-		if (text === run.output && truncated === run.outputTruncated) return;
+		if (text === run.output && truncated === run.outputTruncated) return false;
 		if (text !== run.output && text) run.lastOutputAt = Date.now();
 		run.output = text;
 		run.outputTruncated = truncated;
 		this.changed();
+		return true;
 	}
 
 	/** Whether the tool of job `id` returned and its finish is not recorded yet. */

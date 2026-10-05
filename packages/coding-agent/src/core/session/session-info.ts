@@ -21,6 +21,7 @@ import { getLatestCompactionEntry, type SessionManager, serializeSessionJsonlSna
 import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { getThemeByName, theme } from "../theme/runtime.ts";
+import type { PresenterSet } from "../ui/presentation.ts";
 
 /** The text of a user message's content, without its images. */
 export function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
@@ -91,6 +92,8 @@ export interface SessionInfoHost {
 	/** The runtime state an HTML export renders. */
 	state(): AgentSessionState;
 	getToolDefinition(name: string): ToolDefinition | undefined;
+	/** The presenters tool calls and custom messages export with. */
+	presenters(): PresenterSet;
 	emit(event: AgentSessionEvent): void;
 }
 
@@ -311,6 +314,7 @@ export class SessionInfo {
 			outputPath,
 			themeName,
 			toolRenderer,
+			presenters: this.host.presenters(),
 		});
 	}
 

@@ -20,6 +20,7 @@ import { LiveState } from "../src/core/host/live-state.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/protocol/transport/index.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { builtinSessionPresenters } from "./utilities/test-presenters.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
 
@@ -98,6 +99,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 	const session = {
 		leafId,
 		liveState: new LiveState(),
+		presenters: builtinSessionPresenters(),
 		autoCompactionEnabled: false,
 		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		followUpMode: "all" as const,

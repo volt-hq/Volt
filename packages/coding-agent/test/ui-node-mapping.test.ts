@@ -444,8 +444,9 @@ describe("tool card", () => {
 		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [running] Executing");
 		toolCard.setProps({ ...base, state: "pending", elapsedMs: undefined });
 		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [pending] Executing");
-		// The title gives way to the chrome first.
-		expect(lines(toolCard, 24)[1]).toBe(" $… [pending] Executing");
+		// Where the title would shrink to almost nothing, the state goes on its own line.
+		expect(lines(toolCard, 24).slice(1, 3)).toEqual([" $ npm test", " [pending] Executing"]);
+		expect(lines(toolCard, 32)[1]).toBe(" $ npm test [pending] Executing");
 		toolCard.setProps({ ...base, presentation: { ...base.presentation, hidden: true } });
 		expect(toolCard.render(60).lines).toEqual([]);
 	});

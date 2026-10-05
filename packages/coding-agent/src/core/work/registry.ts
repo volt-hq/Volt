@@ -17,9 +17,10 @@
  * {@link WORK_CHECKPOINT_INTERVAL_MS} (a later phase replaces one still
  * waiting, and a finish drops it), and an item records at most
  * {@link WORK_CHECKPOINTS_MAX} checkpoints over its lifetime, its resumes
- * included; later phases stay live only. Fine-grained progress and output reach
- * clients through the live `work/<workId>` value (live.ts); a finished
- * item's notice follows its kind's delivery (delivery.ts).
+ * included; later phases stay live only. Fine-grained progress, output, and
+ * the kind's detail reach clients through the live `work/<workId>` value
+ * (live.ts), so clients read output again only when its value changes; a
+ * finished item's notice follows its kind's delivery (delivery.ts).
  *
  * Work of a kind that needs approval starts `awaiting_approval`; its
  * executor runs once `approve` checkpoints `running`, and a cancel or close
@@ -67,6 +68,7 @@ import { Check } from "typebox/value";
 import type { ConversationHost } from "../host/conversation-host.ts";
 import type { LiveState } from "../host/live-state.ts";
 import type { HostClient } from "../host/targets.ts";
+import type { WorkDetailInput } from "../ui/presentation.ts";
 import { WorkDeliveries } from "./delivery.ts";
 import { WorkLiveFeed } from "./live.ts";
 
@@ -129,6 +131,12 @@ export interface WorkContext {
 	checkpoint(progress: WorkProgress, detail?: UiNode): void;
 	/** Output: its newest {@link WORK_OUTPUT_MAX_UTF8_BYTES} become the result's output unless the execution names its own. */
 	output(text: string): void;
+	/**
+	 * Output as a snapshot, for work whose tool reports its newest output
+	 * whole: `text` replaces the output reported so far, and `bytes` is how
+	 * much output the work produced in all.
+	 */
+	outputSnapshot(output: { readonly text: string; readonly truncated: boolean; readonly bytes: number }): void;
 }
 
 export type WorkExecutor = (ctx: WorkContext) => Promise<WorkExecution>;
@@ -190,8 +198,12 @@ export interface WorkKindDefinition {
 	 * runs, with its signal aborted, to release what was prepared.
 	 */
 	resume?(item: WorkRecord, signal: AbortSignal): WorkExecutor | Promise<WorkExecutor>;
-	/** Output of running work the kind keeps itself, such as a tool's latest tail, instead of reporting it through `output`. */
-	output?(workId: string): { readonly text: string; readonly truncated: boolean } | undefined;
+	/**
+	 * The detail of a running item, presented from its record, progress, and
+	 * output: pure and synchronous. A detail the executor reports with its
+	 * progress replaces it; one the presenter throws for is left out.
+	 */
+	detail?(work: WorkDetailInput): UiNode | undefined;
 }
 
 export interface WorkStartOptions {
@@ -310,6 +322,15 @@ class OutputTail {
 		this.bytes += bytes;
 		// Cut in batches, so a stream of small writes stays linear.
 		if (this.bytes > 2 * WORK_OUTPUT_MAX_UTF8_BYTES) this.cut();
+	}
+
+	/** Replace the output with a snapshot of the newest; `received` becomes `bytes` unless it is less. */
+	replace(text: string, truncated: boolean, bytes: number): void {
+		const tail = outputTail(text, truncated);
+		this.text = tail.text;
+		this.bytes = Buffer.byteLength(tail.text, "utf8");
+		this.truncated = tail.truncated;
+		this.received = Math.max(this.received, Number.isSafeInteger(bytes) && bytes > 0 ? bytes : this.bytes);
 	}
 
 	snapshot(): { text: string; truncated: boolean } {
@@ -772,10 +793,7 @@ export class WorkRegistry {
 		}
 		const active = this.active.get(workId);
 		if (active && active.output.received > 0) return { ...active.output.snapshot(), final: false };
-		const own = (active?.definition ?? this.kinds.get(record.kind))?.output?.(workId);
-		return own === undefined
-			? { text: "", truncated: false, final: false }
-			: { ...outputTail(own.text, own.truncated), final: false };
+		return { text: "", truncated: false, final: false };
 	}
 
 	/**
@@ -979,7 +997,11 @@ export class WorkRegistry {
 		active.controller.signal.addEventListener("abort", () => active.approval?.resolve(false), { once: true });
 		this.active.set(record.workId, active);
 		EXECUTING.add(this.executingKey(record.workId));
-		this.liveFeed.attach(record.workId);
+		const present = definition.detail;
+		this.liveFeed.attach(
+			record.workId,
+			present === undefined ? undefined : (progress) => this.presentDetail(active, present, progress),
+		);
 		this.runningChanged();
 		if (this.closed) {
 			// The conversation closed while the work started: it ends as the closing left it.
@@ -987,6 +1009,33 @@ export class WorkRegistry {
 			active.controller.abort(new Error("The conversation closed"));
 		}
 		return active;
+	}
+
+	/** The detail the kind presents for running `active`, or none when it throws or returns nothing. */
+	private presentDetail(
+		active: ActiveWork,
+		present: NonNullable<WorkKindDefinition["detail"]>,
+		progress: WorkProgress | undefined,
+	): UiNode | undefined {
+		const record = this.get(active.workId);
+		if (!record || record.outcome !== undefined) return undefined;
+		// Every client sees the detail: a kind that keeps its work from some remote clients presents
+		// without the input and output those clients may not read.
+		const gated = (active.definition.requires?.length ?? 0) > 0;
+		try {
+			return present({
+				workId: record.workId,
+				title: record.title,
+				input: gated ? null : record.input,
+				state: record.state === "cancelling" || active.cancelling ? "cancelling" : "running",
+				...(progress === undefined ? {} : { progress }),
+				output: gated
+					? { text: "", truncated: false, bytes: active.output.received }
+					: { ...active.output.snapshot(), bytes: active.output.received },
+			});
+		} catch {
+			return undefined;
+		}
 	}
 
 	private detach(active: ActiveWork): void {
@@ -1028,6 +1077,11 @@ export class WorkRegistry {
 			output: (text) => {
 				if (active.detached || typeof text !== "string") return;
 				active.output.append(text);
+				this.liveFeed.output(active.workId, active.output.received);
+			},
+			outputSnapshot: ({ text, truncated, bytes }) => {
+				if (active.detached || typeof text !== "string") return;
+				active.output.replace(text, truncated === true, bytes);
 				this.liveFeed.output(active.workId, active.output.received);
 			},
 		};

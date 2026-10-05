@@ -1,13 +1,15 @@
 /**
  * The transcript view of a message-like entry (RFC §4.3): one shape for every
- * profile, a pure function of the entry and the log before it. Text is
- * bounded per entry by the profile (`truncated` says the `content` query has
- * the rest); tool items carry their tool call's arguments from the entry's
- * ancestors and, on full-fidelity profiles, diff and patch previews. On a
- * transcript profile, a work notice's text is rebuilt from its details.
+ * profile, a pure function of the entry, the log before it, and the
+ * presenter set. Text is bounded per entry by the profile (`truncated` says
+ * the `content` query has the rest); tool items carry their tool call's
+ * arguments from the entry's ancestors, their presentation, and, on
+ * full-fidelity profiles, diff and patch previews; a custom message whose
+ * type has a presenter carries its presentation. On a transcript profile, a
+ * work notice's text is rebuilt from its details.
  */
 
-import type { ImageContent, TextContent, ToolCall } from "@hansjm10/volt-ai";
+import type { ImageContent, JsonValue, TextContent, ToolCall } from "@hansjm10/volt-ai";
 import {
 	type TranscriptItem,
 	WORK_NOTICE_CUSTOM_TYPE,
@@ -20,6 +22,7 @@ import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../subagents/tool-names.ts";
 import { workText } from "../../work/registry.ts";
 import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
+import { type PresentationSource, projectMessagePresentation, projectToolPresentation } from "./presentation.ts";
 import {
 	boundSummaryWithMetadata,
 	boundText,
@@ -33,8 +36,11 @@ import {
 	TOOL_SUMMARY_LIMIT,
 } from "./tool-view.ts";
 
-/** The log before a projected entry: lookups by id, host-only records included. */
-export interface ProjectionSource {
+/**
+ * The log before a projected entry (lookups by id, host-only records
+ * included), and what presents its tool calls and custom messages.
+ */
+export interface ProjectionSource extends PresentationSource {
 	entry(id: string): CommittedSessionEntry | undefined;
 }
 
@@ -98,6 +104,29 @@ function textItem(
 	const text = boundScalars(extractVisibleTextContent(content), profile.limits.textScalars);
 	const imageCount = messageImages(content).length;
 	return { role, text: text.text, truncated: text.truncated, ...(imageCount > 0 ? { imageCount } : {}) };
+}
+
+/** A displayed custom message's view: its text, and its presentation when its type has a presenter. */
+function customItem(
+	id: string,
+	message: { customType: string; content: string | (TextContent | ImageContent)[]; details?: unknown },
+	source: ProjectionSource,
+	profile: Profile,
+): TranscriptItem {
+	const presentation = projectMessagePresentation(
+		id,
+		{
+			customType: message.customType,
+			content: message.content,
+			...(message.details === undefined ? {} : { details: message.details as JsonValue }),
+		},
+		source,
+		profile,
+	);
+	return {
+		...textItem(customRole(message.customType), message.content, profile),
+		...(presentation === undefined ? {} : { presentation }),
+	};
 }
 
 /** The role a displayed custom message shows with; remote-visible types keep their remote role. */
@@ -235,6 +264,26 @@ function toolResultItem(
 	const full = profile.fidelity === "full";
 	const diffPreview = full ? getBoundedString(details, "diff", MUTATION_PREVIEW_LIMIT) : undefined;
 	const patchPreview = full ? getBoundedString(details, "patch", MUTATION_PREVIEW_LIMIT) : undefined;
+	const presentation = projectToolPresentation(
+		entry.id,
+		toolName,
+		{
+			args: args ?? {},
+			argsComplete: true,
+			state: "done",
+			result: {
+				content: message.content,
+				...(message.details === undefined ? {} : { details: message.details }),
+				isError: message.isError,
+				partial: false,
+			},
+		},
+		// The generic presentation shows the arguments the view carries: a call's own, on a full-fidelity
+		// profile, only for a tool whose arguments the view does not project.
+		projectedArgs ?? (profile.fidelity === "full" ? (args ?? {}) : {}),
+		source,
+		profile,
+	);
 	return {
 		role: "tool",
 		text: summary.text,
@@ -250,11 +299,14 @@ function toolResultItem(
 		...(imageCount > 0 ? { imageCount } : {}),
 		...(diffPreview === undefined ? {} : { diffPreview }),
 		...(patchPreview === undefined ? {} : { patchPreview }),
+		presentation,
 	};
 }
 
 function bashItem(
+	id: string,
 	message: { command: string; output: string; exitCode?: number; cancelled: boolean; truncated: boolean },
+	source: ProjectionSource,
 	profile: Profile,
 ): TranscriptItem {
 	const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
@@ -265,6 +317,29 @@ function bashItem(
 	else if (message.exitCode !== undefined) parts.push(`exit ${message.exitCode}`);
 	const summary = boundSummaryWithMetadata(parts.join("; "), TOOL_SUMMARY_LIMIT);
 	const output = boundScalars(message.output, profile.limits.textScalars);
+	// A user's command presents as the bash tool's would: its output, then how it ended.
+	const status = message.cancelled
+		? "Command aborted"
+		: message.exitCode !== undefined && message.exitCode !== 0
+			? `Command exited with code ${message.exitCode}`
+			: "";
+	const presentation = projectToolPresentation(
+		id,
+		"bash",
+		{
+			args: { command: message.command },
+			argsComplete: true,
+			state: "done",
+			result: {
+				content: [{ type: "text", text: [message.output, status].filter(Boolean).join("\n\n") }],
+				isError: failed,
+				partial: false,
+			},
+		},
+		{ command: message.command },
+		source,
+		profile,
+	);
 	return {
 		role: "tool",
 		text: summary.text,
@@ -278,6 +353,7 @@ function bashItem(
 		...(output.text.length > 0
 			? { output: output.text, outputTruncated: output.truncated || message.truncated }
 			: {}),
+		presentation,
 	};
 }
 
@@ -308,7 +384,7 @@ function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile:
 			return { role: "system", text: summary.text, truncated: summary.truncated };
 		}
 		case "custom_message":
-			return entry.display ? textItem(customRole(entry.customType), entry.content, profile) : undefined;
+			return entry.display ? customItem(entry.id, entry, source, profile) : undefined;
 		case "message": {
 			const message = entry.message;
 			switch (message.role) {
@@ -322,9 +398,9 @@ function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile:
 				case "toolResult":
 					return toolResultItem(entry, message, source, profile);
 				case "bashExecution":
-					return bashItem(message, profile);
+					return bashItem(entry.id, message, source, profile);
 				case "custom":
-					return message.display ? textItem(customRole(message.customType), message.content, profile) : undefined;
+					return message.display ? customItem(entry.id, message, source, profile) : undefined;
 				default:
 					return undefined;
 			}

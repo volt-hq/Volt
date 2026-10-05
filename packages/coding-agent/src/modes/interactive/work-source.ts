@@ -182,21 +182,35 @@ export class TuiWorkSource implements WorkSource {
 	}
 
 	items(): WorkItemView[] {
-		const conversation = this.host.conversation();
-		const work = conversation.work;
-		const records = work.list();
+		const records = this.host.conversation().work.list();
 		const open = records.filter((record) => record.outcome === undefined).reverse();
 		const finished = records
 			.filter((record) => record.outcome !== undefined)
 			.sort((left, right) => (right.finishedOrdinal ?? 0) - (left.finishedOrdinal ?? 0))
 			.slice(0, CLIENT_WORK_FINISHED_MAX);
+		return this.views([...open, ...finished]);
+	}
+
+	/** The work the tool call `toolCallId` started, finished work older than the list included. */
+	itemsOfToolCall(toolCallId: string): WorkItemView[] {
+		return this.views(
+			this.host
+				.conversation()
+				.work.list()
+				.filter((record) => record.toolCallId === toolCallId),
+		);
+	}
+
+	private views(records: readonly WorkRecord[]): WorkItemView[] {
+		const conversation = this.host.conversation();
+		const work = conversation.work;
 		const time = (ordinal: number | undefined): number | undefined => {
 			if (ordinal === undefined) return undefined;
 			const timestamp = conversation.session.sessionManager.getCommittedEntryAt(ordinal)?.timestamp;
 			const parsed = timestamp === undefined ? Number.NaN : Date.parse(timestamp);
 			return Number.isFinite(parsed) ? parsed : undefined;
 		};
-		return [...open, ...finished].map((record) => {
+		return records.map((record) => {
 			const suspended = work.suspended(record);
 			const live = this.live.get(record.workId);
 			const startedAt = time(record.startedOrdinal);

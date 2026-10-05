@@ -16,7 +16,11 @@
  * the redactor folds the raw patch, redacts the patched value, and sends the
  * client the patch from the redacted value it holds to the new one, or the
  * whole value when that is smaller or the two differ beyond the node. A reset
- * carries the patched values.
+ * carries the patched values. A running tool's presentation is redacted the
+ * same way: whole, without image data, within the remote presentation bound
+ * (a presentation that does not fit becomes its tool's name only), and sent
+ * as a patch from the redacted presentation the client holds when that is
+ * smaller.
  */
 
 import { Buffer } from "node:buffer";
@@ -27,6 +31,7 @@ import type {
 	HostResponse,
 	LiveItem,
 	LiveValue,
+	ToolPresentation,
 	UiNode,
 	UiPatchOp,
 } from "@hansjm10/volt-protocol";
@@ -40,6 +45,8 @@ import {
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer, type IrohRemoteSanitizerOptions } from "../remote/iroh/sanitizer.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { fitPresentation } from "../ui/presentation.ts";
+import { presentationChange } from "../ui/presentation-state.ts";
 import { redactedWorkPhase } from "../work/phase.ts";
 import {
 	emptyLiveFold,
@@ -49,6 +56,7 @@ import {
 	type LiveFoldState,
 	liveCommitOf,
 } from "./live-fold.ts";
+import { withoutImages } from "./projection/presentation.ts";
 import { projectSubagentDetails } from "./projection/tool-view.ts";
 
 type LiveFrame = Extract<HostFrame, { type: "live" }>;
@@ -70,6 +78,8 @@ export interface RemoteRedactionOptions extends IrohRemoteSanitizerOptions {
 	readonly textScalars: number;
 	/** Most serialized bytes of a streaming assistant message a client is sent in one item. */
 	readonly assistantSnapshotBytes: number;
+	/** Largest tool presentation a client is sent, as serialized JSON in UTF-8 bytes. */
+	readonly presentationBytes: number;
 }
 
 /** Identifiers the client sent, on the frame that answers it: never rewritten. */
@@ -128,6 +138,13 @@ interface HeldChange {
 	readonly key: string;
 	readonly before: LiveValue | undefined;
 	readonly after: LiveValue | undefined;
+}
+
+/** What a sent tool item did to the presentation the client holds for its call. */
+interface HeldPresentation {
+	readonly toolCallId: string;
+	readonly before: ToolPresentation | undefined;
+	readonly after: ToolPresentation;
 }
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -220,6 +237,8 @@ interface StreamingView {
 	seq: number;
 	/** The redacted panels and work items the client holds, by raw key: what the next patch of each starts from. */
 	readonly held: Map<string, LiveValue>;
+	/** The redacted presentations of running tools the client holds, by tool call id. */
+	readonly presentations: Map<string, ToolPresentation>;
 }
 
 function newView(basedOn: number): StreamingView {
@@ -231,6 +250,7 @@ function newView(basedOn: number): StreamingView {
 		bytes: 0,
 		seq: 0,
 		held: new Map(),
+		presentations: new Map(),
 	};
 }
 
@@ -434,7 +454,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	const redactTool = (item: ToolItem): ToolItem => {
-		const redacted = sanitize(item);
+		const { presentation: _presentation, patch: _patch, ...rest } = item;
+		const redacted = sanitize(rest);
 		const subagent = item.toolName === "subagent" || item.toolName === SUBAGENT_REGISTRY_TOOL_NAME;
 		const partial = redacted.partial;
 		return {
@@ -465,6 +486,41 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 						},
 					}),
 		};
+	};
+
+	/**
+	 * A raw presentation as the client may receive it: redacted whole, image
+	 * nodes as their description, and within the presentation bound; one that
+	 * does not fit is its tool's name only.
+	 */
+	const redactPresentation = (presentation: ToolPresentation, toolName: string): ToolPresentation => {
+		const redacted = sanitizeUi(presentation);
+		const summary = withoutImages(redacted.summary);
+		const body = withoutImages(redacted.body);
+		const shaped: ToolPresentation = {
+			...redacted,
+			...(summary === undefined ? {} : { summary }),
+			...(body === undefined ? {} : { body }),
+		};
+		return fitPresentation(shaped, options.presentationBytes) ?? { title: sanitizeText(toolName) };
+	};
+
+	/**
+	 * A raw tool item, already folded: its own fields redacted, and what it
+	 * changed of the call's presentation as a change from the redacted
+	 * presentation the client holds.
+	 */
+	const redactToolItem = (view: StreamingView, item: ToolItem): Sent[] => {
+		const base = redactTool(item);
+		if (item.presentation === undefined && item.patch === undefined) return [{ item: base }];
+		const raw = view.raw.tools.get(item.toolCallId)?.presentation;
+		if (raw === undefined) return [{ item: base }];
+		const after = redactPresentation(raw, item.toolName);
+		// A start replaces whatever the client held for the call.
+		const before = item.op === "start" ? undefined : view.presentations.get(item.toolCallId);
+		view.presentations.set(item.toolCallId, after);
+		const change = presentationChange(before, after);
+		return [{ item: { ...base, ...change }, tool: { toolCallId: item.toolCallId, before, after } }];
 	};
 
 	/** Remember how option values were redacted, so an answer maps back to the host's values. */
@@ -561,8 +617,11 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return jsonBytes(bounded) <= LIVE_VALUE_MAX_BYTES ? bounded : undefined;
 	};
 
-	/** A sent item and, under a patchable key, what it changes of the value the client holds. */
-	type Sent = { readonly item: LiveItem; readonly held?: HeldChange };
+	/**
+	 * A sent item and, under a patchable key, what it changes of the value the
+	 * client holds; for a tool item, what it changes of the call's presentation.
+	 */
+	type Sent = { readonly item: LiveItem; readonly held?: HeldChange; readonly tool?: HeldPresentation };
 
 	/** Record that the client now holds `after` under `key`. */
 	const hold = (view: StreamingView, key: string, after: LiveValue | undefined): HeldChange => {
@@ -596,7 +655,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "assistant_end":
 				return sent([item]);
 			case "tool":
-				return sent([redactTool(item)]);
+				return redactToolItem(view, item);
 			case "set": {
 				if (item.key.startsWith("host_request/") && item.value.kind !== "host_request") return [];
 				const value = redactValue(item.value);
@@ -629,8 +688,35 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			frame,
 		);
 		const diverged = new Set<string>();
+		const divergedTools = new Set<string>();
 		const kept: LiveItem[] = [];
 		sent.forEach((each, index) => {
+			const tool = each.tool;
+			if (tool !== undefined && each.item.type === "tool") {
+				const fits = fitting.has(index);
+				if (!divergedTools.has(tool.toolCallId)) {
+					if (fits) {
+						view.presentations.set(tool.toolCallId, tool.after);
+						kept.push(each.item);
+						return;
+					}
+					// The client keeps what it held: later changes of the call in this frame are left out.
+					divergedTools.add(tool.toolCallId);
+					if (tool.before === undefined) view.presentations.delete(tool.toolCallId);
+					else view.presentations.set(tool.toolCallId, tool.before);
+					return;
+				}
+				const { presentation, patch: _patch, ...rest } = each.item;
+				if (fits && presentation !== undefined) {
+					// A whole presentation starts over from nothing the client holds.
+					divergedTools.delete(tool.toolCallId);
+					view.presentations.set(tool.toolCallId, tool.after);
+					kept.push(each.item);
+				} else if (fits) {
+					kept.push(rest);
+				}
+				return;
+			}
 			const key = each.held?.key;
 			// A later clear or whole value starts over from nothing the client holds: it is sent, and held.
 			if (
@@ -664,7 +750,11 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const previous = views.get(frame.subscriptionId);
 		const view = previous ?? newView(frame.basedOn);
 		views.set(frame.subscriptionId, view);
-		if (frame.reset === true || frame.basedOn !== view.raw.basedOn) clearStreaming(view);
+		if (frame.reset === true || frame.basedOn !== view.raw.basedOn) {
+			clearStreaming(view);
+			// A client discards running tools, and their presentations, with the streaming state.
+			view.presentations.clear();
+		}
 		if (frame.reset === true) view.held.clear();
 		view.raw = foldLiveFrame(view.raw, { basedOn: frame.basedOn, reset: frame.reset, items: [] });
 		const sent: Sent[] = [];
@@ -715,6 +805,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 						if (commit) {
 							view.raw = foldLiveCommit(view.raw, commit);
 							if (commit.role === "assistant") clearStreaming(view);
+							else view.presentations.delete(commit.toolCallId);
 						}
 					}
 					const redacted = sanitize(frame);

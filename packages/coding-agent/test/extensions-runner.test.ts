@@ -729,6 +729,34 @@ export default function(volt) {
 			const missing = runner.getMessageRenderer("not-exists");
 			expect(missing).toBeUndefined();
 		});
+
+		it("gets the first message presenter of a type, with the extension that registered it", async () => {
+			for (const id of ["a-presenter", "b-presenter"]) {
+				fs.writeFileSync(
+					path.join(extensionsDir, `${id}.ts`),
+					`
+					export const manifest = { id: "${id}", displayName: "${id}" };
+					export default function(volt) {
+						volt.registerMessagePresenter("my-type", () => ({ body: [{ type: "text", text: "${id}" }] }));
+						let error;
+						try { volt.registerMessagePresenter("", () => ({ body: [] })); } catch (caught) { error = caught; }
+						if (!error) throw new Error("An empty type must be refused");
+						try { volt.registerMessagePresenter("other", "not a function"); error = undefined; } catch (caught) { error = caught; }
+						if (!error) throw new Error("A presenter must be a function");
+					}
+				`,
+				);
+			}
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const presenter = runner.getMessagePresenter("my-type");
+			expect(presenter?.extensionId).toBe("a-presenter");
+			expect(presenter?.present({ customType: "my-type", content: "" })).toEqual({
+				body: [{ type: "text", text: "a-presenter" }],
+			});
+			expect(runner.getMessagePresenter("other")).toBeUndefined();
+		});
 	});
 
 	describe("flags", () => {

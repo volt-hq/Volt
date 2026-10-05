@@ -12,21 +12,22 @@
  * as a one-line description.
  */
 
-import type {
-	UiCardNode,
-	UiCodeNode,
-	UiFormNode,
-	UiImageNode,
-	UiKeyValueNode,
-	UiNode,
-	UiNodeAction,
-	UiNodeFormField,
-	UiNodeStyledText,
-	UiNodeToken,
-	UiProgressNode,
-	UiTableNode,
-	UiTerminalNode,
-	UiTextNode,
+import {
+	UI_NODE_TERMINAL_MAX_LINES,
+	type UiCardNode,
+	type UiCodeNode,
+	type UiFormNode,
+	type UiImageNode,
+	type UiKeyValueNode,
+	type UiNode,
+	type UiNodeAction,
+	type UiNodeFormField,
+	type UiNodeStyledText,
+	type UiNodeToken,
+	type UiProgressNode,
+	type UiTableNode,
+	type UiTerminalNode,
+	type UiTextNode,
 } from "@hansjm10/volt-protocol";
 import {
 	ActionBar,
@@ -70,6 +71,10 @@ export interface UiNodeViewOptions {
 	readonly intents?: UiIntentSink;
 	/** Show image nodes as terminal images when the terminal can. Defaults to true. */
 	readonly showImages?: boolean;
+	/** Widest terminal image, in cells; 60 by default. */
+	readonly imageWidthCells?: number;
+	/** Show every line of terminal nodes instead of their newest 12, as tool cards do. */
+	readonly fullTerminals?: boolean;
 }
 
 /** Most rows a terminal node shows, its newest lines. */
@@ -259,12 +264,14 @@ class CodeView implements Component {
 class ImageView implements Component {
 	private node: UiImageNode;
 	private readonly showImages: boolean;
+	private readonly maxWidthCells: number;
 	private image: Image | undefined;
 	private description: string | undefined;
 
-	constructor(node: UiImageNode, showImages: boolean) {
+	constructor(node: UiImageNode, showImages: boolean, maxWidthCells: number) {
 		this.node = node;
 		this.showImages = showImages;
+		this.maxWidthCells = maxWidthCells;
 	}
 
 	set(node: UiImageNode): void {
@@ -290,7 +297,7 @@ class ImageView implements Component {
 				this.node.data,
 				this.node.mimeType,
 				{ fallbackColor: (text) => theme.fg("muted", text) },
-				{ maxWidthCells: IMAGE_MAX_WIDTH_CELLS },
+				{ maxWidthCells: this.maxWidthCells },
 			);
 			return this.image.render(width);
 		}
@@ -473,8 +480,13 @@ class FormView extends Form {
 	}
 }
 
-function terminalProps(node: UiTerminalNode) {
-	return { lines: node.lines, omittedLines: node.omittedLines, maxVisibleRows: TERMINAL_VISIBLE_ROWS };
+function terminalProps(node: UiTerminalNode, full: boolean) {
+	return {
+		lines: node.lines,
+		omittedLines: node.omittedLines,
+		maxLines: UI_NODE_TERMINAL_MAX_LINES,
+		...(full ? {} : { maxVisibleRows: TERMINAL_VISIBLE_ROWS }),
+	};
 }
 
 function tableProps(node: UiTableNode) {
@@ -489,6 +501,8 @@ function textToken(node: UiTextNode): UiNodeToken {
 export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegistry<UiNode> {
 	const { intents } = options;
 	const showImages = options.showImages ?? true;
+	const imageWidthCells = Math.max(1, Math.floor(options.imageWidthCells ?? IMAGE_MAX_WIDTH_CELLS));
+	const fullTerminals = options.fullTerminals === true;
 	const registry = new ViewRegistry<UiNode>();
 	registry.register("text", {
 		create: (node) => new StyledTextView(node.text, textToken(node)),
@@ -540,10 +554,11 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 		},
 	});
 	registry.register("terminal", {
-		create: (node) => new TitledView(new TerminalOutput(TUI_SEMANTIC_THEME, terminalProps(node)), node.title),
+		create: (node) =>
+			new TitledView(new TerminalOutput(TUI_SEMANTIC_THEME, terminalProps(node, fullTerminals)), node.title),
 		update: (view, node) => {
 			view.setTitle(node.title);
-			view.body.setProps(terminalProps(node));
+			view.body.setProps(terminalProps(node, fullTerminals));
 		},
 	});
 	registry.register("code", {
@@ -554,7 +569,7 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 		},
 	});
 	registry.register("image", {
-		create: (node) => new ImageView(node, showImages),
+		create: (node) => new ImageView(node, showImages, imageWidthCells),
 		update: (view, node) => view.set(node),
 	});
 	registry.register("tree", {

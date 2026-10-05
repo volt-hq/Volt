@@ -16,13 +16,17 @@
  * An executor sees the work id, an abort signal, progress, checkpoints, and
  * output; never the host, its clients, or the session. Its result keeps a
  * summary, output, data, and the notice's own text; never a child
- * conversation.
+ * conversation. A kind's `detail` presents a running item's detail from the
+ * item; what it returns is normalized under the extension's action policy and
+ * bounded, and an item it throws for shows its progress only.
  */
 
 import type { JsonValue } from "@hansjm10/volt-ai";
 import {
 	REMOTE_CAPABILITIES,
 	type RemoteCapability,
+	type UiNode,
+	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 	type WorkKind,
 	type WorkProgress,
 	type WorkProgressStep,
@@ -36,6 +40,8 @@ import type {
 	WorkRunContext,
 	WorkRunResult,
 } from "../extensions/types.ts";
+import { normalizeUiNode } from "../ui/normalize.ts";
+import { refuseThenable, type WorkDetailInput, type WorkDetailPresenter } from "../ui/presentation.ts";
 import { type WorkContext, type WorkExecution, type WorkRegistry, workText } from "./registry.ts";
 
 /** A kind's name within its extension. */
@@ -70,7 +76,10 @@ export function validateWorkKind(name: unknown, kind: unknown = {}): WorkKindDec
 		);
 	}
 	if (!isRecord(kind)) throw new TypeError(`Work kind ${name} must be declared as an object`);
-	const { delivery = "none", cancellable = true, cancelOnAbort, maxActive = 1, requires = [] } = kind;
+	const { delivery = "none", cancellable = true, cancelOnAbort, maxActive = 1, requires = [], detail } = kind;
+	if (detail !== undefined && typeof detail !== "function") {
+		throw new TypeError(`Work kind ${name}: detail must be a function`);
+	}
 	if (typeof delivery !== "string" || !DELIVERIES.has(delivery)) {
 		throw new TypeError(`Work kind ${name}: delivery must be "none", "message", or "wake"`);
 	}
@@ -97,8 +106,12 @@ export function validateWorkKind(name: unknown, kind: unknown = {}): WorkKindDec
 		...(cancelOnAbort === false ? { cancelOnAbort } : {}),
 		maxActive,
 		requires: Object.freeze([...new Set(capabilities.filter(isCapability))]),
+		...(detail === undefined ? {} : { detail: detail as WorkDetailPresenter }),
 	});
 }
+
+/** Largest detail an extension kind presents, as serialized JSON in UTF-8 bytes: room for its progress in the live value. */
+const EXTENSION_DETAIL_MAX_BYTES = WORK_CHECKPOINT_MAX_SERIALIZED_BYTES - 1024;
 
 /** Progress a client can render: text without control sequences, finite numbers, and well-formed steps. */
 function keptProgress(progress: unknown): WorkProgress | undefined {
@@ -218,6 +231,7 @@ export class ExtensionKinds {
 					...(kind.requires === undefined || kind.requires.length === 0 ? {} : { requires: kind.requires }),
 					maxActive: kind.maxActive ?? 1,
 					title: () => name,
+					...(kind.detail === undefined ? {} : { detail: this.detailOf(extensionId, kind.detail) }),
 				});
 				owned.set(name, { kind: workKind, remove });
 				this.kinds.set(extensionId, owned);
@@ -227,6 +241,19 @@ export class ExtensionKinds {
 			}
 		}
 		return refusals;
+	}
+
+	/** The detail an extension kind presents, normalized under the extension's action policy and bounded. */
+	private detailOf(extensionId: string, present: WorkDetailPresenter): (work: WorkDetailInput) => UiNode | undefined {
+		return (work) => {
+			// The presenter sees a copy: what it changes never reaches the work record.
+			const detail = present(structuredClone(work));
+			refuseThenable(detail);
+			return normalizeUiNode(detail, {
+				policy: { owner: "extension", extensionId, ownsWork: (workId) => this.owns(extensionId, workId) },
+				maxBytes: EXTENSION_DETAIL_MAX_BYTES,
+			});
+		};
 	}
 
 	/** Whether work `workId` is of a kind of the extension with manifest id `extensionId`. */

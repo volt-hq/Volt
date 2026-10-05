@@ -58,6 +58,8 @@ import { McpAuthRequests } from "./mcp-auth-requests.ts";
 interface ToolDefinitionEntry {
 	definition: ToolDefinition<any, any>;
 	sourceInfo: SourceInfo;
+	/** The manifest id of the extension that registered the tool, if one did. */
+	extensionId?: string;
 }
 
 function normalizePromptSnippet(text: string | undefined): string | undefined {
@@ -118,6 +120,8 @@ export interface SessionToolRuntimeHost {
 	/** Whether the session is a review finding discussion. */
 	isReviewDiscussion(): boolean;
 	emit(event: AgentSessionEvent): void;
+	/** The registered tools changed, and with them the presenters of their calls. */
+	presentersChanged(): void;
 }
 
 export type SessionToolRuntimeOptions = Pick<
@@ -316,6 +320,19 @@ export class SessionToolRuntime {
 	/** The registered tool definition, whatever the mode. */
 	registeredDefinition(name: string): ToolDefinition<any, any> | undefined {
 		return this.toolDefinitions.get(name)?.definition;
+	}
+
+	/** The registered tool definition, whatever the mode, and the extension that registered it, if one did. */
+	registeredEntry(
+		name: string,
+	): { readonly definition: ToolDefinition<any, any>; readonly extensionId?: string } | undefined {
+		const entry = this.toolDefinitions.get(name);
+		return entry === undefined
+			? undefined
+			: {
+					definition: entry.definition,
+					...(entry.extensionId === undefined ? {} : { extensionId: entry.extensionId }),
+				};
 	}
 
 	/** Whether the tool is a trusted built-in host tool. */
@@ -609,9 +626,11 @@ export class SessionToolRuntime {
 			definitionRegistry.set(tool.definition.name, {
 				definition: tool.definition,
 				sourceInfo: tool.sourceInfo,
+				...("extensionId" in tool && tool.extensionId !== undefined ? { extensionId: tool.extensionId } : {}),
 			});
 		}
 		this.toolDefinitions = definitionRegistry;
+		this.host.presentersChanged();
 		this.toolPromptSnippets = new Map(
 			Array.from(definitionRegistry.values())
 				.map(({ definition }) => {
