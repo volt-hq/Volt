@@ -4,6 +4,10 @@
  * Runs isolated review/fix cycles over the cumulative branch diff. The loop
  * refuses to start unless the working tree is clean, fixes all review findings,
  * and commits each fix interval before reviewing the updated branch again.
+ *
+ * Settings (`/extensions`, or `extensions.review-loop.settings` in
+ * settings.json): `maxLoops` (default 5) and `baseBranch` (default: detected);
+ * `/review-loop [max-loops] [base-branch]` overrides them for one run.
  */
 
 import { spawn } from "node:child_process";
@@ -13,13 +17,19 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ExecResult, ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 
-const DEFAULT_MAX_LOOPS = 5;
 const MAX_REVIEW_DIFF_CHARS = 150_000;
 const STATE_TYPE = "review-loop-memory";
 const REVIEW_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;
 const FIX_TOOLS = ["read", "bash", "edit", "write", "grep", "find", "ls"] as const;
 
 type JsonRecord = Record<string, unknown>;
+
+/** The settings the manifest declares (package.json `volt.settings`), with their defaults applied. */
+type ReviewLoopSettings = {
+	readonly maxLoops: number;
+	readonly baseBranch?: string;
+};
+type ReviewLoopApi = ExtensionAPI<ReviewLoopSettings>;
 
 interface ParsedLoopArgs {
 	maxLoops: number;
@@ -238,16 +248,16 @@ function isRecord(value: unknown): value is JsonRecord {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseLoopArgs(argsText: string): ParsedLoopArgs {
+function parseLoopArgs(argsText: string, defaultMaxLoops: number): ParsedLoopArgs {
 	const tokens = argsText.trim().split(/\s+/).filter(Boolean);
-	let maxLoops = DEFAULT_MAX_LOOPS;
+	let maxLoops = defaultMaxLoops;
 
 	if (tokens[0] && /^\d+$/.test(tokens[0])) {
 		maxLoops = Number.parseInt(tokens.shift() ?? "", 10);
 	}
 
 	if (!Number.isSafeInteger(maxLoops) || maxLoops < 1) {
-		return { maxLoops: DEFAULT_MAX_LOOPS, error: "Loop count must be a positive integer." };
+		return { maxLoops: defaultMaxLoops, error: "Loop count must be a positive integer." };
 	}
 
 	if (tokens[0]?.toLowerCase() === "uncommitted") {
@@ -857,13 +867,36 @@ async function commitFixes(
 	return revResult.stdout.trim();
 }
 
-function updateProgress(ctx: ExtensionCommandContext, lines: string[]): void {
-	ctx.ui.setWidget("review-loop", lines);
-	ctx.ui.setStatus("review-loop", lines[0] ?? "review-loop");
+/** Show what the loop does now: a status line, and a panel with the headline and its details. */
+function updateProgress(ctx: ExtensionCommandContext, headline: string, details: Array<[label: string, value: string]>): void {
+	ctx.ui.setPanel("progress", {
+		node: {
+			type: "card",
+			title: [{ text: headline, token: "accent" }],
+			sections: [
+				{
+					key: "details",
+					children: [
+						{
+							type: "keyValue",
+							key: "details",
+							items: details.map(([label, value]) => ({ key: label, label, value })),
+						},
+					],
+				},
+			],
+		},
+	});
+	ctx.ui.setStatus("review-loop", [{ text: headline, token: "accent" }]);
 }
 
-async function runReviewLoop(volt: ExtensionAPI, argsText: string, ctx: ExtensionCommandContext): Promise<void> {
-	const parsedArgs = parseLoopArgs(argsText);
+function clearProgress(ctx: ExtensionCommandContext): void {
+	ctx.ui.setStatus("review-loop", undefined);
+	ctx.ui.setPanel("progress", undefined);
+}
+
+async function runReviewLoop(volt: ReviewLoopApi, argsText: string, ctx: ExtensionCommandContext): Promise<void> {
+	const parsedArgs = parseLoopArgs(argsText, volt.settings.maxLoops);
 	if (parsedArgs.error) {
 		ctx.ui.notify(parsedArgs.error, "error");
 		return;
@@ -890,7 +923,7 @@ async function runReviewLoop(volt: ExtensionAPI, argsText: string, ctx: Extensio
 		return;
 	}
 
-	const base = parsedArgs.base ?? (await detectBaseBranch(volt, ctx));
+	const base = parsedArgs.base ?? volt.settings.baseBranch ?? (await detectBaseBranch(volt, ctx));
 	if (!base) {
 		ctx.ui.notify("Could not detect a base branch. Use /review-loop 5 <base-branch>.", "error");
 		return;
@@ -911,10 +944,9 @@ async function runReviewLoop(volt: ExtensionAPI, argsText: string, ctx: Extensio
 				return;
 			}
 
-			updateProgress(ctx, [
-				`review-loop ${iteration}/${parsedArgs.maxLoops}: reviewing ${base}...HEAD`,
-				`Model: ${modelRef}`,
-				`Prior fix commits: ${history.length}`,
+			updateProgress(ctx, `review-loop ${iteration}/${parsedArgs.maxLoops}: reviewing ${base}...HEAD`, [
+				["Model", modelRef],
+				["Prior fix commits", String(history.length)],
 			]);
 
 			const resolved = await resolveBranchReview(volt, ctx, base);
@@ -955,11 +987,14 @@ async function runReviewLoop(volt: ExtensionAPI, argsText: string, ctx: Extensio
 				return;
 			}
 
-			updateProgress(ctx, [
+			updateProgress(
+				ctx,
 				`review-loop ${iteration}/${parsedArgs.maxLoops}: fixing ${parsedReview.findings.length} finding${parsedReview.findings.length === 1 ? "" : "s"}`,
-				`Target: ${resolved.diffCommand}`,
-				`Prior fix commits: ${history.length}`,
-			]);
+				[
+					["Target", resolved.diffCommand],
+					["Prior fix commits", String(history.length)],
+				],
+			);
 
 			const fixRun = await runIsolatedVolt({
 				cwd: ctx.cwd,
@@ -1012,12 +1047,11 @@ async function runReviewLoop(volt: ExtensionAPI, argsText: string, ctx: Extensio
 			"warning",
 		);
 	} finally {
-		ctx.ui.setStatus("review-loop", undefined);
-		ctx.ui.setWidget("review-loop", undefined);
+		clearProgress(ctx);
 	}
 }
 
-export default function reviewLoop(volt: ExtensionAPI): void {
+export default function reviewLoop(volt: ReviewLoopApi): void {
 	volt.registerCommand("review-loop", {
 		description: "Run isolated branch review/fix loops and commit each fix interval",
 		getArgumentCompletions: (prefix) => {
@@ -1030,8 +1064,7 @@ export default function reviewLoop(volt: ExtensionAPI): void {
 			try {
 				await runReviewLoop(volt, args, ctx);
 			} catch (error) {
-				ctx.ui.setStatus("review-loop", undefined);
-				ctx.ui.setWidget("review-loop", undefined);
+				clearProgress(ctx);
 				ctx.ui.notify(`review-loop failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
 		},
