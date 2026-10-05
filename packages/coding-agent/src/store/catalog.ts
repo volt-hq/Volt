@@ -1,32 +1,94 @@
+/**
+ * The store catalog (RFC §8.4): the packages `volt store` and `/store` offer.
+ *
+ * Each entry pins one reviewed commit of a package on an allowlisted git
+ * host and repeats what the package declares at that commit: its manifest id,
+ * display name, version, and permissions. The review record names the
+ * reviewed commit, which is always the pinned one, so installing or updating
+ * a catalog package only ever moves to a reviewed commit.
+ */
+
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import {
+	EXTENSION_DESCRIPTION_MAX_CHARS,
+	ExtensionDisplayNameSchema,
+	ExtensionIdSchema,
+	type ExtensionPermission,
+	ExtensionPermissionsSchema,
+	stringEnum,
+	UI_NODE_LINE_PATTERN,
+	UI_NODE_TEXT_PATTERN,
+} from "@hansjm10/volt-protocol";
+import { Type } from "typebox";
+import { Compile, type Validator } from "typebox/compile";
+import { formatSchemaError } from "../core/protocol/schema-errors.ts";
+import { parseGitUrl } from "../utils/git.ts";
 
 export const DEFAULT_STORE_CATALOG_URL = "https://volt-cli.dev/store/catalog.json";
 
 const DEFAULT_STORE_CATALOG_FETCH_TIMEOUT_MS = 10000;
 
+/** The catalog format this Volt reads. */
+export const STORE_CATALOG_SCHEMA_VERSION = 2;
+
+/**
+ * Hosts a catalog entry's source may name. Entries pin a commit fetched from
+ * one of them over HTTPS; the catalog parser, the resolver, and the catalog
+ * check in CI refuse any other host.
+ */
+export const STORE_CATALOG_GIT_HOSTS: readonly string[] = ["github.com"];
+
 export type StoreResourceType = "extensions" | "skills" | "prompts" | "themes";
 
 export interface StoreCatalog {
-	schemaVersion: 1;
+	schemaVersion: typeof STORE_CATALOG_SCHEMA_VERSION;
 	packages: StoreCatalogPackage[];
 }
 
+/** Who reviewed an entry's pinned commit, when, and what they checked. */
+export interface StoreCatalogReview {
+	/** The reviewed commit: always the commit the entry's source pins. */
+	commit: string;
+	reviewer: string;
+	/** The review date, `YYYY-MM-DD`. */
+	date: string;
+	notes: string;
+}
+
+/**
+ * One store package. `id`, `name`, `version`, and `permissions` repeat the
+ * manifest id, display name, package version, and permissions of the package
+ * at the pinned commit; the catalog check in CI verifies they match.
+ */
 export interface StoreCatalogPackage {
 	id: string;
 	name: string;
 	description: string;
+	version: string;
+	/** `git:https://<host>/<owner>/<repo>@<commit>`: an allowlisted host and the reviewed commit. */
 	source: string;
-	repo?: string;
-	author?: string;
-	license?: string;
-	verified?: boolean;
-	categories?: string[];
-	resources?: StoreResourceType[];
+	repo: string;
+	permissions: ExtensionPermission[];
+	review: StoreCatalogReview;
+	author: string;
+	license: string;
+	categories: string[];
+	resources: StoreResourceType[];
 	compatibility?: { volt?: string };
 	image?: string;
 	video?: string;
+}
+
+/** Where a catalog entry's package lives: an allowlisted host, a repository, and the pinned commit. */
+export interface StoreCatalogPin {
+	host: string;
+	/** `<owner>/<repo>`. */
+	path: string;
+	/** The HTTPS clone URL. */
+	repo: string;
+	commit: string;
 }
 
 export interface StoreCatalogValidationResult {
@@ -63,159 +125,186 @@ export interface LoadDefaultStoreCatalogOptions {
 	timeoutMs?: number;
 }
 
-const RESOURCE_TYPES = new Set<StoreResourceType>(["extensions", "skills", "prompts", "themes"]);
+const closed = { additionalProperties: false } as const;
+
+function line(maxLength: number) {
+	return Type.String({
+		minLength: 1,
+		maxLength,
+		pattern: UI_NODE_LINE_PATTERN,
+		"x-volt-expected": `be one non-empty line of at most ${maxLength} characters without control characters`,
+	});
+}
+
+function text(maxLength: number) {
+	return Type.String({
+		minLength: 1,
+		maxLength,
+		pattern: UI_NODE_TEXT_PATTERN,
+		"x-volt-expected": `be non-empty text of at most ${maxLength} characters without control characters`,
+	});
+}
+
+const HttpsUrlSchema = Type.String({
+	maxLength: 2048,
+	pattern: "^https://\\S+$",
+	"x-volt-expected": "be an https URL",
+});
+
+const CommitSchema = Type.String({
+	pattern: "^[0-9a-f]{40}$",
+	"x-volt-expected": "be a full 40-character lowercase commit hash",
+});
+
+const StoreCatalogReviewSchema = Type.Object(
+	{
+		commit: CommitSchema,
+		reviewer: line(80),
+		date: Type.String({ pattern: "^\\d{4}-\\d{2}-\\d{2}$", "x-volt-expected": "be a date written YYYY-MM-DD" }),
+		notes: text(2000),
+	},
+	closed,
+);
+
+const StoreCatalogPackageSchema = Type.Object(
+	{
+		id: ExtensionIdSchema,
+		name: ExtensionDisplayNameSchema,
+		description: text(EXTENSION_DESCRIPTION_MAX_CHARS),
+		version: Type.String({
+			minLength: 1,
+			maxLength: 64,
+			pattern: "^[0-9A-Za-z.+-]+$",
+			"x-volt-expected": "be a package version",
+		}),
+		source: Type.String({
+			maxLength: 512,
+			pattern: UI_NODE_LINE_PATTERN,
+			"x-volt-expected": "be one line without control characters",
+		}),
+		repo: HttpsUrlSchema,
+		permissions: ExtensionPermissionsSchema,
+		review: StoreCatalogReviewSchema,
+		author: line(80),
+		license: line(80),
+		categories: Type.Array(
+			Type.String({ pattern: "^[a-z0-9][a-z0-9-]{0,39}$", "x-volt-expected": "be a lowercase category slug" }),
+			{ maxItems: 10, uniqueItems: true },
+		),
+		resources: Type.Array(stringEnum(["extensions", "skills", "prompts", "themes"]), { uniqueItems: true }),
+		compatibility: Type.Optional(Type.Object({ volt: Type.Optional(line(64)) }, closed)),
+		image: Type.Optional(HttpsUrlSchema),
+		video: Type.Optional(HttpsUrlSchema),
+	},
+	closed,
+);
+
+const SOURCE_PATTERN = /^git:https:\/\/([^/@\s]+)\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)@([0-9a-f]{40})$/;
+
+let packageValidator: Validator | undefined;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function readRequiredString(record: Record<string, unknown>, key: string, errors: string[]): string | undefined {
-	const value = record[key];
-	if (typeof value === "string" && value.trim()) {
-		return value;
+/**
+ * Parse a catalog entry's source, `git:https://<host>/<owner>/<repo>@<commit>`.
+ * Throws unless it names an allowlisted host and a full commit, in the form
+ * the package manager reads the same way.
+ */
+export function parseStoreCatalogSource(source: string): StoreCatalogPin {
+	const match = SOURCE_PATTERN.exec(source);
+	if (!match) {
+		throw new Error(`source must be git:https://<host>/<owner>/<repo>@<40-character commit>, got ${source}`);
 	}
-	errors.push(`${key} must be a non-empty string`);
-	return undefined;
+	const [, host = "", owner = "", name = "", commit = ""] = match;
+	if (!STORE_CATALOG_GIT_HOSTS.includes(host)) {
+		throw new Error(`source host ${host} is not allowed; catalog sources use ${STORE_CATALOG_GIT_HOSTS.join(", ")}`);
+	}
+	if (owner.startsWith(".") || name.startsWith(".") || name.endsWith(".git")) {
+		throw new Error(`source must name <owner>/<repo> without a leading dot or a .git suffix, got ${owner}/${name}`);
+	}
+	const path = `${owner}/${name}`;
+	const repo = `https://${host}/${path}`;
+	// The package manager installs whatever parseGitUrl reads from the source; it must read this one the same way.
+	const parsed = parseGitUrl(source);
+	if (parsed?.host !== host || parsed.path !== path || parsed.repo !== repo || parsed.ref !== commit) {
+		throw new Error(`source ${source} does not parse as ${repo} at ${commit}`);
+	}
+	return { host, path, repo, commit };
 }
 
-function readOptionalString(record: Record<string, unknown>, key: string, errors: string[]): string | undefined {
-	const value = record[key];
-	if (value === undefined) {
-		return undefined;
+/**
+ * Where a catalog package installs from. Throws unless its source names an
+ * allowlisted host and its review record covers the pinned commit.
+ */
+export function getCatalogPackagePin(pkg: StoreCatalogPackage): StoreCatalogPin {
+	const pin = parseStoreCatalogSource(pkg.source);
+	if (pkg.review.commit !== pin.commit) {
+		throw new Error(`review.commit ${pkg.review.commit} is not the pinned commit ${pin.commit}`);
 	}
-	if (typeof value === "string") {
-		return value;
-	}
-	errors.push(`${key} must be a string`);
-	return undefined;
+	return pin;
 }
 
-function readOptionalBoolean(record: Record<string, unknown>, key: string, errors: string[]): boolean | undefined {
-	const value = record[key];
-	if (value === undefined) {
-		return undefined;
-	}
-	if (typeof value === "boolean") {
-		return value;
-	}
-	errors.push(`${key} must be a boolean`);
-	return undefined;
+function isCalendarDate(value: string): boolean {
+	const date = new Date(`${value}T00:00:00Z`);
+	return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 }
 
-function readOptionalStringArray(record: Record<string, unknown>, key: string, errors: string[]): string[] | undefined {
-	const value = record[key];
-	if (value === undefined) {
-		return undefined;
+function isHttpsUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+		return url.protocol === "https:" && url.hostname !== "" && url.username === "" && url.password === "";
+	} catch {
+		return false;
 	}
-	if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) {
-		errors.push(`${key} must be an array of strings`);
-		return undefined;
-	}
-	return [...value];
 }
 
-function readOptionalResources(
-	record: Record<string, unknown>,
-	key: string,
-	errors: string[],
-): StoreResourceType[] | undefined {
-	const value = record[key];
-	if (value === undefined) {
-		return undefined;
+function validateCatalogPackage(value: unknown): { pkg: StoreCatalogPackage } | { error: string } {
+	packageValidator ??= Compile(StoreCatalogPackageSchema);
+	if (!packageValidator.Check(value)) {
+		return { error: formatSchemaError(StoreCatalogPackageSchema, packageValidator.Errors(value)) };
 	}
-	if (!Array.isArray(value)) {
-		errors.push(`${key} must be an array`);
-		return undefined;
+	const pkg: StoreCatalogPackage = structuredClone(value as StoreCatalogPackage);
+	try {
+		getCatalogPackagePin(pkg);
+	} catch (error: unknown) {
+		return { error: error instanceof Error ? error.message : String(error) };
 	}
-
-	const resources: StoreResourceType[] = [];
-	for (const entry of value) {
-		if (typeof entry !== "string" || !RESOURCE_TYPES.has(entry as StoreResourceType)) {
-			errors.push(`${key} contains an invalid resource type`);
-			return undefined;
+	if (!isCalendarDate(pkg.review.date)) {
+		return { error: `review.date ${pkg.review.date} is not a calendar date` };
+	}
+	for (const field of ["repo", "image", "video"] as const) {
+		const url = pkg[field];
+		if (url !== undefined && !isHttpsUrl(url)) {
+			return { error: `${field} must be an https URL without credentials` };
 		}
-		resources.push(entry as StoreResourceType);
 	}
-	return resources;
-}
-
-function readOptionalCompatibility(
-	record: Record<string, unknown>,
-	key: string,
-	errors: string[],
-): { volt?: string } | undefined {
-	const value = record[key];
-	if (value === undefined) {
-		return undefined;
-	}
-	if (!isRecord(value)) {
-		errors.push(`${key} must be an object`);
-		return undefined;
-	}
-	const volt = readOptionalString(value, "volt", errors);
-	return volt === undefined ? {} : { volt };
-}
-
-function validateCatalogPackage(value: unknown, index: number): { pkg?: StoreCatalogPackage; errors: string[] } {
-	const errors: string[] = [];
-	if (!isRecord(value)) {
-		return { errors: [`packages[${index}] must be an object`] };
-	}
-
-	const id = readRequiredString(value, "id", errors);
-	const name = readRequiredString(value, "name", errors);
-	const description = readRequiredString(value, "description", errors);
-	const source = readRequiredString(value, "source", errors);
-	const repo = readOptionalString(value, "repo", errors);
-	const author = readOptionalString(value, "author", errors);
-	const license = readOptionalString(value, "license", errors);
-	const verified = readOptionalBoolean(value, "verified", errors);
-	const categories = readOptionalStringArray(value, "categories", errors);
-	const resources = readOptionalResources(value, "resources", errors);
-	const compatibility = readOptionalCompatibility(value, "compatibility", errors);
-	const image = readOptionalString(value, "image", errors);
-	const video = readOptionalString(value, "video", errors);
-
-	if (errors.length > 0 || !id || !name || !description || !source) {
-		return { errors };
-	}
-
-	const pkg: StoreCatalogPackage = {
-		id,
-		name,
-		description,
-		source,
-		...(repo !== undefined ? { repo } : {}),
-		...(author !== undefined ? { author } : {}),
-		...(license !== undefined ? { license } : {}),
-		...(verified !== undefined ? { verified } : {}),
-		...(categories !== undefined ? { categories } : {}),
-		...(resources !== undefined ? { resources } : {}),
-		...(compatibility !== undefined ? { compatibility } : {}),
-		...(image !== undefined ? { image } : {}),
-		...(video !== undefined ? { video } : {}),
-	};
-	return { pkg, errors: [] };
+	return { pkg };
 }
 
 export function validateStoreCatalog(value: unknown): StoreCatalogValidationResult {
 	if (!isRecord(value)) {
 		throw new Error("Store catalog must be a JSON object");
 	}
-	if (value.schemaVersion !== 1) {
-		throw new Error("Store catalog schemaVersion must be 1");
+	if (value.schemaVersion !== STORE_CATALOG_SCHEMA_VERSION) {
+		throw new Error(`Store catalog schemaVersion must be ${STORE_CATALOG_SCHEMA_VERSION}`);
 	}
 	if (!Array.isArray(value.packages)) {
 		throw new Error("Store catalog packages must be an array");
+	}
+	const unknownField = Object.keys(value).find((key) => key !== "schemaVersion" && key !== "packages");
+	if (unknownField !== undefined) {
+		throw new Error(`Store catalog field "${unknownField}" is not recognized`);
 	}
 
 	const warnings: string[] = [];
 	const packages: StoreCatalogPackage[] = [];
 	const seenIds = new Set<string>();
 	for (let index = 0; index < value.packages.length; index++) {
-		const result = validateCatalogPackage(value.packages[index], index);
-		if (!result.pkg) {
-			warnings.push(`Skipping invalid catalog package at index ${index}: ${result.errors.join("; ")}`);
+		const result = validateCatalogPackage(value.packages[index]);
+		if ("error" in result) {
+			warnings.push(`Skipping invalid catalog package at index ${index}: ${result.error}`);
 			continue;
 		}
 		if (seenIds.has(result.pkg.id)) {
@@ -227,7 +316,7 @@ export function validateStoreCatalog(value: unknown): StoreCatalogValidationResu
 	}
 
 	return {
-		catalog: { schemaVersion: 1, packages },
+		catalog: { schemaVersion: STORE_CATALOG_SCHEMA_VERSION, packages },
 		warnings,
 	};
 }
@@ -325,13 +414,13 @@ export async function loadDefaultStoreCatalog(
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
 			return {
-				catalog: { schemaVersion: 1, packages: [] },
+				catalog: { schemaVersion: STORE_CATALOG_SCHEMA_VERSION, packages: [] },
 				source: "empty",
 				warnings: [`Offline mode enabled and cached store catalog is invalid: ${message}`],
 			};
 		}
 		return {
-			catalog: { schemaVersion: 1, packages: [] },
+			catalog: { schemaVersion: STORE_CATALOG_SCHEMA_VERSION, packages: [] },
 			source: "empty",
 			warnings: ["Offline mode enabled and no cached store catalog is available."],
 		};

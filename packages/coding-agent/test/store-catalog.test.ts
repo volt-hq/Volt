@@ -3,11 +3,21 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+	getCatalogPackagePin,
 	getStoreCatalogCachePath,
 	loadDefaultStoreCatalog,
+	parseStoreCatalogJson,
+	parseStoreCatalogSource,
 	searchCatalogPackages,
 	validateStoreCatalog,
 } from "../src/store/catalog.ts";
+import {
+	NEXT_TEST_STORE_COMMIT,
+	TEST_STORE_COMMIT,
+	testCatalog,
+	testCatalogEntry,
+	testStoreSource,
+} from "./store-catalog-fixtures.ts";
 
 describe("store catalog", () => {
 	let tempDir: string;
@@ -22,58 +32,115 @@ describe("store catalog", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	it("validates entries and skips malformed or duplicate packages", () => {
-		const result = validateStoreCatalog({
-			schemaVersion: 1,
-			packages: [
-				{
-					id: "rtk",
-					name: "RTK",
-					description: "Token optimized shell output",
-					source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
-					resources: ["extensions"],
-				},
-				{
-					id: "bad",
-					name: "Bad",
-					source: "npm:bad@1.0.0",
-				},
-				{
-					id: "rtk",
-					name: "Duplicate",
-					description: "Duplicate",
-					source: "npm:duplicate@1.0.0",
-				},
-			],
-		});
+	it("parses the catalog the site serves without warnings", () => {
+		const raw = readFileSync(new URL("../../../site/public/store/catalog.json", import.meta.url), "utf-8");
 
-		expect(result.catalog.packages.map((pkg) => pkg.id)).toEqual(["rtk"]);
+		const result = parseStoreCatalogJson(raw);
+
+		expect(result.warnings).toEqual([]);
+		expect(result.catalog.packages.length).toBeGreaterThan(0);
+		for (const pkg of result.catalog.packages) {
+			expect(getCatalogPackagePin(pkg).commit).toBe(pkg.review.commit);
+		}
+	});
+
+	it("validates entries and skips malformed or duplicate packages", () => {
+		const { description: _description, ...withoutDescription } = testCatalogEntry("bad");
+		const result = validateStoreCatalog(
+			testCatalog(
+				testCatalogEntry("rtk"),
+				withoutDescription as never,
+				testCatalogEntry("rtk", { name: "Duplicate" }),
+			),
+		);
+
+		expect(result.catalog.packages.map((pkg) => pkg.name)).toEqual(["RTK Output Compression"]);
 		expect(result.warnings).toEqual([
-			"Skipping invalid catalog package at index 1: description must be a non-empty string",
+			'Skipping invalid catalog package at index 1: "description" is required',
 			'Skipping duplicate catalog package id "rtk" at index 2',
 		]);
 	});
 
+	it.each([
+		["the removed verified flag", { verified: true }, '"verified" is not a recognized field'],
+		["an id that is not a manifest id", { id: "Not An Id" }, '"id" must be a lowercase extension id'],
+		["an unknown permission", { permissions: ["root"] }, '"permissions[0]" must be'],
+		["a name with terminal escapes", { name: "RTK \u001b[31mred" }, '"name" must be one non-empty line'],
+		["a plain-http repo link", { repo: "http://github.com/volt-hq/Volt" }, '"repo" must be an https URL'],
+		[
+			"a repo link with credentials",
+			{ repo: "https://user:token@github.com/volt-hq/Volt" },
+			"repo must be an https URL without credentials",
+		],
+		["an npm source", { source: "npm:volt-rtk@0.2.0" }, "source must be git:https://"],
+		["a branch ref", { source: "git:https://github.com/volt-hq/Volt@main" }, "source must be git:https://"],
+		[
+			"a host off the allowlist",
+			{ source: `git:https://gitlab.com/volt-hq/Volt@${TEST_STORE_COMMIT}` },
+			"source host gitlab.com is not allowed",
+		],
+		[
+			"a review of another commit",
+			{ source: testStoreSource(NEXT_TEST_STORE_COMMIT) },
+			`review.commit ${TEST_STORE_COMMIT} is not the pinned commit ${NEXT_TEST_STORE_COMMIT}`,
+		],
+		[
+			"a review date that is not a date",
+			{ review: { commit: TEST_STORE_COMMIT, reviewer: "hansjm10", date: "2026-02-30", notes: "Reviewed." } },
+			"review.date 2026-02-30 is not a calendar date",
+		],
+	])("skips an entry with %s", (_label, overrides, warning) => {
+		const result = validateStoreCatalog(testCatalog({ ...testCatalogEntry("rtk"), ...overrides } as never));
+
+		expect(result.catalog.packages).toEqual([]);
+		expect(result.warnings).toHaveLength(1);
+		expect(result.warnings[0]).toContain(warning);
+	});
+
+	it("rejects other schema versions and unknown top-level fields", () => {
+		expect(() => validateStoreCatalog({ schemaVersion: 1, packages: [] })).toThrow(
+			"Store catalog schemaVersion must be 2",
+		);
+		expect(() => validateStoreCatalog({ schemaVersion: 2, packages: [], mirror: "x" })).toThrow(
+			'Store catalog field "mirror" is not recognized',
+		);
+	});
+
+	it.each([
+		["shorthand", `git:github.com/volt-hq/Volt@${TEST_STORE_COMMIT}`],
+		["plain http", `git:http://github.com/volt-hq/Volt@${TEST_STORE_COMMIT}`],
+		["ssh", `git:ssh://git@github.com/volt-hq/Volt@${TEST_STORE_COMMIT}`],
+		["a port", `git:https://github.com:443/volt-hq/Volt@${TEST_STORE_COMMIT}`],
+		["credentials", `git:https://token@github.com/volt-hq/Volt@${TEST_STORE_COMMIT}`],
+		["a .git suffix", `git:https://github.com/volt-hq/Volt.git@${TEST_STORE_COMMIT}`],
+		["a dot segment", `git:https://github.com/volt-hq/..@${TEST_STORE_COMMIT}`],
+		["a nested path", `git:https://github.com/volt-hq/Volt/sub@${TEST_STORE_COMMIT}`],
+		["an abbreviated commit", "git:https://github.com/volt-hq/Volt@0123456789ab"],
+		["an uppercase commit", `git:https://github.com/volt-hq/Volt@${TEST_STORE_COMMIT.toUpperCase()}`],
+	])("refuses a catalog source with %s", (_label, source) => {
+		expect(() => parseStoreCatalogSource(source)).toThrow();
+	});
+
+	it("reads a canonical catalog source as the package manager does", () => {
+		expect(parseStoreCatalogSource(testStoreSource())).toEqual({
+			host: "github.com",
+			path: "volt-hq/Volt",
+			repo: "https://github.com/volt-hq/Volt",
+			commit: TEST_STORE_COMMIT,
+		});
+	});
+
 	it("searches ids, names, descriptions, and categories case-insensitively", () => {
-		const catalog = validateStoreCatalog({
-			schemaVersion: 1,
-			packages: [
-				{
-					id: "rtk",
-					name: "RTK Output Compression",
-					description: "Token optimized shell output",
-					source: "git:github.com/hansjm10/volt-rtk@v0.1.0",
-					categories: ["Shell"],
-				},
-				{
-					id: "theme-dark",
+		const catalog = validateStoreCatalog(
+			testCatalog(
+				testCatalogEntry("rtk", { categories: ["shell"] }),
+				testCatalogEntry("theme-dark", {
 					name: "Dark Theme",
 					description: "Theme package",
-					source: "npm:@scope/theme-dark@1.0.0",
-					categories: ["Theme"],
-				},
-			],
-		}).catalog;
+					categories: ["theme"],
+				}),
+			),
+		).catalog;
 
 		expect(searchCatalogPackages(catalog, "SHELL").map((pkg) => pkg.id)).toEqual(["rtk"]);
 		expect(searchCatalogPackages(catalog, "theme").map((pkg) => pkg.id)).toEqual(["theme-dark"]);
@@ -81,34 +148,19 @@ describe("store catalog", () => {
 	});
 
 	it("fetches and caches the default catalog", async () => {
-		const fetcher = vi.fn(async () => Response.json({ schemaVersion: 1, packages: [] }));
+		const fetcher = vi.fn(async () => Response.json(testCatalog()));
 
 		const result = await loadDefaultStoreCatalog({ agentDir: tempDir, fetcher });
 
 		expect(result.source).toBe("remote");
 		expect(fetcher).toHaveBeenCalledOnce();
-		expect(JSON.parse(readFileSync(getStoreCatalogCachePath(tempDir), "utf-8"))).toEqual({
-			schemaVersion: 1,
-			packages: [],
-		});
+		expect(JSON.parse(readFileSync(getStoreCatalogCachePath(tempDir), "utf-8"))).toEqual(testCatalog());
 	});
 
 	it("keeps the remote catalog when cache persistence fails", async () => {
 		const agentDir = join(tempDir, "agent-file");
 		writeFileSync(agentDir, "not a directory");
-		const fetcher = vi.fn(async () =>
-			Response.json({
-				schemaVersion: 1,
-				packages: [
-					{
-						id: "remote",
-						name: "Remote",
-						description: "Fresh remote package",
-						source: "npm:@scope/remote@1.0.0",
-					},
-				],
-			}),
-		);
+		const fetcher = vi.fn(async () => Response.json(testCatalog(testCatalogEntry("remote"))));
 
 		const result = await loadDefaultStoreCatalog({ agentDir, fetcher });
 
@@ -118,7 +170,7 @@ describe("store catalog", () => {
 	});
 
 	it("uses the cached catalog in offline mode", async () => {
-		const fetcher = vi.fn(async () => Response.json({ schemaVersion: 1, packages: [] }));
+		const fetcher = vi.fn(async () => Response.json(testCatalog()));
 		await loadDefaultStoreCatalog({ agentDir: tempDir, fetcher });
 
 		const result = await loadDefaultStoreCatalog({ agentDir: tempDir, offline: true });
@@ -131,19 +183,7 @@ describe("store catalog", () => {
 		await loadDefaultStoreCatalog({
 			agentDir: tempDir,
 			url: "https://example.test/catalog-a.json",
-			fetcher: vi.fn(async () =>
-				Response.json({
-					schemaVersion: 1,
-					packages: [
-						{
-							id: "from-a",
-							name: "From A",
-							description: "Catalog A package",
-							source: "npm:@scope/from-a@1.0.0",
-						},
-					],
-				}),
-			),
+			fetcher: vi.fn(async () => Response.json(testCatalog(testCatalogEntry("from-a")))),
 		});
 
 		await expect(
@@ -160,19 +200,7 @@ describe("store catalog", () => {
 	it("falls back to the cached catalog when the remote fetch times out", async () => {
 		await loadDefaultStoreCatalog({
 			agentDir: tempDir,
-			fetcher: vi.fn(async () =>
-				Response.json({
-					schemaVersion: 1,
-					packages: [
-						{
-							id: "cached",
-							name: "Cached",
-							description: "Cached package",
-							source: "npm:@scope/cached@1.0.0",
-						},
-					],
-				}),
-			),
+			fetcher: vi.fn(async () => Response.json(testCatalog(testCatalogEntry("cached")))),
 		});
 		const fetcher = vi.fn(() => new Promise<never>(() => {}));
 		const options = { agentDir: tempDir, fetcher, timeoutMs: 5 };

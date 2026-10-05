@@ -136,27 +136,6 @@ A package declares at most one extension: `id`, `displayName`, and `entry` (the 
 
 Skill, prompt, and theme paths are relative to the package root. Their arrays support glob patterns and `!exclusions`.
 
-### Package Metadata
-
-Packages can include `video` or `image` fields for tools that render package previews:
-
-```json
-{
-  "name": "my-package",
-  "keywords": ["volt-package"],
-  "volt": {
-    "skills": ["./skills"],
-    "video": "https://example.com/demo.mp4",
-    "image": "https://example.com/screenshot.png"
-  }
-}
-```
-
-- **video**: MP4 only. On desktop, autoplays on hover. Clicking opens a fullscreen player.
-- **image**: PNG, JPEG, GIF, or WebP. Displayed as a static preview.
-
-If both are set, video takes precedence.
-
 ## Package Structure
 
 ### Convention Directories

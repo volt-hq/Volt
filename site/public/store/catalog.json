@@ -1,15 +1,24 @@
 {
-	"schemaVersion": 1,
+	"schemaVersion": 2,
 	"packages": [
 		{
 			"id": "rtk",
 			"name": "RTK Output Compression",
 			"description": "Rewrites bash commands through RTK for token-optimized command output.",
-			"source": "git:https://github.com/volt-hq/Volt@6330542c0c2194b67cf374f3c5c24e7643008901",
+			"version": "0.2.0",
+			"source": "git:https://github.com/volt-hq/Volt@ebdd3167752cc733928eb1b4506ddca60a02a718",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/rtk",
+			"permissions": [
+				"exec"
+			],
+			"review": {
+				"commit": "ebdd3167752cc733928eb1b4506ddca60a02a718",
+				"reviewer": "hansjm10",
+				"date": "2026-10-05",
+				"notes": "package.json only on top of 6330542c0c21 (#656): manifest id rtk with permission exec (the extension runs the rtk binary through volt.exec) and version 0.2.0. Extension code unchanged."
+			},
 			"author": "Volt",
 			"license": "MIT",
-			"verified": true,
 			"categories": [
 				"shell",
 				"tokens"
@@ -22,11 +31,22 @@
 			"id": "terminal-bench-harbor",
 			"name": "Terminal-Bench Harbor",
 			"description": "Runs Volt on Terminal-Bench through Harbor.",
-			"source": "git:https://github.com/volt-hq/Volt@fc9fa6cb3d9f0feca6b729640112ac3f8ad963fc",
+			"version": "0.4.0",
+			"source": "git:https://github.com/volt-hq/Volt@5c72af2cdea51af524add85f71f3259d5d319996",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/terminal-bench-harbor",
+			"permissions": [
+				"exec",
+				"network",
+				"fs-write"
+			],
+			"review": {
+				"commit": "5c72af2cdea51af524add85f71f3259d5d319996",
+				"reviewer": "hansjm10",
+				"date": "2026-10-05",
+				"notes": "package.json only on top of fc9fa6cb3d9f (#657): manifest id terminal-bench-harbor with permissions exec, network, fs-write (runs harbor, which fetches tasks and writes job output) and version 0.4.0. Extension and Harbor wrapper code unchanged."
+			},
 			"author": "Volt",
 			"license": "MIT",
-			"verified": true,
 			"categories": [
 				"benchmark",
 				"harbor",
@@ -40,11 +60,22 @@
 			"id": "azure-devops",
 			"name": "Azure DevOps",
 			"description": "Azure DevOps integration tools for Volt.",
-			"source": "git:https://github.com/volt-hq/Volt@51fb02493895cb4038ee40df2df44f76b9433264",
+			"version": "0.2.0",
+			"source": "git:https://github.com/volt-hq/Volt@d08a2434efea3bd8bcee1d55a42da5ff26bd5556",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/azure-devops",
+			"permissions": [
+				"network",
+				"fs-write",
+				"secrets"
+			],
+			"review": {
+				"commit": "d08a2434efea3bd8bcee1d55a42da5ff26bd5556",
+				"reviewer": "hansjm10",
+				"date": "2026-10-05",
+				"notes": "package.json and the lockfile root version only on top of 51fb02493895 (#653): manifest id azure-devops with permissions network, fs-write, secrets (Azure DevOps API calls, /ado-config save writes .volt/azure-devops.json, PAT and bearer tokens from the environment) and version 0.2.0. Extension code and dependencies unchanged."
+			},
 			"author": "Volt",
 			"license": "MIT",
-			"verified": true,
 			"categories": [
 				"azure-devops",
 				"developer-tools",
@@ -58,11 +89,21 @@
 			"id": "review-loop",
 			"name": "Review Loop",
 			"description": "Runs isolated review/fix loops for a branch until findings are resolved.",
-			"source": "git:https://github.com/volt-hq/Volt@bae7a055a905bc462c99e76f4bd32beac34ed450",
+			"version": "0.2.0",
+			"source": "git:https://github.com/volt-hq/Volt@e036331d232effb16fb47bb365256e32fd0ee2a6",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/review-loop",
+			"permissions": [
+				"exec",
+				"fs-write"
+			],
+			"review": {
+				"commit": "e036331d232effb16fb47bb365256e32fd0ee2a6",
+				"reviewer": "hansjm10",
+				"date": "2026-10-05",
+				"notes": "package.json only on top of bae7a055a905 (#655): manifest id review-loop with permissions exec, fs-write (runs git and child volt processes and commits fixes) and version 0.2.0. Extension code unchanged."
+			},
 			"author": "Volt",
 			"license": "MIT",
-			"verified": true,
 			"categories": [
 				"code-review",
 				"automation",
@@ -76,11 +117,21 @@
 			"id": "build-ios-apps",
 			"name": "Build iOS Apps",
 			"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
-			"source": "git:https://github.com/volt-hq/Volt@65c877f0fd0f9d380bc1d9782f0cd53b6ac0c7f8",
+			"version": "0.2.0",
+			"source": "git:https://github.com/volt-hq/Volt@031ec5186d0720113ab6740332e38f11c275a92b",
 			"repo": "https://github.com/volt-hq/Volt/tree/store/build-ios-apps",
+			"permissions": [
+				"exec",
+				"fs-write"
+			],
+			"review": {
+				"commit": "031ec5186d0720113ab6740332e38f11c275a92b",
+				"reviewer": "hansjm10",
+				"date": "2026-10-05",
+				"notes": "package.json and the lockfile root version only on top of 65c877f0fd0f (#654): manifest id build-ios-apps with permissions exec, fs-write (spawns xcodebuildmcp, which builds and writes Xcode artifacts) and version 0.2.0. Extension code, skills, and dependencies unchanged."
+			},
 			"author": "OpenAI",
 			"license": "MIT",
-			"verified": true,
 			"categories": [
 				"developer-tools",
 				"ios",

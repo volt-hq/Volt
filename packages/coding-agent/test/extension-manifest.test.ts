@@ -15,8 +15,10 @@ import { createExtensionRuntime, loadExtensionFromFactory, loadExtensions } from
 import {
 	declaresPackageExtension,
 	defineManifest,
+	ExtensionManifestError,
 	readModuleManifest,
 	readPackageManifest,
+	readVoltFieldManifest,
 	validateManifest,
 } from "../src/core/extensions/manifest.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
@@ -147,7 +149,7 @@ describe("extension manifests", () => {
 	});
 
 	describe("readPackageManifest", () => {
-		it("reads the manifest, version, and entry, leaving resources and previews out", () => {
+		it("reads the manifest, version, and entry, leaving resources out", () => {
 			const root = writePackage(
 				"pkg",
 				{
@@ -155,7 +157,6 @@ describe("extension manifests", () => {
 					displayName: "Pkg",
 					entry: "src/index.ts",
 					skills: ["skills"],
-					image: "https://example.com/i.png",
 				},
 				{ "src/index.ts": "throw new Error('never evaluated');" },
 			);
@@ -167,10 +168,27 @@ describe("extension manifests", () => {
 			});
 		});
 
-		it("declares no extension for a field with only resources and previews", () => {
-			const root = writePackage("skills-only", { skills: ["skills"], prompts: [], video: "x.mp4" });
+		it("declares no extension for a field with only resources", () => {
+			const root = writePackage("skills-only", { skills: ["skills"], prompts: [], themes: [] });
 			expect(declaresPackageExtension(root)).toBe(false);
 			expect(readPackageManifest(root)).toBeUndefined();
+		});
+
+		it("reads image and video as manifest fields, which refuse them: previews belong in the store catalog", () => {
+			const root = writePackage("previews", { skills: ["skills"], video: "https://example.com/demo.mp4" });
+			expect(declaresPackageExtension(root)).toBe(true);
+			expect(() => readPackageManifest(root)).toThrow(ExtensionManifestError);
+		});
+
+		it("checks a volt field as data without looking for the entry", () => {
+			expect(readVoltFieldManifest({ skills: ["skills"] })).toBeUndefined();
+			expect(readVoltFieldManifest({ id: "pkg", displayName: "Pkg", entry: "missing.ts", skills: [] })).toEqual({
+				id: "pkg",
+				displayName: "Pkg",
+				entry: "missing.ts",
+			});
+			expect(() => readVoltFieldManifest({ id: "pkg", displayName: "Pkg" })).toThrow('"entry" is required');
+			expect(() => readVoltFieldManifest("index.ts")).toThrow('The "volt" field of package.json must be an object');
 		});
 
 		it("explains the replaced extensions list", () => {

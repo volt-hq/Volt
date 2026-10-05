@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import type { StoreCatalog, StoreCatalogPackage } from "../src/store/catalog.ts";
+import { testCatalog, testCatalogEntry } from "./store-catalog-fixtures.ts";
 
 type StoreCatalogBrowserContext = {
 	loadStoreCatalog: (required: boolean) => Promise<StoreCatalog | undefined>;
@@ -19,18 +20,7 @@ type InteractiveModeStorePrivate = {
 const interactiveModePrototype = InteractiveMode.prototype as unknown as InteractiveModeStorePrivate;
 
 function createCatalog(): StoreCatalog {
-	return {
-		schemaVersion: 1,
-		packages: [
-			{
-				id: "rtk",
-				name: "RTK Output Compression",
-				description: "Token optimized shell output",
-				source: "npm:volt-rtk",
-				verified: true,
-			},
-		],
-	};
+	return testCatalog(testCatalogEntry("rtk"));
 }
 
 function createStoreCatalogBrowserContext(catalog: StoreCatalog): StoreCatalogBrowserContext {
@@ -41,8 +31,7 @@ function createStoreCatalogBrowserContext(catalog: StoreCatalog): StoreCatalogBr
 		showStatus: vi.fn(),
 		showStoreText: vi.fn(),
 		showStorePackageActions: vi.fn(async () => {}),
-		formatStorePackageOption: (pkg, index) =>
-			`${index + 1}. ${pkg.id} - ${pkg.name}${pkg.verified ? " verified" : ""}`,
+		formatStorePackageOption: (pkg, index) => `${index + 1}. ${pkg.id} - ${pkg.name}`,
 	};
 }
 
@@ -56,7 +45,7 @@ describe("InteractiveMode store browser", () => {
 		expect(context.loadStoreCatalog).toHaveBeenCalledWith(true);
 		expect(context.showExtensionInput).not.toHaveBeenCalled();
 		expect(context.showExtensionSelector).toHaveBeenCalledWith("Store packages", [
-			"1. rtk - RTK Output Compression verified",
+			"1. rtk - RTK Output Compression",
 			"Search",
 			"Cancel",
 		]);

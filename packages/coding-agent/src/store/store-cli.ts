@@ -12,7 +12,13 @@ import {
 	reportProjectTrustWarnings,
 	reportSettingsErrors,
 } from "../package-manager-cli.ts";
-import { findCatalogPackage, loadDefaultStoreCatalog, type StoreCatalog, searchCatalogPackages } from "./catalog.ts";
+import {
+	findCatalogPackage,
+	loadDefaultStoreCatalog,
+	STORE_CATALOG_SCHEMA_VERSION,
+	type StoreCatalog,
+	searchCatalogPackages,
+} from "./catalog.ts";
 import { inspectStorePackage } from "./inspector.ts";
 import {
 	buildStoreInstallPlan,
@@ -308,7 +314,7 @@ async function loadCatalog(agentDir: string, options: { required: boolean }): Pr
 		const message = error instanceof Error ? error.message : String(error);
 		if (!options.required) {
 			console.error(chalk.yellow(`Warning: ${message}; continuing without catalog metadata.`));
-			return { schemaVersion: 1, packages: [] };
+			return { schemaVersion: STORE_CATALOG_SCHEMA_VERSION, packages: [] };
 		}
 		console.error(chalk.red(`Error: ${message}`));
 		process.exitCode = 1;

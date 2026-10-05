@@ -8,6 +8,7 @@ import { inspectStorePackage } from "../src/store/inspector.ts";
 import { buildStoreInstallPlan } from "../src/store/install-plan.ts";
 import { renderStoreInstallPlan } from "../src/store/render.ts";
 import type { StoreResolvedSource } from "../src/store/resolver.ts";
+import { testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
 import { createDirectorySymlinkSync, tryCreateFileSymlinkSync } from "./symlink-utils.ts";
 
 describe("store inspector and install plan", () => {
@@ -83,6 +84,12 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 
 		expect(inspection.packageName).toBe("volt-example");
 		expect(inspection.packageVersion).toBe("1.2.3");
+		expect(inspection.volt).toEqual({
+			manifest: { id: "volt-example", displayName: "Volt Example", entry: "extensions/example.ts" },
+		});
+		expect(inspection.warnings).toEqual([
+			"Local package paths are not reproducible and are inspected directly from disk.",
+		]);
 		// The package is its extension: its manifest names the entry.
 		expect(inspection.discoveredResources.extensions).toEqual(["."]);
 		expect(inspection.discoveredResources.extensions).toEqual((await resolveRuntimeResources(packageDir)).extensions);
@@ -93,7 +100,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(existsSync(sentinelPath)).toBe(false);
 	});
 
-	it("reports a package with the old extensions list as its one extension, as runtime loading does", async () => {
+	it("reports a package with the old extensions list as its one invalid extension, as runtime loading does", async () => {
 		writeFileSync(
 			join(packageDir, "package.json"),
 			JSON.stringify(
@@ -109,7 +116,10 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 
-		expect(inspection.voltManifest?.extensions).toEqual(["extensions/*.ts", "!extensions/dev.ts"]);
+		expect(inspection.volt).toEqual({});
+		expect(inspection.warnings).toContain(
+			`Invalid extension manifest: "volt.extensions" is replaced by the manifest: declare the package's one extension with "id", "displayName", and "entry"`,
+		);
 		expect(inspection.discoveredResources.extensions).toEqual(["."]);
 		expect(inspection.discoveredResources.extensions).toEqual((await resolveRuntimeResources(packageDir)).extensions);
 	});
@@ -257,7 +267,7 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const inspection = await inspectStorePackage({ source: emptyManifestPackageDir, cwd: tempDir });
 		const runtimeResources = await resolveRuntimeResources(emptyManifestPackageDir);
 
-		expect(inspection.voltManifest).toEqual({});
+		expect(inspection.volt).toEqual({});
 		expect(inspection.discoveredResources).toEqual(runtimeResources);
 		expect(inspection.discoveredResources.extensions).toEqual([]);
 		expect(inspection.discoveredResources.skills).toEqual([]);
@@ -279,7 +289,10 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const runtimeResources = await resolveRuntimeResources(invalidManifestPackageDir);
 
 		expect(runtimeResources.extensions).toEqual(["."]);
-		expect(inspection.voltManifest).toEqual({});
+		expect(inspection.volt).toEqual({});
+		expect(inspection.warnings).toContain(
+			'Invalid extension manifest: The "volt" field of package.json must be an object',
+		);
 		expect(inspection.discoveredResources).toEqual(runtimeResources);
 	});
 
@@ -387,18 +400,16 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 		const resolved: StoreResolvedSource = {
 			input: "example",
-			source: packageDir,
+			source: testStoreSource(),
 			kind: "catalog",
-			pinned: false,
+			pinned: true,
 			tracking: false,
-			catalogPackage: {
-				id: "example",
+			catalogPackage: testCatalogEntry("example", {
 				name: "Example",
 				description: "Example",
-				source: packageDir,
 				compatibility: { volt: ">=0.1.0" },
-			},
-			warnings: ["Local package paths are not reproducible."],
+			}),
+			warnings: [],
 		};
 
 		const plan = buildStoreInstallPlan({
@@ -419,22 +430,19 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		expect(rendered).toContain("Scripts:");
 		expect(rendered).toContain("postinstall: node build.js");
 		expect(rendered).toContain("Compatibility: compatible");
+		expect(rendered).toContain("Volt manifest:\n  id: volt-example\n  display name: Volt Example");
+		expect(rendered).toContain("  entry: extensions/example.ts\n  permissions: none");
 	});
 
 	it("renders catalog git plans with package names and shortened source labels", async () => {
 		const inspection = await inspectStorePackage({ source: packageDir, cwd: tempDir });
 		const resolved: StoreResolvedSource = {
 			input: "rtk",
-			source: "git:https://github.com/user/volt-rtk@0123456789abcdef0123456789abcdef01234567",
+			source: testStoreSource(),
 			kind: "catalog",
 			pinned: true,
 			tracking: false,
-			catalogPackage: {
-				id: "rtk",
-				name: "RTK Output Compression",
-				description: "Token optimized shell output",
-				source: "git:https://github.com/user/volt-rtk",
-			},
+			catalogPackage: testCatalogEntry("rtk"),
 			warnings: [],
 		};
 
@@ -447,7 +455,10 @@ writeFileSync(${JSON.stringify(sentinelPath)}, "loaded");
 		const rendered = renderStoreInstallPlan(plan);
 
 		expect(rendered).toContain("Package: rtk - RTK Output Compression");
-		expect(rendered).toContain("Source: git github.com/user/volt-rtk @ 0123456789ab");
-		expect(rendered).not.toContain("git:https://github.com/user/volt-rtk@0123456789abcdef0123456789abcdef01234567");
+		expect(rendered).toContain("Source: git github.com/volt-hq/Volt @ 0123456789ab");
+		expect(rendered).not.toContain(testStoreSource());
+		expect(rendered).toContain(
+			"Permissions: exec\nReviewed: 0123456789ab by hansjm10 on 2026-10-05\nReview notes: Manifest only on top of the last pin.",
+		);
 	});
 });

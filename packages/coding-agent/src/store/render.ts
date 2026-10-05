@@ -1,7 +1,7 @@
 import chalk from "chalk";
 import { parseGitUrl } from "../utils/git.ts";
 import type { StoreCatalogPackage, StoreResourceType } from "./catalog.ts";
-import type { StorePackageInspection, StoreVoltManifest } from "./inspector.ts";
+import type { StorePackageInspection, StoreVoltField } from "./inspector.ts";
 import type { StoreInstallPlan } from "./install-plan.ts";
 import type { StoreResolvedSource } from "./resolver.ts";
 
@@ -48,24 +48,38 @@ function renderRecord(title: string, values: Record<string, string>): string[] {
 	return [`${title}:`, ...entries.map(([name, version]) => `  - ${name}: ${version}`)];
 }
 
-function renderVoltManifest(manifest: StoreVoltManifest | undefined): string[] {
-	if (!manifest) {
+function renderVoltField(volt: StoreVoltField | undefined): string[] {
+	if (!volt) {
 		return ["Volt manifest: none"];
 	}
 	const lines = ["Volt manifest:"];
-	for (const resourceType of RESOURCE_TYPES) {
-		const entries = manifest[resourceType];
+	const manifest = volt.manifest;
+	if (manifest) {
+		lines.push(`  id: ${manifest.id}`);
+		lines.push(`  display name: ${manifest.displayName}`);
+		if (manifest.description) lines.push(`  description: ${manifest.description}`);
+		lines.push(`  entry: ${manifest.entry ?? "none"}`);
+		lines.push(`  permissions: ${formatList(manifest.permissions)}`);
+		if (manifest.settings) lines.push(`  settings: ${formatList(Object.keys(manifest.settings.properties))}`);
+	} else {
+		lines.push("  extension: none");
+	}
+	for (const resourceType of ["skills", "prompts", "themes"] as const) {
+		const entries = volt[resourceType];
 		if (entries !== undefined) {
 			lines.push(`  ${resourceType}: ${formatList(entries)}`);
 		}
 	}
-	if (manifest.image) {
-		lines.push(`  image: ${manifest.image}`);
-	}
-	if (manifest.video) {
-		lines.push(`  video: ${manifest.video}`);
-	}
 	return lines;
+}
+
+/** The catalog's review record and declared permissions for a catalog package. */
+function renderCatalogReview(pkg: StoreCatalogPackage): string[] {
+	return [
+		`Permissions: ${formatList(pkg.permissions)}`,
+		`Reviewed: ${pkg.review.commit.slice(0, 12)} by ${pkg.review.reviewer} on ${pkg.review.date}`,
+		`Review notes: ${pkg.review.notes}`,
+	];
 }
 
 function renderDiscoveredResources(inspection: StorePackageInspection): string[] {
@@ -90,10 +104,10 @@ export function renderCatalogSearch(packages: readonly StoreCatalogPackage[], qu
 
 	const lines = [chalk.bold("Store packages:")];
 	for (const pkg of packages) {
-		const verified = pkg.verified ? " verified" : "";
-		const categories = pkg.categories && pkg.categories.length > 0 ? ` [${pkg.categories.join(", ")}]` : "";
-		lines.push(`${pkg.id} - ${pkg.name}${verified}${categories}`);
+		const categories = pkg.categories.length > 0 ? ` [${pkg.categories.join(", ")}]` : "";
+		lines.push(`${pkg.id} - ${pkg.name} ${pkg.version}${categories}`);
 		lines.push(chalk.dim(`  ${pkg.description}`));
+		lines.push(chalk.dim(`  Permissions: ${formatList(pkg.permissions)}`));
 		lines.push(chalk.dim(`  Source: ${formatStoreSourceSummary(pkg.source)}`));
 	}
 	return lines.join("\n");
@@ -106,12 +120,13 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 		lines.push(chalk.bold(catalogPackage.name));
 		lines.push(`ID: ${catalogPackage.id}`);
 		lines.push(`Description: ${catalogPackage.description}`);
+		lines.push(`Version: ${catalogPackage.version}`);
 		lines.push(`Source: ${formatStoreSourceSummary(catalogPackage.source)}`);
-		lines.push(`Verified: ${catalogPackage.verified === true ? "yes" : "no"}`);
-		if (catalogPackage.repo) lines.push(`Repo: ${catalogPackage.repo}`);
-		if (catalogPackage.author) lines.push(`Author: ${catalogPackage.author}`);
-		if (catalogPackage.license) lines.push(`License: ${catalogPackage.license}`);
-		if (catalogPackage.resources) lines.push(`Catalog resources: ${formatList(catalogPackage.resources)}`);
+		lines.push(...renderCatalogReview(catalogPackage));
+		lines.push(`Repo: ${catalogPackage.repo}`);
+		lines.push(`Author: ${catalogPackage.author}`);
+		lines.push(`License: ${catalogPackage.license}`);
+		lines.push(`Catalog resources: ${formatList(catalogPackage.resources)}`);
 		if (catalogPackage.compatibility?.volt) lines.push(`Volt compatibility: ${catalogPackage.compatibility.volt}`);
 		lines.push("");
 	} else {
@@ -126,7 +141,7 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 	lines.push(`Description: ${inspection.packageDescription ?? "unknown"}`);
 	lines.push(`License: ${inspection.packageLicense ?? "unknown"}`);
 	lines.push(`Repository: ${inspection.packageRepository ?? "unknown"}`);
-	lines.push(...renderVoltManifest(inspection.voltManifest));
+	lines.push(...renderVoltField(inspection.volt));
 	lines.push(...renderDiscoveredResources(inspection));
 	lines.push(...renderRecord("Dependencies", inspection.dependencies));
 	lines.push(...renderRecord("Peer dependencies", inspection.peerDependencies));
@@ -139,10 +154,12 @@ export function renderStoreShow(resolved: StoreResolvedSource, inspection: Store
 export function renderStoreInstallPlan(plan: StoreInstallPlan): string {
 	const target = formatStoreInstallPlanTarget(plan);
 	const source = formatStoreSourceSummary(plan.source);
+	const catalogPackage = plan.resolved.catalogPackage;
 	const lines = [
 		chalk.bold("Store install plan"),
 		...(target !== source ? [`Package: ${target}`] : []),
 		`Source: ${source}`,
+		...(catalogPackage ? renderCatalogReview(catalogPackage) : []),
 		`Scope: ${plan.scope}`,
 		`Tracking: ${plan.tracking ? "yes" : "no"}`,
 		`Script policy: ${plan.scriptPolicy}`,
@@ -154,7 +171,7 @@ export function renderStoreInstallPlan(plan: StoreInstallPlan): string {
 		`Description: ${plan.inspection.packageDescription ?? "unknown"}`,
 		`License: ${plan.inspection.packageLicense ?? "unknown"}`,
 		`Repository: ${plan.inspection.packageRepository ?? "unknown"}`,
-		...renderVoltManifest(plan.inspection.voltManifest),
+		...renderVoltField(plan.inspection.volt),
 		...renderDiscoveredResources(plan.inspection),
 		...renderRecord("Dependencies", plan.inspection.dependencies),
 		...renderRecord("Peer dependencies", plan.inspection.peerDependencies),
