@@ -1,6 +1,6 @@
 {
 	"name": "volt-review-loop",
-	"version": "0.2.0",
+	"version": "0.3.0",
 	"description": "Run isolated review/fix loops for a branch until findings are resolved.",
 	"type": "module",
 	"keywords": [
@@ -20,6 +20,26 @@
 		"displayName": "Review Loop",
 		"description": "Runs isolated review/fix loops for a branch until findings are resolved.",
 		"entry": "extensions/review-loop.ts",
+		"settings": {
+			"type": "object",
+			"properties": {
+				"maxLoops": {
+					"type": "integer",
+					"title": "Maximum loops",
+					"description": "Review/fix cycles /review-loop runs at most. A count in its arguments overrides it.",
+					"minimum": 1,
+					"maximum": 50,
+					"default": 5
+				},
+				"baseBranch": {
+					"type": "string",
+					"title": "Base branch",
+					"description": "Ref the branch diff is taken against. Unset: origin/HEAD, else origin/main, main, origin/master, or master. A base in the arguments overrides it.",
+					"maxLength": 200,
+					"pattern": "[A-Za-z0-9_][A-Za-z0-9._/-]*"
+				}
+			}
+		},
 		"permissions": [
 			"exec",
 			"network",
