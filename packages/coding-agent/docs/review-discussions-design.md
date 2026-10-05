@@ -1,5 +1,7 @@
 # Review finding discussions (#341)
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) (§7, §14 Q7) runs reviews as `review` work items and keeps review state as log entries; a discussion start or reset holds its conversation open for daemon retention instead of a separate pending-work check. Where this document describes review workflows, `unfinished` runs, side tables, or their counters, the [session format](session-format.md#review-state-entries-host-only) and [RPC mode](rpc.md#work) describe the current behavior. The rest of this document is a historical record.
+
 Developer design for independent, host-owned finding conversations. iOS integration is tracked in volt-app #249.
 
 ## Ownership and persistence

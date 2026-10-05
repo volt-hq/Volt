@@ -9,10 +9,10 @@ import type { HostedConversation } from "../src/core/host/hosted-conversation.ts
 import type { HostClient } from "../src/core/host/targets.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import { createRequestUserInputToolDefinition } from "../src/core/tools/request-user-input.ts";
-import { BackgroundJobsInspector } from "../src/modes/interactive/components/background-jobs.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import { UserInputDialog } from "../src/modes/interactive/components/user-input-dialog.ts";
+import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
@@ -205,13 +205,13 @@ describe.each(["regular", "fullscreen"] as const)("native questions in %s Intera
 		}
 	});
 
-	it("returns focus from background inspection and dismisses the inspector on external abort", async () => {
+	it("returns focus from work inspection and dismisses the inspector on external abort", async () => {
 		const f = await fixture(tuiMode);
 		const { harness, access, terminal } = f;
 		const { running, dialog } = await ask(f);
 		terminal.sendInput("\x1bj");
 		await terminal.waitForRender();
-		expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+		expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
 		terminal.sendInput("\r");
 		expect(harness.eventsOfType("tool_execution_end")).toHaveLength(0);
 		terminal.sendInput("\x1b");

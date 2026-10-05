@@ -806,7 +806,8 @@ export interface ReviewWorkflowOptions {
 		resolution: ResolvedReview;
 		signal?: AbortSignal;
 	}) => Promise<boolean>;
-	createHooks?: () => Promise<ReviewWorkflowHooks> | ReviewWorkflowHooks;
+	/** The caller's hooks for the review that runs as work `workId`; its progress is that work's. */
+	createHooks?: (workId: string) => Promise<ReviewWorkflowHooks> | ReviewWorkflowHooks;
 	onReviewModelWarning?: (message: string) => void;
 	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
 	/** The conversation's work: the review runs as its `review` work, which other clients see and may cancel. */
@@ -1973,10 +1974,10 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 	let prepared: PreparedReviewWorkflow | undefined;
 	let cancelFromLocalUi: (() => void) | undefined;
 	try {
-		hooks = await options.createHooks?.();
+		const workId = createReviewWorkflowId();
+		hooks = await options.createHooks?.(workId);
 		if (hooks?.signal?.aborted) return { status: "cancelled" };
 		const admitted = hooks;
-		const workId = createReviewWorkflowId();
 		const startedAt = Date.now();
 		const ended = Promise.withResolvers<ReviewWorkflowEnd>();
 		const execute = async (ctx: WorkContext): Promise<WorkExecution> => {
@@ -1997,7 +1998,11 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 					sessionManager: options.session.sessionWriter?.sessionManager,
 					requireProjectTrust: options.requireProjectTrust,
 					signal,
-					onProgress: admitted?.onProgress,
+					// Preparation reports its stage as the work's progress, which every client sees.
+					onProgress: (message) => {
+						ctx.progress({ text: message });
+						admitted?.onProgress?.(message);
+					},
 				});
 			} catch (error) {
 				if (error instanceof ReviewPreparationCancelledError || signal.aborted) {

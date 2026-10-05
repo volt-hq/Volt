@@ -168,7 +168,7 @@ describe("PR #380: shared session abort admission", () => {
 			finish.resolve();
 			await joined;
 		}
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 		harness.setResponses([fauxAssistantMessage("admission reopened")]);
 		await harness.session.sendCustomMessage({ ...message, content: "allowed after abort" }, { triggerTurn: true });
 		expect(harness.session.getLastAssistantText()).toBe("admission reopened");
@@ -230,7 +230,7 @@ describe("PR #380: shared session abort admission", () => {
 			await expect(tool(harness, "bash").execute("denied", { command: "denied", background: true })).rejects.toThrow(
 				"admission is suspended",
 			);
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 		} finally {
 			finish.resolve();
 			await rejected;

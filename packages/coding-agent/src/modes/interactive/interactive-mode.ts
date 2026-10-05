@@ -19,7 +19,7 @@ import {
 	type OAuthSelectPrompt,
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
-import type { HostRequest, HostResponse, LiveValue } from "@hansjm10/volt-protocol";
+import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -176,7 +176,6 @@ import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
-import { BackgroundJobsInspector, BackgroundJobsStatus } from "./components/background-jobs.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -258,13 +257,17 @@ import { ScopedModelsSelectorComponent } from "./components/scoped-models-select
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
-import { SubagentInspectorComponent } from "./components/subagent-inspector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserInputDialog } from "./components/user-input-dialog.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
+import { WorkInspector } from "./components/work-inspector.ts";
+import { queuedWorkNoticeLine, WorkNoticeComponent, workOutcomeLine } from "./components/work-notice.ts";
+import { WorkStatus } from "./components/work-status.ts";
+import { createUiNodeView } from "./ui-node/index.ts";
+import { TuiWorkSource } from "./work-source.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -510,8 +513,9 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
-	private jobsContainer: Container;
-	private jobsStatus: BackgroundJobsStatus;
+	/** The work of the conversation the TUI shows, for the footer's work line and the work inspector. */
+	private readonly workSource: TuiWorkSource;
+	private workStatus: WorkStatus;
 	private planStatusContainer: Container;
 	private planDetailsContainer: Container;
 	private documentContainer: Container;
@@ -583,9 +587,10 @@ export class InteractiveMode {
 	private liveBackgroundJobTools = new Map<string, { component: ToolExecutionComponent; settled?: boolean }>();
 	private unsubscribeBackgroundJobs: (() => void) | undefined;
 	private jobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
-	private jobsInspector: BackgroundJobsInspector | undefined;
-	private jobsOverlay: OverlayHandle | undefined;
-	private dismissBackgroundJobsInspector: (() => void) | undefined;
+	private workInspector: WorkInspector | undefined;
+	private workOverlay: OverlayHandle | undefined;
+	private dismissWorkInspector: (() => void) | undefined;
+	private unsubscribeWorkSource: (() => void) | undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -651,7 +656,6 @@ export class InteractiveMode {
 	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
-	private dismissSubagentInspector: (() => void) | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation:
 		| { warnedAt: number; activityRevision: number; signal: AbortSignal | undefined }
@@ -677,8 +681,6 @@ export class InteractiveMode {
 	// Extension widgets (components rendered above/below the editor)
 	private extensionWidgetsAbove = new Map<string, Component & { dispose?(): void }>();
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
-	/** The progress of running extension work, by work id, shown above the editor after the widgets. */
-	private extensionWorkWidgets = new Map<string, Component>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
 
@@ -746,7 +748,7 @@ export class InteractiveMode {
 		const ui = createInteractiveTuiReference(() => this.renderer);
 		const setFocus: TUI["setFocus"] = (component) => {
 			// Host loaders can restore focus without changing views. Never leave their input behind this overlay.
-			if (component !== this.jobsInspector) this.dismissBackgroundJobsInspector?.();
+			if (component !== this.workInspector) this.dismissWorkInspector?.();
 			ui.setFocus(component);
 		};
 		this.ui = new Proxy(ui, {
@@ -758,9 +760,11 @@ export class InteractiveMode {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
-		this.jobsContainer = new Container();
-		this.jobsStatus = new BackgroundJobsStatus(() => this.session.jobs);
-		this.jobsContainer.addChild(this.jobsStatus);
+		this.workSource = new TuiWorkSource({
+			conversation: () => this.conversation,
+			intentContext: () => this.intentContext(),
+		});
+		this.workStatus = new WorkStatus(() => this.workSource);
 		this.planStatusContainer = new Container();
 		this.planDetailsContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -799,6 +803,7 @@ export class InteractiveMode {
 		this.footer = new FooterComponent(this.session, this.footerDataProvider, () => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer.addChild(this.footer);
+		this.footerContainer.addChild(this.workStatus);
 		this.fullscreenTranscript = new ScrollView(this.documentContainer, {
 			follow: "end",
 			primary: true,
@@ -818,7 +823,6 @@ export class InteractiveMode {
 				minSize: 0,
 				visible: () => !this.mainView.isTerminalSplit(),
 			},
-			{ component: this.jobsContainer, shrink: 2, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 1 },
 			{ component: this.widgetContainerBelow, shrink: 3, minSize: 0 },
 		]);
@@ -833,7 +837,6 @@ export class InteractiveMode {
 				this.pendingMessagesContainer,
 				this.statusContainer,
 				this.widgetContainerAbove,
-				this.jobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -845,7 +848,6 @@ export class InteractiveMode {
 				this.widgetContainerAbove,
 				this.planStatusContainer,
 				this.planDetailsContainer,
-				this.jobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -2423,10 +2425,11 @@ export class InteractiveMode {
 
 	private beginSessionReplacementUi(): void {
 		this.sessionRenderSuspension ??= this.ui.suspendRendering();
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
-		this.dismissSubagentInspector?.();
+		this.unsubscribeWorkSource?.();
+		this.unsubscribeWorkSource = undefined;
 		this.resetExtensionUI();
 	}
 
@@ -2463,7 +2466,7 @@ export class InteractiveMode {
 		this.lastSigintTime = 0;
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
 		this.clearWorkSummaryTimer();
@@ -2477,6 +2480,7 @@ export class InteractiveMode {
 		this.showSessionExtensions(session);
 		this.subscribeToAgent(session);
 		this.subscribeToBackgroundJobs(session);
+		this.followWork();
 		await this.updateAvailableProviderCount();
 		this.closePlanDetails();
 		// A session the TUI moved to is a fresh presentation, so a ready plan is offered again.
@@ -2867,7 +2871,7 @@ export class InteractiveMode {
 	 * live view, which follows the live state of the conversation the TUI shows.
 	 */
 	private resetExtensionUI(): void {
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.dismissPendingExtensionDialogs();
 		this.clearTurnDoneAlertTimer();
 		this.clearPromptCacheAlertTimer();
@@ -2897,12 +2901,7 @@ export class InteractiveMode {
 	 */
 	private renderWidgets(): void {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
-		this.renderWidgetContainer(
-			this.widgetContainerAbove,
-			[...this.extensionWidgetsAbove.values(), ...this.extensionWorkWidgets.values()],
-			true,
-			true,
-		);
+		this.renderWidgetContainer(this.widgetContainerAbove, [...this.extensionWidgetsAbove.values()], true, true);
 		this.renderWidgetContainer(this.widgetContainerBelow, [...this.extensionWidgetsBelow.values()], false, false);
 		this.ui.requestRender();
 	}
@@ -2953,6 +2952,8 @@ export class InteractiveMode {
 			this.customFooter = undefined;
 			this.footerContainer.addChild(this.footer);
 		}
+		// The work line stays below any footer.
+		this.footerContainer.addChild(this.workStatus);
 
 		this.ui.requestRender();
 	}
@@ -3055,8 +3056,8 @@ export class InteractiveMode {
 			notify: (level, message) => this.showExtensionNotify(message, level),
 			setEditorText: (text) => this.editor.setText(text),
 			showWork: (workId, value) => {
-				this.showHostActionProgress(workId, value);
-				this.showExtensionWorkProgress(workId, value);
+				this.workSource.setLive(workId, value);
+				if (!value) this.showWorkEnd(workId);
 			},
 		});
 	}
@@ -3111,61 +3112,29 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * A host action's progress while it runs, then how it ended, as status
-	 * lines. An action that never ran (denied, dismissed) shows nothing; other
-	 * work has its own views.
+	 * Work whose executor detached ended: when it finished and nothing else
+	 * reports its end (it delivers no notice, and no tool call waits on it),
+	 * a status line says how.
 	 */
-	private showHostActionProgress(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void {
-		const record = this.session.work.get(workId);
-		if (record?.kind !== "host_action") return;
-		if (value) {
-			if (value.progress?.text) this.showStatus(value.progress.text);
-			return;
-		}
-		if (record.progress === undefined) return;
-		if (record.outcome === "completed") {
-			this.showStatus(record.result?.summary ?? `${record.title} completed`);
-		} else if (record.outcome === "failed") {
-			this.showWarning(record.error ?? `${record.title} failed`);
-		} else if (record.outcome === "cancelled") {
-			this.showStatus(record.result?.summary ?? "Host action cancelled");
-		}
+	private showWorkEnd(workId: string): void {
+		const record = this.workSource.record(workId);
+		if (record?.outcome === undefined || record.delivery !== "none" || record.toolCallId !== undefined) return;
+		const view = this.workSource.items().find((candidate) => candidate.item.workId === workId);
+		if (!view) return;
+		const line = workOutcomeLine(view.item);
+		if (line.warning) this.showWarning(line.text);
+		else this.showStatus(line.text);
 	}
 
-	/**
-	 * Extension work's progress while it runs, as a widget above the editor,
-	 * then how it ended as a status line. Stopping the run (Escape) cancels
-	 * the work of kinds that cancel with it. Other work has its own views.
-	 */
-	private showExtensionWorkProgress(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void {
-		const record = this.session.work.get(workId);
-		if (!value) {
-			if (!this.extensionWorkWidgets.delete(workId)) return;
-			this.renderWidgets();
-			if (record?.outcome === "completed") {
-				const summary = record.result?.summary?.split("\n")[0];
-				this.showStatus(summary ? `${record.title} completed: ${summary}` : `${record.title} completed`);
-			} else if (record?.outcome === "failed") {
-				this.showWarning(record.error ? `${record.title} failed: ${record.error}` : `${record.title} failed`);
-			} else if (record?.outcome !== undefined) {
-				this.showStatus(`${record.title} ${record.outcome}`);
-			}
-			return;
-		}
-		if (!record?.kind.startsWith("ext:")) return;
-		const cancel = this.session.work.cancelsWithRun(workId) ? ` (${keyText("app.interrupt")} to cancel)` : "";
-		const lines = [theme.fg("accent", record.title) + theme.fg("dim", cancel)];
-		if (value.progress?.text) lines.push(theme.fg("muted", value.progress.text));
-		for (const step of value.progress?.steps ?? []) {
-			const mark = { pending: "○", active: "●", done: "✓", failed: "✗", skipped: "–" }[step.status];
-			const color = step.status === "active" ? "accent" : step.status === "failed" ? "error" : "dim";
-			lines.push(theme.fg(color, `  ${mark} ${step.label}`));
-		}
-		const widget = new Container();
-		for (const line of lines.slice(0, InteractiveMode.MAX_WIDGET_LINES))
-			widget.addChild(new TruncatedText(line, 1, 0));
-		this.extensionWorkWidgets.set(workId, widget);
-		this.renderWidgets();
+	/** Follow the work of the conversation the TUI shows: the footer's work line and the queued notices. */
+	private followWork(): void {
+		this.workSource.bind(this.conversation);
+		this.unsubscribeWorkSource?.();
+		this.unsubscribeWorkSource = this.workSource.subscribe(() => {
+			this.workStatus.invalidate();
+			this.updatePendingMessagesDisplay();
+			this.ui.requestRender();
+		});
 	}
 
 	/** The TUI's terminal for the extensions; dialogs, status, string widgets, and title come from the live view. */
@@ -3265,7 +3234,7 @@ export class InteractiveMode {
 			opts?.signal?.addEventListener("abort", dismiss, { once: true });
 			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
-			this.dismissBackgroundJobsInspector?.();
+			this.dismissWorkInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
@@ -3352,7 +3321,7 @@ export class InteractiveMode {
 			opts?.signal?.addEventListener("abort", dismiss, { once: true });
 			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
-			this.dismissBackgroundJobsInspector?.();
+			this.dismissWorkInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionInput = new ExtensionInputComponent(title, placeholder, (value) => settle(value), dismiss, {
 				tui: this.ui,
@@ -3403,7 +3372,7 @@ export class InteractiveMode {
 			opts?.signal?.addEventListener("abort", dismiss, { once: true });
 			if (!opts?.live) this.pendingExtensionDialogs.add(dismiss);
 
-			this.dismissBackgroundJobsInspector?.();
+			this.dismissWorkInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionEditor = new ExtensionEditorComponent(
 				this.ui,
@@ -3439,7 +3408,7 @@ export class InteractiveMode {
 	 * Pass undefined to restore the default editor.
 	 */
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.editorComponentFactory = factory;
 
 		// Save text from current editor before switching
@@ -3543,7 +3512,7 @@ export class InteractiveMode {
 	): Promise<T> {
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
-		if (!isOverlay) this.dismissBackgroundJobsInspector?.();
+		if (!isOverlay) this.dismissWorkInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
 		let nativeQuestion = false;
@@ -3718,8 +3687,8 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			// Preserve foreground Bash's interrupt priority when only background jobs remain.
-			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.hasRunningWork)) {
+			// Preserve foreground Bash's interrupt priority when only background work remains.
+			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.work.busy())) {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "keyboard_interrupt" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
 				});
@@ -3770,7 +3739,6 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.tree", () => this.showTreeSelector());
 		this.defaultEditor.onAction("app.session.fork", () => this.showUserMessageSelector());
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
-		this.defaultEditor.onAction("app.subagents.open", () => this.showSubagentInspector());
 
 		let previousEditorText = this.editor.getText();
 		this.defaultEditor.onChange = (text, change) => {
@@ -3803,10 +3771,10 @@ export class InteractiveMode {
 	private setupGlobalInputRouting(): void {
 		this.globalInputUnsubscribe?.();
 		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
-			if (this.keybindings.matches(data, "app.jobs.open")) {
+			if (this.keybindings.matches(data, "app.work.open")) {
 				if (!isKeyRelease(data) && !isKeyRepeat(data)) {
-					if (this.jobsOverlay?.isFocused()) this.jobsInspector?.handleInput(data);
-					else this.showBackgroundJobsInspector();
+					if (this.workOverlay?.isFocused()) this.workInspector?.handleInput(data);
+					else this.showWorkInspector();
 				}
 				return { consume: true };
 			}
@@ -3946,9 +3914,9 @@ export class InteractiveMode {
 			if (!text) return;
 
 			// Local inspection never enters prompt admission or the foreground wait queue.
-			if (text === "/jobs") {
+			if (text === "/work") {
 				this.editor.setText("");
-				this.showBackgroundJobsInspector();
+				this.showWorkInspector();
 				return;
 			}
 
@@ -4075,11 +4043,6 @@ export class InteractiveMode {
 			}
 			if (text === "/tree") {
 				this.showTreeSelector();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/subagents") {
-				this.showSubagentInspector();
 				this.editor.setText("");
 				return;
 			}
@@ -4281,7 +4244,6 @@ export class InteractiveMode {
 					this.liveBackgroundJobTools.delete(toolCallId);
 				}
 			}
-			this.jobsStatus.invalidate();
 			this.ui.requestRender();
 			if (activeToolCalls.size > 0 && elapsedTimer === undefined) {
 				elapsedTimer = setInterval(() => coalescer.update(undefined), 1000);
@@ -4783,7 +4745,11 @@ export class InteractiveMode {
 				break;
 			}
 			case "custom": {
-				if (message.display) {
+				if (message.display && message.customType === WORK_NOTICE_CUSTOM_TYPE) {
+					this.chatContainer.addChild(new WorkNoticeComponent(message, this.getMarkdownThemeWithSettings()));
+					// A notice in the transcript left the queue.
+					this.updatePendingMessagesDisplay();
+				} else if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
 					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
 					component.setExpanded(this.toolOutputExpanded);
@@ -5040,10 +5006,7 @@ export class InteractiveMode {
 	 */
 	private async requestQuit(): Promise<void> {
 		const now = Date.now();
-		if (
-			(this.session.isBusy || this.session.hasRunningWork || this.activeInteractiveReview) &&
-			!this.hasQuitConfirmation(now)
-		) {
+		if ((this.conversation.isActive() || this.activeInteractiveReview) && !this.hasQuitConfirmation(now)) {
 			this.quitConfirmation = {
 				warnedAt: now,
 				activityRevision: this.session.activityRevision,
@@ -5100,7 +5063,7 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
 		// Keep signal handlers registered until terminal cleanup has completed.
@@ -5303,9 +5266,9 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
-		if (text === "/jobs") {
+		if (text === "/work") {
 			this.editor.setText("");
-			this.showBackgroundJobsInspector();
+			this.showWorkInspector();
 			return;
 		}
 
@@ -5922,6 +5885,14 @@ export class InteractiveMode {
 	private updatePendingMessagesDisplay(): void {
 		this.pendingMessagesContainer.clear();
 		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		// Notices of finished work wait for the next turn too; they leave with it.
+		const notices = this.session.getQueuedWorkNotices();
+		if (notices.length > 0) {
+			this.pendingMessagesContainer.addChild(new Spacer(1));
+			for (const notice of notices) {
+				this.pendingMessagesContainer.addChild(new TruncatedText(queuedWorkNoticeLine(notice), 1, 0));
+			}
+		}
 		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
 			this.pendingMessagesContainer.addChild(new Spacer(1));
 			for (const message of steeringMessages) {
@@ -6174,9 +6145,9 @@ export class InteractiveMode {
 	}
 
 	private activateView(view: ActiveViewDescriptor, focus: Component | null, forceRender = true): void {
-		// A dedicated view must never receive input behind the jobs overlay.
-		if (focus === this.jobsInspector) focus = this.editor;
-		this.dismissBackgroundJobsInspector?.();
+		// A dedicated view must never receive input behind the work overlay.
+		if (focus === this.workInspector) focus = this.editor;
+		this.dismissWorkInspector?.();
 		this.ui.clear();
 		for (const component of view.regularComponents) this.ui.addChild(component);
 		if (isViewportTUI(this.ui)) this.ui.setLayoutRoot(view.fullscreenRoot);
@@ -6203,8 +6174,7 @@ export class InteractiveMode {
 	private showSelector(
 		create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void },
 	): void {
-		this.dismissBackgroundJobsInspector?.();
-		this.dismissSubagentInspector?.();
+		this.dismissWorkInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
 		let component: Component | undefined;
@@ -6229,19 +6199,21 @@ export class InteractiveMode {
 		this.activateView(this.createDedicatedView(component), created.focus);
 	}
 
-	private showBackgroundJobsInspector(): void {
+	/** Show the work inspector over the conversation, or focus it when it shows; `workId` selects an item. */
+	private showWorkInspector(workId?: string): void {
 		if (this.isShuttingDown || this.sessionRenderSuspension) return;
-		if (this.jobsOverlay) {
-			this.jobsOverlay.focus();
-			this.jobsInspector?.refresh();
+		if (this.workOverlay) {
+			this.workOverlay.focus();
+			this.workInspector?.refresh();
 			return;
 		}
 		let closed = false;
 		let overlay: OverlayHandle | undefined;
-		const inspector = new BackgroundJobsInspector(this.session.jobs, {
+		const inspector = new WorkInspector(this.workSource, {
 			getHeight: () => Math.max(1, this.ui.terminal.rows - 2),
 			requestRender: () => this.ui.requestRender(),
 			onClose: () => close(),
+			...(workId === undefined ? {} : { workId }),
 		});
 		const close = () => {
 			if (closed) return;
@@ -6249,10 +6221,10 @@ export class InteractiveMode {
 			inspector.dispose();
 			// Remove only this overlay; another dialog can be stacked above it.
 			overlay?.hide();
-			if (this.jobsInspector === inspector) {
-				this.jobsInspector = undefined;
-				this.jobsOverlay = undefined;
-				this.dismissBackgroundJobsInspector = undefined;
+			if (this.workInspector === inspector) {
+				this.workInspector = undefined;
+				this.workOverlay = undefined;
+				this.dismissWorkInspector = undefined;
 			}
 			this.ui.requestRender();
 		};
@@ -6266,40 +6238,9 @@ export class InteractiveMode {
 			inspector.dispose();
 			throw error;
 		}
-		this.jobsInspector = inspector;
-		this.jobsOverlay = overlay;
-		this.dismissBackgroundJobsInspector = close;
-	}
-
-	private showSubagentInspector(): void {
-		const manager = this.session.getSubagentToolManager();
-		if (!manager?.listActivities || !manager.subscribeActivities) {
-			this.showWarning("Subagent conversations are unavailable for this session.");
-			return;
-		}
-
-		const previousView = this.activeView;
-		const previousFocus = this.ui.getFocusedComponent();
-		let closed = false;
-		let view: SubagentInspectorComponent;
-		const close = () => {
-			if (closed) return;
-			closed = true;
-			view.dispose();
-			this.activateView(previousView, previousFocus ?? this.editor);
-			if (this.dismissSubagentInspector === close) this.dismissSubagentInspector = undefined;
-		};
-		view = new SubagentInspectorComponent(
-			{
-				listActivities: () => manager.listActivities?.() ?? [],
-				subscribeActivities: (listener) => manager.subscribeActivities?.(listener) ?? (() => undefined),
-			},
-			this.ui,
-			close,
-		);
-
-		this.activateView(this.createDedicatedView(view), view);
-		this.dismissSubagentInspector = close;
+		this.workInspector = inspector;
+		this.workOverlay = overlay;
+		this.dismissWorkInspector = close;
 	}
 
 	private showRemoteControlCenter(): void {
@@ -8247,7 +8188,7 @@ export class InteractiveMode {
 
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
-			this.dismissBackgroundJobsInspector?.();
+			this.dismissWorkInspector?.();
 			const previousView = this.activeView;
 			const previousFocus = this.ui.getFocusedComponent();
 			const restoreDialog = () => this.activateView(previousView, previousFocus ?? dialog);
@@ -8403,7 +8344,7 @@ export class InteractiveMode {
 		await new Promise((resolve) => process.nextTick(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
-			this.dismissBackgroundJobsInspector?.();
+			this.dismissWorkInspector?.();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(editor);
 			this.ui.setFocus(editor);
@@ -9071,8 +9012,7 @@ export class InteractiveMode {
 		const followUp = this.getAppKeyDisplay("app.message.followUp");
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
-		const openSubagents = this.getAppKeyDisplay("app.subagents.open");
-		const openJobs = this.getAppKeyDisplay("app.jobs.open");
+		const openWork = this.getAppKeyDisplay("app.work.open");
 
 		const sections: HotkeySection[] = [
 			{
@@ -9087,8 +9027,7 @@ export class InteractiveMode {
 					{ key: toggleAgentMode, action: "Toggle Build / Plan mode" },
 					{ key: togglePlanPane, action: "Switch conversation / plan pane focus" },
 					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
-					{ key: openSubagents, action: "Switch to subagent conversations" },
-					{ key: openJobs, action: "Inspect background jobs" },
+					{ key: openWork, action: "Inspect work: jobs, subagents, reviews" },
 				],
 			},
 			{
@@ -9142,8 +9081,7 @@ export class InteractiveMode {
 					{ key: followUp, action: "Queue follow-up message" },
 					{ key: dequeue, action: "Restore queued messages" },
 					{ key: pasteImage, action: "Paste image from clipboard" },
-					{ key: openSubagents, action: "Switch to subagent conversations" },
-					{ key: `${openJobs} / /jobs`, action: "Inspect background jobs without interrupting work" },
+					{ key: `${openWork} / /work`, action: "Inspect work without interrupting it" },
 					{ key: "/", action: "Slash commands" },
 					{ key: "!", action: "Run bash command" },
 					{ key: "!!", action: "Run bash command (excluded from context)" },
@@ -9537,27 +9475,45 @@ export class InteractiveMode {
 		});
 	}
 
-	private createReviewWorkflowHooks(): ReviewWorkflowHooks {
+	/**
+	 * The local UI of a review this TUI runs as work `workId`: a loader that
+	 * shows the work's progress and its accounting detail as every client sees
+	 * them (the live `work/<workId>` value), and the review conversation live
+	 * in the transcript.
+	 */
+	private createReviewWorkflowHooks(workId: string): ReviewWorkflowHooks {
 		const loader = new BorderedLoader(this.ui, theme, "Preparing review…");
+		const detail = createUiNodeView();
 		this.editorContainer.clear();
 		this.editorContainer.addChild(loader);
+		this.editorContainer.addChild(detail);
 		this.ui.setFocus(loader);
 		this.ui.requestRender();
 
 		let baseMessage = "Preparing review…";
 		let reviewRenderer: InlineSessionRenderer | undefined;
 		let cleanedUp = false;
+		const showProgress = (): void => {
+			const view = this.workSource.items().find((candidate) => candidate.item.workId === workId);
+			const live = view?.live;
+			const text = live?.progress?.text;
+			loader.setMessage(text ? (reviewRenderer ? `${baseMessage} ${text}` : text) : baseMessage);
+			try {
+				detail.update(live?.detail === undefined ? [] : [live.detail]);
+			} catch {
+				detail.update([]);
+			}
+			this.ui.requestRender();
+		};
+		const unsubscribe = this.workSource.subscribe(showProgress);
 		return {
 			signal: loader.signal,
-			onProgress: (message) => {
-				loader.setMessage(reviewRenderer ? `${baseMessage} ${message}` : message);
-				this.ui.requestRender();
-			},
 			onPrepared: (resolution, model) => {
 				baseMessage = `Reviewing ${resolution.description} with ${model.id}…`;
 				loader.setMessage(baseMessage);
 				this.editorContainer.clear();
 				this.editorContainer.addChild(loader);
+				this.editorContainer.addChild(detail);
 				this.ui.setFocus(loader);
 				// Render the isolated review session live in the transcript so it reads like
 				// a normal conversation. This remains transient and is removed on handoff.
@@ -9580,9 +9536,11 @@ export class InteractiveMode {
 			cleanup: () => {
 				if (cleanedUp) return;
 				cleanedUp = true;
+				unsubscribe();
 				this.footer.setTransientUsage(undefined);
 				reviewRenderer?.dispose();
 				loader.dispose();
+				detail.dispose();
 				this.editorContainer.clear();
 				this.editorContainer.addChild(this.editor);
 				this.ui.setFocus(this.editor);
@@ -9774,7 +9732,7 @@ export class InteractiveMode {
 				onDiagnosticRetentionWarning: (message) => {
 					diagnosticRetentionWarning = message;
 				},
-				createHooks: () => this.createReviewWorkflowHooks(),
+				createHooks: (workId) => this.createReviewWorkflowHooks(workId),
 				work: this.conversation.work,
 			});
 
@@ -9846,9 +9804,12 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
-		this.dismissBackgroundJobsInspector?.();
+		this.dismissWorkInspector?.();
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
+		this.unsubscribeWorkSource?.();
+		this.unsubscribeWorkSource = undefined;
+		this.workSource.dispose();
 		this.clearTurnDoneAlertTimer();
 		this.clearPromptCacheAlertTimer();
 		this.clearWorkSummaryTimer();
@@ -9867,7 +9828,6 @@ export class InteractiveMode {
 		this.globalInputUnsubscribe = undefined;
 		this.planPaneInputUnsubscribe?.();
 		this.planPaneInputUnsubscribe = undefined;
-		this.dismissSubagentInspector?.();
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
 		if (this.unsubscribe) {

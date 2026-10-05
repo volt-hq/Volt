@@ -525,7 +525,7 @@ export class ToolExecutionComponent extends Container {
 			}
 			if (this.toolName === "subagent") {
 				const outputs = keyHint("app.tools.expand", this.expanded ? "collapse outputs" : "outputs");
-				renderContainer.addChild(new Text(`${keyHint("app.subagents.open", "inspect")}  ${outputs}`, 0, 0));
+				renderContainer.addChild(new Text(`${keyHint("app.work.open", "inspect")}  ${outputs}`, 0, 0));
 				hasContent = true;
 			}
 		} else {

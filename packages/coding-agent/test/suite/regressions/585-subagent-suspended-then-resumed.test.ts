@@ -1,7 +1,8 @@
 // Regression for #585 (Phase 4, RFC §7.1 as amended): a subagent is
 // `subagent` work in its parent conversation's log. A subagent running when
 // its parent's runtime closes stays open: the reopened conversation shows it
-// suspended, spends no tokens on it, and resumes it only when asked. A resume
+// suspended, spends no tokens on it, and resumes it only when asked. Its
+// closed child conversation opens read-only from its log meanwhile. A resume
 // reopens the child's log and lets the child finish its task.
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,6 +18,10 @@ import type { ResourceLoader } from "../../../src/core/resource-loader.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
 import { type SubagentDefinition, SubagentManager } from "../../../src/core/subagents/index.ts";
+import { initTheme } from "../../../src/core/theme/runtime.ts";
+import { conversationLines } from "../../../src/modes/interactive/components/work-inspector.ts";
+import { stripAnsi } from "../../../src/utils/ansi.ts";
+import { createSessionWorkSource } from "../../utilities/work-source.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
@@ -178,7 +183,21 @@ describe("#585 subagent suspended after a restart, then resumed explicitly", () 
 		expect(suspended?.outcome).toBeUndefined();
 		// Suspended: open without an executor. Opening ran nothing and spent no tokens.
 		expect(second.parent.session.work.running()).toEqual([]);
-		expect(second.parent.session.hasRunningWork).toBe(false);
+		expect(second.parent.session.work.busy()).toBe(false);
+		expect(second.children).toHaveLength(0);
+		expect(second.parent.faux.state.callCount).toBe(0);
+		// The work inspector shows it suspended, and opens its closed conversation read-only from its log.
+		const source = createSessionWorkSource(second.parent.session);
+		expect(source.items()).toEqual([
+			expect.objectContaining({ suspended: true, actions: { cancel: true, resume: true, open: true } }),
+		]);
+		const opened = await source.open(workId);
+		if (opened.kind !== "view") throw new Error("Expected a read-only view of the child");
+		initTheme("dark");
+		expect(opened.conversation.live).toBe(false);
+		expect(conversationLines(opened.conversation.messages(), 100).map(stripAnsi).join("\n")).toContain(
+			"Audit the authentication module",
+		);
 		expect(second.children).toHaveLength(0);
 		expect(second.parent.faux.state.callCount).toBe(0);
 		await second.manager.ensureRegistryHydrated();

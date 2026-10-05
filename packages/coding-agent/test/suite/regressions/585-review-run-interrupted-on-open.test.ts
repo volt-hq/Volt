@@ -202,7 +202,7 @@ describe("#585 review run interrupted on open", () => {
 			outcome: "interrupted",
 			progress: { text: "Discovery pass" },
 		});
-		expect(second.session.hasRunningWork).toBe(false);
+		expect(second.session.work.busy()).toBe(false);
 		expect(getReviewRun(second.sessionManager, runId)).toBeUndefined();
 		expect(unfinishedTraces(second)).toEqual([]);
 		// An interrupted review has no findings to open; nothing runs.

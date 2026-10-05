@@ -26,6 +26,7 @@ import type {
 } from "@hansjm10/volt-agent-core";
 import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
+import type { WorkNoticeDetails } from "@hansjm10/volt-protocol/entries";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -179,6 +180,8 @@ export type AgentSessionEvent =
 			type: "queue_update";
 			steering: readonly AgentSessionQueuedMessage[];
 			followUp: readonly AgentSessionQueuedMessage[];
+			/** Notices of finished work the next turn takes. */
+			notices: readonly WorkNoticeDetails[];
 	  }
 	| {
 			type: "client_input_outcome";
@@ -567,7 +570,7 @@ export class AgentSession {
 			cacheRetention: () => this._modelSettings.streamOptions.cacheRetention,
 			// The phase the session last observed counts too: an operation that already ended still has
 			// its start to report, so keepalive sees both edges in order.
-			hasInFlightWork: () => this._events.phaseOperation !== null || this.isBusy || this.hasRunningWork,
+			hasInFlightWork: () => this._events.phaseOperation !== null || this.isBusy || this._work.running().length > 0,
 			isDisposed: () => this._disposed,
 			emit: (event) => this._events.emit(event),
 		});
@@ -664,7 +667,10 @@ export class AgentSession {
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),
 				hasActiveWork: () =>
-					this._turnActive || this.isBashRunning || this.hasActiveSessionMutation || this.hasRunningWork,
+					this._turnActive ||
+					this.isBashRunning ||
+					this.hasActiveSessionMutation ||
+					this._work.running().length > 0,
 				extensionCommandRunning: () => this._prompting.extensionCommandRunning,
 				sendCustomMessage: (message, options, allowDuringPromptTransaction) =>
 					this._prompting.sendCustomMessage(message, options, allowDuringPromptTransaction),
@@ -1453,11 +1459,6 @@ export class AgentSession {
 		return this._jobs.runtime;
 	}
 
-	/** Whether this runtime runs work: open work with an executor, cancelling work included. */
-	get hasRunningWork(): boolean {
-		return this._work.running().length > 0;
-	}
-
 	/**
 	 * Whether the conversation is busy: an operation (a turn, compaction, tree
 	 * navigation, or reload) holds it, or a `!` command or extension command runs.
@@ -1472,8 +1473,8 @@ export class AgentSession {
 	}
 
 	/**
-	 * Observe changes of what `isBusy`, `operation`, and `hasRunningWork`
-	 * read. Listeners run synchronously; their failures are ignored.
+	 * Observe changes of what `isBusy` and `operation` read, and of the work
+	 * this runtime runs. Listeners run synchronously; their failures are ignored.
 	 */
 	subscribeActivity(listener: () => void): () => void {
 		this._activityListeners.add(listener);
@@ -1483,7 +1484,7 @@ export class AgentSession {
 	}
 
 	/**
-	 * An `isBusy` or `hasRunningWork` input changed. Prompt-cache keepalive measures its idle
+	 * An `isBusy` input changed, or work started or stopped running. Prompt-cache keepalive measures its idle
 	 * window from these transitions.
 	 */
 	private _activityChanged(): void {
@@ -1862,6 +1863,12 @@ export class AgentSession {
 	getFollowUpMessages(): readonly AgentSessionQueuedMessage[] {
 		this._assertNotDisposed();
 		return this._clientInputs.queueView().followUp;
+	}
+
+	/** The notices of finished work queued for the next turn, oldest first (read-only). */
+	getQueuedWorkNotices(): readonly WorkNoticeDetails[] {
+		this._assertNotDisposed();
+		return this._clientInputs.queueView().notices;
 	}
 
 	get resourceLoader(): ResourceLoader {

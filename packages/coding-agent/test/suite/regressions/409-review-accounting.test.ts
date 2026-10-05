@@ -669,8 +669,8 @@ describe("#409 initial review accounting", () => {
 		expect(await queryRegistry.run(context, "review.result", { runId: "historical" })).toMatchObject({
 			usage: { status: "unavailable" },
 		});
-		const listed = await queryRegistry.run(context, "review.workflows", {});
-		expect(Compile(QUERY_SCHEMAS["review.workflows"].result).Errors(listed)).toEqual([]);
+		const listed = await queryRegistry.run(context, "review.runs", {});
+		expect(Compile(QUERY_SCHEMAS["review.runs"].result).Errors(listed)).toEqual([]);
 		expect(JSON.stringify(listed)).toContain("pendingRequests");
 		// Running reviews are work items; the durable listing holds ended runs only.
 		expect(listed).not.toHaveProperty("activeWorkflows");

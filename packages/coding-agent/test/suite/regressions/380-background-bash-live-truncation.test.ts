@@ -8,8 +8,9 @@ import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
 import { JOB_OUTPUT_MAX_BYTES } from "../../../src/core/tools/jobs.ts";
 import { DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
-import { BackgroundJobsInspector } from "../../../src/modes/interactive/components/background-jobs.ts";
+import { WorkInspector } from "../../../src/modes/interactive/components/work-inspector.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
+import { createSessionWorkSource } from "../../utilities/work-source.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const previousBindings = getKeybindings();
@@ -26,7 +27,7 @@ describe("background Bash live truncation", () => {
 		["over line limit", "line\n".repeat(DEFAULT_MAX_LINES + 1), true],
 		["at byte limit", "x".repeat(JOB_OUTPUT_MAX_BYTES), false],
 		["at line limit", "line\n".repeat(DEFAULT_MAX_LINES), false],
-	] as const)("reports %s in live reads, waits, and the inspector", async (_label, output, truncated) => {
+	] as const)("reports %s in live reads, waits, and the work inspector", async (_label, output, truncated) => {
 		const finish = Promise.withResolvers<void>();
 		const operations: BashOperations = {
 			exec: async (_command, _cwd, { onData }) => {
@@ -41,7 +42,7 @@ describe("background Bash live truncation", () => {
 			createDefinitions(cwd, { ...options, bash: { ...options?.bash, operations } }),
 		);
 		let harness: Harness | undefined;
-		let inspector: BackgroundJobsInspector | undefined;
+		let inspector: WorkInspector | undefined;
 		try {
 			harness = await createHarness({
 				initialActiveToolNames: ["bash", "jobs"],
@@ -106,14 +107,16 @@ describe("background Bash live truncation", () => {
 
 			initTheme("dark");
 			setKeybindings(new KeybindingsManager());
-			inspector = new BackgroundJobsInspector(jobs, {
+			inspector = new WorkInspector(createSessionWorkSource(harness.session), {
 				getHeight: () => 24,
 				requestRender: () => {},
 				onClose: () => {},
 			});
-			expect(inspector.render(80).lines.map(stripAnsi).join("\n").includes("Output truncated")).toBe(truncated);
 			inspector.handleInput("\r");
-			expect(inspector.render(80).lines.map(stripAnsi).join("\n").includes("Output truncated")).toBe(truncated);
+			const shown = inspector;
+			// The detail reads the job's output with `work_output`, as every client does.
+			await vi.waitFor(() => expect(shown.render(80).lines.map(stripAnsi).join("\n")).toContain("Following latest"));
+			expect(shown.render(80).lines.map(stripAnsi).join("\n").includes("older output dropped")).toBe(truncated);
 		} finally {
 			inspector?.dispose();
 			harness?.appendResponses([fauxAssistantMessage("Noticed the result.")]);

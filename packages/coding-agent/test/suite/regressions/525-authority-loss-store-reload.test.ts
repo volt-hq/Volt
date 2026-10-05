@@ -31,6 +31,7 @@ import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type InteractiveAccess = {
+	followWork(): void;
 	renderer: ReturnType<typeof createInteractiveTui>;
 	ui: TUI;
 	editor: CustomEditor;
@@ -210,6 +211,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		await host.attach(access.client, conversation);
 		access.showSessionExtensions(conversation.session);
 		access.subscribeToAgent(conversation.session);
+		access.followWork();
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}
 
@@ -421,10 +423,12 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const actions = opened.conversation.session.hostActions;
 		const request: HostActionRequest = { action: "test.action", title: "Host action" };
 		let runs = 0;
+		// The install runs until the footer's work line showed its progress.
+		const shown = Promise.withResolvers<void>();
 		const install = async (ctx: WorkContext): Promise<WorkExecution> => {
 			runs++;
 			ctx.checkpoint({ text: "Installing the test tool" });
-			await new Promise((resolve) => setTimeout(resolve, 150));
+			await shown.promise;
 			return { outcome: "completed", result: { summary: "Test tool installed" } };
 		};
 
@@ -434,9 +438,13 @@ describe("regression #525: ending a session whose saved state could not be confi
 		access.resetExtensionUI();
 		expect(access.extensionSelector).toBeDefined();
 		access.extensionSelector?.handleInput("\n");
-		await vi.waitFor(() => expect(viewport(terminal)).toContain("Installing the test tool"));
+		await vi.waitFor(() =>
+			expect(viewport(terminal)).toContain("host_action · Host action · Installing the test tool"),
+		);
+		shown.resolve();
 		await expect(kept).resolves.toMatchObject({ status: "ran", execution: { outcome: "completed" } });
-		await vi.waitFor(() => expect(viewport(terminal)).toContain("Test tool installed"));
+		// It delivers no notice, so a status line says how it ended.
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Host action completed: Test tool installed"));
 		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
 
 		// Escape denies; the requester's abort closes the dialog without an answer. Neither runs.

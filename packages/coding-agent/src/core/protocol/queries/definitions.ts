@@ -508,7 +508,7 @@ export const reviewResultQuery = defineQuery({
 
 export const reviewRunsQuery = defineQuery({
 	...review,
-	name: "review.workflows",
+	name: "review.runs",
 	async run(ctx, params) {
 		const page = await listCanonicalReviewRuns(targetOf(ctx).session.sessionManager, {
 			cursor: params.cursor,
@@ -517,7 +517,7 @@ export const reviewRunsQuery = defineQuery({
 		return {
 			runs: page.runs.map((run) => projectReviewRun(run, false)),
 			...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-		} as QueryResult<"review.workflows">;
+		} as QueryResult<"review.runs">;
 	},
 });
 
@@ -554,5 +554,5 @@ export const BUILTIN_QUERIES = {
 	"review.discussion_source": reviewDiscussionSourceQuery,
 	"review.general": reviewGeneralQuery,
 	"review.result": reviewResultQuery,
-	"review.workflows": reviewRunsQuery,
+	"review.runs": reviewRunsQuery,
 } as const satisfies { readonly [N in QueryName]: QueryDefinition<N> };

@@ -20,9 +20,11 @@ import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
 	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
+	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer, type IrohRemoteSanitizerOptions } from "../remote/iroh/sanitizer.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { redactedWorkPhase } from "../work/phase.ts";
 import {
 	emptyLiveFold,
 	foldLiveCommit,
@@ -423,6 +425,15 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	};
 
 	const redactValue = (value: LiveValue): LiveValue | undefined => {
+		// Work progress the host cut loses a root's start the cut left; the value keeps the host's bound for it.
+		if (value.kind === "work") {
+			return redactedWorkPhase(
+				value,
+				sanitize,
+				(text) => sanitizer.sanitizeCutText(text),
+				WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
+			);
+		}
 		const redacted = sanitize(value);
 		if (redacted.kind === "host_request" && value.kind === "host_request") {
 			rememberOptions(value.requestId, value.request, redacted.request);

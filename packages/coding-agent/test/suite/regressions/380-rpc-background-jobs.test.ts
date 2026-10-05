@@ -219,7 +219,7 @@ describe("background jobs over protocol frames", () => {
 		await vi.waitFor(() => expect(executions.get("first")!.signal?.aborted).toBe(true));
 		executions.get("first")!.finish();
 		await expect(abort).resolves.toMatchObject({ type: "accepted" });
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 		expect(harness.session.jobs.list()).toMatchObject([{ status: "cancelled" }]);
 	});
 
@@ -261,7 +261,7 @@ describe("background jobs over protocol frames", () => {
 
 		// The job outlives the client that saw it start.
 		await first.stop();
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		executions.get("first")!.finish();
 		await harness.session.work.waitForIdle();
 		for (const phone of [observer, controller]) {

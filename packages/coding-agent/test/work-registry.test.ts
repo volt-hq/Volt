@@ -16,8 +16,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LiveState } from "../src/core/host/live-state.ts";
 import {
 	WORK_CHECKPOINT_INTERVAL_MS,
+	WORK_CHECKPOINTS_MAX,
 	WORK_CLOSE_GRACE_MS,
 	WORK_NOTICES_MAX_QUEUED,
+	type WorkContext,
 	type WorkExecution,
 	type WorkExecutor,
 	type WorkKindDefinition,
@@ -784,5 +786,102 @@ describe("kind policies: stops, remote devices, and resume preparation", () => {
 		await closing;
 		expect(runtime.registry.get(runtime.workId)?.outcome).toBeUndefined();
 		expect(runtime.registry.running()).toEqual([]);
+	});
+});
+
+describe("work registry bounds and activity", () => {
+	it("counts suspended work against its kind's maxActive, and admits its own resume at the limit", async () => {
+		const first = await setup();
+		const resumable = kind({
+			kind: "subagent",
+			maxActive: 2,
+			resume: () => async () => ({ outcome: "completed" }),
+		});
+		first.registry.register(resumable);
+		const a = await first.registry.start("subagent", 1, held().execute);
+		await first.registry.start("subagent", 2, held().execute);
+		await first.registry.cancelAll("closed");
+		const second = await nextRuntime(first);
+		second.registry.register(resumable);
+		const record = second.registry.get(a.workId);
+		if (!record) throw new Error("Expected the suspended work");
+		expect(second.registry.suspended(record)).toBe(true);
+		expect(second.registry.busy()).toBe(false);
+		// Two suspended items fill the kind: a restart never piles more up.
+		await expect(second.registry.start("subagent", 3, held().execute)).rejects.toMatchObject({ code: "limit" });
+		await second.registry.resume(a.workId);
+		await second.registry.waitForIdle();
+		expect(second.registry.get(a.workId)?.outcome).toBe("completed");
+		const third = await second.registry.start("subagent", 3, async () => ({ outcome: "completed" }));
+		await second.registry.waitForIdle();
+		expect(second.registry.get(third.workId)?.outcome).toBe("completed");
+	});
+
+	it("records at most WORK_CHECKPOINTS_MAX checkpoints over an item's lifetime; later phases stay live", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const { registry, live } = await setup();
+		registry.register(kind());
+		const ctx = Promise.withResolvers<WorkContext>();
+		const running = held();
+		const record = await registry.start("ext:test/run", null, async (context) => {
+			ctx.resolve(context);
+			return await running.execute(context);
+		});
+		const context = await ctx.promise;
+		const phases = WORK_CHECKPOINTS_MAX + 4;
+		for (let index = 0; index < phases; index++) {
+			context.checkpoint({ text: `phase ${index}` });
+			await vi.advanceTimersByTimeAsync(WORK_CHECKPOINT_INTERVAL_MS);
+		}
+		expect(registry.get(record.workId)?.checkpoints).toBe(WORK_CHECKPOINTS_MAX);
+		expect(registry.get(record.workId)?.progress).toEqual({ text: `phase ${WORK_CHECKPOINTS_MAX - 1}` });
+		const values = live.flatMap((item) => (item.type === "set" && item.value.kind === "work" ? [item.value] : []));
+		expect(values.at(-1)?.progress).toEqual({ text: `phase ${phases - 1}` });
+		running.release();
+		vi.useRealTimers();
+		await registry.waitForIdle();
+		expect(registry.get(record.workId)?.outcome).toBe("completed");
+	});
+
+	it("counts running work as busy, but not work awaiting approval", async () => {
+		const { registry } = await setup();
+		registry.register(kind({ kind: "host_action", approval: true }));
+		const action = held();
+		const record = await registry.start("host_action", null, action.execute);
+		expect(registry.running().map((running) => running.workId)).toEqual([record.workId]);
+		expect(registry.busy()).toBe(false);
+		await registry.waitForNotBusy();
+		await registry.approve(record.workId);
+		expect(registry.busy()).toBe(true);
+		let idle = false;
+		const waiting = registry.waitForNotBusy().then(() => {
+			idle = true;
+		});
+		await Promise.resolve();
+		expect(idle).toBe(false);
+		action.release();
+		await waiting;
+		expect(registry.busy()).toBe(false);
+	});
+
+	it("tells subscribers when work entries commit and when executors attach or detach", async () => {
+		const { registry } = await setup();
+		registry.register(kind());
+		const observer = vi.fn();
+		const unsubscribe = registry.subscribe(observer);
+		registry.subscribe(() => {
+			throw new Error("observers never affect work");
+		});
+		const running = held();
+		await registry.start("ext:test/run", null, running.execute);
+		expect(observer).toHaveBeenCalled();
+		const attached = observer.mock.calls.length;
+		running.release();
+		await registry.waitForIdle();
+		expect(observer.mock.calls.length).toBeGreaterThan(attached);
+		unsubscribe();
+		const calls = observer.mock.calls.length;
+		registry.changed();
+		expect(observer).toHaveBeenCalledTimes(calls);
 	});
 });

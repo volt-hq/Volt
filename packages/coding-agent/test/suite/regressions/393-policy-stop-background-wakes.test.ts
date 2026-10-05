@@ -103,7 +103,7 @@ describe("#393 subagent policy stops fence background wakes", () => {
 			await vi.waitFor(() => expect(fixture.faux.state.callCount).toBe(2));
 			await child.waitForIdle();
 			expect(child.getLastAssistantText()).toBe("Child final report.");
-			expect(child.hasRunningWork).toBe(true);
+			expect(child.work.busy()).toBe(true);
 			expect(exec).toHaveBeenCalledTimes(2);
 			const jobs = child.jobs.list();
 			let expectedCalls = 2;

@@ -211,32 +211,9 @@ export interface ReviewDiscussionHost {
 export class HostReviewDiscussionService {
 	private readonly host: ReviewDiscussionHost;
 	private readonly lanes = new Map<string, Promise<unknown>>();
-	private readonly pending = new Map<HostedConversation, Set<Promise<unknown>>>();
 
 	constructor(host: ReviewDiscussionHost) {
 		this.host = host;
-	}
-
-	hasPendingWork(runtime: HostedConversation): boolean {
-		return (this.pending.get(runtime)?.size ?? 0) > 0;
-	}
-
-	async waitForIdle(runtime: HostedConversation): Promise<void> {
-		while (this.hasPendingWork(runtime)) await Promise.allSettled([...this.pending.get(runtime)!]);
-	}
-
-	private track<T>(runtime: HostedConversation, operation: () => Promise<T>): Promise<T> {
-		const promise = operation();
-		const pending = this.pending.get(runtime) ?? new Set<Promise<unknown>>();
-		this.pending.set(runtime, pending);
-		pending.add(promise);
-		void promise
-			.finally(() => {
-				pending.delete(promise);
-				if (pending.size === 0 && this.pending.get(runtime) === pending) this.pending.delete(runtime);
-			})
-			.catch(() => undefined);
-		return promise;
 	}
 
 	forRuntime(runtime: HostedConversation): ReviewDiscussionService {
@@ -267,8 +244,9 @@ export class HostReviewDiscussionService {
 						return appendReviewFindingTransition(writer, transition);
 					});
 				}),
+			// A start or reset holds its conversation open: it stays active until the operation settles.
 			start: (runId, ids, requestId, discussionConfiguration) =>
-				this.track(runtime, () =>
+				runtime.whileOpen(() =>
 					this.withStore(runtime, (store, ref, assertCurrent) =>
 						this.start(runtime, store, ref, assertCurrent, runId, ids, requestId, discussionConfiguration),
 					),
@@ -308,7 +286,7 @@ export class HostReviewDiscussionService {
 					};
 				}),
 			reset: (id, expected, requestId) =>
-				this.track(runtime, () =>
+				runtime.whileOpen(() =>
 					this.withStore(runtime, async (store, ref, assertCurrent) => {
 						const indexed = await store.findReviewDiscussion(id);
 						if (!indexed) throw new Error("Review discussion unavailable");

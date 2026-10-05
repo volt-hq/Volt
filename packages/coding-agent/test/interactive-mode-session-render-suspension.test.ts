@@ -10,7 +10,7 @@ type SessionReplacementContext = {
 		requestRender(force?: boolean): void;
 	};
 	sessionRenderSuspension: RenderSuspensionLease | undefined;
-	dismissSubagentInspector?: () => void;
+	dismissWorkInspector?: () => void;
 	resetExtensionUI(): void;
 	bindDaemonChangeObservation(session: AgentSession): void;
 	observeLoss(conversation: HostedConversation): void;
@@ -43,7 +43,7 @@ describe("InteractiveMode session replacement rendering", () => {
 				requestRender: vi.fn((force?: boolean) => order.push(`render:${String(force)}`)),
 			},
 			sessionRenderSuspension: undefined,
-			dismissSubagentInspector: vi.fn(() => order.push("dismiss")),
+			dismissWorkInspector: vi.fn(() => order.push("dismiss")),
 			resetExtensionUI: vi.fn(() => order.push("reset")),
 			bindDaemonChangeObservation: vi.fn(() => order.push("bind-change")),
 			observeLoss: vi.fn(),

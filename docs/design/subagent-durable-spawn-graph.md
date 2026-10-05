@@ -1,5 +1,7 @@
 # Design: Durable subagent spawn graph and lazy result recovery
 
+> **Superseded.** The [architecture rewrite](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/architecture-rewrite-design.md) (§7) replaced the durable spawn edges (`subagent_spawn` entries), hydrated and stranded child state, and transcript heuristics described here: each subagent is `subagent` work in its parent conversation's log, a subagent running when its runtime stops is suspended until a client resumes or cancels it, and its child conversation is read through the work item that links it. See the [session format](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/session-format.md#work-entries-host-only). This document is kept for historical context.
+
 > **Status: in progress (2026-07-27).** Tracking issue: #129. §§1-4 are
 > implemented with regression tests (`129-subagent-spawn-entries.test.ts`,
 > dispose suite, `agent-session-subagent-recovery-notice.test.ts`).

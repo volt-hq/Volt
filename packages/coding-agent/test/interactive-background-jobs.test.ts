@@ -19,14 +19,12 @@ import {
 	type JobSource,
 	jobResult,
 } from "../src/core/tools/jobs.ts";
-import {
-	BackgroundJobsInspector,
-	type BackgroundJobsStatus,
-} from "../src/modes/interactive/components/background-jobs.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
-import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
+import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
+import { WorkNoticeComponent } from "../src/modes/interactive/components/work-notice.ts";
+import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
@@ -42,9 +40,10 @@ type InteractiveTestAccess = {
 	conversationView: View;
 	chatContainer: Container;
 	editorContainer: Container;
-	jobsStatus: BackgroundJobsStatus;
-	jobsInspector?: BackgroundJobsInspector;
-	jobsOverlay?: OverlayHandle;
+	workStatus: WorkStatus;
+	workInspector?: WorkInspector;
+	workOverlay?: OverlayHandle;
+	followWork(): void;
 	jobsRenderCoalescer?: StreamingRenderCoalescer<void>;
 	isInitialized: boolean;
 	pendingUserInputs: string[];
@@ -114,6 +113,8 @@ async function createFixture(
 		},
 	};
 	vi.spyOn(harness.session, "jobs", "get").mockReturnValue(source);
+	// The conversation's work is the fixture's: the TUI's work inspector and footer line read it.
+	vi.spyOn(harness.session, "work", "get").mockReturnValue(runtime.work);
 	const getToolDefinition = harness.session.getToolDefinition.bind(harness.session);
 	const bash = withBackgroundJobs(createBashToolDefinition(harness.tempDir), {
 		jobs: source,
@@ -151,6 +152,8 @@ async function createFixture(
 	access.setupEditorSubmitHandler();
 	access.activateView(access.conversationView, access.editor, false);
 	access.subscribeToBackgroundJobs(harness.session);
+	access.followWork();
+	if (access.client.live) runtime.live.attach("tui", access.client.live);
 	access.isInitialized = true;
 	access.ui.start();
 
@@ -224,14 +227,15 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 }
 
 describe("interactive background jobs", () => {
-	it("registers /jobs as a built-in local command", () => {
-		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "jobs")?.description).toContain(
-			"background jobs",
+	it("registers /work, and no longer /jobs or /subagents, as a built-in local command", () => {
+		expect(BUILTIN_SLASH_COMMANDS.find((command) => command.name === "work")?.description).toContain("jobs");
+		expect(BUILTIN_SLASH_COMMANDS.some((command) => command.name === "jobs" || command.name === "subagents")).toBe(
+			false,
 		);
 	});
 
 	it.each(["regular", "fullscreen"] as const)(
-		"opens /jobs during a foreground wait without cancelling work (%s)",
+		"opens /work during a foreground wait without cancelling work (%s)",
 		async (tuiMode) => {
 			const { harness, access, jobs, job, terminal, listeners, update, finish } = await createFixture(tuiMode);
 			vi.spyOn(harness.session, "isStreaming", "get").mockReturnValue(true);
@@ -243,22 +247,33 @@ describe("interactive background jobs", () => {
 				waitSettled = true;
 			});
 
-			await access.defaultEditor.onSubmit?.(" /jobs ");
+			await access.defaultEditor.onSubmit?.(" /work ");
 			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
-			expect(listeners.size).toBe(2);
-			expect(terminal.getViewport().join("\n")).toContain("first live output");
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
+			expect(listeners.size).toBe(1);
+			terminal.sendInput("\r");
+			await vi.waitFor(async () => {
+				await terminal.waitForRender();
+				expect(terminal.getViewport().join("\n")).toContain("first live output");
+			});
 			update({ content: [{ type: "text", text: "latest inspector output" }] });
-			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).toContain("latest inspector output");
+			// The job keeps its output itself: the inspector reads it again while it runs.
+			await vi.waitFor(
+				async () => {
+					await terminal.waitForRender();
+					expect(terminal.getViewport().join("\n")).toContain("latest inspector output");
+				},
+				{ timeout: 3000 },
+			);
 			expect(waitSettled).toBe(false);
 			expect(prompt).not.toHaveBeenCalled();
 			expect(access.pendingUserInputs).toEqual([]);
 
 			terminal.sendInput("\x1b");
+			terminal.sendInput("\x1b");
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
-			expect(listeners.size).toBe(1);
+			expect(access.workInspector).toBeUndefined();
 			expect(abort).not.toHaveBeenCalled();
 			expect(cancel).not.toHaveBeenCalled();
 			expect(jobs.get(job.id).status).toBe("running");
@@ -267,24 +282,57 @@ describe("interactive background jobs", () => {
 		},
 	);
 
+	it("says how work ended when no notice or tool call reports it", async () => {
+		const { access, runtime, terminal } = await createFixture("regular");
+		runtime.work.register({
+			kind: "ext:test/install",
+			delivery: "none",
+			cancellable: true,
+			maxActive: 2,
+			title: () => "Install rust-analyzer",
+		});
+		const installed = await runtime.work.start("ext:test/install", null, async () => ({
+			outcome: "completed",
+			result: { summary: "rust-analyzer is ready\nmore detail" },
+		}));
+		const denied = await runtime.work.start("ext:test/install", null, async () => ({
+			outcome: "failed",
+			error: "denied",
+		}));
+		await runtime.work.settled(installed.workId);
+		await runtime.work.settled(denied.workId);
+		await vi.waitFor(async () => {
+			await terminal.waitForRender();
+			const chat = stripAnsi(access.chatContainer.render(100).lines.join("\n"));
+			expect(chat).toContain("Install rust-analyzer completed: rust-analyzer is ready");
+			expect(chat).toContain("Install rust-analyzer failed: denied");
+			expect(chat).not.toContain("more detail");
+		});
+		// The job its tool call reports says nothing here.
+		expect(stripAnsi(access.chatContainer.render(100).lines.join("\n"))).not.toContain(
+			"Run focused integration checks",
+		);
+	});
+
 	it.each(["regular", "fullscreen"] as const)(
-		"keeps a one-row background dock above the editor beside a wide plan (%s)",
+		"keeps a one-row work line in the footer below the editor beside a wide plan (%s)",
 		async (tuiMode) => {
 			const { access, terminal } = await createFixture(tuiMode, 160, true);
 			const viewport = terminal.getViewport();
-			const statusRow = viewport.findIndex((line) => line.includes("Jobs  running"));
+			const statusRow = viewport.findIndex((line) => line.includes("Work · ● running"));
 			const editorRow = viewport.findIndex((line) => line.includes("ASK VOLT"));
 			expect(statusRow).toBeGreaterThanOrEqual(0);
-			expect(editorRow).toBeGreaterThan(statusRow);
+			expect(statusRow).toBeGreaterThan(editorRow);
 			expect(viewport.join("\n")).toContain("Keep the plan visible");
 			expect(viewport.join("\n")).not.toContain("first live output");
-			expect(viewport.filter((line) => line.includes("Jobs  running"))).toHaveLength(1);
-			expect(access.jobsStatus.render(80).lines).toHaveLength(1);
+			expect(viewport.filter((line) => line.includes("Work · ● running"))).toHaveLength(1);
+			expect(viewport[statusRow]).toContain("Run focused integration checks");
+			expect(access.workStatus.render(80).lines).toHaveLength(1);
 
 			access.ui.setFocus(access.editor);
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
@@ -292,23 +340,28 @@ describe("interactive background jobs", () => {
 	);
 
 	it.each(["regular", "fullscreen"] as const)(
-		"removes the dock row once the job finished and keeps inspector history available (%s)",
+		"removes the work line once the job finished and keeps it in the inspector (%s)",
 		async (tuiMode) => {
 			const { access, terminal, jobs, job, finish } = await createFixture(tuiMode);
-			expect(terminal.getViewport().join("\n")).toContain("Jobs  running");
+			expect(terminal.getViewport().join("\n")).toContain("Work · ● running");
 			expect(terminal.getViewport().join("\n")).not.toContain("first live output");
 			finish();
 			await jobs.wait([job.id]);
 			access.jobsRenderCoalescer?.flush();
 			await terminal.waitForRender();
 			const settled = terminal.getViewport().join("\n");
-			expect(settled).not.toContain("Jobs  ");
+			expect(settled).not.toContain("Work · ");
 			expect(settled).not.toContain("final output");
-			expect(access.jobsStatus.render(80).lines).toEqual([]);
+			expect(access.workStatus.render(80).lines).toEqual([]);
 			expect(access.ui.getFocusedComponent()).toBe(access.editor);
-			await access.defaultEditor.onSubmit?.("/jobs");
+			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).toContain("final output");
+			expect(terminal.getViewport().join("\n")).toContain("✓ completed");
+			terminal.sendInput("\r");
+			await vi.waitFor(async () => {
+				await terminal.waitForRender();
+				expect(terminal.getViewport().join("\n")).toContain("final output");
+			});
 		},
 	);
 
@@ -336,7 +389,7 @@ describe("interactive background jobs", () => {
 			);
 			await access.handleEvent({ type: "message_start", message: notice });
 			access.jobsRenderCoalescer?.flush();
-			const notification = access.chatContainer.children.find((child) => child instanceof CustomMessageComponent);
+			const notification = access.chatContainer.children.find((child) => child instanceof WorkNoticeComponent);
 			expect(
 				stripAnsi(notification?.render(120).lines.join(" ") ?? "")
 					.replace(/\s+/g, " ")
@@ -398,15 +451,16 @@ describe("interactive background jobs", () => {
 		terminal.sendInput("\x1bj");
 		await terminal.waitForRender();
 		const inspector = access.ui.getFocusedComponent();
-		expect(inspector).toBeInstanceOf(BackgroundJobsInspector);
+		expect(inspector).toBeInstanceOf(WorkInspector);
 		closeExtension();
 		await extension;
 		await terminal.waitForRender();
 		expect(access.ui.getFocusedComponent()).toBe(inspector);
-		expect(listeners.size).toBe(2);
+		expect(access.workInspector).toBe(inspector);
 		terminal.sendInput("\x1b");
 		await terminal.waitForRender();
 		expect(access.ui.getFocusedComponent()).toBe(access.editor);
+		expect(access.workInspector).toBeUndefined();
 		expect(listeners.size).toBe(1);
 	});
 
@@ -414,7 +468,7 @@ describe("interactive background jobs", () => {
 		"keeps confirmations visible and prevents inspection keys from approving them (%s)",
 		async (tuiMode) => {
 			const { access, terminal, listeners, jobs, job } = await createFixture(tuiMode);
-			await access.defaultEditor.onSubmit?.("/jobs");
+			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
 			let resolved = false;
 			const confirmation = access
@@ -424,7 +478,7 @@ describe("interactive background jobs", () => {
 					return value;
 				});
 			await terminal.waitForRender();
-			expect(access.jobsInspector).toBeUndefined();
+			expect(access.workInspector).toBeUndefined();
 			expect(listeners.size).toBe(1);
 			expect(terminal.getViewport().join("\n")).toContain("Permission required");
 			expect(resolved).toBe(false);
@@ -432,8 +486,10 @@ describe("interactive background jobs", () => {
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
 			terminal.sendInput("\r");
-			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).toContain("Following latest");
+			await vi.waitFor(async () => {
+				await terminal.waitForRender();
+				expect(terminal.getViewport().join("\n")).toContain("Following latest");
+			});
 			expect(resolved).toBe(false);
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
@@ -464,12 +520,12 @@ describe("interactive background jobs", () => {
 			);
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
 			const component = new Text("Dedicated confirmation content", 0, 0);
 			ready(component);
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(component);
-			expect(access.jobsInspector).toBeUndefined();
+			expect(access.workInspector).toBeUndefined();
 			expect(terminal.getViewport().join("\n")).toContain("Dedicated confirmation content");
 			expect(listeners.size).toBe(1);
 			close();
@@ -484,7 +540,7 @@ describe("interactive background jobs", () => {
 		["fullscreen", false],
 		["fullscreen", true],
 	] as const)(
-		"restores login input after account selection interrupts jobs inspection (%s, cancel: %s)",
+		"restores login input after account selection interrupts work inspection (%s, cancel: %s)",
 		async (tuiMode, cancel) => {
 			const { access, terminal, jobs, job } = await createFixture(tuiMode);
 			const input = vi.fn();
@@ -492,13 +548,13 @@ describe("interactive background jobs", () => {
 			access.activateView({ regularComponents: [dialog], fullscreenRoot: dialog }, dialog);
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
 			const selected = access.showOAuthLoginSelect(dialog, {
 				message: "Choose an account",
 				options: [{ id: "first", label: "First account" }],
 			});
 			await terminal.waitForRender();
-			expect(access.jobsInspector).toBeUndefined();
+			expect(access.workInspector).toBeUndefined();
 			expect(terminal.getViewport().join("\n")).toContain("Choose an account");
 			terminal.sendInput(cancel ? "\x1b" : "\r");
 			expect(await selected).toBe(cancel ? undefined : "first");
@@ -583,13 +639,13 @@ describe("interactive background jobs", () => {
 				terminal.sendInput("\x1bj");
 				await terminal.waitForRender();
 				const inspector = access.ui.getFocusedComponent();
-				expect(inspector).toBeInstanceOf(BackgroundJobsInspector);
+				expect(inspector).toBeInstanceOf(WorkInspector);
 				access.ui.setFocus(inspector);
-				expect(access.jobsInspector).toBe(inspector);
+				expect(access.workInspector).toBe(inspector);
 				release();
 				await operation;
 				await terminal.waitForRender();
-				expect(access.jobsInspector).toBeUndefined();
+				expect(access.workInspector).toBeUndefined();
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
 				expect(listeners.size).toBe(1);
 				terminal.sendInput("visible draft");
@@ -633,12 +689,12 @@ describe("interactive background jobs", () => {
 				await started;
 				terminal.sendInput("\x1bj");
 				await terminal.waitForRender();
-				expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
-				expect(listeners.size).toBe(2);
+				expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
+				expect(access.workInspector).toBeDefined();
 				release();
 				expect(await reloading).toBe(!failed);
 				await terminal.waitForRender();
-				expect(access.jobsInspector).toBeUndefined();
+				expect(access.workInspector).toBeUndefined();
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
 				expect(listeners.size).toBe(1);
 				terminal.sendInput("draft after reload");
@@ -653,7 +709,7 @@ describe("interactive background jobs", () => {
 		},
 	);
 
-	it("keeps follow-up /jobs local and cancels only the selected job after confirmation", async () => {
+	it("keeps follow-up /work local and cancels only the selected job after confirmation", async () => {
 		const { harness, access, jobs, terminal, job, listeners } = await createFixture("fullscreen");
 		vi.spyOn(harness.session, "isStreaming", "get").mockReturnValue(true);
 		const prompt = vi.spyOn(harness.session, "prompt");
@@ -664,11 +720,15 @@ describe("interactive background jobs", () => {
 			run: async () => ({ content: [] }),
 		});
 		await jobs.wait([other.id]);
-		access.editor.setText("/jobs");
+		access.editor.setText("/work");
 		await access.handleFollowUp();
 		await terminal.waitForRender();
 		expect(prompt).not.toHaveBeenCalled();
+		// The running job is listed first, and selected.
+		expect(terminal.getViewport().join("\n")).toContain("1 running · 1 completed");
 		terminal.sendInput("\x0b");
+		await terminal.waitForRender();
+		expect(terminal.getViewport().join("\n")).toContain("Cancel this work?");
 		await terminal.waitForRender();
 		expect(jobs.get(job.id).status).toBe("running");
 		terminal.sendInput("\r");
@@ -808,7 +868,7 @@ describe("interactive background jobs", () => {
 		},
 	);
 
-	it("releases a settled launch binding once its job leaves the list, without live lookups on replay", async () => {
+	it("releases a settled launch binding once its job leaves the list, and replays its recorded outcome", async () => {
 		const fixture = await createFixture("regular");
 		const { access, jobs, job, finish, source } = fixture;
 		const card = await acknowledgeLaunch(fixture);
@@ -828,20 +888,19 @@ describe("interactive background jobs", () => {
 		expect(jobs.list()).toHaveLength(JOB_LIST_MAX);
 		expect(jobs.list().some((listed) => listed.id === job.id)).toBe(false);
 		await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
-		const get = vi.spyOn(source, "get");
-		const runtimeGet = vi.spyOn(jobs, "get");
 		for (let index = 0; index < 2; index++) {
 			access.renderCurrentSessionState();
+			// A finished job's card shows its recorded outcome, not the running state it captured.
 			const output = stripAnsi(access.chatContainer.render(100).lines.join("\n"));
-			expect(output).toContain("Running at capture");
-			expect(output).not.toContain("final output");
+			expect(output).toContain("Bash · background · Completed");
+			expect(output).toContain("final output");
+			expect(output).not.toContain("Running at capture");
 		}
-		expect(get).not.toHaveBeenCalledWith(job.id);
-		expect(runtimeGet).not.toHaveBeenCalledWith(job.id);
+		expect(source.get(job.id).status).toBe("completed");
 	});
 
 	it.each(["regular", "fullscreen"] as const)(
-		"covers both transcript edges in the jobs inspector and restores editor input (%s)",
+		"covers both transcript edges in the work inspector and restores editor input (%s)",
 		async (tuiMode) => {
 			const { access, terminal } = await createFixture(tuiMode);
 			access.chatContainer.addChild(new Text(Array.from({ length: 30 }, () => "X".repeat(80)).join("\n"), 0, 0));
@@ -851,7 +910,7 @@ describe("interactive background jobs", () => {
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
 			expect(terminal.getViewport().slice(1, -1).join("\n")).not.toContain("X");
-			expect(access.ui.getFocusedComponent()).toBeInstanceOf(BackgroundJobsInspector);
+			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
 			terminal.sendInput("\x1b");
 			terminal.sendInput("editor restored");
 			await terminal.waitForRender();
@@ -872,13 +931,13 @@ describe("interactive background jobs", () => {
 				access.jobsRenderCoalescer?.flush();
 			}
 			const dispose = vi.spyOn(card, "dispose");
-			await access.defaultEditor.onSubmit?.("/jobs");
+			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
-			expect(listeners.size).toBe(2);
+			expect(access.workInspector).toBeDefined();
 			access.beginSessionReplacementUi();
 			expect(listeners.size).toBe(0);
 			expect(dispose).toHaveBeenCalledOnce();
-			expect(access.jobsInspector).toBeUndefined();
+			expect(access.workInspector).toBeUndefined();
 			const replacement = await createHarness({
 				settings: { lsp: { enabled: false }, theme: "dark", quietStartup: true },
 			});
@@ -888,11 +947,11 @@ describe("interactive background jobs", () => {
 			access.renderCurrentSessionState();
 			update({ content: [{ type: "text", text: "stale runtime output" }] });
 			await terminal.waitForRender();
-			expect(access.jobsStatus.render(80).lines).toEqual([]);
+			expect(access.workStatus.render(80).lines).toEqual([]);
 			expect(terminal.getViewport().join("\n")).not.toContain("stale runtime output");
-			await access.defaultEditor.onSubmit?.("/jobs");
+			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
-			expect(terminal.getViewport().join("\n")).toContain("No background jobs");
+			expect(terminal.getViewport().join("\n")).toContain("No work in this conversation.");
 		},
 	);
 });

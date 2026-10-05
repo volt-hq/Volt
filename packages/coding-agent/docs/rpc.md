@@ -77,7 +77,7 @@ A subscription streams one conversation's projected log and, unless `live: false
 | `lost` | The conversation lost its log. |
 | `shutdown` | The host is shutting down. |
 
-A client may subscribe to the conversation it is on, to another open conversation of the host, or, observe-only, to the open conversation of a subagent its conversation links by `subagent` work (`work_started.child.conversation`), directly or through linked children.
+A client may subscribe to the conversation it is on, to another open conversation of the host, or, observe-only, to the conversation of a subagent its conversation links by `subagent` work (`work_started.child.conversation`), directly or through linked children. While the child is open the subscription follows it; once it closed (it ended, or a restart suspended it), the host answers a snapshot of the child's log, then `ended{closed}`.
 
 ### Entries and positions
 
@@ -94,9 +94,19 @@ An entry's bytes depend only on the log up to it and the profile: every subscrib
 
 ### The client fold
 
-What a client knows about the conversation is the client fold of the entries it received: `clientFold` in `@hansjm10/volt-protocol` (with `clientRestore` for a snapshot and `clientAdvance` for `head`). It derives the active leaf, the branch's model, thinking level, Fast mode, and plan state, the name, the labels, the pending client inputs (the delivery queue), and fork lineage. A `leaf` entry moves the active branch; every other conversation entry becomes the leaf when appended.
+What a client knows about the conversation is the client fold of the entries it received: `clientFold` in `@hansjm10/volt-protocol` (with `clientRestore` for a snapshot and `clientAdvance` for `head`). It derives the active leaf, the branch's model, thinking level, Fast mode, and plan state, the name, the labels, the pending client inputs (the delivery queue), fork lineage, and the conversation's work. A `leaf` entry moves the active branch; every other conversation entry becomes the leaf when appended.
 
-A snapshot's `state` is `{leafId, entries, earlier, model, thinkingLevel, fastMode, planning, name, labels, queue, forkedFrom?}`. On the local profile `entries` holds every projected entry and `earlier` is `false`.
+A snapshot's `state` is `{leafId, entries, earlier, model, thinkingLevel, fastMode, planning, name, labels, queue, forkedFrom?, work?}`. On the local profile `entries` holds every projected entry and `earlier` is `false`.
+
+### Work
+
+Long-running work of a conversation is a work item: a background job (`job`), a subagent (`subagent`), a review (`review`), a host action awaiting the user's approval (`host_action`), or an extension's work (`ext:<extension>/<kind>`). Its `work_started`, `work_checkpoint`, and `work_finished` entries describe it, and the client fold's `work` holds every open item and the 64 most recently finished, each with its kind, title, state, outcome, latest checkpointed progress and detail, and result metadata (`summary`, `child`, whether it has `output`), never its input or output text.
+
+- **States.** Open work is `awaiting_approval` (a host action), `running`, or `cancelling`; it ends `completed`, `failed`, `cancelled`, or `interrupted`. Open work with a live `work/<workId>` value runs on the host now. Open work of a resumable kind (`resume: true`, subagents) without one is suspended since a restart: it runs again only after `resume_work`, and `cancel_work` ends it. Other work a restart left open ends `interrupted` when the conversation opens again.
+- **Progress.** Checkpoints are coarse (state changes, and kind phases at most every 10 seconds, at most 256 per item); the live value carries the fine-grained progress and detail (`UiNode` data) while the work runs.
+- **Output.** `work_output` reads a work item's output by id: what running work produced so far, or what its result kept (its newest 50 KB).
+- **Delivery.** A completed or failed item of a `wake` kind (jobs) queues a `work_notice` message and starts a turn when the conversation is idle; a `message` kind's notice rides the next turn instead. Notices carry the result's metadata, not its output.
+- **Actions.** `cancel_work`, `open_work`, and `resume_work` act on an item as its kind allows: an item a kind does not let clients cancel is refused with `not_allowed`.
 
 ## Live lane
 
@@ -129,8 +139,7 @@ Keyed values (`value.kind` is the key's family):
 | `git` | `{gitContext}`: path-free Git metadata of the working tree, or `null`. |
 | `prompt_cache` | `{promptCache}`: the current model's prompt-cache retention, or `null`. |
 | `intents` | `{availability: [{name, enabled, reason?, state?}]}`: the intents whose availability and state follow the conversation (`set_fast_mode`, `set_agent_mode`, `set_auto_compaction`, `set_compaction_threshold`). |
-| `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs, such as a background job or an approved host action, set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
-| `workflow/<id>` | `{event, activeTools}`: a detached review workflow's latest event and running tools; cleared after its end. |
+| `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs (a job, subagent, review, approved host action, or extension work), set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
 | `host_request/<id>` | `{requestId, request}`: a pending host request (below). |
 | `ext_status/<key>`, `ext_widget/<key>`, `ext_title` | Extension status lines, string widgets (`{lines, placement}`), and the window title. |
 
@@ -169,7 +178,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 |---|---|---|
 | `prompt` | `{message, images?, streamingBehavior?: steer|followUp}` | |
 | `steer`, `follow_up` | `{message, images?}` | |
-| `abort` | `{}`: abort the run and cancel running work (subagents, reviews, and approved host actions run on until `cancel_work`); queued input is delivered | |
+| `abort` | `{}`: abort the run and cancel running work (subagents, reviews, approved host actions, and extension work whose kind restricts remote clients run on until `cancel_work`); queued input is delivered | |
 | `abort_retry`, `abort_bash` | `{}` | |
 | `bash` | `{command, excludeFromContext?}` | `{output, exitCode?, cancelled, truncated, fullOutputPath?}` |
 | `compact` | `{customInstructions?}` | the compaction result |
@@ -185,12 +194,12 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `fork` | `{entryId}`: fork before a user message | `{text}` (the message, for the editor) or `{cancelled: true}` |
 | `clone` | `{}` | `{cancelled: true}` when cancelled |
 | `export_html` | `{outputPath?}` | `{path}` |
-| `cancel_work` | `{workId}`: cancel open work, such as a background job or a subagent | |
-| `open_work` | `{workId}`: a subagent's open conversation, to subscribe to | `{conversation}` |
+| `cancel_work` | `{workId}`: cancel open work, such as a background job, a review, or a subagent, suspended ones included | |
+| `open_work` | `{workId}`: a subagent's conversation, open or closed, to subscribe to; a finished review's findings in a new session, which moves the client | `{conversation}`, or `accepted{conversation}` for a move |
 | `resume_work` | `{workId}`: continue a subagent suspended since a restart | |
 | `start_subagent` | `{agent, prompt}`: start a subagent as work of the conversation | `{workId, conversation}` |
-| `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls | `{workflowId}` |
-| `review_rerun`, `review_cancel_workflow`, `review_open_session`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_export_feedback`, `review_start_discussions`, `review_reset_discussion` | see the contract | |
+| `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls | `{workId}` |
+| `review_rerun`, `review_open_session`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_export_feedback`, `review_start_discussions`, `review_reset_discussion` | see the contract | |
 | `set_default_model` | `{provider, modelId}`: the default for new conversations | |
 | `set_default_thinking_level` | `{level}` | |
 | `set_steering_mode`, `set_follow_up_mode` | `{mode: all|one-at-a-time}` | |
@@ -224,7 +233,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `subagent_definitions` | | Discovered subagent definitions. |
 | `work_output` | `{workId, offset?}` | A work item's output, such as a background job's: what it produced so far, or what its result kept, in chunks. |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |
-| `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.workflows` | see the contract | Durable review reads. |
+| `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` | see the contract | Durable review reads; `review.runs` pages the conversation's review runs. |
 
 `changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
 

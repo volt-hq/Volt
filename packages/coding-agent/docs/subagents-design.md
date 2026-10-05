@@ -1,5 +1,7 @@
 # Core Subagents Design
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) (§7) made subagents `subagent` work items: `start_subagent`, `cancel_work`, `open_work`, and `resume_work` replace the `subagent_*` commands and events, a subagent running when its runtime stops is suspended until it is resumed or cancelled, and the TUI's `/work` inspector replaces `/subagents` with a read-only view of each child conversation. Where this document describes the subagent inspector, spawn entries, or status enums, [Using Volt](usage.md#work) and [RPC mode](rpc.md#work) describe the current behavior. The rest of this document is a historical record.
+
 ## Status
 
 Local MVP implemented. This document records the supported boundary for core subagents and the work intentionally deferred beyond the MVP.

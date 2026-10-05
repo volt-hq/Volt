@@ -412,8 +412,7 @@ describe("conversation host client session lifecycle events", () => {
 			sessionId: originatingRef!.sessionId,
 			seeded: false,
 		});
-		const activeReviewError =
-			"Cannot change sessions while a detached review is active; cancel or wait for it to finish";
+		const activeReviewError = "Cannot change sessions while work runs; cancel it or wait for it to finish";
 		await expect(runtimeHost.fork(forkEntry!.id, { position: "at" })).rejects.toThrow(activeReviewError);
 		await expect(runtimeHost.newSession()).rejects.toThrow(activeReviewError);
 		expect(runtimeHost.session).toBe(originatingSession);

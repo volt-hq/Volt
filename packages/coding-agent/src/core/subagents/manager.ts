@@ -1800,7 +1800,7 @@ export class SubagentManager {
 				isIdle: () =>
 					idleActivityRevision === runtime.session.activityRevision &&
 					!runtime.session.isStreaming &&
-					!runtime.session.hasRunningWork,
+					runtime.session.work.running().length === 0,
 			});
 			delegation.reservation.commit(id, () => {
 				markRunAbortRequested();

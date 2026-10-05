@@ -22,8 +22,22 @@ interface FakeExtensionAttachment {
 interface FakeSessionLike {
 	sessionId?: string;
 	liveState?: LiveState;
+	isBusy?: boolean;
+	work?: { busy(): boolean };
 	attachExtensionClient?: (client: object) => FakeExtensionAttachment;
 }
+
+/** The work of a fake session without any: nothing runs, and nothing was recorded. */
+const NO_WORK = Object.freeze({
+	list: () => [],
+	get: () => undefined,
+	running: () => [],
+	busy: () => false,
+	suspended: () => false,
+	cancellable: () => false,
+	opens: () => false,
+	subscribe: () => () => undefined,
+});
 
 export interface FakeConversation {
 	readonly conversation: HostedConversation;
@@ -34,7 +48,9 @@ export interface FakeConversation {
 /**
  * A fake hosted conversation over `session`. `members` adds or replaces
  * conversation members (`listSessions`, `work`, `services`, ...).
- * Its live state is the session's `liveState`, or its own.
+ * Its live state is the session's `liveState`, or its own; its work is the
+ * session's `work`, or none; it is active while the session is busy or its
+ * work runs.
  */
 export function createFakeConversation(session: object, members: Record<string, unknown> = {}): FakeConversation {
 	const lost = Promise.withResolvers<Error>();
@@ -47,6 +63,12 @@ export function createFakeConversation(session: object, members: Record<string, 
 		lost: lost.promise,
 		services: {},
 		liveState: (session as FakeSessionLike).liveState ?? new LiveState(),
+		get work() {
+			return (session as FakeSessionLike).work ?? NO_WORK;
+		},
+		isActive(): boolean {
+			return (session as FakeSessionLike).isBusy === true || this.work.busy();
+		},
 		...members,
 	};
 	return { conversation: conversation as unknown as HostedConversation, loseLog: (error) => lost.resolve(error) };

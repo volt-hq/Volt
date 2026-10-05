@@ -220,6 +220,10 @@ export interface TestDaemonRuntimeParts {
 	listSessions?: () => Promise<object[]>;
 	/** Never resolves by default. */
 	lost?: Promise<Error>;
+	/** The retention check; by default whether the session is busy. */
+	isActive?: () => boolean;
+	/** Resolves once what made it active settled; by default once the session is not busy. */
+	waitForIdle?: () => Promise<void>;
 }
 
 /** The close of each conversation a daemon host double hosts. */
@@ -246,6 +250,12 @@ export function createTestDaemonRuntime(parts: TestDaemonRuntimeParts, host?: Co
 		lost: parts.lost ?? new Promise<Error>(() => {}),
 		startRecoveredClientInputs: parts.startRecoveredClientInputs ?? (async () => {}),
 		listSessions: parts.listSessions ?? (async () => []),
+		isActive: parts.isActive ?? (() => (parts.session as { isBusy?: boolean }).isBusy === true),
+		waitForIdle:
+			parts.waitForIdle ??
+			(async () => {
+				await (parts.session as { waitForNotBusy?: () => Promise<void> }).waitForNotBusy?.();
+			}),
 	} as unknown as HostedConversation;
 	const conversationHost = host ?? createTestDaemonHost();
 	const closers = testDaemonHostClosers.get(conversationHost);

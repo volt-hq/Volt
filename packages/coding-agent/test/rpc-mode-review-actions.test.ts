@@ -459,7 +459,7 @@ describe("durable review intents over protocol frames", () => {
 		};
 		const { client } = await setup([durableRecord("review:older"), newer]);
 
-		const list = await client.query("review.workflows", { limit: 1 });
+		const list = await client.query("review.runs", { limit: 1 });
 		expect(list.runs).toHaveLength(1);
 		expect(list.runs[0]?.target).toMatchObject({
 			pullRequest: {
@@ -483,10 +483,10 @@ describe("durable review intents over protocol frames", () => {
 		});
 		expect(JSON.stringify(list)).not.toContain("PRIVATE_PULL_REQUEST_BODY");
 		if (!list.nextCursor) throw new Error("Expected a next page");
-		await expect(client.query("review.workflows", { cursor: list.nextCursor, limit: 1 })).resolves.toMatchObject({
+		await expect(client.query("review.runs", { cursor: list.nextCursor, limit: 1 })).resolves.toMatchObject({
 			runs: [{ runId: "review:older" }],
 		});
-		await expect(client.query("review.workflows", { limit: 51 })).rejects.toMatchObject({
+		await expect(client.query("review.runs", { limit: 51 })).rejects.toMatchObject({
 			code: "invalid_input",
 			message: expect.stringContaining("limit"),
 		});
@@ -642,7 +642,7 @@ describe("durable review intents over protocol frames", () => {
 		expect(sourceRun?.result?.findings).toHaveLength(1);
 		expect(targetRun?.result?.findings).toHaveLength(1);
 
-		await expect(client.query("review.workflows", {})).resolves.toMatchObject({
+		await expect(client.query("review.runs", {})).resolves.toMatchObject({
 			runs: [{ runId: "review:test", acknowledgedAt: sourceRun?.acknowledgedAt }],
 		});
 		await expect(client.query("review.result", { runId: "review:test" })).resolves.toMatchObject({
@@ -708,7 +708,7 @@ describe("durable review intents over protocol frames", () => {
 
 	test("accepts an incremental durable branch rerun through its host-only locator", async () => {
 		const { client } = await setup([durableBranchRecord()]);
-		const list = await client.query("review.workflows", {});
+		const list = await client.query("review.runs", {});
 		expect(list.runs).toHaveLength(1);
 		expect(JSON.stringify(list)).not.toContain("branchBase");
 

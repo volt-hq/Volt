@@ -133,7 +133,7 @@ describe("#392 background outcome continuation", () => {
 				context.completedTurn && context.completedTurn.toolResults.length === 0 ? { type: "stop" } : undefined,
 		});
 		const jobs = await launch(harness, [command, "later"]);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		workers.get(command)!.resolve();
 		workers.get("later")!.resolve();
 		await settle(harness);

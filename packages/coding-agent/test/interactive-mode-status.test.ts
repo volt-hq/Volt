@@ -1239,7 +1239,7 @@ describe("InteractiveMode plan pane integration", () => {
 				(InteractiveMode as any).prototype.createDedicatedView.call(fakeThis, component),
 			activateView: (view: unknown, focus: Component | null, forceRender?: boolean) =>
 				(InteractiveMode as any).prototype.activateView.call(fakeThis, view, focus, forceRender),
-			dismissSubagentInspector: undefined,
+			dismissWorkInspector: undefined,
 			editor,
 			editorContainer,
 			fullscreenTranscript: { setPrimary: vi.fn() },

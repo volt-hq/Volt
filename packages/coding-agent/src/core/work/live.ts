@@ -15,6 +15,7 @@ import {
 	type WorkProgress,
 } from "@hansjm10/volt-protocol";
 import { type LiveState, liveKey } from "../host/live-state.ts";
+import { boundedWorkPhase } from "./phase.ts";
 
 /** How often one item's progress reaches the live state at most. */
 export const WORK_LIVE_COALESCE_MS = 100;
@@ -29,26 +30,19 @@ interface LiveWork {
 	timer?: ReturnType<typeof setTimeout>;
 }
 
-function serializedBytes(value: unknown): number {
-	return Buffer.byteLength(JSON.stringify(value), "utf8");
-}
-
 /** The value of `workId` within the bound: without detail, then without steps, then without progress. */
 function boundedValue(workId: string, work: LiveWork): LiveValue {
-	const base = {
-		kind: "work" as const,
-		workId,
-		...(work.outputBytes > 0 ? { output: { bytes: work.outputBytes } } : {}),
-	};
 	const { progress, detail } = work;
-	const candidates: LiveValue[] = [
-		{ ...base, ...(progress === undefined ? {} : { progress }), ...(detail === undefined ? {} : { detail }) },
-	];
-	if (progress !== undefined) {
-		const { steps: _steps, ...stepless } = progress;
-		candidates.push({ ...base, progress }, { ...base, progress: stepless });
-	}
-	return candidates.find((candidate) => serializedBytes(candidate) <= WORK_LIVE_VALUE_MAX_BYTES) ?? base;
+	return boundedWorkPhase(
+		{
+			kind: "work" as const,
+			workId,
+			...(work.outputBytes > 0 ? { output: { bytes: work.outputBytes } } : {}),
+			...(progress === undefined ? {} : { progress }),
+			...(detail === undefined ? {} : { detail }),
+		},
+		WORK_LIVE_VALUE_MAX_BYTES,
+	);
 }
 
 /** Publishes the live values of a registry's running work. */

@@ -16,13 +16,16 @@ import {
 	type ClientInputReceiptEntryPayload,
 	type ProjectedEntry,
 	type TranscriptItem,
+	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 	WORK_TITLE_MAX_CHARS,
+	type WorkCheckpointEntryPayload,
 	type WorkFinishedEntryPayload,
 	type WorkResult,
 	type WorkStartedEntryPayload,
 } from "@hansjm10/volt-protocol";
 import { toLogEntry } from "../../conversation-log/entry-codec.ts";
 import type { CommittedSessionEntry, SessionManager } from "../../session-manager.ts";
+import { redactedWorkPhase } from "../../work/phase.ts";
 import { workText } from "../../work/registry.ts";
 import type { Profile } from "../profiles.ts";
 import { type ProjectionSource, projectTranscriptItem } from "./transcript.ts";
@@ -47,8 +50,10 @@ function withoutImageData<T extends { readonly data: string }>(images: readonly 
  * A work entry as a transcript profile sends it: without the work's input,
  * its child's locator, its output text, and its result data, which may hold
  * host paths, secrets, or bulk (output is read with `work_output`). Paths
- * are redacted first, text the host cut to its bound loses a root's start
- * the cut left, and text redaction lengthened is bounded again.
+ * are redacted first, text the host cut to its bound (a title, summary,
+ * error, progress text, or step label) loses a root's start the cut left,
+ * and what redaction lengthened is bounded again: text to its bound, a
+ * checkpoint to the checkpoint bound.
  */
 function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, profile: Profile): unknown {
 	const cut = (text: string, max?: number): string => workText(profile.sourceCut(text), max);
@@ -60,6 +65,14 @@ function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, p
 			input: null,
 			...(child === undefined ? {} : { child: { conversation: child.conversation } }),
 		} satisfies WorkStartedEntryPayload;
+	}
+	if (entry.type === "work_checkpoint") {
+		return redactedWorkPhase(
+			payload as WorkCheckpointEntryPayload,
+			profile.source,
+			profile.sourceCut,
+			WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
+		);
 	}
 	if (entry.type !== "work_finished") return profile.source(payload);
 	const { result, error, ...finished } = payload as WorkFinishedEntryPayload;

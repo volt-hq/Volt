@@ -140,7 +140,7 @@ describe("review work", () => {
 			state: "running",
 		});
 		expect(work.running().map((item) => item.workId)).toEqual(["review:one"]);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 
 		await work.cancel("review:one");
 		await work.settled("review:one");
