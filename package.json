@@ -1,6 +1,6 @@
 {
 	"name": "volt-rtk-extension",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Rewrite bash tool calls through RTK for token-optimized command output.",
 	"type": "module",
 	"keywords": [
@@ -10,8 +10,12 @@
 	],
 	"license": "MIT",
 	"volt": {
-		"extensions": [
-			"extensions/rtk.ts"
+		"id": "rtk",
+		"displayName": "RTK Output Compression",
+		"description": "Rewrites bash commands through RTK for token-optimized command output.",
+		"entry": "extensions/rtk.ts",
+		"permissions": [
+			"exec"
 		]
 	}
 }
