@@ -47,6 +47,31 @@
 			"lineMaxChars": 4096,
 			"imageDataMaxChars": 1048576
 		},
+		"uiPatch": {
+			"pathMaxKeys": 32
+		},
+		"presentation": {
+			"maxSerializedBytes": 65536,
+			"remoteMaxSerializedBytes": 16384,
+			"panelMaxSerializedBytes": 32768
+		},
+		"extensions": {
+			"idPattern": "^(?!(?:volt|core|builtin|host|ext)$)[a-z0-9][a-z0-9-]{0,63}$",
+			"reservedIds": [
+				"volt",
+				"core",
+				"builtin",
+				"host",
+				"ext"
+			],
+			"displayNameMaxChars": 80,
+			"descriptionMaxChars": 240,
+			"entryMaxChars": 512,
+			"settingNamePattern": "^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,63}$",
+			"settingPatternMaxChars": 512,
+			"settingsMaxSerializedBytes": 16384,
+			"errorMaxChars": 2000
+		},
 		"work": {
 			"titleMaxChars": 200,
 			"textMaxChars": 2000,
@@ -82,6 +107,8 @@
 			"intentOutcomeWindow": 256,
 			"historyPageMaxEntries": 200,
 			"contentTextMaxScalars": 12000,
+			"editorCompletionsMaxItems": 50,
+			"editorCompletionTextMaxChars": 1024,
 			"liveKeyIdMaxChars": 256
 		}
 	},
@@ -168,6 +195,8 @@
 				"review_export_feedback",
 				"review_start_discussions",
 				"review_reset_discussion",
+				"set_extension_enabled",
+				"set_extension_settings",
 				"set_default_model",
 				"set_default_thinking_level",
 				"set_steering_mode",
@@ -3026,9 +3055,398 @@
 			"pattern": "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
 			"x-volt-expected": "be a dynamic intent name"
 		},
+		"EditorCompletionItem": {
+			"type": "object",
+			"required": [
+				"value"
+			],
+			"properties": {
+				"value": {
+					"type": "string",
+					"maxLength": 1024
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 1024
+				},
+				"description": {
+					"type": "string",
+					"maxLength": 1024
+				}
+			},
+			"additionalProperties": false
+		},
 		"EmptyInput": {
 			"type": "object",
 			"properties": {},
+			"additionalProperties": false
+		},
+		"ExtensionDescription": {
+			"type": "string",
+			"maxLength": 240,
+			"pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$",
+			"x-volt-expected": "be text without terminal control sequences"
+		},
+		"ExtensionDisplayName": {
+			"type": "string",
+			"minLength": 1,
+			"maxLength": 80,
+			"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$",
+			"x-volt-expected": "be one non-empty line without terminal control sequences"
+		},
+		"ExtensionEntry": {
+			"type": "string",
+			"maxLength": 512,
+			"pattern": "^(?!/|[A-Za-z]:)(?!(?:[^/]*/)*\\.\\.(?:/|$))[^\\\\\\u0000-\\u001f\\u007f]+$",
+			"x-volt-expected": "be a relative path inside the package"
+		},
+		"ExtensionId": {
+			"type": "string",
+			"pattern": "^(?!(?:volt|core|builtin|host|ext)$)[a-z0-9][a-z0-9-]{0,63}$",
+			"x-volt-expected": "be a lowercase extension id that is not reserved"
+		},
+		"ExtensionManifest": {
+			"type": "object",
+			"required": [
+				"id",
+				"displayName"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"displayName": {
+					"$ref": "#/$defs/ExtensionDisplayName"
+				},
+				"description": {
+					"$ref": "#/$defs/ExtensionDescription"
+				},
+				"entry": {
+					"$ref": "#/$defs/ExtensionEntry"
+				},
+				"settings": {
+					"$ref": "#/$defs/ExtensionSettings"
+				},
+				"permissions": {
+					"$ref": "#/$defs/ExtensionPermissions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ExtensionPanelPlacement": {
+			"type": "string",
+			"enum": [
+				"aboveEditor",
+				"belowEditor",
+				"sidebar"
+			]
+		},
+		"ExtensionPermission": {
+			"type": "string",
+			"enum": [
+				"exec",
+				"network",
+				"fs-write",
+				"secrets",
+				"providers"
+			]
+		},
+		"ExtensionPermissions": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/ExtensionPermission"
+			},
+			"maxItems": 5,
+			"uniqueItems": true
+		},
+		"ExtensionSetting": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "string"
+						},
+						"title": {
+							"$ref": "#/$defs/ExtensionDisplayName"
+						},
+						"description": {
+							"$ref": "#/$defs/ExtensionDescription"
+						},
+						"default": {
+							"type": "string"
+						},
+						"minLength": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"maxLength": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"pattern": {
+							"type": "string",
+							"maxLength": 512
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"enum"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "string"
+						},
+						"enum": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							},
+							"minItems": 1,
+							"uniqueItems": true
+						},
+						"title": {
+							"$ref": "#/$defs/ExtensionDisplayName"
+						},
+						"description": {
+							"$ref": "#/$defs/ExtensionDescription"
+						},
+						"default": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "boolean"
+						},
+						"title": {
+							"$ref": "#/$defs/ExtensionDisplayName"
+						},
+						"description": {
+							"$ref": "#/$defs/ExtensionDescription"
+						},
+						"default": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "integer"
+						},
+						"title": {
+							"$ref": "#/$defs/ExtensionDisplayName"
+						},
+						"description": {
+							"$ref": "#/$defs/ExtensionDescription"
+						},
+						"default": {
+							"type": "integer"
+						},
+						"minimum": {
+							"type": "integer"
+						},
+						"maximum": {
+							"type": "integer"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"ExtensionSettings": {
+			"type": "object",
+			"required": [
+				"type",
+				"properties"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "object"
+				},
+				"properties": {
+					"type": "object",
+					"patternProperties": {
+						"^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,63}$": {
+							"$ref": "#/$defs/ExtensionSetting"
+						}
+					},
+					"additionalProperties": false
+				},
+				"required": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"pattern": "^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,63}$",
+						"x-volt-expected": "be a setting name"
+					},
+					"uniqueItems": true
+				},
+				"additionalProperties": {
+					"type": "boolean",
+					"const": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"ExtensionSettingsScope": {
+			"type": "string",
+			"enum": [
+				"global",
+				"project"
+			]
+		},
+		"ExtensionSettingsValues": {
+			"type": "object",
+			"patternProperties": {
+				"^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,63}$": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "boolean"
+						},
+						{
+							"type": "integer"
+						}
+					]
+				}
+			},
+			"additionalProperties": false,
+			"x-volt-max-serialized-bytes": 16384
+		},
+		"ExtensionSettingsView": {
+			"type": "object",
+			"required": [
+				"form",
+				"values",
+				"projectTrusted"
+			],
+			"properties": {
+				"form": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNodeFormField"
+					}
+				},
+				"values": {
+					"type": "object",
+					"required": [
+						"global"
+					],
+					"properties": {
+						"global": {
+							"$ref": "#/$defs/ExtensionSettingsValues"
+						},
+						"project": {
+							"$ref": "#/$defs/ExtensionSettingsValues"
+						}
+					},
+					"additionalProperties": false
+				},
+				"projectTrusted": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ExtensionSourceScope": {
+			"type": "string",
+			"enum": [
+				"user",
+				"project",
+				"temporary"
+			]
+		},
+		"ExtensionState": {
+			"type": "string",
+			"enum": [
+				"disabled",
+				"activating",
+				"active",
+				"deactivating",
+				"failed"
+			]
+		},
+		"ExtensionSummary": {
+			"type": "object",
+			"required": [
+				"id",
+				"displayName",
+				"version",
+				"scope",
+				"enabled",
+				"state",
+				"permissions",
+				"permissionsAcknowledged",
+				"hasSettings"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"displayName": {
+					"$ref": "#/$defs/ExtensionDisplayName"
+				},
+				"description": {
+					"$ref": "#/$defs/ExtensionDescription"
+				},
+				"version": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 256,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
+				},
+				"scope": {
+					"$ref": "#/$defs/ExtensionSourceScope"
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"state": {
+					"$ref": "#/$defs/ExtensionState"
+				},
+				"permissions": {
+					"$ref": "#/$defs/ExtensionPermissions"
+				},
+				"permissionsAcknowledged": {
+					"type": "boolean"
+				},
+				"hasSettings": {
+					"type": "boolean"
+				},
+				"error": {
+					"type": "string",
+					"maxLength": 2000,
+					"pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+				}
+			},
 			"additionalProperties": false
 		},
 		"FatalCode": {
@@ -3402,6 +3820,12 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.review_reset_discussion"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_extension_enabled"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_extension_settings"
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.set_default_model"
@@ -4919,6 +5343,64 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.set_extension_enabled": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_extension_enabled"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_extension_enabled"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_extension_settings": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_extension_settings"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_extension_settings"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.set_fast_mode": {
 			"type": "object",
 			"required": [
@@ -5341,6 +5823,9 @@
 					"$ref": "#/$defs/Frame.query.intent_completions"
 				},
 				{
+					"$ref": "#/$defs/Frame.query.editor_completions"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.history"
 				},
 				{
@@ -5357,6 +5842,12 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.query.subscription_usage"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.extensions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.extension_settings"
 				},
 				{
 					"$ref": "#/$defs/Frame.query.host_status"
@@ -5489,6 +5980,98 @@
 				},
 				"params": {
 					"$ref": "#/$defs/QueryParams.content"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.editor_completions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "editor_completions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.editor_completions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.extension_settings": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "extension_settings"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.extension_settings"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.extensions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "extensions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
 				}
 			},
 			"additionalProperties": false
@@ -6605,6 +7188,31 @@
 			},
 			"additionalProperties": false
 		},
+		"HostDialogAction": {
+			"type": "object",
+			"required": [
+				"id",
+				"label"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 160,
+					"pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
+				},
+				"label": {
+					"$ref": "#/$defs/UiNodeText"
+				},
+				"token": {
+					"$ref": "#/$defs/UiNodeToken"
+				},
+				"destructive": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
 		"HostFrame": {
 			"anyOf": [
 				{
@@ -6778,6 +7386,42 @@
 					"type": "object",
 					"required": [
 						"kind",
+						"title",
+						"body",
+						"actions"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "dialog"
+						},
+						"title": {
+							"$ref": "#/$defs/UiNodeText"
+						},
+						"body": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/UiNode"
+							}
+						},
+						"actions": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/HostDialogAction"
+							},
+							"minItems": 1
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
 						"action",
 						"title"
 					],
@@ -6887,6 +7531,23 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "editor_text"
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},
@@ -6898,8 +7559,10 @@
 				"input",
 				"editor",
 				"form",
+				"dialog",
 				"approval",
-				"mcp_auth"
+				"mcp_auth",
+				"editor_text"
 			]
 		},
 		"HostResponse": {
@@ -8009,6 +8672,46 @@
 			},
 			"additionalProperties": false,
 			"description": "The default thinking level for new conversations."
+		},
+		"IntentInput.set_extension_enabled": {
+			"type": "object",
+			"required": [
+				"id",
+				"enabled",
+				"scope"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"scope": {
+					"$ref": "#/$defs/ExtensionSettingsScope"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_extension_settings": {
+			"type": "object",
+			"required": [
+				"id",
+				"scope",
+				"values"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"scope": {
+					"$ref": "#/$defs/ExtensionSettingsScope"
+				},
+				"values": {
+					"$ref": "#/$defs/ExtensionSettingsValues"
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentInput.set_fast_mode": {
 			"type": "object",
@@ -9269,6 +9972,9 @@
 					"$ref": "#/$defs/LiveItem.clear"
 				},
 				{
+					"$ref": "#/$defs/LiveItem.patch"
+				},
+				{
 					"$ref": "#/$defs/LiveItem.notice"
 				},
 				{
@@ -9391,6 +10097,27 @@
 			},
 			"additionalProperties": false
 		},
+		"LiveItem.patch": {
+			"type": "object",
+			"required": [
+				"type",
+				"key",
+				"ops"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "patch"
+				},
+				"key": {
+					"$ref": "#/$defs/LivePatchKey"
+				},
+				"ops": {
+					"$ref": "#/$defs/UiPatch"
+				}
+			},
+			"additionalProperties": false
+		},
 		"LiveItem.set": {
 			"type": "object",
 			"required": [
@@ -9450,14 +10177,25 @@
 				},
 				"isError": {
 					"type": "boolean"
+				},
+				"presentation": {
+					"$ref": "#/$defs/ToolPresentation"
+				},
+				"patch": {
+					"$ref": "#/$defs/ToolPresentationPatch"
 				}
 			},
 			"additionalProperties": false
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|work)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|ext_panel|work)/[^\\u0000-\\u001f\\u007f]{1,256})$",
 			"x-volt-expected": "be a live key"
+		},
+		"LivePatchKey": {
+			"type": "string",
+			"pattern": "^(?:ext_panel|work)/[^\\u0000-\\u001f\\u007f]{1,256}$",
+			"x-volt-expected": "be the live key of a panel or work item"
 		},
 		"LiveToolPartial": {
 			"type": "object",
@@ -9529,12 +10267,43 @@
 					"$ref": "#/$defs/LiveValue.ext_widget"
 				},
 				{
+					"$ref": "#/$defs/LiveValue.ext_panel"
+				},
+				{
 					"$ref": "#/$defs/LiveValue.ext_title"
 				},
 				{
 					"$ref": "#/$defs/LiveValue.work"
 				}
 			]
+		},
+		"LiveValue.ext_panel": {
+			"type": "object",
+			"required": [
+				"kind",
+				"extension",
+				"placement",
+				"node"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "ext_panel"
+				},
+				"extension": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"title": {
+					"$ref": "#/$defs/UiNodeStyledText"
+				},
+				"placement": {
+					"$ref": "#/$defs/ExtensionPanelPlacement"
+				},
+				"node": {
+					"$ref": "#/$defs/UiNode"
+				}
+			},
+			"additionalProperties": false
 		},
 		"LiveValue.ext_status": {
 			"type": "object",
@@ -9546,6 +10315,9 @@
 				"kind": {
 					"type": "string",
 					"const": "ext_status"
+				},
+				"extension": {
+					"$ref": "#/$defs/ExtensionId"
 				},
 				"text": {
 					"type": "string"
@@ -11456,6 +12228,30 @@
 				}
 			]
 		},
+		"MessagePresentation": {
+			"type": "object",
+			"required": [
+				"body"
+			],
+			"properties": {
+				"title": {
+					"$ref": "#/$defs/UiNodeStyledText"
+				},
+				"summary": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNode"
+					}
+				},
+				"body": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNode"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
 		"ProfileName": {
 			"type": "string",
 			"enum": [
@@ -12576,12 +13372,15 @@
 			"enum": [
 				"intents",
 				"intent_completions",
+				"editor_completions",
 				"history",
 				"content",
 				"models",
 				"sessions",
 				"settings",
 				"subscription_usage",
+				"extensions",
+				"extension_settings",
 				"host_status",
 				"web_search_status",
 				"subagent_definitions",
@@ -12633,6 +13432,39 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"QueryParams.editor_completions": {
+			"type": "object",
+			"required": [
+				"text",
+				"cursor"
+			],
+			"properties": {
+				"text": {
+					"type": "string",
+					"x-volt-max-utf8-bytes": 524288
+				},
+				"cursor": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.extension_settings": {
+			"type": "object",
+			"required": [
+				"id"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.extensions": {
+			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.history": {
 			"type": "object",
@@ -13071,6 +13903,45 @@
 							"additionalProperties": false
 						}
 					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.editor_completions": {
+			"type": "object",
+			"required": [
+				"prefix",
+				"items"
+			],
+			"properties": {
+				"prefix": {
+					"type": "string",
+					"maxLength": 1024
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/EditorCompletionItem"
+					},
+					"maxItems": 50
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.extension_settings": {
+			"$ref": "#/$defs/ExtensionSettingsView"
+		},
+		"QueryResult.extensions": {
+			"type": "object",
+			"required": [
+				"extensions"
+			],
+			"properties": {
+				"extensions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionSummary"
+					}
 				}
 			},
 			"additionalProperties": false
@@ -18933,6 +19804,58 @@
 			},
 			"additionalProperties": false
 		},
+		"ToolPresentation": {
+			"type": "object",
+			"required": [
+				"title"
+			],
+			"properties": {
+				"title": {
+					"$ref": "#/$defs/UiNodeStyledText"
+				},
+				"activity": {
+					"$ref": "#/$defs/UiNodeStyledText"
+				},
+				"summary": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNode"
+					}
+				},
+				"body": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNode"
+					}
+				},
+				"actions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UiNodeAction"
+					}
+				},
+				"hidden": {
+					"type": "boolean"
+				},
+				"showsDuration": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ToolPresentationPatch": {
+			"type": "object",
+			"properties": {
+				"summary": {
+					"$ref": "#/$defs/UiPatch"
+				},
+				"body": {
+					"$ref": "#/$defs/UiPatch"
+				}
+			},
+			"additionalProperties": false,
+			"minProperties": 1
+		},
 		"ToolResultMessage": {
 			"type": "object",
 			"required": [
@@ -19866,6 +20789,127 @@
 				"info"
 			]
 		},
+		"UiPatch": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/UiPatchOp"
+			},
+			"minItems": 1
+		},
+		"UiPatchOp": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"op",
+						"path",
+						"node"
+					],
+					"properties": {
+						"op": {
+							"type": "string",
+							"const": "replace"
+						},
+						"path": {
+							"$ref": "#/$defs/UiPatchPath"
+						},
+						"node": {
+							"$ref": "#/$defs/UiNode"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"op",
+						"path"
+					],
+					"properties": {
+						"op": {
+							"type": "string",
+							"const": "remove"
+						},
+						"path": {
+							"$ref": "#/$defs/UiPatchPath"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"op",
+						"path",
+						"node"
+					],
+					"properties": {
+						"op": {
+							"type": "string",
+							"const": "insert"
+						},
+						"path": {
+							"$ref": "#/$defs/UiPatchPath"
+						},
+						"before": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"node": {
+							"$ref": "#/$defs/UiNode"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"op",
+						"path",
+						"lines"
+					],
+					"properties": {
+						"op": {
+							"type": "string",
+							"const": "append_lines"
+						},
+						"path": {
+							"type": "array",
+							"items": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 256
+							},
+							"minItems": 1,
+							"maxItems": 32
+						},
+						"lines": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/UiNodeStyledLine"
+							},
+							"minItems": 1,
+							"maxItems": 2000
+						},
+						"omittedLines": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"UiPatchPath": {
+			"type": "array",
+			"items": {
+				"type": "string",
+				"minLength": 1,
+				"maxLength": 256
+			},
+			"maxItems": 32
+		},
 		"UiProgressNode": {
 			"anyOf": [
 				{
@@ -19959,6 +21003,16 @@
 									},
 									"detail": {
 										"$ref": "#/$defs/UiNodeStyledText"
+									},
+									"startedAt": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"endedAt": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
 									}
 								},
 								"additionalProperties": false

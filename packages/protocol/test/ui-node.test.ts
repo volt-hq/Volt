@@ -28,8 +28,14 @@ const EVERY_NODE: UiNode[] = [
 		kind: "steps",
 		title: "Review",
 		steps: [
-			{ key: "discover", label: "Discover", status: "done" },
-			{ key: "verify", label: "Verify", status: "active", detail: "2 of 5" },
+			{
+				key: "discover",
+				label: "Discover",
+				status: "done",
+				startedAt: 1_760_000_000_000,
+				endedAt: 1_760_000_004_000,
+			},
+			{ key: "verify", label: "Verify", status: "active", detail: "2 of 5", startedAt: 1_760_000_004_000 },
 		],
 	},
 	{
@@ -158,6 +164,9 @@ describe("UiNode", () => {
 		expect(Check(UiNodeSchema, { type: "terminal", lines })).toBe(false);
 		expect(Check(UiNodeSchema, { type: "progress", kind: "determinate", value: -1 })).toBe(false);
 		expect(Check(UiNodeSchema, { type: "progress", kind: "determinate", value: 1, max: 0 })).toBe(false);
+		const step = { key: "s", label: "Step", status: "done" };
+		expect(Check(UiNodeSchema, { type: "progress", kind: "steps", steps: [{ ...step, startedAt: -1 }] })).toBe(false);
+		expect(Check(UiNodeSchema, { type: "progress", kind: "steps", steps: [{ ...step, endedAt: 1.5 }] })).toBe(false);
 		expect(Check(UiNodeSchema, { type: "image", mimeType: "image/svg+xml", data: "PHN2Zz4=" })).toBe(false);
 		expect(Check(UiNodeSchema, { type: "image", mimeType: "image/png", data: "not base64!" })).toBe(false);
 	});

@@ -461,6 +461,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "clear":
 				if (item.key.startsWith("host_request/")) optionMaps.delete(item.key.slice("host_request/".length));
 				return [{ type: "clear", key: redactKey(item.key) }];
+			case "patch":
+				// Patched nodes have no remote redaction: remote clients get no patches.
+				return [];
 			case "notice":
 			case "directive":
 				return [sanitize(item)];

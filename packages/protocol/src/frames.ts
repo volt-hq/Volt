@@ -30,7 +30,14 @@ import {
 import { HostRequestKindSchema, HostResponseSchema, LIVE_KEY_ID_MAX_CHARS, LiveItemSchema } from "./live.ts";
 import { RpcConversationIdentifierSchema, RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
-import { CONTENT_TEXT_MAX_SCALARS, HISTORY_PAGE_MAX_ENTRIES, type QueryFrame, QueryFrameSchema } from "./queries.ts";
+import {
+	CONTENT_TEXT_MAX_SCALARS,
+	EDITOR_COMPLETION_TEXT_MAX_CHARS,
+	EDITOR_COMPLETIONS_MAX_ITEMS,
+	HISTORY_PAGE_MAX_ENTRIES,
+	type QueryFrame,
+	QueryFrameSchema,
+} from "./queries.ts";
 import { RemoteCapabilitySchema } from "./remote-access.ts";
 import { RPC_RETRY_AFTER_MS_MAX } from "./wire-limits.ts";
 
@@ -355,5 +362,7 @@ export const PROTOCOL_LIMITS = {
 	intentOutcomeWindow: INTENT_OUTCOME_WINDOW,
 	historyPageMaxEntries: HISTORY_PAGE_MAX_ENTRIES,
 	contentTextMaxScalars: CONTENT_TEXT_MAX_SCALARS,
+	editorCompletionsMaxItems: EDITOR_COMPLETIONS_MAX_ITEMS,
+	editorCompletionTextMaxChars: EDITOR_COMPLETION_TEXT_MAX_CHARS,
 	liveKeyIdMaxChars: LIVE_KEY_ID_MAX_CHARS,
 } as const;
