@@ -1,6 +1,6 @@
 {
 	"name": "volt-build-ios-apps",
-	"version": "0.1.2",
+	"version": "0.2.0",
 	"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
 	"type": "module",
 	"keywords": [
@@ -28,8 +28,13 @@
 		"skills"
 	],
 	"volt": {
-		"extensions": [
-			"extensions/xcodebuildmcp.ts"
+		"id": "build-ios-apps",
+		"displayName": "Build iOS Apps",
+		"description": "Build, profile, debug, and refine iOS apps with SwiftUI and Xcode workflows.",
+		"entry": "extensions/xcodebuildmcp.ts",
+		"permissions": [
+			"exec",
+			"fs-write"
 		],
 		"skills": [
 			"skills"
