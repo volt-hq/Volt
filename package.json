@@ -34,6 +34,7 @@
 		"entry": "extensions/xcodebuildmcp.ts",
 		"permissions": [
 			"exec",
+			"network",
 			"fs-write"
 		],
 		"skills": [
