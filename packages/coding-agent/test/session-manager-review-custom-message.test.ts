@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { adoptTestSession } from "./utilities/host-client.ts";
 
@@ -67,6 +68,7 @@ describe("review custom-message sessions", () => {
 		const { conversation } = adoptTestSession(
 			{
 				sessionManager,
+				settingsManager: SettingsManager.inMemory(),
 				lost: new Promise<Error>(() => {}),
 				get sessionId() {
 					return sessionManager.getSessionId();

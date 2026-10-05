@@ -116,7 +116,10 @@ describe("extension permissions", () => {
 			expect(store.review({ ...subject, permissions: [] })).toEqual({ status: "acknowledged" });
 			expect(store.review(subject)).toEqual({ status: "ask", added: ["exec"] });
 			store.acknowledge({ ...subject, version: "1.0.0" });
-			expect(statSync(join(tempDir, "extension-permissions.json")).mode & 0o777).toBe(0o600);
+			// POSIX modes only: Windows does not enforce them.
+			if (process.platform !== "win32") {
+				expect(statSync(join(tempDir, "extension-permissions.json")).mode & 0o777).toBe(0o600);
+			}
 			expect(store.isAcknowledged(subject)).toBe(true);
 			expect(store.get("deploy")).toMatchObject({
 				fingerprint: "npm:deploy@1.0.0",
