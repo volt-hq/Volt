@@ -17,6 +17,7 @@ import {
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
 import { ExtensionHandlerRegistry } from "../src/core/extensions/policy-registration.ts";
+import { ExtensionLifetime } from "../src/core/extensions/types.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -89,6 +90,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			intents: new Map(),
 			completionProviders: new Map(),
 			workKinds: new Map(),
+			providers: new Set(),
+			lifetime: new ExtensionLifetime(),
 		};
 	}
 
@@ -266,6 +269,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			intents: new Map(),
 			completionProviders: new Map(),
 			workKinds: new Map(),
+			providers: new Set(),
+			lifetime: new ExtensionLifetime(),
 		};
 
 		await createSession([throwingExtension]);
@@ -322,6 +327,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			intents: new Map(),
 			completionProviders: new Map(),
 			workKinds: new Map(),
+			providers: new Set(),
+			lifetime: new ExtensionLifetime(),
 		};
 
 		const extension2: Extension = {
@@ -360,6 +367,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			intents: new Map(),
 			completionProviders: new Map(),
 			workKinds: new Map(),
+			providers: new Set(),
+			lifetime: new ExtensionLifetime(),
 		};
 
 		await createSession([extension1, extension2]);

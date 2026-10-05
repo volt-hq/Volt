@@ -4,8 +4,13 @@
  * extensions reach the session through, and the in-place runtime reload that
  * rebuilds the runner and the tools.
  *
- * The extensions are bound once: the first client to attach fixes the mode and
- * `session_start` fires. Later clients only add their surface. The data-only
+ * The extensions are bound once: the first client to attach fixes the mode,
+ * and `activate` and `session_start` fire. Later clients only add their
+ * surface. The extension registry (core/extensions/registry.ts) keeps which
+ * extensions run in line with settings: an extension enabled or disabled
+ * while the session runs starts or stops alone, and what it declared here
+ * (UI, dialogs, terminal UI, providers, services tasks, work) goes with it.
+ * The data-only
  * UI calls (dialogs, forms, notifications, status, panels, string widgets,
  * title, and editor text) write the conversation's live state, which every
  * attached client that accepts them sees; the first answer to a dialog wins.
@@ -34,7 +39,13 @@ import {
 	type SessionStartEvent,
 	type ShutdownHandler,
 } from "../extensions/index.ts";
-import { type DiscoveredResourcePath, emitSessionShutdownEvent } from "../extensions/runner.ts";
+import { ExtensionRegistry, type ExtensionRegistryHost } from "../extensions/registry.ts";
+import {
+	type DiscoveredResourcePath,
+	emitSessionShutdownEvent,
+	registerReplacedSessionContext,
+} from "../extensions/runner.ts";
+import { type Extension, ExtensionUIDismissedError } from "../extensions/types.ts";
 import { ClientScope } from "../host/client-scope.ts";
 import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../host/live-state.ts";
 import type { CustomMessageInput } from "../messages.ts";
@@ -145,6 +156,10 @@ export interface SessionExtensionBindingHost {
 	): Promise<void>;
 	/** Track work that must settle before the session's resources close. */
 	trackAncillaryWork<T>(work: Promise<T>): Promise<T>;
+	/** Resolves at the next turn boundary: at once when no turn runs, else when the running turn ends. */
+	turnBoundary(): Promise<void>;
+	/** The extensions that run changed, or their states: their commands, intents, and list may differ. */
+	extensionsChanged(): void;
 }
 
 /** The `ctx.ui` members the conversation's live state carries. */
@@ -200,6 +215,68 @@ export interface ExtensionClient {
 	readonly onError?: ExtensionErrorListener;
 }
 
+/** The terminal-only UI a client shows once at a time; the extension that set it last undoes it when it stops. */
+type TerminalSlot =
+	| "footer"
+	| "header"
+	| "editorComponent"
+	| "workingMessage"
+	| "workingVisible"
+	| "workingIndicator"
+	| "hiddenThinkingLabel";
+
+/** Undo a terminal slot an extension set: its default comes back. */
+const RESET_TERMINAL_SLOT: Readonly<Record<TerminalSlot, (ui: ExtensionTerminalUI) => void>> = {
+	footer: (ui) => ui.setFooter(undefined),
+	header: (ui) => ui.setHeader(undefined),
+	editorComponent: (ui) => ui.setEditorComponent(undefined),
+	workingMessage: (ui) => ui.setWorkingMessage(),
+	workingVisible: (ui) => ui.setWorkingVisible(true),
+	workingIndicator: (ui) => ui.setWorkingIndicator(),
+	hiddenThinkingLabel: (ui) => ui.setHiddenThinkingLabel(),
+};
+
+/** What one extension holds of the terminal client's UI, released when it stops. */
+interface OwnedTerminalUI {
+	/** Its raw terminal input listeners' removals. */
+	readonly inputListeners: Set<() => void>;
+	/** Aborted when it stops: its custom components close. */
+	readonly stopped: AbortController;
+}
+
+/**
+ * What a stopped extension's `ctx.ui` answers while its instance retires: no
+ * dialog, no UI. Members not listed read through.
+ */
+const STOPPED_UI: Partial<Record<keyof ExtensionUIContext, unknown>> = {
+	select: async () => undefined,
+	confirm: async () => false,
+	input: async () => undefined,
+	editor: async () => undefined,
+	form: async () => undefined,
+	dialog: async () => undefined,
+	notify: () => {},
+	setPanel: () => {},
+	setStatus: () => {},
+	setTitle: () => {},
+	setWidget: () => {},
+	pasteToEditor: () => {},
+	setEditorText: () => {},
+	getEditorText: async () => undefined,
+	onTerminalInput: () => () => {},
+	setFooter: () => {},
+	setHeader: () => {},
+	setEditorComponent: () => {},
+	setWorkingMessage: () => {},
+	setWorkingVisible: () => {},
+	setWorkingIndicator: () => {},
+	setHiddenThinkingLabel: () => {},
+	addAutocompleteProvider: () => {},
+	setToolsExpanded: () => {},
+	setTheme: () => ({ success: false, error: "The extension is stopping" }),
+	custom: () => Promise.reject(new ExtensionUIDismissedError()),
+};
+
 /** A client's attachment to a session's extensions. */
 export interface ExtensionClientAttachment {
 	/** Settles once the extensions are bound; rejects, with the client detached, when binding fails. */
@@ -225,10 +302,18 @@ export class SessionExtensionBinding {
 	private readonly clients: ExtensionClient[] = [];
 	/** Set by the first attachment; settles once `session_start` and resource discovery ran. */
 	private bound: Promise<void> | undefined;
-	/** The latest component widget per key, replayed to a client that starts showing UI. */
-	private readonly widgets = new Map<string, (ui: ExtensionTerminalUI) => void>();
-	/** Dialogs the extensions asked, ended when the extensions reload. */
-	private readonly extensionRequests = new Set<AbortController>();
+	/** The latest component widget per key, and the extension that set it, replayed to a client that starts showing UI. */
+	private readonly widgets = new Map<string, { owner: string | undefined; show: (ui: ExtensionTerminalUI) => void }>();
+	/** Dialogs the extensions asked, by the extension that asked: ended when the extensions reload, or it stops. */
+	private readonly extensionRequests = new Map<AbortController, string | undefined>();
+	/** What each extension holds of the terminal client's UI, by manifest id. */
+	private readonly terminalUI = new Map<string, OwnedTerminalUI>();
+	/** The extension that last set each terminal slot. */
+	private readonly terminalSlots = new Map<TerminalSlot, string | undefined>();
+	/** Whether `activate` and `session_start` reached the extensions: one enabled now hears them itself. */
+	private started = false;
+	/** The extensions of the session, which run as settings enable them. */
+	readonly registry: ExtensionRegistry;
 	/** Each extension's `ctx.ui`, by manifest id; `undefined` for contexts no extension owns. */
 	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
 	private readonly uiHost: ExtensionUiHost = {
@@ -255,6 +340,98 @@ export class SessionExtensionBinding {
 		this.host = host;
 		this.extensionRunnerRef = options.extensionRunnerRef;
 		this.sessionStartEvent = options.sessionStartEvent;
+		this.registry = new ExtensionRegistry(this.createRegistryHost());
+	}
+
+	/** What the registry starts and stops extensions through. */
+	private createRegistryHost(): ExtensionRegistryHost {
+		const resourceLoader = this.host.resourceLoader;
+		return {
+			runner: () => this.extensionRunner,
+			enabled: (id) => this.host.settingsManager.getExtensionEnabled(id),
+			bound: () => this.started,
+			changed: () => {
+				const runner = this.extensionRunner;
+				this.refuseKinds(runner, this.host.extensionKinds().sync(runner.getWorkKinds()));
+				// The next request offers the active extensions' tools, and no others.
+				this.host.tools().refreshRegistry();
+				this.host.extensionsChanged();
+			},
+			statesChanged: () => this.host.extensionsChanged(),
+			retireDeclarations: (extension) => this.retireDeclarations(extension),
+			retireWork: (id) => this.host.extensionKinds().retire(id),
+			turnBoundary: () => this.host.turnBoundary(),
+			reportError: (error) => this.extensionRunner.emitError(error),
+			...(resourceLoader.rescanExtensions === undefined
+				? {}
+				: {
+						rescan: (known) =>
+							resourceLoader.rescanExtensions?.(known) ?? Promise.reject(new Error("unavailable")),
+					}),
+		};
+	}
+
+	/**
+	 * Remove what the stopped `extension` declared outside its record: its
+	 * status items, panels, and title; its pending dialogs; its terminal UI;
+	 * its managed-services tasks; and the providers it registered.
+	 */
+	private retireDeclarations(extension: Extension): void {
+		const id = extension.id;
+		const live = this.host.liveState;
+		live.clearMatching([`ext_status/${id}/`, `ext_panel/${id}/`]);
+		const title = live.get("ext_title");
+		if (title?.kind === "ext_title" && title.extension === id) live.clear("ext_title");
+		for (const [request, owner] of this.extensionRequests) if (owner === id) request.abort();
+		this.releaseTerminalUI(id);
+		this.host.extensionServices().servicesManager.retire(id);
+		if (extension.providers.size > 0) {
+			for (const name of extension.providers) {
+				try {
+					this.host.modelRegistry.unregisterProvider(name);
+				} catch (error) {
+					this.extensionRunner.emitError({ extensionId: id, event: "unregister_provider", error: String(error) });
+				}
+			}
+			extension.providers.clear();
+			this.refreshModelAfterProviderChange();
+		}
+	}
+
+	/** Undo what the extension `id` set on the terminal client: its input listeners, components, widgets, and slots. */
+	private releaseTerminalUI(id: string): void {
+		const owned = this.terminalUI.get(id);
+		this.terminalUI.delete(id);
+		owned?.stopped.abort();
+		for (const remove of owned?.inputListeners ?? []) {
+			try {
+				remove();
+			} catch {
+				// The listener is gone either way.
+			}
+		}
+		const ui = this.uiClient()?.ui;
+		for (const [key, widget] of [...this.widgets]) {
+			if (widget.owner !== id) continue;
+			this.widgets.delete(key);
+			ui?.setWidget(key, undefined);
+		}
+		for (const [slot, owner] of [...this.terminalSlots]) {
+			if (owner !== id) continue;
+			this.terminalSlots.delete(slot);
+			if (ui) RESET_TERMINAL_SLOT[slot](ui);
+		}
+		this.uiRouters.delete(id);
+	}
+
+	/** What the extension `owner` holds of the terminal client's UI. */
+	private ownedTerminalUI(owner: string): OwnedTerminalUI {
+		let owned = this.terminalUI.get(owner);
+		if (!owned) {
+			owned = { inputListeners: new Set(), stopped: new AbortController() };
+			this.terminalUI.set(owner, owned);
+		}
+		return owned;
 	}
 
 	/** The runner over the loaded extensions. */
@@ -320,15 +497,22 @@ export class SessionExtensionBinding {
 		this.uiClientChanged(previousUIClient);
 	}
 
-	private async bind(mode: ExtensionMode): Promise<void> {
-		this.extensionMode = mode;
-		this.applyExtensionBindings(this.extensionRunner);
-		// Interactive-only native tools follow the bound mode and UI.
-		this.host.tools().syncPlanningRuntime();
-		await this.extensionRunner.emit(this.sessionStartEvent);
-		this.host.assertActive();
-		await this.extendResourcesFromExtensions(this.sessionStartEvent.reason === "reload" ? "reload" : "startup");
-		this.host.assertActive();
+	private bind(mode: ExtensionMode): Promise<void> {
+		// Runtime toggles wait: each extension hears `activate` and `session_start` once.
+		return this.registry.exclusive(async () => {
+			this.extensionMode = mode;
+			this.applyExtensionBindings(this.extensionRunner);
+			// Interactive-only native tools follow the bound mode and UI.
+			this.host.tools().syncPlanningRuntime();
+			this.started = true;
+			const reloaded = this.sessionStartEvent.reason === "reload";
+			await this.extensionRunner.emit({ type: "activate", reason: reloaded ? "reload" : "startup" });
+			this.host.assertActive();
+			await this.extensionRunner.emit(this.sessionStartEvent);
+			this.host.assertActive();
+			await this.extendResourcesFromExtensions(reloaded ? "reload" : "startup");
+			this.host.assertActive();
+		});
 	}
 
 	/** The client terminal-only calls go to: the last attached client with a terminal. */
@@ -368,9 +552,9 @@ export class SessionExtensionBinding {
 	private replayUI(client: ExtensionClient): void {
 		const ui = client.ui;
 		if (!ui) return;
-		for (const replay of this.widgets.values()) {
+		for (const widget of this.widgets.values()) {
 			try {
-				replay(ui);
+				widget.show(ui);
 			} catch (error) {
 				this.extensionRunner.emitError({
 					extensionId: "<runtime>",
@@ -381,9 +565,12 @@ export class SessionExtensionBinding {
 		}
 	}
 
-	/** Forget what the extensions declared: their component widgets and their live status, panels, and title. */
+	/** Forget what the extensions declared: their component widgets, terminal UI, and live status, panels, and title. */
 	private clearDeclaredUI(): void {
 		this.widgets.clear();
+		for (const owned of this.terminalUI.values()) owned.stopped.abort();
+		this.terminalUI.clear();
+		this.terminalSlots.clear();
 		this.host.liveState.clearMatching(["ext_status/", "ext_panel/", "ext_title"]);
 	}
 
@@ -394,12 +581,14 @@ export class SessionExtensionBinding {
 	}
 
 	/**
-	 * Ask the attached clients through the live state (only the views of
-	 * `options.client`, when given). Resolves with the first answer, or
-	 * undefined when the request ended without one: `signal` aborted, it timed
-	 * out, no client takes it, or the extensions reloaded.
+	 * Ask the attached clients through the live state for the extension
+	 * `owner` (only the views of `options.client`, when given). Resolves with
+	 * the first answer, or undefined when the request ended without one:
+	 * `signal` aborted, it timed out, no client takes it, the extensions
+	 * reloaded, or `owner` stopped.
 	 */
 	private async ask(
+		owner: string | undefined,
 		request: HostRequest,
 		signal?: AbortSignal,
 		options: Pick<HostRequestOptions, "client"> = {},
@@ -408,7 +597,7 @@ export class SessionExtensionBinding {
 		const abort = (): void => controller.abort();
 		if (signal?.aborted) abort();
 		else signal?.addEventListener("abort", abort, { once: true });
-		this.extensionRequests.add(controller);
+		this.extensionRequests.set(controller, owner);
 		try {
 			const outcome = await this.host.liveState.request(request, { ...options, signal: controller.signal });
 			return outcome.status === "answered" ? outcome.response : undefined;
@@ -423,23 +612,50 @@ export class SessionExtensionBinding {
 	 * any client's call: undefined when that client has left, shows no editor,
 	 * or does not answer within {@link EDITOR_TEXT_TIMEOUT_MS}.
 	 */
-	private async editorText(): Promise<string | undefined> {
+	private async editorText(owner: string | undefined): Promise<string | undefined> {
 		const client = this.actionClient();
 		if (!client) return undefined;
-		const response = await this.ask({ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS }, undefined, {
+		const response = await this.ask(owner, { kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS }, undefined, {
 			client: client.id,
 		});
 		return response !== undefined && "value" in response ? response.value : undefined;
 	}
 
-	/** The `ctx.ui` of the extension with manifest id `owner`, or of contexts no extension owns. */
+	/**
+	 * The `ctx.ui` of the extension with manifest id `owner`, or of contexts no
+	 * extension owns. While the extension stops, it shows no UI and asks
+	 * nothing ({@link STOPPED_UI}).
+	 */
 	private uiFor(owner: string | undefined): ExtensionUIContext {
 		let router = this.uiRouters.get(owner);
 		if (!router) {
-			router = this.createUIRouter(owner);
+			const created = this.createUIRouter(owner);
+			router = owner === undefined ? created : this.stoppableUI(owner, created);
 			this.uiRouters.set(owner, router);
 		}
 		return router;
+	}
+
+	/** `ui` as the extension `owner` holds it: once it stops, each member answers as {@link STOPPED_UI} does when called. */
+	private stoppableUI(owner: string, ui: ExtensionUIContext): ExtensionUIContext {
+		const wrapped = new Map<string, (...args: unknown[]) => unknown>();
+		return new Proxy(ui, {
+			get: (target, key) => {
+				const value: unknown = Reflect.get(target, key);
+				if (typeof key !== "string" || typeof value !== "function" || !Object.hasOwn(STOPPED_UI, key)) return value;
+				let member = wrapped.get(key);
+				if (!member) {
+					const stopped = STOPPED_UI[key as keyof ExtensionUIContext] as (...args: unknown[]) => unknown;
+					// Checked at each call: a member taken before the extension stopped stops with it.
+					member = (...args) =>
+						this.registry.stopped(owner)
+							? stopped(...args)
+							: (Reflect.get(target, key) as (...args: unknown[]) => unknown)(...args);
+					wrapped.set(key, member);
+				}
+				return member;
+			},
+		});
 	}
 
 	/** Every attached client hears every extension error; one failing listener cannot silence the others. */
@@ -494,7 +710,8 @@ export class SessionExtensionBinding {
 	 * extension owns (`undefined`). Data-only calls write the live state;
 	 * status items, panels, string widgets, and the title need an owner.
 	 * Terminal-only calls go to the terminal client with their arguments as
-	 * given, and no-op without one.
+	 * given, and no-op without one; what an extension sets there is recorded,
+	 * so it is undone when the extension stops.
 	 */
 	private createUIRouter(owner: string | undefined): ExtensionUIContext {
 		const ui = () => this.uiClient()?.ui;
@@ -503,6 +720,12 @@ export class SessionExtensionBinding {
 		const owned = (member: string): string => {
 			if (owner === undefined) throw new Error(`ctx.ui.${member} is available only in an extension's own context`);
 			return owner;
+		};
+		/** Set a terminal slot, recording that `owner` set it last. */
+		const setSlot = (slot: TerminalSlot, set: (target: ExtensionTerminalUI) => void): void => {
+			this.terminalSlots.set(slot, owner);
+			const target = ui();
+			if (target) set(target);
 		};
 		type UI = ExtensionUIContext;
 		return {
@@ -515,14 +738,16 @@ export class SessionExtensionBinding {
 					options: [...options],
 					...hostRequestTimeout(opts?.timeout),
 				};
-				return this.ask(request, opts?.signal).then((response) =>
+				return this.ask(owner, request, opts?.signal).then((response) =>
 					response !== undefined && "value" in response ? response.value : undefined,
 				);
 			},
 			confirm: (title, message, opts) =>
-				this.ask({ kind: "confirm", title, message, ...hostRequestTimeout(opts?.timeout) }, opts?.signal).then(
-					(response) => response !== undefined && "confirmed" in response && response.confirmed,
-				),
+				this.ask(
+					owner,
+					{ kind: "confirm", title, message, ...hostRequestTimeout(opts?.timeout) },
+					opts?.signal,
+				).then((response) => response !== undefined && "confirmed" in response && response.confirmed),
 			input: (title, placeholder, opts) => {
 				const request: HostRequest = {
 					kind: "input",
@@ -530,13 +755,13 @@ export class SessionExtensionBinding {
 					...(placeholder === undefined ? {} : { placeholder }),
 					...hostRequestTimeout(opts?.timeout),
 				};
-				return this.ask(request, opts?.signal).then((response) =>
+				return this.ask(owner, request, opts?.signal).then((response) =>
 					response !== undefined && "value" in response ? response.value : undefined,
 				);
 			},
 			editor: (title, prefill) =>
-				this.ask({ kind: "editor", title, ...(prefill === undefined ? {} : { prefill }) }).then((response) =>
-					response !== undefined && "value" in response ? response.value : undefined,
+				this.ask(owner, { kind: "editor", title, ...(prefill === undefined ? {} : { prefill }) }).then(
+					(response) => (response !== undefined && "value" in response ? response.value : undefined),
 				),
 			form: (form, opts) => {
 				let request: HostRequest;
@@ -545,7 +770,7 @@ export class SessionExtensionBinding {
 				} catch (error) {
 					return Promise.reject(error);
 				}
-				return this.ask(request, opts?.signal).then((response) =>
+				return this.ask(owner, request, opts?.signal).then((response) =>
 					response !== undefined && "values" in response ? response.values : undefined,
 				);
 			},
@@ -556,20 +781,32 @@ export class SessionExtensionBinding {
 				} catch (error) {
 					return Promise.reject(error);
 				}
-				return this.ask(request, opts?.signal).then((response) =>
+				return this.ask(owner, request, opts?.signal).then((response) =>
 					response !== undefined && "value" in response ? response.value : undefined,
 				);
 			},
 			notify: (message, type) =>
 				live().notice(type === "warning" || type === "error" ? type : "info", notificationText(message), owner),
-			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => ui()?.onTerminalInput(...args) ?? (() => {}),
+			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => {
+				const remove = ui()?.onTerminalInput(...args) ?? (() => {});
+				if (owner === undefined) return remove;
+				const listeners = this.ownedTerminalUI(owner).inputListeners;
+				listeners.add(remove);
+				return () => {
+					listeners.delete(remove);
+					remove();
+				};
+			},
 			setStatus: (key, text) => setExtensionStatus(this.uiHost, owned("setStatus"), key, text),
 			setPanel: (name, panel) => setExtensionPanel(this.uiHost, owned("setPanel"), name, panel),
-			setWorkingMessage: (...args: Parameters<UI["setWorkingMessage"]>) => ui()?.setWorkingMessage(...args),
-			setWorkingVisible: (...args: Parameters<UI["setWorkingVisible"]>) => ui()?.setWorkingVisible(...args),
-			setWorkingIndicator: (...args: Parameters<UI["setWorkingIndicator"]>) => ui()?.setWorkingIndicator(...args),
+			setWorkingMessage: (...args: Parameters<UI["setWorkingMessage"]>) =>
+				setSlot("workingMessage", (target) => target.setWorkingMessage(...args)),
+			setWorkingVisible: (...args: Parameters<UI["setWorkingVisible"]>) =>
+				setSlot("workingVisible", (target) => target.setWorkingVisible(...args)),
+			setWorkingIndicator: (...args: Parameters<UI["setWorkingIndicator"]>) =>
+				setSlot("workingIndicator", (target) => target.setWorkingIndicator(...args)),
 			setHiddenThinkingLabel: (...args: Parameters<UI["setHiddenThinkingLabel"]>) =>
-				ui()?.setHiddenThinkingLabel(...args),
+				setSlot("hiddenThinkingLabel", (target) => target.setHiddenThinkingLabel(...args)),
 			setWidget: (key, content, options) => {
 				// A string widget is the panel `key`; a component widget is the terminal's.
 				if (content === undefined) {
@@ -586,21 +823,37 @@ export class SessionExtensionBinding {
 				} else {
 					setExtensionPanel(this.uiHost, owned("setWidget"), key, undefined);
 					const show = (target: ExtensionTerminalUI): void => target.setWidget(key, content, options);
-					this.widgets.set(key, show);
+					this.widgets.set(key, { owner, show });
 					const target = ui();
 					if (target) show(target);
 				}
 			},
-			setFooter: (...args: Parameters<UI["setFooter"]>) => ui()?.setFooter(...args),
-			setHeader: (...args: Parameters<UI["setHeader"]>) => ui()?.setHeader(...args),
+			setFooter: (...args: Parameters<UI["setFooter"]>) => setSlot("footer", (target) => target.setFooter(...args)),
+			setHeader: (...args: Parameters<UI["setHeader"]>) => setSlot("header", (target) => target.setHeader(...args)),
 			setTitle: (title) => setExtensionTitle(this.uiHost, owned("setTitle"), title),
-			custom: (factory, options) => ui()?.custom(factory, options) ?? Promise.resolve(undefined as never),
+			custom: (factory, options) => {
+				// A stopping extension's component closes: its call rejects as dismissed.
+				const signal =
+					owner === undefined
+						? options?.signal
+						: options?.signal === undefined
+							? this.ownedTerminalUI(owner).stopped.signal
+							: AbortSignal.any([options.signal, this.ownedTerminalUI(owner).stopped.signal]);
+				return (
+					ui()?.custom(factory, { ...options, ...(signal === undefined ? {} : { signal }) }) ??
+					Promise.resolve(undefined as never)
+				);
+			},
 			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
 			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
-			getEditorText: () => this.editorText(),
-			addAutocompleteProvider: (...args: Parameters<UI["addAutocompleteProvider"]>) =>
-				ui()?.addAutocompleteProvider(...args),
-			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) => ui()?.setEditorComponent(...args),
+			getEditorText: () => this.editorText(owner),
+			addAutocompleteProvider: (factory: Parameters<UI["addAutocompleteProvider"]>[0]) =>
+				// A stopped extension's provider steps aside the next time the client builds its providers.
+				ui()?.addAutocompleteProvider((current) =>
+					owner !== undefined && this.registry.stopped(owner) ? current : factory(current),
+				),
+			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) =>
+				setSlot("editorComponent", (target) => target.setEditorComponent(...args)),
 			getEditorComponent: () => ui()?.getEditorComponent(),
 			get theme() {
 				return ui()?.theme ?? theme;
@@ -668,6 +921,7 @@ export class SessionExtensionBinding {
 
 	/** Detach every client of a disposed session: nothing reaches them or is replayed to them afterwards. */
 	releaseClients(): void {
+		this.registry.close();
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = undefined;
 		this.settingsUnsubscriber?.();
@@ -733,11 +987,27 @@ export class SessionExtensionBinding {
 		// not be used after reload. No-ops when the new runner shares the old
 		// runtime (project-trust rebuild), so live generations are unaffected.
 		previousRunner?.invalidateStaleGeneration(extensionsResult.runtime);
+		// The previous generation's instances the new one does not keep retire: their event-bus listeners leave.
+		for (const extension of previousRunner?.getExtensions() ?? []) {
+			if (!extensionsResult.extensions.includes(extension)) {
+				extension.lifetime.retire(`Extension ${extension.id} was reloaded`);
+			}
+		}
+		this.registry.reset(extensionsResult);
 		// The extensions read and write the session's settings; their changes reach them as `settings_changed`.
 		extensionsResult.runtime.settings.bind(this.host.settingsManager);
 		this.extensionRunner.trackSettings();
+		// Settings saved here or in another conversation: the extensions hear what changed, and the ones
+		// settings enable or disable start or stop.
 		this.settingsUnsubscriber ??= this.host.settingsManager.subscribeExtensionSettings(() => {
 			this.extensionRunner.emitSettingsChanged().catch(() => {});
+			this.registry.reconcile().catch((error: unknown) => {
+				this.extensionRunner.emitError({
+					extensionId: "<runtime>",
+					event: "reconcile",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 		});
 		this.bindExtensionCore(this.extensionRunner);
 		// The previous generation's work kinds go with it, interrupting their work; this generation's replace them.
@@ -880,25 +1150,32 @@ export class SessionExtensionBinding {
 				"Cannot reload while active session work still owns this runtime; abort or wait for it to finish",
 			);
 		}
-		// Reload holds the conversation as a host operation: nothing else runs until it settles.
-		await this.host.conversation().runHostOperation(async () => {
-			this.reloadInProgress = true;
-			try {
-				await this.reloadRuntime();
-			} finally {
-				this.reloadInProgress = false;
-			}
-		});
+		// Reload holds the conversation as a host operation: nothing else runs until it settles. Runtime
+		// toggles queued before it take effect first; the ones after it see the reloaded extensions.
+		await this.registry.exclusive(() =>
+			this.host.conversation().runHostOperation(async () => {
+				this.reloadInProgress = true;
+				try {
+					await this.reloadRuntime();
+				} finally {
+					this.reloadInProgress = false;
+				}
+			}),
+		);
 	}
 
 	private async reloadRuntime(): Promise<void> {
 		// The dialogs the extensions asked end with them; the reloaded extensions ask again.
-		for (const request of this.extensionRequests) request.abort();
+		for (const request of this.extensionRequests.keys()) request.abort();
 		this.host.extensionServices().invalidate();
 		await this.host.extensionServices().reopen();
 		const previousFlagValues = this.extensionRunner.getFlagValues();
 		await emitSessionShutdownEvent(this.extensionRunner, { type: "session_shutdown", reason: "reload" });
 		this.host.assertActive();
+		if (this.started) {
+			await this.extensionRunner.emit({ type: "deactivate", reason: "reload" });
+			this.host.assertActive();
+		}
 		// The shut-down extensions' work kinds go with them, interrupting the work they still run.
 		await this.host.extensionKinds().clear();
 		this.host.assertActive();
@@ -916,6 +1193,8 @@ export class SessionExtensionBinding {
 		if (this.bound) {
 			// The reloaded extensions declare their UI again from session_start.
 			this.clearDeclaredUI();
+			await this.extensionRunner.emit({ type: "activate", reason: "reload" });
+			this.host.assertActive();
 			await this.extensionRunner.emit({ type: "session_start", reason: "reload" });
 			this.host.assertActive();
 			await this.extendResourcesFromExtensions("reload");
@@ -923,13 +1202,24 @@ export class SessionExtensionBinding {
 		}
 	}
 
-	createReplacedSessionContext(): ReplacedSessionContext {
+	/**
+	 * A command context of the session for `withSession` callbacks, belonging
+	 * to the extension `owner` (its UI, work, and services), or to none. One
+	 * that belongs to none is had as an extension's own by the runner of the
+	 * session the extension changed from, while that extension runs here.
+	 */
+	createReplacedSessionContext(owner?: string): ReplacedSessionContext {
 		const context = Object.defineProperties(
 			{},
 			Object.getOwnPropertyDescriptors(
-				this.extensionRunner.createCommandContext(undefined, this.host.lifetimeSignal),
+				this.extensionRunner.createCommandContext(undefined, this.host.lifetimeSignal, owner),
 			),
 		) as ReplacedSessionContext;
+		if (owner === undefined) {
+			registerReplacedSessionContext(context, (id) =>
+				this.extensionRunner.getExtension(id) ? this.createReplacedSessionContext(id) : undefined,
+			);
+		}
 		context.sendMessage = (message, options) => {
 			const reserved = reservedCustomType(message);
 			return reserved ? Promise.reject(reserved) : this.host.sendCustomMessage(message, options, true);

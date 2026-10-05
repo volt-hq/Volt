@@ -319,6 +319,8 @@ export interface ExtensionUIContext {
 			overlayOptions?: OverlayOptions | (() => OverlayOptions);
 			/** Called with the overlay handle after the overlay is shown. Use to control visibility. */
 			onHandle?: (handle: OverlayHandle) => void;
+			/** Closes the component: the call rejects with `ExtensionUIDismissedError`. Disabling the extension closes it too. */
+			signal?: AbortSignal;
 		},
 	): Promise<T>;
 
@@ -780,11 +782,11 @@ export interface ResourcesDiscoverResult {
 // Session Events
 // ============================================================================
 
-/** Fired when a session is started, loaded, or reloaded */
+/** Fired when a session is started, loaded, or reloaded, and to one extension when it is enabled at runtime */
 export interface SessionStartEvent {
 	type: "session_start";
-	/** Why this session start happened. */
-	reason: "startup" | "reload" | "new" | "resume" | "fork";
+	/** Why this session start happened; `enable`: the extension was just enabled in a running session. */
+	reason: "startup" | "reload" | "new" | "resume" | "fork" | "enable";
 	/** Previously active persisted session. Present for "new", "resume", and "fork". */
 	previousSessionRef?: SessionReference;
 }
@@ -827,10 +829,13 @@ export interface SessionCompactEvent {
 	willRetry: boolean;
 }
 
-/** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */
+/**
+ * Fired before an extension runtime is torn down due to quit, reload, or
+ * session replacement, and to one extension when it is disabled at runtime.
+ */
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
-	reason: "quit" | "reload" | "new" | "resume" | "fork";
+	reason: "quit" | "reload" | "new" | "resume" | "fork" | "disable";
 	/** Destination persisted session when shutting down due to session replacement. */
 	targetSessionRef?: SessionReference;
 }
@@ -864,6 +869,28 @@ export interface SessionTreeEvent {
 	oldLeafId: string | null;
 	summaryEntry?: BranchSummaryEntry;
 	fromExtension?: boolean;
+}
+
+/**
+ * Fired to one extension when it becomes active in a conversation, before its
+ * `session_start`: the conversation started with it (`startup`), it was
+ * enabled at runtime (`enable`), or the extensions reloaded (`reload`).
+ */
+export interface ActivateEvent {
+	type: "activate";
+	reason: "startup" | "enable" | "reload";
+}
+
+/**
+ * Fired to one extension after its `session_shutdown` when it stops running
+ * in a conversation: it was disabled at runtime (`disable`) or the extensions
+ * reloaded (`reload`). Its tools, commands, intents, shortcuts, completion
+ * providers, providers, UI, and work are removed afterwards, and its `volt`
+ * and contexts stop working.
+ */
+export interface DeactivateEvent {
+	type: "deactivate";
+	reason: "disable" | "reload";
 }
 
 export type SessionEvent =
@@ -1309,7 +1336,9 @@ export type ExtensionEvent =
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
-	| SettingsChangedEvent;
+	| SettingsChangedEvent
+	| ActivateEvent
+	| DeactivateEvent;
 
 /** Keyed by `ExtensionEvent["type"]`, so a name missing from or added beyond the union fails to compile. */
 const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
@@ -1346,6 +1375,8 @@ const EXTENSION_EVENTS: { readonly [Name in ExtensionEvent["type"]]: true } = {
 	tool_call: true,
 	tool_result: true,
 	settings_changed: true,
+	activate: true,
+	deactivate: true,
 };
 
 /** Every event `volt.on()` subscribes to. It throws for any other name. */
@@ -1632,6 +1663,10 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	/** This extension's settings changed. */
 	on(event: "settings_changed", handler: ExtensionHandler<SettingsChangedEvent<TSettings>>): void;
+	/** This extension became active in the conversation; its `session_start` follows. */
+	on(event: "activate", handler: ExtensionHandler<ActivateEvent>): void;
+	/** This extension stops running in the conversation, after its `session_shutdown`. */
+	on(event: "deactivate", handler: ExtensionHandler<DeactivateEvent>): void;
 
 	// =========================================================================
 	// Tool Registration
@@ -2110,6 +2145,65 @@ export interface ExtensionCommandContextActions {
  */
 export interface ExtensionRuntime extends ExtensionRuntimeState, ExtensionActions {}
 
+/**
+ * The life of one extension instance. It stops when the extension is
+ * disabled: it registers nothing more, while what it runs finishes. It is
+ * retired once it stopped, or when it is reloaded or fails to load: its
+ * `volt` and contexts throw from then on, and what it registered to run on
+ * retirement runs once.
+ */
+export class ExtensionLifetime {
+	private message: string | undefined;
+	private stoppedMessage: string | undefined;
+	private readonly cleanups = new Set<() => void>();
+
+	get retired(): boolean {
+		return this.message !== undefined;
+	}
+
+	/** Throws once the instance is retired. */
+	assertActive(): void {
+		if (this.message !== undefined) throw new Error(this.message);
+	}
+
+	/** Throws once the instance stopped or retired: it may register nothing more. */
+	assertRunning(): void {
+		this.assertActive();
+		if (this.stoppedMessage !== undefined) throw new Error(this.stoppedMessage);
+	}
+
+	/** Stop the instance: registering anything throws `message` from now on. Later calls do nothing. */
+	stop(message: string): void {
+		this.stoppedMessage ??= message;
+	}
+
+	/** Run `cleanup` when the instance retires (at once if it has). Returns a function that cancels it. */
+	onRetire(cleanup: () => void): () => void {
+		if (this.message !== undefined) {
+			cleanup();
+			return () => {};
+		}
+		this.cleanups.add(cleanup);
+		return () => {
+			this.cleanups.delete(cleanup);
+		};
+	}
+
+	/** Retire the instance: `message` is what its calls throw from now on. Later calls do nothing. */
+	retire(message: string): void {
+		if (this.message !== undefined) return;
+		this.message = message;
+		for (const cleanup of [...this.cleanups]) {
+			try {
+				cleanup();
+			} catch {
+				// Cleanups are the host's own; one failing does not keep the others from running.
+			}
+		}
+		this.cleanups.clear();
+	}
+}
+
 /** Loaded extension with all registered items. */
 export interface Extension {
 	/** The manifest id: the extension's identity. Contributions, errors, and work kinds are keyed by it. */
@@ -2140,11 +2234,44 @@ export interface Extension {
 	completionProviders: Map<string, RegisteredCompletionProvider>;
 	/** The work kinds the extension declared, by name. */
 	workKinds: Map<string, WorkKindDeclaration>;
+	/** The model providers the extension registered, by name: they are unregistered when it stops. */
+	providers: Set<string>;
+	/** The instance's lifetime: retired when the extension is disabled, reloaded, or fails to load. */
+	readonly lifetime: ExtensionLifetime;
+}
+
+/**
+ * An extension that owns its manifest id in a conversation, whether it runs
+ * or not: its manifest was read, and `load` runs a new instance of it. One
+ * that does not run is disabled by settings or failed to load (`error`).
+ */
+export interface ExtensionDeclaration {
+	readonly id: string;
+	readonly manifest: ExtensionManifest;
+	/** The package version, or `local` for a single-file or SDK extension. */
+	readonly version: string;
+	readonly path: string;
+	readonly resolvedPath: string;
+	/** Where it was found; loading it gives the extension this source. */
+	sourceInfo: SourceInfo;
+	/** See {@link Extension.fingerprint}. */
+	readonly fingerprint: string;
+	/** Why it failed to load when it was declared. */
+	readonly error?: string;
+	/**
+	 * Run a new instance in the runtime it was declared for: import a
+	 * package's entry and run the factory. Rejects with what failed; a failed
+	 * instance is retired and its providers unregistered.
+	 */
+	load(): Promise<Extension>;
 }
 
 /** Result of loading extensions. */
 export interface LoadExtensionsResult {
+	/** The extensions running: loaded, and enabled. */
 	extensions: Extension[];
+	/** Every extension that owns its id, in load order, running or not (disabled by settings, or failed to load). */
+	declarations?: ExtensionDeclaration[];
 	errors: Array<{ path: string; error: string }>;
 	/** Shared runtime - actions are throwing stubs until runner.initialize() */
 	runtime: ExtensionRuntime;

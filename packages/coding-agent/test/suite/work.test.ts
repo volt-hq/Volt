@@ -329,16 +329,20 @@ describe("work in hosted conversations", () => {
 		await conversation.work.cancelAll("closed");
 	});
 
-	it("refuses a paired device the output of work whose extension kind the host no longer knows", async () => {
+	it("holds a paired device to what a removed extension kind required of it, as the work recorded it", async () => {
 		const harness = await harnessFor();
 		const conversation = await harness.openStartup();
-		const remove = conversation.work.register(kind({ requires: ["conversation.observe.v1"] }));
+		const remove = conversation.work.register(kind({ requires: ["host.manage.v1"] }));
 		const pair = createIrohStreamPair();
 		const connection = serveIrohRemoteConnection({
 			host: harness.host,
 			conversation,
 			stream: pair.host,
-			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			grant: {
+				schemaVersion: 1,
+				revision: 1,
+				capabilities: REMOTE_CAPABILITIES.filter((capability) => capability !== "host.manage.v1"),
+			},
 			redaction: { workspacePath: harness.tempDir },
 			redirect: {},
 		});
@@ -354,12 +358,11 @@ describe("work in hosted conversations", () => {
 			return { outcome: "completed" };
 		});
 		await conversation.work.waitForIdle();
-		expect((await phone.query("work_output", { workId: record.workId })).type).toBe("result");
+		const refused = { type: "query_error", reason: { code: "not_allowed", requiredCapability: "host.manage.v1" } };
+		expect(await phone.query("work_output", { workId: record.workId })).toMatchObject(refused);
 		await remove();
-		expect(await phone.query("work_output", { workId: record.workId })).toMatchObject({
-			type: "query_error",
-			reason: { code: "not_allowed" },
-		});
+		// The kind's extension is gone; its work still requires what the kind did.
+		expect(await phone.query("work_output", { workId: record.workId })).toMatchObject(refused);
 		// The local profile still reads it.
 		expect(conversation.work.output(record.workId)).toMatchObject({ text: "kept\n", final: true });
 	});

@@ -1,29 +1,32 @@
 /**
  * Extension queries (RFC §8.2, §8.3): the extension catalog, one extension's
  * settings, and editor completions from extension completion providers.
+ * `extensions` lists every extension of the conversation, running or not,
+ * with its state, permissions, and whether the user acknowledged them.
  * `extension_settings` returns an extension's settings form and the values
- * stored in each scope; remote clients need `host.manage.v1`. Hosts do not
- * list extensions by id yet, so `extensions` is unavailable everywhere.
- * Editor completions ask the conversation's completion providers
- * (core/extensions/completions.ts); a remote client asks only those whose
- * extension opted in.
+ * stored in each scope, whether it runs or not; remote clients need
+ * `host.manage.v1`. Editor completions ask the conversation's completion
+ * providers (core/extensions/completions.ts); a remote client asks only
+ * those whose extension opted in.
  */
 
 import { completeEditorText } from "../../extensions/completions.ts";
+import { ExtensionPermissionStore } from "../../extensions/permissions.ts";
 import { extensionSettingsView } from "../../extensions/settings.ts";
 import type { IntentTarget } from "../intents/types.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
-
-function unavailable(): never {
-	throw new QueryRejectedError("unavailable", "Extensions are not managed by id on this host");
-}
 
 export const extensionsQuery = defineQuery({
 	name: "extensions",
 	scope: "conversation",
 	remote: "safe",
 	requires: ["conversation.observe.v1"],
-	run: async () => unavailable(),
+	run: async (ctx) => {
+		const target = ctx.target;
+		if (!target) throw new QueryRejectedError("unavailable", "This query needs a conversation");
+		const permissions = new ExtensionPermissionStore(target.conversation.services.agentDir);
+		return { extensions: target.session.extensionRegistry.summaries(permissions) };
+	},
 });
 
 export const extensionSettingsQuery = defineQuery({
@@ -34,7 +37,7 @@ export const extensionSettingsQuery = defineQuery({
 	run: async (ctx, params) => {
 		const session = ctx.target?.session;
 		if (!session) throw new QueryRejectedError("unavailable", "This query needs a conversation");
-		const extension = session.extensionRunner.getExtension(params.id);
+		const extension = session.extensionRegistry.get(params.id);
 		if (!extension) throw new QueryRejectedError("invalid_input", `No extension "${params.id}" in this conversation`);
 		return extensionSettingsView(session.settingsManager, extension.id, extension.manifest.settings);
 	},

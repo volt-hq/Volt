@@ -544,6 +544,11 @@ export class ExtensionSettingsRuntime {
 		return snapshot;
 	}
 
+	/** Whether settings enable the extension `id`; every extension is enabled without settings. */
+	enabled(id: string): boolean {
+		return this.manager?.getExtensionEnabled(id) ?? true;
+	}
+
 	/** The effective settings of `owner`, frozen. */
 	values(owner: SettingsOwner): Readonly<ExtensionSettingsValues> {
 		const snapshot = this.snapshot(owner);

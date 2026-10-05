@@ -213,7 +213,8 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `set_auto_retry` | `{enabled}` | |
 | `set_auto_compaction` | `{enabled, provider?, modelId?, expectedProfile?}` | |
 | `set_compaction_threshold` | `{tokens, provider, modelId, expectedProfile}` | |
-| `set_extension_settings` | `{id, scope: global|project, values}`: replace what the scope stores for the extension with manifest id `id`; values are checked against its settings, and `project` needs a trusted project | |
+| `set_extension_enabled` | `{id, enabled, scope: global|project}`: store whether the extension with manifest id `id` runs; every open conversation starts or stops it, and this one has when the intent is accepted (a disabled extension's tools leave at the next turn boundary). `project` needs a trusted project. Enabling an extension whose permissions are not acknowledged sends the invoking client an `approval` request (`action: "enable_extension"`) and is rejected `not_allowed` unless it is approved; the remote profile is rejected without asking | |
+| `set_extension_settings` | `{id, scope: global|project, values}`: replace what the scope stores for the extension with manifest id `id`, whether it runs or not; values are checked against its settings, and `project` needs a trusted project | |
 | `mcp.connect`, `mcp.disconnect`, `mcp.refresh` | `{server}` | the server |
 | `mcp.set_enabled` | `{server, enabled}` | the server |
 | `mcp.auth_start_device`, `mcp.auth_start_browser`, `mcp.auth_complete`, `mcp.auth_poll`, `mcp.auth_cancel`, `mcp.logout` | `{server, …}` | the authorization state |
@@ -241,13 +242,14 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `sessions` | `{limit?, cursor?}` | The workspace's stored sessions, newest first; `cursor` is the `nextCursor` of the previous page. |
 | `settings` | | `{steeringMode, followUpMode, autoCompaction, autoRetry, profile}`; `profile` is the active settings profile (`""` without one), which the compaction intents name as `expectedProfile`. |
 | `subscription_usage` | | Subscription quota usage of stored logins. |
+| `extensions` | | `{extensions}`: every extension of the conversation, running or not: `{id, displayName, description?, version, scope, enabled, state, permissions, permissionsAcknowledged, hasSettings, error?}`, where `state` is `active`, `disabled`, `failed` (with `error`), `activating`, or `deactivating`. |
 | `extension_settings` | `{id}` | `{form, values: {global, project?}, projectTrusted}`: the extension's settings as form fields (each `value` its default) and the values each scope stores; `project` only for a trusted project. |
 | `subagent_definitions` | | Discovered subagent definitions. |
 | `work_output` | `{workId, offset?}` | A work item's output, such as a background job's: what it produced so far, or what its result kept, in chunks. |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |
 | `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` | see the contract | Durable review reads; `review.runs` pages the conversation's review runs. |
 
-`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
+`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, or an extension is enabled, disabled, or changes state, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
 
 ## Host requests
 
@@ -266,7 +268,7 @@ Dialogs, forms, approvals, and MCP sign-ins the host asks are keyed live values 
 | `form` | `title, fields, timeoutMs?` | `{values}` |
 | `dialog` | `title, body (UiNode[]), actions: [{id, label, token?, destructive?}], timeoutMs?` | `{value}` (an action id) |
 | `editor_text` | `timeoutMs?`: asked only of the client whose request is running, or of the first attached client | `{value}`: the client's editor text, without asking the user |
-| `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …`: a host action, such as an LSP server install; `requestId` is its `host_action` work id | `{decision: approved|denied|dismissed, message?}` |
+| `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …`: a host action, such as an LSP server install, whose `requestId` is its `host_action` work id; or (`action: "enable_extension"`) acknowledging the permissions of an extension being enabled, asked only of the client that enables it | `{decision: approved|denied|dismissed, message?}` |
 | `mcp_auth` | `server, flow, authorizationUrl?, userCode?, …` | completes through the `mcp.auth_*` intents |
 
 Every kind may be answered `{cancelled: true}`. The first valid answer wins; the request is cleared and later answers are ignored. A host action is `host_action` work awaiting approval: `approved` runs it; any other answer, its timeout, or `cancel_work` finishes it `cancelled` without running, and one still awaiting approval when its conversation closes or its host stops ends `interrupted` (on the next open, after a crash). On the remote profile, approving or cancelling a host action, or reading its output with `work_output`, needs `host.manage.v1`. A request outlives the clients that saw it: a client that subscribes later, or resubscribes, finds it in its live reset. It ends when answered, when its timeout expires (the host then resolves the default), or when its conversation closes.

@@ -35,6 +35,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [Writing an Extension](#writing-an-extension)
   - [Settings](#settings)
   - [Permissions](#permissions)
+  - [Enabling and disabling](#enabling-and-disabling)
   - [Extension Styles](#extension-styles)
 - [JSON Data Boundary](#json-data-boundary)
 - [Events](#events)
@@ -242,7 +243,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 ### Permissions
 
-`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `/store install`) or updated and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks.
+`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `/store install`) or updated, and when an extension is enabled, and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks, and an extension whose permissions you have not acknowledged still runs: acknowledgment gates enabling it, not running it.
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
@@ -253,6 +254,16 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 | `fs-write` | Writing files | No: declared and shown only |
 
 Permissions are advisory: extensions run in your process and can reach Node's own modules and change shared objects, so a missing permission only stops the volt APIs above. Install only extensions you trust. `volt.setModel` always sets the catalog's model with the given provider and id.
+
+### Enabling and disabling
+
+`extensions.<id>.enabled` in global or (trusted) project settings decides whether an extension runs; it does by default. A disabled extension's factory never runs: a package's entry is not imported until it is enabled, and a single file is evaluated only to read its manifest. Toggle one with `/extensions` (pick it, then Enable or Disable), `/extensions enable <id>`, `/extensions disable <id>`, or the `set_extension_enabled` intent ([rpc.md](rpc.md)); every open conversation follows at once, without `/reload`.
+
+- **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have.
+- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or renderer of it runs again. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, terminal UI, providers, and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
+- Skills, prompts, and themes an extension adds through `resources_discover` change on the next `/reload`.
+
+`/store install` and `/store remove` pick up an installed or removed extension the same way; `/reload` reloads every extension (`deactivate` and `activate` with `reason: "reload"`).
 
 ### Async factory functions
 
@@ -426,7 +437,23 @@ thinking level changes (settings, keybinding, volt.setThinkingLevel())
 
 exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
   └─► session_shutdown
+
+extension enabled while the session runs (this extension only)
+  ├─► activate { reason: "enable" }
+  └─► session_start { reason: "enable" }
+
+extension disabled while the session runs (this extension only)
+  ├─► session_shutdown { reason: "disable" }
+  └─► deactivate { reason: "disable" }
+
+/reload
+  ├─► session_shutdown { reason: "reload" }
+  ├─► deactivate { reason: "reload" }
+  ├─► activate { reason: "reload" }            reloaded extensions
+  └─► session_start { reason: "reload" }       reloaded extensions
 ```
+
+When a session starts, each extension hears `activate` (`reason: "startup"`) before `session_start`.
 
 ### Startup Events
 
@@ -580,6 +607,19 @@ volt.on("session_before_tree", async (event, ctx) => {
 
 volt.on("session_tree", async (event, ctx) => {
   // event.newLeafId, oldLeafId, summaryEntry, fromExtension
+});
+```
+
+#### activate / deactivate
+
+`activate` reaches an extension when it starts running in a conversation, before its `session_start`: `reason` is `"startup"` (the session started), `"enable"` (it was enabled while the session runs), or `"reload"`. `deactivate` reaches it after its `session_shutdown` when it stops: `"disable"` or `"reload"`. Each reaches only the extension starting or stopping. After `deactivate`, everything the extension contributed is removed (see [Enabling and disabling](#enabling-and-disabling)).
+
+```typescript
+volt.on("activate", (event) => {
+  // event.reason - "startup" | "enable" | "reload"
+});
+volt.on("deactivate", (event) => {
+  // event.reason - "disable" | "reload"
 });
 ```
 

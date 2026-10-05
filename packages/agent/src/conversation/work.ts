@@ -13,6 +13,7 @@
 
 import type { JsonValue } from "@hansjm10/volt-ai";
 import type { LogEntry, WorkCheckpointEntryPayload, WorkChild, WorkResult } from "@hansjm10/volt-protocol/entries";
+import type { RemoteCapability } from "@hansjm10/volt-protocol/remote-access";
 import type { WorkDelivery, WorkKind, WorkOutcome, WorkProgress, WorkState } from "@hansjm10/volt-protocol/work";
 import type { ConversationState } from "./fold.ts";
 
@@ -28,6 +29,10 @@ export interface WorkRecord {
 	readonly resume: boolean;
 	readonly toolCallId?: string;
 	readonly child?: WorkChild;
+	/** Remote capabilities a client needs to act on the work, as its kind declared when it started. */
+	readonly requires?: readonly RemoteCapability[];
+	/** Whether a paired remote device may cancel or resume the work, as its kind declared when it started. */
+	readonly remote?: { readonly cancel: boolean; readonly resume: boolean };
 	/** The latest open state; kept when the work finishes. */
 	readonly state: WorkState;
 	/** Present once the work finished. */
@@ -89,6 +94,8 @@ export function reduceWork(
 			resume: payload.resume,
 			...(payload.toolCallId === undefined ? {} : { toolCallId: payload.toolCallId }),
 			...(payload.child === undefined ? {} : { child: payload.child }),
+			...(payload.requires === undefined ? {} : { requires: payload.requires }),
+			...(payload.remote === undefined ? {} : { remote: payload.remote }),
 			state: payload.state,
 			startedOrdinal: entry.ordinal,
 			updatedOrdinal: entry.ordinal,

@@ -9,9 +9,20 @@ export type { ResourceCollision, ResourceDiagnostic } from "./diagnostics.ts";
 
 import { canonicalizePath, isLocalPath, resolvePath } from "../utils/paths.ts";
 import { createEventBus, type EventBus } from "./event-bus.ts";
-import { createExtensionRuntime, type ExtensionSource, loadExtensions } from "./extensions/loader.ts";
+import {
+	createExtensionRuntime,
+	declareExtensions,
+	type ExtensionSource,
+	loadExtensions,
+} from "./extensions/loader.ts";
 import { ExtensionSettingsRuntime } from "./extensions/settings.ts";
-import type { Extension, ExtensionDefinition, ExtensionRuntime, LoadExtensionsResult } from "./extensions/types.ts";
+import type {
+	Extension,
+	ExtensionDeclaration,
+	ExtensionDefinition,
+	ExtensionRuntime,
+	LoadExtensionsResult,
+} from "./extensions/types.ts";
 import { DefaultPackageManager, type PathMetadata, type ResolvedResource } from "./package-manager.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
@@ -47,6 +58,20 @@ export interface ResourceLoader {
 	getAppendSystemPrompt(): string[];
 	extendResources(paths: ResourceExtensionPaths): void;
 	reload(options?: ResourceLoaderReloadOptions): Promise<void>;
+	/**
+	 * Declare the extensions the current sources name besides `known` (by
+	 * resolved path), into the loaded extensions' runtime: their manifests are
+	 * read and no factory runs. `present` holds every current source's
+	 * resolved path. A loader without it cannot pick up extensions without a
+	 * reload.
+	 */
+	rescanExtensions?(
+		known: readonly { readonly id: string; readonly path: string; readonly resolvedPath: string }[],
+	): Promise<{
+		declarations: ExtensionDeclaration[];
+		present: ReadonlySet<string>;
+		errors: LoadExtensionsResult["errors"];
+	}>;
 }
 
 function resolvePromptInput(input: string | undefined, description: string): string | undefined {
@@ -497,6 +522,41 @@ export class DefaultResourceLoader implements ResourceLoader {
 			: baseAppend;
 	}
 
+	async rescanExtensions(
+		known: readonly { readonly id: string; readonly path: string; readonly resolvedPath: string }[],
+	): Promise<{
+		declarations: ExtensionDeclaration[];
+		present: ReadonlySet<string>;
+		errors: LoadExtensionsResult["errors"];
+	}> {
+		const resolvedPaths = await this.packageManager.resolve();
+		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
+			temporary: true,
+		});
+		const metadataByPath = new Map<string, PathMetadata>();
+		for (const resource of [...resolvedPaths.extensions, ...cliExtensionPaths.extensions]) {
+			if (!metadataByPath.has(resource.path)) metadataByPath.set(resource.path, resource.metadata);
+		}
+		// The same sources a reload loads: a project's only while it is trusted.
+		const sources = this.extensionSources(cliExtensionPaths.extensions, resolvedPaths.extensions);
+		const present = new Set(sources.map((source) => this.resolveExtensionLoadPath(source.path)));
+		const knownPaths = new Set(known.map((extension) => extension.resolvedPath));
+		const { declarations, errors } = await declareExtensions(
+			sources.filter((source) => !knownPaths.has(this.resolveExtensionLoadPath(source.path))),
+			this.cwd,
+			this.eventBus,
+			this.extensionsResult.runtime,
+			known,
+		);
+		for (const declaration of declarations) {
+			declaration.sourceInfo =
+				this.findSourceInfoForPath(declaration.path, undefined, metadataByPath) ??
+				this.getDefaultSourceInfoForPath(declaration.path);
+		}
+		this.extensionsResult.declarations = [...(this.extensionsResult.declarations ?? []), ...declarations];
+		return { declarations, present, errors };
+	}
+
 	private async loadCurrentExtensionSet(): Promise<LoadExtensionsResult> {
 		const resolvedPaths = await this.packageManager.resolve();
 		const cliExtensionPaths = await this.packageManager.resolveExtensionSources(this.additionalExtensionPaths, {
@@ -571,14 +631,22 @@ export class DefaultResourceLoader implements ResourceLoader {
 		}
 
 		const finalPaths = new Set(extensionSources.map((source) => this.resolveExtensionLoadPath(source.path)));
-		const inlineExtensions = preTrustExtensions.extensions.filter((extension) =>
-			extension.path.startsWith("<inline:"),
+		const runtime = preTrustExtensions.runtime;
+		// The trusted project's settings may disable a preloaded extension.
+		const enabled = (extension: Extension): boolean => runtime.settings.enabled(extension.id);
+		const inlineExtensions = preTrustExtensions.extensions.filter(
+			(extension) => extension.path.startsWith("<inline:") && enabled(extension),
 		);
 		// A preloaded extension the final set no longer names (its package or path is now the
 		// project's copy) is dropped, and its id is free for that copy.
 		const preloadedByPath = new Map(
 			preTrustExtensions.extensions
-				.filter((extension) => !extension.path.startsWith("<inline:") && finalPaths.has(extension.resolvedPath))
+				.filter(
+					(extension) =>
+						!extension.path.startsWith("<inline:") &&
+						finalPaths.has(extension.resolvedPath) &&
+						enabled(extension),
+				)
 				.map((extension) => [extension.resolvedPath, extension]),
 		);
 		const failedPreloadPaths = new Set(
@@ -605,17 +673,38 @@ export class DefaultResourceLoader implements ResourceLoader {
 			.map((source) => loadedByPath.get(this.resolveExtensionLoadPath(source.path)))
 			.filter((extension): extension is Extension => extension !== undefined);
 		orderedExtensions.push(...inlineExtensions);
-		// Providers a dropped preloaded extension queued go with it.
+		// Providers a dropped preloaded extension queued go with it, and its instance retires.
 		const loadedIds = new Set(orderedExtensions.map((extension) => extension.id));
-		const runtime = preTrustExtensions.runtime;
 		runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((registration) =>
 			loadedIds.has(registration.extensionId),
+		);
+		for (const extension of preTrustExtensions.extensions) {
+			if (!orderedExtensions.includes(extension))
+				extension.lifetime.retire(`Extension ${extension.id} was not kept`);
+		}
+		// Declarations follow the final order: a source loaded again is declared again.
+		const reloadedPaths = new Set(remainingSources.map((source) => this.resolveExtensionLoadPath(source.path)));
+		const declarationsByPath = new Map<string, ExtensionDeclaration>();
+		for (const declaration of preTrustExtensions.declarations ?? []) {
+			if (finalPaths.has(declaration.resolvedPath) && !reloadedPaths.has(declaration.resolvedPath)) {
+				declarationsByPath.set(declaration.resolvedPath, declaration);
+			}
+		}
+		for (const declaration of remainingExtensions.declarations ?? []) {
+			declarationsByPath.set(declaration.resolvedPath, declaration);
+		}
+		const declarations = extensionSources
+			.map((source) => declarationsByPath.get(this.resolveExtensionLoadPath(source.path)))
+			.filter((declaration): declaration is ExtensionDeclaration => declaration !== undefined);
+		declarations.push(
+			...(preTrustExtensions.declarations ?? []).filter((declaration) => declaration.path.startsWith("<inline:")),
 		);
 
 		const extensionsResult: LoadExtensionsResult = {
 			extensions: orderedExtensions,
+			declarations,
 			errors: [...preTrustExtensions.errors, ...remainingExtensions.errors],
-			runtime: preTrustExtensions.runtime,
+			runtime,
 		};
 		this.addExtensionConflictDiagnostics(extensionsResult);
 		return extensionsResult;
@@ -741,6 +830,11 @@ export class DefaultResourceLoader implements ResourceLoader {
 	}
 
 	private applyExtensionSourceInfo(extensions: Extension[], metadataByPath: Map<string, PathMetadata>): void {
+		for (const declaration of this.extensionsResult.declarations ?? []) {
+			declaration.sourceInfo =
+				this.findSourceInfoForPath(declaration.path, undefined, metadataByPath) ??
+				this.getDefaultSourceInfoForPath(declaration.path);
+		}
 		for (const extension of extensions) {
 			extension.sourceInfo =
 				this.findSourceInfoForPath(extension.path, undefined, metadataByPath) ??

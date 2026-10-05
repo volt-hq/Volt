@@ -156,7 +156,7 @@ export interface Settings {
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensionPaths?: string[]; // Array of local extension file paths or directories
-	/** Per-extension state by manifest id: its settings (and, reserved, whether it is enabled). */
+	/** Per-extension state by manifest id: whether it is enabled, and its settings. */
 	extensions?: Record<string, ExtensionEntrySettings>;
 	skills?: string[]; // Array of local skill file paths or directories
 	prompts?: string[]; // Array of local prompt template paths or directories
@@ -190,7 +190,7 @@ export interface Settings {
 
 /** What settings hold for one extension, by manifest id, under `extensions.<id>`. */
 export interface ExtensionEntrySettings {
-	/** Reserved for the runtime toggle: whether the extension loads. */
+	/** Whether the extension loads; true when absent. Open conversations load or unload it when it changes. */
 	enabled?: boolean;
 	/** Setting values by name, checked against the extension's manifest when read. */
 	settings?: Record<string, string | boolean | number | null>;
@@ -1752,6 +1752,50 @@ export class SettingsManager {
 			if (Object.keys(next).length > 0) entry.settings = next;
 			else delete entry.settings;
 			defineOwnEnumerableProperty(extensions, id, Object.keys(entry).length > 0 ? entry : undefined);
+			settings.extensions = extensions;
+		};
+		if (scope === "project") this.updateProjectSettings("extensions", update, id);
+		else this.updateGlobalSettings("extensions", update, id);
+	}
+
+	/**
+	 * Whether the extension `id` loads: what a trusted project stores for it,
+	 * else what the global settings store; true when neither stores `enabled`.
+	 */
+	getExtensionEnabled(id: string): boolean {
+		const extensions = this.settings.extensions;
+		if (!isSettingsRecord(extensions) || !Object.hasOwn(extensions, id)) return true;
+		const entry: unknown = extensions[id];
+		return !(isSettingsRecord(entry) && entry.enabled === false);
+	}
+
+	/** What `scope` stores as `enabled` for the extension `id` (a trusted project's only), if anything. */
+	getStoredExtensionEnabled(id: string, scope: SettingsScope): boolean | undefined {
+		const extensions = (scope === "global" ? this.globalEffectiveSettings : this.projectEffectiveSettings).extensions;
+		if (!isSettingsRecord(extensions) || !Object.hasOwn(extensions, id)) return undefined;
+		const entry: unknown = extensions[id];
+		return isSettingsRecord(entry) && typeof entry.enabled === "boolean" ? entry.enabled : undefined;
+	}
+
+	/**
+	 * Store whether the extension `id` loads in `scope`; its settings are kept.
+	 * A project write needs a trusted project, and neither scope is written
+	 * while its settings file failed to load.
+	 */
+	setExtensionEnabled(id: string, scope: SettingsScope, enabled: boolean): void {
+		if (scope === "global" ? this.globalSettingsLoadError : this.projectSettingsLoadError) {
+			throw new Error(`Host ${scope} settings could not be loaded; repair them and reload`);
+		}
+		const update = (settings: Settings): void => {
+			if (Array.isArray(settings.extensions)) {
+				throw new Error('"extensions" holds a list of paths; rename it to "extensionPaths"');
+			}
+			const extensions: Record<string, ExtensionEntrySettings> = {};
+			for (const [key, entry] of Object.entries(isSettingsRecord(settings.extensions) ? settings.extensions : {})) {
+				defineOwnEnumerableProperty(extensions, key, entry);
+			}
+			const current = Object.hasOwn(extensions, id) ? extensions[id] : undefined;
+			defineOwnEnumerableProperty(extensions, id, { ...(isSettingsRecord(current) ? current : {}), enabled });
 			settings.extensions = extensions;
 		};
 		if (scope === "project") this.updateProjectSettings("extensions", update, id);

@@ -13,6 +13,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../.
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type {
 	ExtensionAPI,
+	ExtensionDefinition,
 	ExtensionFactory,
 	ExtensionMode,
 	SessionBeforeForkEvent,
@@ -56,6 +57,8 @@ export interface HostHarnessOptions {
 	permissions?: ExtensionPermission[];
 	/** The settings the recording extension declares. */
 	settings?: ExtensionSettings;
+	/** More extensions every session loads after the recording extension. */
+	extensions?: readonly ExtensionDefinition[];
 }
 
 export interface HostHarness {
@@ -122,6 +125,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 							options.extension?.(volt);
 						},
 					},
+					...(options.extensions ?? []),
 				],
 				noSkills: true,
 				noPromptTemplates: true,
