@@ -210,6 +210,14 @@ type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
 const RESOURCE_TYPES: ResourceType[] = ["extensions", "skills", "prompts", "themes"];
 
+/** The settings key listing each resource type's local paths. */
+const RESOURCE_SETTINGS_KEYS = {
+	extensions: "extensionPaths",
+	skills: "skills",
+	prompts: "prompts",
+	themes: "themes",
+} as const satisfies Record<ResourceType, keyof Settings>;
+
 const FILE_PATTERNS: Record<ResourceType, RegExp> = {
 	extensions: /\.(ts|js)$/,
 	skills: /\.md$/,
@@ -885,8 +893,8 @@ export class DefaultPackageManager implements PackageManager {
 
 		for (const resourceType of RESOURCE_TYPES) {
 			const target = this.getTargetMap(accumulator, resourceType);
-			const globalEntries = (globalSettings[resourceType] ?? []) as string[];
-			const projectEntries = (projectSettings[resourceType] ?? []) as string[];
+			const globalEntries = (globalSettings[RESOURCE_SETTINGS_KEYS[resourceType]] ?? []) as string[];
+			const projectEntries = (projectSettings[RESOURCE_SETTINGS_KEYS[resourceType]] ?? []) as string[];
 			this.resolveLocalEntries(
 				projectEntries,
 				resourceType,
@@ -2483,13 +2491,13 @@ export class DefaultPackageManager implements PackageManager {
 		};
 
 		const userOverrides = {
-			extensions: (globalSettings.extensions ?? []) as string[],
+			extensions: (globalSettings.extensionPaths ?? []) as string[],
 			skills: (globalSettings.skills ?? []) as string[],
 			prompts: (globalSettings.prompts ?? []) as string[],
 			themes: (globalSettings.themes ?? []) as string[],
 		};
 		const projectOverrides = {
-			extensions: (projectSettings.extensions ?? []) as string[],
+			extensions: (projectSettings.extensionPaths ?? []) as string[],
 			skills: (projectSettings.skills ?? []) as string[],
 			prompts: (projectSettings.prompts ?? []) as string[],
 			themes: (projectSettings.themes ?? []) as string[],

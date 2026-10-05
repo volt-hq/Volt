@@ -55,6 +55,7 @@ import {
 	renderStyledText,
 	ScrollView,
 	Spacer,
+	sanitizeText,
 	setKeybindings,
 	styledTextToPlain,
 	Text,
@@ -89,6 +90,12 @@ import type {
 	ToolInfo,
 } from "../../core/extensions/index.ts";
 import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
+import {
+	ExtensionPermissionStore,
+	type PackagePermissionOutcome,
+	permissionRequestLines,
+	reviewPackagePermissions,
+} from "../../core/extensions/permissions.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
@@ -198,6 +205,7 @@ import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
+import { ExtensionSettingsComponent, extensionDetail } from "./components/extension-settings.ts";
 import { FooterComponent } from "./components/footer.ts";
 import { HostDialogComponent, HostFormDialogComponent } from "./components/host-request-dialog.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
@@ -4148,9 +4156,10 @@ export class InteractiveMode {
 				await this.handleStoreInteractiveCommand(args);
 				return;
 			}
-			if (text === "/extensions") {
+			if (text === "/extensions" || text.startsWith("/extensions ")) {
+				const extensionId = text.slice("/extensions".length).trim();
 				this.editor.setText("");
-				await this.handleExtensionsInteractiveCommand();
+				await this.handleExtensionsInteractiveCommand(extensionId);
 				return;
 			}
 			if (text === "/login") {
@@ -6800,6 +6809,20 @@ export class InteractiveMode {
 			if (this.reportStoreSettingsErrors(packageManager, plan.source, scope)) {
 				return;
 			}
+			if (
+				!(await this.confirmPackagePermissions(
+					packageManager,
+					plan.source,
+					scope,
+					"Declining removes the package.",
+				))
+			) {
+				await packageManager.removeAndPersist(plan.source, { local: scope === "project" });
+				await this.settingsManager.flush();
+				this.reportStoreSettingsErrors(packageManager, plan.source, scope);
+				this.showStatus(`Removed ${targetLabel}: its permissions were not acknowledged`);
+				return;
+			}
 			await this.offerStoreReload(`Installed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
@@ -6843,6 +6866,7 @@ export class InteractiveMode {
 			}
 			try {
 				await packageManager.update(undefined, { scripts: "never" });
+				await this.reviewUpdatedPackages(packageManager);
 				this.showStatus("Updated packages. Run /reload to load resource changes.");
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -6864,6 +6888,7 @@ export class InteractiveMode {
 			}
 			try {
 				await packageManager.update(input, { scripts: "never" });
+				await this.reviewUpdatedPackages(packageManager, input);
 				this.showStatus(`Updated ${inputLabel}. Run /reload to load resource changes.`);
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
@@ -6890,10 +6915,12 @@ export class InteractiveMode {
 					this.showStatus("Store update cancelled");
 					return;
 				}
-				await packageManager.update(selection.target.actionSource ?? selection.target.source, {
+				const updateSource = selection.target.actionSource ?? selection.target.source;
+				await packageManager.update(updateSource, {
 					local: selection.target.scope === "project",
 					scripts: "never",
 				});
+				await this.reviewUpdatedPackages(packageManager, updateSource);
 				this.showStatus(`Updated ${targetLabel}. Run /reload to load resource changes.`);
 				return;
 			}
@@ -6920,12 +6947,25 @@ export class InteractiveMode {
 				this.showStatus("Store update cancelled");
 				return;
 			}
-			await packageManager.installAndPersist(plan.source, {
-				local: selection.target.scope === "project",
-				scripts: "never",
-			});
+			const local = selection.target.scope === "project";
+			await packageManager.installAndPersist(plan.source, { local, scripts: "never" });
 			await this.settingsManager.flush();
 			if (this.reportStoreSettingsErrors(packageManager, plan.source, selection.target.scope)) {
+				return;
+			}
+			if (
+				!(await this.confirmPackagePermissions(
+					packageManager,
+					plan.source,
+					selection.target.scope,
+					`Declining keeps ${currentLabel}.`,
+				))
+			) {
+				// Back to the reviewed pin: the update's new permissions were not acknowledged.
+				await packageManager.installAndPersist(selection.target.source, { local, scripts: "never" });
+				await this.settingsManager.flush();
+				this.reportStoreSettingsErrors(packageManager, selection.target.source, selection.target.scope);
+				this.showStatus(`Kept ${currentLabel}: the update's permissions were not acknowledged`);
 				return;
 			}
 			await this.offerStoreReload(`Updated ${currentLabel} to ${targetLabel}`);
@@ -6934,7 +6974,118 @@ export class InteractiveMode {
 		}
 	}
 
-	private async handleExtensionsInteractiveCommand(): Promise<void> {
+	/** `/extensions`: the conversation's extensions, each opening its detail and settings; `/extensions <id>` opens one. */
+	private async handleExtensionsInteractiveCommand(extensionId: string): Promise<void> {
+		if (extensionId) {
+			this.showExtensionDetail(extensionId);
+			return;
+		}
+		const labels = new Map<string, string>();
+		const options = this.session.resourceLoader.getExtensions().extensions.map((extension) => {
+			const label = `${extension.manifest.displayName} (${extension.id})${extension.manifest.settings ? " · settings" : ""}`;
+			labels.set(label, extension.id);
+			return label;
+		});
+		const packagesLabel = "Installed packages";
+		options.push(packagesLabel, "Cancel");
+		const selection = await this.showExtensionSelector("Extensions", options);
+		if (!selection || selection === "Cancel") return;
+		if (selection === packagesLabel) {
+			await this.showInstalledPackages();
+			return;
+		}
+		const selected = labels.get(selection);
+		if (selected !== undefined) this.showExtensionDetail(selected);
+	}
+
+	/** An extension's detail and settings form, reading and saving through the host's query and intent. */
+	private showExtensionDetail(id: string): void {
+		const extension = this.session.extensionRunner.getExtension(id);
+		if (!extension) {
+			this.showWarning(`No extension "${id}" in this conversation`);
+			return;
+		}
+		const detail = extensionDetail(
+			{
+				manifest: extension.manifest,
+				version: extension.version,
+				scope: extension.sourceInfo.scope,
+				fingerprint: extension.fingerprint,
+			},
+			new ExtensionPermissionStore(this.conversation.services.agentDir),
+		);
+		this.showSelector((done) => {
+			const component = new ExtensionSettingsComponent(
+				detail,
+				{
+					load: () => queryRegistry.run(this.intentContext(), "extension_settings", { id }),
+					save: async (scope, values) => {
+						await intentRegistry.invoke(this.intentContext(), "set_extension_settings", { id, scope, values });
+					},
+				},
+				{ onClose: done, requestRender: () => this.ui.requestRender() },
+			);
+			void component.start();
+			return { component, focus: component };
+		});
+	}
+
+	/**
+	 * Ask the user to acknowledge the permissions of the package just installed
+	 * or updated from `source` in `scope`, unless they already did (an update
+	 * that adds none is recorded without asking). True unless the user declined.
+	 */
+	private async confirmPackagePermissions(
+		packageManager: DefaultPackageManager,
+		source: string,
+		scope: StoreInstallScope,
+		consequence: string,
+	): Promise<boolean> {
+		const root = packageManager.getInstalledPath(source, scope);
+		if (root === undefined) return true;
+		let outcome: PackagePermissionOutcome;
+		try {
+			outcome = await reviewPackagePermissions({
+				store: new ExtensionPermissionStore(this.conversation.services.agentDir),
+				root,
+				source,
+				confirm: (subject, added) =>
+					this.showExtensionConfirm(
+						"Extension permissions",
+						[...permissionRequestLines(subject, added), "", `Acknowledge these permissions? ${consequence}`].join(
+							"\n",
+						),
+					),
+			});
+		} catch (error: unknown) {
+			// The message can carry text from the package: show it inert, and treat it as declined.
+			this.showWarning(
+				`Could not review the package's permissions: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
+			);
+			return false;
+		}
+		return outcome.status !== "declined";
+	}
+
+	/** After an update, review the permissions of the configured packages it updated (`source`, or all). */
+	private async reviewUpdatedPackages(packageManager: DefaultPackageManager, source?: string): Promise<void> {
+		for (const pkg of packageManager.listConfiguredPackages()) {
+			if (source !== undefined && pkg.source !== source && pkg.actionSource !== source) continue;
+			const acknowledged = await this.confirmPackagePermissions(
+				packageManager,
+				pkg.source,
+				pkg.scope,
+				"Declining leaves it installed with its permissions unacknowledged.",
+			);
+			if (!acknowledged) {
+				this.showWarning(
+					`${formatStoreSourceSummary(pkg.source)} asks for permissions you did not acknowledge; remove it with /store remove`,
+				);
+			}
+		}
+	}
+
+	private async showInstalledPackages(): Promise<void> {
 		const packageManager = this.getStorePackageManager();
 		const packages = packageManager.listConfiguredPackages();
 		if (packages.length === 0) {
@@ -7018,6 +7169,7 @@ export class InteractiveMode {
 		}
 		try {
 			await packageManager.update(pkg.actionSource, { local: pkg.scope === "project", scripts: "never" });
+			await this.reviewUpdatedPackages(packageManager, pkg.actionSource);
 			this.showStatus(`Updated ${sourceLabel}. Run /reload to load resource changes.`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));

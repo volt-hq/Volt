@@ -322,7 +322,7 @@ export default function(volt) {
 				{
 					profiles: {
 						development: {
-							extensions: [profileExtensionPath],
+							extensionPaths: [profileExtensionPath],
 						},
 					},
 				},
@@ -858,7 +858,7 @@ export default function() {
 					JSON.stringify({
 						name: "dupe-pkg",
 						version: "1.0.0",
-						volt: { id: "guard", displayName: "Guard", entry: "index.js" },
+						volt: { id: "guard", displayName: "Guard", entry: "index.js", permissions: ["providers"] },
 					}),
 				);
 				writeFileSync(

@@ -260,7 +260,7 @@ Every stream a paired device opens is served on the remote profile, chosen by th
 | `conversation.control.v1` | `prompt`, `steer`, `follow_up`, `abort`, `set_fast_mode`, `set_agent_mode`, `plan_execute`, `plan_change`, `plan_discard`, `new_session`, `switch_session`, `cancel_work`, `set_auto_compaction`, `set_compaction_threshold`, `review_uncommitted`, `review_branch`, `review_pr`, `review_commit`, `review_rerun`, `review_open_session`, `open_work`, `resume_work`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_start_discussions`, `review_reset_discussion`, and the dynamic `extension.command.*` (only commands registered `remoteSafe: true`), `prompt.template.*`, and `skill.*` intents | |
 | `model.select.v1` | `set_model`, `set_thinking_level` (the bound session only) | `models`, `agent_options` |
 | `model.select.v1` + `host.manage.v1` | `set_default_model`, `set_default_thinking_level` (host defaults) | |
-| `host.manage.v1` | `set_keep_awake` | `subscription_usage` |
+| `host.manage.v1` | `set_keep_awake`, `set_extension_settings` (project settings only for a trusted project) | `subscription_usage`, `extension_settings` |
 | `integrations.manage.v1` | `set_web_search_key`, `mcp.connect`, `mcp.disconnect`, `mcp.refresh`, `mcp.set_enabled`, `mcp.auth_start_device`, `mcp.auth_poll`, `mcp.auth_cancel`, `mcp.logout` | `web_search_status`, `mcp.*` reads |
 | `worktrees.manage.v1` | `create_worktree`, `remove_worktree` | |
 | `conversation.control.v1` + `worktrees.manage.v1` | `prepare_pr_review` | |

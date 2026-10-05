@@ -15,6 +15,7 @@ import {
 	type OAuthCredentials,
 } from "@hansjm10/volt-ai";
 import { builtInOAuthProviders } from "@hansjm10/volt-ai/oauth";
+import type { ExtensionPermission } from "@hansjm10/volt-protocol";
 import { type MockInstance, vi } from "vitest";
 import { AgentSession, type AgentSessionConfig } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -228,9 +229,13 @@ export interface TestSessionContext {
 	cleanup: () => Promise<void>;
 }
 
-/** An SDK extension for tests: a manifest with `id` (the display name too), and `factory`. */
-export function testExtension(id: string, factory: ExtensionFactory): ExtensionDefinition {
-	return { manifest: { id, displayName: id }, factory };
+/** An SDK extension for tests: a manifest with `id` (the display name too) and `permissions`, and `factory`. */
+export function testExtension(
+	id: string,
+	factory: ExtensionFactory,
+	permissions?: ExtensionPermission[],
+): ExtensionDefinition {
+	return { manifest: { id, displayName: id, ...(permissions === undefined ? {} : { permissions }) }, factory };
 }
 
 export interface CreateTestExtensionsResultInput {
@@ -238,6 +243,8 @@ export interface CreateTestExtensionsResultInput {
 	/** The manifest id; `inline-<n>` by default. */
 	id?: string;
 	path?: string;
+	/** The manifest's permissions; none by default. */
+	permissions?: ExtensionPermission[];
 }
 
 /** Load test extensions; a bare factory, or one without an id, is `inline-<n>` for its 1-based position. */
@@ -255,7 +262,13 @@ export async function createTestExtensionsResult(
 		const extensionPath =
 			typeof input === "function" ? `<inline:${index + 1}>` : (input.path ?? `<inline:${index + 1}>`);
 		extensions.push(
-			await loadExtensionFromFactory(testExtension(id, factory), cwd, eventBus, runtime, extensionPath),
+			await loadExtensionFromFactory(
+				testExtension(id, factory, typeof input === "function" ? undefined : input.permissions),
+				cwd,
+				eventBus,
+				runtime,
+				extensionPath,
+			),
 		);
 	}
 

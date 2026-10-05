@@ -19,6 +19,7 @@ import * as _bundledVoltAgentCore from "@hansjm10/volt-agent-core";
 import type { JsonCompatibleInput } from "@hansjm10/volt-ai";
 import * as _bundledVoltAi from "@hansjm10/volt-ai";
 import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
+import type { ExtensionSettingsScope } from "@hansjm10/volt-protocol";
 import * as _bundledVoltProtocol from "@hansjm10/volt-protocol";
 import { EXTENSION_INTENT_NAME_PATTERN, REMOTE_CAPABILITIES, type RemoteCapability } from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
@@ -52,7 +53,9 @@ import {
 	readPackageManifest,
 	validateManifest,
 } from "./manifest.ts";
+import { ExtensionPermissionError, extensionFingerprint, requirePermission } from "./permissions.ts";
 import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
+import { ExtensionSettingsRuntime } from "./settings.ts";
 import {
 	EXTENSION_EVENT_NAMES,
 	type Extension,
@@ -354,8 +357,11 @@ function validateTrigger(name: string, trigger: unknown): string {
 /**
  * Create a runtime with throwing stubs for action methods.
  * Runner.bindCore() replaces these with real implementations.
+ *
+ * @param settings The extensions' settings; without them each extension sees
+ *   its defaults until the session binds its settings manager.
  */
-export function createExtensionRuntime(): ExtensionRuntime {
+export function createExtensionRuntime(settings = new ExtensionSettingsRuntime()): ExtensionRuntime {
 	const notInitialized = () => {
 		throw new Error("Extension runtime not initialized. Action methods cannot be called during extension loading.");
 	};
@@ -367,6 +373,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 	};
 
 	const runtime: ExtensionRuntime = {
+		settings,
 		sendMessage: notInitialized,
 		sendUserMessage: notInitialized,
 		appendEntry: notInitialized,
@@ -418,6 +425,16 @@ function createExtensionAPI(
 	eventBus: EventBus,
 ): ExtensionAPI {
 	const api = {
+		get settings() {
+			runtime.assertActive();
+			return runtime.settings.values(extension);
+		},
+
+		updateSettings(values: Readonly<Record<string, unknown>>, options?: { readonly scope?: ExtensionSettingsScope }) {
+			runtime.assertActive();
+			return runtime.settings.update(extension, values, options?.scope ?? "global");
+		},
+
 		// Registration methods - write to extension
 		on(event: string, handler: ExtensionHandlerFn) {
 			if (!EXTENSION_EVENTS.has(event)) {
@@ -581,6 +598,9 @@ function createExtensionAPI(
 
 		exec(command: string, args: string[], options?: ExecOptions) {
 			runtime.assertActive();
+			if (!extension.manifest.permissions?.includes("exec")) {
+				return Promise.reject(new ExtensionPermissionError(extension.id, "exec", "volt.exec"));
+			}
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
 
@@ -621,11 +641,13 @@ function createExtensionAPI(
 
 		registerProvider(name: string, config: ProviderConfig) {
 			runtime.assertActive();
+			requirePermission(extension, "providers", "volt.registerProvider");
 			runtime.registerProvider(name, config, extension.id);
 		},
 
 		unregisterProvider(name: string) {
 			runtime.assertActive();
+			requirePermission(extension, "providers", "volt.unregisterProvider");
 			runtime.unregisterProvider(name, extension.id);
 		},
 
@@ -694,6 +716,8 @@ export interface ExtensionSource {
 	readonly installed?: boolean;
 	/** An SDK extension, loaded instead of `path`. */
 	readonly definition?: ExtensionDefinition;
+	/** The npm, git, or local package source it was installed from: its permission fingerprint names it. */
+	readonly packageSource?: string;
 }
 
 /** An extension whose manifest was read, before its factory runs. */
@@ -704,6 +728,7 @@ interface Candidate {
 	readonly manifest: ExtensionManifest;
 	readonly version: string;
 	readonly baseDir: string | undefined;
+	readonly packageSource: string | undefined;
 	/** The factory; a package's entry module is imported only once the package owns its id. */
 	readonly factory: () => Promise<ExtensionFactory>;
 }
@@ -727,6 +752,7 @@ function definitionCandidate(definition: ExtensionDefinition, label: string, sco
 		manifest: validateManifest(manifest, { package: false }),
 		version: LOCAL_EXTENSION_VERSION,
 		baseDir: undefined,
+		packageSource: undefined,
 		factory: async () => factory,
 	};
 }
@@ -736,7 +762,7 @@ async function prepareExtension(source: ExtensionSource, cwd: string): Promise<C
 	const scope = source.scope ?? "temporary";
 	if (source.definition !== undefined) return definitionCandidate(source.definition, source.path, scope);
 	const resolvedPath = resolvePath(source.path, cwd, { normalizeUnicodeSpaces: true });
-	const base = { path: source.path, resolvedPath, scope };
+	const base = { path: source.path, resolvedPath, scope, packageSource: source.packageSource };
 	if (isDirectory(resolvedPath) && declaresPackageExtension(resolvedPath)) {
 		const declared = readPackageManifest(resolvedPath);
 		if (declared === undefined) throw new ExtensionManifestError("package.json declares no extension");
@@ -774,6 +800,38 @@ async function prepareExtension(source: ExtensionSource, cwd: string): Promise<C
 	};
 }
 
+/** What an extension declares, read as loading reads it, before its factory runs. */
+export interface DeclaredExtension {
+	readonly manifest: ExtensionManifest;
+	readonly version: string;
+	readonly scope: SourceScope;
+	/** See {@link Extension.fingerprint}. */
+	readonly fingerprint: string;
+}
+
+/**
+ * Read what `source` declares as loading would: a package's manifest from
+ * package.json, or a trusted module's exported manifest (evaluating the
+ * module, never its factory). Throws when there is no valid manifest.
+ */
+export async function readDeclaredExtension(source: ExtensionSource, cwd: string): Promise<DeclaredExtension> {
+	const candidate = await prepareExtension(source, resolvePath(cwd));
+	return {
+		manifest: candidate.manifest,
+		version: candidate.version,
+		scope: candidate.scope,
+		fingerprint: candidateFingerprint(candidate),
+	};
+}
+
+function candidateFingerprint(candidate: Candidate): string {
+	return extensionFingerprint({
+		id: candidate.manifest.id,
+		path: candidate.resolvedPath,
+		...(candidate.packageSource === undefined ? {} : { packageSource: candidate.packageSource }),
+	});
+}
+
 function loadError(error: unknown): string {
 	if (error instanceof ExtensionManifestError) return `Invalid extension manifest: ${error.message}`;
 	if (error instanceof MissingFactoryError) return error.message;
@@ -796,6 +854,7 @@ function createExtension(candidate: Candidate): Extension {
 			scope: candidate.scope,
 			baseDir: candidate.baseDir,
 		}),
+		fingerprint: candidateFingerprint(candidate),
 		handlers: new ExtensionHandlerRegistry(),
 		tools: new Map(),
 		messageRenderers: new Map(),

@@ -62,45 +62,49 @@ function createDaemon() {
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					testExtension("test-extension-1", (volt: ExtensionAPI) => {
-						volt.registerProvider(faux.getModel().provider, {
-							baseUrl: faux.getModel().baseUrl,
-							apiKey: "faux-key",
-							api: faux.api,
-							streamSimple: faux.streamSimple,
-							models: faux.models.map((model) => ({
-								id: model.id,
-								name: model.name,
-								api: model.api,
-								reasoning: model.reasoning,
-								input: model.input,
-								cost: model.cost,
-								contextWindow: model.contextWindow,
-								maxTokens: model.maxTokens,
-							})),
-						});
-						volt.on("session_start", (event, ctx) => {
-							events.push({
-								type: event.type,
-								sessionId: ctx.sessionManager.getSessionId(),
-								reason: event.reason,
+					testExtension(
+						"test-extension-1",
+						(volt: ExtensionAPI) => {
+							volt.registerProvider(faux.getModel().provider, {
+								baseUrl: faux.getModel().baseUrl,
+								apiKey: "faux-key",
+								api: faux.api,
+								streamSimple: faux.streamSimple,
+								models: faux.models.map((model) => ({
+									id: model.id,
+									name: model.name,
+									api: model.api,
+									reasoning: model.reasoning,
+									input: model.input,
+									cost: model.cost,
+									contextWindow: model.contextWindow,
+									maxTokens: model.maxTokens,
+								})),
 							});
-						});
-						volt.on("session_before_switch", (event, ctx) => {
-							events.push({
-								type: event.type,
-								sessionId: ctx.sessionManager.getSessionId(),
-								reason: event.reason,
+							volt.on("session_start", (event, ctx) => {
+								events.push({
+									type: event.type,
+									sessionId: ctx.sessionManager.getSessionId(),
+									reason: event.reason,
+								});
 							});
-						});
-						volt.on("session_shutdown", (event, ctx) => {
-							events.push({
-								type: event.type,
-								sessionId: ctx.sessionManager.getSessionId(),
-								reason: event.reason,
+							volt.on("session_before_switch", (event, ctx) => {
+								events.push({
+									type: event.type,
+									sessionId: ctx.sessionManager.getSessionId(),
+									reason: event.reason,
+								});
 							});
-						});
-					}),
+							volt.on("session_shutdown", (event, ctx) => {
+								events.push({
+									type: event.type,
+									sessionId: ctx.sessionManager.getSessionId(),
+									reason: event.reason,
+								});
+							});
+						},
+						["providers"],
+					),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

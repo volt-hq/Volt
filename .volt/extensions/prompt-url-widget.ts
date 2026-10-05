@@ -173,6 +173,7 @@ export const manifest = defineManifest({
 	id: "prompt-url-widget",
 	displayName: "Prompt URL Widget",
 	description: "Shows the GitHub pull request or issue a prompt links to above the editor.",
+	permissions: ["exec"],
 });
 
 export default function promptUrlWidgetExtension(volt: ExtensionAPI) {

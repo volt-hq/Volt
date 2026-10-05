@@ -7,7 +7,11 @@
 
 import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
-export const manifest = defineManifest({ id: "auto-commit-on-exit", displayName: "Auto Commit on Exit" });
+export const manifest = defineManifest({
+	id: "auto-commit-on-exit",
+	displayName: "Auto Commit on Exit",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("session_shutdown", async (_event, ctx) => {

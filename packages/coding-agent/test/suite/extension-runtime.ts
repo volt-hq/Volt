@@ -8,6 +8,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
+import type { ExtensionPermission } from "@hansjm10/volt-protocol";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionMode } from "../../src/core/extensions/index.ts";
@@ -27,7 +28,7 @@ export interface ExtensionRuntime {
 
 export async function createExtensionRuntime(
 	extensionFactory: ExtensionFactory,
-	options: { extensionMode?: ExtensionMode } = {},
+	options: { extensionMode?: ExtensionMode; permissions?: ExtensionPermission[] } = {},
 ): Promise<ExtensionRuntime> {
 	const tempDir = mkdtempSync(join(tmpdir(), "volt-extension-runtime-"));
 	const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
@@ -40,25 +41,29 @@ export async function createExtensionRuntime(
 			authStorage,
 			resourceLoaderOptions: {
 				extensionFactories: [
-					testExtension("test-extension", (volt: ExtensionAPI) => {
-						volt.registerProvider(faux.getModel().provider, {
-							baseUrl: faux.getModel().baseUrl,
-							apiKey: "faux-key",
-							api: faux.api,
-							streamSimple: faux.streamSimple,
-							models: faux.models.map((model) => ({
-								id: model.id,
-								name: model.name,
-								api: model.api,
-								reasoning: model.reasoning,
-								input: model.input,
-								cost: model.cost,
-								contextWindow: model.contextWindow,
-								maxTokens: model.maxTokens,
-							})),
-						});
-						extensionFactory(volt);
-					}),
+					testExtension(
+						"test-extension",
+						(volt: ExtensionAPI) => {
+							volt.registerProvider(faux.getModel().provider, {
+								baseUrl: faux.getModel().baseUrl,
+								apiKey: "faux-key",
+								api: faux.api,
+								streamSimple: faux.streamSimple,
+								models: faux.models.map((model) => ({
+									id: model.id,
+									name: model.name,
+									api: model.api,
+									reasoning: model.reasoning,
+									input: model.input,
+									cost: model.cost,
+									contextWindow: model.contextWindow,
+									maxTokens: model.maxTokens,
+								})),
+							});
+							extensionFactory(volt);
+						},
+						["providers", ...(options.permissions ?? [])],
+					),
 				],
 				noSkills: true,
 				noPromptTemplates: true,

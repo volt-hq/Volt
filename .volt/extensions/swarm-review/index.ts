@@ -384,6 +384,7 @@ export const manifest = defineManifest({
 	id: "swarm-review",
 	displayName: "Swarm Review",
 	description: "Reviews changes with many inexpensive reviewers in waves and verifies the clustered findings.",
+	permissions: ["exec", "fs-write", "secrets"],
 });
 
 export default function swarmReview(volt: ExtensionAPI) {

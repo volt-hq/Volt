@@ -15,7 +15,11 @@ import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
 const TRIGGER = /\b(changes?|diff|modified)\b/i;
 
-export const manifest = defineManifest({ id: "input-transform-streaming", displayName: "Streaming-Aware Input Gate" });
+export const manifest = defineManifest({
+	id: "input-transform-streaming",
+	displayName: "Streaming-Aware Input Gate",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI) {
 	volt.on("input", async (event) => {

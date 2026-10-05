@@ -20,6 +20,7 @@ export const manifest = defineManifest({
 	id: "inline-bash",
 	displayName: "Inline Bash",
 	description: "Expands inline bash commands in user prompts.",
+	permissions: ["exec"],
 });
 
 export default function (volt: ExtensionAPI) {

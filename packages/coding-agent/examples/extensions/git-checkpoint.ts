@@ -7,7 +7,7 @@
 
 import { defineManifest, type ExtensionAPI } from "@hansjm10/volt-coding-agent";
 
-export const manifest = defineManifest({ id: "git-checkpoint", displayName: "Git Checkpoint" });
+export const manifest = defineManifest({ id: "git-checkpoint", displayName: "Git Checkpoint", permissions: ["exec"] });
 
 export default function (volt: ExtensionAPI) {
 	const checkpoints = new Map<string, string>();

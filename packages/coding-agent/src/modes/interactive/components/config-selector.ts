@@ -17,6 +17,7 @@ import {
 	visibleWidth,
 } from "@hansjm10/volt-tui";
 import { CONFIG_DIR_NAME } from "../../../config.ts";
+import type { DeclaredExtension } from "../../../core/extensions/loader.ts";
 import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";
@@ -40,7 +41,17 @@ interface ResourceItem {
 	displayName: string;
 	groupKey: string;
 	subgroupKey: string;
+	/** The extension's declaration, when it declares settings: confirming the row opens them. */
+	declared?: DeclaredExtension;
 }
+
+/** The settings key listing each resource type's local paths. */
+const PATHS_SETTINGS_KEYS = {
+	extensions: "extensionPaths",
+	skills: "skills",
+	prompts: "prompts",
+	themes: "themes",
+} as const satisfies Record<ResourceType, string>;
 
 interface ResourceSubgroup {
 	type: ResourceType;
@@ -90,7 +101,10 @@ function getGroupLabel(metadata: PathMetadata): string {
 	return metadata.scope === "user" ? "User settings" : "Project settings";
 }
 
-function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
+function buildGroups(
+	resolved: ResolvedPaths,
+	declared: ReadonlyMap<string, DeclaredExtension> = new Map(),
+): ResourceGroup[] {
 	const groupMap = new Map<string, ResourceGroup>();
 
 	const addToGroup = (resources: ResolvedResource[], resourceType: ResourceType) => {
@@ -132,14 +146,16 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 			} else {
 				displayName = fileName;
 			}
+			const declaration = resourceType === "extensions" ? declared.get(path) : undefined;
 			subgroup.items.push({
 				path,
 				enabled,
 				metadata,
 				resourceType,
-				displayName,
+				displayName: declaration ? `${declaration.manifest.displayName} (${displayName})` : displayName,
 				groupKey,
 				subgroupKey,
+				...(declaration?.manifest.settings ? { declared: declaration } : {}),
 			});
 		}
 	};
@@ -184,7 +200,8 @@ class ConfigSelectorHeader implements Component {
 	render(width: number): RenderFrame {
 		const title = theme.bold("Resource Configuration");
 		const sep = theme.fg("muted", " · ");
-		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc", "close");
+		const hint =
+			rawKeyHint("space", "toggle") + sep + rawKeyHint("enter", "settings") + sep + rawKeyHint("esc", "close");
 		const hintWidth = visibleWidth(hint);
 		const titleWidth = visibleWidth(title);
 		const spacing = Math.max(1, width - titleWidth - hintWidth);
@@ -210,6 +227,8 @@ class ResourceList implements Component, Focusable {
 	public onCancel?: () => void;
 	public onExit?: () => void;
 	public onToggle?: (item: ResourceItem, newEnabled: boolean) => void;
+	/** Confirming an extension row that declares settings opens them. */
+	public onOpenSettings?: (declared: DeclaredExtension) => void;
 
 	private _focused = false;
 	get focused(): boolean {
@@ -375,7 +394,8 @@ class ResourceList implements Component, Focusable {
 				const cursor = isSelected ? "> " : "  ";
 				const checkbox = item.enabled ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
 				const name = isSelected ? theme.bold(item.displayName) : item.displayName;
-				lines.push(truncateToWidth(`${cursor}    ${checkbox} ${name}`, width, "..."));
+				const settings = item.declared ? theme.fg("muted", " · settings") : "";
+				lines.push(truncateToWidth(`${cursor}    ${checkbox} ${name}${settings}`, width, "..."));
 			}
 		}
 
@@ -431,6 +451,13 @@ class ResourceList implements Component, Focusable {
 			this.onExit?.();
 			return;
 		}
+		if (kb.matches(data, "tui.select.confirm")) {
+			const entry = this.filteredItems[this.selectedIndex];
+			if (entry?.type === "item" && entry.item.declared && this.onOpenSettings) {
+				this.onOpenSettings(entry.item.declared);
+				return;
+			}
+		}
 		if (data === " " || kb.matches(data, "tui.select.confirm")) {
 			const entry = this.filteredItems[this.selectedIndex];
 			if (entry?.type === "item") {
@@ -463,7 +490,7 @@ class ResourceList implements Component, Focusable {
 				: this.settingsManager.getGlobalEffectiveSettings();
 
 		const arrayKey = item.resourceType as "extensions" | "skills" | "prompts" | "themes";
-		const current = (settings[arrayKey] ?? []) as string[];
+		const current = (settings[PATHS_SETTINGS_KEYS[arrayKey]] ?? []) as string[];
 
 		// Generate pattern for this resource
 		const pattern = this.getResourcePattern(item);
@@ -603,10 +630,15 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		onExit: () => void,
 		requestRender: () => void,
 		terminalHeight?: number,
+		extensions?: {
+			/** What each extension path declares, by path. */
+			readonly declared: ReadonlyMap<string, DeclaredExtension>;
+			readonly onOpenSettings: (declared: DeclaredExtension) => void;
+		},
 	) {
 		super();
 
-		const groups = buildGroups(resolvedPaths);
+		const groups = buildGroups(resolvedPaths, extensions?.declared);
 
 		// Add header
 		this.addChild(new Spacer(1));
@@ -620,6 +652,7 @@ export class ConfigSelectorComponent extends Container implements Focusable {
 		this.resourceList.onCancel = onClose;
 		this.resourceList.onExit = onExit;
 		this.resourceList.onToggle = () => requestRender();
+		if (extensions) this.resourceList.onOpenSettings = extensions.onOpenSettings;
 		this.addChild(this.resourceList);
 
 		// Bottom border

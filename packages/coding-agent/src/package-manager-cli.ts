@@ -1,4 +1,4 @@
-import { Markdown, type MarkdownTheme } from "@hansjm10/volt-tui";
+import { Markdown, type MarkdownTheme, sanitizeText } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { selectConfig } from "./cli/config-selector.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
@@ -14,6 +14,12 @@ import {
 	type SelfUpdateCommand,
 	VERSION,
 } from "./config.ts";
+import {
+	ExtensionPermissionStore,
+	type PackagePermissionOutcome,
+	permissionRequestLines,
+	reviewPackagePermissions,
+} from "./core/extensions/permissions.ts";
 import type { ExtensionDefinition } from "./core/extensions/types.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
@@ -614,6 +620,52 @@ export async function createCommandSettingsManager(options: {
 	return { settingsManager, projectTrustWarnings };
 }
 
+/**
+ * Review the permissions of the package installed from `source` in `scope`:
+ * in a terminal, show the ones not acknowledged yet and ask; otherwise show
+ * them, unacknowledged. A manifest that cannot be read is reported and left
+ * to fail when the extension loads.
+ */
+async function reviewInstalledPermissions(
+	packageManager: DefaultPackageManager,
+	agentDir: string,
+	source: string,
+	scope: "user" | "project",
+	consequence: string,
+): Promise<PackagePermissionOutcome["status"] | "failed"> {
+	const root = packageManager.getInstalledPath(source, scope);
+	if (root === undefined) return "none";
+	try {
+		const outcome = await reviewPackagePermissions({
+			store: new ExtensionPermissionStore(agentDir),
+			root,
+			source,
+			...(getCommandAppMode() === "interactive"
+				? {
+						confirm: async (subject, added) => {
+							console.log(permissionRequestLines(subject, added).join("\n"));
+							return promptConfirm(`Acknowledge these permissions? ${consequence}`);
+						},
+					}
+				: {}),
+		});
+		if (outcome.status === "unreviewed") {
+			console.log(chalk.yellow(permissionRequestLines(outcome.subject, []).join("\n")));
+			console.log(
+				chalk.yellow(
+					`These permissions are not acknowledged. Run "${APP_NAME} install ${source}" in a terminal to review them.`,
+				),
+			);
+		}
+		return outcome.status;
+	} catch (error: unknown) {
+		// The message can carry text from the package: print it inert.
+		const message = sanitizeText(error instanceof Error ? error.message : String(error));
+		console.error(chalk.yellow(`Could not review the permissions of ${source}: ${message}`));
+		return "failed";
+	}
+}
+
 export async function handleConfigCommand(
 	args: string[],
 	runtimeOptions: PackageCommandRuntimeOptions = {},
@@ -726,10 +778,25 @@ export async function handlePackageCommand(
 
 	try {
 		switch (options.command) {
-			case "install":
+			case "install": {
 				await packageManager.installAndPersist(source!, { local: options.local });
+				const scope = options.local ? "project" : "user";
+				const permissions = await reviewInstalledPermissions(
+					packageManager,
+					agentDir,
+					source!,
+					scope,
+					"Declining removes the package.",
+				);
+				if (permissions === "declined" || permissions === "failed") {
+					await packageManager.removeAndPersist(source!, { local: options.local });
+					console.error(chalk.red(`Removed ${source}: its permissions were not acknowledged`));
+					process.exitCode = 1;
+					return true;
+				}
 				console.log(chalk.green(`Installed ${source}`));
 				return true;
+			}
 
 			case "remove": {
 				const removed = await packageManager.removeAndPersist(source!, { local: options.local });
@@ -783,6 +850,25 @@ export async function handlePackageCommand(
 				if (updateTargetIncludesExtensions(target)) {
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
+					for (const pkg of packageManager.listConfiguredPackages()) {
+						if (updateSource !== undefined && pkg.source !== updateSource && pkg.actionSource !== updateSource) {
+							continue;
+						}
+						const permissions = await reviewInstalledPermissions(
+							packageManager,
+							agentDir,
+							pkg.source,
+							pkg.scope,
+							"Declining leaves it installed with its permissions unacknowledged.",
+						);
+						if (permissions === "declined" || permissions === "failed") {
+							console.error(
+								chalk.yellow(
+									`${pkg.source} asks for permissions you did not acknowledge; remove it with "${APP_NAME} remove ${pkg.source}"`,
+								),
+							);
+						}
+					}
 					if (updateSource) {
 						console.log(chalk.green(`Updated ${updateSource}`));
 					} else {

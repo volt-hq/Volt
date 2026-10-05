@@ -15,6 +15,7 @@ import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
+import { type PermissionHolder, permissionCheckedModelRegistry } from "./permissions.ts";
 import {
 	type ExtensionServicesManager,
 	extensionServicesForbidden,
@@ -66,6 +67,7 @@ import type {
 	SessionBeforeTreeResult,
 	SessionIntentResult,
 	SessionShutdownEvent,
+	SettingsChangedEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolResultEvent,
@@ -150,6 +152,7 @@ type RunnerEmitEvent = Exclude<
 	| InputEvent
 	| RequestBoundaryEvent
 	| ExtensionOperationEvent
+	| SettingsChangedEvent
 >;
 
 type SessionBeforeEvent = Extract<
@@ -174,6 +177,45 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				: undefined;
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
+
+/** Options of a session change that may continue in the new session. */
+interface SessionChangeOptions {
+	readonly withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+}
+
+/** `options` with a `withSession` that sees its context as `holder` holds it (see {@link ownedSessionContext}). */
+function withOwnedSession<O extends SessionChangeOptions>(
+	options: O | undefined,
+	holder: PermissionHolder,
+): O | undefined {
+	const withSession = options?.withSession;
+	if (options === undefined || withSession === undefined) return options;
+	return { ...options, withSession: (ctx: ReplacedSessionContext) => withSession(ownedSessionContext(ctx, holder)) };
+}
+
+/**
+ * A replaced session's context, which belongs to no extension, as the
+ * extension that changed sessions holds it: its model registry checked
+ * against that extension's permissions, and so are the session changes it
+ * starts.
+ */
+function ownedSessionContext(ctx: ReplacedSessionContext, holder: PermissionHolder): ReplacedSessionContext {
+	const owned = Object.defineProperties({}, Object.getOwnPropertyDescriptors(ctx)) as ReplacedSessionContext;
+	let checked: { readonly source: ModelRegistry; readonly registry: ModelRegistry } | undefined;
+	Object.defineProperty(owned, "modelRegistry", {
+		get: () => {
+			const source = ctx.modelRegistry;
+			if (checked?.source !== source) checked = { source, registry: permissionCheckedModelRegistry(source, holder) };
+			return checked.registry;
+		},
+		enumerable: true,
+		configurable: true,
+	});
+	owned.newSession = (options) => ctx.newSession(withOwnedSession(options, holder));
+	owned.fork = (entryId, options) => ctx.fork(entryId, withOwnedSession(options, holder));
+	owned.switchSession = (sessionRef, options) => ctx.switchSession(sessionRef, withOwnedSession(options, holder));
+	return owned;
+}
 
 /** A resource path an extension's `resources_discover` handler returned. */
 export interface DiscoveredResourcePath {
@@ -325,6 +367,8 @@ export class ExtensionRunner {
 	private runtime: ExtensionRuntime;
 	private uiFactory: ExtensionUIFactory;
 	private guardedContextObjects = new WeakMap<object, object>();
+	/** `ctx.modelRegistry` as each extension sees it: what its permissions allow. */
+	private ownerModelRegistries = new Map<string, ModelRegistry>();
 	private mode: ExtensionMode = "print";
 	private hasUIFn: () => boolean = () => this.uiFactory !== noOpUIFactory;
 	private cwd: string;
@@ -543,6 +587,11 @@ export class ExtensionRunner {
 
 	hasUI(): boolean {
 		return this.hasUIFn();
+	}
+
+	/** The loaded extension with manifest id `id`, if any. */
+	getExtension(id: string): Extension | undefined {
+		return this.extensions.find((extension) => extension.id === id);
 	}
 
 	/** Get all registered tools from all extensions (first registration per name wins). */
@@ -848,6 +897,72 @@ export class ExtensionRunner {
 		return guarded;
 	}
 
+	/** The model registry an extension's context shows: credentials need `secrets`, provider registration `providers`. */
+	private modelRegistryFor(owner: string | undefined): ModelRegistry {
+		const guarded = this.guardContextObject(this.modelRegistry);
+		if (owner === undefined) return guarded;
+		let registry = this.ownerModelRegistries.get(owner);
+		if (!registry) {
+			registry = permissionCheckedModelRegistry(guarded, this.permissionHolder(owner));
+			this.ownerModelRegistries.set(owner, registry);
+		}
+		return registry;
+	}
+
+	/** The extension `owner` names, as its permissions are checked; one this runner does not load has none. */
+	private permissionHolder(owner: string): PermissionHolder {
+		return this.getExtension(owner) ?? { id: owner, manifest: {} };
+	}
+
+	/**
+	 * Report the stored settings values the extensions' settings dropped, as
+	 * errors of the extensions they belong to.
+	 */
+	reportDroppedSettings(): void {
+		if (this.isInert) return;
+		for (const { id, message } of this.runtime.settings.drainDropped()) {
+			this.emitErrorContained({ extensionId: id, event: "settings", error: `Ignored stored settings: ${message}` });
+		}
+	}
+
+	/**
+	 * Start tracking the extensions' settings: changes from now on reach them
+	 * as `settings_changed` through {@link emitSettingsChanged}.
+	 */
+	trackSettings(): void {
+		this.runtime.settings.changes(this.extensions);
+	}
+
+	/** Send `settings_changed` to each extension whose effective settings changed since it last saw them. */
+	async emitSettingsChanged(): Promise<void> {
+		if (this.isInert) return;
+		const changes = this.runtime.settings.changes(this.extensions);
+		this.reportDroppedSettings();
+		for (const change of changes) {
+			const extension = this.extensions.find((candidate) => candidate.id === change.id);
+			for (const handler of extension?.handlers.get("settings_changed") ?? []) {
+				const event: SettingsChangedEvent = {
+					type: "settings_changed",
+					settings: change.settings,
+					previous: change.previous,
+					scope: change.scope,
+				};
+				try {
+					await handler(event, this.createContext(change.id));
+				} catch (err) {
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitErrorContained({
+						extensionId: change.id,
+						event: "settings_changed",
+						error: err instanceof Error ? err.message : String(err),
+						...(stack === undefined ? {} : { stack }),
+					});
+				}
+				if (this.isInert) return;
+			}
+		}
+	}
+
 	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
@@ -887,7 +1002,7 @@ export class ExtensionRunner {
 			},
 			get modelRegistry() {
 				runner.assertActive();
-				return runner.guardContextObject(runner.modelRegistry);
+				return runner.modelRegistryFor(owner);
 			},
 			get model() {
 				runner.assertActive();
@@ -969,13 +1084,17 @@ export class ExtensionRunner {
 			this.assertActive();
 			return waitForIdle();
 		};
+		// The new session's context belongs to no extension: the owner's permissions go with it.
+		const holder = owner === undefined ? undefined : this.permissionHolder(owner);
+		const own = <O extends SessionChangeOptions>(options: O | undefined): O | undefined =>
+			holder === undefined ? options : withOwnedSession(options, holder);
 		context.newSession = (options) => {
 			this.assertActive();
-			return this.newSessionHandler(options);
+			return this.newSessionHandler(own(options));
 		};
 		context.fork = (entryId, options) => {
 			this.assertActive();
-			return this.forkHandler(entryId, options);
+			return this.forkHandler(entryId, own(options));
 		};
 		context.navigateTree = (targetId, options) => {
 			this.assertActive();
@@ -983,7 +1102,7 @@ export class ExtensionRunner {
 		};
 		context.switchSession = (sessionRef, options) => {
 			this.assertActive();
-			return this.switchSessionHandler(sessionRef, options);
+			return this.switchSessionHandler(sessionRef, own(options));
 		};
 		context.reload = () => {
 			this.assertActive();

@@ -53,22 +53,26 @@ describe("regression #527: extension cleanup when a session ends", () => {
 				resourceLoaderOptions: {
 					eventBus,
 					extensionFactories: [
-						testExtension("test-extension-1", (volt) => {
-							const instance = ++instances;
-							let resource: AbortController;
-							volt.on("session_start", (event) => {
-								resource = new AbortController();
-								resources.push(resource);
-								lifecycle.push(`${instance}:start:${event.reason}`);
-							});
-							extend?.(volt, instance);
-							// Runs even if an earlier shutdown handler throws.
-							volt.on("session_shutdown", async (event) => {
-								await Promise.resolve();
-								resource.abort();
-								lifecycle.push(`${instance}:shutdown:${event.reason}`);
-							});
-						}),
+						testExtension(
+							"test-extension-1",
+							(volt) => {
+								const instance = ++instances;
+								let resource: AbortController;
+								volt.on("session_start", (event) => {
+									resource = new AbortController();
+									resources.push(resource);
+									lifecycle.push(`${instance}:start:${event.reason}`);
+								});
+								extend?.(volt, instance);
+								// Runs even if an earlier shutdown handler throws.
+								volt.on("session_shutdown", async (event) => {
+									await Promise.resolve();
+									resource.abort();
+									lifecycle.push(`${instance}:shutdown:${event.reason}`);
+								});
+							},
+							["exec", "providers", "secrets"],
+						),
 						...otherExtensions.map((factory, index) => testExtension(`other-${index + 1}`, factory)),
 					],
 					noSkills: true,

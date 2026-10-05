@@ -127,7 +127,11 @@ function createIssueAutocompleteProvider(
 	};
 }
 
-export const manifest = defineManifest({ id: "github-issue-autocomplete", displayName: "GitHub Issue Autocomplete" });
+export const manifest = defineManifest({
+	id: "github-issue-autocomplete",
+	displayName: "GitHub Issue Autocomplete",
+	permissions: ["exec"],
+});
 
 export default function (volt: ExtensionAPI): void {
 	volt.on("session_start", async (_event, ctx) => {
