@@ -17,7 +17,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { ExtensionAPI, ToolResultEvent } from "../../src/core/extensions/index.ts";
 import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
@@ -25,6 +24,7 @@ import * as nativeTools from "../../src/core/tools/index.ts";
 import { type JobSnapshot, type JobSummary, jobOfDetails } from "../../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
+import { createFakeConversation } from "../utilities/fake-conversation-host.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 function deferred() {
@@ -129,13 +129,7 @@ describe("AgentSession background jobs", () => {
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 		// The TUI shows the harness session; nothing here attaches it to a host.
-		const mode = new InteractiveMode(
-			{} as ConversationHost,
-			{
-				session: harness.session,
-				lost: new Promise<Error>(() => {}),
-			} as unknown as HostedConversation,
-		);
+		const mode = new InteractiveMode({} as ConversationHost, createFakeConversation(harness.session).conversation);
 		modes.push(mode);
 		const control = mode as unknown as {
 			renderer: TuiMainScreen;
@@ -187,13 +181,13 @@ describe("AgentSession background jobs", () => {
 	it("lets the parent finish while Bash lives, then wakes the idle conversation with a notice", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 		const job = await startJob(harness);
 		await backend.started.promise;
 		expect(job).toMatchObject({ tool: "bash", status: "running", label: "controlled work" });
 		expect(harness.session.isBusy).toBe(false);
 		await harness.session.waitForIdle();
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		expect(harness.session.getLastAssistantText()).toBe("Parent can continue independently.");
 		expect(backend.signal?.aborted).toBe(false);
 		expect(harness.session.work.get(job.id)).toMatchObject({ kind: "job", toolCallId: job.toolCallId });
@@ -216,7 +210,7 @@ describe("AgentSession background jobs", () => {
 		backend.finish.resolve();
 		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected the result."));
 		await harness.session.waitForIdle();
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 		expect(harness.session.jobs.get(job.id)).toMatchObject({ status: "completed" });
 		expect(notices(harness)).toHaveLength(1);
 		expect(notices(harness)[0]).toMatchObject({ details: { workId: job.id, kind: "job", outcome: "completed" } });
@@ -436,14 +430,14 @@ describe("AgentSession background jobs", () => {
 		try {
 			await harness.session.waitForIdle();
 			expect(joined).not.toHaveBeenCalled();
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 			expect(backend.signal?.aborted).toBe(false);
 		} finally {
 			harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 			backend.finish.resolve();
 		}
 		await joining;
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 	});
 
 	it("runs native result hooks once at completion, preserves call policy, and supplies the job signal", async () => {
@@ -524,7 +518,7 @@ describe("AgentSession background jobs", () => {
 		try {
 			await backend.aborted.promise;
 			expect(aborted).toBe(false);
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 			expect(jobOf(await jobsTool(harness).execute("read-cancelling", { action: "read", id: job.id })).status).toBe(
 				"cancelling",
 			);
@@ -532,7 +526,7 @@ describe("AgentSession background jobs", () => {
 			backend.finish.resolve();
 		}
 		await abort;
-		expect(harness.session.hasRunningWork).toBe(false);
+		expect(harness.session.work.busy()).toBe(false);
 		expect(harness.session.jobs.get(job.id).status).toBe("cancelled");
 		expect(completed).not.toHaveBeenCalled();
 		expect(noticeInputs(harness)).toEqual([]);
@@ -581,7 +575,7 @@ describe("AgentSession background jobs", () => {
 				await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
 				await expect(attemptedStart).rejects.toThrow("Operation admission is suspended");
 				expect(settledAbort).not.toHaveBeenCalled();
-				expect(harness.session.hasRunningWork).toBe(true);
+				expect(harness.session.work.busy()).toBe(true);
 				expect(await jobsTool(harness).execute("list-during-abort", { action: "list" })).toMatchObject({
 					details: { jobs: [{ id: job.id, status: "cancelling" }] },
 				});
@@ -590,7 +584,7 @@ describe("AgentSession background jobs", () => {
 				finishForeground.resolve();
 				await Promise.all([joined, reentrantAbort, foreground]);
 			}
-			expect(harness.session.hasRunningWork).toBe(false);
+			expect(harness.session.work.busy()).toBe(false);
 			expect(harness.session.jobs.get(job.id).status).toBe("cancelled");
 			expect(backend.operations.exec).toHaveBeenCalledTimes(1);
 			if (source === "foreground") {
@@ -845,7 +839,7 @@ describe("AgentSession background jobs", () => {
 			await vi.waitFor(() => expect(abort).toHaveBeenCalledExactlyOnceWith("keyboard_interrupt"));
 			expect((await settled(harness, job.id)).status).toBe("cancelled");
 			expect(backend.signal?.aborted).toBe(true);
-			expect(harness.session.hasRunningWork).toBe(false);
+			expect(harness.session.work.busy()).toBe(false);
 			expect(harness.session.pendingMessageCount).toBe(0);
 			expect(control.defaultEditor.getText()).toBe(
 				["queued steering", "queued follow-up", draft].filter(Boolean).join("\n\n"),
@@ -865,7 +859,7 @@ describe("AgentSession background jobs", () => {
 
 		expect(control.defaultEditor.getText()).toBe("");
 		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 	});
 
 	it.each(["onSubmit", "Enter"])("handles rejected /plan through %s without stopping jobs", async (entryPoint) => {
@@ -893,7 +887,7 @@ describe("AgentSession background jobs", () => {
 		expect(harness.session.planningState).toEqual(planning);
 		expect(harness.session.agentMode).toBe("build");
 		expect(harness.session.isBusy).toBe(false);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		expect(backend.signal?.aborted).toBe(false);
 		expect(control.defaultEditor.getText()).toBe("");
 		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
@@ -937,7 +931,7 @@ describe("AgentSession background jobs", () => {
 		expect(abort).not.toHaveBeenCalled();
 		expect(dispose).not.toHaveBeenCalled();
 		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 
 		now += 2999;
 		quit();
@@ -959,7 +953,7 @@ describe("AgentSession background jobs", () => {
 				"cancelling",
 			);
 			expect(harness.session.isBusy).toBe(false);
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 			terminal.sendInput("\x04");
 			expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
 			expect(control.shutdown).not.toHaveBeenCalled();
@@ -988,7 +982,7 @@ describe("AgentSession background jobs", () => {
 		expect(control.showWarning).toHaveBeenCalledTimes(2);
 		expect(control.shutdown).not.toHaveBeenCalled();
 		expect(backend.signal?.aborted).toBe(false);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 
 		now += 1;
 		await control.defaultEditor.onSubmit!("/quit");
@@ -1008,7 +1002,7 @@ describe("AgentSession background jobs", () => {
 		harness.setResponses([fauxAssistantMessage("Foreground work completed.")]);
 		await harness.session.prompt("Continue foreground work");
 		expect(harness.session.isBusy).toBe(false);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		expect(backend.signal?.aborted).toBe(false);
 
 		terminal.sendInput("\x04");
@@ -1042,7 +1036,7 @@ describe("AgentSession background jobs", () => {
 			await shell;
 			expect(harness.session.isBashRunning).toBe(false);
 			expect(backend.signal?.aborted).toBe(false);
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 
 			control.defaultEditor.onEscape!();
 			await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));

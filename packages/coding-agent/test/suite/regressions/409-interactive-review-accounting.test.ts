@@ -82,6 +82,8 @@ describe("#409 interactive terminal review accounting", () => {
 					editor,
 					editorContainer,
 					footer,
+					// The loader follows the review work's live progress; this test reads the transcript only.
+					workSource: { subscribe: () => () => undefined, items: () => [] },
 					pendingMessagesContainer: new Container(),
 					pendingTools: new Map(),
 					liveBackgroundJobTools: new Map(),

@@ -1822,24 +1822,14 @@ export class IntegratedRuntimeRegistry {
 		// rather than restarting a full TTL, so a flaky reconnect-then-abort loop
 		// cannot keep resetting the clock and pin a detached runtime open forever.
 		const ttlMs = ttlOverrideMs ?? this.options.detachedRuntimeTtlMs();
-		// Running work, reviews included, counts as activity: it must pin the
-		// runtime until it reaches a terminal state.
+		// One check (RFC §7.3): a busy operation, running work, or a hold pins the runtime.
 		const conversation = entry.runtime.conversation;
-		const isEntryActive = () =>
-			conversation.session.isBusy ||
-			conversation.session.hasRunningWork ||
-			this.reviewDiscussions.hasPendingWork(conversation);
-		// Each wait must block while its own activity check above is true.
-		const waitForEntryIdle = async () => {
-			await conversation.session.waitForNotBusy();
-			await conversation.work.waitForIdle();
-			await this.reviewDiscussions.waitForIdle(conversation);
-		};
+		const isEntryActive = () => conversation.isActive();
 		const handle = scheduleDetachedRuntimeRetention({
 			ttlMs,
 			isDetached: () => this.isDetached(entry),
 			isActive: isEntryActive,
-			waitForIdle: waitForEntryIdle,
+			waitForIdle: () => conversation.waitForIdle(),
 			onExpire: async () => {
 				if (!this.isDetached(entry) || isEntryActive()) {
 					return;

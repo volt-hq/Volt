@@ -98,7 +98,7 @@ describe("regression #537: a conversation that loses its log stops only its own 
 		review.releaseCleanup();
 		// The review stops; its lost log cannot record how, so the next open reconciles it.
 		await vi.waitFor(() => expect(conversation.work.running()).toEqual([]));
-		expect(conversation.session.hasRunningWork).toBe(false);
+		expect(conversation.session.work.busy()).toBe(false);
 		expect(conversation.work.get("review")?.outcome).toBeUndefined();
 
 		// The other conversation's review runs on and finishes as usual.

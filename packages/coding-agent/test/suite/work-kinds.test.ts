@@ -70,10 +70,14 @@ describe("extension work kinds", () => {
 			outcome: "completed",
 			result: { summary: "2 stale files", output: { text: "swept 2 files\n", truncated: false } },
 		});
-		// The notice waits for a turn: none started.
+		// The notice waits for a turn: none started. Clients see it queued, by its details.
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(0);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+		expect(harness.session.getQueuedWorkNotices()).toEqual([
+			expect.objectContaining({ workId: record?.workId, title: "Sweep the repo", outcome: "completed" }),
+		]);
+		expect(harness.eventsOfType("queue_update").at(-1)?.notices).toEqual(harness.session.getQueuedWorkNotices());
 
 		const requests: string[][] = [];
 		harness.setResponses([
@@ -90,6 +94,8 @@ describe("extension work kinds", () => {
 				"what did the sweep find?",
 			],
 		]);
+		// The turn took the notice.
+		expect(harness.session.getQueuedWorkNotices()).toEqual([]);
 	});
 
 	it("starts only the owning extension's kinds, and registers none for an extension whose id another owns", async () => {

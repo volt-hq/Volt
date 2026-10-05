@@ -16,27 +16,32 @@ afterEach(async () => {
 
 describe("daemon running work retention", () => {
 	it.each([true, false])(
-		"retains a detached runtime until running work settles and the full TTL elapses (active at detach: %s)",
+		"retains a detached runtime while its conversation is active, then for the full TTL (active at detach: %s)",
 		async (activeAtDetach) => {
 			let finish!: () => void;
 			const finished = new Promise<void>((resolve) => {
 				finish = resolve;
 			});
+			let active = activeAtDetach;
 			const session = {
 				sessionId: "retained-background-session",
 				isBusy: false,
-				hasRunningWork: activeAtDetach,
-				waitForNotBusy: vi.fn(async () => {}),
-				work: {
-					waitForIdle: vi.fn(async () => {
-						await finished;
-						session.hasRunningWork = false;
-					}),
-				},
 				abort: vi.fn(async () => {}),
 			};
+			// The one retention check: the conversation's own.
+			const isActive = vi.fn(() => active);
+			const waitForIdle = vi.fn(async () => {
+				await finished;
+				active = false;
+			});
 			const dispose = vi.fn(async () => {});
-			const runtime = createTestDaemonRuntime({ cwd: process.cwd(), session, close: dispose });
+			const runtime = createTestDaemonRuntime({
+				cwd: process.cwd(),
+				session,
+				close: dispose,
+				isActive,
+				waitForIdle,
+			});
 			const registry = new IntegratedRuntimeRegistry({
 				auditLogger: new IrohRemoteAuditLogger({ sink: { write: () => {} } }),
 				stateManager: new IrohRemoteHostStateManager(),
@@ -96,11 +101,10 @@ describe("daemon running work retention", () => {
 			await registry.detachWithoutSubscriber(entry, attachClaim, "phone_detached");
 			if (!activeAtDetach) {
 				await vi.advanceTimersByTimeAsync(500);
-				session.hasRunningWork = true;
+				active = true;
 			}
 			await vi.advanceTimersByTimeAsync(5000);
-			expect(session.work.waitForIdle).toHaveBeenCalledTimes(1);
-			expect(session.waitForNotBusy).toHaveBeenCalledTimes(1);
+			expect(waitForIdle).toHaveBeenCalledTimes(1);
 			expect(session.abort).not.toHaveBeenCalled();
 			expect(dispose).not.toHaveBeenCalled();
 			expect(registry.findOwner("workspace", session.sessionId)).toBe(entry);

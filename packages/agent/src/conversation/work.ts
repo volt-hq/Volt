@@ -41,6 +41,8 @@ export interface WorkRecord {
 	/** The newest entry that changed the record. */
 	readonly updatedOrdinal: number;
 	readonly finishedOrdinal?: number;
+	/** How many checkpoints the item recorded: a host bounds them over the item's lifetime. */
+	readonly checkpoints: number;
 }
 
 export type WorkLogEntry = Extract<LogEntry, { type: "work_started" | "work_checkpoint" | "work_finished" }>;
@@ -90,6 +92,7 @@ export function reduceWork(
 			state: payload.state,
 			startedOrdinal: entry.ordinal,
 			updatedOrdinal: entry.ordinal,
+			checkpoints: 0,
 		});
 	}
 	const record = records.get(entry.payload.workId);
@@ -106,6 +109,7 @@ export function reduceWork(
 			...(progress === undefined ? {} : { progress }),
 			...(detail === undefined ? {} : { detail }),
 			updatedOrdinal: entry.ordinal,
+			checkpoints: record.checkpoints + 1,
 		});
 	}
 	const { outcome, result, error } = entry.payload;

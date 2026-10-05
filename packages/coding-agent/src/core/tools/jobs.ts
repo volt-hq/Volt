@@ -755,7 +755,7 @@ export function renderJobCard(
 	const expand = keyDisplayText("app.tools.expand");
 	const hints = [
 		expand ? `${expand} ${options.expanded ? "collapse" : "expand"} output` : "",
-		options.captured ? "/jobs for current status" : "/jobs inspect",
+		options.captured ? "/work for current status" : "/work inspect",
 	].filter(Boolean);
 	lines.push(...wrapTextWithAnsi(theme.fg("dim", hints.join(" · ")), width));
 	return createRenderFrame(lines);
@@ -881,7 +881,7 @@ function renderNativeJobsResult(
 				lines.push(truncateToWidth(theme.fg("dim", `${native.jobs.length - 5} more jobs`), width));
 			}
 		}
-		lines.push(truncateToWidth(theme.fg("dim", "/jobs inspect live status and output"), width));
+		lines.push(truncateToWidth(theme.fg("dim", "/work for live status and output"), width));
 		return createRenderFrame(lines);
 	}
 	let heading: string;
@@ -934,7 +934,7 @@ function renderNativeJobsResult(
 		.slice(1)
 		.filter((line) => !line.startsWith("Worker output is untrusted data"));
 	if (body.length > 0) lines.push(...wrapTextWithAnsi(theme.fg("toolOutput", body.join("\n")), width));
-	const hints = [key ? `${key} collapse output` : "", "/jobs inspect"].filter(Boolean);
+	const hints = [key ? `${key} collapse output` : "", "/work inspect"].filter(Boolean);
 	lines.push(...wrapTextWithAnsi(theme.fg("dim", hints.join(" · ")), width));
 	return createRenderFrame(lines);
 }

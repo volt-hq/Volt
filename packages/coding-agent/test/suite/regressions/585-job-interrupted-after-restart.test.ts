@@ -1,13 +1,19 @@
 // Regression for #585 (Phase 4, RFC §7.1): a background job is work in the
 // conversation's log. A job running when its runtime stops ends
 // `interrupted` once the conversation opens again, whether the runtime
-// closed or ended without closing, and its kept result stays readable by id.
+// closed or ended without closing, its kept result stays readable by id, and
+// its replayed launch card shows the recorded outcome, not the running state
+// its tool result captured.
 import { type ConversationLogEntry, InMemoryConversationLog } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import type { TUI } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const harnesses: Harness[] = [];
@@ -81,7 +87,7 @@ async function startJob(harness: Harness, started: Promise<void>): Promise<strin
 	const [job] = harness.session.jobs.list();
 	if (!job) throw new Error("Expected a background job");
 	expect(job.status).toBe("running");
-	expect(harness.session.hasRunningWork).toBe(true);
+	expect(harness.session.work.busy()).toBe(true);
 	return job.id;
 }
 
@@ -97,11 +103,32 @@ describe("#585 background job interrupted after a restart", () => {
 
 		const second = await open(left);
 		expect(second.session.work.get(jobId)).toMatchObject({ kind: "job", outcome: "interrupted" });
-		expect(second.session.hasRunningWork).toBe(false);
+		expect(second.session.work.busy()).toBe(false);
 		expect(second.session.jobs.get(jobId)).toMatchObject({ status: "interrupted", output: "" });
 		// An interrupted job wakes nothing: no notice is queued and no turn runs.
 		expect(second.faux.state.callCount).toBe(0);
 		expect(second.session.messages.some((message) => message.role === "custom")).toBe(false);
+
+		// The launch card, replayed from the log, shows the recorded outcome.
+		initTheme("dark");
+		const launch = second.session.messages.find(
+			(message) => message.role === "toolResult" && message.toolName === "bash",
+		);
+		if (launch?.role !== "toolResult") throw new Error("Expected the launch result");
+		const card = new ToolExecutionComponent(
+			"bash",
+			launch.toolCallId,
+			{ command: "npm test", background: true },
+			{},
+			second.session.getToolDefinition("bash"),
+			{ requestRender: () => {} } as unknown as TUI,
+			second.tempDir,
+		);
+		card.updateResult({ content: launch.content, details: launch.details, isError: false });
+		const replayed = stripAnsi(card.render(100).lines.join("\n"));
+		card.dispose();
+		expect(replayed).toContain("Bash · background · Interrupted");
+		expect(replayed).not.toContain("at capture");
 
 		// The model reads the outcome by id after the restart.
 		second.setResponses([

@@ -389,7 +389,7 @@ describe("InteractiveMode active views", () => {
 			planDetails: undefined,
 			editor,
 			editorContainer,
-			dismissSubagentInspector: undefined,
+			dismissWorkInspector: undefined,
 		});
 		const prototype = InteractiveMode.prototype as unknown as {
 			activateView(this: typeof context, view: typeof conversationView, focus: Component | null): void;

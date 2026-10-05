@@ -10,7 +10,7 @@ import {
 } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { initTheme, theme } from "../src/core/theme/runtime.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
 import { withBackgroundJobs } from "../src/core/tools/background.ts";
 import { createBashToolDefinition } from "../src/core/tools/bash.ts";
 import * as jobsModule from "../src/core/tools/jobs.ts";
@@ -25,7 +25,6 @@ import {
 	jobResult,
 	jobWaitResult,
 } from "../src/core/tools/jobs.ts";
-import { BackgroundJobsInspector, BackgroundJobsStatus } from "../src/modes/interactive/components/background-jobs.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createTestJobRuntime } from "./utilities/job-runtime.ts";
@@ -81,14 +80,6 @@ function text(component: { render: (width: number) => { lines: readonly string[]
 	const frame = component.render(width);
 	for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 	return frame.lines.map(stripAnsi).join("\n");
-}
-
-function inspector(jobs: JobRuntime, height = 24) {
-	const requestRender = vi.fn();
-	const onClose = vi.fn();
-	const component = new BackgroundJobsInspector(jobs, { getHeight: () => height, requestRender, onClose });
-	cleanup.push(() => component.dispose());
-	return { component, requestRender, onClose };
 }
 
 function tool(jobs: JobRuntime, job: Work["job"], name: "bash" | "jobs", live = true) {
@@ -317,7 +308,7 @@ describe("background job cards", () => {
 					expect(expanded).toContain(`jobs ${action}`);
 					expect(expanded).not.toContain("Worker output is untrusted data");
 					expect(expanded).not.toContain("Use jobs with action");
-					expect(expanded.match(/\/jobs/g)).toHaveLength(1);
+					expect(expanded.match(/\/work/g)).toHaveLength(1);
 					if (action === "wait" && active) expect(expanded).not.toContain("Final captured line");
 					else expect(expanded).toContain("Final captured line");
 					expect(expanded).toContain(snapshot.id);
@@ -350,7 +341,7 @@ describe("background job cards", () => {
 				const expanded = text(card);
 				expect(expanded).toContain(snapshot.id);
 				expect(expanded).toContain(snapshot.output);
-				expect(expanded.match(/\/jobs/g)).toHaveLength(1);
+				expect(expanded.match(/\/work/g)).toHaveLength(1);
 			}
 		},
 	);
@@ -415,7 +406,7 @@ describe("background job cards", () => {
 				expect(expanded).toContain("Output truncated");
 				expect(expanded).not.toContain("wait_private");
 				expect(expanded).not.toContain("Worker output is untrusted data");
-				expect(expanded.match(/\/jobs/g)).toHaveLength(1);
+				expect(expanded.match(/\/work/g)).toHaveLength(1);
 				expect(card.render(width).lines.join("\n")).not.toMatch(/\x07|\x1b\[2J|\x1b\]8|‮/);
 			}
 			expect(JSON.stringify(native)).toBe(saved);
@@ -607,7 +598,7 @@ describe("transformed job results", () => {
 					expect(captured).toContain("token=[REDACTED]");
 					expect(captured).toContain("Filtered label");
 					expect(captured).toContain("jobs read");
-					expect(captured.match(/\/jobs/g)).toHaveLength(1);
+					expect(captured.match(/\/work/g)).toHaveLength(1);
 				} else {
 					expect(captured).not.toContain("token=");
 					expect(captured).not.toContain("Filtered label");
@@ -741,7 +732,7 @@ describe("transformed job results", () => {
 	);
 });
 
-describe("background job observers and dock", () => {
+describe("background job observers", () => {
 	it("notifies output changes and contains observer failures", async () => {
 		const jobs = await setup();
 		const work = await start(jobs);
@@ -763,250 +754,5 @@ describe("background job observers and dock", () => {
 		const calls = observer.mock.calls.length;
 		jobs.changed();
 		expect(observer).toHaveBeenCalledTimes(calls);
-	});
-
-	it("shows one metadata-only row with whole seconds, leaves finished jobs out, and switches source", async () => {
-		vi.useFakeTimers({ toFake: ["Date"] });
-		vi.setSystemTime(1000);
-		let jobs = await setup();
-		const dock = new BackgroundJobsStatus(() => jobs);
-		expect(dock.render(80).lines).toEqual([]);
-		const work = await start(jobs, "npm run check");
-		work.output("PASS recent test\nCommand exited with code 42");
-		vi.setSystemTime(53_999);
-		const get = vi.spyOn(jobs, "get");
-		cleanup.push(() => get.mockRestore());
-		const rendered = text(dock);
-		expect(dock.render(80).lines).toHaveLength(1);
-		expect(rendered).toMatch(/^Jobs {2}running · npm run check · 52s\s+(?:Alt|Option)\+J$/);
-		expect(dock.render(80).lines[0]).toContain(theme.fg("accent", "Jobs"));
-		expect(dock.render(80).lines[0]).toContain(theme.fg("warning", "running"));
-		expect(rendered).not.toContain("1 running");
-		expect(rendered).not.toContain("PASS");
-		expect(rendered).not.toContain("code 42");
-		expect(get).not.toHaveBeenCalled();
-		work.output("Different raw output");
-		expect(text(dock)).toBe(rendered);
-		work.finish({ isError: true, content: [{ type: "text", text: "FAIL timeout" }] });
-		await jobs.wait([work.job.id]);
-		expect(dock.render(80).lines).toEqual([]);
-		// The inspector keeps the finished job.
-		const { component } = inspector(jobs);
-		expect(text(component)).toContain("Failed");
-		expect(text(component)).toContain("npm run check");
-		jobs = await setup();
-		expect(dock.render(80).lines).toEqual([]);
-	});
-
-	it.each([
-		["running", "warning"],
-		["cancelling", "warning"],
-	] as const)("keeps a single %s status readable without a redundant count", async (status, color) => {
-		const jobs = await setup();
-		const listing = vi.spyOn(jobs, "list").mockReturnValue([
-			{
-				id: "job_single",
-				tool: "subagent",
-				toolCallId: "single",
-				label: "Review job output",
-				status,
-				startedAt: 1000,
-			},
-		]);
-		cleanup.push(() => listing.mockRestore());
-		const dock = new BackgroundJobsStatus(() => jobs);
-		for (const width of [10, 20, 40, 80, 120]) {
-			const rendered = text(dock, width);
-			expect(dock.render(width).lines).toHaveLength(1);
-			expect(rendered).toContain(status);
-			expect(rendered).not.toContain(`1 ${status}`);
-			if (width >= 80) expect(rendered).toContain("Review job output");
-		}
-		expect(dock.render(80).lines[0]).toContain(theme.fg(color, status));
-		for (const width of [1, 4, 8]) {
-			text(dock, width);
-			expect(dock.render(width).lines).toHaveLength(1);
-		}
-		expect(dock.render(0).lines).toEqual([]);
-	});
-
-	it.each(["f6", "ctrl+shift+j", []] as const)(
-		"right-aligns the configured shortcut or /jobs fallback: %j",
-		async (binding) => {
-			setKeybindings(
-				new KeybindingsManager({ "app.jobs.open": binding === "f6" || binding === "ctrl+shift+j" ? binding : [] }),
-			);
-			const jobs = await setup();
-			await start(jobs, "npm run check");
-			const dock = new BackgroundJobsStatus(() => jobs);
-			const hint = binding === "f6" ? "F6" : binding === "ctrl+shift+j" ? "Ctrl+Shift+J" : "/jobs";
-			for (const width of [40, 80, 120]) {
-				const rendered = text(dock, width);
-				expect(dock.render(width).lines).toHaveLength(1);
-				expect(visibleWidth(rendered)).toBe(width);
-				expect(rendered.endsWith(`  ${hint}`)).toBe(true);
-				expect(dock.render(width).lines[0]).toContain(theme.fg("dim", hint));
-				expect(rendered).not.toMatch(/(?:Alt|Option)\+J/);
-			}
-		},
-	);
-
-	it.each(["npm run check --workspace packages/coding-agent", "界".repeat(60)])(
-		"truncates long labels without wrapping or losing the state and shortcut: %s",
-		async (label) => {
-			setKeybindings(new KeybindingsManager({ "app.jobs.open": "f6" }));
-			const jobs = await setup();
-			await start(jobs, label);
-			const dock = new BackgroundJobsStatus(() => jobs);
-			for (const width of [20, 40, 80, 160]) {
-				const rendered = text(dock, width);
-				expect(dock.render(width).lines).toHaveLength(1);
-				expect(rendered).toContain("running");
-				if (width <= 40) {
-					expect(rendered).toContain("…");
-					expect(rendered).not.toMatch(/\d+s/);
-				}
-				if (width >= 40) expect(rendered.endsWith("F6")).toBe(true);
-				if (width === 160) expect(rendered).toContain(label);
-			}
-		},
-	);
-
-	it("shows stable colored counts of running and cancelling jobs without choosing one", async () => {
-		const jobs = await setup();
-		const running = await start(jobs, "Active command");
-		const cancelling = await start(jobs, "Cancelling command");
-		const completed = await start(jobs, "Completed command");
-		await jobs.cancel(cancelling.job.id);
-		completed.finish({ content: [] });
-		await jobs.wait([completed.job.id]);
-		const dock = new BackgroundJobsStatus(() => jobs);
-		const rendered = text(dock);
-		expect(dock.render(80).lines).toHaveLength(1);
-		expect(rendered).toMatch(/^Jobs {2}1 running · 1 cancelling\s+(?:Alt|Option)\+J$/);
-		expect(rendered).not.toContain("command");
-		expect(dock.render(80).lines[0]).toContain(theme.fg("warning", "1 running"));
-		expect(dock.render(80).lines[0]).toContain(theme.fg("warning", "1 cancelling"));
-		running.output("New output does not select or rotate a job");
-		expect(text(dock)).toBe(rendered);
-		for (const width of [10, 20, 40, 120]) {
-			text(dock, width);
-			expect(dock.render(width).lines).toHaveLength(1);
-		}
-	});
-});
-
-describe("background jobs inspector", () => {
-	it.each([20, 40, 80, 120])("keeps controls and bounded output at %i columns", async (width) => {
-		const jobs = await setup();
-		const work = await start(jobs, "界".repeat(150));
-		work.output(`\x1b[2J**literal output**\x07\n${"line\n".repeat(3000)}`);
-		const { component } = inspector(jobs);
-		expect(text(component, width)).toContain("Background jobs");
-		expect(component.render(width).lines.length).toBeLessThanOrEqual(24);
-		component.handleInput("\r");
-		expect(text(component, width)).not.toContain("\x07");
-		expect(component.render(width).lines.length).toBeLessThanOrEqual(24);
-		expect(text(component, width).replace(/\s+/g, " ")).toContain("back");
-	});
-
-	it("follows new output, pauses scrolling, and resumes with the configured key", async () => {
-		const jobs = await setup();
-		const work = await start(jobs);
-		work.output(Array.from({ length: 50 }, (_, i) => `output ${i}`).join("\n"));
-		const { component } = inspector(jobs);
-		text(component);
-		component.handleInput("\r");
-		expect(text(component)).toContain("output 49");
-		component.handleInput("\x1b[5~");
-		expect(text(component)).toContain("Scroll paused");
-		expect(text(component)).not.toContain("output 49");
-		work.output(Array.from({ length: 60 }, (_, i) => `output ${i}`).join("\n"));
-		expect(text(component)).not.toContain("output 59");
-		setKeybindings(new KeybindingsManager({ "app.jobs.follow": "f6" }));
-		expect(text(component)).toContain("F6 follow latest");
-		component.handleInput("\x1b[17~");
-		expect(text(component)).toContain("Following latest");
-		expect(text(component)).toContain("output 59");
-	});
-
-	it("keeps a bounded paused reading snapshot when live retention rolls over", async () => {
-		const jobs = await setup();
-		const work = await start(jobs);
-		const output = (count: number) =>
-			Array.from({ length: count }, (_, index) => `output ${String(index).padStart(4, "0")}`).join("\n");
-		work.output(output(2000));
-		const { component } = inspector(jobs);
-		text(component);
-		component.handleInput("\r");
-		text(component);
-		component.handleInput("\x1b[H");
-		for (let index = 0; index < 30; index++) component.handleInput("\x1b[B");
-		expect(text(component)).toContain("output 0030");
-		work.output(output(2010));
-		expect(jobs.get(work.job.id).outputTruncated).toBe(true);
-		expect(text(component)).toContain("output 0030");
-		expect(text(component)).toContain("snapshot; newer output available");
-		work.output(output(5000));
-		expect(jobs.get(work.job.id).output).not.toContain("output 0030");
-		expect(text(component)).toContain("output 0030");
-		component.handleInput("\x1b[F");
-		expect(text(component)).toContain("output 4999");
-		expect(text(component)).toContain("Following latest");
-	});
-
-	it("reserves readable output rows for long labels and truncated output at 20x24", async () => {
-		const jobs = await setup();
-		const work = await start(jobs, "界".repeat(150));
-		work.output(`${"earlier\n".repeat(3000)}VISIBLE LATEST\n`);
-		const { component } = inspector(jobs);
-		text(component, 20);
-		component.handleInput("\r");
-		const rendered = text(component, 20);
-		expect(rendered).toContain("VISIBLE LATEST");
-		expect(rendered).toContain("back");
-		expect(component.render(20).lines.length).toBeLessThanOrEqual(24);
-	});
-
-	it("keeps the selected job stable and confirms cancellation of only that job", async () => {
-		const jobs = await setup();
-		const first = await start(jobs, "First job");
-		const { component, onClose } = inspector(jobs);
-		text(component);
-		const second = await start(jobs, "Second job");
-		text(component);
-		component.handleInput("\x0b");
-		expect(text(component)).toContain("Cancel this job?");
-		expect(text(component)).toContain("First job");
-		expect(text(component)).toContain(first.job.id);
-		component.handleInput("\x1b");
-		expect(jobs.get(first.job.id).status).toBe("running");
-		component.handleInput("\x0b");
-		component.handleInput("\r");
-		await vi.waitFor(() => expect(jobs.get(first.job.id).status).toBe("cancelling"));
-		expect(jobs.get(second.job.id).status).toBe("running");
-		expect(text(component)).toContain("waiting for the worker to stop");
-		first.finish({ content: [] });
-		await jobs.wait([first.job.id]);
-		expect(text(component)).toContain("Cancelled");
-		expect(text(component)).not.toContain("waiting for the worker to stop");
-		component.handleInput("\x1b");
-		expect(onClose).toHaveBeenCalledOnce();
-		expect(jobs.get(second.job.id).status).toBe("running");
-	});
-
-	it("releases timers and subscriptions when disposed", async () => {
-		const jobs = await setup();
-		const work = await start(jobs);
-		const { component, requestRender } = inspector(jobs);
-		text(component);
-		vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
-		component.dispose();
-		requestRender.mockClear();
-		work.output("after dispose");
-		work.finish({ content: [] });
-		await jobs.wait([work.job.id]);
-		await vi.advanceTimersByTimeAsync(1000);
-		expect(requestRender).not.toHaveBeenCalled();
 	});
 });

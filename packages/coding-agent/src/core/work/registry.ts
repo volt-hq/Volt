@@ -15,7 +15,9 @@
  * Durable checkpoints are coarse: a state transition (cancelling, resumed)
  * is written at once, a kind phase at most once every
  * {@link WORK_CHECKPOINT_INTERVAL_MS} (a later phase replaces one still
- * waiting, and a finish drops it). Fine-grained progress and output reach
+ * waiting, and a finish drops it), and an item records at most
+ * {@link WORK_CHECKPOINTS_MAX} checkpoints over its lifetime, its resumes
+ * included; later phases stay live only. Fine-grained progress and output reach
  * clients through the live `work/<workId>` value (live.ts); a finished
  * item's notice follows its kind's delivery (delivery.ts).
  *
@@ -70,6 +72,9 @@ import { WorkLiveFeed } from "./live.ts";
 
 /** The least time between two durable phase checkpoints of one item. */
 export const WORK_CHECKPOINT_INTERVAL_MS = 10_000;
+
+/** Most checkpoints one item records over its lifetime; later phases reach clients through the live value only. */
+export const WORK_CHECKPOINTS_MAX = 256;
 
 /** How long closing waits for executors to stop before it finishes their work without them. */
 export const WORK_CLOSE_GRACE_MS = 2_000;
@@ -167,7 +172,7 @@ export interface WorkKindDefinition {
 	readonly approval?: boolean;
 	/** `tool_grant`: the kind's work starts only from a tool call, under that call's grant. */
 	readonly scoped?: "tool_grant";
-	/** Most items of the kind running at once in the conversation. */
+	/** Most items of the kind open at once in the conversation: running, awaiting approval, or suspended. */
 	readonly maxActive: number;
 	/** The one-line title lists and notices show. */
 	title(input: JsonValue): string;
@@ -435,6 +440,7 @@ export class WorkRegistry {
 	private readonly starting = new Map<string, number>();
 	private readonly deliveries = new WorkDeliveries();
 	private readonly liveFeed: WorkLiveFeed;
+	private readonly listeners = new Set<() => void>();
 	private closed = false;
 
 	constructor(host: WorkRegistryHost) {
@@ -621,7 +627,7 @@ export class WorkRegistry {
 		if (!definition?.resume) {
 			throw new WorkError("unavailable", `Work of kind ${record.kind} cannot resume in this host`);
 		}
-		this.reserve(definition);
+		this.reserve(definition, workId);
 		let active: ActiveWork;
 		try {
 			active = this.attach(record, definition);
@@ -681,6 +687,54 @@ export class WorkRegistry {
 	/** The work this runtime runs: open work with an executor. */
 	running(): WorkRecord[] {
 		return [...this.active.keys()].flatMap((workId) => this.get(workId) ?? []);
+	}
+
+	/**
+	 * Whether work runs here: an executor attached to work that does not await
+	 * approval. Work awaiting approval and suspended work keep nothing alive.
+	 */
+	busy(): boolean {
+		return this.busyWork().length > 0;
+	}
+
+	/** Resolves once no work runs here, as {@link busy} counts it. */
+	async waitForNotBusy(): Promise<void> {
+		for (let busy = this.busyWork(); busy.length > 0; busy = this.busyWork()) {
+			await Promise.race(busy.map((active) => active.done.promise));
+		}
+	}
+
+	/** Whether `record` is suspended: open work of a resumable kind that no executor of this process runs. */
+	suspended(record: WorkRecord): boolean {
+		return record.outcome === undefined && record.resume && !this.active.has(record.workId);
+	}
+
+	/** Whether this host can open `record`: its kind is registered and opens its work. */
+	opens(record: WorkRecord): boolean {
+		return this.kinds.get(record.kind)?.open !== undefined;
+	}
+
+	/**
+	 * Observe the conversation's work: a work entry committed, or an executor
+	 * attached or detached. Listeners run synchronously; their failures are
+	 * ignored. Progress reaches clients through the live values instead.
+	 */
+	subscribe(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+
+	/** The conversation committed work entries. */
+	changed(): void {
+		for (const listener of [...this.listeners]) {
+			try {
+				listener();
+			} catch {
+				// Observers never affect work.
+			}
+		}
 	}
 
 	/** Whether stopping the conversation's run cancels `workId`: work this runtime runs of a kind that cancels with it. */
@@ -874,14 +928,30 @@ export class WorkRegistry {
 		return record;
 	}
 
-	/** Count a start against its kind's `maxActive`, or refuse it. */
-	private reserve(definition: WorkKindDefinition): void {
-		let running = this.starting.get(definition.kind) ?? 0;
-		for (const active of this.active.values()) if (active.definition.kind === definition.kind) running++;
-		if (running >= definition.maxActive) {
-			throw new WorkError("limit", `At most ${definition.maxActive} ${definition.kind} work items run at once`);
+	/**
+	 * Count a start against its kind's `maxActive`, or refuse it. Suspended
+	 * work counts too: it stays open until it is resumed or cancelled, so
+	 * restarts never pile it up. A resume does not count its own item twice.
+	 */
+	private reserve(definition: WorkKindDefinition, resuming?: string): void {
+		let open = this.starting.get(definition.kind) ?? 0;
+		for (const active of this.active.values()) if (active.definition.kind === definition.kind) open++;
+		for (const record of this.host.state().work.values()) {
+			if (record.kind === definition.kind && record.workId !== resuming && this.suspended(record)) open++;
+		}
+		if (open >= definition.maxActive) {
+			const suspended = definition.resume === undefined ? "" : ", suspended ones included";
+			throw new WorkError(
+				"limit",
+				`At most ${definition.maxActive} ${definition.kind} work items run at once${suspended}`,
+			);
 		}
 		this.starting.set(definition.kind, (this.starting.get(definition.kind) ?? 0) + 1);
+	}
+
+	/** The executors of work that does not await approval. */
+	private busyWork(): ActiveWork[] {
+		return [...this.active.values()].filter((active) => this.get(active.workId)?.state !== "awaiting_approval");
 	}
 
 	private release(definition: WorkKindDefinition): void {
@@ -933,6 +1003,7 @@ export class WorkRegistry {
 		} catch {
 			// Observers never affect work.
 		}
+		this.changed();
 	}
 
 	/** Run `write` after the item's earlier writes. */
@@ -1074,6 +1145,8 @@ export class WorkRegistry {
 		const phase = active.pendingPhase;
 		active.pendingPhase = undefined;
 		if (!phase || active.detached) return;
+		// Past its lifetime's checkpoints, an item's phases stay live only.
+		if ((this.get(active.workId)?.checkpoints ?? WORK_CHECKPOINTS_MAX) >= WORK_CHECKPOINTS_MAX) return;
 		active.lastCheckpoint = Date.now();
 		// A phase over the checkpoint bound drops its detail, then its steps; one that is not JSON is dropped.
 		let checkpoint: Phase | undefined;

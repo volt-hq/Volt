@@ -297,7 +297,7 @@ A public entry's parent is always a public entry. A host entry's `parentId` is t
 | `client_input_receipt` | host | Client input reservation |
 | `client_input_queued` | host | Queued delivery of a client input |
 | `client_input_state` | host | Client input state change |
-| `work_started`, `work_checkpoint`, `work_finished` | host | Long-running work: a background job or a subagent (whose `child` names its conversation) |
+| `work_started`, `work_checkpoint`, `work_finished` | host | Long-running work: a background job, subagent, review, host action, or extension work (see [Work Entries](#work-entries-host-only)) |
 | `forked_from` | host | Lineage of a forked, cloned, or imported session; always the first entry |
 | `session_start_git_context` | host | First Git observation (coding-agent product type) |
 | `pr_review_binding` | host | PR checkout a review session is bound to (coding-agent product type) |
@@ -409,9 +409,9 @@ Extension state persistence. Does NOT participate in LLM context.
 
 Use `customType` to identify your extension's entries on reload.
 
-### Review accounting custom entries
+### Review run records
 
-`volt.review.run` records retain review identity and outcome. An `unfinished` run has no `endedAt` or findings result; this is a persisted observation, not proof that inference is still running. `volt.review.usage` entries contain compact cumulative accounting checkpoints keyed by `runId` and a monotonic revision. Hydration replaces older checkpoints instead of summing them. Terminal run records embed finalized accounting; delayed checkpoints cannot overwrite it.
+A review is `review` work (see [Work Entries](#work-entries-host-only)); its `workId` is its run ID. When a run ends, a `volt.review.run` custom entry records its identity, outcome, findings, and finalized accounting. While it runs, its accounting so far is its work item's detail, checkpointed once per pass. A run that was still running when its runtime stopped ends `interrupted` as work and records no run entry. Run entries with status `unfinished` and `volt.review.usage` entries that earlier versions wrote are ignored.
 
 Accounting retains per-pass/repair provider/model, available service tier, host request attempts, assistant turns, token components, and model-priced USD estimates. Pending or incomplete observations remain partial/unavailable after reopen. Missing historical accounting is unavailable and is never backfilled. Accounting does not retain inference transcripts, enter model context, or contribute to subsequent discussion totals. Host-created aliases resolve the canonical source; copied entries do not create new spend or authority. Ordinary session retention limits still apply; in-memory sessions are not restart-durable.
 
@@ -491,6 +491,30 @@ States:
 `accepted` moves to `started`, `completed`, `failed`, or `withdrawn`; `started` moves to `accepted`, `completed`, or `failed`. `completed`, `failed`, and `withdrawn` are terminal.
 
 When a session opens, accepted inputs with a queued delivery are replayed in admission order. A `started` input with no completing message or terminal state is ambiguous: it may or may not have reached the model, so it is never replayed and later input waits behind it until it is settled (`client_input_outcome_ambiguous`).
+
+### Work Entries (host-only)
+
+Long-running work of a conversation is a work item recorded by three core host entry types. A work item is one of these kinds: `job` (a background bash or subagent tool call), `subagent` (a child conversation), `review`, `host_action` (an action that waits for the user's approval, such as a language server install), or `ext:<extension>/<kind>` (an extension's work). Only the host writes work entries: `Conversation.append` refuses them, extensions cannot write them, and they never copy into forks, clones, imports, or snapshots.
+
+`work_started {workId, kind, title, parentWorkId?, input, cancellable, delivery, resume, state, toolCallId?, child?}` starts an item. `title` is one line of at most 200 characters. `input` is the kind's JSON input, at most 16 KiB serialized; kinds keep only what they need (a job keeps its tool, a subagent its agent and bounded task). `delivery` (`none`, `message`, or `wake`) and `resume` are copied from the kind, so reconciliation and delivery are functions of the log alone. `state` is `running`, or `awaiting_approval` for a host action. `parentWorkId` names the work that started this one: an earlier item of the same log, or, for a subagent, its parent run in the parent conversation's log. `toolCallId` names the tool call that started the work. `child {conversation, ref?}` names the conversation a subagent runs in; `ref` locates its persisted log.
+
+```json
+{"type":"work_started","id":"w1a2b3c4","parentId":"c3d4e5f6","timestamp":"2026-10-05T12:00:00.000Z","ordinal":20,"workId":"7f3c1a2e-0000-4000-8000-000000000001","kind":"job","title":"npm test","input":{"tool":"bash"},"cancellable":true,"delivery":"wake","resume":false,"state":"running","toolCallId":"call_1"}
+```
+
+`work_checkpoint {workId, state?, progress?, detail?}` records a state change (`running`, after an approval or a resume; `cancelling`, once a cancel was requested) or a coarse phase: `progress {text?, value?, max?, steps?}` and `detail`, kind-specific `UiNode` data such as a review's accounting. A checkpoint is at most 8 KiB serialized. Phases are written at most once every 10 seconds and at most 256 checkpoints per item over its lifetime; fine-grained progress reaches clients only through the live `work/<workId>` value.
+
+`work_finished {workId, outcome, result?, error?}` ends an item: `completed`, `failed`, `cancelled`, or `interrupted` (its executor was lost: the runtime ended, or the conversation closed while it ran). `result {summary?, output?, child?, data?}` keeps a summary and an error of at most 2,000 characters each, the output's newest 50 KiB (`{text, truncated}`), and kind data of at most 64 KiB serialized.
+
+```json
+{"type":"work_finished","id":"w9x8y7z6","parentId":"w1a2b3c4","timestamp":"2026-10-05T12:01:30.000Z","ordinal":31,"workId":"7f3c1a2e-0000-4000-8000-000000000001","outcome":"completed","result":{"output":{"text":"PASS 40 tests\n","truncated":false}}}
+```
+
+Lifecycle, checked by the fold: a work id starts once; a checkpoint or finish names open work; `awaiting_approval` moves to `running` or `cancelling`, `running` to `cancelling`, and nothing moves back; a finished item never changes. Every entry is a child of the current leaf but never moves it.
+
+Reconciliation: when a host opens a conversation, before `session_start`, open work no executor of the new runtime runs ends `interrupted` in one batch, except work of a resumable kind (`resume: true`, subagents), which stays open and suspended until a client resumes it (`resume_work`) or cancels it (`cancel_work`). Resumable children of an in-log parent that ends interrupted end with it.
+
+Delivery: a completed or failed item of a `message` or `wake` kind commits, with its `work_finished` in the same batch, a host client input (`client_input_receipt` with `origin: "host"`, then `client_input_queued`) that delivers a `work_notice` custom message. Its details are `{workId, kind, title, outcome, summary?, error?, child?, output?: {truncated}}`; its text is the line naming the work, then the summary and error, or the kind's own text. A `wake` notice starts a turn when the conversation is idle; a `message` notice (`queuedInput.wake: false`) rides the next turn. Cancelled and interrupted work delivers nothing.
 
 ### ForkedFromEntry (host-only)
 

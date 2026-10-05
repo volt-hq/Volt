@@ -14,7 +14,6 @@ import {
 	type JobToolName,
 	jobWaitResult,
 } from "../../../src/core/tools/jobs.ts";
-import { BackgroundJobsStatus } from "../../../src/modes/interactive/components/background-jobs.ts";
 import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createTestJobRuntime, type TestJobRuntime } from "../../utilities/job-runtime.ts";
@@ -261,12 +260,9 @@ describe("multi-job presentation and delivery", () => {
 		const waiting = jobs.wait(ids, { mode: "all", toolCallId: "wait-call" });
 		try {
 			card.markExecutionStarted();
-			const dock = new BackgroundJobsStatus(() => jobs);
-			const frames = [card.render(width), dock.render(width)];
-			expect(frames[0].lines.map(stripAnsi).join(" ")).toContain("Waiting for background jobs");
-			expect(frames[1].lines.map(stripAnsi).join(" ")).toContain("waiting (all)");
-			for (const frame of frames)
-				for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			const frame = card.render(width);
+			expect(frame.lines.map(stripAnsi).join(" ")).toContain("Waiting for background jobs");
+			for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			first.finish.resolve();
 			second.finish.resolve();
 			const result = jobWaitResult(await waiting);
@@ -375,7 +371,7 @@ describe("active-run waiting", () => {
 			await started.promise;
 			if (!prequeued) await harness.session.steer("Change the priority");
 			await prompting;
-			expect(harness.session.hasRunningWork).toBe(true);
+			expect(harness.session.work.busy()).toBe(true);
 			expect(waitDetails(harness)?.reason).toBe("steered");
 			expect(harness.faux.state.callCount).toBe(3);
 			// The job's notice wakes the idle conversation once it completes.
@@ -431,7 +427,7 @@ describe("active-run waiting", () => {
 		foreground.resolve();
 		await prompting;
 		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.hasRunningWork).toBe(true);
+		expect(harness.session.work.busy()).toBe(true);
 		finish.resolve();
 		await harness.session.work.waitForIdle();
 		await harness.session.waitForIdle();

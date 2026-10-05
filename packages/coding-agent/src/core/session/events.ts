@@ -90,7 +90,7 @@ export interface SessionEventsHost {
 	isLost(): boolean;
 	/** Rejects once the session is disposed or has lost its log. */
 	assertActive(): void;
-	/** An `isBusy` or `hasRunningWork` input changed. */
+	/** An `isBusy` input changed, or work started or stopped running. */
 	activityChanged(): void;
 	/** Admitted work began or settled. */
 	bumpActivityRevision(): void;
@@ -333,7 +333,10 @@ export class SessionEvents {
 				if (event.entries.some((entry) => entry.type.startsWith("client_input_"))) {
 					this.host.clientInputs().publishQueue();
 				}
-				if (event.entries.some((entry) => entry.type.startsWith("work_"))) this.host.jobs().runtime.changed();
+				if (event.entries.some((entry) => entry.type.startsWith("work_"))) {
+					this.host.jobs().runtime.changed();
+					this.host.work().changed();
+				}
 				return;
 			case "queue_changed":
 				// A jobs wait ends for user steering, not for the notices of finished work.

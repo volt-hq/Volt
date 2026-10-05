@@ -362,7 +362,7 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	get_review_general: queries("review.general"),
 	cancel_workflow: intents("cancel_work"),
 	get_review_result: queries("review.result"),
-	list_review_workflows: queries("review.workflows"),
+	list_review_workflows: queries("review.runs"),
 	open_review_session: intents("review_open_session"),
 	acknowledge_review: intents("review_acknowledge"),
 	record_review_finding_outcome: intents("review_record_finding_outcome"),

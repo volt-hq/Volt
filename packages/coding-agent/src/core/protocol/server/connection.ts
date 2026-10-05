@@ -66,7 +66,8 @@ import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
-import { linkedSubagentConversation } from "../../subagents/work.ts";
+import { SessionManager } from "../../session-manager.ts";
+import { linkedSubagentConversation, linkingSubagentWork } from "../../subagents/work.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
@@ -76,7 +77,7 @@ import { QueryRejectedError } from "../queries/types.ts";
 import { formatSchemaBoundError } from "../schema-errors.ts";
 import { RpcFrameTooLargeError, type RpcTransport } from "../transport/transport.ts";
 import { createLocalIntentServices } from "./local-services.ts";
-import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
+import { logSnapshot, Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
 
 /** Frames a connection holds for its intent and query lane, at most. */
 const MAX_PENDING_FRAMES = 256;
@@ -646,6 +647,16 @@ export function serveConnection(
 		return linkedSubagentConversation(home, id);
 	};
 
+	/**
+	 * A subagent child a client may read that closed: its conversation is not
+	 * open, but the subagent work that links it records its log.
+	 */
+	const resolveClosedChild = (id: string) => {
+		if (!home || !profile.conversations(id, home.id)) return undefined;
+		const linking = linkingSubagentWork(home, id);
+		return linking?.record.child?.ref === undefined ? undefined : linking;
+	};
+
 	/** A conversation a client may subscribe to or read: a target, or a subagent child. */
 	const resolveReadable = (id: string | undefined): HostedConversation | undefined => {
 		const target = resolveTarget(id);
@@ -895,7 +906,7 @@ export function serveConnection(
 	};
 
 	/** Run a subscription change or an answer in order, once the connection's authority is re-read. */
-	const enqueueControl = (task: () => void): void => {
+	const enqueueControl = (task: () => void | Promise<void>): void => {
 		if (pendingFrames >= MAX_PENDING_FRAMES) {
 			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
 			return;
@@ -904,7 +915,7 @@ export function serveConnection(
 		controlLane = controlLane.then(async () => {
 			try {
 				if (closing || !(await stillAuthorized())) return;
-				task();
+				await task();
 			} catch {
 				// Each frame answers its own failure.
 			} finally {
@@ -929,7 +940,52 @@ export function serveConnection(
 		}
 	};
 
-	const subscribe = (frame: Static<typeof SubscribeFrameSchema>): void => {
+	/**
+	 * A closed subagent child, read-only: its log as a snapshot from its last
+	 * position, then `ended{closed}`. The log must be the subagent conversation
+	 * of the conversation whose work links it.
+	 */
+	const subscribeClosedChild = async (
+		frame: Static<typeof SubscribeFrameSchema>,
+		linking: NonNullable<ReturnType<typeof resolveClosedChild>>,
+	): Promise<void> => {
+		const ended = () => write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
+		const ref = linking.record.child?.ref;
+		if (!ref || !reads.take(1)) {
+			if (ref) void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
+			else ended();
+			return;
+		}
+		let manager: SessionManager;
+		try {
+			manager = await SessionManager.openReadOnly(ref);
+		} catch {
+			ended();
+			return;
+		}
+		try {
+			const header = manager.getHeader();
+			if (
+				header?.origin === "subagent" &&
+				header.parentSession?.sessionId === linking.parent.id &&
+				manager.getSessionId() === frame.conversation
+			) {
+				const ordinal = manager.getOrdinal();
+				write({
+					type: "snapshot",
+					subscriptionId: frame.subscriptionId,
+					conversation: manager.getSessionId(),
+					ordinal,
+					state: logSnapshot(manager, profile, ordinal),
+				});
+			}
+		} finally {
+			await manager.closePersistence().catch(() => undefined);
+		}
+		ended();
+	};
+
+	const subscribe = (frame: Static<typeof SubscribeFrameSchema>): void | Promise<void> => {
 		if (subscriptions.has(frame.subscriptionId)) {
 			void close({ code: "invalid_frame", message: `Subscription ${frame.subscriptionId} is already active` });
 			return;
@@ -940,6 +996,8 @@ export function serveConnection(
 		}
 		const conversation = resolveReadable(frame.conversation);
 		if (!conversation || conversation.closed) {
+			const closedChild = conversation === undefined ? resolveClosedChild(frame.conversation) : undefined;
+			if (closedChild) return subscribeClosedChild(frame, closedChild);
 			write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
 			return;
 		}

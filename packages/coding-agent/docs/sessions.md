@@ -65,6 +65,10 @@ Extensions observe the stop through the aborted `ctx.signal` of their commands a
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
 
+### Work and Switching Sessions
+
+Background jobs, subagents, reviews, host actions, and extension work are work items of the session that started them (see [Session Format](session-format.md#work-entries-host-only)); `/work` lists them. While work runs, `/clear`, `/resume`, `/fork`, `/clone`, and `/import` refuse to leave the session: cancel the work in `/work` or wait for it to finish. Work suspended since a restart, such as a subagent that was running when Volt stopped, does not hold the session; it stays in `/work` until you resume or cancel it.
+
 ## Resuming and Deleting Sessions
 
 `/resume` opens an interactive session picker for the current project. `volt -r` opens the same picker at startup.

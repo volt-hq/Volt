@@ -238,7 +238,7 @@ describe("protocol subagents", () => {
 		expect(context.parent.liveState.get(`subagent/${workId}`)).toBeUndefined();
 	});
 
-	test("cancel_work stops a running subagent and its conversation closes", async () => {
+	test("cancel_work stops a running subagent; its closed conversation stays readable from its log", async () => {
 		const context = await setup();
 		const { workId, conversation } = await startScout(context);
 		expect(context.parent.work.running().map((record) => record.workId)).toEqual([workId]);
@@ -251,12 +251,40 @@ describe("protocol subagents", () => {
 		await expect(context.client.intent("cancel_work", { workId })).resolves.toMatchObject({ type: "accepted" });
 		await vi.waitFor(() => expect(context.parent.work.get(workId)?.outcome).toBe("cancelled"));
 		await vi.waitFor(() => expect(context.parent.liveState.get(`work/${workId}`)).toBeUndefined());
-		await expect(context.client.subscribe(conversation, "child")).resolves.toEqual({
+		await vi.waitFor(() =>
+			expect(context.parent.session.getSubagentToolManager()?.childConversation?.(conversation)).toBeUndefined(),
+		);
+		// open_work still names the closed child, and a subscription reads its log once, then ends.
+		await expect(context.client.intent("open_work", { workId })).resolves.toMatchObject({
+			type: "accepted",
+			result: { conversation },
+		});
+		const snapshot = await context.client.subscribe(conversation, "child");
+		if (snapshot.type !== "snapshot") throw new Error("Expected the closed child's snapshot");
+		expect(snapshot.conversation).toBe(conversation);
+		expect(
+			snapshot.state.entries.flatMap((entry) =>
+				entry.type === "message" ? [[entry.view?.role, entry.view?.text]] : [],
+			),
+		).toContainEqual(["user", "inspect auth"]);
+		await vi.waitFor(() =>
+			expect(context.client.frames).toContainEqual({ type: "ended", subscriptionId: "child", reason: "closed" }),
+		);
+		// Read-only: nothing acts on the closed child.
+		await expect(
+			context.client.intent("set_session_name", { name: "renamed" }, { conversation }),
+		).resolves.toMatchObject({ type: "rejected" });
+		await expect(context.client.intent("cancel_work", { workId })).resolves.toMatchObject({ type: "rejected" });
+	});
+
+	test("a subscription to a conversation no work links ends without reading any log", async () => {
+		const context = await setup();
+		await startScout(context);
+		await expect(context.client.subscribe("not-a-linked-child", "other")).resolves.toEqual({
 			type: "ended",
-			subscriptionId: "child",
+			subscriptionId: "other",
 			reason: "closed",
 		});
-		await expect(context.client.intent("cancel_work", { workId })).resolves.toMatchObject({ type: "rejected" });
 	});
 
 	test("a client reads a linked child's log, observe-only, and open_work names it", async () => {

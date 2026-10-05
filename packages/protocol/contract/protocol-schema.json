@@ -5428,7 +5428,7 @@
 					"$ref": "#/$defs/Frame.query.review.result"
 				},
 				{
-					"$ref": "#/$defs/Frame.query.review.workflows"
+					"$ref": "#/$defs/Frame.query.review.runs"
 				}
 			]
 		},
@@ -6105,7 +6105,7 @@
 			},
 			"additionalProperties": false
 		},
-		"Frame.query.review.workflows": {
+		"Frame.query.review.runs": {
 			"type": "object",
 			"required": [
 				"type",
@@ -6122,7 +6122,7 @@
 				},
 				"query": {
 					"type": "string",
-					"const": "review.workflows"
+					"const": "review.runs"
 				},
 				"conversation": {
 					"type": "string",
@@ -6130,7 +6130,7 @@
 					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				},
 				"params": {
-					"$ref": "#/$defs/QueryParams.review.workflows"
+					"$ref": "#/$defs/QueryParams.review.runs"
 				}
 			},
 			"additionalProperties": false
@@ -12605,7 +12605,7 @@
 				"review.discussion_source",
 				"review.general",
 				"review.result",
-				"review.workflows"
+				"review.runs"
 			]
 		},
 		"QueryParams.agent_options": {
@@ -12893,7 +12893,7 @@
 			},
 			"additionalProperties": false
 		},
-		"QueryParams.review.workflows": {
+		"QueryParams.review.runs": {
 			"type": "object",
 			"properties": {
 				"cursor": {
@@ -13327,7 +13327,7 @@
 		"QueryResult.review.result": {
 			"$ref": "#/$defs/RpcReviewWorkflowResultResponse"
 		},
-		"QueryResult.review.workflows": {
+		"QueryResult.review.runs": {
 			"$ref": "#/$defs/RpcReviewWorkflowListResponse"
 		},
 		"QueryResult.session_contexts": {

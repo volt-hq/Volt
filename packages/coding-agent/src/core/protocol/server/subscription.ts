@@ -17,6 +17,7 @@
  */
 
 import {
+	type ClientSnapshot,
 	clientActiveBranch,
 	clientFold,
 	clientSnapshot,
@@ -27,6 +28,7 @@ import {
 } from "@hansjm10/volt-protocol";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import type { LiveUpdate } from "../../host/live-state.ts";
+import type { SessionManager } from "../../session-manager.ts";
 import type { Profile } from "../profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
 import type { ProjectionSource } from "../projection/transcript.ts";
@@ -68,7 +70,15 @@ export function projectLog(
 	afterOrdinal: number,
 	throughOrdinal: number,
 ): ProjectedEntry[] {
-	const sessionManager = conversation.session.sessionManager;
+	return projectEntries(conversation.session.sessionManager, profile, afterOrdinal, throughOrdinal);
+}
+
+function projectEntries(
+	sessionManager: SessionManager,
+	profile: Profile,
+	afterOrdinal: number,
+	throughOrdinal: number,
+): ProjectedEntry[] {
 	const source = sessionProjectionSource(sessionManager);
 	const projected: ProjectedEntry[] = [];
 	for (const entry of sessionManager.committedEntriesAfter(afterOrdinal, throughOrdinal - afterOrdinal)) {
@@ -76,6 +86,16 @@ export function projectLog(
 		if (entryFrame) projected.push(entryFrame);
 	}
 	return projected;
+}
+
+/** A snapshot of a log at `ordinal` for `profile`: the fold of its projection, with at most the profile's tail of entries. */
+export function logSnapshot(sessionManager: SessionManager, profile: Profile, ordinal: number): ClientSnapshot {
+	const projected = projectEntries(sessionManager, profile, 0, ordinal);
+	const state = clientFold(projected);
+	const tail = profile.limits.snapshotTail;
+	return projected.length <= tail
+		? clientSnapshot(state)
+		: { ...clientSnapshot(state), entries: clientActiveBranch(state).slice(-tail), earlier: true };
 }
 
 /** Whether a subscription from `after` starts with a snapshot: from `snapshot`, past the log, or further back than the profile replays. */
@@ -258,20 +278,12 @@ export class Subscription {
 	}
 
 	private writeSnapshot(ordinal: number): void {
-		const profile = this.options.profile;
-		const projected = projectLog(this.conversation, profile, 0, ordinal);
-		const state = clientFold(projected);
-		const tail = profile.limits.snapshotTail;
-		const snapshot =
-			projected.length <= tail
-				? clientSnapshot(state)
-				: { ...clientSnapshot(state), entries: clientActiveBranch(state).slice(-tail), earlier: true };
 		this.options.sink.send({
 			type: "snapshot",
 			subscriptionId: this.id,
 			conversation: this.conversation.id,
 			ordinal,
-			state: snapshot,
+			state: logSnapshot(this.conversation.session.sessionManager, this.options.profile, ordinal),
 		});
 		this.cursor = ordinal;
 	}

@@ -16,6 +16,7 @@ import {
 	type QueryResult,
 	REMOTE_CAPABILITIES,
 	type RemoteGrant,
+	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 	WORK_NOTICE_CUSTOM_TYPE,
 	WORK_OUTPUT_MAX_UTF8_BYTES,
 	WORK_TEXT_MAX_CHARS,
@@ -415,6 +416,78 @@ describe("work in hosted conversations", () => {
 		expect(output.text.startsWith("/workspace/file-")).toBe(true);
 		const local = conversation.work.output(record.workId)?.text ?? "";
 		expect(local.startsWith(workspace)).toBe(false);
+	});
+
+	it("shows a paired device work progress without a root a cut left, bounded again after redaction", async () => {
+		const harness = await harnessFor();
+		const workspace = harness.tempDir;
+		const conversation = await harness.openStartup();
+		const name = basename(workspace);
+		conversation.work.register(kind());
+		// Progress text and a step label a host cut one character into the workspace's unique name.
+		const cutText = (lead: string) => {
+			const text = `${lead} ${workspace}/file.ts`;
+			const end = lead.length + 1 + workspace.length - name.length + 1;
+			return `${text.slice(0, end)}…`;
+		};
+		const text = cutText("p".repeat(40));
+		const label = cutText("s".repeat(20));
+		// Detail within the checkpoint bound on the host, past it once its paths are rewritten longer.
+		const items = Array.from({ length: 12 }, (_, index) => ({
+			key: `path-${index}`,
+			label: `Path ${index}`,
+			value: `${workspace}/a/${index}`,
+		}));
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: workspace, remoteWorkspacePath: `/${"w".repeat(1_000)}` },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		const running = held();
+		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
+			ctx.checkpoint(
+				{ text, steps: [{ key: "step", label, status: "active" }] },
+				{ type: "keyValue", key: "paths", items },
+			);
+			return await running.execute(ctx);
+		});
+		const checkpoint = await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "entry" }> =>
+				frame.type === "entry" && frame.entry.type === "work_checkpoint",
+		);
+		const live = await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "live" }> =>
+				frame.type === "live" &&
+				frame.items.some((item) => item.type === "set" && item.value.kind === "work" && item.value.progress),
+		);
+		running.release();
+		await conversation.work.waitForIdle();
+		// The host kept the detail: it fit the bound before redaction.
+		expect(conversation.work.get(record.workId)?.detail).toBeDefined();
+		const payload = checkpoint.entry.payload as { progress?: { text?: string; steps?: Array<{ label: string }> } };
+		expect(payload.progress?.text).toBe(`${"p".repeat(40)} …`);
+		expect(payload.progress?.steps?.[0]?.label).toBe(`${"s".repeat(20)} …`);
+		// Redaction lengthened the detail past the checkpoint bound: the device gets the progress without it.
+		expect(payload).not.toHaveProperty("detail");
+		expect(Buffer.byteLength(JSON.stringify(payload))).toBeLessThanOrEqual(WORK_CHECKPOINT_MAX_SERIALIZED_BYTES);
+		const value = live.items.flatMap((item) =>
+			item.type === "set" && item.value.kind === "work" ? [item.value] : [],
+		)[0];
+		expect(value?.progress?.text).toBe(`${"p".repeat(40)} …`);
+		expect(value).not.toHaveProperty("detail");
+		expect(Buffer.byteLength(JSON.stringify(value))).toBeLessThanOrEqual(WORK_CHECKPOINT_MAX_SERIALIZED_BYTES);
+		expect(JSON.stringify(phone.frames)).not.toContain(workspace.slice(0, -name.length + 1));
 	});
 
 	it("shows a paired device a work notice rebuilt from its details, without the notice's own text or a root a cut left", async () => {

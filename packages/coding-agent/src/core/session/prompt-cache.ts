@@ -109,7 +109,7 @@ export class SessionPromptCache {
 	}
 
 	/**
-	 * An input of the keepalive idle window changed (`isBusy`, `hasRunningWork`, or the
+	 * An input of the keepalive idle window changed (`isBusy`, the running work, or the
 	 * observed operation): keepalive measures the window from these transitions.
 	 */
 	activityChanged(): void {

@@ -452,9 +452,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		await expect(queryRegistry.run(contextOf(alias), "review.result", { runId: "review:341" })).rejects.toMatchObject(
 			SOURCE_UNAVAILABLE,
 		);
-		await expect(queryRegistry.run(contextOf(alias), "review.workflows", {})).rejects.toMatchObject(
-			SOURCE_UNAVAILABLE,
-		);
+		await expect(queryRegistry.run(contextOf(alias), "review.runs", {})).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		await expect(intentRegistry.invoke(contextOf(alias), "review_export_feedback", {})).rejects.toMatchObject(
 			SOURCE_UNAVAILABLE,
 		);
@@ -478,9 +476,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			await expect(
 				queryRegistry.run(contextOf(alias), "review.result", { runId: "review:341" }),
 			).rejects.toMatchObject(SOURCE_UNAVAILABLE);
-			await expect(queryRegistry.run(contextOf(alias), "review.workflows", {})).rejects.toMatchObject(
-				SOURCE_UNAVAILABLE,
-			);
+			await expect(queryRegistry.run(contextOf(alias), "review.runs", {})).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 			await expect(
 				recordOutcome(alias, { runId: "review:341", findingId: "f1", status: "fixed" }),
 			).rejects.toMatchObject(SOURCE_UNAVAILABLE);

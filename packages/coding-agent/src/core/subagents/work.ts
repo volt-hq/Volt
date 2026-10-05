@@ -14,7 +14,8 @@
  * remote device observes subagents but may not cancel or resume their work,
  * as it could not abort or start them before work items; it still stops one
  * the ways it could, by stopping the tool call or job that waits on it or the
- * subagent's own conversation.
+ * subagent's own conversation. Opening a subagent names its conversation for
+ * a read-only view: the open conversation, or, once it closed, its log.
  */
 
 import type { WorkRecord } from "@hansjm10/volt-agent-core";
@@ -92,13 +93,41 @@ export function subagentWorkKind(options: SubagentWorkKindOptions): WorkKindDefi
 		open: async (item) => {
 			const id = item.child?.conversation;
 			const child = id === undefined ? undefined : options.childConversation(id);
-			if (!child || child.closed) {
-				throw new WorkError("unavailable", `The conversation of subagent ${item.workId} is not open`);
-			}
-			return { conversation: child.id, moved: false };
+			if (child && !child.closed) return { conversation: child.id, moved: false };
+			// A closed child is read from its log: a client views it read-only.
+			if (id !== undefined && item.child?.ref !== undefined) return { conversation: id, moved: false };
+			throw new WorkError("unavailable", `The conversation of subagent ${item.workId} was not kept`);
 		},
 		resume: (item, signal) => options.resume(item, signal),
 	};
+}
+
+/**
+ * The subagent work that links conversation `id` from `conversation`'s log,
+ * directly or through the logs of its open linked children, with the
+ * conversation whose log holds it: what locates a linked child that closed,
+ * which a client of `conversation` may still read from its log.
+ */
+export function linkingSubagentWork(
+	conversation: HostedConversation,
+	id: string,
+	depth = SUBAGENT_LINK_MAX_DEPTH,
+): { readonly record: WorkRecord; readonly parent: HostedConversation } | undefined {
+	const manager = conversation.session.getSubagentToolManager();
+	const linked: HostedConversation[] = [];
+	for (const record of conversation.work.list()) {
+		const childId = record.kind === SUBAGENT_WORK_KIND ? record.child?.conversation : undefined;
+		if (childId === undefined) continue;
+		if (childId === id) return { record, parent: conversation };
+		const child = manager?.childConversation?.(childId);
+		if (child && !child.closed && child.id === childId) linked.push(child);
+	}
+	if (depth <= 1) return undefined;
+	for (const child of linked) {
+		const found = linkingSubagentWork(child, id, depth - 1);
+		if (found) return found;
+	}
+	return undefined;
 }
 
 /**

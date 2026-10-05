@@ -138,9 +138,6 @@ Use `F12` or `/debug` to capture diagnostics while a response or tool is active.
 | `app.session.tree` | *(none)* | Open session tree navigator (`/tree`) |
 | `app.session.fork` | *(none)* | Fork current session (`/fork`) |
 | `app.session.resume` | *(none)* | Open session resume picker (`/resume`) |
-| `app.subagents.open` | `alt+a` | Switch between the main conversation and subagent conversations (`/subagents`) |
-| `app.subagents.previous` | `left` | Show the previous subagent while in the subagents view |
-| `app.subagents.next` | `right` | Show the next subagent while in the subagents view |
 | `app.session.togglePath` | `ctrl+p` | Toggle path display |
 | `app.session.toggleSort` | `ctrl+s` | Toggle sort mode |
 | `app.session.toggleNamedFilter` | `ctrl+n` | Toggle named-only filter |
@@ -148,15 +145,16 @@ Use `F12` or `/debug` to capture diagnostics while a response or tool is active.
 | `app.session.delete` | `ctrl+d` | Delete session |
 | `app.session.deleteNoninvasive` | `ctrl+backspace` | Delete session when query is empty |
 
-### Background Jobs
+### Work
 
-`/jobs` or Alt+J opens the live background-job inspector, including while the model is waiting. Arrow keys select a job; Enter opens its retained output. In the output view, arrow keys and PageUp/PageDown scroll a paused, bounded reading snapshot. End resumes following new output. Escape returns to the list or closes the inspector without cancelling work.
+`/work` or Alt+J opens the work inspector (background jobs, subagents, reviews, host actions, extension work), including while the model is waiting. Arrow keys select an item; Enter shows its details, and in the details opens the conversation the work runs in or produced (read-only for a subagent). Arrow keys and PageUp/PageDown scroll output or a conversation; End resumes following. Escape goes back or closes the inspector without cancelling work. Cancel and resume show only when the item's kind allows them.
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.jobs.open` | `alt+j` | Open or close the background-job inspector |
-| `app.jobs.cancel` | `ctrl+k` | Request cancellation of the selected job, after confirmation |
-| `app.jobs.follow` | `end` | Follow the latest output in the inspector |
+| `app.work.open` | `alt+j` | Open or close the work inspector |
+| `app.work.cancel` | `ctrl+k` | Cancel the selected work, after confirmation |
+| `app.work.resume` | `ctrl+r` | Resume the selected work suspended since a restart |
+| `app.work.follow` | `end` | Follow the latest output in the inspector |
 
 Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
 

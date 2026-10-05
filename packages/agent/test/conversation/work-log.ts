@@ -131,7 +131,13 @@ export class WorkModel {
 		const ordinal = entry.ordinal;
 		if (entry.type === "work_started") {
 			const { state, ...payload } = entry.payload;
-			this.records.set(payload.workId, { ...payload, state, startedOrdinal: ordinal, updatedOrdinal: ordinal });
+			this.records.set(payload.workId, {
+				...payload,
+				state,
+				startedOrdinal: ordinal,
+				updatedOrdinal: ordinal,
+				checkpoints: 0,
+			});
 			if (payload.parentWorkId !== undefined) this.parents.add(payload.parentWorkId);
 			return;
 		}
@@ -139,7 +145,12 @@ export class WorkModel {
 		if (!record) throw new Error("apply needs a legal entry");
 		if (entry.type === "work_checkpoint") {
 			const { workId: _workId, ...changes } = entry.payload;
-			this.records.set(record.workId, { ...record, ...changes, updatedOrdinal: ordinal });
+			this.records.set(record.workId, {
+				...record,
+				...changes,
+				updatedOrdinal: ordinal,
+				checkpoints: record.checkpoints + 1,
+			});
 			return;
 		}
 		const { workId: _workId, ...finish } = entry.payload;

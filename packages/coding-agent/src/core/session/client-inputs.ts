@@ -22,6 +22,8 @@ import type {
 } from "@hansjm10/volt-agent-core";
 import { ConversationError, clientInputDigest, clientInputRecovery } from "@hansjm10/volt-agent-core";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
+import type { WorkNoticeDetails } from "@hansjm10/volt-protocol/entries";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol/work";
 import type {
 	AgentSessionEvent,
 	AgentSessionQueuedMessage,
@@ -188,14 +190,25 @@ export class SessionClientInputs {
 	 * admission order, that the conversation holds for delivery. Input being
 	 * delivered or withdrawn has left it. Recovered input fenced behind an
 	 * ambiguous predecessor stays visible, though nothing delivers it. Host
-	 * messages are queued too, but show no text.
+	 * messages are queued too, but show no text; the notices of finished work
+	 * show by their details.
 	 */
-	queueView(): { steering: AgentSessionQueuedMessage[]; followUp: AgentSessionQueuedMessage[] } {
+	queueView(): {
+		steering: AgentSessionQueuedMessage[];
+		followUp: AgentSessionQueuedMessage[];
+		notices: WorkNoticeDetails[];
+	} {
 		const steering: AgentSessionQueuedMessage[] = [];
 		const followUp: AgentSessionQueuedMessage[] = [];
-		if (this.disposedQueueHandback) return { steering, followUp };
+		const notices: WorkNoticeDetails[] = [];
+		if (this.disposedQueueHandback) return { steering, followUp, notices };
 		const state = this.host.conversation().state;
 		const queue = this.host.conversation().queue;
+		for (const message of [...queue.steer, ...queue.followUp]) {
+			if (message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE) {
+				notices.push(structuredClone(message.details as WorkNoticeDetails));
+			}
+		}
 		const held = new Set([...queue.steer, ...queue.followUp].flatMap((message) => getClientMessageId(message) ?? []));
 		const fenced = clientInputRecovery(state).kind === "blocked";
 		for (const clientMessageId of state.clientInputs.queued) {
@@ -204,7 +217,7 @@ export class SessionClientInputs {
 			if (!queued || record.origin === "host" || (!fenced && !held.has(clientMessageId))) continue;
 			(queued.delivery === "steer" ? steering : followUp).push({ clientMessageId, text: queued.message });
 		}
-		return { steering, followUp };
+		return { steering, followUp, notices };
 	}
 
 	/** Publish the queue when it changed since the session last published it. */

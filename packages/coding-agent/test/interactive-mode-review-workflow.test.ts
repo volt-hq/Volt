@@ -91,6 +91,8 @@ function createContext(): ReviewContext {
 		},
 		host: {},
 		client: {},
+		// The review's progress is its work's: none reported here.
+		workSource: { subscribe: () => () => undefined, items: () => [] },
 		newSession: openNewSession,
 		ui,
 		editorContainer,
@@ -174,7 +176,7 @@ describe("InteractiveMode review workflow", () => {
 				return { cancelled: false, sessionId: "review-session", seeded: true };
 			});
 			reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-				const hooks = await options.createHooks?.();
+				const hooks = await options.createHooks?.("review-work");
 				try {
 					await hooks?.onPrepared?.(resolution, { id: "review-model" } as never);
 					await options.onDiagnosticRetentionWarning?.(DIAGNOSTIC_RETENTION_WARNING);
@@ -257,7 +259,7 @@ describe("InteractiveMode review workflow", () => {
 			hooksCreated = resolve;
 		});
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			const hooks = await options.createHooks?.();
+			const hooks = await options.createHooks?.("review-work");
 			hooksCreated();
 			await preparationGate;
 			await hooks?.onPrepared?.(resolution, { id: "review-model" } as never);
@@ -278,6 +280,47 @@ describe("InteractiveMode review workflow", () => {
 		expect(context.editorContainer.children).toEqual([context.editor]);
 	});
 
+	it("shows the review's progress and accounting from its live work value, as every client sees it", async () => {
+		const context = createContext();
+		const listeners = new Set<() => void>();
+		let live: object | undefined;
+		Object.assign(context, {
+			workSource: {
+				subscribe: (listener: () => void) => {
+					listeners.add(listener);
+					return () => listeners.delete(listener);
+				},
+				items: () => (live ? [{ item: { workId: "review-work" }, live }] : []),
+			},
+		});
+		const report = (value: object) => {
+			live = { kind: "work", workId: "review-work", ...value };
+			for (const listener of listeners) listener();
+		};
+		const shown = () => stripAnsi(context.editorContainer.render(120).lines.join("\n"));
+		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
+			const hooks = await options.createHooks?.("review-work");
+			report({ progress: { text: "Resolving repository…" } });
+			expect(shown()).toContain("Resolving repository…");
+			await hooks?.onPrepared?.(resolution, { id: "review-model" } as never);
+			report({
+				progress: { text: "Discovery pass" },
+				detail: {
+					type: "keyValue",
+					key: "review-usage",
+					items: [{ key: "requests", label: "Requests", value: "2 (0 pending)" }],
+				},
+			});
+			expect(shown()).toContain("Reviewing uncommitted changes with review-model… Discovery pass");
+			expect(shown()).toContain("Requests: 2 (0 pending)");
+			hooks?.cleanup?.();
+			expect(listeners.size).toBe(0);
+			return { status: "cancelled", resolution };
+		});
+		await run(context);
+		expect(context.editorContainer.children).toEqual([context.editor]);
+	});
+
 	it("reattaches and focuses the loader after accepting review confirmation", async () => {
 		const context = createContext();
 		let loader!: BorderedLoader;
@@ -291,7 +334,7 @@ describe("InteractiveMode review workflow", () => {
 		});
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
 			expect(options.requireConfirmation).toBe(true);
-			const hooks = await options.createHooks?.();
+			const hooks = await options.createHooks?.("review-work");
 			loader = context.editorContainer.children[0] as BorderedLoader;
 			const confirmed = await options.confirm?.({
 				title: "Review changes",
@@ -311,7 +354,10 @@ describe("InteractiveMode review workflow", () => {
 		context.extensionSelector?.handleInput("\n");
 		await preparedReady;
 
-		expect(context.editorContainer.children).toEqual([loader]);
+		// The loader, then the review work's detail (empty until the work reports it).
+		expect(context.editorContainer.children[0]).toBe(loader);
+		expect(context.editorContainer.children).toHaveLength(2);
+		expect(context.editorContainer.children[1]?.render(80).lines).toEqual([]);
 		expect(context.ui.setFocus).toHaveBeenLastCalledWith(loader);
 		expect(context.createInlineSessionRenderer).toHaveBeenCalledOnce();
 
@@ -324,7 +370,7 @@ describe("InteractiveMode review workflow", () => {
 		const context = createContext();
 		const controller = new AbortController();
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			const hooks = await options.createHooks?.();
+			const hooks = await options.createHooks?.("review-work");
 			const confirmed = await options.confirm?.({
 				title: "Review changes",
 				message: "Confirm rerun",
@@ -351,7 +397,7 @@ describe("InteractiveMode review workflow", () => {
 		let hooks: ReviewWorkflowHooks | undefined;
 		let inferenceCalls = 0;
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			hooks = await options.createHooks?.();
+			hooks = await options.createHooks?.("review-work");
 			await new Promise<void>((resolve) => {
 				if (hooks?.signal?.aborted) resolve();
 				else hooks?.signal?.addEventListener("abort", () => resolve(), { once: true });
@@ -394,7 +440,7 @@ describe("InteractiveMode review workflow", () => {
 			release = resolve;
 		});
 		reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
-			const hooks = await options.createHooks?.();
+			const hooks = await options.createHooks?.("review-work");
 			await gate;
 			hooks?.cleanup?.();
 			return { status: "cancelled" };

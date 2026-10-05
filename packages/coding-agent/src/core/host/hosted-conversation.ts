@@ -198,7 +198,8 @@ export class HostedConversation {
 	/**
 	 * Run `operation` against the session while the conversation stays open: a
 	 * close requested meanwhile, such as a lease handoff disposing the runtime,
-	 * starts only once the operation settles. Rejects once the conversation is
+	 * starts only once the operation settles, and the conversation counts as
+	 * active until then ({@link isActive}). Rejects once the conversation is
 	 * closing. The operation must not wait for this conversation to close.
 	 */
 	whileOpen<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
@@ -215,6 +216,27 @@ export class HostedConversation {
 
 	private async waitForHolds(): Promise<void> {
 		while (this.holds.size > 0) await Promise.all([...this.holds]);
+	}
+
+	/**
+	 * Whether the conversation is active (RFC §7.3): an operation holds it (a
+	 * turn, compaction, navigation, reload, or a `!` or extension command),
+	 * work runs (open with a live executor, not awaiting approval), or an
+	 * operation holds it open (`whileOpen`). Suspended work and work awaiting
+	 * approval keep nothing alive. Daemon retention keeps an active
+	 * conversation open; a client may not leave one ({@link assertCanLeave}).
+	 */
+	isActive(): boolean {
+		return this.session.isBusy || this.work.busy() || this.holds.size > 0;
+	}
+
+	/**
+	 * Resolves once what made the conversation active settled: its operation,
+	 * its running work, and its holds. It may be active again by then; callers
+	 * check {@link isActive} again.
+	 */
+	async waitForIdle(): Promise<void> {
+		await Promise.all([this.session.waitForNotBusy(), this.work.waitForNotBusy(), this.waitForHolds()]);
 	}
 
 	/** The conversation's summary, read from its open log. */
@@ -288,17 +310,17 @@ export class HostedConversation {
 	}
 
 	/**
-	 * Throws when a client may not leave the conversation for another one: a
-	 * turn, bash run, or session mutation is active, a review runs, or durable
-	 * queued input is still to be delivered or has an ambiguous outcome.
+	 * Throws when a client may not leave the conversation for another one: it
+	 * is active ({@link isActive}; an extension command that moves its own
+	 * client is done with it), or durable queued input is still to be
+	 * delivered or has an ambiguous outcome.
 	 */
 	assertCanLeave(): void {
 		this.assertNotBusy();
-		const session = this.session;
-		if (this.work.running().some((record) => record.kind === "review")) {
-			throw new Error("Cannot change sessions while a detached review is active; cancel or wait for it to finish");
+		if (this.work.busy() || this.holds.size > 0) {
+			throw new Error("Cannot change sessions while work runs; cancel it or wait for it to finish");
 		}
-		const recovery = wakingInputRecovery(session.sessionManager.getConversationState());
+		const recovery = wakingInputRecovery(this.session.sessionManager.getConversationState());
 		if (recovery.kind === "blocked") {
 			throw new Error("Cannot replace the session while a durable client input outcome is ambiguous");
 		}

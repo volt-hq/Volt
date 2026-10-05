@@ -156,7 +156,11 @@ export function withBackgroundJobs<T extends TProperties, TDetails, TState>(
 		renderResult(result, renderOptions, theme, context) {
 			const job = jobOfDetails(result.details);
 			if (job) {
-				const current = context.executionStarted ? findJob(options.jobs, job.id) : undefined;
+				// A replayed card stays as captured while its job runs; once the job finished it shows the
+				// recorded outcome, after a restart too.
+				const found = findJob(options.jobs, job.id);
+				const finished = found !== undefined && found.status !== "running" && found.status !== "cancelling";
+				const current = context.executionStarted || finished ? found : undefined;
 				const cache = !current || (current.status !== "running" && current.status !== "cancelling");
 				const label = labelOf(context.args as Record<string, unknown>);
 				return new JobView((width) => {

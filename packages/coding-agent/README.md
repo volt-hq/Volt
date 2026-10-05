@@ -178,8 +178,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/usage` | Show remaining subscription quota and local reset times |
 | `/lsp` | Inspect language-server health without starting servers; `/lsp restart` and `/lsp trace [path\|off]` manage recovery/tracing |
 | `/tree` | Jump to any point in the session and continue from there |
-| `/subagents` | Inspect active or completed subagent conversations and tool flow |
-| `/jobs` | Inspect background jobs, follow their output, or cancel one job |
+| `/work` | Inspect work (background jobs, subagents, reviews, host actions, extension work): output, cancel, open, or resume |
 | `/review [target] [options]` | Review uncommitted, branch, PR, or commit changes with independent verification |
 | `/trust` | Save project trust decision for future sessions (restart required) |
 | `/fork` | Create a new session from a previous user message |
@@ -217,8 +216,7 @@ See `/hotkeys` for the full list. Customize via `~/.volt/agent/keybindings.json`
 | Ctrl+Shift+T | Cycle thinking level |
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
-| Alt+A | Open the subagent inspector |
-| Alt+J | Open the background-job inspector |
+| Alt+J | Open the work inspector (`/work`) |
 
 ### Message Queue
 

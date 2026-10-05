@@ -236,7 +236,7 @@ describe("native background subagents", () => {
 				expect(child.getLastAssistantText()).toBe("Child final report.");
 				expect(child.isBusy).toBe(false);
 				expect(child.isStreaming).toBe(false);
-				expect(child.hasRunningWork).toBe(true);
+				expect(child.work.busy()).toBe(true);
 				expect(signal?.aborted).toBe(false);
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
 				const childJobs = child.state.tools.find((tool) => tool.name === "jobs")!;
@@ -255,7 +255,7 @@ describe("native background subagents", () => {
 					await vi.waitFor(() => expect(signal?.aborted).toBe(true));
 					await setImmediate();
 					expect(settled).not.toHaveBeenCalled();
-					expect(context.session.hasRunningWork).toBe(true);
+					expect(context.session.work.busy()).toBe(true);
 					expect(
 						jobSnapshot(await childJobs.execute("child-cancelling", { action: "read", id: childJob.id })).status,
 					).toBe("cancelling");
@@ -278,8 +278,8 @@ describe("native background subagents", () => {
 				);
 				expect(result.status).toBe(operation === "abort" ? "cancelled" : "completed");
 				if (operation === "complete") expect(result.output).toContain("Child collected its background output.");
-				expect(child.hasRunningWork).toBe(false);
-				expect(context.session.hasRunningWork).toBe(false);
+				expect(child.work.busy()).toBe(false);
+				expect(context.session.work.busy()).toBe(false);
 				expect(context.scopes[0]?.snapshot().activeDescendants).toBe(0);
 				expect(context.manager.listDelegations()[0]?.status).toBe(
 					operation === "abort" ? "cancelled" : "completed",
@@ -361,7 +361,7 @@ describe("native background subagents", () => {
 				await started.promise;
 				const child = context.runtimes[0]!.conversation.session;
 				await child.waitForIdle();
-				expect(child.hasRunningWork).toBe(true);
+				expect(child.work.busy()).toBe(true);
 				expect(context.manager.isSubagentRuntime()).toBe(true);
 				expect(context.scopes[0]).toBe(scope);
 				expect(scope.snapshot().activeDescendants).toBe(1);
@@ -393,14 +393,14 @@ describe("native background subagents", () => {
 				const cancelling = jobSnapshot(await jobs.execute("cancelling", { action: "read", id: parentJob.id }));
 				expect(cancelling.status).toBe("cancelling");
 				expect(cancelling.endedAt).toBeUndefined();
-				expect(child.hasRunningWork).toBe(true);
+				expect(child.work.busy()).toBe(true);
 
 				releaseCleanup.resolve();
 				expect(
 					jobSnapshot(await jobs.execute("done", { action: "wait", ids: [parentJob.id], timeoutMs: 30_000 }))
 						.status,
 				).toBe("cancelled");
-				expect(child.hasRunningWork).toBe(false);
+				expect(child.work.busy()).toBe(false);
 				expect(scope.snapshot().activeDescendants).toBe(0);
 				const available = await subagent.execute("second-available", second);
 				expect(available.details?.capacity?.fits).toBe(true);

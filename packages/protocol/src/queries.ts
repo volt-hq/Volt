@@ -329,7 +329,7 @@ export const QUERY_SCHEMAS = {
 		}),
 	},
 	"review.result": { params: Type.Object({ runId }, closed), result: RpcReviewWorkflowResultResponseSchema },
-	"review.workflows": {
+	"review.runs": {
 		params: Type.Object(
 			{
 				cursor: Type.Optional(Type.String()),

@@ -304,7 +304,14 @@ conversation at a time:
   phones. When the last phone disconnects, the runtime is retained for
   `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm. A
   session the last phone moved away from (see below) closes as soon as it is
-  idle instead.
+  idle instead. The timer starts only once the conversation is idle: no turn
+  or other operation holds it, no work runs (a background job, a subagent, a
+  review, an approved host action, or extension work), and no operation, such
+  as a review discussion start, holds it open. Work suspended since a restart
+  and host actions still waiting for approval keep nothing alive: they stay
+  in the log and the conversation closes as any idle one does; a suspended
+  subagent resumes once a client asks after the conversation opens again, and
+  a pending approval ends with the runtime.
 - **tui-owned** — a desktop TUI owns the runtime. The daemon still terminates
   the phone's Iroh connection, then relays the raw stream bytes to the TUI,
   which serves it from its in-process session. Prompts from either side appear

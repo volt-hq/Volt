@@ -1,12 +1,10 @@
 import type { JsonValue, TextContent } from "@hansjm10/volt-ai";
-import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { Component } from "@hansjm10/volt-tui";
 import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
 import { formatReviewUsage } from "../../../core/review-presentation.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
-import { jobText } from "../../../core/tools/jobs.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 
 /**
@@ -104,12 +102,6 @@ export class CustomMessageComponent extends Container {
 				.filter((c): c is TextContent => c.type === "text")
 				.map((c) => c.text)
 				.join("\n");
-		}
-
-		if (this.message.customType === WORK_NOTICE_CUSTOM_TYPE) {
-			// A work notice names its work by title: commands and tasks are data, not Markdown.
-			this.defaultContainer.addChild(new Text(theme.fg("customMessageText", jobText(text).trim()), 1, 0));
-			return;
 		}
 
 		this.defaultContainer.addChild(
