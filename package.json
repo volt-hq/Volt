@@ -1,13 +1,17 @@
 {
 	"name": "volt-azure-devops",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"description": "Azure DevOps integration tools for Volt.",
 	"type": "module",
 	"keywords": ["volt-package", "volt-extension", "volt", "azure-devops", "ado"],
 	"license": "MIT",
 	"files": ["README.md", "extensions"],
 	"volt": {
-		"extensions": ["extensions/azure-devops.ts"]
+		"id": "azure-devops",
+		"displayName": "Azure DevOps",
+		"description": "Azure DevOps integration tools for Volt.",
+		"entry": "extensions/azure-devops.ts",
+		"permissions": ["network", "fs-write", "secrets"]
 	},
 	"dependencies": {
 		"@azure/identity": "4.13.1",
