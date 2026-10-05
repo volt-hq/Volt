@@ -262,8 +262,9 @@ export class ConversationHost {
 
 	/**
 	 * Open a conversation. No client is attached to it yet; its extensions
-	 * bind when the first client with a surface attaches. A failed open closes
-	 * whatever it created and leaves `from` as it was.
+	 * bind when the first client with a surface attaches. The work a previous
+	 * runtime left open is reconciled first. A failed open closes whatever it
+	 * created and leaves `from` as it was.
 	 */
 	open(target: ConversationTarget, options: OpenConversationOptions = {}): Promise<OpenConversationResult> {
 		return this.openTarget(target, options, false);
@@ -519,8 +520,9 @@ export class ConversationHost {
 				"Conversation open failed and its session manager could not be closed",
 			);
 		}
+		let conversation: HostedConversation;
 		try {
-			return new HostedConversation(created, {
+			conversation = new HostedConversation(created, {
 				openedAs: sessionStartEvent?.reason ?? "startup",
 				lifetime: options.lifetime ?? (subagentContext ? "owner" : "clients"),
 				...(subagentContext === undefined ? {} : { subagentContext }),
@@ -528,6 +530,18 @@ export class ConversationHost {
 		} catch (error) {
 			return await disposeUnownedSession(created, error);
 		}
+		try {
+			// Work a previous runtime left open settles before session_start and before recovered input starts.
+			await conversation.work.reconcile();
+		} catch (error) {
+			try {
+				await conversation.discard();
+			} catch (discardError) {
+				throw new AggregateError([error, discardError], "Conversation open failed and could not be closed");
+			}
+			throw error;
+		}
+		return conversation;
 	}
 
 	/**

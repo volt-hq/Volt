@@ -689,6 +689,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				settleInvokingCommandInput: vi.fn(async () => {}),
 				subscribe: vi.fn(() => () => {}),
 				lost: new Promise<Error>(() => {}),
+				conversationWork: { reconcile: async () => ({ interrupt: [], suspended: [] }) },
 				get sessionRef() {
 					return sessionManager.getSessionRef();
 				},

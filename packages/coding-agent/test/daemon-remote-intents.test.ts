@@ -1151,13 +1151,16 @@ describe("admitRemoteIntent", () => {
 		"review_open_session",
 		"review_start_discussions",
 		"review_reset_discussion",
+		"open_work",
+		"resume_work",
+		"start_subagent",
 		"extension.command.deploy",
 		"prompt.template.fix",
 		"skill.review",
 	];
 
 	it("admits everything on an open conversation", () => {
-		for (const intent of [...WORK, "abort", "set_model", "set_keep_awake"]) {
+		for (const intent of [...WORK, "abort", "cancel_work", "set_model", "set_keep_awake"]) {
 			expect(admitRemoteIntent(intent, open)).toBeUndefined();
 		}
 	});
@@ -1182,7 +1185,8 @@ describe("admitRemoteIntent", () => {
 				code: "host_shutdown",
 			});
 		}
-		for (const intent of ["abort", "abort_retry", "abort_bash", "set_model"]) {
+		// Stopping work is admitted while the host shuts down.
+		for (const intent of ["abort", "abort_retry", "abort_bash", "cancel_work", "set_model"]) {
 			expect(admitRemoteIntent(intent, { ...open, shuttingDown: true })).toBeUndefined();
 		}
 	});

@@ -1,0 +1,449 @@
+/**
+ * Work in hosted conversations (RFC §7): the host reconciles the work a
+ * previous runtime left before `session_start`, delivery wakes an idle
+ * conversation, closing interrupts running work and leaves resumable work
+ * suspended, the work intents and `work_output` on the local and remote
+ * profiles, the remote projection of work entries, the write authority over
+ * work entries, and quiet notices across a restart.
+ */
+
+import { writeFileSync } from "node:fs";
+import { basename, join } from "node:path";
+import {
+	CONTENT_TEXT_MAX_SCALARS,
+	type HostFrame,
+	type ProjectedEntry,
+	REMOTE_CAPABILITIES,
+	type RemoteGrant,
+	WORK_NOTICE_CUSTOM_TYPE,
+	WORK_OUTPUT_MAX_UTF8_BYTES,
+	WORK_TEXT_MAX_CHARS,
+	WORK_TITLE_MAX_CHARS,
+} from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient, ProtocolQueryError, ProtocolRejectedError } from "../../src/client/protocol-client.ts";
+import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
+import {
+	assertCurrentSessionSnapshot,
+	CURRENT_SESSION_SNAPSHOT_VERSION,
+	CURRENT_SESSION_VERSION,
+	loadEntriesFromFile,
+	SessionManager,
+} from "../../src/core/session-manager.ts";
+import type { WorkExecution, WorkExecutor, WorkKindDefinition } from "../../src/core/work/registry.ts";
+import { closeLocalSessionManager } from "../../src/daemon/session-worktree.ts";
+import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "../utilities/remote-phone.ts";
+import { seedSession } from "../utilities/seed-log.ts";
+import { createHostHarness, type HostHarness } from "./host-harness.ts";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+	while (cleanups.length > 0) await cleanups.pop()?.();
+});
+
+async function harnessFor(responses: string[] = []): Promise<HostHarness> {
+	const harness = await createHostHarness({ whenUnattached: "keep", responses });
+	cleanups.push(() => harness.cleanup());
+	return harness;
+}
+
+function kind(overrides: Partial<WorkKindDefinition> = {}): WorkKindDefinition {
+	return {
+		kind: "ext:test/run",
+		delivery: "none",
+		cancellable: true,
+		maxActive: 4,
+		title: () => "Test work",
+		...overrides,
+	};
+}
+
+/** An executor that runs until it is released or aborted. */
+function held(): { execute: WorkExecutor; release(execution?: WorkExecution): void } {
+	const release = Promise.withResolvers<WorkExecution>();
+	return {
+		execute: async (ctx) => {
+			ctx.signal.addEventListener("abort", () => release.resolve({ outcome: "cancelled" }), { once: true });
+			return await release.promise;
+		},
+		release: (execution = { outcome: "completed" }) => release.resolve(execution),
+	};
+}
+
+function workTypes(conversation: HostedConversation): string[] {
+	return conversation.session.sessionManager
+		.committedEntriesAfter(0)
+		.filter((entry) => entry.type.startsWith("work_"))
+		.map((entry) => entry.type);
+}
+
+describe("work in hosted conversations", () => {
+	it("settles the previous runtime's open work when the host opens the conversation, before session_start", async () => {
+		const harness = await harnessFor();
+		const manager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+		const started = {
+			kind: "job",
+			title: "npm test",
+			input: { command: "npm test" },
+			cancellable: true,
+			delivery: "wake",
+			resume: false,
+			state: "running",
+		};
+		await seedSession(manager, (log) => {
+			log.user("hello").assistant("hi");
+			log.hostRecord("work_started", { ...started, workId: "job-1" });
+			log.hostRecord("work_started", {
+				...started,
+				workId: "child-1",
+				kind: "subagent",
+				delivery: "none",
+				resume: true,
+			});
+		});
+		const opened = await harness.host.open({ kind: "adopt", sessionManager: manager });
+		if (opened.cancelled) throw new Error("Expected the conversation to open");
+		const conversation = opened.conversation;
+		// Reconciled during the open: no client attached and no session_start fired yet.
+		expect(harness.events.filter((event) => event.sessionId === conversation.id)).toEqual([]);
+		expect(conversation.work.get("job-1")).toMatchObject({ outcome: "interrupted" });
+		expect(conversation.work.get("child-1")?.outcome).toBeUndefined();
+		expect(conversation.work.running()).toEqual([]);
+		await harness.host.attach(harness.client("tui"), conversation);
+		expect(harness.events.filter((event) => event.sessionId === conversation.id).map((event) => event.type)).toEqual([
+			"session_start",
+		]);
+		// The suspended child is cancelled without an executor.
+		await conversation.work.cancel("child-1");
+		expect(conversation.work.get("child-1")).toMatchObject({ outcome: "cancelled" });
+	});
+
+	it("queues a wake notice that starts a turn on the idle conversation", async () => {
+		const harness = await harnessFor(["noticed"]);
+		const conversation = await harness.openStartup();
+		await harness.host.attach(harness.client("tui"), conversation);
+		conversation.work.register(kind({ kind: "job", delivery: "wake", title: () => "echo done" }));
+		const record = await conversation.work.start("job", { command: "echo done" }, async (ctx) => {
+			ctx.output("done\n");
+			return { outcome: "completed", result: { summary: "echoed" } };
+		});
+		await conversation.work.waitForIdle();
+		await vi.waitFor(() => expect(conversation.session.messages.at(-1)?.role).toBe("assistant"));
+		await conversation.session.waitForIdle();
+		const notice = conversation.session.messages.find(
+			(message) => message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE,
+		);
+		expect(notice).toMatchObject({ details: { workId: record.workId, outcome: "completed", summary: "echoed" } });
+		expect(conversation.work.output(record.workId)).toEqual({ text: "done\n", truncated: false, final: true });
+	});
+
+	it("closing interrupts running work and leaves resumable work for an explicit resume after reopening", async () => {
+		const harness = await harnessFor();
+		const first = await harness.openStartup();
+		const resumable = kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) });
+		first.work.register(kind({ kind: "job" }));
+		first.work.register(resumable);
+		const job = await first.work.start("job", null, held().execute);
+		const child = await first.work.start("subagent", null, held().execute);
+		const ref = first.session.sessionRef;
+		if (!ref) throw new Error("Expected a stored session");
+		await harness.host.close(first);
+		const reopened = await harness.host.open({ kind: "session", ref });
+		if (reopened.cancelled) throw new Error("Expected the conversation to reopen");
+		const second = reopened.conversation;
+		expect(second.work.get(job.workId)).toMatchObject({ outcome: "interrupted" });
+		expect(second.work.get(child.workId)?.outcome).toBeUndefined();
+		second.work.register(resumable);
+		const client = await createLoopbackClient(harness.host, second);
+		cleanups.push(() => client.stop());
+		await client.intent("resume_work", { workId: child.workId });
+		await second.work.waitForIdle();
+		expect(second.work.get(child.workId)).toMatchObject({ outcome: "completed" });
+		await expect(client.intent("resume_work", { workId: child.workId })).rejects.toMatchObject({
+			reason: { code: "unavailable" },
+		});
+	});
+
+	it("serves the work intents and work_output on the local profile", async () => {
+		const harness = await harnessFor();
+		const conversation = await harness.openStartup();
+		conversation.work.register(kind());
+		conversation.work.register(kind({ kind: "ext:test/fixed", cancellable: false }));
+		conversation.work.register(
+			kind({ kind: "ext:test/open", open: async () => ({ conversation: "child-conversation", moved: false }) }),
+		);
+		const client = await createLoopbackClient(harness.host, conversation);
+		cleanups.push(() => client.stop());
+
+		const running = held();
+		let output: ((text: string) => void) | undefined;
+		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
+			output = ctx.output;
+			return await running.execute(ctx);
+		});
+		await vi.waitFor(() => expect(output).toBeDefined());
+		output?.(`${"a".repeat(CONTENT_TEXT_MAX_SCALARS)}\u001b[31mtail\r\n`);
+		const first = await client.query("work_output", { workId: record.workId });
+		expect(first).toMatchObject({ offset: 0, nextOffset: CONTENT_TEXT_MAX_SCALARS, final: false });
+		const rest = await client.query("work_output", { workId: record.workId, offset: CONTENT_TEXT_MAX_SCALARS });
+		expect(rest).toMatchObject({ text: "tail\n", nextOffset: null, truncated: false });
+		await expect(client.query("work_output", { workId: "missing" })).rejects.toBeInstanceOf(ProtocolQueryError);
+
+		const fixed = held();
+		const pinned = await conversation.work.start("ext:test/fixed", null, fixed.execute);
+		const rejection = async (promise: Promise<unknown>) => {
+			const error = await promise.then(
+				() => undefined,
+				(reason: unknown) => reason,
+			);
+			if (!(error instanceof ProtocolRejectedError)) throw new Error("Expected a rejected intent");
+			return error.reason.code;
+		};
+		expect(await rejection(client.intent("cancel_work", { workId: pinned.workId }))).toBe("not_allowed");
+		expect(await rejection(client.intent("cancel_work", { workId: "missing" }))).toBe("invalid_input");
+		expect(await rejection(client.intent("resume_work", { workId: record.workId }))).toBe("conflict");
+		expect(await rejection(client.intent("open_work", { workId: record.workId }))).toBe("unavailable");
+
+		await client.intent("cancel_work", { workId: record.workId });
+		await vi.waitFor(() => expect(conversation.work.get(record.workId)?.outcome).toBe("cancelled"));
+		expect(await rejection(client.intent("cancel_work", { workId: record.workId }))).toBe("unavailable");
+
+		const openable = await conversation.work.start("ext:test/open", null, async () => ({ outcome: "completed" }));
+		const opened = await client.intent("open_work", { workId: openable.workId });
+		expect(opened.result).toEqual({ conversation: "child-conversation" });
+		fixed.release();
+		await conversation.work.waitForIdle();
+		expect(workTypes(conversation)).toContain("work_checkpoint");
+	});
+
+	it("shows a paired device work without input, locators, or output, and redacts the output it reads", async () => {
+		const harness = await harnessFor();
+		const workspace = harness.tempDir;
+		const conversation = await harness.openStartup();
+		conversation.work.register(kind());
+		conversation.work.register(kind({ kind: "ext:test/fixed", cancellable: false }));
+		const connect = async (grant: RemoteGrant) => {
+			const pair = createIrohStreamPair();
+			const connection = serveIrohRemoteConnection({
+				host: harness.host,
+				conversation,
+				stream: pair.host,
+				grant,
+				redaction: { workspacePath: workspace },
+				redirect: {},
+			});
+			const phone = connectRemotePhone(pair.phone);
+			cleanups.push(async () => {
+				await connection.close().catch(() => undefined);
+				await phone.close();
+			});
+			await phone.hello();
+			return phone;
+		};
+		const phone = await connect({ schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] });
+		await phone.subscribe(conversation.id);
+
+		const record = await conversation.work.start(
+			"ext:test/run",
+			{ command: `cat ${workspace}/secret.txt` },
+			async (ctx) => {
+				ctx.output(`read ${workspace}/secret.txt\n`);
+				return {
+					outcome: "completed",
+					result: { summary: `checked ${workspace}`, data: { path: `${workspace}/data` } },
+				};
+			},
+			{
+				child: {
+					conversation: "child-session",
+					ref: {
+						sessionDirectory: join(workspace, "sessions"),
+						storeId: "store",
+						sessionId: "child-session",
+						sessionGeneration: "g1",
+					},
+				},
+			},
+		);
+		await conversation.work.waitForIdle();
+		const pinned = await conversation.work.start("ext:test/fixed", null, held().execute);
+		const entryOf = (type: string, workId: string) =>
+			phone.waitFor(
+				(frame): frame is Extract<HostFrame, { type: "entry" }> =>
+					frame.type === "entry" &&
+					frame.entry.type === type &&
+					(frame.entry.payload as { workId?: string } | undefined)?.workId === workId,
+			);
+		const started = (await entryOf("work_started", record.workId)).entry as ProjectedEntry & { type: "work_started" };
+		expect(started.payload).toMatchObject({ input: null, child: { conversation: "child-session" } });
+		expect(started.payload?.child).toEqual({ conversation: "child-session" });
+		const finished = (await entryOf("work_finished", record.workId)).entry as ProjectedEntry & {
+			type: "work_finished";
+		};
+		expect(finished.payload?.result).toEqual({
+			summary: expect.stringContaining("checked"),
+			output: { text: "", truncated: false },
+		});
+		await entryOf("work_started", pinned.workId);
+		await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "live" }> =>
+				frame.type === "live" &&
+				frame.items.some((item) => item.type === "set" && item.key === `work/${pinned.workId}`),
+		);
+		expect(JSON.stringify(phone.frames)).not.toContain(workspace);
+
+		// A device that subscribes later folds the same item from its snapshot.
+		const later = await connect({ schemaVersion: 1, revision: 1, capabilities: ["conversation.observe.v1"] });
+		await later.subscribe(conversation.id);
+		const snapshot = later.frames.find(
+			(frame): frame is Extract<HostFrame, { type: "snapshot" }> => frame.type === "snapshot",
+		);
+		const item = snapshot?.state.work?.find((work) => work.workId === record.workId);
+		expect(item).toMatchObject({ outcome: "completed", result: { output: { truncated: false } } });
+		expect(item?.child).toEqual({ conversation: "child-session" });
+		expect(JSON.stringify(later.frames)).not.toContain(workspace);
+
+		const read = await phone.query("work_output", { workId: record.workId });
+		expect(read.type).toBe("result");
+		expect(JSON.stringify(read)).not.toContain(workspace);
+		expect(JSON.stringify(read)).toContain("secret.txt");
+		expect((await later.query("work_output", { workId: record.workId })).type).toBe("result");
+
+		const refused = await phone.intent("cancel_work", { workId: pinned.workId });
+		expect(refused).toMatchObject({ type: "rejected", reason: { code: "not_allowed" } });
+		const subagent = await phone.intent("start_subagent", { agent: "explore", prompt: "look" });
+		expect(subagent).toMatchObject({ type: "rejected", reason: { code: "not_allowed" } });
+		const denied = await later.intent("cancel_work", { workId: record.workId });
+		expect(denied).toMatchObject({
+			type: "rejected",
+			reason: { code: "not_allowed", requiredCapability: "conversation.control.v1" },
+		});
+		await conversation.work.cancelAll("closed");
+	});
+
+	it("shows a paired device no part of a root that a host cut or the output bound left", async () => {
+		const harness = await harnessFor();
+		const workspace = harness.tempDir;
+		const conversation = await harness.openStartup();
+		const name = basename(workspace);
+		// The title's cut falls one character into the workspace's unique name.
+		const lead = "x".repeat(WORK_TITLE_MAX_CHARS - workspace.length + name.length - 3);
+		conversation.work.register(kind({ title: () => `${lead} ${workspace}/file.ts` }));
+		// Output whose kept tail starts inside a line, and so inside a root.
+		let lines = Array.from({ length: 2_000 }, (_, index) => `${workspace}/file-${index}.ts`).join("\n");
+		while (lines[lines.length - WORK_OUTPUT_MAX_UTF8_BYTES - 1] === "\n") lines += "e";
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: workspace },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
+			ctx.output(lines);
+			return {
+				outcome: "failed",
+				error: `${"y".repeat(WORK_TEXT_MAX_CHARS - workspace.length + 3)} ${workspace}`,
+			};
+		});
+		await conversation.work.waitForIdle();
+		expect(record.title.endsWith("…")).toBe(true);
+		expect(conversation.work.get(record.workId)?.result?.output?.truncated).toBe(true);
+		await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "entry" }> =>
+				frame.type === "entry" && frame.entry.type === "work_finished",
+		);
+		expect(record.title.endsWith(`${workspace.slice(0, -name.length + 1)}…`)).toBe(true);
+		const wire = JSON.stringify(phone.frames);
+		expect(wire).not.toContain(workspace.slice(0, -name.length + 1));
+		const read = await phone.query("work_output", { workId: record.workId });
+		if (read.type !== "result") throw new Error("Expected the output");
+		const output = read.data as { text: string; truncated: boolean };
+		expect(output.truncated).toBe(true);
+		// The tail starts at a line, so no part of a root the cut left reaches the device.
+		expect(output.text.startsWith("/workspace/file-")).toBe(true);
+		const local = conversation.work.output(record.workId)?.text ?? "";
+		expect(local.startsWith(workspace)).toBe(false);
+	});
+
+	it("never carries work entries into a fork, a clone, or an import", async () => {
+		const harness = await harnessFor(["reply"]);
+		const conversation = await harness.openStartup();
+		conversation.work.register(kind());
+		await conversation.session.prompt("hello");
+		await conversation.work.start("ext:test/run", null, async () => ({ outcome: "completed" }));
+		await conversation.work.waitForIdle();
+		const source = conversation.session.sessionManager;
+		expect(workTypes(conversation)).toEqual(["work_started", "work_finished"]);
+		const leafId = source.getLeafId();
+		if (!leafId) throw new Error("Expected a branch");
+		const branched = await SessionManager.createBranched(source, leafId);
+		cleanups.push(() => closeLocalSessionManager(branched));
+		expect(branched.committedEntriesAfter(0).filter((entry) => entry.type.startsWith("work_"))).toEqual([]);
+
+		// A snapshot file that holds a work entry is not a valid import.
+		const header = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			snapshotVersion: CURRENT_SESSION_SNAPSHOT_VERSION,
+			id: "imported",
+			timestamp: new Date().toISOString(),
+			cwd: harness.tempDir,
+		};
+		const work = source.committedEntriesAfter(0).find((entry) => entry.type === "work_started");
+		const path = join(harness.tempDir, "with-work.jsonl");
+		writeFileSync(path, `${[header, work].map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+		expect(() => assertCurrentSessionSnapshot(loadEntriesFromFile(path))).toThrow(
+			/unsupported host-only entry: work_started/,
+		);
+	});
+
+	it("keeps a quiet notice queued across a restart without replaying it or fencing fresh input", async () => {
+		const harness = await harnessFor(["answer"]);
+		const manager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+		const notice = {
+			role: "custom" as const,
+			customType: WORK_NOTICE_CUSTOM_TYPE,
+			content: "Sweep (ext:test/run w1) completed.",
+			display: true,
+			details: { workId: "w1", kind: "ext:test/run", title: "Sweep", outcome: "completed" },
+			timestamp: Date.now(),
+		};
+		await seedSession(manager, (log) => {
+			log.user("hello").assistant("hi");
+			log.clientInput("host-notice-1", "steer", { message: "" }, { origin: "host" });
+			log.hostRecord("client_input_queued", {
+				receiptId: log.lastId,
+				clientMessageId: "host-notice-1",
+				queuedInput: { delivery: "steer", message: "", images: [], messages: [notice], wake: false },
+			});
+		});
+		const opened = await harness.host.open({ kind: "adopt", sessionManager: manager });
+		if (opened.cancelled) throw new Error("Expected the conversation to open");
+		const conversation = opened.conversation;
+		await harness.host.attach(harness.client("tui"), conversation);
+		await conversation.startRecoveredClientInputs();
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(() => conversation.assertCanLeave()).not.toThrow();
+		await conversation.session.prompt("next");
+		await conversation.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(1);
+		// The quiet notice rode the turn the prompt made.
+		expect(
+			conversation.session.messages.some(
+				(message) => message.role === "custom" && message.customType === WORK_NOTICE_CUSTOM_TYPE,
+			),
+		).toBe(true);
+	});
+});

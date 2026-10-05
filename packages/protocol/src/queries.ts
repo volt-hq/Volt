@@ -222,6 +222,31 @@ export const QUERY_SCHEMAS = {
 		params: Type.Object({ jobId: RpcConversationIdentifierSchema }, closed),
 		result: Type.Object({ job: RpcBackgroundJobSnapshotSchema }, closed),
 	},
+	/**
+	 * A work item's output as plain text without terminal control sequences:
+	 * what running work produced so far, or what its result kept. Only the
+	 * newest output is kept (`truncated` when older output was dropped; a
+	 * remote client's then starts at a line). Text comes in chunks from
+	 * `offset` (in Unicode scalars); output that is still growing may shift,
+	 * so a client reads it again from 0.
+	 */
+	work_output: {
+		params: Type.Object({ workId: LogEntryIdSchema, offset: Type.Optional(Type.Integer({ minimum: 0 })) }, closed),
+		result: Type.Object(
+			{
+				workId: LogEntryIdSchema,
+				text: Type.String(),
+				offset: Type.Integer({ minimum: 0 }),
+				/** Where the next chunk starts, or null at the end of the output. */
+				nextOffset: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+				totalScalars: Type.Integer({ minimum: 0 }),
+				truncated: Type.Boolean(),
+				/** The work finished: its output no longer changes. */
+				final: Type.Boolean(),
+			},
+			closed,
+		),
+	},
 
 	// The connection's workspace
 	/** The models and default configuration for a new conversation in the workspace. */

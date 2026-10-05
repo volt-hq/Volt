@@ -126,6 +126,30 @@ function validEntries(): Array<Record<string, unknown>> {
 			clientMessageId: "client-1",
 			state: "withdrawn",
 		},
+		{
+			...base("work_started", "work-started", 21),
+			workId: "work-1",
+			kind: "job",
+			title: "npm test",
+			input: { command: "npm test" },
+			cancellable: true,
+			delivery: "wake",
+			resume: false,
+			state: "running",
+			toolCallId: "call-1",
+		},
+		{
+			...base("work_checkpoint", "work-checkpoint", 22),
+			workId: "work-1",
+			state: "cancelling",
+			progress: { text: "stopping", value: 1, max: 2 },
+		},
+		{
+			...base("work_finished", "work-finished", 23),
+			workId: "work-1",
+			outcome: "cancelled",
+			result: { summary: "stopped", output: { text: "out", truncated: false } },
+		},
 	];
 }
 
@@ -169,6 +193,9 @@ const REQUIRED_TYPE_FIELD: Record<string, string> = {
 	leaf: "targetId",
 	subagent_spawn: "requestKey",
 	forked_from: "entryId",
+	work_started: "title",
+	work_checkpoint: "workId",
+	work_finished: "outcome",
 };
 
 describe("session entry codec", () => {
@@ -190,6 +217,9 @@ describe("session entry codec", () => {
 					"leaf",
 					"subagent_spawn",
 					"forked_from",
+					"work_started",
+					"work_checkpoint",
+					"work_finished",
 				].includes(String(value.type)),
 			});
 		}
@@ -265,6 +295,66 @@ describe("session entry codec", () => {
 		expect(() => parsePersistedSessionEntry({ ...queued, queuedInput: { ...queuedInput, extra: true } })).toThrow(
 			"unknown property",
 		);
+	});
+
+	it("validates work entries against their schemas and byte bounds", () => {
+		const started = entryOf("work-started", 1);
+		expect(() => parsePersistedSessionEntry({ ...started, kind: "unknown" })).toThrow("invalid work_started payload");
+		expect(() => parsePersistedSessionEntry({ ...started, title: "two\nlines" })).toThrow(
+			"invalid work_started payload",
+		);
+		expect(() => parsePersistedSessionEntry({ ...started, input: { blob: "x".repeat(17 * 1024) } })).toThrow(
+			"work input exceeds",
+		);
+		const checkpoint = entryOf("work-checkpoint", 1);
+		expect(() => parsePersistedSessionEntry({ ...checkpoint, state: "awaiting_approval" })).toThrow(
+			"invalid work_checkpoint payload",
+		);
+		expect(() => parsePersistedSessionEntry({ ...checkpoint, progress: { text: "x".repeat(9 * 1024) } })).toThrow(
+			"work checkpoint exceeds",
+		);
+		const finished = entryOf("work-finished", 1);
+		expect(() => parsePersistedSessionEntry({ ...finished, outcome: "lost" })).toThrow(
+			"invalid work_finished payload",
+		);
+		expect(() =>
+			parsePersistedSessionEntry({
+				...finished,
+				result: { output: { text: "x".repeat(51 * 1024), truncated: true } },
+			}),
+		).toThrow("work output exceeds");
+		expect(() => parsePersistedSessionEntry({ ...finished, error: "\u001b[31mred" })).toThrow(
+			"invalid work_finished payload",
+		);
+		// A snapshot never carries work: it is host-only.
+		expect(() =>
+			validatePersistedSessionEntrySequence(
+				[
+					{ ...started, ordinal: 1 },
+					{ ...entryOf("leaf", 2), targetId: null },
+				],
+				{
+					snapshot: true,
+				},
+			),
+		).toThrow("unsupported host-only entry: work_started");
+	});
+
+	it("accepts quiet queued input only for messages a host queues", () => {
+		const queued = entryOf("host-queued", 1);
+		const queuedInput = queued.queuedInput as Record<string, unknown>;
+		const quiet = { ...queued, queuedInput: { ...queuedInput, wake: false } };
+		expect(parsePersistedSessionEntry(quiet)).toEqual(quiet);
+		expect(() => parsePersistedSessionEntry({ ...queued, queuedInput: { ...queuedInput, wake: true } })).toThrow(
+			"queued wake is invalid",
+		);
+		const client = entryOf("queued", 1);
+		expect(() =>
+			parsePersistedSessionEntry({
+				...client,
+				queuedInput: { ...(client.queuedInput as Record<string, unknown>), wake: false },
+			}),
+		).toThrow("Only queued host messages may be quiet");
 	});
 
 	it("rejects unknown and missing fields for every entry type", () => {

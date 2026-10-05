@@ -4,7 +4,8 @@
  * whole. The remote profile sends no workspace root, worktree root, parent
  * checkout, or worktrees root, and no provider signature, in any frame:
  * entries, snapshots, live streaming split at any point, keyed values, and
- * query results.
+ * query results. Its work entries carry no input, child locator, output
+ * text, or result data (Phase 4 plan §9).
  */
 
 import { resolve } from "node:path";
@@ -22,7 +23,8 @@ type Step =
 	| { kind: "assistant"; text: string; tool: boolean }
 	| { kind: "result"; text: string }
 	| { kind: "custom"; value: string }
-	| { kind: "label"; text: string };
+	| { kind: "label"; text: string }
+	| { kind: "work"; text: string; finish: boolean };
 
 const text = fc.string({ maxLength: 40 });
 const step: fc.Arbitrary<Step> = fc.oneof(
@@ -31,15 +33,51 @@ const step: fc.Arbitrary<Step> = fc.oneof(
 	fc.record({ kind: fc.constant("result" as const), text }),
 	fc.record({ kind: fc.constant("custom" as const), value: text }),
 	fc.record({ kind: fc.constant("label" as const), text: fc.string({ minLength: 1, maxLength: 10 }) }),
+	fc.record({ kind: fc.constant("work" as const), text, finish: fc.boolean() }),
 );
 
 async function seed(steps: readonly Step[], cwd = (path: string) => path): Promise<SessionManager> {
 	const manager = SessionManager.inMemory(cwd("/tmp/volt-profile-redaction/workspace"));
 	const open: string[] = [];
 	let call = 0;
+	let works = 0;
 	await seedSession(manager, (log: LogSeed) => {
 		for (const item of steps) {
 			switch (item.kind) {
+				case "work": {
+					// Work whose input, child locator, progress, output, and data name the workspace.
+					const workId = `work-${works++}`;
+					const path = `${cwd("/tmp/volt-profile-redaction/workspace")}/file.ts`;
+					const text = `${item.text} ${path}`;
+					log.hostRecord("work_started", {
+						workId,
+						kind: "job",
+						title: `Work ${item.text} ${path}`.slice(0, 200),
+						input: { command: text },
+						cancellable: true,
+						delivery: "none",
+						resume: false,
+						state: "running",
+						child: {
+							conversation: "child-session",
+							ref: {
+								sessionDirectory: `${cwd("/tmp/volt-profile-redaction/workspace")}/sessions`,
+								storeId: "store",
+								sessionId: "child-session",
+								sessionGeneration: "generation",
+							},
+						},
+					});
+					log.hostRecord("work_checkpoint", { workId, progress: { text } });
+					if (item.finish) {
+						log.hostRecord("work_finished", {
+							workId,
+							outcome: "completed",
+							result: { summary: text, output: { text, truncated: false }, data: { path } },
+						});
+					}
+					break;
+				}
 				case "user":
 					log.user(`${item.text} ${cwd("/tmp/volt-profile-redaction/workspace")}/file.ts`);
 					break;
@@ -125,6 +163,7 @@ describe("profile redaction", () => {
 			fc.record({ kind: fc.constant("result" as const), text: prose }),
 			fc.record({ kind: fc.constant("custom" as const), value: prose }),
 			fc.record({ kind: fc.constant("label" as const), text: fc.string({ minLength: 1, maxLength: 10 }) }),
+			fc.record({ kind: fc.constant("work" as const), text: prose, finish: fc.boolean() }),
 		);
 		const leaks = (frame: HostFrame | undefined): string[] => {
 			const wire = JSON.stringify(frame ?? null);
@@ -158,6 +197,15 @@ describe("profile redaction", () => {
 						.flatMap((entry) => projectEntry(entry, source, profile) ?? []);
 					for (const entry of projected) {
 						expect(leaks(redactor.redact({ type: "entry", subscriptionId: "s", entry }))).toEqual([]);
+						// Work reaches the device without its input, child locator, output text, or data.
+						if (entry.type === "work_started") {
+							expect(entry.payload?.input).toBeNull();
+							expect(entry.payload?.child).toEqual({ conversation: "child-session" });
+						}
+						if (entry.type === "work_finished") {
+							expect(entry.payload?.result?.output?.text).toBe("");
+							expect(entry.payload?.result?.data).toBeUndefined();
+						}
 					}
 					const snapshot: HostFrame = {
 						type: "snapshot",

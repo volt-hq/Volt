@@ -36,6 +36,9 @@ import {
 	type SessionInfoEntryPayload,
 	type SubagentSpawnEntryPayload,
 	type ThinkingLevelChangeEntryPayload,
+	type WorkCheckpointEntryPayload,
+	type WorkFinishedEntryPayload,
+	type WorkStartedEntryPayload,
 } from "@hansjm10/volt-protocol";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { randomUUID } from "crypto";
@@ -366,6 +369,23 @@ export interface ForkedFromEntry extends SessionEntryBase, ForkedFromEntryPayloa
 	type: "forked_from";
 }
 
+/**
+ * Work items (RFC §7.1): started, checkpointed, and finished. Host records the
+ * conversation writes only through its work registry; never part of model
+ * context, branch navigation, forks, or imports.
+ */
+export interface WorkStartedEntry extends SessionEntryBase, WorkStartedEntryPayload {
+	type: "work_started";
+}
+
+export interface WorkCheckpointEntry extends SessionEntryBase, WorkCheckpointEntryPayload {
+	type: "work_checkpoint";
+}
+
+export interface WorkFinishedEntry extends SessionEntryBase, WorkFinishedEntryPayload {
+	type: "work_finished";
+}
+
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
 export type SessionEntry =
 	| SessionMessageEntry
@@ -386,7 +406,10 @@ export type SessionEntry =
 	| PrReviewBindingEntry
 	| LeafEntry
 	| SubagentSpawnEntry
-	| ForkedFromEntry;
+	| ForkedFromEntry
+	| WorkStartedEntry
+	| WorkCheckpointEntry
+	| WorkFinishedEntry;
 
 /** Host-only input admission WAL records. These never participate in the conversation branch or projection. */
 export function isClientInputWalEntry(

@@ -46,5 +46,8 @@ export const SESSION_ENTRY_TYPES = {
 	leaf: CORE_LOG_ENTRY_TYPES.leaf,
 	subagent_spawn: CORE_LOG_ENTRY_TYPES.subagent_spawn,
 	forked_from: CORE_LOG_ENTRY_TYPES.forked_from,
+	work_started: CORE_LOG_ENTRY_TYPES.work_started,
+	work_checkpoint: CORE_LOG_ENTRY_TYPES.work_checkpoint,
+	work_finished: CORE_LOG_ENTRY_TYPES.work_finished,
 	...PRODUCT_SESSION_ENTRY_TYPES,
 } as const;

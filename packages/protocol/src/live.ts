@@ -14,9 +14,10 @@
  * Keys name a value family and, for keyed families, an id:
  * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, `jobs`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
- * `workflow/<workflowId>`, `subagent/<subagentId>`, `host_action/<id>`.
- * A value's `kind` is its key's family. `jobs`, `workflow`, `subagent`, and
- * `host_action` are interim values until work items replace them (Phase 4).
+ * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`,
+ * `host_action/<id>`. A value's `kind` is its key's family. `jobs`,
+ * `workflow`, `subagent`, and `host_action` are interim values until work
+ * items replace them (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
  * until answered; any client that accepts the request's kind may answer with
@@ -31,7 +32,7 @@ import {
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
 import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
-import { LogSessionIdSchema } from "./entries.ts";
+import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
@@ -43,7 +44,8 @@ import {
 	RpcActiveRetrySchema,
 	RpcPromptCacheStatusSchema,
 } from "./session.ts";
-import { UiNodeFormFieldSchema } from "./ui-node.ts";
+import { UiNodeFormFieldSchema, UiNodeSchema } from "./ui-node.ts";
+import { WorkProgressSchema } from "./work.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -239,6 +241,24 @@ export const LiveExtensionTitleValueSchema = Type.Object(
 /** The conversation's background jobs (interim until work items). */
 export const LiveJobsValueSchema = Type.Object({ kind: Type.Literal("jobs"), jobs: RpcBackgroundJobsSchema }, closed);
 
+/**
+ * Work this host runs (RFC §7.1): set when the work's executor attaches and
+ * cleared once it detaches, so open work without this value is suspended.
+ * Carries fine-grained progress; the `work_*` entries hold the rest, and
+ * `output` says how much output the `work_output` query can read.
+ */
+export const LiveWorkValueSchema = Type.Object(
+	{
+		kind: Type.Literal("work"),
+		workId: LogEntryIdSchema,
+		progress: Type.Optional(WorkProgressSchema),
+		detail: Type.Optional(UiNodeSchema),
+		/** Output the work produced so far, in UTF-8 bytes, older output included. */
+		output: Type.Optional(Type.Object({ bytes: Type.Integer({ minimum: 0 }) }, closed)),
+	},
+	closed,
+);
+
 /** A review workflow's latest event and running tools (interim until work items). */
 export const LiveWorkflowValueSchema = Type.Object(
 	{
@@ -285,6 +305,7 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_status: LiveExtensionStatusValueSchema,
 	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
+	work: LiveWorkValueSchema,
 	jobs: LiveJobsValueSchema,
 	workflow: LiveWorkflowValueSchema,
 	subagent: LiveSubagentValueSchema,
@@ -303,6 +324,7 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionStatusValueSchema,
 	LiveExtensionWidgetValueSchema,
 	LiveExtensionTitleValueSchema,
+	LiveWorkValueSchema,
 	LiveJobsValueSchema,
 	LiveWorkflowValueSchema,
 	LiveSubagentValueSchema,
@@ -326,6 +348,7 @@ export const LIVE_KEYED_KINDS = [
 	"host_request",
 	"ext_status",
 	"ext_widget",
+	"work",
 	"workflow",
 	"subagent",
 	"host_action",

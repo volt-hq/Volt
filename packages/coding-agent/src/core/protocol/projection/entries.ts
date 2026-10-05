@@ -7,17 +7,23 @@
  * `parentId`, and a `leaf` entry's target, name the nearest ancestor the
  * profile projects, so a client's tree never points at a hidden entry. A
  * full-fidelity profile sends payloads whole; a transcript profile sends
- * message-like entries as their transcript view only.
+ * message-like entries as their transcript view only, and work entries
+ * without input, locators, output, or result data.
  */
 
-import type {
-	ClientInputQueuedEntryPayload,
-	ClientInputReceiptEntryPayload,
-	ProjectedEntry,
-	TranscriptItem,
+import {
+	type ClientInputQueuedEntryPayload,
+	type ClientInputReceiptEntryPayload,
+	type ProjectedEntry,
+	type TranscriptItem,
+	WORK_TITLE_MAX_CHARS,
+	type WorkFinishedEntryPayload,
+	type WorkResult,
+	type WorkStartedEntryPayload,
 } from "@hansjm10/volt-protocol";
 import { toLogEntry } from "../../conversation-log/entry-codec.ts";
 import type { CommittedSessionEntry, SessionManager } from "../../session-manager.ts";
+import { workText } from "../../work/registry.ts";
 import type { Profile } from "../profiles.ts";
 import { type ProjectionSource, projectTranscriptItem } from "./transcript.ts";
 
@@ -35,6 +41,38 @@ const HIDDEN_ANCESTOR_DEPTH = 4_096;
  */
 function withoutImageData<T extends { readonly data: string }>(images: readonly T[]): T[] {
 	return images.map((image) => ({ ...image, data: "" }));
+}
+
+/**
+ * A work entry as a transcript profile sends it: without the work's input,
+ * its child's locator, its output text, and its result data, which may hold
+ * host paths, secrets, or bulk (output is read with `work_output`). Paths
+ * are redacted first, text the host cut to its bound loses a root's start
+ * the cut left, and text redaction lengthened is bounded again.
+ */
+function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, profile: Profile): unknown {
+	const cut = (text: string, max?: number): string => workText(profile.sourceCut(text), max);
+	if (entry.type === "work_started") {
+		const { input: _input, child, title, ...started } = payload as WorkStartedEntryPayload;
+		return {
+			...profile.source(started),
+			title: cut(title, WORK_TITLE_MAX_CHARS),
+			input: null,
+			...(child === undefined ? {} : { child: { conversation: child.conversation } }),
+		} satisfies WorkStartedEntryPayload;
+	}
+	if (entry.type !== "work_finished") return profile.source(payload);
+	const { result, error, ...finished } = payload as WorkFinishedEntryPayload;
+	const kept: WorkResult = {
+		...(result?.summary === undefined ? {} : { summary: cut(result.summary) }),
+		...(result?.output === undefined ? {} : { output: { text: "", truncated: result.output.truncated } }),
+		...(result?.child === undefined ? {} : { child: result.child }),
+	};
+	return {
+		...profile.source(finished),
+		...(Object.keys(kept).length === 0 ? {} : { result: kept }),
+		...(error === undefined ? {} : { error: cut(error) }),
+	} satisfies WorkFinishedEntryPayload;
 }
 
 /** The projection source over a session manager's committed log. */
@@ -81,6 +119,11 @@ export function projectEntry(
 		} else if (profile.fidelity === "transcript" && entry.type === "client_input_receipt") {
 			const receipt = log.payload as ClientInputReceiptEntryPayload;
 			payload = { ...receipt, input: { ...receipt.input, images: withoutImageData(receipt.input.images) } };
+		} else if (
+			profile.fidelity === "transcript" &&
+			(entry.type === "work_started" || entry.type === "work_checkpoint" || entry.type === "work_finished")
+		) {
+			payload = transcriptWorkPayload(entry, log.payload, profile);
 		} else if (profile.fidelity === "transcript" && entry.type === "client_input_queued") {
 			// The host messages a queued input delivers become entries the profile shows or hides; the queue
 			// a client folds needs only the input's text and image count.

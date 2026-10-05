@@ -13,10 +13,12 @@ import type {
 	AdmissionGate,
 	AgentMessage,
 	AgentTool,
+	ClientInputRecovery,
 	Conversation,
 	ConversationInput,
 	ConversationInputAdmission,
 	ConversationQueue,
+	ConversationState,
 } from "@hansjm10/volt-agent-core";
 import { ConversationError, clientInputDigest, clientInputRecovery } from "@hansjm10/volt-agent-core";
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
@@ -54,6 +56,18 @@ function messageText(content: AgentMessage): string {
 		.filter((part): part is TextContent => part.type === "text")
 		.map((part) => part.text)
 		.join("");
+}
+
+/**
+ * The recovery of the client inputs a previous runtime left, without quiet
+ * host input: a `message` work notice (`wake: false`) stays queued by design
+ * until a turn runs anyway, so it neither replays nor fences fresh input.
+ */
+export function wakingInputRecovery(state: ConversationState): ClientInputRecovery {
+	const recovery = clientInputRecovery(state);
+	const records = recovery.records.filter((record) => record.queuedInput?.wake !== false);
+	if (recovery.kind === "blocked") return { ...recovery, records };
+	return records.length > 0 ? { kind: "replay", records } : { kind: "idle", records: [] };
 }
 
 /** The queue identity projection retains every admitted entry inside its wire budget. */
@@ -160,7 +174,7 @@ export class SessionClientInputs {
 
 	/** Fence fresh input behind the input a previous runtime left to replay. */
 	fenceRecovered(): void {
-		this.recoveredReplayPending = clientInputRecovery(this.host.conversation().state).kind !== "idle";
+		this.recoveredReplayPending = wakingInputRecovery(this.host.conversation().state).kind !== "idle";
 	}
 
 	private ambiguousRecoveredError(clientMessageId: string): ClientInputOutcomeAmbiguousError {
@@ -552,8 +566,10 @@ export class SessionClientInputs {
 	 * Replays recoverable queued client input after the runtime is fully ready:
 	 * one turn delivers the recovered steering input, then the follow-ups, in
 	 * their admission order. Interrupted provider/tool work is never resumed. A
-	 * started input without an outcome blocks the replay as ambiguous. Finding
-	 * discussions never replay: their interrupted inputs fail.
+	 * started input without an outcome blocks the replay as ambiguous. Quiet
+	 * host input (`wake: false`) starts no replay and stays queued for the
+	 * next turn. Finding discussions never replay: their interrupted inputs
+	 * fail.
 	 */
 	resumeRecovered(): Promise<void> {
 		this.host.assertActive();
@@ -588,7 +604,7 @@ export class SessionClientInputs {
 				this.recoveredReplayPending = false;
 				return;
 			}
-			const recovery = clientInputRecovery(conversation.state);
+			const recovery = wakingInputRecovery(conversation.state);
 			if (recovery.kind === "blocked") {
 				this.recoveredReplayPending = true;
 				throw this.ambiguousRecoveredError(recovery.blocker.clientMessageId);
@@ -604,7 +620,7 @@ export class SessionClientInputs {
 			// A hook that failed the replayed delivery reports to the resume caller.
 			const fatalError = operationId === undefined ? undefined : this.host.events().turnFatalError(operationId);
 			if (fatalError) throw fatalError;
-			const remaining = clientInputRecovery(conversation.state);
+			const remaining = wakingInputRecovery(conversation.state);
 			this.recoveredReplayPending = remaining.kind !== "idle";
 			if (remaining.kind === "blocked") {
 				throw this.ambiguousRecoveredError(remaining.blocker.clientMessageId);
@@ -628,7 +644,7 @@ export class SessionClientInputs {
 		if (this.host.isReviewDiscussion() && this.resumePromise) {
 			throw new Error("Review discussion input recovery must settle before another prompt is admitted");
 		}
-		const recovery = clientInputRecovery(this.host.conversation().state);
+		const recovery = wakingInputRecovery(this.host.conversation().state);
 		if (recovery.kind === "idle") {
 			// Queue cancellation/terminalization is authoritative and releases the
 			// fence even after a previous replay attempt failed.
