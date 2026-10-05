@@ -266,7 +266,7 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { WorkInspector } from "./components/work-inspector.ts";
 import { queuedWorkNoticeLine, WorkNoticeComponent, workOutcomeLine } from "./components/work-notice.ts";
 import { WorkStatus } from "./components/work-status.ts";
-import { createUiNodeView } from "./ui-node/index.ts";
+import { createUiNodeView } from "./ui-node/registry.ts";
 import { TuiWorkSource } from "./work-source.ts";
 
 /** Interface for components that can be expanded/collapsed */

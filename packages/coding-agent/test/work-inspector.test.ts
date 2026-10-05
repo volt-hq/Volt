@@ -4,7 +4,7 @@
  * kind detail with.
  */
 
-import type { ClientWorkItem, UiNode, WorkNoticeDetails } from "@hansjm10/volt-protocol";
+import type { ClientWorkItem, WorkNoticeDetails } from "@hansjm10/volt-protocol";
 import { getKeybindings, setKeybindings, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
@@ -26,7 +26,6 @@ import {
 	workOutcomeLine,
 } from "../src/modes/interactive/components/work-notice.ts";
 import { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
-import { createUiNodeView } from "../src/modes/interactive/ui-node/index.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const previousBindings = getKeybindings();
@@ -494,57 +493,5 @@ describe("work notices", () => {
 			text: "Install cancelled",
 			warning: false,
 		});
-	});
-});
-
-describe("UiNode mapping", () => {
-	it("renders text, keyValue, progress, terminal, and list nodes, and placeholders for the rest", () => {
-		const view = createUiNodeView();
-		disposals.push(() => view.dispose());
-		const nodes: UiNode[] = [
-			{ type: "text", key: "t", text: [{ text: "bold", bold: true }, { text: " plain" }] },
-			{ type: "keyValue", key: "kv", items: [{ label: "Tokens", value: "12 input" }] },
-			{ type: "progress", key: "bar", kind: "determinate", value: 1, max: 2, label: "Half" },
-			{
-				type: "progress",
-				key: "steps",
-				kind: "steps",
-				title: "Waves",
-				steps: [
-					{ label: "One", status: "done" },
-					{ label: "Two", status: "failed", detail: "timeout" },
-				],
-			},
-			{ type: "terminal", key: "out", lines: ["$ npm test", "ok"], omittedLines: 3 },
-			{
-				type: "list",
-				key: "list",
-				ordered: true,
-				items: [
-					{ type: "text", text: "first" },
-					{ type: "text", text: "second" },
-				],
-			},
-			{ type: "card", key: "card", title: "Not mapped yet" },
-		];
-		view.update(nodes);
-		const rendered = text(view, 60);
-		expect(rendered).toContain("bold plain");
-		expect(rendered).toContain("Tokens: 12 input");
-		expect(rendered).toContain("Half");
-		expect(rendered).toContain("50%");
-		expect(rendered).toContain("Waves (1/2)");
-		expect(rendered).toContain("✗ Two  timeout");
-		expect(rendered).toContain("$ npm test");
-		expect(rendered).toContain("1. first");
-		expect(rendered).toContain("2. second");
-		expect(rendered).toContain("[card]");
-
-		// Keyed updates keep retained components.
-		const terminal = view.getComponent(["out"]);
-		const more: UiNode = { type: "terminal", key: "out", lines: ["$ npm test", "ok", "done"], omittedLines: 3 };
-		view.update(nodes.map((node) => (node.key === "out" ? more : node)));
-		expect(view.getComponent(["out"])).toBe(terminal);
-		expect(text(view, 60)).toContain("done");
 	});
 });

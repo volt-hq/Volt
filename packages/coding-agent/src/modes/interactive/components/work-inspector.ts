@@ -24,7 +24,7 @@ import {
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { createUiNodeView } from "../ui-node/index.ts";
+import { createUiNodeView } from "../ui-node/registry.ts";
 import { keyDisplayText } from "./keybinding-hints.ts";
 
 /** A live `work/<workId>` value: present while this host's executor runs the work. */
