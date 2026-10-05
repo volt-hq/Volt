@@ -18,6 +18,7 @@ import { initTheme } from "../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { builtinSessionPresenters } from "./utilities/test-presenters.ts";
 
 const reviewSummary = [
 	"**Review · PR #346 · eec0db3c22ef**",
@@ -263,6 +264,7 @@ describe("CustomMessageComponent", () => {
 							return [...sessionManager.getConversationState().context.messages];
 						},
 						extensionRunner: { getMessageRenderer: () => undefined },
+						presenters: builtinSessionPresenters(),
 						settingsManager: { getCodeBlockIndent: () => "  ", isProjectTrusted: () => true },
 					},
 				},
