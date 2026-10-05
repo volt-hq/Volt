@@ -50,6 +50,7 @@ import { execCommand } from "../exec.ts";
 import { isSafeFormPattern } from "../host/live-state.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo, type SourceInfo, type SourceScope } from "../source-info.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
 import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
 import {
@@ -580,6 +581,9 @@ function createExtensionAPI(
 				throw new TypeError("A message presenter needs the custom type it presents");
 			}
 			if (typeof present !== "function") throw new TypeError(`Message presenter ${customType} must be a function`);
+			if (HOST_CUSTOM_MESSAGE_TYPES.has(customType)) {
+				throw new Error(`Custom messages of type ${customType} are the host's; an extension cannot present them`);
+			}
 			extension.messagePresenters.set(customType, present as MessagePresenter);
 		},
 

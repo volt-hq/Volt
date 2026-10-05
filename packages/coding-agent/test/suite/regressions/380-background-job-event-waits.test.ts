@@ -7,14 +7,14 @@ import * as toolProgressCapture from "../../../src/core/tool-progress-capture.ts
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
 import {
-	createJobsToolDefinition,
 	type JobRuntime,
 	type JobSnapshot,
 	type JobSummary,
 	type JobToolName,
 	jobWaitResult,
 } from "../../../src/core/tools/jobs.ts";
-import { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
+import { BUILTIN_PRESENTERS } from "../../../src/core/tools/presenters.ts";
+import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createTestJobRuntime, type TestJobRuntime } from "../../utilities/job-runtime.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
@@ -247,13 +247,10 @@ describe("multi-job presentation and delivery", () => {
 		const first = await controlledJob(jobs, "bash", "first");
 		const second = await controlledJob(jobs, "bash", "second");
 		const ids = [first.job.id, second.job.id];
-		const definition = createJobsToolDefinition({ jobs });
-		const card = new ToolExecutionComponent(
+		const card = new PresentedToolComponent(
 			"jobs",
-			"wait-call",
 			{ action: "wait", ids, mode: "all" },
-			{},
-			definition,
+			() => BUILTIN_PRESENTERS,
 			{ requestRender: () => {} } as unknown as TUI,
 			process.cwd(),
 		);
@@ -261,13 +258,15 @@ describe("multi-job presentation and delivery", () => {
 		try {
 			card.markExecutionStarted();
 			const frame = card.render(width);
-			expect(frame.lines.map(stripAnsi).join(" ")).toContain("Waiting for background jobs");
+			expect(frame.lines.map(stripAnsi).join(" ").replace(/\s+/g, " ")).toContain("[running] Waiting for");
 			for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			first.finish.resolve();
 			second.finish.resolve();
 			const result = jobWaitResult(await waiting);
 			card.updateResult({ ...result, isError: false });
-			expect(card.render(100).lines.map(stripAnsi).join(" ")).toContain("jobs wait (all) · 2 completed");
+			const done = card.render(100).lines.map(stripAnsi).join(" ");
+			expect(done).toContain("jobs wait (all)");
+			expect(done).toContain("2 completed");
 		} finally {
 			card.dispose();
 		}

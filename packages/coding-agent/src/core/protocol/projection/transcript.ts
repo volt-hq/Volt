@@ -2,15 +2,15 @@
  * The transcript view of a message-like entry (RFC §4.3): one shape for every
  * profile, a pure function of the entry, the log before it, and the
  * presenter set. Text is bounded per entry by the profile (`truncated` says
- * the `content` query has the rest); tool items carry their tool call's
- * arguments from the entry's ancestors, their presentation, and, on
- * full-fidelity profiles, diff and patch previews; a custom message whose
- * type has a presenter carries its presentation. On a transcript profile, a
- * work notice's text is rebuilt from its details.
+ * the `content` query has the rest); a tool item carries its presentation,
+ * presented with its tool call's arguments from the entry's ancestors; a
+ * custom message whose type has a presenter carries its presentation. On a transcript profile, a work notice's text is rebuilt from
+ * its details.
  */
 
 import type { ImageContent, JsonValue, TextContent, ToolCall } from "@hansjm10/volt-ai";
 import {
+	type ToolPresentation,
 	type TranscriptItem,
 	WORK_NOTICE_CUSTOM_TYPE,
 	WORK_TITLE_MAX_CHARS,
@@ -19,22 +19,9 @@ import {
 import { Check } from "typebox/value";
 import { extractVisibleTextContent } from "../../messages.ts";
 import type { CommittedSessionEntry } from "../../session-manager.ts";
-import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../subagents/tool-names.ts";
 import { workText } from "../../work/registry.ts";
 import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
 import { type PresentationSource, projectMessagePresentation, projectToolPresentation } from "./presentation.ts";
-import {
-	boundSummaryWithMetadata,
-	boundText,
-	getBoundedString,
-	getToolPath,
-	MUTATION_PREVIEW_LIMIT,
-	projectSubagentDetails,
-	projectToolArgs,
-	summarizeToolResult,
-	TOOL_COMMAND_LIMIT,
-	TOOL_SUMMARY_LIMIT,
-} from "./tool-view.ts";
 
 /**
  * The log before a projected entry (lookups by id, host-only records
@@ -202,33 +189,19 @@ function assistantItem(
 	};
 }
 
-const JOB_STATUSES: ReadonlySet<unknown> = new Set([
-	"running",
-	"cancelling",
-	"completed",
-	"failed",
-	"cancelled",
-	"interrupted",
-]);
+/** Longest text of a tool item, in Unicode scalars. */
+const TOOL_TEXT_MAX_SCALARS = 1_000;
 
-/**
- * The job a background start or `jobs` result names, as recorded with the
- * result: its work id and state then. The job itself is a work item; its
- * output is read by id, never from the transcript.
- */
-function projectJobDetails(
-	details: Record<string, unknown> | undefined,
-): { workId: string; status: string } | undefined {
-	const job = details !== undefined && isRecord(details.job) ? details.job : undefined;
-	if (
-		job === undefined ||
-		typeof job.id !== "string" ||
-		!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(job.id) ||
-		!JOB_STATUSES.has(job.status)
-	) {
-		return undefined;
-	}
-	return { workId: job.id, status: job.status as string };
+/** A tool item's text: its presentation's title on one line, and how the call ended. */
+function toolText(
+	presentation: ToolPresentation,
+	status: "completed" | "failed",
+): { text: string; truncated: boolean } {
+	const title =
+		typeof presentation.title === "string"
+			? presentation.title
+			: presentation.title.map((span) => span.text).join("");
+	return boundScalars(`${title.replace(/\s+/g, " ").trim()} (${status})`, TOOL_TEXT_MAX_SCALARS);
 }
 
 function toolResultItem(
@@ -247,23 +220,7 @@ function toolResultItem(
 	const call = findToolCall(entry, message.toolCallId, source);
 	const args = call === undefined ? undefined : profile.source(call).arguments;
 	const status = message.isError ? "failed" : "completed";
-	const path = getToolPath(toolName, args);
-	const details = isRecord(message.details) ? message.details : undefined;
-	const job = projectJobDetails(details);
-	const summary = job
-		? boundSummaryWithMetadata(`Background job ${job.workId}: ${job.status} (snapshot)`, TOOL_SUMMARY_LIMIT)
-		: summarizeToolResult(toolName, status, args, path);
-	const projectedArgs = projectToolArgs(toolName, args);
-	const projectedDetails = job
-		? { job }
-		: toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME
-			? projectSubagentDetails(details)
-			: undefined;
-	const output = boundScalars(extractVisibleTextContent(message.content), profile.limits.textScalars);
 	const imageCount = messageImages(message.content).length;
-	const full = profile.fidelity === "full";
-	const diffPreview = full ? getBoundedString(details, "diff", MUTATION_PREVIEW_LIMIT) : undefined;
-	const patchPreview = full ? getBoundedString(details, "patch", MUTATION_PREVIEW_LIMIT) : undefined;
 	const presentation = projectToolPresentation(
 		entry.id,
 		toolName,
@@ -278,27 +235,20 @@ function toolResultItem(
 				partial: false,
 			},
 		},
-		// The generic presentation shows the arguments the view carries: a call's own, on a full-fidelity
-		// profile, only for a tool whose arguments the view does not project.
-		projectedArgs ?? (profile.fidelity === "full" ? (args ?? {}) : {}),
+		// The generic presentation shows a call's arguments only on a full-fidelity profile.
+		profile.fidelity === "full" ? (args ?? {}) : {},
 		source,
 		profile,
 	);
+	const text = toolText(presentation, status);
 	return {
 		role: "tool",
-		text: summary.text,
-		truncated: summary.truncated,
+		text: text.text,
+		truncated: text.truncated,
 		toolCallId: message.toolCallId,
 		toolName,
 		status,
-		summary: summary.text,
-		...(path === undefined ? {} : { path }),
-		...(projectedArgs === undefined ? {} : { args: projectedArgs }),
-		...(projectedDetails === undefined ? {} : { details: projectedDetails }),
-		...(output.text.length > 0 ? { output: output.text, outputTruncated: output.truncated } : {}),
 		...(imageCount > 0 ? { imageCount } : {}),
-		...(diffPreview === undefined ? {} : { diffPreview }),
-		...(patchPreview === undefined ? {} : { patchPreview }),
 		presentation,
 	};
 }
@@ -310,15 +260,8 @@ function bashItem(
 	profile: Profile,
 ): TranscriptItem {
 	const failed = message.cancelled || (message.exitCode !== undefined && message.exitCode !== 0);
-	const command = boundSummaryWithMetadata(message.command, TOOL_COMMAND_LIMIT);
-	const parts = [`Ran command: ${command.text}`];
-	if (message.truncated) parts.push("output truncated");
-	if (message.cancelled) parts.push("cancelled");
-	else if (message.exitCode !== undefined) parts.push(`exit ${message.exitCode}`);
-	const summary = boundSummaryWithMetadata(parts.join("; "), TOOL_SUMMARY_LIMIT);
-	const output = boundScalars(message.output, profile.limits.textScalars);
 	// A user's command presents as the bash tool's would: its output, then how it ended.
-	const status = message.cancelled
+	const ending = message.cancelled
 		? "Command aborted"
 		: message.exitCode !== undefined && message.exitCode !== 0
 			? `Command exited with code ${message.exitCode}`
@@ -331,7 +274,7 @@ function bashItem(
 			argsComplete: true,
 			state: "done",
 			result: {
-				content: [{ type: "text", text: [message.output, status].filter(Boolean).join("\n\n") }],
+				content: [{ type: "text", text: [message.output, ending].filter(Boolean).join("\n\n") }],
 				isError: failed,
 				partial: false,
 			},
@@ -340,19 +283,14 @@ function bashItem(
 		source,
 		profile,
 	);
+	const status = failed ? "failed" : "completed";
+	const text = toolText(presentation, status);
 	return {
 		role: "tool",
-		text: summary.text,
-		truncated: command.truncated || summary.truncated,
+		text: text.text,
+		truncated: text.truncated,
 		toolName: "bash",
-		status: failed ? "failed" : "completed",
-		summary: summary.text,
-		...(message.command.trim().length > 0
-			? { args: { command: boundText(message.command, TOOL_COMMAND_LIMIT) } }
-			: {}),
-		...(output.text.length > 0
-			? { output: output.text, outputTruncated: output.truncated || message.truncated }
-			: {}),
+		status,
 		presentation,
 	};
 }

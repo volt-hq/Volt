@@ -1,4 +1,5 @@
 import { type ToolCall, validateToolArguments } from "@hansjm10/volt-ai";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 import type { TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { ExtensionContext, ExtensionUIContext } from "../src/core/extensions/types.ts";
@@ -10,14 +11,15 @@ import {
 	RESEARCH_OPERATION_GRANT_PROFILE,
 } from "../src/core/operation-authorization.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
+import { presentRequestUserInput } from "../src/core/tools/query-presenters.ts";
 import {
 	createRequestUserInputTool,
 	createRequestUserInputToolDefinition,
 	type RequestUserInputToolInput,
 } from "../src/core/tools/request-user-input.ts";
-import type { UserInputResponse } from "../src/core/user-input.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
-import { stripAnsi } from "../src/utils/ansi.ts";
+import { HOST_UI_POLICY, presentToolCall } from "../src/core/ui/presentation.ts";
+import type { UserInputRequest, UserInputResponse } from "../src/core/user-input.ts";
+import { promptUserInput } from "../src/modes/interactive/components/user-input-dialog.ts";
 
 const request: RequestUserInputToolInput = {
 	questions: [
@@ -33,8 +35,13 @@ const request: RequestUserInputToolInput = {
 	],
 };
 
-function context(custom: ExtensionUIContext["custom"], mode: ExtensionContext["mode"] = "tui"): ExtensionContext {
-	return { mode, hasUI: mode === "tui", ui: { custom }, abort: vi.fn() } as unknown as ExtensionContext;
+function context(mode: ExtensionContext["mode"] = "tui"): ExtensionContext {
+	return { mode, hasUI: mode === "tui", abort: vi.fn() } as unknown as ExtensionContext;
+}
+
+/** The tool, asking through `ask` as the TUI client would. */
+function tool(ask: (request: UserInputRequest, signal?: AbortSignal) => Promise<UserInputResponse> | undefined) {
+	return createRequestUserInputToolDefinition({ ask });
 }
 
 const tui = { requestRender: () => {}, terminal: { rows: 36, columns: 120 } } as unknown as TUI;
@@ -63,18 +70,18 @@ describe("request_user_input", () => {
 
 	it("rejects duplicate keys, duplicate choices, and blank content before showing UI", async () => {
 		const custom = vi.fn();
-		const tool = createRequestUserInputToolDefinition();
+		const definition = tool(custom);
 		await expect(
-			tool.execute(
+			definition.execute(
 				"q1",
 				{ questions: [request.questions[0], request.questions[0]] },
 				undefined,
 				undefined,
-				context(custom),
+				context(),
 			),
 		).rejects.toThrow("ids must be unique");
 		await expect(
-			tool.execute(
+			definition.execute(
 				"q1",
 				{
 					questions: [
@@ -86,32 +93,39 @@ describe("request_user_input", () => {
 				},
 				undefined,
 				undefined,
-				context(custom),
+				context(),
 			),
 		).rejects.toThrow("labels must be unique");
 		await expect(
-			tool.execute(
+			definition.execute(
 				"q1",
 				{ questions: [{ ...request.questions[0], question: "  " }] },
 				undefined,
 				undefined,
-				context(custom),
+				context(),
 			),
 		).rejects.toThrow("must not be blank");
 		expect(custom).not.toHaveBeenCalled();
 	});
 
 	it.each(["print", "json", "rpc"] as const)("returns unavailable without waiting in %s", async (mode) => {
-		const custom = vi.fn();
-		const result = await createRequestUserInputToolDefinition().execute(
+		const ask = vi.fn();
+		const result = await tool(ask).execute("q1", request, undefined, undefined, context(mode));
+		expect(result.details).toMatchObject({ status: "unavailable", answers: {} });
+		expect(ask).not.toHaveBeenCalled();
+	});
+
+	it("returns unavailable when no client can ask", async () => {
+		const result = await tool(() => undefined).execute("q1", request, undefined, undefined, context());
+		expect(result.details).toMatchObject({ status: "unavailable", answers: {} });
+		const unwired = await createRequestUserInputToolDefinition().execute(
 			"q1",
 			request,
 			undefined,
 			undefined,
-			context(custom, mode),
+			context(),
 		);
-		expect(result.details).toMatchObject({ status: "unavailable", answers: {} });
-		expect(custom).not.toHaveBeenCalled();
+		expect(unwired.details).toMatchObject({ status: "unavailable", answers: {} });
 	});
 
 	it.each(["answered", "skipped", "cancelled"] as const)(
@@ -124,21 +138,16 @@ describe("request_user_input", () => {
 						? { scope: { answers: ["CLI first (Recommended)", "Keep the phone out of scope"] } }
 						: {},
 			};
-			const custom: ExtensionUIContext["custom"] = async <T>() => response as T;
-			const result = await createRequestUserInputToolDefinition().execute(
-				"q1",
-				request,
-				undefined,
-				undefined,
-				context(custom),
-			);
+			const ctx = context();
+			const result = await tool(async () => response).execute("q1", request, undefined, undefined, ctx);
 			expect(result.content).toEqual([{ type: "text", text: JSON.stringify(response) }]);
 			expect(result.details).toEqual({ questions: request.questions, ...response });
 			expect(result.disposition).toBe(status === "cancelled" ? "stop" : undefined);
+			expect(ctx.abort).toHaveBeenCalledTimes(status === "cancelled" ? 1 : 0);
 		},
 	);
 
-	it("closes a pending UI on abort and removes its listener", async () => {
+	it("closes a pending dialog on abort and removes its listener", async () => {
 		const controller = new AbortController();
 		const remove = vi.spyOn(controller.signal, "removeEventListener");
 		let closeResult: unknown;
@@ -149,12 +158,12 @@ describe("request_user_input", () => {
 					resolve(result as T);
 				});
 			});
-		const pending = createRequestUserInputToolDefinition().execute(
+		const pending = tool((asked, signal) => promptUserInput(custom, asked, signal)).execute(
 			"q1",
 			request,
 			controller.signal,
 			undefined,
-			context(custom),
+			context(),
 		);
 		controller.abort();
 		await expect(pending).rejects.toThrow();
@@ -162,7 +171,7 @@ describe("request_user_input", () => {
 		expect(remove).toHaveBeenCalledWith("abort", expect.any(Function));
 	});
 
-	it("closes a deferred UI factory if cancellation won before it mounted", async () => {
+	it("closes a dialog mounted late if cancellation won before it showed", async () => {
 		const controller = new AbortController();
 		let show: (() => void) | undefined;
 		let response: unknown;
@@ -175,16 +184,14 @@ describe("request_user_input", () => {
 					});
 				};
 			});
-		const pending = createRequestUserInputToolDefinition().execute(
-			"q1",
-			request,
+		const pending = promptUserInput(
+			custom,
+			{ questions: request.questions.map((question) => ({ ...question })) },
 			controller.signal,
-			undefined,
-			context(custom),
 		);
 		controller.abort();
 		show?.();
-		await expect(pending).rejects.toThrow();
+		await expect(pending).resolves.toEqual({ status: "cancelled", answers: {} });
 		expect(response).toEqual({ status: "cancelled", answers: {} });
 	});
 
@@ -198,12 +205,12 @@ describe("request_user_input", () => {
 				},
 			],
 		};
-		const result = await createRequestUserInputToolDefinition().execute(
+		const result = await tool(async () => ({ status: "skipped", answers: {} })).execute(
 			"q1",
 			input,
 			undefined,
 			undefined,
-			context(async <T>() => ({ status: "skipped", answers: {} }) as T),
+			context(),
 		);
 		expect(result.details.questions[0]).toMatchObject({
 			header: "Scope",
@@ -212,11 +219,9 @@ describe("request_user_input", () => {
 	});
 
 	it("does not open a UI for an already aborted call", async () => {
-		const custom = vi.fn();
-		await expect(
-			createRequestUserInputToolDefinition().execute("q1", request, AbortSignal.abort(), undefined, context(custom)),
-		).rejects.toThrow();
-		expect(custom).not.toHaveBeenCalled();
+		const ask = vi.fn();
+		await expect(tool(ask).execute("q1", request, AbortSignal.abort(), undefined, context())).rejects.toThrow();
+		expect(ask).not.toHaveBeenCalled();
 	});
 
 	it("can collect preferences in Plan mode but cannot satisfy the research gate", () => {
@@ -229,33 +234,40 @@ describe("request_user_input", () => {
 		expect(operationProvidesResearchEvidence(decision.resolution)).toBe(false);
 	});
 
-	it("renders answers semantically in the transcript, with full questions on expansion", async () => {
-		const definition = createRequestUserInputToolDefinition();
+	it("presents answers semantically in the transcript, with full questions on expansion", async () => {
 		const response: UserInputResponse = {
 			status: "answered",
 			answers: { scope: { answers: ["CLI first (Recommended)"] } },
 		};
-		const result = await definition.execute(
-			"q1",
-			request,
-			undefined,
-			undefined,
-			context(async <T>() => response as T),
-		);
-		const component = new ToolExecutionComponent(
+		const result = await tool(async () => response).execute("q1", request, undefined, undefined, context());
+		const presentation = presentToolCall(
+			{ present: presentRequestUserInput, policy: HOST_UI_POLICY },
 			"request_user_input",
-			"q1",
-			request,
-			{},
-			definition,
-			tui,
-			process.cwd(),
+			{
+				args: request,
+				argsComplete: true,
+				state: "done",
+				result: { content: result.content, details: result.details, isError: false, partial: false },
+				cwd: process.cwd(),
+			},
+			PRESENTATION_MAX_SERIALIZED_BYTES,
 		);
-		component.updateResult({ ...result, isError: false }, false);
-		const collapsed = stripAnsi(component.render(80).lines.join("\n"));
-		expect(collapsed).toContain("Scope: CLI first (Recommended)");
-		expect(collapsed).not.toContain('"answers"');
-		component.setExpanded(true);
-		expect(stripAnsi(component.render(80).lines.join("\n"))).toContain("Which clients should this cover?");
+		const collapsed = JSON.stringify(presentation.summary);
+		expect(presentation.summary).toEqual([
+			{
+				type: "keyValue",
+				key: "answers",
+				items: [
+					{
+						key: "answer:0",
+						label: [{ text: "Scope", token: "accent" }],
+						value: "CLI first (Recommended)",
+					},
+				],
+			},
+		]);
+		// The answers, not the JSON result the model saw.
+		expect(collapsed).not.toContain("answered");
+		expect(JSON.stringify(presentation.body)).toContain("Which clients should this cover?");
 	});
 });

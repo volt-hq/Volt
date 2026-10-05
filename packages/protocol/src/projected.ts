@@ -61,17 +61,19 @@ export const TranscriptAssistantPartSchema = Type.Union([
 /**
  * The transcript view of a message-like entry: one shape for every profile.
  * Text is bounded per entry by the profile; `truncated` says the full text is
- * available through the `content` query. Tool items carry the tool call's
- * arguments from the fold and, on the local profile, diff and patch previews.
+ * available through the `content` query. A tool item's `text` is its
+ * presentation's title and how the call ended; its result's content is
+ * fetched with the `content` query.
  *
  * `presentation` is how the entry looks as `UiNode` data, computed from the
  * presenters the host has registered when the entry is projected (RFC §4.3):
  * every tool item has a `ToolPresentation` (the generic one for a tool
  * without a presenter); a custom message whose type has a message presenter
- * has a `MessagePresentation`. It is bounded by the profile. On the remote
- * profile it is presented from the redacted entry and shows what its
- * presenter shows of the call (a written file, an edit's diff), without image
- * data; the generic presentation shows only the arguments the view carries.
+ * has a `MessagePresentation`. Clients render tool calls from it alone. It is
+ * bounded by the profile. On the remote profile it is presented from the
+ * redacted entry and shows what its presenter shows of the call (a written
+ * file, an edit's diff), without image data; the generic presentation shows
+ * no arguments there.
  */
 export const TranscriptItemSchema = Type.Object(
 	{
@@ -85,16 +87,8 @@ export const TranscriptItemSchema = Type.Object(
 		toolCallId: Type.Optional(Type.String()),
 		toolName: Type.Optional(Type.String()),
 		status: Type.Optional(stringEnum(["completed", "failed"])),
-		summary: Type.Optional(Type.String()),
-		path: Type.Optional(Type.String()),
-		args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		output: Type.Optional(Type.String()),
-		outputTruncated: Type.Optional(Type.Boolean()),
 		parts: Type.Optional(Type.Array(TranscriptAssistantPartSchema)),
 		stopReason: Type.Optional(StopReasonSchema),
-		diffPreview: Type.Optional(Type.String()),
-		patchPreview: Type.Optional(Type.String()),
 		/** A tool item's `ToolPresentation`, or a presented custom message's `MessagePresentation`. */
 		presentation: Type.Optional(Type.Union([ToolPresentationSchema, MessagePresentationSchema])),
 	},

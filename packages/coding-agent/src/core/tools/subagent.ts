@@ -2,15 +2,6 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, TextContent } from "@hansjm10/volt-ai";
-import {
-	type Component,
-	createRenderFrame,
-	Markdown,
-	type RenderFrame,
-	Text,
-	truncateToWidth,
-	visibleWidth,
-} from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
@@ -39,11 +30,11 @@ import type {
 	SubagentWorkBinding,
 } from "../subagents/index.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
-import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
 import type { WorkKindDefinition } from "../work/registry.ts";
 import { createBackgroundCleanupReceipt } from "./background-cleanup.ts";
 import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
+import { presentSubagent, presentSubagentRegistry } from "./work-presenters.ts";
 
 export const DEFAULT_SUBAGENT_OUTPUT_MAX_BYTES = 50 * 1024;
 export const DEFAULT_SUBAGENT_AGGREGATE_OUTPUT_MAX_BYTES = 100 * 1024;
@@ -416,12 +407,6 @@ interface SubagentTaskExecutionResult {
 interface SubagentExecutionTiming {
 	startedAt: number;
 	durationMs?: number;
-}
-
-interface SubagentRenderState {
-	interval?: ReturnType<typeof setInterval>;
-	summary?: SubagentConversationSummaryComponent;
-	placeholder?: Text;
 }
 
 function isAssistantMessage(message: unknown): message is AssistantMessage {
@@ -1745,71 +1730,12 @@ async function mapWithConcurrencyLimit<TIn, TOut>(
 	});
 }
 
-type SubagentDisplayStatus = SubagentToolDetails["status"] | "pending";
-
-function statusIcon(status: SubagentDisplayStatus, theme: Theme): string {
-	switch (status) {
-		case "completed":
-			return theme.fg("success", "✓");
-		case "failed":
-			return theme.fg("error", "✗");
-		case "cancelled":
-		case "interrupted":
-			return theme.fg("warning", "○");
-		case "suspended":
-			return theme.fg("warning", "‖");
-		case "running":
-			return theme.fg("accent", "…");
-		case "partial":
-			return theme.fg("warning", "◐");
-		case "pending":
-			return theme.fg("muted", "○");
-	}
-	return theme.fg("muted", "?");
-}
-
-function statusText(status: SubagentDisplayStatus, theme: Theme): string {
-	const color =
-		status === "completed"
-			? "success"
-			: status === "partial" || status === "running"
-				? "warning"
-				: status === "pending"
-					? "muted"
-					: status === "cancelled" || status === "interrupted" || status === "suspended"
-						? "warning"
-						: "error";
-	const label =
-		status === "completed"
-			? "done"
-			: status === "cancelled"
-				? "stopped"
-				: status === "partial"
-					? "finishing"
-					: status;
-	return theme.fg(color, label);
-}
-
 function getTextContent(result: AgentToolResult<SubagentToolDetails>): string {
 	return result.content
 		.filter((part): part is TextContent => part.type === "text")
 		.map((part) => part.text)
 		.join("\n")
 		.trim();
-}
-
-function getTaskInput(
-	args: SubagentToolInput | undefined,
-	mode: SubagentToolMode,
-	index: number,
-): SubagentToolTaskInput | undefined {
-	if (!args) {
-		return undefined;
-	}
-	if (mode === "single") {
-		return args.agent && args.task ? { agent: args.agent, task: args.task } : undefined;
-	}
-	return mode === "parallel" ? args.tasks?.[index] : args.chain?.[index];
 }
 
 function formatSummary(details: SubagentToolDetails): string {
@@ -1830,422 +1756,9 @@ function formatSummary(details: SubagentToolDetails): string {
 	return parts.join(", ");
 }
 
-function formatTiming(
-	timing: { startedAt?: number; durationMs?: number } | undefined,
-	isPartial: boolean,
-	theme: Theme,
-): string {
-	if (!timing) {
-		return "";
-	}
-	if (timing.durationMs !== undefined) {
-		return theme.fg("dim", formatDuration(timing.durationMs));
-	}
-	if (isPartial && timing.startedAt !== undefined) {
-		return theme.fg("dim", formatDuration(Date.now() - timing.startedAt));
-	}
-	return "";
-}
-
-function outputWarning(output: SubagentToolOutputDetails | undefined, theme: Theme): string | undefined {
-	if (!output?.truncated) {
-		return undefined;
-	}
-	return theme.fg("warning", `[Truncated: ${output.omittedBytes ?? 0} bytes omitted]`);
-}
-
-interface SubagentConversationItem {
-	index: number;
-	agent: SubagentToolAgentDetails;
-	status: SubagentDisplayStatus;
-	input?: SubagentToolTaskInput;
-	timing?: { startedAt?: number; durationMs?: number };
-	usage?: SubagentToolUsageDetails;
-	output?: SubagentToolOutputDetails;
-	error?: SubagentToolErrorDetails;
-	toolCallsLive?: number;
-	tokensLive?: number;
-	currentActivity?: string;
-	children?: SubagentTreeNode[];
-}
-
-/** Rendered roster rows per subagent call; overflow collapses to one summary line. */
-const SUBAGENT_ROSTER_MAX_VISIBLE = 16;
-/** Rendered nested-tree node budget per roster item; overflow collapses to "…". */
-const SUBAGENT_TREE_RENDER_MAX_NODES = 32;
-
-interface SubagentTreeRenderBudget {
-	remaining: number;
-	marked: boolean;
-}
-
-/** First MAX_VISIBLE items with non-completed runs prioritized, in original order. */
-function selectVisibleRosterItems(items: SubagentConversationItem[]): SubagentConversationItem[] {
-	if (items.length <= SUBAGENT_ROSTER_MAX_VISIBLE) {
-		return items;
-	}
-	const prioritized = [...items].sort(
-		(left, right) => Number(left.status === "completed") - Number(right.status === "completed"),
-	);
-	const selected = new Set(prioritized.slice(0, SUBAGENT_ROSTER_MAX_VISIBLE));
-	return items.filter((item) => selected.has(item));
-}
-
-function formatCompactCount(value: number): string {
-	if (value < 1_000) return String(value);
-	if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 100_000 ? 1 : 0).replace(/\.0$/, "")}k`;
-	return `${(value / 1_000_000).toFixed(value < 100_000_000 ? 1 : 0).replace(/\.0$/, "")}m`;
-}
-
-function pluralize(count: number, singular: string, plural = `${singular}s`): string {
-	return `${count} ${count === 1 ? singular : plural}`;
-}
-
-function renderRosterSummary(items: readonly SubagentConversationItem[], currentTheme: Theme): string {
-	const counts = { running: 0, done: 0, failed: 0, stopped: 0, pending: 0 };
-	for (const item of items) {
-		if (item.status === "completed") counts.done += 1;
-		else if (item.status === "failed") counts.failed += 1;
-		else if (item.status === "cancelled" || item.status === "interrupted" || item.status === "suspended") {
-			counts.stopped += 1;
-		} else if (item.status === "pending") counts.pending += 1;
-		else counts.running += 1;
-	}
-	const parts: string[] = [];
-	if (counts.running > 0) parts.push(currentTheme.fg("warning", `${counts.running} running`));
-	if (counts.pending > 0) parts.push(currentTheme.fg("muted", `${counts.pending} pending`));
-	if (counts.done > 0) parts.push(currentTheme.fg("success", `${counts.done} done`));
-	if (counts.failed > 0) parts.push(currentTheme.fg("error", `${counts.failed} failed`));
-	if (counts.stopped > 0) parts.push(currentTheme.fg("warning", `${counts.stopped} stopped`));
-	return parts.join(currentTheme.fg("dim", " · "));
-}
-
-function appendIndentedMarkdown(
-	lines: string[],
-	text: string,
-	width: number,
-	currentTheme: Theme,
-	branchPrefix: string,
-): void {
-	const prefix = currentTheme.fg("muted", branchPrefix);
-	const rendered = new Markdown(text, 3, 0, getMarkdownTheme(), {
-		color: (value) => currentTheme.fg("toolOutput", value),
-	}).render(Math.max(1, width - visibleWidth(prefix))).lines;
-	for (const line of rendered) {
-		lines.push(truncateToWidth(`${prefix}${line.replace(/ +$/, "")}`, width, currentTheme.fg("dim", "…")));
-	}
-}
-
-class SubagentConversationSummaryComponent implements Component {
-	private args: SubagentToolInput | undefined;
-	private details: SubagentToolDetails | undefined;
-	private resultText = "";
-	private isPartial = true;
-	private resultIsError = false;
-	private expanded = false;
-	private executionStarted = false;
-	private currentTheme: Theme;
-	// The whole UI tree re-renders every TUI frame, so recomputing the roster and
-	// nested trees per frame dominates frame time once many subagents exist.
-	// Rendered lines are cached and recomputed only when inputs change or the
-	// host repaint tick invalidates (which advances elapsed-time displays).
-	private cachedWidth = -1;
-	private cachedLines: string[] | undefined;
-	private lastResultContent: unknown;
-
-	constructor(args: SubagentToolInput | undefined, currentTheme: Theme) {
-		this.args = args;
-		this.currentTheme = currentTheme;
-	}
-
-	setArgs(args: SubagentToolInput | undefined): void {
-		if (this.args === args) {
-			return;
-		}
-		this.args = args;
-		this.clearCache();
-	}
-
-	setTheme(currentTheme: Theme): void {
-		if (this.currentTheme === currentTheme) {
-			return;
-		}
-		this.currentTheme = currentTheme;
-		this.clearCache();
-	}
-
-	setRenderState(expanded: boolean, executionStarted: boolean): void {
-		if (this.expanded === expanded && this.executionStarted === executionStarted) {
-			return;
-		}
-		this.expanded = expanded;
-		this.executionStarted = executionStarted;
-		this.clearCache();
-	}
-
-	setResult(result: AgentToolResult<SubagentToolDetails>, isPartial: boolean, isError: boolean): void {
-		if (
-			this.lastResultContent === result.content &&
-			this.details === result.details &&
-			this.isPartial === isPartial &&
-			this.resultIsError === isError
-		) {
-			return;
-		}
-		this.lastResultContent = result.content;
-		this.details = result.details;
-		this.resultText = getTextContent(result);
-		this.isPartial = isPartial;
-		this.resultIsError = isError;
-		this.clearCache();
-	}
-
-	invalidate(): void {
-		this.clearCache();
-	}
-
-	private clearCache(): void {
-		this.cachedWidth = -1;
-		this.cachedLines = undefined;
-	}
-
-	private getItems(): SubagentConversationItem[] {
-		if (this.details?.mode === "single" || this.details?.mode === "follow" || this.details?.mode === "resume") {
-			return [
-				{
-					index: 0,
-					agent: this.details.agent ?? { name: this.args?.agent ?? "subagent" },
-					status: this.details.status,
-					input: getTaskInput(this.args, "single", 0),
-					timing: this.details,
-					usage: this.details.usage,
-					output: this.details.output,
-					error: this.details.error,
-					...(this.details.toolCalls !== undefined ? { toolCallsLive: this.details.toolCalls } : {}),
-					...(this.details.tokens !== undefined ? { tokensLive: this.details.tokens } : {}),
-					...(this.details.currentActivity ? { currentActivity: this.details.currentActivity } : {}),
-					...(this.details.children ? { children: this.details.children } : {}),
-				},
-			];
-		}
-
-		if (this.details) {
-			const items = this.details.mode === "chain" ? (this.details.steps ?? []) : (this.details.tasks ?? []);
-			if (items.length > 0) {
-				return items.map((item) => ({
-					index: item.index,
-					agent: item.agent,
-					status: item.status,
-					input: getTaskInput(this.args, this.details!.mode, item.index),
-					timing: item,
-					usage: item.usage,
-					output: item.output,
-					error: item.error,
-					...(item.toolCalls !== undefined ? { toolCallsLive: item.toolCalls } : {}),
-					...(item.tokens !== undefined ? { tokensLive: item.tokens } : {}),
-					...(item.currentActivity ? { currentActivity: item.currentActivity } : {}),
-					...(item.children ? { children: item.children } : {}),
-				}));
-			}
-		}
-
-		const inputs =
-			this.args?.tasks ??
-			this.args?.chain ??
-			(this.args?.agent ? [{ agent: this.args.agent, task: this.args.task ?? "" }] : []);
-		const displayInputs =
-			this.resultIsError && inputs.length === 0
-				? [{ agent: this.args?.agent ?? "subagent", task: this.args?.task ?? "" }]
-				: inputs;
-		return displayInputs.map((input, index) => ({
-			index,
-			agent: { name: input.agent },
-			status: this.resultIsError
-				? index === 0
-					? "failed"
-					: "pending"
-				: (this.details?.status ?? (this.executionStarted ? "running" : "pending")),
-			input,
-			...(this.resultIsError && index === 0 && this.resultText ? { error: { message: this.resultText } } : {}),
-		}));
-	}
-
-	/** Render nested delegation nodes with box-drawing branches under an item. */
-	private renderTreeNodes(
-		lines: string[],
-		nodes: readonly SubagentTreeNode[],
-		prefix: string,
-		width: number,
-		depth: number,
-		budget: SubagentTreeRenderBudget,
-	): void {
-		if (depth >= SUBAGENT_TREE_MAX_DEPTH) {
-			return;
-		}
-		for (const [position, node] of nodes.entries()) {
-			if (budget.remaining <= 0) {
-				if (!budget.marked) {
-					budget.marked = true;
-					lines.push(truncateToWidth(this.currentTheme.fg("muted", `${prefix}└─ …`), width, ""));
-				}
-				return;
-			}
-			const last = position === nodes.length - 1;
-			const branch = last ? "└─" : "├─";
-			const continuation = last ? "  " : "│ ";
-			const agentLabel = this.currentTheme.bold(this.currentTheme.fg("text", node.agent.name));
-			const task = node.task?.replace(/\s+/g, " ").trim();
-			const taskSuffix = task ? this.currentTheme.fg("muted", ` · ${task}`) : "";
-			lines.push(
-				truncateToWidth(
-					`${this.currentTheme.fg("muted", `${prefix}${branch} `)}${statusIcon(node.status, this.currentTheme)} ${agentLabel}${taskSuffix}`,
-					width,
-					this.currentTheme.fg("dim", "…"),
-				),
-			);
-
-			const metadata: string[] = [statusText(node.status, this.currentTheme)];
-			if (node.toolCalls !== undefined) {
-				metadata.push(this.currentTheme.fg("muted", pluralize(node.toolCalls, "tool call")));
-			}
-			const timing = formatTiming(
-				{
-					...(node.startedAt !== undefined ? { startedAt: node.startedAt } : {}),
-					...(node.durationMs !== undefined ? { durationMs: node.durationMs } : {}),
-				},
-				node.status === "running",
-				this.currentTheme,
-			);
-			if (timing) metadata.push(timing);
-			if (node.tokens !== undefined) {
-				metadata.push(this.currentTheme.fg("dim", `${formatCompactCount(node.tokens)} tokens`));
-			}
-			if (node.status === "running" && node.currentActivity) {
-				metadata.push(this.currentTheme.fg("accent", node.currentActivity.replace(/\s+/g, " ")));
-			}
-			if (metadata.length > 1 || node.status !== "running") {
-				lines.push(
-					truncateToWidth(
-						`${this.currentTheme.fg("muted", `${prefix}${continuation}  `)}${metadata.join(this.currentTheme.fg("dim", " · "))}`,
-						width,
-						this.currentTheme.fg("dim", "…"),
-					),
-				);
-			}
-
-			budget.remaining -= 1;
-			if (node.children && node.children.length > 0) {
-				this.renderTreeNodes(lines, node.children, `${prefix}${continuation}`, width, depth + 1, budget);
-			}
-		}
-	}
-
-	render(width: number): RenderFrame {
-		if (this.cachedLines && this.cachedWidth === width) {
-			return createRenderFrame(this.cachedLines);
-		}
-		const lines = this.renderLines(width);
-		this.cachedWidth = width;
-		this.cachedLines = lines;
-		return createRenderFrame(lines);
-	}
-
-	private renderLines(width: number): string[] {
-		const safeWidth = Math.max(1, width);
-		const isRegistryQuery =
-			this.details?.mode === "list" ||
-			(!this.details &&
-				(this.args?.list !== undefined || this.args?.follow !== undefined || this.args?.resume !== undefined));
-		if (isRegistryQuery) {
-			const title = this.currentTheme.bold(this.currentTheme.fg("accent", "Subagent registry"));
-			const summary = this.currentTheme.fg("muted", this.details ? formatSummary(this.details) : "querying…");
-			const lines = [truncateToWidth(`${title}  ${summary}`, safeWidth, "")];
-			if (this.expanded && this.resultText) {
-				appendIndentedMarkdown(lines, this.resultText, safeWidth, this.currentTheme, "  ");
-			}
-			return lines.map((line) =>
-				visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, this.currentTheme.fg("dim", "…")) : line,
-			);
-		}
-		const items = this.getItems();
-		if (items.length === 0) {
-			return [truncateToWidth(this.currentTheme.fg("muted", "  Preparing subagent…"), safeWidth, "")];
-		}
-
-		const lines: string[] = [];
-		const mode = this.details?.mode ?? (this.args?.tasks ? "parallel" : this.args?.chain ? "chain" : "single");
-		const title = this.currentTheme.bold(
-			this.currentTheme.fg("accent", items.length === 1 ? "Subagent" : "Subagents"),
-		);
-		const modeLabel = items.length > 1 ? this.currentTheme.fg("dim", ` · ${mode}`) : "";
-		const summary = renderRosterSummary(items, this.currentTheme);
-		lines.push(truncateToWidth(`${title}${modeLabel}${summary ? `  ${summary}` : ""}`, safeWidth, ""));
-
-		const visibleItems = selectVisibleRosterItems(items);
-		const hiddenCount = items.length - visibleItems.length;
-		for (const [position, item] of visibleItems.entries()) {
-			const last = position === visibleItems.length - 1 && hiddenCount === 0;
-			const branch = last ? "└─" : "├─";
-			const continuation = last ? "  " : "│ ";
-			const agentLabel = this.currentTheme.bold(this.currentTheme.fg("text", item.agent.name));
-			const task = item.input?.task?.replace(/\s+/g, " ").trim();
-			const taskPrefix = `${this.currentTheme.fg("muted", `${branch} `)}${statusIcon(item.status, this.currentTheme)} ${agentLabel}`;
-			const taskSuffix = task ? this.currentTheme.fg("muted", ` · ${task}`) : "";
-			lines.push(truncateToWidth(`${taskPrefix}${taskSuffix}`, safeWidth, this.currentTheme.fg("dim", "…")));
-
-			const metadata: string[] = [statusText(item.status, this.currentTheme)];
-			const toolCalls = item.usage?.messages.toolCalls ?? item.toolCallsLive;
-			if (toolCalls !== undefined) metadata.push(this.currentTheme.fg("muted", pluralize(toolCalls, "tool call")));
-			const timing = formatTiming(item.timing, this.isPartial, this.currentTheme);
-			if (timing) metadata.push(timing);
-			const tokens = item.usage?.tokens.total ?? item.tokensLive;
-			if (tokens !== undefined) metadata.push(this.currentTheme.fg("dim", `${formatCompactCount(tokens)} tokens`));
-			if (item.status === "running" && item.currentActivity) {
-				metadata.push(this.currentTheme.fg("accent", item.currentActivity.replace(/\s+/g, " ")));
-			}
-			if (item.error?.message) metadata.push(this.currentTheme.fg("error", item.error.message.replace(/\s+/g, " ")));
-			lines.push(
-				truncateToWidth(
-					`${this.currentTheme.fg("muted", `${continuation}  `)}${metadata.join(this.currentTheme.fg("dim", " · "))}`,
-					safeWidth,
-					this.currentTheme.fg("dim", "…"),
-				),
-			);
-
-			const warning = outputWarning(item.output, this.currentTheme);
-			if (warning) {
-				lines.push(truncateToWidth(`${continuation}  ${warning}`, safeWidth, this.currentTheme.fg("dim", "…")));
-			}
-			if (item.children && item.children.length > 0) {
-				this.renderTreeNodes(lines, item.children, `${continuation} `, safeWidth, 1, {
-					remaining: SUBAGENT_TREE_RENDER_MAX_NODES,
-					marked: false,
-				});
-			}
-			if (!this.expanded) continue;
-			const outputText = item.output?.text ?? (items.length === 1 && !this.isPartial ? this.resultText : undefined);
-			if (outputText && outputText.trim() !== item.error?.message?.trim()) {
-				appendIndentedMarkdown(lines, outputText, safeWidth, this.currentTheme, continuation);
-			}
-		}
-		if (hiddenCount > 0) {
-			lines.push(
-				truncateToWidth(
-					this.currentTheme.fg("muted", `└─ …and ${hiddenCount} more agent${hiddenCount === 1 ? "" : "s"}`),
-					safeWidth,
-					"",
-				),
-			);
-		}
-		return lines.map((line) =>
-			visibleWidth(line) > safeWidth ? truncateToWidth(line, safeWidth, this.currentTheme.fg("dim", "…")) : line,
-		);
-	}
-}
-
 export function createSubagentToolDefinition(
 	_options: SubagentToolOptions,
-): ToolDefinition<typeof subagentSchema, SubagentToolDetails, SubagentRenderState> {
+): ToolDefinition<typeof subagentSchema, SubagentToolDetails> {
 	const options = _options;
 	const registryModesRequested = options.includeRegistryModes ?? true;
 	const includeListMode =
@@ -2897,42 +2410,7 @@ export function createSubagentToolDefinition(
 				}
 			}
 		},
-		// The result renderer shows per-subagent running/completed durations, so
-		// the generic tool-header duration suffix is suppressed.
-		rendersDuration: true,
-		renderShell: "self",
-		renderCall(args, theme, context) {
-			const summary = context.state.summary ?? new SubagentConversationSummaryComponent(args, theme);
-			context.state.summary = summary;
-			summary.setTheme(theme);
-			summary.setArgs(args);
-			summary.setRenderState(context.expanded, context.executionStarted);
-			return summary;
-		},
-		renderResult(result, options, _theme, context) {
-			const state = context.state;
-			state.summary?.setResult(result, options.isPartial, context.isError);
-			if (options.isPartial && !context.isError) {
-				// Tick once a second while running so elapsed times update live.
-				// The tick also invalidates the summary's render cache, which is
-				// what advances elapsed-time displays between progress updates.
-				if (!state.interval) {
-					state.interval = setInterval(() => context.invalidate(), 1000);
-					state.interval.unref?.();
-				}
-			} else if (state.interval) {
-				clearInterval(state.interval);
-				state.interval = undefined;
-			}
-			state.placeholder ??= new Text("", 0, 0);
-			return state.placeholder;
-		},
-		disposeRenderState(state) {
-			if (state.interval) {
-				clearInterval(state.interval);
-				state.interval = undefined;
-			}
-		},
+		present: presentSubagent,
 	};
 }
 
@@ -2995,6 +2473,7 @@ export function createSubagentRegistryToolDefinition(
 		],
 		parameters: createSubagentRegistrySchema(includeListMode, includeFollowMode),
 		executionMode: "sequential",
+		present: presentSubagentRegistry,
 		async execute(_toolCallId, params, signal, onUpdate) {
 			if (signal?.aborted) {
 				throw new Error("Operation aborted");

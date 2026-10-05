@@ -12,15 +12,14 @@ import { resolvePath } from "../../utils/paths.ts";
 import { PRIVATE_DIRECTORY_MODE, PRIVATE_FILE_MODE } from "../../utils/private-files.ts";
 import type { AgentSessionEvent, AgentSessionState, SessionStats } from "../agent-session.ts";
 import { calculateContextTokens, estimateContextTokens } from "../compaction/index.ts";
-import { exportSessionToHtml, type ToolHtmlRenderer } from "../export-html/index.ts";
-import { createToolHtmlRenderer } from "../export-html/tool-renderer.ts";
-import type { ContextUsage, ToolDefinition } from "../extensions/index.ts";
+import { exportSessionToHtml } from "../export-html/index.ts";
+import type { ContextUsage } from "../extensions/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { getPromptCacheRefreshUsage } from "../prompt-cache-keepalive.ts";
 import { getLatestCompactionEntry, type SessionManager, serializeSessionJsonlSnapshot } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
-import { getThemeByName, theme } from "../theme/runtime.ts";
+import { getThemeByName } from "../theme/runtime.ts";
 import type { PresenterSet } from "../ui/presentation.ts";
 
 /** The text of a user message's content, without its images. */
@@ -91,7 +90,6 @@ export interface SessionInfoHost {
 	activeTools(): readonly AgentTool[];
 	/** The runtime state an HTML export renders. */
 	state(): AgentSessionState;
-	getToolDefinition(name: string): ToolDefinition | undefined;
 	/** The presenters tool calls and custom messages export with. */
 	presenters(): PresenterSet;
 	emit(event: AgentSessionEvent): void;
@@ -303,17 +301,9 @@ export class SessionInfo {
 		const configuredThemeName = this.host.settingsManager.getTheme();
 		const themeName = configuredThemeName && getThemeByName(configuredThemeName) ? configuredThemeName : undefined;
 
-		// Create tool renderer if we have an extension runner (for custom tool HTML rendering)
-		const toolRenderer: ToolHtmlRenderer = createToolHtmlRenderer({
-			getToolDefinition: (name) => this.host.getToolDefinition(name),
-			theme,
-			cwd: this.host.sessionManager.getCwd(),
-		});
-
 		return await exportSessionToHtml(this.host.sessionManager, this.host.state(), {
 			outputPath,
 			themeName,
-			toolRenderer,
 			presenters: this.host.presenters(),
 		});
 	}

@@ -20,11 +20,10 @@ import {
 	jobResult,
 } from "../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
+import { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
 import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
-import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
-import { WorkNoticeComponent } from "../src/modes/interactive/components/work-notice.ts";
 import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -118,7 +117,6 @@ async function createFixture(
 	vi.spyOn(harness.session, "work", "get").mockReturnValue(runtime.work);
 	const getToolDefinition = harness.session.getToolDefinition.bind(harness.session);
 	const bash = withBackgroundJobs(createBashToolDefinition(harness.tempDir), {
-		jobs: source,
 		start: (job) => jobs.start(job),
 	});
 	const jobsTool = createJobsToolDefinition({ jobs });
@@ -390,7 +388,7 @@ describe("interactive background jobs", () => {
 			);
 			await access.handleEvent({ type: "message_start", message: notice });
 			access.jobsRenderCoalescer?.flush();
-			const notification = access.chatContainer.children.find((child) => child instanceof WorkNoticeComponent);
+			const notification = access.chatContainer.children.find((child) => child instanceof PresentedMessageComponent);
 			expect(
 				stripAnsi(notification?.render(120).lines.join(" ") ?? "")
 					.replace(/\s+/g, " ")
@@ -419,18 +417,19 @@ describe("interactive background jobs", () => {
 			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: true });
 			await terminal.waitForRender();
 			const collapsed = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			// The launch's title and its job's line, and the notice.
-			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(3);
+			// The launch's title and its job's line, the notice, and the wait's table row.
+			expect(collapsed.match(/Run focused integration checks/g)).toHaveLength(4);
 			expect(collapsed.match(/final output/g)).toHaveLength(1);
 			expect(collapsed).toContain("$ Run focused integration checks");
 			expect(collapsed).toContain("Failed · Run focused integration checks");
-			expect(collapsed).toContain("jobs wait · 1 failed");
+			expect(collapsed).toContain(`jobs wait ${job.id}`);
+			expect(collapsed).toContain("1 failed");
 			expect(collapsed).not.toContain("terminal (any)");
 			const saved = harness.sessionManager.getConversationState().context;
 			terminal.sendInput("\x0f");
 			await terminal.waitForRender();
 			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
-			expect(expanded).toContain("jobs wait · 1 failed");
+			expect(expanded).toContain(`jobs wait ${job.id}`);
 			expect(expanded).toContain(job.id);
 			expect(expanded.match(/final output/g)).toHaveLength(2);
 			terminal.sendInput("\x0f");
@@ -595,19 +594,21 @@ describe("interactive background jobs", () => {
 				access.jobsRenderCoalescer?.flush();
 				await terminal.waitForRender();
 				const card = access.chatContainer.children
-					.filter((child) => child instanceof ToolExecutionComponent)
+					.filter((child) => child instanceof PresentedToolComponent)
 					.at(-1);
 				if (!card) throw new Error("Expected pending wait card");
 				const output = stripAnsi(card.render(80).lines.join("\n"));
 				expect(output).toContain("Waiting for background job");
-				expect(output).toContain(job.label);
-				expect(output).toContain(`live wait output ${index}`);
-				expect(output).not.toContain("Running at capture");
+				expect(output).toContain("jobs wait");
+				// The job's own launch card above shows it live, as the job reports it.
+				const transcript = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
+				expect(transcript).toContain(`Running · ${job.label}`);
+				expect(transcript).not.toContain("Running at capture");
 			}
 			finish();
 			const result = await waiting;
 			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: false });
-			const card = access.chatContainer.children.filter((child) => child instanceof ToolExecutionComponent).at(-1);
+			const card = access.chatContainer.children.filter((child) => child instanceof PresentedToolComponent).at(-1);
 			if (!card) throw new Error("Expected completed wait card");
 			const collapsed = stripAnsi(card.render(80).lines.join("\n"));
 			expect(collapsed).toContain("completed");
@@ -785,14 +786,14 @@ describe("interactive background jobs", () => {
 		const fixture = await createFixture("regular");
 		const { access, jobs, job, update } = fixture;
 		const launch = await acknowledgeLaunch(fixture);
-		const inspections: ToolExecutionComponent[] = [];
+		const inspections: PresentedToolComponent[] = [];
 		for (let index = 0; index < 200; index++) {
 			const toolCallId = `completed-inspection-${index}`;
 			const args: { action: "read"; id: string } | { action: "wait"; ids: string[]; timeoutMs: number } =
 				index % 2 === 0 ? { action: "read", id: job.id } : { action: "wait", ids: [job.id], timeoutMs: 0 };
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
 			const component = access.chatContainer.children.at(-1);
-			if (!(component instanceof ToolExecutionComponent)) throw new Error("Expected inspection component");
+			if (!(component instanceof PresentedToolComponent)) throw new Error("Expected inspection component");
 			await access.handleEvent({
 				type: "tool_execution_end",
 				toolCallId,
@@ -812,7 +813,7 @@ describe("interactive background jobs", () => {
 			args: { action: "wait", ids: [job.id] },
 		});
 		const pending = access.chatContainer.children.at(-1);
-		if (!(pending instanceof ToolExecutionComponent)) throw new Error("Expected pending inspection");
+		if (!(pending instanceof PresentedToolComponent)) throw new Error("Expected pending inspection");
 		const pendingInvalidation = vi.spyOn(pending, "invalidate");
 		for (let index = 0; index < 10; index++)
 			update({ content: [{ type: "text", text: `latest live output ${index}` }] });
@@ -821,8 +822,9 @@ describe("interactive background jobs", () => {
 		for (const invalidate of invalidations) expect(invalidate).not.toHaveBeenCalled();
 		expect(launchInvalidation).toHaveBeenCalled();
 		expect(pendingInvalidation).toHaveBeenCalled();
+		// The launch card shows the job's live output; a pending wait shows what it waits for.
 		expect(stripAnsi(launch.render(80).lines.join("\n"))).toContain("latest live output 9");
-		expect(stripAnsi(pending.render(80).lines.join("\n"))).toContain("latest live output 9");
+		expect(stripAnsi(pending.render(80).lines.join("\n"))).toContain("Waiting for background job");
 		expect(stripAnsi(inspections[0].render(80).lines.join("\n"))).not.toContain("first live output");
 		inspections[0].setExpanded(true);
 		expect(stripAnsi(inspections[0].render(80).lines.join("\n"))).toContain("first live output");

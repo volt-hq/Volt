@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import { waitForChildProcess } from "../../utils/child-process.ts";
 import {
@@ -10,9 +9,21 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { Theme } from "../theme/runtime.ts";
+import { outputLines, resultText, type ToolPresenter } from "../ui/presentation.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
-import { invalidArgText, str } from "./render-utils.ts";
+import {
+	argSpan,
+	byteLimitText,
+	failureOutput,
+	isFailed,
+	isRecord,
+	linesOutput,
+	oneLine,
+	presentationOf,
+	titleSpans,
+	truncationOf,
+	warningNode,
+} from "./present-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult } from "./truncate.ts";
 
@@ -784,16 +795,52 @@ function createInspectionEnvironment(): NodeJS.ProcessEnv {
 	};
 }
 
-function renderInspectionCall(args: InspectionToolInput | undefined, theme: Theme): string {
-	if (!args) return theme.fg("error", "[invalid inspect arguments]");
-	try {
-		const command = resolveInspectionCommand(args);
-		return `${theme.fg("toolTitle", theme.bold("inspect"))} ${theme.fg("accent", command.display)}`;
-	} catch {
-		const operation = str(args.operation);
-		return `${theme.fg("toolTitle", theme.bold("inspect"))} ${operation === null ? invalidArgText(theme) : theme.fg("accent", operation || "...")}`;
+/** Inspection output lines inspect shows collapsed. */
+const INSPECT_SUMMARY_LINES = 10;
+
+/**
+ * inspect: the command the call resolves to (its operation while the
+ * arguments do not resolve), its output as terminal lines (collapsed, the
+ * first ten), and how it was truncated.
+ */
+export const presentInspect: ToolPresenter = (input) => {
+	const { operation, args } = input.args;
+	let target = argSpan(input.args, "operation");
+	if (
+		typeof operation === "string" &&
+		(args === undefined || (Array.isArray(args) && args.every((arg) => typeof arg === "string")))
+	) {
+		try {
+			const display = resolveInspectionCommand({ operation, args } as InspectionToolInput).display;
+			target = { text: oneLine(display), token: "accent" };
+		} catch {
+			// Arguments that do not resolve (yet) show the operation.
+		}
 	}
-}
+	const title = titleSpans("inspect", target);
+	if (input.state !== "done") return presentationOf(title, { showsDuration: true });
+	if (isFailed(input)) {
+		return presentationOf(title, { ...failureOutput(input, INSPECT_SUMMARY_LINES), showsDuration: true });
+	}
+	const details = isRecord(input.result?.details) ? input.result.details : {};
+	const truncation = truncationOf(details);
+	const text = resultText(input.result)
+		.replace(/\n\n\[Showing \d+ of \d+ lines \([^\n]*\)\. Full output: [^\n]*\]\s*$/, "")
+		.trim();
+	const notes = [
+		...(truncation === undefined
+			? []
+			: [
+					`Truncated: showing ${String(truncation.outputLines)} of ${String(truncation.totalLines)} lines (${byteLimitText(truncation)} limit)`,
+				]),
+		...(typeof details.fullOutputPath === "string" ? [`Full output: ${details.fullOutputPath}`] : []),
+	];
+	const warnings = notes.length === 0 ? [] : [warningNode(`[${notes.join(". ")}]`)];
+	return presentationOf(title, {
+		...linesOutput(outputLines(text), INSPECT_SUMMARY_LINES, [], warnings),
+		showsDuration: true,
+	});
+};
 
 export function createInspectionToolDefinition(
 	cwd: string,
@@ -810,6 +857,7 @@ export function createInspectionToolDefinition(
 			"Pass each CLI argument as a separate args item; shell syntax, redirection, and pipelines are not supported.",
 		],
 		parameters: inspectionSchema,
+		present: presentInspect,
 		async execute(_toolCallId, input, signal, onUpdate) {
 			const command = resolveInspectionCommand(input);
 			const timeout = Math.min(
@@ -901,11 +949,6 @@ export function createInspectionToolDefinition(
 					await output.closeTempFile();
 				}
 			}
-		},
-		renderCall(args, theme, context) {
-			const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-			text.setText(renderInspectionCall(args, theme));
-			return text;
 		},
 	};
 }

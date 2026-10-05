@@ -45,8 +45,8 @@ import {
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
-import { CustomMessageComponent } from "../../../src/modes/interactive/components/custom-message.ts";
 import { anchorReviewRun } from "../../utilities/review-runs.ts";
+import { presentedMessage } from "../../utilities/test-presenters.ts";
 import { createHarness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -693,7 +693,7 @@ describe("#409 initial review accounting", () => {
 		expect(JSON.stringify(convertToLlm([message]))).not.toContain("estimatedCost");
 		expect(seed.content).not.toContain(h.getModel().id);
 		initTheme("dark");
-		const component = new CustomMessageComponent(message);
+		const component = presentedMessage(message);
 		component.setExpanded(true);
 		expect(component.render(120).lines.join("\n")).toContain("Model-priced estimate");
 		expect(formatReviewUsage(record.usage, true)).toContain("discovery");

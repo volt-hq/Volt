@@ -7,8 +7,9 @@ import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "../src/core/r
 import type { ReviewFinding } from "../src/core/review-report.ts";
 import type { ReviewRunRecord } from "../src/core/review-state.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
+import type { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { presentedMessage } from "./utilities/test-presenters.ts";
 
 function finding(
 	id: string,
@@ -97,7 +98,7 @@ function record(findings: ReviewFinding[] = []): ReviewRunRecord {
 
 function component(run: ReviewRunRecord, ids?: readonly string[]) {
 	const seed = createReviewSeedMessage(run, ids);
-	return new CustomMessageComponent(
+	return presentedMessage(
 		createCustomMessage(
 			seed.customType,
 			seed.content,
@@ -108,7 +109,7 @@ function component(run: ReviewRunRecord, ids?: readonly string[]) {
 	);
 }
 
-function rendered(view: CustomMessageComponent, width = 80): string[] {
+function rendered(view: PresentedMessageComponent, width = 80): string[] {
 	return view.render(width).lines.map(stripAnsi);
 }
 
@@ -350,7 +351,7 @@ describe("review presentation", () => {
 		expect(seed.details.summary).not.toContain("\n# forged heading");
 		expect(seed.details.summary).toContain("\\[click\\]");
 		const restored = JSON.parse(JSON.stringify(seed)) as typeof seed;
-		const view = new CustomMessageComponent(
+		const view = presentedMessage(
 			createCustomMessage(
 				restored.customType,
 				restored.content,

@@ -24,12 +24,11 @@ import type { SettingsManager } from "../settings-manager.ts";
 import { readSubagentWorkInput, SUBAGENT_WORK_KIND } from "../subagents/work.ts";
 import type { ToolProgressDiagnostics } from "../tool-progress-diagnostics.ts";
 import type { SubagentToolManager, SubagentToolMode } from "../tools/index.ts";
+import { SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE } from "../ui/message-presenters.ts";
 import type { SessionBash } from "./bash.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionPromptCache } from "./prompt-cache.ts";
 
-/** Custom-message type of the persisted subagent recovery notice. */
-export const SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE = "subagent_recovery";
 const SUBAGENT_RECOVERY_NOTICE_MAX_LISTED = 8;
 const SUBAGENT_RECOVERY_NOTICE_TASK_PREVIEW_CHARS = 80;
 

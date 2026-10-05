@@ -63,6 +63,7 @@ import {
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
 import { getMarkdownTheme, highlightCode, theme } from "../../../core/theme/runtime.ts";
+import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { formSubmitIntent, type UiIntentSink } from "./intents.ts";
 import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
@@ -191,40 +192,78 @@ class TitledView<C extends Component> implements Component {
 	}
 }
 
-/** A determinate bar or a list of steps; a node that changes kind swaps the component. */
+/**
+ * A determinate bar or a list of steps; a node that changes kind swaps the
+ * component. A timed step shows how long it ran, or, while active, runs so
+ * far, which advances whenever the view renders.
+ */
 class ProgressView implements Component {
+	private node: UiProgressNode;
 	private view: { kind: "determinate"; bar: ProgressBar } | { kind: "steps"; steps: StepProgress };
 
 	constructor(node: UiProgressNode) {
+		this.node = node;
 		this.view = ProgressView.create(node);
 	}
 
 	private static create(node: UiProgressNode): ProgressView["view"] {
 		return node.kind === "determinate"
 			? { kind: "determinate", bar: new ProgressBar(TUI_SEMANTIC_THEME, barProps(node)) }
-			: { kind: "steps", steps: new StepProgress(TUI_SEMANTIC_THEME, stepsProps(node)) };
+			: { kind: "steps", steps: new StepProgress(TUI_SEMANTIC_THEME, stepsProps(node, Date.now())) };
 	}
 
 	set(node: UiProgressNode): void {
+		this.node = node;
 		if (node.kind === "determinate" && this.view.kind === "determinate") this.view.bar.setProps(barProps(node));
-		else if (node.kind === "steps" && this.view.kind === "steps") this.view.steps.setProps(stepsProps(node));
+		else if (node.kind === "steps" && this.view.kind === "steps")
+			this.view.steps.setProps(stepsProps(node, Date.now()));
 		else this.view = ProgressView.create(node);
 	}
 
 	invalidate(): void {}
 
 	render(width: number): RenderFrame {
-		return this.view.kind === "determinate" ? this.view.bar.render(width) : this.view.steps.render(width);
+		if (this.view.kind === "determinate") return this.view.bar.render(width);
+		const node = this.node;
+		if (node.kind === "steps" && node.steps.some(isRunningTimedStep)) {
+			this.view.steps.setProps(stepsProps(node, Date.now()));
+		}
+		return this.view.steps.render(width);
 	}
+}
+
+type ProgressStep = Extract<UiProgressNode, { kind: "steps" }>["steps"][number];
+
+function isRunningTimedStep(step: ProgressStep): boolean {
+	return step.status === "active" && step.startedAt !== undefined && step.endedAt === undefined;
+}
+
+/** How long a step ran, or runs so far while active; undefined for an untimed step. */
+function stepDuration(step: ProgressStep, now: number): string | undefined {
+	if (step.startedAt === undefined) return undefined;
+	const end = step.endedAt ?? (step.status === "active" ? now : undefined);
+	return end === undefined ? undefined : formatDuration(Math.max(0, end - step.startedAt));
 }
 
 function barProps(node: Extract<UiProgressNode, { kind: "determinate" }>) {
 	return { value: node.value, max: node.max, label: node.label, token: node.token };
 }
 
-function stepsProps(node: Extract<UiProgressNode, { kind: "steps" }>) {
+function stepsProps(node: Extract<UiProgressNode, { kind: "steps" }>, now: number) {
 	return {
-		steps: node.steps.map((step) => ({ label: step.label, status: step.status, detail: step.detail })),
+		steps: node.steps.map((step) => {
+			const duration = stepDuration(step, now);
+			const detail: UiNodeStyledText | undefined =
+				duration === undefined
+					? step.detail
+					: step.detail === undefined
+						? duration
+						: [
+								...(typeof step.detail === "string" ? [{ text: step.detail }] : step.detail),
+								{ text: ` · ${duration}` },
+							];
+			return { label: step.label, status: step.status, detail };
+		}),
 		title: node.title,
 	};
 }

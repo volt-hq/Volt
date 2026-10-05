@@ -68,16 +68,28 @@ import {
 	setExtensionStatus,
 	setExtensionTitle,
 } from "../ui/extension-ui.ts";
+import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
+import type { UserInputPrompt, UserInputRequest, UserInputResponse } from "../user-input.ts";
 import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
 import type { ModelSettings } from "./model-settings.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
 
-/** The error of an extension message of a type only the host sends (work notices); none for others. */
-function reservedCustomType(message: { readonly customType?: unknown }): Error | undefined {
-	return message.customType === WORK_NOTICE_CUSTOM_TYPE
-		? new Error(`Custom messages of type ${WORK_NOTICE_CUSTOM_TYPE} are the host's`)
+/** The custom types the host's own contexts may not send either: a work notice is the work registry's. */
+const WORK_NOTICE_TYPES: ReadonlySet<string> = new Set([WORK_NOTICE_CUSTOM_TYPE]);
+
+/**
+ * The error of a message of a type `reserved` keeps for the host; none for
+ * others. Extensions may not send any of the host's message types, which the
+ * host presents as its own.
+ */
+function reservedCustomType(
+	message: { readonly customType?: unknown },
+	reserved: ReadonlySet<string> = HOST_CUSTOM_MESSAGE_TYPES,
+): Error | undefined {
+	return typeof message.customType === "string" && reserved.has(message.customType)
+		? new Error(`Custom messages of type ${message.customType} are the host's`)
 		: undefined;
 }
 
@@ -216,6 +228,8 @@ export interface ExtensionClient {
 	readonly shutdownHandler?: ShutdownHandler;
 	/** Receives every extension error. */
 	readonly onError?: ExtensionErrorListener;
+	/** Asks the user the request_user_input tool's questions in the client's terminal. */
+	readonly userInput?: UserInputPrompt;
 }
 
 /** The terminal-only UI a client shows once at a time; the extension that set it last undoes it when it stops. */
@@ -498,6 +512,14 @@ export class SessionExtensionBinding {
 	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
 	get uiContext(): ExtensionUIContext | undefined {
 		return this.uiClient() ? this.uiFor(undefined) : undefined;
+	}
+
+	/**
+	 * Ask the user `request`'s questions in the client terminal-only calls go
+	 * to; undefined when that client cannot ask them.
+	 */
+	askUserInput(request: UserInputRequest, signal?: AbortSignal): Promise<UserInputResponse> | undefined {
+		return this.uiClient()?.userInput?.(request, signal);
 	}
 
 	/** The mode the first attached client fixed. */
@@ -1279,7 +1301,11 @@ export class SessionExtensionBinding {
 			);
 		}
 		context.sendMessage = (message, options) => {
-			const reserved = reservedCustomType(message);
+			// The host's own context sends its message types (a plan execution prompt); an extension's sends none.
+			const reserved = reservedCustomType(
+				message,
+				owner === undefined ? WORK_NOTICE_TYPES : HOST_CUSTOM_MESSAGE_TYPES,
+			);
 			return reserved ? Promise.reject(reserved) : this.host.sendCustomMessage(message, options, true);
 		};
 		context.sendUserMessage = (content, options) => this.host.session.sendUserMessage(content, options);

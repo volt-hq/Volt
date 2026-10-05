@@ -107,6 +107,7 @@ export {
 	createRequestUserInputToolDefinition,
 	type RequestUserInputToolDetails,
 	type RequestUserInputToolInput,
+	type RequestUserInputToolOptions,
 } from "./request-user-input.ts";
 export {
 	createSubagentRegistryTool,
@@ -210,7 +211,11 @@ import { createJobsTool, createJobsToolDefinition, type JobsToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createLspTool, createLspToolDefinition, type LspToolOptions } from "./lsp.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
-import { createRequestUserInputTool, createRequestUserInputToolDefinition } from "./request-user-input.ts";
+import {
+	createRequestUserInputTool,
+	createRequestUserInputToolDefinition,
+	type RequestUserInputToolOptions,
+} from "./request-user-input.ts";
 import {
 	createSubagentRegistryTool,
 	createSubagentRegistryToolDefinition,
@@ -282,6 +287,7 @@ export const allToolNames: Set<ToolName> = new Set([
 ]);
 
 export interface ToolsOptions {
+	requestUserInput?: RequestUserInputToolOptions;
 	jobs?: JobsToolOptions;
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
@@ -303,7 +309,7 @@ export interface ToolsOptions {
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	switch (toolName) {
 		case "request_user_input":
-			return createRequestUserInputToolDefinition();
+			return createRequestUserInputToolDefinition(options?.requestUserInput);
 		case "jobs":
 			return createJobsToolDefinition(options?.jobs);
 		case "read":
@@ -353,7 +359,7 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
 	switch (toolName) {
 		case "request_user_input":
-			return createRequestUserInputTool();
+			return createRequestUserInputTool(options?.requestUserInput);
 		case "jobs":
 			return createJobsTool(options?.jobs);
 		case "read":
@@ -428,7 +434,7 @@ export function createAllToolDefinitions(
 	options?: ToolsOptions,
 ): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", ToolDef>> {
 	return {
-		request_user_input: createRequestUserInputToolDefinition(),
+		request_user_input: createRequestUserInputToolDefinition(options?.requestUserInput),
 		jobs: createJobsToolDefinition(options?.jobs),
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
@@ -478,7 +484,7 @@ export function createAllTools(
 	options?: ToolsOptions,
 ): Record<CoreToolName, Tool> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", Tool>> {
 	return {
-		request_user_input: createRequestUserInputTool(),
+		request_user_input: createRequestUserInputTool(options?.requestUserInput),
 		jobs: createJobsTool(options?.jobs),
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),

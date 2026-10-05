@@ -89,8 +89,17 @@ function mcpCallId(callId: string): string {
 	return `mcp_call:${callId}`;
 }
 
-/** A tool's partial result as the live lane carries it: its content blocks and details. */
-function toolPartial(value: unknown): LiveToolPartial | undefined {
+/** A tool's result as its presenter sees it: its content blocks and details. */
+interface ToolResultView {
+	readonly content: LiveToolPartial["content"];
+	readonly details?: unknown;
+}
+
+/**
+ * A tool's partial or final result as its presenter sees it. The live lane
+ * carries only its content: how the call looks is its presentation.
+ */
+function toolResult(value: unknown): ToolResultView | undefined {
 	if (!isRecord(value) || !Array.isArray(value.content)) return undefined;
 	const content = value.content.filter(
 		(block): block is LiveToolPartial["content"][number] =>
@@ -166,12 +175,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		},
 	});
 	/** End a call: its end item carries what its final result changed of its presentation. */
-	const endTool = (
-		toolCallId: string,
-		toolName: string,
-		result: { content: LiveToolPartial["content"]; details?: unknown },
-		isError: boolean,
-	): void => {
+	const endTool = (toolCallId: string, toolName: string, result: ToolResultView, isError: boolean): void => {
 		const held = live.snapshot().tools.get(toolCallId);
 		if (!held) {
 			presentations.drop(toolCallId);
@@ -211,17 +215,23 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				return;
 			}
 			case "tool_execution_update": {
-				const partial = toolPartial(event.partialResult);
+				const partial = toolResult(event.partialResult);
 				if (partial) {
 					stream([
-						{ type: "tool", op: "update", toolCallId: event.toolCallId, toolName: event.toolName, partial },
+						{
+							type: "tool",
+							op: "update",
+							toolCallId: event.toolCallId,
+							toolName: event.toolName,
+							partial: { content: partial.content },
+						},
 					]);
 					presentations.update(event.toolCallId, partial);
 				}
 				return;
 			}
 			case "tool_execution_end":
-				endTool(event.toolCallId, event.toolName, toolPartial(event.result) ?? { content: [] }, event.isError);
+				endTool(event.toolCallId, event.toolName, toolResult(event.result) ?? { content: [] }, event.isError);
 				return;
 			case "agent_start":
 			case "agent_end":
@@ -256,12 +266,12 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				const toolCallId = mcpCallId(event.call.id);
 				if (!live.snapshot().tools.has(toolCallId)) return;
 				const { progress, total, message } = event.progress;
-				const partial: LiveToolPartial = {
-					content: message === undefined ? [] : [{ type: "text", text: message }],
+				const content: LiveToolPartial["content"] = message === undefined ? [] : [{ type: "text", text: message }];
+				stream([{ type: "tool", op: "update", toolCallId, toolName: "mcp", partial: { content } }]);
+				presentations.update(toolCallId, {
+					content,
 					details: { progress, ...(total === undefined ? {} : { total }) },
-				};
-				stream([{ type: "tool", op: "update", toolCallId, toolName: "mcp", partial }]);
-				presentations.update(toolCallId, partial);
+				});
 				return;
 			}
 			case "mcp_call_end": {

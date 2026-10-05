@@ -12,7 +12,7 @@
         bytes[i] = binary.charCodeAt(i);
       }
       const data = JSON.parse(new TextDecoder('utf-8').decode(bytes));
-      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, renderedTools, presentedTools, presentedMessages } = data;
+      const { header, entries, leafId: defaultLeafId, systemPrompt, tools, presentedTools, presentedMessages } = data;
 
       // ============================================================
       // URL PARAMETER HANDLING
@@ -555,53 +555,12 @@
       // TREE DISPLAY TEXT (pure data -> string)
       // ============================================================
 
-      function shortenPath(p) {
-        if (typeof p !== 'string') return '';
-        if (p.startsWith('/Users/')) {
-          const parts = p.split('/');
-          if (parts.length > 2) return '~' + p.slice(('/Users/' + parts[2]).length);
-        }
-        if (p.startsWith('/home/')) {
-          const parts = p.split('/');
-          if (parts.length > 2) return '~' + p.slice(('/home/' + parts[2]).length);
-        }
-        return p;
-      }
-
-      function formatToolCall(name, args) {
-        switch (name) {
-          case 'read': {
-            const path = shortenPath(String(args.path || args.file_path || ''));
-            const offset = args.offset;
-            const limit = args.limit;
-            let display = path;
-            if (offset !== undefined || limit !== undefined) {
-              const start = offset ?? 1;
-              const end = limit !== undefined ? start + limit - 1 : '';
-              display += `:${start}${end ? `-${end}` : ''}`;
-            }
-            return `[read: ${display}]`;
-          }
-          case 'write':
-            return `[write: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'edit':
-            return `[edit: ${shortenPath(String(args.path || args.file_path || ''))}]`;
-          case 'bash': {
-            const rawCmd = String(args.command || '');
-            const cmd = rawCmd.replace(/[\n\t]/g, ' ').trim().slice(0, 50);
-            return `[bash: ${cmd}${rawCmd.length > 50 ? '...' : ''}]`;
-          }
-          case 'grep':
-            return `[grep: /${args.pattern || ''}/ in ${shortenPath(String(args.path || '.'))}]`;
-          case 'find':
-            return `[find: ${args.pattern || ''} in ${shortenPath(String(args.path || '.'))}]`;
-          case 'ls':
-            return `[ls: ${shortenPath(String(args.path || '.'))}]`;
-          default: {
-            const argsStr = JSON.stringify(args).slice(0, 40);
-            return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? '...' : ''}]`;
-          }
-        }
+      /** A tool call in the session tree: its presentation's title as text, or its name and arguments. */
+      function formatToolCall(call) {
+        const presented = presentedTools && Object.hasOwn(presentedTools, call.id) ? presentedTools[call.id] : undefined;
+        if (presented) return `[${presented.text}]`;
+        const argsJson = JSON.stringify(call.arguments ?? {});
+        return `[${call.name}: ${argsJson.slice(0, 40)}${argsJson.length > 40 ? '...' : ''}]`;
       }
 
       function escapeHtml(text) {
@@ -672,7 +631,7 @@
             if (msg.role === 'toolResult') {
               const toolCall = msg.toolCallId ? toolCallMap.get(msg.toolCallId) : null;
               if (toolCall) {
-                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall.name, toolCall.arguments))}</span>`;
+                return labelHtml + `<span class="tree-role-tool">${escapeHtml(formatToolCall(toolCall))}</span>`;
               }
               return labelHtml + `<span class="tree-role-tool">[${escapeHtml(msg.toolName || 'tool')}]</span>`;
             }
@@ -813,27 +772,6 @@
         return text.replace(/\t/g, '   ');
       }
 
-      /** Safely coerce value to string for display. Returns null if invalid type. */
-      function str(value) {
-        if (typeof value === 'string') return value;
-        if (value == null) return '';
-        return null;
-      }
-
-      function getLanguageFromPath(filePath) {
-        const ext = filePath.split('.').pop()?.toLowerCase();
-        const extToLang = {
-          ts: 'typescript', tsx: 'typescript', js: 'javascript', jsx: 'javascript',
-          py: 'python', rb: 'ruby', rs: 'rust', go: 'go', java: 'java',
-          c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp', cs: 'csharp',
-          php: 'php', sh: 'bash', bash: 'bash', zsh: 'bash',
-          sql: 'sql', html: 'html', css: 'css', scss: 'scss',
-          json: 'json', yaml: 'yaml', yml: 'yaml', xml: 'xml',
-          md: 'markdown', dockerfile: 'dockerfile'
-        };
-        return extToLang[ext];
-      }
-
       function findToolResult(toolCallId) {
         for (const entry of entries) {
           if (entry.type === 'message' && entry.message.role === 'toolResult') {
@@ -845,37 +783,11 @@
         return null;
       }
 
-      function formatExpandableOutput(text, maxLines, lang) {
+      function formatExpandableOutput(text, maxLines) {
         text = replaceTabs(text);
         const lines = text.split('\n');
         const displayLines = lines.slice(0, maxLines);
         const remaining = lines.length - maxLines;
-
-        if (lang) {
-          let highlighted;
-          try {
-            highlighted = hljs.highlight(text, { language: lang }).value;
-          } catch {
-            highlighted = escapeHtml(text);
-          }
-
-          if (remaining > 0) {
-            const previewCode = displayLines.join('\n');
-            let previewHighlighted;
-            try {
-              previewHighlighted = hljs.highlight(previewCode, { language: lang }).value;
-            } catch {
-              previewHighlighted = escapeHtml(previewCode);
-            }
-
-            return `<div class="tool-output expandable" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-              <div class="output-preview"><pre><code class="hljs">${previewHighlighted}</code></pre>
-              <div class="expand-hint">... (${remaining} more lines)</div></div>
-              <div class="output-full"><pre><code class="hljs">${highlighted}</code></pre></div></div>`;
-          }
-
-          return `<div class="tool-output"><pre><code class="hljs">${highlighted}</code></pre></div>`;
-        }
 
         // Plain text output
         if (remaining > 0) {
@@ -948,68 +860,21 @@
         const args = call.arguments || {};
         const name = call.name;
 
-        const invalidArg = '<span class="tool-error">[invalid arg]</span>';
-
-        const presented = presentedTools && Object.hasOwn(presentedTools, call.id) ? presentedTools[call.id] : undefined;
-        if (presented) {
+        if (presentedTools && Object.hasOwn(presentedTools, call.id)) {
+          const presented = presentedTools[call.id];
+          // A call its presentation hides is not shown.
+          if (!presented) return '';
           html += renderPresented(presented, 'tool-header');
           html += renderResultImages();
           html += '</div>';
           return html;
         }
 
-        switch (name) {
-          case 'ls': {
-            const dirPath = str(args.path);
-            const limit = args.limit;
-
-            let pathHtml = dirPath === null ? invalidArg : escapeHtml(shortenPath(dirPath || '.'));
-            if (limit !== undefined) {
-              pathHtml += ` <span class="line-count">(limit ${escapeHtml(String(limit))})</span>`;
-            }
-
-            html += `<div class="tool-header"><span class="tool-name">ls</span> <span class="tool-path">${pathHtml}</span></div>`;
-            if (result) {
-              const output = getResultText().trim();
-              if (output) html += formatExpandableOutput(output, 20);
-            }
-            break;
-          }
-          default: {
-            // Check for pre-rendered custom tool HTML
-            const rendered = renderedTools?.[call.id];
-            if (rendered?.callHtml || rendered?.resultHtmlCollapsed || rendered?.resultHtmlExpanded) {
-              // Custom tool with pre-rendered HTML from TUI renderer
-              if (rendered.callHtml) {
-                html += `<div class="tool-header ansi-rendered">${rendered.callHtml}</div>`;
-              } else {
-                html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
-              }
-
-              if (rendered.resultHtmlCollapsed && rendered.resultHtmlExpanded && rendered.resultHtmlCollapsed !== rendered.resultHtmlExpanded) {
-                // Both collapsed and expanded differ - render expandable section
-                html += `<div class="tool-output expandable ansi-rendered" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-                  <div class="output-preview">${rendered.resultHtmlCollapsed}</div>
-                  <div class="output-full">${rendered.resultHtmlExpanded}</div>
-                </div>`;
-              } else if (rendered.resultHtmlExpanded) {
-                // Only expanded exists (or collapsed is identical) - show directly
-                html += `<div class="tool-output ansi-rendered">${rendered.resultHtmlExpanded}</div>`;
-              } else if (result) {
-                // No pre-rendered result HTML - fallback to JSON
-                const output = getResultText();
-                if (output) html += formatExpandableOutput(output, 10);
-              }
-            } else {
-              // Fallback to JSON display (existing behavior)
-              html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
-              html += `<div class="tool-output"><pre>${escapeHtml(JSON.stringify(args, null, 2))}</pre></div>`;
-              if (result) {
-                const output = getResultText();
-                if (output) html += formatExpandableOutput(output, 10);
-              }
-            }
-          }
+        html += `<div class="tool-header"><span class="tool-name">${escapeHtml(name)}</span></div>`;
+        html += `<div class="tool-output"><pre>${escapeHtml(JSON.stringify(args, null, 2))}</pre></div>`;
+        if (result) {
+          const output = getResultText();
+          if (output) html += formatExpandableOutput(output, 10);
         }
 
         html += '</div>';
