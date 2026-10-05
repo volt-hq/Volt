@@ -37,6 +37,10 @@ import type {
 import type {
 	ExtensionManifest,
 	RemoteCapability,
+	UiNode,
+	UiNodeFormField,
+	UiNodeStyledText,
+	UiNodeToken,
 	WorkDelivery,
 	WorkProgress,
 	WorkResult,
@@ -52,7 +56,7 @@ import type {
 	OverlayOptions,
 	TUI,
 } from "@hansjm10/volt-tui";
-import type { Static, TSchema } from "typebox";
+import type { Static, TObject, TSchema } from "typebox";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
 import type { EventBus } from "../event-bus.ts";
@@ -135,6 +139,52 @@ export interface ExtensionUIDialogOptions {
 	timeout?: number;
 }
 
+/**
+ * Text with semantic styling: a string, or styled spans. ANSI styling in a
+ * string becomes semantic tokens on the host; other terminal controls are
+ * removed.
+ */
+export type StyledText = UiNodeStyledText;
+
+/** Where a panel shows. Clients without a sidebar show `sidebar` panels above the editor. */
+export type ExtensionPanelPlacement = "aboveEditor" | "belowEditor" | "sidebar";
+
+/**
+ * A named panel: UI data an extension shows beside the conversation. Every
+ * client renders it; actions and forms in it may send only the extension's own
+ * intents and commands, and `open_work`/`cancel_work` for its own work.
+ */
+export interface ExtensionPanel {
+	title?: StyledText;
+	/** Defaults to `aboveEditor`. */
+	placement?: ExtensionPanelPlacement;
+	node: UiNode;
+}
+
+/** A dialog button: choosing it answers the dialog with its id. */
+export interface ExtensionDialogAction {
+	id: string;
+	label: string;
+	token?: UiNodeToken;
+	destructive?: boolean;
+}
+
+/** A dialog: a title, UI data, and the buttons that answer it. */
+export interface ExtensionDialog {
+	title: string;
+	body?: UiNode[];
+	actions: ExtensionDialogAction[];
+}
+
+/** A form: string, boolean, enum, and integer fields every client renders and validates. */
+export interface ExtensionForm {
+	title: string;
+	fields: UiNodeFormField[];
+}
+
+/** The values a submitted form holds, by field id; fields left empty are absent. */
+export type ExtensionFormValues = Record<string, string | boolean | number>;
+
 /** Placement for extension widgets. */
 export type WidgetPlacement = "aboveEditor" | "belowEditor";
 
@@ -173,14 +223,37 @@ export interface ExtensionUIContext {
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
 
+	/**
+	 * Show a form: resolves with the submitted values, or undefined when the
+	 * form was dismissed, timed out, or no client shows forms.
+	 */
+	form(form: ExtensionForm, opts?: ExtensionUIDialogOptions): Promise<ExtensionFormValues | undefined>;
+
+	/**
+	 * Show a dialog: resolves with the id of the action chosen, or undefined
+	 * when it was dismissed, timed out, or no client shows dialogs.
+	 */
+	dialog(dialog: ExtensionDialog, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
 	/** Show a notification to the user. */
-	notify(message: string, type?: "info" | "warning" | "error"): void;
+	notify(message: StyledText, type?: "info" | "warning" | "error"): void;
+
+	/**
+	 * Show, replace, or (with undefined) remove the panel `name` (1 to 128
+	 * characters). A panel's node is at most 32 KB of JSON; an extension shows
+	 * at most 16 panels.
+	 */
+	setPanel(name: string, panel: ExtensionPanel | undefined): void;
 
 	/** Listen to raw terminal input (interactive mode only). Returns an unsubscribe function. */
 	onTerminalInput(handler: TerminalInputHandler): () => void;
 
-	/** Set status text in the footer/status bar. Pass undefined to clear. */
-	setStatus(key: string, text: string | undefined): void;
+	/**
+	 * Set the status item `key` (1 to 128 characters) in the footer, or clear it
+	 * with undefined. Its text is at most 1 KB of JSON; an extension sets at
+	 * most 32 status items.
+	 */
+	setStatus(key: string, text: StyledText | undefined): void;
 
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
@@ -201,7 +274,10 @@ export interface ExtensionUIContext {
 	/** Set the label shown for hidden thinking blocks. Call with no argument to restore default. */
 	setHiddenThinkingLabel(label?: string): void;
 
-	/** Set a widget to display above or below the editor. Accepts string array or component factory. */
+	/**
+	 * Set a widget to display above or below the editor. Accepts string array or component factory.
+	 * A string array shows as the panel `key`, as `setPanel` does.
+	 */
 	setWidget(key: string, content: string[] | undefined, options?: ExtensionWidgetOptions): void;
 	setWidget(
 		key: string,
@@ -244,14 +320,18 @@ export interface ExtensionUIContext {
 		},
 	): Promise<T>;
 
-	/** Paste text into the editor, triggering paste handling (collapse for large content). */
+	/** Paste text into the editor of every interactive client, triggering paste handling (collapse for large content). */
 	pasteToEditor(text: string): void;
 
 	/** Set the text in the core input editor. */
 	setEditorText(text: string): void;
 
-	/** Get the current text from the core input editor. */
-	getEditorText(): string;
+	/**
+	 * The text in the editor of the client the call runs for (outside any
+	 * client's call, the conversation's first client); undefined when that
+	 * client has no editor or does not answer within 2 seconds.
+	 */
+	getEditorText(): Promise<string | undefined>;
 
 	/** Show a multi-line editor for text editing. */
 	editor(title: string, prefill?: string): Promise<string | undefined>;
@@ -1346,6 +1426,91 @@ export interface RegisteredCommand {
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 
+// ============================================================================
+// Intents, shortcuts, and completions
+// ============================================================================
+
+/**
+ * An intent an extension registers: clients invoke it as
+ * `extension.intent.<manifest id>.<name>`, from UI actions and forms, the
+ * extension's shortcuts, or any protocol client.
+ */
+export interface ExtensionIntentOptions<TInput extends TObject = TObject> {
+	label: string;
+	description?: string;
+	/** The input, a TypeBox object schema; the host rejects other input before `handler` runs. Defaults to no fields. */
+	input?: TInput;
+	/**
+	 * Paired remote devices may invoke it. Defaults to false. They also need
+	 * `conversation.control.v1` and every capability in `requires`.
+	 */
+	remote?: boolean;
+	/** Remote capabilities an invocation needs beyond `conversation.control.v1`. */
+	requires?: readonly RemoteCapability[];
+	/** Runs the intent in the extension's command context; a throw rejects it as `failed`. */
+	handler: (input: Static<TInput>, ctx: ExtensionCommandContext) => Promise<void> | void;
+}
+
+/** An intent an extension registered, as its extension record keeps it. */
+export interface RegisteredIntent {
+	/** The name within the extension. */
+	readonly name: string;
+	/** The intent name clients invoke: `extension.intent.<manifest id>.<name>`. */
+	readonly intent: string;
+	readonly label: string;
+	readonly description?: string;
+	readonly input: TObject;
+	readonly remote: boolean;
+	readonly requires: readonly RemoteCapability[];
+	readonly handler: (input: unknown, ctx: ExtensionCommandContext) => Promise<void> | void;
+	/** The manifest id of the extension that registered it: its handler's `ctx` belongs to it. */
+	readonly extensionId: string;
+}
+
+/** What an editor completion offers: `value` replaces the token, shown as `label` with `description`. */
+export interface ExtensionCompletionItem {
+	value: string;
+	label?: string;
+	description?: string;
+}
+
+/** What a completion provider is asked to complete. */
+export interface ExtensionCompletionRequest {
+	/** The editor's text. */
+	readonly text: string;
+	/** The cursor, in Unicode scalars from the start of `text`. */
+	readonly cursor: number;
+	/** The token before the cursor, starting with the provider's trigger. */
+	readonly prefix: string;
+	/** `prefix` without the trigger. */
+	readonly query: string;
+	/** Aborted once the host stops waiting (after 1 second) or the client moves on. */
+	readonly signal: AbortSignal;
+}
+
+/**
+ * An editor completion provider: asked when the token before the cursor starts
+ * with its trigger. The host keeps at most 50 items and waits at most 1 second.
+ */
+export interface ExtensionCompletionProvider {
+	/** What starts the token it completes, such as `#` or `@`: 1 to 8 characters without whitespace. */
+	trigger: string;
+	/** Paired remote devices may ask it. Defaults to false. */
+	remote?: boolean;
+	complete(
+		request: ExtensionCompletionRequest,
+	): ExtensionCompletionItem[] | undefined | Promise<ExtensionCompletionItem[] | undefined>;
+}
+
+/** A completion provider an extension registered, as its extension record keeps it. */
+export interface RegisteredCompletionProvider {
+	readonly name: string;
+	readonly trigger: string;
+	readonly remote: boolean;
+	readonly complete: ExtensionCompletionProvider["complete"];
+	readonly extensionId: string;
+}
+
 export interface ResolvedCommand extends RegisteredCommand {
 	/** The slash name: `name`, or `<extension id>:<name>` when an earlier extension took `name`. */
 	invocationName: string;
@@ -1441,14 +1606,25 @@ export interface ExtensionAPI {
 	 */
 	registerCommand(name: string, options: Omit<RegisteredCommand, "name" | "sourceInfo">): void;
 
-	/** Register a keyboard shortcut. */
-	registerShortcut(
-		shortcut: KeyId,
-		options: {
-			description?: string;
-			handler: (ctx: ExtensionContext) => Promise<void> | void;
-		},
-	): void;
+	/**
+	 * Register an intent: `name` is a letter or digit, then at most 63
+	 * letters, digits, `_`, and `-`. Returns the intent's name,
+	 * `extension.intent.<manifest id>.<name>`, which UI actions, forms, and
+	 * shortcuts send.
+	 */
+	registerIntent<TInput extends TObject = TObject>(name: string, options: ExtensionIntentOptions<TInput>): string;
+
+	/**
+	 * Map a key to one of the extension's intents or commands: `intent` is a
+	 * name `registerIntent` returned, an `extension.command.<manifest id>.<name>`,
+	 * or the name of one of the extension's intents. The key is its default:
+	 * users rebind it in keybindings.json under the intent's name. Pressing it
+	 * invokes the intent with no input.
+	 */
+	registerShortcut(shortcut: KeyId, options: { description?: string; intent: string }): void;
+
+	/** Register an editor completion provider: at most 8 per extension. */
+	registerCompletionProvider(name: string, provider: ExtensionCompletionProvider): void;
 
 	/** Register a CLI flag. */
 	registerFlag(
@@ -1740,8 +1916,9 @@ export interface ExtensionFlag {
 export interface ExtensionShortcut {
 	shortcut: KeyId;
 	description?: string;
-	handler: (ctx: ExtensionContext) => Promise<void> | void;
-	/** The manifest id of the extension that registered the shortcut: its handler's `ctx` belongs to it. */
+	/** The intent the key invokes: one of the extension's own intents or commands. */
+	intent: string;
+	/** The manifest id of the extension that registered the shortcut. */
 	extensionId: string;
 }
 
@@ -1899,6 +2076,10 @@ export interface Extension {
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;
+	/** The intents the extension registered, by name. */
+	intents: Map<string, RegisteredIntent>;
+	/** The editor completion providers the extension registered, by name. */
+	completionProviders: Map<string, RegisteredCompletionProvider>;
 	/** The work kinds the extension declared, by name. */
 	workKinds: Map<string, WorkKindDeclaration>;
 }

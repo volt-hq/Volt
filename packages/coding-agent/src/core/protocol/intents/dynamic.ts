@@ -1,8 +1,12 @@
 /**
- * Dynamic intents: extension commands, prompt templates, and skills. An
- * extension command is `extension.command.<manifest id>.<command name>`;
- * prompt templates and skills are `prompt.template.<id>` and `skill.<id>` by
- * opaque per-catalog ids. Invoking one sends its slash text as a prompt.
+ * Dynamic intents: extension commands and intents, prompt templates, and
+ * skills. An extension command is `extension.command.<manifest id>.<command
+ * name>`; prompt templates and skills are `prompt.template.<id>` and
+ * `skill.<id>` by opaque per-catalog ids. Invoking one of those sends its
+ * slash text as a prompt. An extension intent is
+ * `extension.intent.<manifest id>.<name>`: invoking it runs its handler with
+ * input the host checked against the schema the extension registered; paired
+ * remote devices invoke it only when the extension opted in.
  *
  * Descriptors never carry prompt bodies, skill content, raw source info, or
  * host paths: display strings are bounded and path-like text is redacted.
@@ -10,7 +14,7 @@
 
 import { randomBytes } from "node:crypto";
 import type { IntentOption } from "@hansjm10/volt-protocol";
-import type { ResolvedCommand } from "../../extensions/types.ts";
+import type { RegisteredIntent, ResolvedCommand } from "../../extensions/types.ts";
 import type { PromptTemplate } from "../../prompt-templates.ts";
 import type { ResourceLoader } from "../../resource-loader.ts";
 import type { Skill } from "../../skills.ts";
@@ -29,6 +33,8 @@ const REDACTED_PATH = "[redacted path]";
 export interface DynamicIntentSource {
 	extensionRunner: {
 		getRegisteredCommands(): ResolvedCommand[];
+		getRegisteredIntents(): RegisteredIntent[];
+		getIntent(intent: string): RegisteredIntent | undefined;
 	};
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
@@ -46,6 +52,15 @@ export interface DynamicIntent extends IntentMetadata {
 	/** Bounded argument hint (prompt templates). */
 	readonly argumentHint?: string;
 	readonly command?: ResolvedCommand;
+}
+
+/** An intent an extension registered, as the catalog describes it. */
+export interface ExtensionIntent extends IntentMetadata {
+	readonly name: string;
+	readonly source: "extension";
+	/** The extension's manifest id. */
+	readonly sourceLabel: string;
+	readonly registered: RegisteredIntent;
 }
 
 interface CatalogState {
@@ -70,6 +85,36 @@ export function listDynamicIntents(source: DynamicIntentSource): DynamicIntent[]
 
 export function findDynamicIntent(source: DynamicIntentSource, name: string): DynamicIntent | undefined {
 	return listDynamicIntents(source).find((intent) => intent.name === name);
+}
+
+/** The intents the session's extensions registered, in load order. */
+export function listExtensionIntents(source: DynamicIntentSource): ExtensionIntent[] {
+	return source.extensionRunner.getRegisteredIntents().map(createExtensionIntent);
+}
+
+/** The extension intent named `name`, if an extension registered it. */
+export function findExtensionIntent(source: DynamicIntentSource, name: string): ExtensionIntent | undefined {
+	const registered = source.extensionRunner.getIntent(name);
+	return registered === undefined ? undefined : createExtensionIntent(registered);
+}
+
+function createExtensionIntent(registered: RegisteredIntent): ExtensionIntent {
+	return {
+		name: registered.intent,
+		label: boundedDisplayString(registered.label, MAX_INTENT_LABEL_LENGTH) ?? "Extension intent",
+		description: boundedDisplayString(registered.description, MAX_DESCRIPTION_LENGTH),
+		category: "extension",
+		source: "extension",
+		sourceLabel: registered.extensionId,
+		scope: "conversation",
+		fence: "none",
+		remote: registered.remote ? "safe" : "unsafe",
+		// Conversation control first: remote admission names the first capability a device lacks.
+		requires: [...new Set(["conversation.control.v1" as const, ...registered.requires])],
+		whileBusy: "run",
+		presentation: { kind: "palette", group: "Extensions" },
+		registered,
+	};
 }
 
 /** The prompt a dynamic intent sends for its raw argument text. */

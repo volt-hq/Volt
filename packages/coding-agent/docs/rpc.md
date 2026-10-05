@@ -41,7 +41,7 @@ The client's first frame is `hello`; the host answers `welcome`:
 {"type":"welcome","protocol":1,"connectionId":"6f0c…","profile":"local","server":{"name":"volt","version":"0.2.3"},"conversation":"01990f6e-…"}
 ```
 
-- `accepts.hostRequests` lists the host request kinds the client shows and answers (`select`, `confirm`, `input`, `editor`, `form`, `approval`, `mcp_auth`). It is asked only those; an extension dialog no attached client accepts resolves to its default at once.
+- `accepts.hostRequests` lists the host request kinds the client shows and answers (`select`, `confirm`, `input`, `editor`, `form`, `dialog`, `approval`, `mcp_auth`, `editor_text`). It is asked only those; an extension dialog no attached client accepts resolves to its default at once.
 - `welcome.conversation` is the conversation the host attached the client to. Subscribe to it.
 - The host attaches the client when it says hello, which binds the conversation's extensions (`session_start` runs then). The client may subscribe and answer host requests at once; its intents and queries run once the extensions are bound.
 
@@ -117,7 +117,8 @@ Long-running work of a conversation is a work item: a background job (`job`), a 
 - **Invariant W.** A live frame is written only after every entry up to its `basedOn`: a client never sees live state ahead of the entries it builds on.
 - **Streaming items** (`assistant_start`, `assistant_delta`, `assistant_end`, `tool`) build on `basedOn`. Discard them when a frame arrives with another `basedOn` (the host repeats what still streams in that frame), and when you apply the entry that commits them: an assistant message entry ends the streaming message, a tool result entry ends its tool call.
 - **Keyed values** (`set{key, value}`, `clear{key}`) persist until the host clears or replaces them, or a reset. A commit never drops one.
-- `notice{level, message, source?}` and `directive{directive: "set_editor_text", text}` leave no state.
+- `patch{key, ops}` changes the node of a panel (`ext_panel/…`) or the detail of a work item (`work/…`) in place, with the `UiNode` patch operations of the contract (`replace`, `remove`, `insert`, `append_lines`). A reset carries the patched value. A patch that does not apply to the value you hold means your state diverged: resubscribe after your position.
+- `notice{level, message, source?}` (`message` is styled text: a string or styled spans) and `directive{directive: "set_editor_text" | "insert_editor_text", text}` leave no state.
 
 The live fold (`foldLiveFrame`, `foldLiveCommit` in `@hansjm10/volt-coding-agent`) applies these rules; the host's live state is the same fold of the items it published.
 
@@ -141,7 +142,13 @@ Keyed values (`value.kind` is the key's family):
 | `intents` | `{availability: [{name, enabled, reason?, state?}]}`: the intents whose availability and state follow the conversation (`set_fast_mode`, `set_agent_mode`, `set_auto_compaction`, `set_compaction_threshold`). |
 | `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs (a job, subagent, review, approved host action, or extension work), set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
 | `host_request/<id>` | `{requestId, request}`: a pending host request (below). |
-| `ext_status/<key>`, `ext_widget/<key>`, `ext_title` | Extension status lines, string widgets (`{lines, placement}`), and the window title. |
+| `ext_status/<extension id>/<name>` | `{extension, text}`: an extension's status item, styled text. |
+| `ext_panel/<extension id>/<name>` | `{extension, title?, placement: aboveEditor|belowEditor|sidebar, node}`: an extension's panel of `UiNode` data (see [Extension UI](#extension-ui)). |
+| `ext_title` | `{extension, title}`: the window title an extension set. |
+
+### Extension UI
+
+Extension panels, dialogs, forms, and status are data every client renders: `UiNode` trees (`text`, `markdown`, `list`, `table`, `keyValue`, `progress`, `form`, `actions`, `card`, `diff`, `terminal`, `code`, `image`, `tree`) and styled text with semantic tokens, never ANSI. The host normalizes them before any client sees them: a panel's node is at most 32 KB of JSON and a status item at most 1 KB. An action or form in extension UI sends only that extension's own intents (`extension.intent.<id>.*`) and commands (`extension.command.<id>.*`), and `open_work` or `cancel_work` for its own work; the host leaves out any other. Clients without a sidebar show `sidebar` panels above the editor.
 
 ## Intents
 
@@ -216,6 +223,8 @@ Remote-only intents (`set_keep_awake`, `set_web_search_key`, `upload_device_logs
 
 Extension commands, prompt templates, and skills are intents named `extension.command.<extension id>.<command>`, `prompt.template.<id>`, and `skill.<id>`, with input `{arguments?, streamingBehavior?}`. An extension command's name stays the same while its extension keeps its manifest id; prompt template and skill ids are opaque. The `intents` query lists them with their ids, labels, and sources. Invoking one sends its slash text as a prompt. A prompt whose text starts with `/` runs an extension command of that name too.
 
+Intents an extension registers are named `extension.intent.<extension id>.<name>`; their input is a JSON object the host checks against the schema in the intent's descriptor. The remote profile reaches only those whose extension opted in, with `conversation.control.v1` and the capabilities their descriptor `requires`.
+
 ## Queries
 
 A query frame is `{type: "query", queryId, query, conversation?, params?}`; the host answers `result{queryId, data}` or `query_error{queryId, reason: {code, message}}` (`invalid_input`, `unknown_query`, `not_allowed`, `unavailable`, `failed`).
@@ -224,6 +233,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 |---|---|---|
 | `intents` | | Every intent's descriptor: input schema, scope, fence, remote safety, required capabilities, availability, state, slash alias. |
 | `intent_completions` | `{intent, field, prefix?}` | Completions for one input field. |
+| `editor_completions` | `{text, cursor}` | `{prefix, items (≤ 50)}`: completions from the extensions' completion providers for the token ending at `cursor` (in Unicode scalars); `items` replace `prefix`. The host waits at most one second; the remote profile asks only providers that opted in. |
 | `history` | `{before, limit (≤ 200), branch?}` | `{entries, earlier}`: projected entries before ordinal `before`, newest last; with `branch`, the path from the root to that entry. Entries are projected exactly as the subscription sends them. |
 | `content` | `{entryId, part?, offset?}` | `{entryId, part, parts, content}`: one text, thinking, or image block of an entry in full. Text comes in chunks of up to 12,000 Unicode scalars from `offset`, with `nextOffset` and `totalScalars`. |
 | `models` | | `{models, cycleScope}`. |
@@ -252,6 +262,8 @@ Dialogs, forms, approvals, and MCP sign-ins the host asks are keyed live values 
 | `input` | `title, placeholder?, timeoutMs?` | `{value}` |
 | `editor` | `title, prefill?` | `{value}` |
 | `form` | `title, fields, timeoutMs?` | `{values}` |
+| `dialog` | `title, body (UiNode[]), actions: [{id, label, token?, destructive?}], timeoutMs?` | `{value}` (an action id) |
+| `editor_text` | `timeoutMs?`: asked only of the client whose request is running, or of the first attached client | `{value}`: the client's editor text, without asking the user |
 | `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …`: a host action, such as an LSP server install; `requestId` is its `host_action` work id | `{decision: approved|denied|dismissed, message?}` |
 | `mcp_auth` | `server, flow, authorizationUrl?, userCode?, …` | completes through the `mcp.auth_*` intents |
 
@@ -261,11 +273,11 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 
 `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`. The data-only UI reaches the client through the live lane:
 
-- `select`, `confirm`, `input`, and `editor` are host requests;
-- `notify` is a `notice`; `setStatus`, string `setWidget`, and `setTitle` are keyed values; `setEditorText` is a `set_editor_text` directive;
+- `select`, `confirm`, `input`, `editor`, `dialog`, `form`, and `getEditorText()` (`editor_text`) are host requests;
+- `notify` is a `notice`; `setStatus`, `setPanel`, string `setWidget` (a panel), and `setTitle` are keyed values; `setEditorText` and `pasteToEditor` are `set_editor_text` and `insert_editor_text` directives;
 - extension errors are `notice{level: "error", message: "<event>: <error>", source: <extension path>}`.
 
-The terminal-only UI needs a terminal and does nothing in RPC mode: `custom()` returns `undefined`; component widgets, `setFooter()`, `setHeader()`, `setEditorComponent()`, `setWorkingMessage()`, `setWorkingIndicator()`, and theme changes are no-ops (`setTheme()` reports that no UI is available); `getEditorText()` returns `""`.
+The terminal-only UI needs a terminal and does nothing in RPC mode: `custom()` returns `undefined`; component widgets, `setFooter()`, `setHeader()`, `setEditorComponent()`, `setWorkingMessage()`, `setWorkingIndicator()`, and theme changes are no-ops (`setTheme()` reports that no UI is available).
 
 ## Example session
 

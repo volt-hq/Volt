@@ -87,6 +87,7 @@ type EntryOp =
 type Op =
 	| { kind: "commit"; entries: EntryOp[] }
 	| { kind: "status"; key: number; text: string | null }
+	| { kind: "panel"; text: string; patch: boolean }
 	| { kind: "assistantStream"; text: string; end: boolean }
 	| { kind: "tool"; op: "start" | "update" | "end" }
 	| { kind: "request" }
@@ -126,6 +127,10 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 			key: fc.integer({ min: 0, max: 2 }),
 			text: fc.option(text, { nil: null }),
 		}),
+	},
+	{
+		weight: 2,
+		arbitrary: fc.record({ kind: fc.constant("panel" as const), text, patch: fc.boolean() }),
 	},
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("assistantStream" as const), text, end: fc.boolean() }) },
 	{
@@ -340,9 +345,24 @@ async function commit(host: Host, ops: readonly EntryOp[], run: RunState): Promi
 function liveAction(host: Host, action: Op, run: RunState): void {
 	switch (action.kind) {
 		case "status":
-			if (action.text === null) host.live.clear(`ext_status/s${action.key}`);
-			else host.live.set(`ext_status/s${action.key}`, { kind: "ext_status", text: action.text });
+			if (action.text === null) host.live.clear(`ext_status/ci/s${action.key}`);
+			else host.live.set(`ext_status/ci/s${action.key}`, { kind: "ext_status", extension: "ci", text: action.text });
 			return;
+		case "panel": {
+			// A patch changes the panel in place: a resubscribing client's reset carries the patched panel.
+			const key = "ext_panel/ci/log";
+			if (action.patch && host.live.get(key)) {
+				host.live.patch(key, [{ op: "append_lines", path: ["out"], lines: [action.text] }]);
+			} else {
+				host.live.set(key, {
+					kind: "ext_panel",
+					extension: "ci",
+					placement: "belowEditor",
+					node: { type: "terminal", key: "out", lines: [action.text] },
+				});
+			}
+			return;
+		}
 		case "assistantStream": {
 			const items: LiveItem[] = [];
 			if (!host.live.snapshot().assistant) {

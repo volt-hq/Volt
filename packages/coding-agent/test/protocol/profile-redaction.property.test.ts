@@ -14,6 +14,7 @@ import { clientFold, clientSnapshot, type HostFrame, type LiveItem } from "@hans
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { toLogEntry } from "../../src/core/conversation-log/entry-codec.ts";
+import { emptyLiveFold, foldLiveFrame } from "../../src/core/protocol/live-fold.ts";
 import { localProfile, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -312,7 +313,34 @@ describe("profile redaction", () => {
 					});
 					items.push({ type: "assistant_delta", event: { type: "text_end", contentIndex: 0, content: streamed } });
 					items.push({ type: "notice", level: "info", message: streamed });
-					items.push({ type: "set", key: "ext_status/x", value: { kind: "ext_status", text: streamed } });
+					items.push({
+						type: "set",
+						key: "ext_status/x/s",
+						value: { kind: "ext_status", extension: "x", text: streamed },
+					});
+					// A panel and its patches: what each patch leaves the client holding is redacted as a whole value.
+					const panel = "ext_panel/x/log";
+					items.push({
+						type: "set",
+						key: panel,
+						value: {
+							kind: "ext_panel",
+							extension: "x",
+							placement: "sidebar",
+							node: { type: "terminal", key: "out", lines: ["start"] },
+						},
+					});
+					items.push({
+						type: "patch",
+						key: panel,
+						ops: [{ op: "append_lines", path: ["out"], lines: [streamed] }],
+					});
+					items.push({
+						type: "patch",
+						key: panel,
+						ops: [{ op: "replace", path: ["out"], node: { type: "code", key: "out", code: streamed } }],
+					});
+					let clientLive = emptyLiveFold();
 					let held = "";
 					for (const [index, item] of items.entries()) {
 						const frame = redactor.redact({
@@ -324,6 +352,10 @@ describe("profile redaction", () => {
 							items: [item],
 						});
 						expect(leaks(frame)).toEqual([]);
+						if (frame?.type === "live") clientLive = foldLiveFrame(clientLive, frame);
+						// The client's patched panel never spells a root either.
+						const shown = JSON.stringify(clientLive.values.get(panel) ?? null);
+						expect(roots.filter((root) => shown.includes(JSON.stringify(root).slice(1, -1)))).toEqual([]);
 						for (const sent of frame?.type === "live" ? frame.items : []) {
 							if (sent.type === "assistant_start") held = "";
 							if (sent.type === "assistant_delta" && sent.event.type === "text_delta") held += sent.event.delta;

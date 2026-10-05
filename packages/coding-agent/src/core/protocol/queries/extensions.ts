@@ -1,10 +1,14 @@
 /**
  * Extension queries (RFC §8.2, §8.3): the extension catalog, one extension's
  * settings, and editor completions from extension completion providers.
- * Hosts do not manage extensions by id or serve completion providers yet, so
- * each is unavailable everywhere.
+ * Hosts do not manage extensions by id yet, so the catalog and settings are
+ * unavailable everywhere. Editor completions ask the conversation's
+ * completion providers (core/extensions/completions.ts); a remote client asks
+ * only those whose extension opted in.
  */
 
+import { completeEditorText } from "../../extensions/completions.ts";
+import type { IntentTarget } from "../intents/types.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
 
 function unavailable(): never {
@@ -32,5 +36,10 @@ export const editorCompletionsQuery = defineQuery({
 	scope: "conversation",
 	remote: "safe",
 	requires: ["conversation.control.v1"],
-	run: async () => unavailable(),
+	run: async (ctx, { text, cursor }) => {
+		const runner = (ctx.target as IntentTarget).session.extensionRunner;
+		const remote = ctx.profile.name === "remote";
+		const providers = runner.getCompletionProviders().filter((provider) => !remote || provider.remote);
+		return completeEditorText(providers, text, cursor, { onError: (error) => runner.emitError(error) });
+	},
 });

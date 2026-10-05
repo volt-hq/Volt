@@ -1,3 +1,4 @@
+import { styledTextToPlain } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import type { ProjectTrustContext } from "../core/extensions/types.ts";
 import type { AppMode } from "../core/project-trust.ts";
@@ -54,7 +55,7 @@ export function createProjectTrustContext(options: {
 			notify: (message, type = "info") => {
 				if (options.mode !== "interactive") {
 					const color = type === "error" ? chalk.red : type === "warning" ? chalk.yellow : chalk.cyan;
-					console.error(color(message));
+					console.error(color(styledTextToPlain(message)));
 				}
 			},
 		},

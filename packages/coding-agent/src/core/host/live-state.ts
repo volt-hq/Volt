@@ -2,8 +2,10 @@
  * A conversation's live state (RFC §6.1): the keyed values of its live lane,
  * its transient items, and its pending host requests.
  *
- * Keyed values (extension status, widgets, and title; pending host requests;
- * work progress) persist until the host clears or replaces them.
+ * Keyed values (extension status, panels, and title; pending host requests;
+ * work progress) persist until the host clears, replaces, or patches them: a
+ * patch changes a panel's node or a work item's detail in place, and a client
+ * that attaches later receives the patched value.
  * Notices and editor directives reach the clients attached when they are
  * raised and are not kept. A client attached with `attach` first receives the
  * current values as a reset, then every change in order; detaching it, or
@@ -11,7 +13,8 @@
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are keyed
  * values `host_request/<requestId>` until they end. A request reaches only the
- * attached clients that accept its kind, and only such a client may answer it:
+ * attached clients that accept its kind (and, for a request asked of one host
+ * client, only that client's views), and only such a client may answer it:
  * the first valid answer wins. A request ends when it is answered, when its
  * requester aborts it, when it times out, or when the conversation closes. It
  * outlives the clients that saw it, so a client that attaches later, or
@@ -28,17 +31,24 @@
 
 import { randomUUID } from "node:crypto";
 import {
+	EXTENSION_ID_PATTERN,
 	type HostRequest,
 	type HostRequestKind,
 	type HostResponse,
 	HostResponseSchema,
+	LIVE_EXTENSION_KINDS,
+	LIVE_EXTENSION_NAME_MAX_CHARS,
 	LIVE_KEY_ID_MAX_CHARS,
 	LIVE_KEYED_KINDS,
+	LIVE_PATCHABLE_KINDS,
 	LIVE_SINGLETON_KINDS,
 	type LiveItem,
+	LivePatchItemSchema,
 	type LiveValue,
 	LiveValueSchema,
 	type UiNodeFormField,
+	type UiNodeStyledText,
+	type UiPatchOp,
 } from "@hansjm10/volt-protocol";
 import { Compile, type Validator } from "typebox/compile";
 import {
@@ -49,6 +59,7 @@ import {
 	type LiveCommit,
 	type LiveFoldState,
 	liveStreamingItems,
+	patchLiveValue,
 } from "../protocol/live-fold.ts";
 
 /** A change to a client's live state; with `reset`, `items` replace everything the client held. */
@@ -66,6 +77,12 @@ export interface LiveStateOptions {
 
 /** A client's view of a conversation's live state. */
 export interface LiveClient {
+	/**
+	 * The host client the view belongs to, when it is one of several views of
+	 * one client (a protocol connection's subscriptions); its attachment id
+	 * otherwise. A request asked of one client reaches only that client's views.
+	 */
+	readonly owner?: string;
 	/** Whether the client shows and may answer host requests of `kind`; read at every delivery and answer. */
 	acceptsHostRequest(kind: HostRequestKind): boolean;
 	/** Receives the live state: the current values as a reset when attached, then every change. */
@@ -103,6 +120,12 @@ export interface HostRequestOptions {
 	 * ends at once as unavailable.
 	 */
 	readonly unattended?: boolean;
+	/**
+	 * Ask only the views of the host client with this id: its own attachment,
+	 * and attachments whose `owner` it is. Other clients neither see the
+	 * request nor may answer it.
+	 */
+	readonly client?: string;
 }
 
 /** A pending host request. */
@@ -112,6 +135,8 @@ export interface PendingHostRequest {
 }
 
 interface PendingEntry extends PendingHostRequest {
+	/** The host client the request was asked of, if one. */
+	readonly client: string | undefined;
 	readonly resolve: (outcome: HostRequestOutcome) => void;
 	readonly signal: AbortSignal | undefined;
 	readonly onAbort: () => void;
@@ -131,11 +156,17 @@ interface AttachedClient {
 const IDENTIFIER_MAX_UTF8_BYTES = 256;
 
 let liveValueValidator: Validator | undefined;
+let livePatchValidator: Validator | undefined;
 let hostResponseValidator: Validator | undefined;
 
 function isLiveValue(value: LiveValue): boolean {
 	liveValueValidator ??= Compile(LiveValueSchema);
 	return liveValueValidator.Check(value);
+}
+
+function isLivePatch(item: LiveItem): boolean {
+	livePatchValidator ??= Compile(LivePatchItemSchema);
+	return livePatchValidator.Check(item);
 }
 
 function isHostResponse(response: HostResponse): boolean {
@@ -160,17 +191,42 @@ function isRequestId(id: string): boolean {
 
 const SINGLETON_KINDS: ReadonlySet<string> = new Set(LIVE_SINGLETON_KINDS);
 const KEYED_KINDS: ReadonlySet<string> = new Set(LIVE_KEYED_KINDS);
+const EXTENSION_KINDS: ReadonlySet<string> = new Set(LIVE_EXTENSION_KINDS);
+const PATCHABLE_KINDS: ReadonlySet<string> = new Set(LIVE_PATCHABLE_KINDS);
+const EXTENSION_ID = new RegExp(EXTENSION_ID_PATTERN);
 
 /** The key of a keyed value: `<kind>/<id>`. */
 export function liveKey(kind: (typeof LIVE_KEYED_KINDS)[number], id: string): string {
 	return `${kind}/${id}`;
 }
 
-/** Whether `key` is a well-formed key for `value`'s family. */
+/** The key of an extension's status item or panel: `<kind>/<extension id>/<name>`. */
+export function extensionLiveKey(kind: (typeof LIVE_EXTENSION_KINDS)[number], extension: string, name: string): string {
+	return `${kind}/${extension}/${name}`;
+}
+
+/** Whether `name` names an extension's status item or panel: 1 to 128 characters without control characters. */
+export function isExtensionLiveName(name: string): boolean {
+	return isKeyId(name) && [...name].length <= LIVE_EXTENSION_NAME_MAX_CHARS;
+}
+
+/**
+ * Whether `key` is a well-formed key for `value`'s family. An extension's
+ * status item or panel is keyed by the extension the value names.
+ */
 function keyFits(key: string, value: LiveValue): boolean {
 	if (SINGLETON_KINDS.has(value.kind)) return key === value.kind;
 	if (!KEYED_KINDS.has(value.kind) || !key.startsWith(`${value.kind}/`)) return false;
-	return isKeyId(key.slice(value.kind.length + 1));
+	const id = key.slice(value.kind.length + 1);
+	if (!EXTENSION_KINDS.has(value.kind)) return isKeyId(id);
+	const extension = "extension" in value ? value.extension : undefined;
+	if (extension === undefined || !EXTENSION_ID.test(extension) || !id.startsWith(`${extension}/`)) return false;
+	return isExtensionLiveName(id.slice(extension.length + 1));
+}
+
+/** Whether `attached` is one of the views of the host client `client`. */
+function belongsTo(attached: AttachedClient, client: string): boolean {
+	return (attached.client.owner ?? attached.id) === client;
 }
 
 /** Whether `client` accepts `kind`; a client whose check throws accepts nothing. */
@@ -182,9 +238,15 @@ function acceptsKind(client: LiveClient, kind: HostRequestKind): boolean {
 	}
 }
 
-/** The host request kind a client must accept to see `value`, if it is a host request. */
-function gateOf(value: LiveValue): HostRequestKind | undefined {
-	return value.kind === "host_request" ? value.request.kind : undefined;
+/** Whether `attached` may see and answer a request behind `gate`. */
+function mayShow(attached: AttachedClient, gate: RequestGate): boolean {
+	return (gate.client === undefined || belongsTo(attached, gate.client)) && acceptsKind(attached.client, gate.kind);
+}
+
+/** What a client must be to see `value`, if it is a host request: of the kind it accepts, and of the client it was asked. */
+interface RequestGate {
+	readonly kind: HostRequestKind;
+	readonly client: string | undefined;
 }
 
 /** Longest form field pattern, in characters. */
@@ -684,9 +746,9 @@ export class LiveState {
 		this.clients.set(clientId, attached);
 		const items: LiveItem[] = [];
 		for (const [key, value] of this.fold.values) {
-			const gate = gateOf(value);
+			const gate = this.gateOf(value);
 			if (gate !== undefined) {
-				if (!acceptsKind(client, gate)) continue;
+				if (!mayShow(attached, gate)) continue;
 				attached.shown.add(key);
 			}
 			items.push({ type: "set", key, value });
@@ -700,10 +762,10 @@ export class LiveState {
 		};
 	}
 
-	/** Whether an attached client accepts host requests of `kind`. */
-	accepts(kind: HostRequestKind): boolean {
+	/** Whether an attached client (of the host client `client`, when given) accepts host requests of `kind`. */
+	accepts(kind: HostRequestKind, client?: string): boolean {
 		for (const attached of this.clients.values()) {
-			if (acceptsKind(attached.client, kind)) return true;
+			if (mayShow(attached, { kind, client })) return true;
 		}
 		return false;
 	}
@@ -736,8 +798,25 @@ export class LiveState {
 		if (items.length > 0) this.publish(items);
 	}
 
+	/**
+	 * Change the node of the panel or work item under `key` in place: `ops`
+	 * apply to it as `patch` items do (live-fold.ts). Throws when no such value
+	 * is held or the patch does not apply; nothing is published then.
+	 */
+	patch(key: string, ops: readonly UiPatchOp[]): void {
+		const item: LiveItem = { type: "patch", key, ops: [...ops] };
+		if (!isLivePatch(item)) throw new TypeError(`Invalid live patch for ${JSON.stringify(key)}`);
+		if (this.closed) return;
+		const value = this.fold.values.get(key);
+		if (value === undefined || !PATCHABLE_KINDS.has(value.kind)) {
+			throw new TypeError(`No panel or work item under ${JSON.stringify(key)} to patch`);
+		}
+		if (!isLiveValue(patchLiveValue(value, ops))) throw new TypeError(`Patched ${value.kind} value is invalid`);
+		this.publish([item]);
+	}
+
 	/** Tell the attached clients something: a notification or an error. */
-	notice(level: "info" | "warning" | "error", message: string, source?: string): void {
+	notice(level: "info" | "warning" | "error", message: UiNodeStyledText, source?: string): void {
 		if (this.closed) return;
 		this.publish([{ type: "notice", level, message, ...(source === undefined ? {} : { source }) }]);
 	}
@@ -746,6 +825,12 @@ export class LiveState {
 	setEditorText(text: string): void {
 		if (this.closed) return;
 		this.publish([{ type: "directive", directive: "set_editor_text", text }]);
+	}
+
+	/** Ask the attached interactive clients to paste `text` into their editor at the cursor. */
+	insertEditorText(text: string): void {
+		if (this.closed) return;
+		this.publish([{ type: "directive", directive: "insert_editor_text", text }]);
 	}
 
 	/** Publish streaming items: the streaming assistant message and tool progress. */
@@ -792,7 +877,7 @@ export class LiveState {
 		if (this.closed) return Promise.resolve({ status: "cancelled", reason: "closed" });
 		const signal = options.signal;
 		if (signal?.aborted) return Promise.resolve({ status: "cancelled", reason: "aborted" });
-		if (options.unattended !== true && !this.accepts(request.kind)) {
+		if (options.unattended !== true && !this.accepts(request.kind, options.client)) {
 			return Promise.resolve({ status: "cancelled", reason: "unavailable" });
 		}
 		if (this.pending.has(requestId)) {
@@ -802,6 +887,7 @@ export class LiveState {
 			const entry: PendingEntry = {
 				requestId,
 				request,
+				client: options.client,
 				resolve,
 				signal,
 				onAbort: () => this.settle(entry, { status: "cancelled", reason: "aborted" }),
@@ -832,15 +918,16 @@ export class LiveState {
 
 	/**
 	 * Answer `requestId` for the attached client `clientId`. The client must
-	 * accept the request's kind and the response must fit the request; the first
-	 * accepted answer ends the request, and later answers find it unknown.
+	 * accept the request's kind, be of the host client the request was asked of
+	 * (when it was asked of one), and the response must fit the request; the
+	 * first accepted answer ends the request, and later answers find it unknown.
 	 */
 	answer(requestId: string, response: HostResponse, clientId: string): HostAnswerResult {
 		const attached = this.clients.get(clientId);
 		if (!attached) return "not_allowed";
 		const entry = this.pending.get(requestId);
 		if (!entry) return "unknown";
-		if (!acceptsKind(attached.client, entry.request.kind)) return "not_allowed";
+		if (!mayShow(attached, { kind: entry.request.kind, client: entry.client })) return "not_allowed";
 		if (!answers(entry.request, response)) return "invalid";
 		this.settle(entry, { status: "answered", response, clientId });
 		return "accepted";
@@ -913,15 +1000,21 @@ export class LiveState {
 		}
 	}
 
-	/** The part of `items` `attached` may see: host requests only of the kinds it accepts. */
+	/** What a client must be to see `value`, when it is a host request. */
+	private gateOf(value: LiveValue): RequestGate | undefined {
+		if (value.kind !== "host_request") return undefined;
+		return { kind: value.request.kind, client: this.pending.get(value.requestId)?.client };
+	}
+
+	/** The part of `items` `attached` may see: host requests only of the kinds it accepts, asked of it. */
 	private visible(attached: AttachedClient, items: readonly LiveItem[]): LiveItem[] {
 		const visible: LiveItem[] = [];
 		for (const item of items) {
 			if (item.type === "set") {
-				const gate = gateOf(item.value);
+				const gate = this.gateOf(item.value);
 				if (gate === undefined) {
 					visible.push(item);
-				} else if (acceptsKind(attached.client, gate)) {
+				} else if (mayShow(attached, gate)) {
 					attached.shown.add(item.key);
 					visible.push(item);
 				}

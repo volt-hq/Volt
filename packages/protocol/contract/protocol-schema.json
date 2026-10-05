@@ -102,14 +102,17 @@
 				"changed",
 				"fatal"
 			],
-			"dynamicIntentPattern": "^(extension\\.command|prompt\\.template|skill)\\.",
+			"dynamicIntentPattern": "^(extension\\.command|extension\\.intent|prompt\\.template|skill)\\.",
 			"intentNameMaxChars": 160,
 			"intentOutcomeWindow": 256,
 			"historyPageMaxEntries": 200,
 			"contentTextMaxScalars": 12000,
 			"editorCompletionsMaxItems": 50,
 			"editorCompletionTextMaxChars": 1024,
-			"liveKeyIdMaxChars": 256
+			"liveKeyIdMaxChars": 256,
+			"liveExtensionNameMaxChars": 128,
+			"extensionStatusMaxSerializedBytes": 1024,
+			"extensionTitleMaxChars": 256
 		}
 	},
 	"$defs": {
@@ -3052,7 +3055,7 @@
 		"DynamicIntentName": {
 			"type": "string",
 			"maxLength": 160,
-			"pattern": "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
+			"pattern": "^(?:extension\\.command|extension\\.intent|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
 			"x-volt-expected": "be a dynamic intent name"
 		},
 		"EditorCompletionItem": {
@@ -3104,6 +3107,18 @@
 			"type": "string",
 			"pattern": "^(?!(?:volt|core|builtin|host|ext)$)[a-z0-9][a-z0-9-]{0,63}$",
 			"x-volt-expected": "be a lowercase extension id that is not reserved"
+		},
+		"ExtensionIntentInput": {
+			"type": "object",
+			"patternProperties": {
+				"^.*$": {}
+			}
+		},
+		"ExtensionIntentName": {
+			"type": "string",
+			"maxLength": 160,
+			"pattern": "^extension\\.intent\\.(?!(?:volt|core|builtin|host|ext)\\.)[a-z0-9][a-z0-9-]{0,63}\\.[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+			"x-volt-expected": "be an extension intent name"
 		},
 		"ExtensionManifest": {
 			"type": "object",
@@ -3904,6 +3919,9 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.dynamic"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.extension"
 				}
 			]
 		},
@@ -4141,7 +4159,10 @@
 			],
 			"properties": {
 				"type": {
-					"$ref": "#/$defs/DynamicIntentName"
+					"type": "string",
+					"maxLength": 160,
+					"pattern": "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
+					"x-volt-expected": "be the name of an extension command, prompt template, or skill"
 				},
 				"intentId": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
@@ -4184,6 +4205,33 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.export_html"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.extension": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"$ref": "#/$defs/ExtensionIntentName"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/ExtensionIntentInput"
 				}
 			},
 			"additionalProperties": false
@@ -9230,10 +9278,7 @@
 				"outcomes": {
 					"type": "array",
 					"items": {
-						"type": "object",
-						"patternProperties": {
-							"^.*$": {}
-						}
+						"$ref": "#/$defs/ExtensionIntentInput"
 					}
 				},
 				"path": {
@@ -10060,7 +10105,10 @@
 				},
 				"directive": {
 					"type": "string",
-					"const": "set_editor_text"
+					"enum": [
+						"set_editor_text",
+						"insert_editor_text"
+					]
 				},
 				"text": {
 					"type": "string"
@@ -10089,7 +10137,7 @@
 					]
 				},
 				"message": {
-					"type": "string"
+					"$ref": "#/$defs/UiNodeStyledText"
 				},
 				"source": {
 					"type": "string"
@@ -10167,10 +10215,7 @@
 					"type": "string"
 				},
 				"args": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"partial": {
 					"$ref": "#/$defs/LiveToolPartial"
@@ -10189,12 +10234,12 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|ext_status|ext_widget|ext_panel|work)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title)|(?:host_request|work)/[^\\u0000-\\u001f\\u007f]{1,256}|(?:ext_status|ext_panel)/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LivePatchKey": {
 			"type": "string",
-			"pattern": "^(?:ext_panel|work)/[^\\u0000-\\u001f\\u007f]{1,256}$",
+			"pattern": "^(?:work/[^\\u0000-\\u001f\\u007f]{1,256}|ext_panel/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
 			"x-volt-expected": "be the live key of a panel or work item"
 		},
 		"LiveToolPartial": {
@@ -10264,9 +10309,6 @@
 					"$ref": "#/$defs/LiveValue.ext_status"
 				},
 				{
-					"$ref": "#/$defs/LiveValue.ext_widget"
-				},
-				{
 					"$ref": "#/$defs/LiveValue.ext_panel"
 				},
 				{
@@ -10309,6 +10351,7 @@
 			"type": "object",
 			"required": [
 				"kind",
+				"extension",
 				"text"
 			],
 			"properties": {
@@ -10320,7 +10363,7 @@
 					"$ref": "#/$defs/ExtensionId"
 				},
 				"text": {
-					"type": "string"
+					"$ref": "#/$defs/UiNodeStyledText"
 				}
 			},
 			"additionalProperties": false
@@ -10329,6 +10372,7 @@
 			"type": "object",
 			"required": [
 				"kind",
+				"extension",
 				"title"
 			],
 			"properties": {
@@ -10336,36 +10380,13 @@
 					"type": "string",
 					"const": "ext_title"
 				},
+				"extension": {
+					"$ref": "#/$defs/ExtensionId"
+				},
 				"title": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"LiveValue.ext_widget": {
-			"type": "object",
-			"required": [
-				"kind",
-				"lines",
-				"placement"
-			],
-			"properties": {
-				"kind": {
 					"type": "string",
-					"const": "ext_widget"
-				},
-				"lines": {
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
-				"placement": {
-					"type": "string",
-					"enum": [
-						"aboveEditor",
-						"belowEditor"
-					]
+					"maxLength": 256,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
 				}
 			},
 			"additionalProperties": false
@@ -13534,10 +13555,7 @@
 					"type": "string"
 				},
 				"arguments": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"argumentsJson": {
 					"type": "string"
@@ -15501,10 +15519,7 @@
 					"$ref": "#/$defs/RpcDiagnosticErrorInfo"
 				},
 				"details": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				}
 			},
 			"additionalProperties": false
@@ -16850,10 +16865,7 @@
 					"x-volt-opaque": "MCP SDK JSON schema; passed through verbatim"
 				},
 				"annotations": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"metadataHash": {
 					"type": "string"
@@ -19650,10 +19662,7 @@
 					"type": "string"
 				},
 				"arguments": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"thoughtSignature": {
 					"type": "string"
@@ -20016,16 +20025,10 @@
 					"type": "string"
 				},
 				"args": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"details": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				},
 				"output": {
 					"type": "string"
@@ -20681,10 +20684,7 @@
 					"pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
 				},
 				"input": {
-					"type": "object",
-					"patternProperties": {
-						"^.*$": {}
-					}
+					"$ref": "#/$defs/ExtensionIntentInput"
 				}
 			},
 			"additionalProperties": false

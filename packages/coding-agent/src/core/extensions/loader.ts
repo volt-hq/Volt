@@ -20,12 +20,14 @@ import type { JsonCompatibleInput } from "@hansjm10/volt-ai";
 import * as _bundledVoltAi from "@hansjm10/volt-ai";
 import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
 import * as _bundledVoltProtocol from "@hansjm10/volt-protocol";
+import { EXTENSION_INTENT_NAME_PATTERN, REMOTE_CAPABILITIES, type RemoteCapability } from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
 import { createJiti } from "jiti/static";
 // Static imports of packages that extensions may use.
 // These MUST be static so the standalone bundler includes them.
 // The virtualModules option then makes them available to extensions.
 import * as _bundledTypebox from "typebox";
+import { type TObject, Type } from "typebox";
 import * as _bundledTypeboxCompile from "typebox/compile";
 import * as _bundledTypeboxValue from "typebox/value";
 import { CONFIG_DIR_NAME, getAgentDir, isBundledCli, isStandaloneBinary } from "../../config.ts";
@@ -53,14 +55,16 @@ import {
 	EXTENSION_EVENT_NAMES,
 	type Extension,
 	type ExtensionAPI,
-	type ExtensionContext,
+	type ExtensionCompletionProvider,
 	type ExtensionDefinition,
 	type ExtensionFactory,
+	type ExtensionIntentOptions,
 	type ExtensionRuntime,
 	type LoadExtensionsResult,
 	type MessageRenderer,
 	type ProviderConfig,
 	type RegisteredCommand,
+	type RegisteredIntent,
 	type ToolDefinition,
 	type WorkKindDeclaration,
 } from "./types.ts";
@@ -178,6 +182,110 @@ export function validateExtensionCommandName(name: string): void {
 	}
 }
 
+const EXTENSION_INTENT_NAME = new RegExp(EXTENSION_INTENT_NAME_PATTERN);
+const CAPABILITIES: ReadonlySet<string> = new Set(REMOTE_CAPABILITIES);
+
+/** Most intents one extension registers. */
+export const EXTENSION_INTENTS_MAX = 64;
+/** Most completion providers one extension registers. */
+export const EXTENSION_COMPLETION_PROVIDERS_MAX = 8;
+/** Longest completion trigger, in characters. */
+const COMPLETION_TRIGGER_MAX_CHARS = 8;
+/** Longest intent label, in characters. */
+const INTENT_LABEL_MAX_CHARS = 80;
+/** Largest intent input schema, in characters of JSON: clients read it from the intent's descriptor. */
+const INTENT_INPUT_SCHEMA_MAX_CHARS = 16 * 1024;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** A name the extension gives an intent or a completion provider; throws what the author must fix. */
+function validateContributionName(what: string, name: unknown): asserts name is string {
+	if (typeof name !== "string" || !EXTENSION_INTENT_NAME.test(name)) {
+		throw new Error(
+			`Invalid ${what} name ${JSON.stringify(name)}: use a letter or digit, then at most 63 letters, digits, "_", and "-"`,
+		);
+	}
+}
+
+/** An intent declaration of extension `extensionId`, checked and copied. */
+function validateIntent(extensionId: string, name: string, options: unknown): RegisteredIntent {
+	validateContributionName("intent", name);
+	if (!isRecord(options)) throw new TypeError(`Intent ${name} must be declared as an object`);
+	const { label, description, input, remote = false, requires = [], handler } = options;
+	if (typeof label !== "string" || label.trim().length === 0 || label.length > INTENT_LABEL_MAX_CHARS) {
+		throw new TypeError(`Intent ${name}: label must be 1 to ${INTENT_LABEL_MAX_CHARS} characters`);
+	}
+	if (description !== undefined && typeof description !== "string") {
+		throw new TypeError(`Intent ${name}: description must be a string`);
+	}
+	if (input !== undefined && (!isRecord(input) || input.type !== "object")) {
+		throw new TypeError(`Intent ${name}: input must be a TypeBox object schema`);
+	}
+	if (
+		input !== undefined &&
+		(JSON.stringify(input)?.length ?? Number.POSITIVE_INFINITY) > INTENT_INPUT_SCHEMA_MAX_CHARS
+	) {
+		throw new TypeError(
+			`Intent ${name}: input schema is larger than ${INTENT_INPUT_SCHEMA_MAX_CHARS} characters of JSON`,
+		);
+	}
+	if (typeof remote !== "boolean") throw new TypeError(`Intent ${name}: remote must be a boolean`);
+	const capabilities: unknown[] | undefined = Array.isArray(requires) ? [...requires] : undefined;
+	if (!capabilities?.every((capability) => typeof capability === "string" && CAPABILITIES.has(capability))) {
+		throw new TypeError(`Intent ${name}: requires must list remote capabilities`);
+	}
+	if (typeof handler !== "function") throw new TypeError(`Intent ${name}: handler must be a function`);
+	return Object.freeze({
+		name,
+		intent: `extension.intent.${extensionId}.${name}`,
+		label,
+		...(description === undefined ? {} : { description }),
+		input: (input as TObject | undefined) ?? Type.Object({}, { additionalProperties: false }),
+		remote,
+		requires: Object.freeze([...new Set(capabilities as RemoteCapability[])]),
+		handler: handler as RegisteredIntent["handler"],
+		extensionId,
+	});
+}
+
+/**
+ * The intent a shortcut of extension `extensionId` invokes: one of its own
+ * intents or commands. A name without a `.` names one of its intents.
+ */
+function shortcutIntent(extensionId: string, intent: unknown): string {
+	if (typeof intent !== "string" || intent.length === 0) {
+		throw new TypeError("A shortcut needs the intent it invokes");
+	}
+	if (!intent.includes(".")) {
+		validateContributionName("intent", intent);
+		return `extension.intent.${extensionId}.${intent}`;
+	}
+	for (const prefix of [`extension.intent.${extensionId}.`, `extension.command.${extensionId}.`]) {
+		if (intent.startsWith(prefix)) {
+			validateContributionName("intent", intent.slice(prefix.length));
+			return intent;
+		}
+	}
+	throw new Error(`A shortcut of extension ${extensionId} invokes only its own intents and commands, not ${intent}`);
+}
+
+/** A completion trigger: 1 to 8 characters without whitespace or control characters. */
+function validateTrigger(name: string, trigger: unknown): string {
+	if (
+		typeof trigger !== "string" ||
+		trigger.length === 0 ||
+		[...trigger].length > COMPLETION_TRIGGER_MAX_CHARS ||
+		/[\s\p{Cc}]/u.test(trigger)
+	) {
+		throw new TypeError(
+			`Completion provider ${name}: trigger must be 1 to ${COMPLETION_TRIGGER_MAX_CHARS} characters without whitespace`,
+		);
+	}
+	return trigger;
+}
+
 /**
  * Create a runtime with throwing stubs for action methods.
  * Runner.bindCore() replaces these with real implementations.
@@ -279,16 +387,61 @@ function createExtensionAPI(
 			});
 		},
 
-		registerShortcut(
-			shortcut: KeyId,
-			options: {
-				description?: string;
-				handler: (ctx: ExtensionContext) => Promise<void> | void;
-			},
-		): void {
+		registerIntent(name: string, options: ExtensionIntentOptions): string {
 			runtime.assertActive();
-			// The extension id comes last: it names the extension a shortcut's ctx belongs to.
-			extension.shortcuts.set(shortcut, { ...options, shortcut, extensionId: extension.id });
+			const intent = validateIntent(extension.id, name, options);
+			if (extension.intents.has(name)) throw new Error(`Intent ${name} is already registered`);
+			if (extension.intents.size >= EXTENSION_INTENTS_MAX) {
+				throw new Error(`An extension registers at most ${EXTENSION_INTENTS_MAX} intents`);
+			}
+			extension.intents.set(name, intent);
+			return intent.intent;
+		},
+
+		registerShortcut(shortcut: KeyId, options: { description?: string; intent: string }): void {
+			runtime.assertActive();
+			if (typeof shortcut !== "string" || shortcut.trim().length === 0) {
+				throw new TypeError("A shortcut needs a key");
+			}
+			if (!isRecord(options)) throw new TypeError(`Shortcut ${shortcut} must be declared as an object`);
+			const { description } = options;
+			if (description !== undefined && typeof description !== "string") {
+				throw new TypeError(`Shortcut ${shortcut}: description must be a string`);
+			}
+			extension.shortcuts.set(shortcut, {
+				shortcut,
+				...(description === undefined ? {} : { description }),
+				intent: shortcutIntent(extension.id, options.intent),
+				extensionId: extension.id,
+			});
+		},
+
+		registerCompletionProvider(name: string, provider: ExtensionCompletionProvider): void {
+			runtime.assertActive();
+			validateContributionName("completion provider", name);
+			if (!isRecord(provider)) throw new TypeError(`Completion provider ${name} must be declared as an object`);
+			const { trigger, remote = false, complete } = provider;
+			if (typeof remote !== "boolean") throw new TypeError(`Completion provider ${name}: remote must be a boolean`);
+			if (typeof complete !== "function") {
+				throw new TypeError(`Completion provider ${name}: complete must be a function`);
+			}
+			if (extension.completionProviders.has(name))
+				throw new Error(`Completion provider ${name} is already registered`);
+			if (extension.completionProviders.size >= EXTENSION_COMPLETION_PROVIDERS_MAX) {
+				throw new Error(
+					`An extension registers at most ${EXTENSION_COMPLETION_PROVIDERS_MAX} completion providers`,
+				);
+			}
+			extension.completionProviders.set(
+				name,
+				Object.freeze({
+					name,
+					trigger: validateTrigger(name, trigger),
+					remote,
+					complete: complete as ExtensionCompletionProvider["complete"],
+					extensionId: extension.id,
+				}),
+			);
 		},
 
 		registerFlag(
@@ -584,6 +737,8 @@ function createExtension(candidate: Candidate): Extension {
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		intents: new Map(),
+		completionProviders: new Map(),
 		workKinds: new Map(),
 	};
 }

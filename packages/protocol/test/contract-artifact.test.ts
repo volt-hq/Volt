@@ -131,6 +131,7 @@ describe("committed protocol contract artifact", () => {
 		expect(refs("Frame.intent")).toEqual([
 			...BUILTIN_INTENT_NAMES.map((name) => `#/$defs/Frame.intent.${name}`),
 			"#/$defs/Frame.intent.dynamic",
+			"#/$defs/Frame.intent.extension",
 		]);
 		expect(refs("Frame.query")).toEqual(QUERY_NAMES.map((name) => `#/$defs/Frame.query.${name}`));
 		expect(refs("ProjectedEntry")).toEqual(

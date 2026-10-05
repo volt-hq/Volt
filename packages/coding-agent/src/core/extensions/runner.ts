@@ -53,6 +53,8 @@ import type {
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
 	ProviderConfig,
+	RegisteredCompletionProvider,
+	RegisteredIntent,
 	RegisteredTool,
 	ReplacedSessionContext,
 	ResolvedCommand,
@@ -281,7 +283,10 @@ const noOpUIContext: ExtensionUIContext = {
 	select: async () => undefined,
 	confirm: async () => false,
 	input: async () => undefined,
+	form: async () => undefined,
+	dialog: async () => undefined,
 	notify: () => {},
+	setPanel: () => {},
 	onTerminalInput: () => () => {},
 	setStatus: () => {},
 	setWorkingMessage: () => {},
@@ -295,7 +300,7 @@ const noOpUIContext: ExtensionUIContext = {
 	custom: async () => undefined as never,
 	pasteToEditor: () => {},
 	setEditorText: () => {},
-	getEditorText: () => "",
+	getEditorText: async () => undefined,
 	editor: async () => undefined,
 	addAutocompleteProvider: () => {},
 	setEditorComponent: () => {},
@@ -310,13 +315,18 @@ const noOpUIContext: ExtensionUIContext = {
 	setToolsExpanded: () => {},
 };
 
+/** The UI of the extension with manifest id `owner`; `undefined` for a context no extension owns. */
+export type ExtensionUIFactory = (owner: string | undefined) => ExtensionUIContext;
+
+const noOpUIFactory: ExtensionUIFactory = () => noOpUIContext;
+
 export class ExtensionRunner {
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
-	private uiContext: ExtensionUIContext;
+	private uiFactory: ExtensionUIFactory;
 	private guardedContextObjects = new WeakMap<object, object>();
 	private mode: ExtensionMode = "print";
-	private hasUIFn: () => boolean = () => this.uiContext !== noOpUIContext;
+	private hasUIFn: () => boolean = () => this.uiFactory !== noOpUIFactory;
 	private cwd: string;
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
@@ -361,7 +371,7 @@ export class ExtensionRunner {
 		}
 		this.extensions = extensions;
 		this.runtime = runtime;
-		this.uiContext = noOpUIContext;
+		this.uiFactory = noOpUIFactory;
 		this.cwd = cwd;
 		this.sessionManager = sessionManager;
 		this.modelRegistry = modelRegistry;
@@ -508,15 +518,27 @@ export class ExtensionRunner {
 		this.reloadHandler = async () => {};
 	}
 
-	/** @param hasUI Whether the UI can reach a user right now; defaults to whether a UI context is set. */
-	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print", hasUI?: () => boolean): void {
-		this.uiContext = uiContext ?? noOpUIContext;
+	/**
+	 * Set the UI extensions see: one context for every extension, or a factory
+	 * of each extension's own (status items, panels, and title are keyed by the
+	 * extension that set them).
+	 *
+	 * @param hasUI Whether the UI can reach a user right now; defaults to whether a UI context is set.
+	 */
+	setUIContext(
+		uiContext?: ExtensionUIContext | ExtensionUIFactory,
+		mode: ExtensionMode = "print",
+		hasUI?: () => boolean,
+	): void {
+		this.uiFactory =
+			uiContext === undefined ? noOpUIFactory : typeof uiContext === "function" ? uiContext : () => uiContext;
 		this.mode = mode;
-		this.hasUIFn = hasUI ?? (() => this.uiContext !== noOpUIContext);
+		this.hasUIFn = hasUI ?? (() => this.uiFactory !== noOpUIFactory);
 	}
 
-	getUIContext(): ExtensionUIContext {
-		return this.uiContext;
+	/** The UI of the extension with manifest id `owner`, or of a context no extension owns. */
+	getUIContext(owner?: string): ExtensionUIContext {
+		return this.uiFactory(owner);
 	}
 
 	hasUI(): boolean {
@@ -545,6 +567,25 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/** Every extension's intents, in load order. */
+	getRegisteredIntents(): RegisteredIntent[] {
+		return this.extensions.flatMap((ext) => [...ext.intents.values()]);
+	}
+
+	/** The intent `extension.intent.<id>.<name>` an extension registered. */
+	getIntent(intent: string): RegisteredIntent | undefined {
+		for (const ext of this.extensions) {
+			const prefix = `extension.intent.${ext.id}.`;
+			if (intent.startsWith(prefix)) return ext.intents.get(intent.slice(prefix.length));
+		}
+		return undefined;
+	}
+
+	/** Every extension's editor completion providers, in load order. */
+	getCompletionProviders(): RegisteredCompletionProvider[] {
+		return this.extensions.flatMap((ext) => [...ext.completionProviders.values()]);
 	}
 
 	/** The work kinds every extension declared, in load order. */
@@ -826,7 +867,7 @@ export class ExtensionRunner {
 			},
 			get ui() {
 				runner.assertActive();
-				return runner.guardContextObject(runner.uiContext);
+				return runner.guardContextObject(runner.getUIContext(owner));
 			},
 			get mode() {
 				runner.assertActive();

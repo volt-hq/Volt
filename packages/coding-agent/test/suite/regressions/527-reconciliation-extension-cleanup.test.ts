@@ -314,13 +314,17 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		let runtime: TestClient | undefined;
 		// The client's live view: editor text, notifications, and the dialogs it answers.
 		const live: LiveClient = {
-			acceptsHostRequest: (kind) => kind === "input",
+			acceptsHostRequest: (kind) => kind === "input" || kind === "editor_text",
 			apply: (update) => {
 				for (const item of update.items) {
 					if (item.type === "directive") draft = item.text;
 					else if (item.type === "notice") notify(item.message);
 					else if (item.type === "set" && item.value.kind === "host_request") {
 						const { requestId, request } = item.value;
+						if (request.kind === "editor_text") {
+							const text = draft;
+							queueMicrotask(() => runtime?.conversation.liveState.answer(requestId, { value: text }, "client"));
+						}
 						if (request.kind !== "input") continue;
 						void input(request.title).then((value) =>
 							runtime?.conversation.liveState.answer(requestId, { value }, "client"),
@@ -345,13 +349,12 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			},
 			[],
 			{
-				getEditorText: () => draft,
 				onTerminalInput: () => unsubscribe,
 			},
 			live,
 		));
 		contexts[0].setEditorText("unsent draft");
-		expect(contexts[0].getEditorText()).toBe("unsent draft");
+		await expect(contexts[0].getEditorText()).resolves.toBe("unsent draft");
 		expect(contexts[0].notify).toBe(capturedNotify!);
 		capturedNotify!("active notification");
 		await expect(capturedInput!("active dialog")).resolves.toBe("answer");

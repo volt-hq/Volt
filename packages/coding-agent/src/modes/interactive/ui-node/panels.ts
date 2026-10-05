@@ -107,6 +107,12 @@ export class UiPanels {
 		return [...this.entries.keys()];
 	}
 
+	/** Whether a panel with `placement` is shown. */
+	has(placement: ExtensionPanelPlacement): boolean {
+		for (const entry of this.entries.values()) if (entry.panel.placement === placement) return true;
+		return false;
+	}
+
 	/** The retained view of the panel under `key`. */
 	getView(key: string): ViewReconciler<UiNode> | undefined {
 		return this.entries.get(key)?.view;

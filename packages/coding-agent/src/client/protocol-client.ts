@@ -46,6 +46,7 @@ import {
 	foldLiveCommit,
 	foldLiveFrame,
 	type LiveFoldState,
+	LivePatchError,
 	liveCommitOf,
 } from "../core/protocol/live-fold.ts";
 import { localProfile } from "../core/protocol/profiles.ts";
@@ -476,7 +477,16 @@ export class ProtocolClient {
 					return;
 				}
 				this.liveSeq = frame.seq;
-				this.liveState = foldLiveFrame(this.liveState, frame);
+				try {
+					this.liveState = foldLiveFrame(this.liveState, frame);
+				} catch (error) {
+					// A patch of a value this client does not hold as the host does: start over after its position.
+					if (error instanceof LivePatchError) {
+						this.resubscribe();
+						return;
+					}
+					throw error;
+				}
 				if (frame.items.some((item) => item.type === "set" && item.key === "phase") || frame.reset === true) {
 					this.phaseBasedOn = frame.basedOn;
 				}

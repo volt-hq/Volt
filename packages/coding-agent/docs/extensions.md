@@ -1715,15 +1715,45 @@ Reloading the extensions removes their kinds: `/reload` is refused while work ru
 
 Register a custom TUI renderer for messages with your `customType`. See [Custom UI](#custom-ui).
 
-### volt.registerShortcut(shortcut, options)
+### volt.registerIntent(name, options)
 
-Register a keyboard shortcut. See [keybindings.md](keybindings.md) for the shortcut format and built-in keybindings.
+Register an intent: an operation every client can invoke by name, from a panel's actions and forms, a shortcut, or a protocol frame. `name` is a letter or digit, then at most 63 letters, digits, `_`, and `-`; the call returns the intent's full name, `extension.intent.<manifest id>.<name>`. An extension registers at most 64 intents.
 
 ```typescript
-volt.registerShortcut("ctrl+shift+f", {
-  description: "Toggle focus mode",
-  handler: async (ctx) => {
-    ctx.ui.notify("Toggled!");
+import { Type } from "typebox";
+
+const deploy = volt.registerIntent("deploy", {
+  label: "Deploy",
+  description: "Deploy the current branch",
+  input: Type.Object({ target: Type.String(), dryRun: Type.Optional(Type.Boolean()) }),
+  handler: async (input, ctx) => {
+    ctx.ui.notify(`Deploying to ${input.target}`);
+  },
+});
+```
+
+The host checks the input against `input` (an object schema; no fields when omitted) before `handler` runs, in the extension's command context. A handler that throws rejects the intent as `failed` and reports an extension error. Intents are local-only by default: set `remote: true` to let a paired device invoke one, which also needs `conversation.control.v1` and every capability in `requires`. The `intents` query lists an extension's intents with their input schema (see [rpc.md](rpc.md#dynamic-intents)).
+
+### volt.registerShortcut(shortcut, options)
+
+Map a key to one of the extension's intents or commands: a name `registerIntent` returned, an `extension.command.<manifest id>.<name>`, or the bare name of one of its intents. Pressing the key invokes the intent with no input. See [keybindings.md](keybindings.md) for the key format.
+
+```typescript
+volt.registerShortcut("ctrl+shift+f", { description: "Deploy", intent: deploy });
+```
+
+The key is a default: the TUI adds an entry named after the intent to its keybinding table, so users rebind it in `keybindings.json` (`"extension.intent.my-ext.deploy": "ctrl+alt+d"`). A key reserved by a built-in action is skipped with a warning.
+
+### volt.registerCompletionProvider(name, provider)
+
+Complete editor tokens that start with `trigger` (1 to 8 characters without whitespace). Every client asks for completions with the `editor_completions` query; the first provider whose trigger starts the token before the cursor and answers with items wins. The host waits at most one second for the providers, keeps at most 50 items, and removes terminal controls from their text. Providers are local-only by default; `remote: true` lets paired devices ask. An extension registers at most 8.
+
+```typescript
+volt.registerCompletionProvider("issues", {
+  trigger: "#",
+  complete: async ({ query, signal }) => {
+    const issues = await searchIssues(query, signal);
+    return issues.map((issue) => ({ value: `#${issue.number}`, description: issue.title }));
   },
 });
 ```
@@ -2485,7 +2515,7 @@ Extensions can interact with users via `ctx.ui` methods and customize how messag
 
 A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
-- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`), `notify`, `setStatus`, string-array `setWidget`, `setTitle`, and `setEditorText` belong to the conversation and reach every attached client that shows UI. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, widgets, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, widgets, and title reach every phone. The terminal-only members (`custom()`, component widgets, header, footer, editor components, terminal input, working indicators) go to the most recently attached client with a terminal.
+- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, string-array `setWidget`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). The terminal-only members (`custom()`, component widgets, header, footer, editor components, terminal input, working indicators) go to the most recently attached client with a terminal.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 - A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, and its extensions start when the phone reconnects; for a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects. `withSession` does not run for a phone, so the result reports `seeded: false`.
@@ -2505,9 +2535,31 @@ const name = await ctx.ui.input("Name:", "placeholder");
 // Multi-line editor
 const text = await ctx.ui.editor("Edit:", "prefilled text");
 
-// Notification (non-blocking)
+// Notification (non-blocking); text with ANSI styling becomes semantic tokens
 ctx.ui.notify("Done!", "info");  // "info" | "warning" | "error"
+ctx.ui.notify([{ text: "Done", token: "success", bold: true }, { text: " in 3s" }]);
+
+// A dialog of UI data: resolves with the id of the action chosen, or undefined
+const choice = await ctx.ui.dialog({
+  title: "Deploy to production?",
+  body: [{ type: "markdown", markdown: "This deploys **main**." }],
+  actions: [
+    { id: "deploy", label: "Deploy", destructive: true },
+    { id: "cancel", label: "Cancel" },
+  ],
+});
+
+// A form: resolves with the values by field id, or undefined
+const values = await ctx.ui.form({
+  title: "Release",
+  fields: [
+    { kind: "string", id: "tag", label: "Tag", required: true, pattern: "v[0-9]+" },
+    { kind: "boolean", id: "notes", label: "Write notes" },
+  ],
+});
 ```
+
+A dialog's body is [`UiNode` data](rpc.md#extension-ui); its actions and forms send only the extension's own intents and commands (see panels below). A form's string patterns must be safe to test (no nested repetition or backreferences).
 
 #### Timed Dialogs with Countdown
 
@@ -2564,12 +2616,21 @@ if (confirmed) {
 
 See [examples/extensions/timed-confirm.ts](../examples/extensions/timed-confirm.ts) for complete examples.
 
-### Widgets, Status, and Footer
+### Panels, Status, and Footer
 
 ```typescript
-// Status in footer (persistent until cleared)
+// Status in footer (persistent until cleared): styled text, at most 1 KB; 32 per extension
 ctx.ui.setStatus("my-ext", "Processing...");
+ctx.ui.setStatus("my-ext", [{ text: "3 ", token: "accent" }, { text: "jobs" }]);
 ctx.ui.setStatus("my-ext", undefined);  // Clear
+
+// A panel of UI data above or below the editor, or in fullscreen's sidebar (above the editor elsewhere)
+ctx.ui.setPanel("build", {
+  title: "Build",
+  placement: "belowEditor",  // "aboveEditor" (default) | "belowEditor" | "sidebar"
+  node: { type: "terminal", key: "log", lines: ["compiling...", "done"] },
+});
+ctx.ui.setPanel("build", undefined);  // Remove
 
 // Working loader (shown during streaming)
 ctx.ui.setWorkingMessage("Thinking deeply...");
@@ -2610,9 +2671,9 @@ ctx.ui.setTitle("volt - my-project");
 
 // Editor text
 ctx.ui.setEditorText("Prefill text");
-const current = ctx.ui.getEditorText();
+const current = await ctx.ui.getEditorText();  // undefined when the client has no editor or does not answer within 2s
 
-// Paste into editor (triggers paste handling, including collapse for large content)
+// Paste into the editors (triggers paste handling, including collapse for large content)
 ctx.ui.pasteToEditor("pasted content");
 
 // Stack custom autocomplete behavior on top of the built-in provider
@@ -2663,6 +2724,8 @@ ctx.ui.theme.fg("accent", "styled text");  // Access current theme
 ```
 
 Custom working-indicator frames are rendered verbatim. If you want colors, add them to the frame strings yourself, for example with `ctx.ui.theme.fg(...)`.
+
+A panel's node is one [`UiNode`](rpc.md#extension-ui) of at most 32 KB of JSON, and an extension shows at most 16 panels. The host converts ANSI styling in its text to semantic tokens and checks it before any client sees it; data that is invalid or too large throws. Its actions and forms may send only the extension's own intents (`extension.intent.<id>.*`) and commands (`extension.command.<id>.*`), and `open_work` or `cancel_work` for its own work: other actions are left out and reported as an extension error, and a panel left empty is removed. Calling `setPanel` again with a changed node sends clients a patch of the node they hold. A string-array `setWidget(key, lines)` shows the panel `key` as one text node.
 
 ### Autocomplete Providers
 

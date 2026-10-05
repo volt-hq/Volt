@@ -27,7 +27,15 @@ import {
 	type IntentFrame,
 	IntentFrameSchema,
 } from "./intents.ts";
-import { HostRequestKindSchema, HostResponseSchema, LIVE_KEY_ID_MAX_CHARS, LiveItemSchema } from "./live.ts";
+import {
+	EXTENSION_STATUS_MAX_SERIALIZED_BYTES,
+	EXTENSION_TITLE_MAX_CHARS,
+	HostRequestKindSchema,
+	HostResponseSchema,
+	LIVE_EXTENSION_NAME_MAX_CHARS,
+	LIVE_KEY_ID_MAX_CHARS,
+	LiveItemSchema,
+} from "./live.ts";
 import { RpcConversationIdentifierSchema, RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
 import {
@@ -365,4 +373,7 @@ export const PROTOCOL_LIMITS = {
 	editorCompletionsMaxItems: EDITOR_COMPLETIONS_MAX_ITEMS,
 	editorCompletionTextMaxChars: EDITOR_COMPLETION_TEXT_MAX_CHARS,
 	liveKeyIdMaxChars: LIVE_KEY_ID_MAX_CHARS,
+	liveExtensionNameMaxChars: LIVE_EXTENSION_NAME_MAX_CHARS,
+	extensionStatusMaxSerializedBytes: EXTENSION_STATUS_MAX_SERIALIZED_BYTES,
+	extensionTitleMaxChars: EXTENSION_TITLE_MAX_CHARS,
 } as const;

@@ -11,13 +11,29 @@
  * and when redaction rewrites text the client already holds, the streaming
  * message is sent again in full. `seq` is renumbered per subscription, since
  * a frame left empty by redaction is not sent.
+ *
+ * A patched panel or work item is redacted as a whole value, as a set one is:
+ * the redactor folds the raw patch, redacts the patched value, and sends the
+ * client the patch from the redacted value it holds to the new one, or the
+ * whole value when that is smaller or the two differ beyond the node. A reset
+ * carries the patched values.
  */
 
 import { Buffer } from "node:buffer";
 import type { AssistantMessage, ToolCall } from "@hansjm10/volt-ai";
-import type { HostFrame, HostRequest, HostResponse, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
+import type {
+	HostFrame,
+	HostRequest,
+	HostResponse,
+	LiveItem,
+	LiveValue,
+	UiNode,
+	UiPatchOp,
+} from "@hansjm10/volt-protocol";
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+	diffUiTree,
+	LIVE_PATCHABLE_KINDS,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
 	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
@@ -65,6 +81,42 @@ const PRESERVED_KEYS: ReadonlySet<string> = new Set([...CLIENT_KEYS, ...HOST_KEY
 
 /** Largest value of one keyed live item, in bytes. */
 const LIVE_VALUE_MAX_BYTES = 64 * 1024;
+const PATCHABLE_KINDS: ReadonlySet<string> = new Set(LIVE_PATCHABLE_KINDS);
+
+/** The node tree a patch of `value` applies to: a panel's node, or a work item's detail. */
+function patchTree(value: LiveValue): UiNode[] | undefined {
+	if (value.kind === "ext_panel") return [value.node];
+	if (value.kind === "work") return value.detail === undefined ? [] : [value.detail];
+	return undefined;
+}
+
+/** `value` without the node a patch changes. */
+function withoutTree(value: LiveValue): unknown {
+	if (value.kind === "ext_panel") return { ...value, node: null };
+	if (value.kind === "work") return { ...value, detail: null };
+	return value;
+}
+
+/**
+ * The patch that turns `held` into `next`, both redacted: none when they
+ * differ beyond the node a patch changes, or when it is not smaller than
+ * `next` itself.
+ */
+function patchBetween(held: LiveValue, next: LiveValue): UiPatchOp[] | undefined {
+	const from = patchTree(held);
+	const to = patchTree(next);
+	if (from === undefined || to === undefined || held.kind !== next.kind) return undefined;
+	if (JSON.stringify(withoutTree(held)) !== JSON.stringify(withoutTree(next))) return undefined;
+	const ops = diffUiTree(from, to);
+	return jsonBytes(ops) < jsonBytes(next) ? ops : undefined;
+}
+
+/** What a sent item did to the value the client holds under a patchable key: what it held before, and after. */
+interface HeldChange {
+	readonly key: string;
+	readonly before: LiveValue | undefined;
+	readonly after: LiveValue | undefined;
+}
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -154,10 +206,20 @@ interface StreamingView {
 	bytes: number;
 	/** The last `seq` sent; 0 before the first frame. */
 	seq: number;
+	/** The redacted panels and work items the client holds, by raw key: what the next patch of each starts from. */
+	readonly held: Map<string, LiveValue>;
 }
 
 function newView(basedOn: number): StreamingView {
-	return { raw: emptyLiveFold(basedOn), text: new Map(), args: new Map(), frozen: new Set(), bytes: 0, seq: 0 };
+	return {
+		raw: emptyLiveFold(basedOn),
+		text: new Map(),
+		args: new Map(),
+		frozen: new Set(),
+		bytes: 0,
+		seq: 0,
+		held: new Map(),
+	};
 }
 
 function clearStreaming(view: StreamingView): void {
@@ -443,31 +505,88 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return jsonBytes(bounded) <= LIVE_VALUE_MAX_BYTES ? bounded : undefined;
 	};
 
-	const redactItem = (view: StreamingView, item: LiveItem): LiveItem[] => {
+	/** A sent item and, under a patchable key, what it changes of the value the client holds. */
+	type Sent = { readonly item: LiveItem; readonly held?: HeldChange };
+
+	/** Record that the client now holds `after` under `key`. */
+	const hold = (view: StreamingView, key: string, after: LiveValue | undefined): HeldChange => {
+		const before = view.held.get(key);
+		if (after === undefined) view.held.delete(key);
+		else view.held.set(key, after);
+		return { key, before, after };
+	};
+
+	/** A raw patch of `key`, already folded: the redacted patched value, as a patch from what the client holds. */
+	const redactPatch = (view: StreamingView, key: string): Sent[] => {
+		const raw = view.raw.values.get(key);
+		const value = raw === undefined ? undefined : redactValue(raw);
+		// A value too large to send: the client keeps what it holds, which the next change starts from.
+		if (value === undefined) return [];
+		const held = view.held.get(key);
+		const ops = held === undefined ? undefined : patchBetween(held, value);
+		if (ops !== undefined && ops.length === 0) return [];
+		const item: LiveItem =
+			ops === undefined ? { type: "set", key: redactKey(key), value } : { type: "patch", key: redactKey(key), ops };
+		return [{ item, held: hold(view, key, value) }];
+	};
+
+	const redactItem = (view: StreamingView, item: LiveItem): Sent[] => {
+		const sent = (items: LiveItem[]): Sent[] => items.map((each) => ({ item: each }));
 		switch (item.type) {
 			case "assistant_start":
-				return [{ type: "assistant_start", message: redactMessage(item.message, view) }];
+				return sent([{ type: "assistant_start", message: redactMessage(item.message, view) }]);
 			case "assistant_delta":
-				return redactDelta(view, item.event);
+				return sent(redactDelta(view, item.event));
 			case "assistant_end":
-				return [item];
+				return sent([item]);
 			case "tool":
-				return [redactTool(item)];
+				return sent([redactTool(item)]);
 			case "set": {
 				if (item.key.startsWith("host_request/") && item.value.kind !== "host_request") return [];
 				const value = redactValue(item.value);
-				return value === undefined ? [] : [{ type: "set", key: redactKey(item.key), value }];
+				if (value === undefined) return [];
+				const set: LiveItem = { type: "set", key: redactKey(item.key), value };
+				return [PATCHABLE_KINDS.has(value.kind) ? { item: set, held: hold(view, item.key, value) } : { item: set }];
 			}
-			case "clear":
+			case "clear": {
 				if (item.key.startsWith("host_request/")) optionMaps.delete(item.key.slice("host_request/".length));
-				return [{ type: "clear", key: redactKey(item.key) }];
+				const clear: LiveItem = { type: "clear", key: redactKey(item.key) };
+				return [view.held.has(item.key) ? { item: clear, held: hold(view, item.key, undefined) } : { item: clear }];
+			}
 			case "patch":
-				// Patched nodes have no remote redaction: remote clients get no patches.
-				return [];
+				return redactPatch(view, item.key);
 			case "notice":
 			case "directive":
-				return [sanitize(item)];
+				return sent([sanitize(item)]);
 		}
+	};
+
+	/**
+	 * The sent items within the frame, in order. After an item the frame cannot
+	 * carry, later items of the same panel or work item are left out too, and
+	 * the value the client holds is what it held before the first of them.
+	 */
+	const keptItems = (view: StreamingView, sent: Sent[], frame: LiveFrame): LiveItem[] => {
+		const fitting = fitLive(
+			sent.map((each) => each.item),
+			frame,
+		);
+		const diverged = new Set<string>();
+		const kept: LiveItem[] = [];
+		sent.forEach((each, index) => {
+			const key = each.held?.key;
+			if (key !== undefined && (diverged.has(key) || !fitting.has(index))) {
+				if (!diverged.has(key)) {
+					diverged.add(key);
+					const before = each.held?.before;
+					if (before === undefined) view.held.delete(key);
+					else view.held.set(key, before);
+				}
+				return;
+			}
+			if (fitting.has(index)) kept.push(each.item);
+		});
+		return kept;
 	};
 
 	const redactLive = (frame: LiveFrame): LiveFrame | undefined => {
@@ -475,14 +594,15 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const view = previous ?? newView(frame.basedOn);
 		views.set(frame.subscriptionId, view);
 		if (frame.reset === true || frame.basedOn !== view.raw.basedOn) clearStreaming(view);
+		if (frame.reset === true) view.held.clear();
 		view.raw = foldLiveFrame(view.raw, { basedOn: frame.basedOn, reset: frame.reset, items: [] });
-		const items: LiveItem[] = [];
+		const sent: Sent[] = [];
 		for (const item of frame.items) {
 			view.raw = foldLiveItems(view.raw, [item]);
-			items.push(...redactItem(view, item));
+			sent.push(...redactItem(view, item));
 		}
-		if (items.length === 0 && frame.reset !== true) return undefined;
-		const fitted = fitLive(items, frame);
+		if (sent.length === 0 && frame.reset !== true) return undefined;
+		const fitted = keptItems(view, sent, frame);
 		view.seq = frame.reset === true ? 1 : view.seq + 1;
 		return {
 			type: "live",
@@ -494,20 +614,20 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		};
 	};
 
-	/** Items of a live frame within the frame limit: the largest are left out first. */
-	const fitLive = (items: LiveItem[], frame: LiveFrame): LiveItem[] => {
+	/** The indexes of the items of a live frame within the frame limit: the largest are left out first. */
+	const fitLive = (items: readonly LiveItem[], frame: LiveFrame): Set<number> => {
+		const kept = new Set(items.keys());
 		const envelope = jsonBytes({ ...frame, items: [] });
 		let total = envelope + items.reduce((sum, item) => sum + jsonBytes(item) + 1, 0);
-		if (total <= options.frameBytes) return items;
+		if (total <= options.frameBytes) return kept;
 		const sized = items.map((item, index) => ({ index, bytes: jsonBytes(item) }));
 		sized.sort((left, right) => right.bytes - left.bytes);
-		const dropped = new Set<number>();
 		for (const entry of sized) {
 			if (total <= options.frameBytes) break;
-			dropped.add(entry.index);
+			kept.delete(entry.index);
 			total -= entry.bytes + 1;
 		}
-		return items.filter((_item, index) => !dropped.has(index));
+		return kept;
 	};
 
 	const fits = (frame: HostFrame): boolean => jsonBytes(frame) <= options.frameBytes;

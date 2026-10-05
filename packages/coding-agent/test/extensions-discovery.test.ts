@@ -473,7 +473,7 @@ export default function(volt) {
 			export default function(volt) {
 				volt.registerShortcut("ctrl+t", {
 					description: "Test shortcut",
-					handler: async (ctx) => {},
+					intent: "noop",
 				});
 			}
 		`;

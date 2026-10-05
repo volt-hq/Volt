@@ -1,15 +1,27 @@
 /**
  * The TUI's view of the live state of the conversation it shows: extension
- * status, string widgets, and title; notices and editor text; the progress
- * of the work this host runs; and the dialogs and approvals it answers in
+ * status, panels, and title; notices and editor directives; the progress of
+ * the work this host runs; and the dialogs, forms, and approvals it answers in
  * process, shown one at a time in the order they were asked. A request
- * another client answered, or that ended, closes without an answer.
+ * another client answered, or that ended, closes without an answer. An
+ * `editor_text` request is answered at once with the editor's text. Patches
+ * change the panels and work it holds in place.
  */
 
-import type { HostRequest, HostRequestKind, HostResponse, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
+import type {
+	HostRequest,
+	HostRequestKind,
+	HostResponse,
+	LiveItem,
+	LiveValue,
+	UiNodeStyledText,
+	UiPatchOp,
+} from "@hansjm10/volt-protocol";
 import type { LiveClient, LiveUpdate } from "../../core/host/live-state.ts";
+import { patchLiveValue } from "../../core/protocol/live-fold.ts";
+import type { UiPanel } from "./ui-node/panels.ts";
 
-type WidgetPlacement = Extract<LiveValue, { kind: "ext_widget" }>["placement"];
+type WorkValue = Extract<LiveValue, { kind: "work" }>;
 
 /** What the live view renders into. */
 export interface LiveViewHost {
@@ -17,24 +29,48 @@ export interface LiveViewHost {
 	showRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined>;
 	/** Answer `requestId` in the conversation the TUI shows. */
 	answer(requestId: string, response: HostResponse): void;
-	setStatus(key: string, text: string | undefined): void;
-	setWidget(key: string, lines: readonly string[] | undefined, placement: WidgetPlacement): void;
+	/** Show or clear an extension's status item, keyed `<extension id>/<name>`. */
+	setStatus(key: string, text: UiNodeStyledText | undefined): void;
+	/** Show, update, or remove the panel under its live key. */
+	setPanel(key: string, panel: UiPanel | undefined): void;
 	/** Show an extension's title, or the TUI's own without one. */
 	setTitle(title: string | undefined): void;
-	notify(level: "info" | "warning" | "error", message: string): void;
+	notify(level: "info" | "warning" | "error", message: UiNodeStyledText): void;
 	setEditorText(text: string): void;
+	/** Paste text into the editor at the cursor. */
+	insertEditorText(text: string): void;
+	/** The editor's text, or undefined when the TUI shows no editor. */
+	editorText(): string | undefined;
 	/** Work `workId` reported progress, or, without a value, its executor detached. */
-	showWork(workId: string, value: Extract<LiveValue, { kind: "work" }> | undefined): void;
+	showWork(workId: string, value: WorkValue | undefined): void;
 }
 
-const TUI_HOST_REQUESTS: ReadonlySet<HostRequestKind> = new Set(["select", "confirm", "input", "editor", "approval"]);
+const TUI_HOST_REQUESTS: ReadonlySet<HostRequestKind> = new Set([
+	"select",
+	"confirm",
+	"input",
+	"editor",
+	"form",
+	"dialog",
+	"approval",
+	"editor_text",
+]);
+
+function panelOf(value: Extract<LiveValue, { kind: "ext_panel" }>): UiPanel {
+	return {
+		...(value.title === undefined ? {} : { title: value.title }),
+		placement: value.placement,
+		node: value.node,
+	};
+}
 
 export class TuiLiveView implements LiveClient {
 	private readonly host: LiveViewHost;
 	private readonly statuses = new Set<string>();
-	private readonly widgets = new Set<string>();
-	/** Work whose progress shows. */
-	private readonly works = new Set<string>();
+	/** Panels shown, by live key. */
+	private readonly panels = new Map<string, Extract<LiveValue, { kind: "ext_panel" }>>();
+	/** Work whose progress shows, by work id. */
+	private readonly works = new Map<string, WorkValue>();
 	private titled = false;
 	/** Pending requests in the order they were asked; the first shows. */
 	private readonly requests = new Map<string, HostRequest>();
@@ -46,11 +82,6 @@ export class TuiLiveView implements LiveClient {
 
 	acceptsHostRequest(kind: HostRequestKind): boolean {
 		return TUI_HOST_REQUESTS.has(kind);
-	}
-
-	/** Whether the widget under `key` shows live lines, which an extension UI reset leaves alone. */
-	ownsWidget(key: string): boolean {
-		return this.widgets.has(key);
 	}
 
 	apply(update: LiveUpdate): void {
@@ -67,11 +98,15 @@ export class TuiLiveView implements LiveClient {
 			case "clear":
 				this.clear(item.key);
 				return;
+			case "patch":
+				this.patch(item.key, item.ops);
+				return;
 			case "notice":
 				this.host.notify(item.level, item.message);
 				return;
 			case "directive":
-				this.host.setEditorText(item.text);
+				if (item.directive === "insert_editor_text") this.host.insertEditorText(item.text);
+				else this.host.setEditorText(item.text);
 				return;
 			default:
 				// Streaming items: the TUI renders its session's events until it is a protocol client.
@@ -86,24 +121,45 @@ export class TuiLiveView implements LiveClient {
 				this.statuses.add(id);
 				this.host.setStatus(id, value.text);
 				return;
-			case "ext_widget":
-				this.widgets.add(id);
-				this.host.setWidget(id, value.lines, value.placement);
+			case "ext_panel":
+				this.panels.set(key, value);
+				this.host.setPanel(key, panelOf(value));
 				return;
 			case "ext_title":
 				this.titled = true;
 				this.host.setTitle(value.title);
 				return;
 			case "host_request":
+				if (value.request.kind === "editor_text") {
+					// Nothing to show: the editor's text answers it.
+					const text = this.host.editorText();
+					this.host.answer(value.requestId, text === undefined ? { cancelled: true } : { value: text });
+					return;
+				}
 				this.requests.set(value.requestId, value.request);
 				return;
 			case "work":
-				this.works.add(value.workId);
+				this.works.set(value.workId, value);
 				this.host.showWork(value.workId, value);
 				return;
 			default:
 				return;
 		}
+	}
+
+	/** Apply a patch to the panel or work held under `key`; one that does not apply leaves it as it is. */
+	private patch(key: string, ops: readonly UiPatchOp[]): void {
+		const workId = key.startsWith("work/") ? key.slice("work/".length) : undefined;
+		const value = workId === undefined ? this.panels.get(key) : this.works.get(workId);
+		if (value === undefined) return;
+		let patched: LiveValue;
+		try {
+			patched = patchLiveValue(value, ops);
+		} catch {
+			// The in-process live state applied it first; a patch that does not apply here changes nothing.
+			return;
+		}
+		this.set(key, patched);
 	}
 
 	private clear(key: string): void {
@@ -115,9 +171,8 @@ export class TuiLiveView implements LiveClient {
 				this.statuses.delete(id);
 				this.host.setStatus(id, undefined);
 				return;
-			case "ext_widget":
-				this.widgets.delete(id);
-				this.host.setWidget(id, undefined, "aboveEditor");
+			case "ext_panel":
+				if (this.panels.delete(key)) this.host.setPanel(key, undefined);
 				return;
 			case "ext_title":
 				this.titled = false;
@@ -139,9 +194,9 @@ export class TuiLiveView implements LiveClient {
 	private clearAll(): void {
 		for (const key of this.statuses) this.host.setStatus(key, undefined);
 		this.statuses.clear();
-		for (const key of this.widgets) this.host.setWidget(key, undefined, "aboveEditor");
-		this.widgets.clear();
-		for (const workId of this.works) this.host.showWork(workId, undefined);
+		for (const key of this.panels.keys()) this.host.setPanel(key, undefined);
+		this.panels.clear();
+		for (const workId of this.works.keys()) this.host.showWork(workId, undefined);
 		this.works.clear();
 		if (this.titled) {
 			this.titled = false;

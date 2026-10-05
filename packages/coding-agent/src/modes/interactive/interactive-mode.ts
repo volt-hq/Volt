@@ -19,13 +19,17 @@ import {
 	type OAuthSelectPrompt,
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
-import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import {
+	type HostRequest,
+	type HostResponse,
+	type UiNodeStyledText,
+	WORK_NOTICE_CUSTOM_TYPE,
+} from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
 	EditorComponent,
 	Keybinding,
-	KeyId,
 	MarkdownTheme,
 	OverlayHandle,
 	OverlayOptions,
@@ -40,17 +44,19 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
+	HStack,
 	isKeyRelease,
 	isKeyRepeat,
 	isViewportTUI,
 	Loader,
 	type LoaderIndicatorOptions,
 	Markdown,
-	matchesKey,
 	ProcessTerminal,
+	renderStyledText,
 	ScrollView,
 	Spacer,
 	setKeybindings,
+	styledTextToPlain,
 	Text,
 	TruncatedText,
 	type TUI,
@@ -75,7 +81,6 @@ import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
 	ExtensionCommandContext,
-	ExtensionContext,
 	ExtensionRunner,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
@@ -86,6 +91,7 @@ import type {
 import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
+import { ClientScope } from "../../core/host/client-scope.ts";
 import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { executePlan } from "../../core/host/plan-handoff.ts";
@@ -99,6 +105,7 @@ import { type ConfiguredPackage, DefaultPackageManager } from "../../core/packag
 import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts";
 import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
 import { describeFastModeChange } from "../../core/protocol/intents/state.ts";
+import { queryRegistry } from "../../core/protocol/queries/index.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { serveIrohRemoteConnection } from "../../core/remote/iroh/connection.ts";
 import { uploadIrohRemoteDeviceLog } from "../../core/remote/iroh/device-log-rpc.ts";
@@ -190,6 +197,7 @@ import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent } from "./components/footer.ts";
+import { HostDialogComponent, HostFormDialogComponent } from "./components/host-request-dialog.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
 import { PlanInspectorComponent } from "./components/plan-inspector.ts";
 import { type PlanDetailsAction, PlanDetailsComponent, PlanStatusComponent } from "./components/plan-status.ts";
@@ -214,9 +222,14 @@ import {
 	type OpenedRelay,
 	openDaemonWorktreeControl,
 } from "./daemon-attach.ts";
+import { withEditorCompletions } from "./editor-completions.ts";
+import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
 import { TuiLiveView } from "./live-view.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
 import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
+import { createRegistryIntentSink } from "./ui-node/intents.ts";
+import { UiPanels } from "./ui-node/panels.ts";
+import { TUI_SEMANTIC_THEME } from "./ui-node/semantic-theme.ts";
 
 function isAsciiOnlyTerminal(): boolean {
 	const termProgram = process.env.TERM_PROGRAM ?? "";
@@ -339,6 +352,10 @@ const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
 /** How long a lease handover waits for the phones relayed into the session the TUI left to hear where to reconnect. */
 const RELAY_END_TIMEOUT_MS = 2000;
+/** Width of fullscreen's panel sidebar, in columns. */
+const PANEL_SIDEBAR_COLUMNS = 40;
+/** Narrowest terminal that shows the panel sidebar; narrower ones show sidebar panels above the editor. */
+const PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS = 100;
 
 /** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
 function formatElapsedDuration(ms: number): string {
@@ -683,6 +700,10 @@ export class InteractiveMode {
 	private extensionWidgetsBelow = new Map<string, Component & { dispose?(): void }>();
 	private widgetContainerAbove!: Container;
 	private widgetContainerBelow!: Container;
+	/** Extension panels: above and below the editor, and in fullscreen's sidebar. */
+	private readonly panels: UiPanels;
+	/** The keybinding-table entries of the extensions' shortcuts. */
+	private readonly extensionShortcuts: ExtensionShortcutBindings;
 
 	// Custom footer from extension (undefined = use built-in footer)
 	private customFooter: (Component & { dispose?(): void }) | undefined = undefined;
@@ -775,6 +796,14 @@ export class InteractiveMode {
 		this.footerContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
+		this.extensionShortcuts = new ExtensionShortcutBindings(this.keybindings);
+		this.panels = new UiPanels({
+			mode: () => (this.showsPanelSidebar() ? "fullscreen" : "regular"),
+			intents: createRegistryIntentSink({
+				context: () => this.intentContext(),
+				onError: (message) => this.showError(message),
+			}),
+		});
 		const editorPaddingX = this.settingsManager.getEditorPaddingX();
 		const autocompleteMaxVisible = this.settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor = new CustomEditor(this.ui, getEditorTheme(), this.keybindings, {
@@ -826,8 +855,24 @@ export class InteractiveMode {
 			{ component: this.editorContainer, shrink: 1, minSize: 1 },
 			{ component: this.widgetContainerBelow, shrink: 3, minSize: 0 },
 		]);
+		// Sidebar panels show beside the transcript while the terminal is wide enough.
+		const fullscreenBody = new HStack(
+			[
+				{ component: this.fullscreenFlexibleSlot, basis: 0, grow: 1, shrink: 1, minSize: 0 },
+				{
+					component: this.panels.sidebar,
+					basis: PANEL_SIDEBAR_COLUMNS,
+					grow: 0,
+					shrink: 0,
+					minSize: PANEL_SIDEBAR_COLUMNS,
+					maxSize: PANEL_SIDEBAR_COLUMNS,
+					visible: () => this.showsPanelSidebar() && this.panels.has("sidebar"),
+				},
+			],
+			{ gap: 1 },
+		);
 		this.fullscreenConversationRoot = new VStack([
-			{ component: this.fullscreenFlexibleSlot, basis: 0, grow: 1, shrink: 1, minSize: 0 },
+			{ component: fullscreenBody, basis: 0, grow: 1, shrink: 1, minSize: 0 },
 			{ component: fullscreenDock, shrink: 1, minSize: 0 },
 		]);
 		this.mainView = new ResponsivePlanLayoutComponent({
@@ -1058,6 +1103,11 @@ export class InteractiveMode {
 		if (triggerCharacters.length > 0) {
 			provider.triggerCharacters = [...new Set(triggerCharacters)];
 		}
+		// The extensions' completion providers answer through the host's editor_completions query.
+		provider = withEditorCompletions(provider, {
+			triggers: this.session.extensionRunner.getCompletionProviders().map((completion) => completion.trigger),
+			complete: (text, cursor) => queryRegistry.run(this.intentContext(), "editor_completions", { text, cursor }),
+		});
 
 		this.autocompleteProvider = provider;
 		this.defaultEditor.setAutocompleteProvider(provider);
@@ -2552,62 +2602,22 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Set up keyboard shortcuts registered by extensions.
+	 * Bind the extensions' shortcuts: each key invokes its extension's intent
+	 * through the intent registry, as this client.
 	 */
 	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void {
-		const shortcuts = extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
-		if (shortcuts.size === 0) return;
-
-		// Create a context for shortcut handlers. Its UI is the extensions' own: dialogs and status reach every client.
-		const createContext = (extensionId: string): ExtensionContext => ({
-			ui: extensionRunner.getUIContext(),
-			mode: "tui",
-			hasUI: true,
-			cwd: this.sessionManager.getCwd(),
-			sessionManager: this.sessionManager,
-			modelRegistry: this.session.modelRegistry,
-			model: this.session.model,
-			isIdle: () => !this.session.isBusy,
-			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-			signal: this.session.signal,
-			abort: () => {
-				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
-					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
-				});
-			},
-			hasPendingMessages: () => this.session.pendingMessageCount > 0,
-			shutdown: () => {
-				this.shutdownRequested = true;
-			},
-			getContextUsage: () => this.session.getContextUsage(),
-			compact: (options) => {
-				void (async () => {
-					try {
-						const result = await this.session.compact(options?.customInstructions);
-						options?.onComplete?.(result);
-					} catch (error) {
-						const err = error instanceof Error ? error : new Error(String(error));
-						options?.onError?.(err);
-					}
-				})();
-			},
-			getSystemPrompt: () => this.session.systemPrompt,
-			startWork: (kind, options, run) => extensionRunner.createContext(extensionId).startWork(kind, options, run),
-		});
-
-		// Set up the extension shortcut handler on the default editor
+		this.extensionShortcuts.bind(extensionRunner);
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
-			for (const [shortcutStr, shortcut] of shortcuts) {
-				// Cast to KeyId - extension shortcuts use the same format
-				if (matchesKey(data, shortcutStr as KeyId)) {
-					// Run handler async, don't block input
-					Promise.resolve(shortcut.handler(createContext(shortcut.extensionId))).catch((err) => {
-						this.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
-					});
-					return true;
-				}
-			}
-			return false;
+			const intent = this.extensionShortcuts.intentFor(data);
+			if (intent === undefined) return false;
+			if (isKeyRelease(data) || isKeyRepeat(data)) return true;
+			// Invoke async, without blocking input.
+			void ClientScope.run(this.client.id, () => intentRegistry.invokeFrame(this.intentContext(), intent, {})).catch(
+				(error: unknown) => {
+					this.showError(`Shortcut failed: ${error instanceof Error ? error.message : String(error)}`);
+				},
+			);
+			return true;
 		};
 	}
 
@@ -2853,14 +2863,11 @@ export class InteractiveMode {
 		this.renderWidgets();
 	}
 
-	/** Remove the component widgets; the live view owns the string widgets. */
+	/** Remove the component widgets; panels, string widgets among them, come from the live view. */
 	private clearComponentWidgets(): void {
 		for (const widgets of [this.extensionWidgetsAbove, this.extensionWidgetsBelow]) {
-			for (const [key, widget] of widgets) {
-				if (this.liveView.ownsWidget(key)) continue;
-				widget.dispose?.();
-				widgets.delete(key);
-			}
+			for (const widget of widgets.values()) widget.dispose?.();
+			widgets.clear();
 		}
 		this.renderWidgets();
 	}
@@ -2884,6 +2891,7 @@ export class InteractiveMode {
 		this.setCustomEditorComponent(undefined);
 		this.setupAutocompleteProvider();
 		this.defaultEditor.onExtensionShortcut = undefined;
+		this.extensionShortcuts.clear();
 		this.workingMessage = undefined;
 		this.workingVisible = true;
 		this.setWorkingIndicator();
@@ -2903,6 +2911,28 @@ export class InteractiveMode {
 		if (!this.widgetContainerAbove || !this.widgetContainerBelow) return;
 		this.renderWidgetContainer(this.widgetContainerAbove, [...this.extensionWidgetsAbove.values()], true, true);
 		this.renderWidgetContainer(this.widgetContainerBelow, [...this.extensionWidgetsBelow.values()], false, false);
+		// The panel slots render nothing without panels; panels show after the component widgets.
+		this.widgetContainerAbove.addChild(this.panels.aboveEditor);
+		this.widgetContainerBelow.addChild(this.panels.belowEditor);
+		this.ui.requestRender();
+	}
+
+	/** Whether sidebar panels show in fullscreen's sidebar; otherwise they show above the editor. */
+	private showsPanelSidebar(): boolean {
+		return (
+			this.ui.mode === "fullscreen" &&
+			this.ui.terminal.columns >= PANEL_SIDEBAR_MIN_TERMINAL_COLUMNS &&
+			this.mainView?.isTerminalSplit() !== true
+		);
+	}
+
+	/** Show, update, or remove an extension panel under its live key. */
+	private setExtensionPanel(key: string, panel: Parameters<UiPanels["set"]>[1]): void {
+		try {
+			this.panels.set(key, panel);
+		} catch (error) {
+			this.showError(`Extension panel ${key}: ${error instanceof Error ? error.message : String(error)}`);
+		}
 		this.ui.requestRender();
 	}
 
@@ -3035,7 +3065,7 @@ export class InteractiveMode {
 				select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
 				confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
 				input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
-				notify: (message, type) => this.showExtensionNotify(message, type),
+				notify: (message, type) => this.showExtensionNotice(type ?? "info", message),
 			},
 		};
 	}
@@ -3046,15 +3076,20 @@ export class InteractiveMode {
 			answer: (requestId, response) => {
 				this.conversation.liveState.answer(requestId, response, this.client.id);
 			},
-			setStatus: (key, text) => this.setExtensionStatus(key, text),
-			setWidget: (key, lines, placement) =>
-				this.setExtensionWidget(key, lines === undefined ? undefined : [...lines], { placement }),
+			setStatus: (key, text) =>
+				this.setExtensionStatus(
+					key,
+					text === undefined ? undefined : renderStyledText(text, TUI_SEMANTIC_THEME).replace(/\n/g, " "),
+				),
+			setPanel: (key, panel) => this.setExtensionPanel(key, panel),
 			setTitle: (title) => {
 				if (title === undefined) this.updateTerminalTitle();
 				else this.ui.terminal.setTitle(title);
 			},
-			notify: (level, message) => this.showExtensionNotify(message, level),
+			notify: (level, message) => this.showExtensionNotice(level, message),
 			setEditorText: (text) => this.editor.setText(text),
+			insertEditorText: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
+			editorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			showWork: (workId, value) => {
 				this.workSource.setLive(workId, value);
 				if (!value) this.showWorkEnd(workId);
@@ -3105,10 +3140,59 @@ export class InteractiveMode {
 				if (outcome.kind === "dismissed") return undefined;
 				return { decision: outcome.kind === "selected" && outcome.option === "Yes" ? "approved" : "denied" };
 			}
+			case "form":
+			case "dialog":
+				return this.showHostRequestDialog(request, options);
 			default:
-				// Forms and MCP authorization are not shown in the TUI.
+				// MCP authorization is not shown in the TUI; the editor answers `editor_text` at once.
 				return undefined;
 		}
+	}
+
+	/** Show a form or dialog request until it is answered, cancelled, or dismissed by `options.signal`. */
+	private showHostRequestDialog(
+		request: Extract<HostRequest, { kind: "form" | "dialog" }>,
+		options: TuiDialogOptions,
+	): Promise<HostResponse | undefined> {
+		return new Promise((resolve) => {
+			if (options.signal?.aborted) {
+				resolve(undefined);
+				return;
+			}
+			const restore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
+			let settled = false;
+			let component: HostFormDialogComponent | HostDialogComponent | undefined;
+			const settle = (response: HostResponse | undefined): void => {
+				if (settled) return;
+				settled = true;
+				options.signal?.removeEventListener("abort", dismiss);
+				component?.dispose();
+				this.activateView(restore.view, restore.focus ?? this.editor);
+				resolve(response);
+			};
+			const dismiss = (): void => settle(undefined);
+			const cancel = (): void => settle({ cancelled: true });
+			options.signal?.addEventListener("abort", dismiss, { once: true });
+			this.dismissWorkInspector?.();
+			const dialogOptions = { tui: this.ui, ...(options.timeout === undefined ? {} : { timeout: options.timeout }) };
+			component =
+				request.kind === "form"
+					? new HostFormDialogComponent(request, (values) => settle({ values }), cancel, dialogOptions)
+					: new HostDialogComponent(request, (value) => settle({ value }), cancel, {
+							...dialogOptions,
+							intents: createRegistryIntentSink({
+								context: () => this.intentContext(),
+								onError: (message) => this.showError(message),
+							}),
+						});
+			this.activateView(this.createDedicatedView(component), component);
+		});
+	}
+
+	/** Show an extension's notification: info dimmed with its styling, warnings and errors in their color. */
+	private showExtensionNotice(level: "info" | "warning" | "error", message: UiNodeStyledText): void {
+		if (level === "info") this.showStatus(renderStyledText(message, TUI_SEMANTIC_THEME, "muted"));
+		else this.showExtensionNotify(styledTextToPlain(message), level);
 	}
 
 	/**
@@ -3154,8 +3238,6 @@ export class InteractiveMode {
 			setFooter: (factory) => this.setExtensionFooter(factory),
 			setHeader: (factory) => this.setExtensionHeader(factory),
 			custom: (factory, options) => this.showExtensionCustom(factory, options),
-			pasteToEditor: (text) => this.editor.handleInput(`\x1b[200~${text}\x1b[201~`),
-			getEditorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
 			addAutocompleteProvider: (factory) => {
 				this.autocompleteProviderWrappers.push(factory);
 				this.setupAutocompleteProvider();
@@ -9089,13 +9171,13 @@ export class InteractiveMode {
 			},
 		];
 
-		const shortcuts = this.session.extensionRunner.getShortcuts(this.keybindings.getEffectiveConfig());
-		if (shortcuts.size > 0) {
+		const shortcuts = this.extensionShortcuts.entries().filter((entry) => entry.keys.length > 0);
+		if (shortcuts.length > 0) {
 			sections.push({
 				title: "Extensions",
-				entries: Array.from(shortcuts, ([key, shortcut]) => ({
-					key: formatKeyText(key, { capitalize: true }),
-					action: shortcut.description ?? shortcut.extensionId,
+				entries: shortcuts.map((entry) => ({
+					key: entry.keys.map((key) => formatKeyText(key, { capitalize: true })).join(" / "),
+					action: entry.description,
 				})),
 			});
 		}

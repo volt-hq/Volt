@@ -38,6 +38,7 @@ import type {
 	ContextUsage,
 	ExtensionRunner,
 	InputSource,
+	RegisteredIntent,
 	ReplacedSessionContext,
 	SessionStartEvent,
 	ToolDefinition,
@@ -1829,6 +1830,14 @@ export class AgentSession {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
 		return this._prompting.sendUserMessage(content, options);
+	}
+
+	/**
+	 * Run an extension intent's handler with input the intent registry checked,
+	 * in its extension's command context. Rejects with the handler's failure.
+	 */
+	runExtensionIntent(intent: RegisteredIntent, input: unknown): Promise<void> {
+		return this._prompting.runExtensionIntent(intent, input);
 	}
 
 	/**

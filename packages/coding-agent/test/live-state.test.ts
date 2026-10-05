@@ -1,4 +1,4 @@
-import type { HostRequest, HostRequestKind, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
+import type { HostRequest, HostRequestKind, LiveItem, LiveValue, UiPatchOp } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,6 +8,7 @@ import {
 	LiveState,
 	type LiveUpdate,
 } from "../src/core/host/live-state.ts";
+import { emptyLiveFold, foldLiveItems, LivePatchError, patchLiveValue } from "../src/core/protocol/live-fold.ts";
 import { createLiveRecorder } from "./utilities/live-recorder.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];
@@ -20,8 +21,8 @@ afterEach(() => {
 describe("LiveState keyed values", () => {
 	it("replays the current values on attach, delivers changes in order, and resets on detach", () => {
 		const live = new LiveState();
-		live.set("ext_status/build", { kind: "ext_status", text: "building" });
-		live.set("ext_title", { kind: "ext_title", title: "volt" });
+		live.set("ext_status/ci/build", { kind: "ext_status", extension: "ci", text: "building" });
+		live.set("ext_title", { kind: "ext_title", extension: "ci", title: "volt" });
 		const client = createLiveRecorder();
 		const detach = live.attach("tui", client);
 		expect(client.updates).toEqual([
@@ -29,13 +30,17 @@ describe("LiveState keyed values", () => {
 				reset: true,
 				basedOn: 0,
 				items: [
-					{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "building" } },
-					{ type: "set", key: "ext_title", value: { kind: "ext_title", title: "volt" } },
+					{
+						type: "set",
+						key: "ext_status/ci/build",
+						value: { kind: "ext_status", extension: "ci", text: "building" },
+					},
+					{ type: "set", key: "ext_title", value: { kind: "ext_title", extension: "ci", title: "volt" } },
 				],
 			},
 		]);
 
-		live.set("ext_status/build", { kind: "ext_status", text: "done" });
+		live.set("ext_status/ci/build", { kind: "ext_status", extension: "ci", text: "done" });
 		live.clear("ext_title");
 		live.clear("ext_title");
 		live.notice("warning", "careful");
@@ -44,13 +49,19 @@ describe("LiveState keyed values", () => {
 			{
 				reset: false,
 				basedOn: 0,
-				items: [{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "done" } }],
+				items: [
+					{
+						type: "set",
+						key: "ext_status/ci/build",
+						value: { kind: "ext_status", extension: "ci", text: "done" },
+					},
+				],
 			},
 			{ reset: false, basedOn: 0, items: [{ type: "clear", key: "ext_title" }] },
 			{ reset: false, basedOn: 0, items: [{ type: "notice", level: "warning", message: "careful" }] },
 			{ reset: false, basedOn: 0, items: [{ type: "directive", directive: "set_editor_text", text: "draft" }] },
 		]);
-		expect(live.entries()).toEqual([["ext_status/build", { kind: "ext_status", text: "done" }]]);
+		expect(live.entries()).toEqual([["ext_status/ci/build", { kind: "ext_status", extension: "ci", text: "done" }]]);
 
 		detach();
 		expect(client.updates.at(-1)).toEqual({ reset: true, basedOn: 0, items: [] });
@@ -60,13 +71,16 @@ describe("LiveState keyed values", () => {
 
 	it("rejects malformed keys and values and keeps host requests to their own lifecycle", () => {
 		const live = new LiveState();
-		expect(() => live.set("ext_status/", { kind: "ext_status", text: "x" })).toThrow(TypeError);
-		expect(() => live.set("ext_status/a\u0007b", { kind: "ext_status", text: "x" })).toThrow(TypeError);
-		expect(() => live.set(`ext_status/${"k".repeat(257)}`, { kind: "ext_status", text: "x" })).toThrow(TypeError);
-		expect(() => live.set("ext_widget/k", { kind: "ext_status", text: "x" })).toThrow(TypeError);
-		expect(() => live.set("ext_status/k", { kind: "ext_status", text: 3 } as unknown as LiveValue)).toThrow(
-			TypeError,
-		);
+		const status = (text: unknown) => ({ kind: "ext_status", extension: "ci", text }) as LiveValue;
+		expect(() => live.set("ext_status/ci/", status("x"))).toThrow(TypeError);
+		expect(() => live.set("ext_status/ci/a\u0007b", status("x"))).toThrow(TypeError);
+		expect(() => live.set(`ext_status/ci/${"k".repeat(129)}`, status("x"))).toThrow(TypeError);
+		// A status item is keyed by the extension its value names.
+		expect(() => live.set("ext_status/build", status("x"))).toThrow(TypeError);
+		expect(() => live.set("ext_status/other/build", status("x"))).toThrow(TypeError);
+		expect(() => live.set("ext_panel/ci/build", status("x"))).toThrow(TypeError);
+		expect(() => live.set("ext_status/ci/k", status(3))).toThrow(TypeError);
+		expect(() => live.set("ext_title", { kind: "ext_title", title: "x" } as unknown as LiveValue)).toThrow(TypeError);
 		expect(() =>
 			live.set("host_request/x", { kind: "host_request", requestId: "x", request: confirm } as LiveValue),
 		).toThrow(TypeError);
@@ -101,6 +115,113 @@ describe("LiveState keyed values", () => {
 		expect(live.answer("dialog", { confirmed: true }, "failing")).toBe("accepted");
 		await expect(asked).resolves.toMatchObject({ status: "answered", clientId: "failing" });
 		expect(other.pending()).toEqual([]);
+	});
+});
+
+describe("LiveState patches", () => {
+	const panel: LiveValue = {
+		kind: "ext_panel",
+		extension: "ci",
+		placement: "belowEditor",
+		node: { type: "terminal", key: "out", lines: ["one"] },
+	};
+
+	it("patches a panel in place, and a client that attaches later receives the patched panel", () => {
+		const live = new LiveState();
+		const early = createLiveRecorder();
+		live.attach("early", early);
+		live.set("ext_panel/ci/log", panel);
+		live.patch("ext_panel/ci/log", [{ op: "append_lines", path: ["out"], lines: ["two"] }]);
+		const patched = { ...panel, node: { type: "terminal", key: "out", lines: ["one", "two"] } };
+		expect(live.get("ext_panel/ci/log")).toEqual(patched);
+		expect(early.items().at(-1)).toEqual({
+			type: "patch",
+			key: "ext_panel/ci/log",
+			ops: [{ op: "append_lines", path: ["out"], lines: ["two"] }],
+		});
+		const late = createLiveRecorder();
+		live.attach("late", late);
+		// The reset never replays the value as it was before the patch.
+		expect(late.updates[0]?.items).toEqual([{ type: "set", key: "ext_panel/ci/log", value: patched }]);
+	});
+
+	it("patches a work item's detail, which a patch may add and remove", () => {
+		const live = new LiveState();
+		live.set("work/w1", { kind: "work", workId: "w1" });
+		live.patch("work/w1", [{ op: "insert", path: [], node: { type: "text", key: "d", text: "detail" } }]);
+		expect(live.get("work/w1")).toEqual({
+			kind: "work",
+			workId: "w1",
+			detail: { type: "text", key: "d", text: "detail" },
+		});
+		live.patch("work/w1", [{ op: "remove", path: [] }]);
+		expect(live.get("work/w1")).toEqual({ kind: "work", workId: "w1" });
+	});
+
+	it("refuses a patch it cannot apply, and publishes nothing then", () => {
+		const live = new LiveState();
+		const client = createLiveRecorder();
+		live.attach("client", client);
+		live.set("ext_panel/ci/log", panel);
+		live.set("ext_status/ci/s", { kind: "ext_status", extension: "ci", text: "ok" });
+		const before = client.items().length;
+		const append: UiPatchOp = { op: "append_lines", path: ["out"], lines: ["x"] };
+		expect(() => live.patch("ext_panel/ci/missing", [append])).toThrow(TypeError);
+		expect(() => live.patch("ext_status/ci/s", [append])).toThrow(TypeError);
+		expect(() => live.patch("ext_panel/ci/log", [])).toThrow(TypeError);
+		expect(() => live.patch("ext_panel/ci/log", [{ op: "remove", path: ["nope"] }])).toThrow(LivePatchError);
+		// A panel keeps exactly one node.
+		expect(() => live.patch("ext_panel/ci/log", [{ op: "remove", path: [] }])).toThrow(LivePatchError);
+		// Lines with terminal controls do not fit a node.
+		expect(() =>
+			live.patch("ext_panel/ci/log", [{ op: "append_lines", path: ["out"], lines: ["\u001b[2J"] }]),
+		).toThrow(TypeError);
+		expect(client.items()).toHaveLength(before);
+		expect(live.get("ext_panel/ci/log")).toEqual(panel);
+	});
+
+	it("folds patches as the host does, and tells a client that cannot apply one", () => {
+		const fold = foldLiveItems(emptyLiveFold(), [
+			{ type: "set", key: "ext_panel/ci/log", value: panel },
+			{ type: "patch", key: "ext_panel/ci/log", ops: [{ op: "append_lines", path: ["out"], lines: ["two"] }] },
+		]);
+		expect(fold.values.get("ext_panel/ci/log")).toMatchObject({ node: { lines: ["one", "two"] } });
+		expect(() =>
+			foldLiveItems(emptyLiveFold(), [
+				{ type: "patch", key: "ext_panel/ci/log", ops: [{ op: "remove", path: [] }] },
+			]),
+		).toThrow(LivePatchError);
+		expect(() => patchLiveValue({ kind: "ext_status", extension: "ci", text: "x" }, [])).toThrow(LivePatchError);
+	});
+});
+
+describe("LiveState requests asked of one client", () => {
+	it("reaches only that client's views, and only they may answer", async () => {
+		const live = new LiveState();
+		const own = createLiveRecorder(["editor_text"]);
+		const subscription = { ...createLiveRecorder(["editor_text"]), owner: "connection" };
+		const other = createLiveRecorder(["editor_text"]);
+		live.attach("connection", own);
+		live.attach("connection:s1", subscription);
+		live.attach("other", other);
+		const asked = live.request({ kind: "editor_text", timeoutMs: 2000 }, { id: "r1", client: "connection" });
+		expect(own.pending()).toHaveLength(1);
+		expect(subscription.pending()).toHaveLength(1);
+		expect(other.pending()).toEqual([]);
+		expect(live.answer("r1", { value: "theirs" }, "other")).toBe("not_allowed");
+		expect(live.answer("r1", { value: "draft" }, "connection:s1")).toBe("accepted");
+		await expect(asked).resolves.toEqual({
+			status: "answered",
+			response: { value: "draft" },
+			clientId: "connection:s1",
+		});
+		expect(other.items()).toEqual([]);
+
+		// A client that takes no such request is not asked, and nobody else is either.
+		await expect(live.request({ kind: "editor_text" }, { client: "nobody" })).resolves.toEqual({
+			status: "cancelled",
+			reason: "unavailable",
+		});
 	});
 });
 
@@ -391,8 +512,13 @@ describe("LiveState properties", () => {
 							if (detaches[current.client] === undefined) attach(current.client);
 							break;
 						case "status":
-							if (current.text === undefined) live.clear(`ext_status/${current.key}`);
-							else live.set(`ext_status/${current.key}`, { kind: "ext_status", text: current.text });
+							if (current.text === undefined) live.clear(`ext_status/ci/${current.key}`);
+							else
+								live.set(`ext_status/ci/${current.key}`, {
+									kind: "ext_status",
+									extension: "ci",
+									text: current.text,
+								});
 							break;
 					}
 					// Every attached client holds exactly what it may see of the live state.

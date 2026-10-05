@@ -1017,6 +1017,7 @@ export function serveConnection(
 		const subscription = new Subscription({
 			subscriptionId: frame.subscriptionId,
 			liveClientId: `${connectionId}:${frame.subscriptionId}`,
+			liveOwner: connectionId,
 			conversation,
 			profile,
 			sink,

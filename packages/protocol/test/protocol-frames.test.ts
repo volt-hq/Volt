@@ -57,6 +57,17 @@ describe("client frames", () => {
 		expect(client({ type: "skill.sk_ab_1", intentId: "i-1", input: { args: {} } })).toBe(false);
 	});
 
+	it("send extension intents with the input their extension checks", () => {
+		const intent = { type: "extension.intent.deploy.ship", intentId: "i-1" };
+		expect(client(intent)).toBe(true);
+		expect(client({ ...intent, input: { target: "prod", dryRun: true, count: 2 } })).toBe(true);
+		expect(client({ ...intent, input: ["prod"] })).toBe(false);
+		expect(client({ ...intent, type: "extension.intent.host.ship" })).toBe(false);
+		expect(client({ ...intent, type: "extension.intent.deploy.ship.now" })).toBe(false);
+		expect(client({ ...intent, type: "extension.intent.Deploy.ship" })).toBe(false);
+		expect(new RegExp(DYNAMIC_INTENT_PATTERN).test(intent.type)).toBe(true);
+	});
+
 	it("send queries with their parameters", () => {
 		const query = { type: "query", queryId: "q1" };
 		expect(client({ ...query, query: "history", params: { before: 10, limit: 50 } })).toBe(true);
@@ -137,9 +148,11 @@ describe("host frames", () => {
 							request: { kind: "confirm", title: "Delete?", message: "Really?" },
 						},
 					},
-					{ type: "clear", key: "ext_status/build" },
+					{ type: "clear", key: "ext_status/ci/build" },
 					{ type: "notice", level: "error", message: "boom" },
+					{ type: "notice", level: "info", message: [{ text: "done", token: "success" }], source: "ci" },
 					{ type: "directive", directive: "set_editor_text", text: "draft" },
+					{ type: "directive", directive: "insert_editor_text", text: "pasted" },
 				],
 			}),
 		).toBe(true);
@@ -172,7 +185,7 @@ describe("host frames", () => {
 	});
 
 	it("name live values by family", () => {
-		for (const key of ["phase", "intents", "work/w1", "ext_widget/a/b"]) {
+		for (const key of ["phase", "intents", "work/w1", "ext_status/ci/build", "ext_panel/ci/a/b", "ext_title"]) {
 			expect(Check(LiveKeySchema, key), key).toBe(true);
 		}
 		for (const key of [
@@ -183,7 +196,13 @@ describe("host frames", () => {
 			"jobs",
 			"subagent/sub-1",
 			"unknown/x",
-			"ext_status/\u0007",
+			"ext_widget/a/b",
+			"ext_status/build",
+			"ext_status/Bad/build",
+			"ext_status/host/build",
+			"ext_status/ci/",
+			`ext_status/ci/${"k".repeat(129)}`,
+			"ext_status/ci/\u0007",
 		]) {
 			expect(Check(LiveKeySchema, key), key).toBe(false);
 		}
