@@ -129,7 +129,7 @@ Keyed values (`value.kind` is the key's family):
 | `git` | `{gitContext}`: path-free Git metadata of the working tree, or `null`. |
 | `prompt_cache` | `{promptCache}`: the current model's prompt-cache retention, or `null`. |
 | `intents` | `{availability: [{name, enabled, reason?, state?}]}`: the intents whose availability and state follow the conversation (`set_fast_mode`, `set_agent_mode`, `set_auto_compaction`, `set_compaction_threshold`). |
-| `jobs` | `{jobs}`: background job metadata, never output (`job_output` reads it). |
+| `work/<id>` | `{workId, progress?, detail?, output?: {bytes}}`: work this host runs, such as a background job, set while its executor runs and cleared once it detaches; never output (`work_output` reads it). The client fold's `work` holds the items themselves. |
 | `workflow/<id>` | `{event, activeTools}`: a detached review workflow's latest event and running tools; cleared after its end. |
 | `subagent/<id>` | `{subagentId, conversation, agent?, status, error?}`: a subagent this client started. Subscribe to `conversation` for its log. |
 | `host_request/<id>` | `{requestId, request}`: a pending host request (below). |
@@ -171,7 +171,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 |---|---|---|
 | `prompt` | `{message, images?, streamingBehavior?: steer|followUp}` | |
 | `steer`, `follow_up` | `{message, images?}` | |
-| `abort` | `{}`: abort the run and background jobs; queued input is delivered | |
+| `abort` | `{}`: abort the run and cancel running work; queued input is delivered | |
 | `abort_retry`, `abort_bash` | `{}` | |
 | `bash` | `{command, excludeFromContext?}` | `{output, exitCode?, cancelled, truncated, fullOutputPath?}` |
 | `compact` | `{customInstructions?}` | the compaction result |
@@ -187,7 +187,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `fork` | `{entryId}`: fork before a user message | `{text}` (the message, for the editor) or `{cancelled: true}` |
 | `clone` | `{}` | `{cancelled: true}` when cancelled |
 | `export_html` | `{outputPath?}` | `{path}` |
-| `cancel_job` | `{jobId}` | `{job}` |
+| `cancel_work` | `{workId}`: cancel open work, such as a background job | |
 | `subagent_start` | `{agent, prompt}` | `{subagentId, conversation}` |
 | `subagent_abort`, `subagent_dispose` | `{subagentId}` | |
 | `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls | `{workflowId}` |
@@ -223,7 +223,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `settings` | | `{steeringMode, followUpMode, autoCompaction, autoRetry, profile}`; `profile` is the active settings profile (`""` without one), which the compaction intents name as `expectedProfile`. |
 | `subscription_usage` | | Subscription quota usage of stored logins. |
 | `subagent_definitions` | | Discovered subagent definitions. |
-| `job_output` | `{jobId}` | A background job's retained output. |
+| `work_output` | `{workId, offset?}` | A work item's output, such as a background job's: what it produced so far, or what its result kept, in chunks. |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |
 | `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.workflows` | see the contract | Durable review reads. |
 

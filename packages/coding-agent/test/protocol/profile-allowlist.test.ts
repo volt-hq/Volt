@@ -402,9 +402,9 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	get_session_tree: removed("snapshot"),
 	get_message_images: { projected: "content" },
 	get_transcript_entry_text: { projected: "content" },
-	list_jobs: removed("live jobs"),
-	read_job: queries("job_output"),
-	cancel_job: intents("cancel_job"),
+	list_jobs: removed("work items in the client fold"),
+	read_job: queries("work_output"),
+	cancel_job: intents("cancel_work"),
 	list_subagents: queries("subagent_definitions"),
 	subagent_start: intents("subagent_start"),
 	subagent_abort: intents("subagent_abort"),
@@ -764,6 +764,8 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 		}
 		// invoke_ui_action required authority for every action.
 		for (const action of LEGACY_REMOTE_SAFE_UI_ACTIONS) fencedByLegacy.add(BUILTIN_UI_ACTION_INTENTS[action]!);
+		// `cancel_job` became `cancel_work`: work is not on a branch, so cancelling it needs no branch fence.
+		fencedByLegacy.delete("cancel_work");
 		for (const name of intentRegistry.names()) {
 			const definition = intentRegistry.get(name);
 			if (definition.remote !== "safe" || definition.scope === "host") {
@@ -803,12 +805,10 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 describe("work intents and queries keep the authorization of the paths they replace", () => {
 	/** Each work intent or query, and the intent or query of the path it replaces (Phase 4 plan §4). */
 	const REPLACED: ReadonlyArray<{ readonly work: Mapping; readonly replaced: Mapping }> = [
-		{ work: intents("cancel_work"), replaced: intents("cancel_job") },
 		{ work: intents("cancel_work"), replaced: intents("review_cancel_workflow") },
-		{ work: intents("resume_work"), replaced: intents("cancel_job") },
+		{ work: intents("resume_work"), replaced: intents("cancel_work") },
 		{ work: intents("open_work"), replaced: intents("review_open_session") },
 		{ work: intents("start_subagent"), replaced: intents("subagent_start") },
-		{ work: queries("work_output"), replaced: queries("job_output") },
 	];
 
 	it("requires the same capabilities and remote safety, deciding every grant alike", async () => {

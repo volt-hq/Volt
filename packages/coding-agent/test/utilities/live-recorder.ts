@@ -7,18 +7,13 @@ import type { HostRequest, HostRequestKind, LiveItem } from "@hansjm10/volt-prot
 import type { LiveClient, LiveUpdate } from "../../src/core/host/live-state.ts";
 
 /** Keys of the values a conversation's session feeds into its live state, beside the extensions' UI. */
-export const SESSION_FED_LIVE_KEYS: ReadonlySet<string> = new Set([
-	"phase",
-	"git",
-	"prompt_cache",
-	"usage",
-	"intents",
-	"jobs",
-]);
+export const SESSION_FED_LIVE_KEYS: ReadonlySet<string> = new Set(["phase", "git", "prompt_cache", "usage", "intents"]);
 
-/** Whether `item` is extension UI or a host request: not a session-fed value and not streaming. */
+/** Whether `item` is extension UI or a host request: not a session-fed value, running work, or streaming. */
 function isUiItem(item: LiveItem): boolean {
-	if (item.type === "set" || item.type === "clear") return !SESSION_FED_LIVE_KEYS.has(item.key);
+	if (item.type === "set" || item.type === "clear") {
+		return !SESSION_FED_LIVE_KEYS.has(item.key) && !item.key.startsWith("work/");
+	}
 	return item.type === "notice" || item.type === "directive";
 }
 

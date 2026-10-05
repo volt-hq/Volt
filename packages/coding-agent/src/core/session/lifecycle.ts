@@ -2,8 +2,8 @@
  * How a session ends. Disposal fences the runtime synchronously, then stops
  * the conversation, settles admitted input and work, commits the cleanup a
  * provider must see (aborted results for dangling tool calls, deferred bash
- * output) and closes the log, alongside subagent, MCP, settings, and
- * background-job teardown. Every caller joins one disposal.
+ * output), stops the session's work, and closes the log, alongside
+ * subagent, MCP, and settings teardown. Every caller joins one disposal.
  *
  * Also the one-shot notice that surfaces subagent results recovered after
  * the session reloads.
@@ -89,8 +89,8 @@ export interface SessionLifecycleHost {
 	fence(): void;
 	/** Detach the extension clients: errors, UI, and session actions stop reaching them. */
 	releaseExtensionClients(): void;
-	/** Close the background jobs; resolves once they drained. */
-	closeBackgroundJobs(): Promise<void>;
+	/** Stop the session's work: resolves once it ended or was left for the next open to reconcile. */
+	closeWork(): Promise<void>;
 	/** Settle the client inputs this runtime admitted once the conversation stopped. */
 	settleLiveClientInputs(): void;
 	/** Dispose the language servers and stop forwarding MCP manager events. */
@@ -103,7 +103,7 @@ export interface SessionLifecycleHost {
 	detachConversation(): void;
 	/** Release the session's observers: git context, event listeners, and generation listeners. */
 	releaseObservers(): void;
-	closeBackgroundDiagnostics(): Promise<void>;
+	closeDiagnostics(): Promise<void>;
 }
 
 export class SessionLifecycle {
@@ -138,8 +138,8 @@ export class SessionLifecycle {
 			void disposal.catch(() => undefined);
 			this.disposePromise = disposal;
 			// Publish the join before cancellation invokes reentrant abort listeners.
-			const backgroundDrain = this.host.closeBackgroundJobs();
-			void this.performDispose(source, leavePromptWork, backgroundDrain).then(resolveDisposal, rejectDisposal);
+			const workDrain = this.host.closeWork();
+			void this.performDispose(source, leavePromptWork, workDrain).then(resolveDisposal, rejectDisposal);
 		}
 		return this.disposePromise;
 	}
@@ -152,7 +152,7 @@ export class SessionLifecycle {
 	private async performDispose(
 		source: AgentAbortSource,
 		leavePromptWork: boolean,
-		backgroundDrain: Promise<void>,
+		workDrain: Promise<void>,
 	): Promise<void> {
 		const conversation = this.host.conversation();
 		conversation.abort(source);
@@ -203,6 +203,8 @@ export class SessionLifecycle {
 			}
 			let closeError: unknown;
 			try {
+				// Work ends in the log before it closes.
+				await workDrain.catch(() => undefined);
 				this.host.detachConversation();
 				await conversation.close();
 				await this.host.sessionManager.closePersistence();
@@ -219,14 +221,8 @@ export class SessionLifecycle {
 		this.host.releaseObservers();
 		cleanupSessionResources(this.host.sessionManager.getSessionId());
 
-		const results = await Promise.allSettled([
-			persistenceDrain,
-			subagentDrain,
-			mcpDrain,
-			settingsDrain,
-			backgroundDrain,
-		]);
-		await this.host.closeBackgroundDiagnostics();
+		const results = await Promise.allSettled([persistenceDrain, subagentDrain, mcpDrain, settingsDrain, workDrain]);
+		await this.host.closeDiagnostics();
 		await this.host.promptCache().close();
 		const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
 		if (rejected.length === 1) throw rejected[0].reason;

@@ -14,9 +14,9 @@ afterEach(async () => {
 	vi.useRealTimers();
 });
 
-describe("daemon background job retention", () => {
+describe("daemon running work retention", () => {
 	it.each([true, false])(
-		"retains a detached runtime until jobs settle and the full TTL elapses (active at detach: %s)",
+		"retains a detached runtime until running work settles and the full TTL elapses (active at detach: %s)",
 		async (activeAtDetach) => {
 			let finish!: () => void;
 			const finished = new Promise<void>((resolve) => {
@@ -25,12 +25,14 @@ describe("daemon background job retention", () => {
 			const session = {
 				sessionId: "retained-background-session",
 				isBusy: false,
-				hasBackgroundJobs: activeAtDetach,
+				hasRunningWork: activeAtDetach,
 				waitForNotBusy: vi.fn(async () => {}),
-				waitForBackgroundJobs: vi.fn(async () => {
-					await finished;
-					session.hasBackgroundJobs = false;
-				}),
+				work: {
+					waitForIdle: vi.fn(async () => {
+						await finished;
+						session.hasRunningWork = false;
+					}),
+				},
 				abort: vi.fn(async () => {}),
 			};
 			const dispose = vi.fn(async () => {});
@@ -94,10 +96,10 @@ describe("daemon background job retention", () => {
 			await registry.detachWithoutSubscriber(entry, attachClaim, "phone_detached");
 			if (!activeAtDetach) {
 				await vi.advanceTimersByTimeAsync(500);
-				session.hasBackgroundJobs = true;
+				session.hasRunningWork = true;
 			}
 			await vi.advanceTimersByTimeAsync(5000);
-			expect(session.waitForBackgroundJobs).toHaveBeenCalledTimes(1);
+			expect(session.work.waitForIdle).toHaveBeenCalledTimes(1);
 			expect(session.waitForNotBusy).toHaveBeenCalledTimes(1);
 			expect(session.abort).not.toHaveBeenCalled();
 			expect(dispose).not.toHaveBeenCalled();

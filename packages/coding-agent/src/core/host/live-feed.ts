@@ -1,7 +1,7 @@
 /**
  * What feeds a conversation's live state from its session (RFC §6.1): the
  * run phase, Git and prompt-cache status, token use, the intents whose
- * availability follows the conversation, background jobs, review workflows,
+ * availability follows the conversation, review workflows,
  * the streaming assistant message, running tools, and the MCP server calls
  * they make. Each value is set when it changes; streaming items are published
  * as the session emits them and leave the live state when the entry that
@@ -13,16 +13,12 @@ import type { LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
 import type { LiveToolPartial } from "../protocol/live-fold.ts";
-import { listRpcBackgroundJobs } from "../protocol/projection/background-jobs.ts";
 import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../review.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { liveKey } from "./live-state.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 type WorkflowToolStart = Extract<ReviewWorkflowToolEvent, { type: "tool_execution_start" }>;
-
-/** How often background job changes reach the live state at most. */
-const JOBS_COALESCE_MS = 100;
 
 /** Entry types whose commit changes what the live `intents` value reads. */
 const INTENT_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
@@ -154,8 +150,6 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 	const updateUsage = (): void => update("usage", () => usageValue(session));
 	const updateIntents = (): void =>
 		update("intents", () => ({ kind: "intents", availability: liveIntentAvailability(session) }));
-	const updateJobs = (): void =>
-		update("jobs", () => ({ kind: "jobs", jobs: listRpcBackgroundJobs(session.backgroundJobs) }));
 	const stream = (items: LiveItem[]): void => {
 		if (closed) return;
 		try {
@@ -299,16 +293,6 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		if (INTENT_STATE_ENTRY_TYPES.has(entry.type)) updateIntents();
 	};
 
-	let jobsTimer: ReturnType<typeof setTimeout> | undefined;
-	const scheduleJobs = (): void => {
-		if (jobsTimer !== undefined || closed) return;
-		jobsTimer = setTimeout(() => {
-			jobsTimer = undefined;
-			updateJobs();
-		}, JOBS_COALESCE_MS);
-		jobsTimer.unref?.();
-	};
-
 	/** Running workflows: the latest event and the tools still running. */
 	const workflows = new Map<string, { event?: ReviewWorkflowEvent; tools: Map<string, WorkflowToolStart> }>();
 	const publishWorkflow = (workflowId: string): void => {
@@ -331,14 +315,12 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			updateIntents();
 		}),
 	);
-	unsubscribers.push(session.backgroundJobs.subscribe(scheduleJobs));
 	const unsubscribeSettings = session.settingsManager.subscribeCompactionSettings?.(updateIntents);
 	if (unsubscribeSettings) unsubscribers.push(unsubscribeSettings);
 
 	updatePhase();
 	updateIntents();
 	updateUsage();
-	updateJobs();
 	update("git", () => ({ kind: "git", gitContext: session.gitContextProvider.getSnapshot() }));
 	update("prompt_cache", () => ({ kind: "prompt_cache", promptCache: session.getPromptCacheStatus() ?? null }));
 
@@ -369,7 +351,6 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		close() {
 			if (closed) return;
 			closed = true;
-			if (jobsTimer !== undefined) clearTimeout(jobsTimer);
 			for (const unsubscribe of unsubscribers.splice(0).reverse()) {
 				try {
 					unsubscribe();

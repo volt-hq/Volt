@@ -13,7 +13,6 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ConversationFactoryResult } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -680,7 +679,6 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 			({
 				sessionManager,
 				sessionWriter: sessionManager.logWriter,
-				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 				extensionRunner: { hasHandlers: () => false },
 				disposeSubagentToolManager: vi.fn(),
 				dispose: vi.fn(),
@@ -689,7 +687,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				settleInvokingCommandInput: vi.fn(async () => {}),
 				subscribe: vi.fn(() => () => {}),
 				lost: new Promise<Error>(() => {}),
-				conversationWork: { reconcile: async () => ({ interrupt: [], suspended: [] }) },
+				work: { reconcile: async () => {}, cancelAll: async () => {} },
 				get sessionRef() {
 					return sessionManager.getSessionRef();
 				},

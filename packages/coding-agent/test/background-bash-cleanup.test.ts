@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { BackgroundJobManager, type BackgroundJobSnapshot } from "../src/core/background-jobs.ts";
 import { withBackgroundJobs } from "../src/core/tools/background.ts";
 import { createBashTool, createBashToolDefinition } from "../src/core/tools/bash.ts";
+import { type JobSummary, jobOfDetails } from "../src/core/tools/jobs.ts";
 import { wrapToolDefinition } from "../src/core/tools/tool-definition-wrapper.ts";
 import * as shell from "../src/utils/shell.ts";
+import { createTestJobRuntime } from "./utilities/job-runtime.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -31,29 +32,31 @@ describe("background native Bash cleanup", () => {
 		"holds job ownership until process-tree teardown settles after %s",
 		async (cause) => {
 			const barrier = holdTeardownCompletion();
-			const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-			const tool = wrapToolDefinition(withBackgroundJobs(createBashToolDefinition(process.cwd()), { manager }));
+			const { jobs, work, close } = await createTestJobRuntime();
+			const tool = wrapToolDefinition(
+				withBackgroundJobs(createBashToolDefinition(process.cwd()), { jobs, start: (job) => jobs.start(job) }),
+			);
 			try {
 				const result = await tool.execute("bash-cleanup", {
 					command: "printf 'ready\\n'; sleep 30",
 					background: true,
 					...(cause === "timeout" ? { timeout: 1 } : {}),
 				});
-				const { id } = (result.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
-				await vi.waitFor(() => expect(manager.get(id).output).toContain("ready"));
-				if (cause === "cancel") manager.cancel(id);
+				const { id } = jobOfDetails(result.details) as JobSummary;
+				await vi.waitFor(() => expect(jobs.get(id).output).toContain("ready"));
+				if (cause === "cancel") await jobs.cancel(id);
 				await barrier.shellStopped.promise;
-				expect(manager.hasActive).toBe(true);
-				expect(manager.get(id).endedAt).toBeUndefined();
-				expect(manager.get(id).status).toBe(cause === "cancel" ? "cancelling" : "running");
+				expect(jobs.hasRunning).toBe(true);
+				expect(jobs.get(id).status).toBe(cause === "cancel" ? "cancelling" : "running");
 				barrier.finishTeardown.resolve();
-				const final = (await manager.wait([id])).results[0];
+				const final = (await jobs.wait([id])).results[0];
 				expect(final.status).toBe(cause === "cancel" ? "cancelled" : "failed");
 				expect(final.output).toContain(cause === "cancel" ? "Command aborted" : "timed out");
-				expect(manager.hasActive).toBe(false);
+				await work.waitForIdle();
+				expect(jobs.hasRunning).toBe(false);
 			} finally {
 				barrier.finishTeardown.resolve();
-				await manager.close();
+				await close();
 				barrier.spy.mockRestore();
 			}
 		},

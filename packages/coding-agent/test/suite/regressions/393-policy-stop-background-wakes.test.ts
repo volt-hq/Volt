@@ -103,19 +103,21 @@ describe("#393 subagent policy stops fence background wakes", () => {
 			await vi.waitFor(() => expect(fixture.faux.state.callCount).toBe(2));
 			await child.waitForIdle();
 			expect(child.getLastAssistantText()).toBe("Child final report.");
-			expect(child.hasBackgroundJobs).toBe(true);
+			expect(child.hasRunningWork).toBe(true);
 			expect(exec).toHaveBeenCalledTimes(2);
-			const jobs = child.backgroundJobs.list();
+			const jobs = child.jobs.list();
 			let expectedCalls = 2;
 			for (const command of ["completed", "failed"]) {
 				fixture.setResponses([fauxAssistantMessage(`Handled ${command} outcome.`)]);
 				workers.get(command)!.resolve();
 				const job = jobs.find((job) => job.label === command)!;
-				await vi.waitFor(() => expect(child.backgroundJobs.get(job.id).endedAt).toBeDefined());
+				// The job's executor detaches once its finish, and any notice, committed.
+				await vi.waitFor(() => expect(child.work.running().map((record) => record.workId)).not.toContain(job.id));
+				expect(child.jobs.get(job.id).status).toBe(command);
 				await child.waitForIdle();
 				if (!exhausted) expectedCalls++;
 				expect(fixture.faux.state.callCount).toBe(expectedCalls);
-				expect(child.backgroundJobs.get(job.id)).toMatchObject({
+				expect(child.jobs.get(job.id)).toMatchObject({
 					status: command,
 					output: expect.stringContaining(`retained output for ${command}`),
 				});

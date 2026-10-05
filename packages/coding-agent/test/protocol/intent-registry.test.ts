@@ -387,7 +387,7 @@ describe("query admission", () => {
 			requiredCapability: "model.select.v1",
 		});
 		await expect(queryRegistry.runFrame(ctx, "mcp.server", {})).rejects.toBeInstanceOf(QueryRejectedError);
-		await expect(queryRegistry.runFrame(ctx, "job_output", { jobId: "j" })).rejects.toMatchObject({
+		await expect(queryRegistry.runFrame(ctx, "work_output", { workId: "j" })).rejects.toMatchObject({
 			code: "unavailable",
 		});
 		await expect(queryRegistry.runFrame(ctx, "mcp.capabilities", {})).resolves.toMatchObject({ protocolVersion: 1 });

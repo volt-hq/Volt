@@ -1,25 +1,21 @@
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
-import { BackgroundJobManager, type BackgroundJobSnapshot } from "../src/core/background-jobs.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { backgroundJobResult, withBackgroundJobs } from "../src/core/tools/background.ts";
+import { withBackgroundJobs } from "../src/core/tools/background.ts";
+import { type JobSummary, jobResult } from "../src/core/tools/jobs.ts";
 import { createSubagentToolDefinition, type SubagentToolDetails } from "../src/core/tools/subagent.ts";
 import { ToolExecutionComponent } from "../src/modes/interactive/components/tool-execution.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
-const job: BackgroundJobSnapshot = {
-	id: "job_12345678-1234-1234-1234-123456789abc",
-	toolName: "subagent",
+const job: JobSummary & { toolCallId: string } = {
+	id: "12345678-1234-1234-1234-123456789abc",
+	tool: "subagent",
 	toolCallId: "background-subagent-call",
 	label: "Inspect the auth flow",
 	status: "running",
-	startedAt: 1,
-	output: "",
-	outputTruncated: false,
 };
 
 function createComponent() {
-	const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
 	const definition = withBackgroundJobs(
 		createSubagentToolDefinition({
 			manager: {
@@ -31,7 +27,11 @@ function createComponent() {
 				},
 			},
 		}),
-		{ manager },
+		{
+			start: async () => {
+				throw new Error("Render-only test must not start a job");
+			},
+		},
 	);
 	return new ToolExecutionComponent(
 		"subagent",
@@ -52,7 +52,7 @@ describe("background subagent tool rows", () => {
 		try {
 			component.markExecutionStarted();
 			expect(component.render(width).lines).toEqual([]);
-			component.updateResult({ ...backgroundJobResult(job), isError: false });
+			component.updateResult({ ...jobResult(job), isError: false });
 
 			for (const expanded of [false, true]) {
 				component.setExpanded(expanded);
@@ -94,16 +94,16 @@ describe("background subagent tool rows", () => {
 		[],
 		{},
 		{ ...job, id: "" },
-		{ ...job, id: "job_" },
-		{ ...job, toolName: "bash" },
+		{ ...job, id: "not a work id" },
+		{ ...job, tool: "bash" },
 		{ ...job, toolCallId: "another-call" },
 		{ ...job, status: "unknown" },
-	])("does not reveal a spawn row for invalid background metadata %j", (backgroundJob) => {
+	])("does not reveal a spawn row for invalid background metadata %j", (invalid) => {
 		const component = createComponent();
 		try {
 			component.updateResult({
 				content: [{ type: "text", text: "Not an acknowledged job" }],
-				details: { backgroundJob },
+				details: { job: invalid },
 				isError: false,
 			});
 			expect(component.render(120).lines).toEqual([]);

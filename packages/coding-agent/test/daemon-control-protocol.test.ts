@@ -581,7 +581,7 @@ describe("daemon control contract", () => {
 			},
 			{ type: "extension.command.deploy", intentId: "i-4" },
 			{ type: "query", queryId: "q-1", query: "models" },
-			{ type: "query", queryId: "q-2", query: "job_output", params: { jobId: "j-1" } },
+			{ type: "query", queryId: "q-2", query: "work_output", params: { workId: "j-1" } },
 			{ type: "query", queryId: "q-3", query: "agent_options" },
 			// Malformed relayed frames.
 			{ type: "set_keep_awake", intentId: "i-5", input: { enabled: "yes" } },

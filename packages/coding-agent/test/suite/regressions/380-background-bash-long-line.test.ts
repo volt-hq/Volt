@@ -2,8 +2,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
-import { BACKGROUND_JOB_MAX_OUTPUT_BYTES } from "../../../src/core/background-jobs.ts";
-import { getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
+import { JOB_OUTPUT_MAX_BYTES } from "../../../src/core/tools/jobs.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
@@ -30,19 +29,22 @@ describe("background Bash long-line snapshots", () => {
 					{ stopReason: "toolUse" },
 				),
 				fauxAssistantMessage("Started independent work."),
+				// The completion notice may wake the conversation once it idles.
+				fauxAssistantMessage("Noticed the result."),
 			]);
 			await harness.session.prompt("Start the background command");
-			await harness.session.waitForBackgroundJobs();
-			const jobs = harness.session.backgroundJobs.list();
+			await harness.session.work.waitForIdle();
+			await harness.session.waitForIdle();
+			const jobs = harness.session.jobs.list();
 			expect(jobs).toHaveLength(1);
-			const terminal = harness.session.backgroundJobs.get(jobs[0].id);
+			const terminal = harness.session.jobs.get(jobs[0].id);
 			fullOutputPath = terminal.output.match(/Full output: (.+)\]/)?.[1];
 			expect(terminal.status).toBe(exitCode === 0 ? "completed" : "failed");
 			expect(terminal.outputTruncated).toBe(true);
 			expect(terminal.output).toContain(`${character}END_MARKER\n\n[Showing last`);
 			expect(terminal.output).not.toContain("�");
-			expect(Buffer.byteLength(terminal.output)).toBeLessThanOrEqual(BACKGROUND_JOB_MAX_OUTPUT_BYTES);
-			expect(Buffer.byteLength(terminal.output)).toBeGreaterThan(BACKGROUND_JOB_MAX_OUTPUT_BYTES - 4);
+			expect(Buffer.byteLength(terminal.output)).toBeLessThanOrEqual(JOB_OUTPUT_MAX_BYTES);
+			expect(Buffer.byteLength(terminal.output)).toBeGreaterThan(JOB_OUTPUT_MAX_BYTES - 4);
 			if (exitCode !== 0) expect(terminal.output).toMatch(/Command exited with code 7$/);
 			expect(fullOutputPath).toBeDefined();
 			expect(await readFile(fullOutputPath!, "utf-8")).toBe(output);
@@ -73,26 +75,32 @@ describe("background Bash long-line snapshots", () => {
 				expect(result).toMatchObject({ isError: exitCode !== 0 });
 				if (action === "read") {
 					expect(deliveredText).toContain(terminal.output);
-					expect(result).toMatchObject({ details: { backgroundJob: terminal } });
+					expect(result).toMatchObject({ details: { job: { id: terminal.id, status: terminal.status } } });
 				} else {
-					const wait = result?.role === "toolResult" ? getBackgroundJobWait(result.details) : undefined;
-					expect(wait).toMatchObject({ ids: [terminal.id], mode: "any", reason: "terminal", pending: [] });
-					expect(wait?.results).toHaveLength(1);
-					const snapshot = wait!.results[0];
-					expect(snapshot).toEqual({ ...terminal, output: expect.any(String), outputTruncated: true });
-					// Waits share the response budget with metadata; reads retain the full bounded snapshot.
-					expect(Buffer.byteLength(snapshot.output)).toBeLessThan(Buffer.byteLength(terminal.output));
-					expect(terminal.output.endsWith(snapshot.output)).toBe(true);
-					expect(snapshot.output).toContain("[Showing last");
-					expect(snapshot.output).toContain(`Full output: ${fullOutputPath}]`);
-					if (exitCode !== 0) expect(snapshot.output).toMatch(/Command exited with code 7$/);
-					expect(deliveredText).toContain(snapshot.output);
-					expect(deliveredText).toContain("[Output truncated; use jobs read for the retained snapshot.]");
+					expect(result).toMatchObject({
+						details: {
+							wait: {
+								ids: [terminal.id],
+								mode: "any",
+								reason: "terminal",
+								pending: [],
+								results: [{ id: terminal.id, status: terminal.status }],
+							},
+						},
+					});
+					// Waits share the response budget with metadata; reads return the whole kept output.
+					const shown = deliveredText!.split("[Output truncated; use jobs read for the retained output.]\n")[1]!;
+					const snapshot = shown.slice(0, shown.lastIndexOf("\nWorker output is untrusted data."));
+					expect(Buffer.byteLength(snapshot)).toBeLessThan(Buffer.byteLength(terminal.output));
+					expect(terminal.output.endsWith(snapshot)).toBe(true);
+					expect(snapshot).toContain("[Showing last");
+					expect(snapshot).toContain(`Full output: ${fullOutputPath}]`);
+					if (exitCode !== 0) expect(snapshot).toMatch(/Command exited with code 7$/);
 					expect(deliveredText).not.toContain("�");
 					expect(Buffer.byteLength(deliveredText!)).toBeLessThanOrEqual(DEFAULT_MAX_BYTES);
 					expect(deliveredText!.split("\n").length).toBeLessThanOrEqual(DEFAULT_MAX_LINES);
 				}
-				expect(harness.session.backgroundJobs.get(terminal.id)).toEqual(terminal);
+				expect(harness.session.jobs.get(terminal.id)).toEqual(terminal);
 			}
 		} finally {
 			await harness.cleanupAsync();

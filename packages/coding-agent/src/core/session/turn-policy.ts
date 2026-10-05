@@ -39,8 +39,8 @@ import {
 } from "../operation-authorization.ts";
 import type { PlanningState } from "../planning.ts";
 import type { SessionManager } from "../session-manager.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
+import type { SessionJobs } from "./jobs.ts";
 import { subagentDetailsForAbortedCall } from "./lifecycle.ts";
 import type { SessionRetry } from "./retry-policy.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
@@ -180,7 +180,7 @@ export interface SessionTurnPolicyHost {
 	extensionRunner(): ExtensionRunner;
 	extensionServices(): SessionExtensionServices;
 	tools(): SessionToolRuntime;
-	background(): SessionBackgroundContinuation;
+	jobs(): SessionJobs;
 	isDisposed(): boolean;
 	/** Whether the session lost its log. */
 	isLost(): boolean;
@@ -274,7 +274,6 @@ export class SessionTurnPolicy {
 			prepareDelivery: (delivery) => this.host.prepareDelivery(delivery),
 			nextAction: (context, signal) => {
 				this.host.assertActive();
-				this.host.background().decisionStarted();
 				return reduceNextAction(context, this.nextActionPolicies(), signal);
 			},
 			requestBoundary: async (boundary, context, signal) =>
@@ -290,7 +289,6 @@ export class SessionTurnPolicy {
 		const workPolicy = { policy: ownTurnPolicy(policy) };
 		const changed = (previous: Readonly<AgentSessionTurnPolicy>, next: Readonly<AgentSessionTurnPolicy>) => {
 			if (previous.beforeToolCall || next.beforeToolCall) this.workPolicyRevision++;
-			if (previous.nextAction || next.nextAction) this.host.background().policyChanged();
 		};
 		this.workToolPolicies.add(workPolicy);
 		changed({}, workPolicy.policy);
@@ -360,9 +358,8 @@ export class SessionTurnPolicy {
 		}
 	}
 
-	/** The session's next-action policy (background notices), then registered turn policies. */
+	/** The registered turn policies' next-action policies. */
 	private *nextActionPolicies(): Generator<NextActionPolicy> {
-		yield (context) => this.host.background().notificationAction(context);
 		for (const registration of this.workToolPolicies) {
 			yield (context, signal) => {
 				const snapshot = registration.policy;
@@ -460,7 +457,7 @@ export class SessionTurnPolicy {
 		backgroundCompletion = false,
 	): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
 		this.host.assertNotLost();
-		if (!backgroundCompletion && this.host.background().takeStartAcknowledgement(event.toolName, event.toolCallId)) {
+		if (!backgroundCompletion && this.host.jobs().takeStartAcknowledgement(event.toolName, event.toolCallId)) {
 			// A start acknowledgement is not the native tool's completed result.
 			// The worker invokes the original result policy once, at settlement.
 			return undefined;
@@ -495,7 +492,7 @@ export class SessionTurnPolicy {
 			} satisfies ToolResultEvent,
 			{
 				origin: { kind: "agent" },
-				signal: this.host.background().hookSignal(),
+				signal: this.host.jobs().hookSignal(),
 			},
 		);
 		const finalDetails =

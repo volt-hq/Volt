@@ -18,9 +18,9 @@ import type {
 	PendingToolExecution,
 } from "@hansjm10/volt-agent-core";
 import type { JsonValue } from "@hansjm10/volt-ai";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { ActiveAgentRun, AgentSessionEvent, AgentSessionEventListener } from "../agent-session.ts";
 import type { BackgroundJobDiagnostics } from "../background-job-diagnostics.ts";
-import type { BackgroundJobManager } from "../background-jobs.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type {
 	ExtensionRunner,
@@ -36,13 +36,15 @@ import type {
 import type { GitContextProvider } from "../git-context-provider.ts";
 import { getClientMessageId } from "../messages.ts";
 import type { ToolProgressDiagnostics } from "../tool-progress-diagnostics.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
+import type { WorkRegistry } from "../work/registry.ts";
 import type { SessionBash } from "./bash.ts";
 import type { SessionClientInputs } from "./client-inputs.ts";
 import type { SessionCompaction } from "./compaction.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
+import type { SessionJobs } from "./jobs.ts";
 import type { SessionPromptCache } from "./prompt-cache.ts";
 import type { SessionPrompting } from "./prompting.ts";
+import type { SessionProviderStream } from "./provider-stream.ts";
 import type { SessionRetry } from "./retry-policy.ts";
 import { extractUserMessageText, type SessionInfo } from "./session-info.ts";
 import type { SessionTurnPolicy } from "./turn-policy.ts";
@@ -66,13 +68,16 @@ function isAgentEvent(event: { type: string }): event is AgentEvent {
 export interface SessionEventsHost {
 	readonly gitContextProvider: GitContextProvider;
 	readonly toolProgressDiagnostics: ToolProgressDiagnostics;
-	readonly backgroundDiagnostics: BackgroundJobDiagnostics;
-	readonly backgroundJobs: BackgroundJobManager;
+	readonly diagnostics: BackgroundJobDiagnostics;
 	readonly retry: SessionRetry;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
 	extensionServices(): SessionExtensionServices;
-	background(): SessionBackgroundContinuation;
+	providerStream(): SessionProviderStream;
+	jobs(): SessionJobs;
+	work(): WorkRegistry;
+	/** The running turn's operation id, if a turn runs. */
+	turnId(): string | undefined;
 	promptCache(): SessionPromptCache;
 	turnPolicy(): SessionTurnPolicy;
 	bash(): SessionBash;
@@ -85,7 +90,7 @@ export interface SessionEventsHost {
 	isLost(): boolean;
 	/** Rejects once the session is disposed or has lost its log. */
 	assertActive(): void;
-	/** An `isBusy` or `hasBackgroundJobs` input changed. */
+	/** An `isBusy` or `hasRunningWork` input changed. */
 	activityChanged(): void;
 	/** Admitted work began or settled. */
 	bumpActivityRevision(): void;
@@ -105,7 +110,7 @@ export class SessionEvents {
 	/** When the active operation's abort source was first observed, for diagnostics. */
 	private abortObserved: { operationId: string; timestamp: number } | undefined;
 	private turnIndex = 0;
-	/** Per-run identity for background waits and provider-result acknowledgement fences. */
+	/** The running agent run's timing. */
 	private run: ActiveAgentRun | undefined = undefined;
 	/** Public elapsed timing spans every run and recovery phase before operation settlement. */
 	private operation: ActiveAgentRun | undefined = undefined;
@@ -213,9 +218,9 @@ export class SessionEvents {
 			}
 		}
 		if (event.type === "agent_start" || event.type === "agent_end") {
-			this.host.background().recordRunDiagnostic(event.type === "agent_start" ? "run_start" : "run_end");
+			this.host.providerStream().recordRunDiagnostic(event.type === "agent_start" ? "run_start" : "run_end");
 		} else if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
-			this.host.background().recordDiagnostic({
+			this.host.providerStream().recordDiagnostic({
 				kind: event.type === "tool_execution_start" ? "tool_start" : "tool_end",
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
@@ -225,7 +230,7 @@ export class SessionEvents {
 		if (event.type === "tool_execution_end" || event.type === "agent_settled") {
 			this.host.gitContextProvider.scheduleRefresh();
 		}
-		if (event.type === "agent_settled") this.host.backgroundDiagnostics.flush();
+		if (event.type === "agent_settled") this.host.diagnostics.flush();
 		this.dispatch(event);
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			this.host.promptCache().requestStarted(event.message);
@@ -328,21 +333,42 @@ export class SessionEvents {
 				if (event.entries.some((entry) => entry.type.startsWith("client_input_"))) {
 					this.host.clientInputs().publishQueue();
 				}
+				if (event.entries.some((entry) => entry.type.startsWith("work_"))) this.host.jobs().runtime.changed();
 				return;
 			case "queue_changed":
-				this.host.backgroundJobs.setSteeringPending(event.queue.steer.length > 0);
+				// A jobs wait ends for user steering, not for the notices of finished work.
+				this.host
+					.jobs()
+					.runtime.setSteering(
+						event.queue.steer.some(
+							(message) => message.role !== "custom" || message.customType !== WORK_NOTICE_CUSTOM_TYPE,
+						),
+					);
 				this.host.clientInputs().publishQueue();
 				return;
 			case "phase_changed":
 				await this.onPhaseChanged(event.phase);
 				return;
-			case "next_action_resolved":
+			case "next_action_resolved": {
 				if (event.stopReason === "policy" || event.stopReason === "tool")
 					this.host.extensionServices().invalidate();
-				this.host.background().nextActionResolved(event);
+				// A stop on a final response, a policy, or a tool fences the notices of the work its turn
+				// started; the turn proceeds once its queued notices are withdrawn.
+				const turnId = this.host.turnId();
+				if (
+					turnId !== undefined &&
+					(event.requestAuthority === "final_response" ||
+						event.stopReason === "policy" ||
+						event.stopReason === "tool")
+				) {
+					await this.host.work().suppressDelivery(turnId);
+				}
 				return;
+			}
 			case "retry_start":
 				this.host.retry.started(event);
+				// The failed request ended and a backoff begins while the prompt still runs.
+				this.host.activityChanged();
 				return;
 			case "retry_end":
 				this.host.retry.ended(event);
@@ -417,7 +443,6 @@ export class SessionEvents {
 		this.host.extensionServices().invalidate();
 		this.settlementRevisionValue += 1;
 		this.emit({ type: "agent_settled" });
-		this.host.background().schedule();
 	}
 
 	/** A handled command or input hook ran no turn: publish the settlement a turn would have. */
@@ -426,7 +451,6 @@ export class SessionEvents {
 		this.host.extensionServices().invalidate();
 		this.settlementRevisionValue += 1;
 		this.emit({ type: "agent_settled" });
-		this.host.background().schedule();
 	}
 
 	/** A loop event of the active turn, after its messages committed. */
@@ -442,7 +466,7 @@ export class SessionEvents {
 			// Aborted tool calls can skip afterToolCall, leaving their plan-mode
 			// authorization records behind; no record outlives its run.
 			this.host.turnPolicy().clearRunRecords();
-			this.host.background().clearRunRecords();
+			this.host.jobs().clearRunRecords();
 		}
 		if (event.type === "turn_start") this.host.compaction().recordRequest(this.host.conversation().operation?.id);
 		if (this.host.isLost()) return;
@@ -499,15 +523,12 @@ export class SessionEvents {
 		if (event.type === "delivery_start") {
 			const userMessage = event.messages.find((message) => message.role === "user");
 			if (userMessage) {
-				// Admitted user input independently authorizes this request even if its wake job is cancelled.
-				this.host.background().userInputDelivered();
 				this.host
 					.sessionInfo()
 					.maybeGenerateName(extractUserMessageText(userMessage.content), this.host.captureGenerationAssertion());
 			}
 		}
 		if (event.type === "message_end" && delivered) {
-			this.host.background().acknowledgeDeliveredNotice(event.message);
 			const clientMessageId = getClientMessageId(event.message);
 			if (clientMessageId !== undefined)
 				this.host.clientInputs().live.get(clientMessageId)?.accepted.resolve("admitted");

@@ -10,7 +10,6 @@ import { join } from "node:path";
 import type { AgentMessage, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import type { AgentSessionConfig, AgentSessionEvent } from "../agent-session.ts";
-import type { BackgroundJobManager } from "../background-jobs.ts";
 import { type ToolDefinition, type ToolInfo, wrapRegisteredTools } from "../extensions/index.ts";
 import type { LiveState } from "../host/live-state.ts";
 import type { HostInteraction } from "../host-interaction.ts";
@@ -52,9 +51,9 @@ import {
 	type PlanningToolController,
 } from "../tools/planning.ts";
 import { createToolDefinitionFromAgentTool } from "../tools/tool-definition-wrapper.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
+import type { SessionJobs } from "./jobs.ts";
 import { McpAuthRequests } from "./mcp-auth-requests.ts";
 
 interface ToolDefinitionEntry {
@@ -91,7 +90,6 @@ export interface SessionToolRuntimeHost {
 	readonly settingsManager: SettingsManager;
 	readonly modelRegistry: ModelRegistry;
 	readonly resourceLoader: ResourceLoader;
-	readonly backgroundJobs: BackgroundJobManager;
 	/** The session's working directory. */
 	readonly cwd: string;
 	/** Global config directory for session-owned artifacts. */
@@ -105,7 +103,7 @@ export interface SessionToolRuntimeHost {
 	conversation(): Conversation<AgentTool>;
 	extensions(): SessionExtensionBinding;
 	extensionServices(): SessionExtensionServices;
-	background(): SessionBackgroundContinuation;
+	jobs(): SessionJobs;
 	sessionWriter(): SessionWriter;
 	isDisposed(): boolean;
 	/** Rejects once the session is disposed or has lost its log. */
@@ -401,7 +399,7 @@ export class SessionToolRuntime {
 		this.host.extensionServices().invalidate();
 		this.effectiveActiveToolNames = validToolNames;
 		this.effectiveToolRegistry = this.toolRegistry;
-		this.host.backgroundJobs.cancelInaccessible();
+		this.host.jobs().revokeUngranted();
 		if (!this.host.isDisposed()) this.host.conversation().setTools(tools);
 
 		// Rebuild base system prompt with new tool set
@@ -681,7 +679,7 @@ export class SessionToolRuntime {
 		this.setActiveToolsByName(resolvedRequestedToolNames);
 		// Replacing a native definition can revoke its authority without changing
 		// the active name list, so it needs its own cancellation check.
-		this.host.backgroundJobs.cancelInaccessible();
+		this.host.jobs().revokeUngranted();
 	}
 
 	/**
@@ -788,7 +786,7 @@ export class SessionToolRuntime {
 					]),
 				)
 			: createAllToolDefinitions(this.host.cwd, {
-					jobs: { manager: this.host.backgroundJobs },
+					jobs: { jobs: this.host.jobs().runtime },
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },
 					edit: { diagnosticsProvider: this.lspManager },
@@ -895,7 +893,7 @@ export class SessionToolRuntime {
 			for (const name of ["bash", "subagent"] as const) {
 				const definition = baseToolDefinitions[name];
 				if (!definition) continue;
-				baseToolDefinitions[name] = this.host.background().wrapNativeTool(name, definition);
+				baseToolDefinitions[name] = this.host.jobs().wrapNativeTool(name, definition);
 			}
 		}
 

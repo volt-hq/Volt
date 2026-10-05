@@ -2,7 +2,6 @@ import { setImmediate } from "node:timers/promises";
 import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall, type JsonObject } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../src/core/agent-session-services.ts";
-import type { BackgroundJobSnapshot } from "../../src/core/background-jobs.ts";
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
 import { createAgentSession } from "../../src/core/sdk.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -16,7 +15,7 @@ import {
 } from "../../src/core/subagents/index.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
-import { getBackgroundJobResultSnapshots } from "../../src/core/tools/jobs.ts";
+import type { JobSummary } from "../../src/core/tools/jobs.ts";
 import { createSubagentTool } from "../../src/core/tools/subagent.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -185,10 +184,12 @@ async function startSubagent(context: Awaited<ReturnType<typeof setup>>, params:
 	return subagent.execute("start", { ...params, confirm });
 }
 
-function jobSnapshot(result: unknown): BackgroundJobSnapshot {
-	const snapshot = getBackgroundJobResultSnapshots((result as { details?: unknown }).details)[0];
-	if (!snapshot) throw new Error("Expected background job result");
-	return snapshot;
+/** The job a background start or jobs result names, with the text the result showed the model. */
+function jobSnapshot(result: unknown): JobSummary & { output: string } {
+	const details = (result as { details?: { job?: JobSummary; wait?: { results: JobSummary[] } } }).details;
+	const job = details?.job ?? details?.wait?.results[0];
+	if (!job) throw new Error("Expected background job result");
+	return { ...job, output: getMessageText(result) };
 }
 
 describe("native background subagents", () => {
@@ -235,7 +236,7 @@ describe("native background subagents", () => {
 				expect(child.getLastAssistantText()).toBe("Child final report.");
 				expect(child.isBusy).toBe(false);
 				expect(child.isStreaming).toBe(false);
-				expect(child.hasBackgroundJobs).toBe(true);
+				expect(child.hasRunningWork).toBe(true);
 				expect(signal?.aborted).toBe(false);
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
 				const childJobs = child.state.tools.find((tool) => tool.name === "jobs")!;
@@ -251,10 +252,10 @@ describe("native background subagents", () => {
 				const settled = vi.fn();
 				if (operation === "abort") {
 					abort = context.session.abort().then(settled);
-					expect(signal?.aborted).toBe(true);
+					await vi.waitFor(() => expect(signal?.aborted).toBe(true));
 					await setImmediate();
 					expect(settled).not.toHaveBeenCalled();
-					expect(context.session.hasBackgroundJobs).toBe(true);
+					expect(context.session.hasRunningWork).toBe(true);
 					expect(
 						jobSnapshot(await childJobs.execute("child-cancelling", { action: "read", id: childJob.id })).status,
 					).toBe("cancelling");
@@ -277,8 +278,8 @@ describe("native background subagents", () => {
 				);
 				expect(result.status).toBe(operation === "abort" ? "cancelled" : "completed");
 				if (operation === "complete") expect(result.output).toContain("Child collected its background output.");
-				expect(child.hasBackgroundJobs).toBe(false);
-				expect(context.session.hasBackgroundJobs).toBe(false);
+				expect(child.hasRunningWork).toBe(false);
+				expect(context.session.hasRunningWork).toBe(false);
 				expect(context.scopes[0]?.snapshot().activeDescendants).toBe(0);
 				expect(context.manager.listDelegations()[0]?.status).toBe(operation === "abort" ? "aborted" : "completed");
 				expect(getMessageText(await subagent.execute("released", params))).toMatch(/"confirm": "/);
@@ -358,7 +359,7 @@ describe("native background subagents", () => {
 				await started.promise;
 				const child = context.runtimes[0]!.conversation.session;
 				await child.waitForIdle();
-				expect(child.hasBackgroundJobs).toBe(true);
+				expect(child.hasRunningWork).toBe(true);
 				expect(context.manager.isSubagentRuntime()).toBe(true);
 				expect(context.scopes[0]).toBe(scope);
 				expect(scope.snapshot().activeDescendants).toBe(1);
@@ -390,14 +391,14 @@ describe("native background subagents", () => {
 				const cancelling = jobSnapshot(await jobs.execute("cancelling", { action: "read", id: parentJob.id }));
 				expect(cancelling.status).toBe("cancelling");
 				expect(cancelling.endedAt).toBeUndefined();
-				expect(child.hasBackgroundJobs).toBe(true);
+				expect(child.hasRunningWork).toBe(true);
 
 				releaseCleanup.resolve();
 				expect(
 					jobSnapshot(await jobs.execute("done", { action: "wait", ids: [parentJob.id], timeoutMs: 30_000 }))
 						.status,
 				).toBe("cancelled");
-				expect(child.hasBackgroundJobs).toBe(false);
+				expect(child.hasRunningWork).toBe(false);
 				expect(scope.snapshot().activeDescendants).toBe(0);
 				const available = await subagent.execute("second-available", second);
 				expect(available.details?.capacity?.fits).toBe(true);
@@ -453,7 +454,7 @@ describe("native background subagents", () => {
 				await vi.waitFor(() => expect(context.signals).toHaveLength(mode === "parallel" ? 2 : 1));
 				expect(context.signals.every((signal) => !signal.aborted)).toBe(true);
 				const result = context.session.messages.filter((message) => message.role === "toolResult").at(-1);
-				const job = (result?.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
+				const job = (result?.details as { job: JobSummary }).job;
 				expect(job.status).toBe("running");
 				context.parentFixture.setResponses([
 					fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
@@ -470,14 +471,9 @@ describe("native background subagents", () => {
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
 				const collected = await jobs.execute("collect", { action: "wait", ids: [job.id], timeoutMs: 30_000 });
 				expect(collected).toMatchObject({
-					details: {
-						backgroundJobWait: {
-							reason: "terminal",
-							results: [{ id: job.id, status: "completed", output: expect.stringContaining("child report") }],
-							pending: [],
-						},
-					},
+					details: { wait: { reason: "terminal", results: [{ id: job.id, status: "completed" }], pending: [] } },
 				});
+				expect(getMessageText(collected)).toContain("child report");
 				expect(context.manager.listDelegations()).toHaveLength(mode === "single" ? 1 : 2);
 				expect(context.manager.listDelegations().every((record) => record.status === "completed")).toBe(true);
 				if (mode === "chain") expect(context.childInputs[1]).toContain("child report");
@@ -724,13 +720,13 @@ describe("native background subagents", () => {
 			const preflight = await subagent.execute("preflight", params);
 			const confirm = /"confirm": "([^"]+)"/.exec(getMessageText(preflight))?.[1];
 			const result = await subagent.execute("start", { ...params, confirm });
-			const job = (result.details as { backgroundJob: BackgroundJobSnapshot }).backgroundJob;
+			const job = (result.details as { job: JobSummary }).job;
 			await vi.waitFor(() => expect(context.signals).toHaveLength(1));
 			await context.session.abort();
 			expect(context.signals[0].aborted).toBe(true);
 			const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;
 			expect(await jobs.execute("read", { action: "read", id: job.id })).toMatchObject({
-				details: { backgroundJob: { status: "cancelled" } },
+				details: { job: { status: "cancelled" } },
 			});
 			await vi.waitFor(() => expect(context.manager.listDelegations()[0]?.status).toBe("aborted"));
 		} finally {

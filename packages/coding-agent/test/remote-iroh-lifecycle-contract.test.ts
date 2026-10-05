@@ -85,8 +85,8 @@ describe("Iroh remote run lifecycle", () => {
 		const { device } = await phone(harness, conversation);
 
 		expect(await device.intent("abort")).toMatchObject({ type: "accepted" });
-		const cancelJob = await device.intent("cancel_job", { jobId: "missing-job" });
-		expect(cancelJob.type === "rejected" ? cancelJob.reason.code : "accepted").not.toMatch(
+		const cancelWork = await device.intent("cancel_work", { workId: "missing-job" });
+		expect(cancelWork.type === "rejected" ? cancelWork.reason.code : "accepted").not.toMatch(
 			/^(not_allowed|unknown_intent)$/,
 		);
 

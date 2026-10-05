@@ -30,6 +30,7 @@ import {
 	type RemoteCapability,
 	type RemoteGrant,
 } from "@hansjm10/volt-protocol";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol/work";
 import { createIrohRemoteProjectionSanitizer } from "../remote/iroh/sanitizer.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { type IntentProfile, LOCAL_INTENT_PROFILE } from "./intents/types.ts";
@@ -157,9 +158,9 @@ export const localProfile: Profile = Object.freeze({
 /**
  * State entries a remote client folds: their payloads, redacted, reach it.
  * Work entries carry no input, child locator, output, or result data
- * (projection/entries.ts); output is read with `work_output`. Work notices
- * stay on the host: they are model context, and the work entries show the
- * result.
+ * (projection/entries.ts); output is read with `work_output`. A work notice
+ * is a system message whose text is rebuilt from its details, never its
+ * content (projection/transcript.ts).
  */
 const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"client_input_receipt",
@@ -191,7 +192,7 @@ export function getRemoteVisibleCustomMessageRole(
 	switch (customType) {
 		case "review":
 			return "assistant";
-		case "background_job_notification":
+		case WORK_NOTICE_CUSTOM_TYPE:
 		case "subagent_recovery":
 			return "system";
 		default:

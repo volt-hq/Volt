@@ -10,6 +10,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageDiagnostic,
 	ImageContent,
+	JsonValue,
 	ProviderError,
 	StopReason,
 	ToolCall,
@@ -285,9 +286,15 @@ export class LogSeed {
 	}
 
 	/** A custom message, which enters the model context; `display` says whether transcripts show it. */
-	customMessage(customType: string, content: string, display: boolean, options: { readonly id?: string } = {}): this {
+	customMessage(
+		customType: string,
+		content: string,
+		display: boolean,
+		options: { readonly id?: string; readonly details?: JsonValue } = {},
+	): this {
+		const details = options.details === undefined ? {} : { details: options.details };
 		return this.add(
-			{ type: "custom_message", visibility: "public", payload: { customType, content, display } },
+			{ type: "custom_message", visibility: "public", payload: { customType, content, display, ...details } },
 			options.id,
 		);
 	}

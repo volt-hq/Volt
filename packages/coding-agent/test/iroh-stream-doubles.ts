@@ -14,7 +14,6 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import { vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../src/core/host/live-state.ts";
@@ -100,7 +99,6 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		leafId,
 		liveState: new LiveState(),
 		autoCompactionEnabled: false,
-		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		followUpMode: "all" as const,
 		gitContextProvider: {
@@ -241,6 +239,10 @@ export function createTestDaemonRuntime(parts: TestDaemonRuntimeParts, host?: Co
 			return (parts.session as { sessionId?: string }).sessionId;
 		},
 		session: parts.session,
+		// The conversation's work is its session's, as in a hosted conversation.
+		get work() {
+			return (parts.session as { work?: unknown }).work;
+		},
 		cwd: parts.cwd ?? "/workspace",
 		closed: false,
 		lost: parts.lost ?? new Promise<Error>(() => {}),

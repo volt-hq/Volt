@@ -13,6 +13,7 @@ import {
 	CONTENT_TEXT_MAX_SCALARS,
 	type HostFrame,
 	type ProjectedEntry,
+	type QueryResult,
 	REMOTE_CAPABILITIES,
 	type RemoteGrant,
 	WORK_NOTICE_CUSTOM_TYPE,
@@ -23,9 +24,13 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoopbackClient, ProtocolQueryError, ProtocolRejectedError } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import { localProfile } from "../../src/core/protocol/profiles.ts";
+import { sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
+import { projectTranscriptItem } from "../../src/core/protocol/projection/transcript.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
 import {
 	assertCurrentSessionSnapshot,
+	type CommittedSessionEntry,
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
 	loadEntriesFromFile,
@@ -124,8 +129,8 @@ describe("work in hosted conversations", () => {
 		const harness = await harnessFor(["noticed"]);
 		const conversation = await harness.openStartup();
 		await harness.host.attach(harness.client("tui"), conversation);
-		conversation.work.register(kind({ kind: "job", delivery: "wake", title: () => "echo done" }));
-		const record = await conversation.work.start("job", { command: "echo done" }, async (ctx) => {
+		conversation.work.register(kind({ kind: "ext:test/wake", delivery: "wake", title: () => "echo done" }));
+		const record = await conversation.work.start("ext:test/wake", { command: "echo done" }, async (ctx) => {
 			ctx.output("done\n");
 			return { outcome: "completed", result: { summary: "echoed" } };
 		});
@@ -143,9 +148,9 @@ describe("work in hosted conversations", () => {
 		const harness = await harnessFor();
 		const first = await harness.openStartup();
 		const resumable = kind({ kind: "subagent", resume: () => async () => ({ outcome: "completed" }) });
-		first.work.register(kind({ kind: "job" }));
+		first.work.register(kind());
 		first.work.register(resumable);
-		const job = await first.work.start("job", null, held().execute);
+		const job = await first.work.start("ext:test/run", null, held().execute);
 		const child = await first.work.start("subagent", null, held().execute);
 		const ref = first.session.sessionRef;
 		if (!ref) throw new Error("Expected a stored session");
@@ -375,6 +380,101 @@ describe("work in hosted conversations", () => {
 		expect(output.text.startsWith("/workspace/file-")).toBe(true);
 		const local = conversation.work.output(record.workId)?.text ?? "";
 		expect(local.startsWith(workspace)).toBe(false);
+	});
+
+	it("shows a paired device a work notice rebuilt from its details, without the notice's own text or a root a cut left", async () => {
+		const harness = await harnessFor(["noticed"]);
+		const workspace = harness.tempDir;
+		const name = basename(workspace);
+		const prefix = workspace.slice(0, -name.length + 1);
+		// A notice delivered before this runtime, whose kind gave it its own text.
+		const manager = await SessionManager.create(workspace, join(workspace, "sessions"));
+		await seedSession(manager, (log) => {
+			log.user("hello").assistant("hi");
+			log.customMessage(WORK_NOTICE_CUSTOM_TYPE, `Wrote ${workspace}/out.txt`, true, {
+				details: { workId: "w1", kind: "ext:test/custom", title: "Report", outcome: "completed" },
+			});
+		});
+		const opened = await harness.host.open({ kind: "adopt", sessionManager: manager });
+		if (opened.cancelled) throw new Error("Expected the conversation to open");
+		const conversation = opened.conversation;
+		await harness.host.attach(harness.client("tui"), conversation);
+		// Text whose cut to `max` falls one character into the workspace's unique name.
+		const cutInRoot = (max: number) => `${"x".repeat(max - workspace.length + name.length - 3)} ${workspace}/file.ts`;
+		conversation.work.register(
+			kind({ kind: "ext:test/wake", delivery: "wake", title: () => cutInRoot(WORK_TITLE_MAX_CHARS) }),
+		);
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: workspace },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+
+		const record = await conversation.work.start("ext:test/wake", null, async () => ({
+			outcome: "completed",
+			result: { summary: cutInRoot(WORK_TEXT_MAX_CHARS) },
+		}));
+		await conversation.work.waitForIdle();
+		await vi.waitFor(() => expect(conversation.session.messages.at(-1)?.role).toBe("assistant"));
+		await conversation.session.waitForIdle();
+		const notices = conversation.session.sessionManager
+			.committedEntriesAfter(0)
+			.filter((entry) => entry.type === "custom_message" && entry.customType === WORK_NOTICE_CUSTOM_TYPE);
+		expect(notices).toHaveLength(2);
+		const [seeded, delivered] = notices as [CommittedSessionEntry, CommittedSessionEntry];
+		// The model's notice holds the title and summary as the host cut them.
+		expect(record.title.endsWith(`${prefix}…`)).toBe(true);
+		expect(delivered.type === "custom_message" && delivered.content).toBe(
+			`${record.title} (ext:test/wake ${record.workId}) completed.\n${cutInRoot(WORK_TEXT_MAX_CHARS).slice(0, WORK_TEXT_MAX_CHARS - 1)}…`,
+		);
+		// A local client is sent the notice's own text.
+		const source = sessionProjectionSource(conversation.session.sessionManager);
+		expect(projectTranscriptItem(seeded, source, localProfile)?.text).toBe(`Wrote ${workspace}/out.txt`);
+
+		const lead = (max: number) => "x".repeat(max - workspace.length + name.length - 3);
+		const expected = new Map([
+			[seeded.id, "Report (ext:test/custom w1) completed."],
+			[
+				delivered.id,
+				`${lead(WORK_TITLE_MAX_CHARS)} … (ext:test/wake ${record.workId}) completed.\n${lead(WORK_TEXT_MAX_CHARS)} …`,
+			],
+		]);
+		await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "entry" }> =>
+				frame.type === "entry" && frame.entry.id === delivered.id,
+		);
+		const views = phone.frames.flatMap((frame) =>
+			frame.type === "snapshot"
+				? frame.state.entries
+				: frame.type === "entry" && frame.entry.type === "custom_message"
+					? [frame.entry]
+					: [],
+		);
+		for (const [id, text] of expected) {
+			const projected = views.find((entry) => entry.id === id);
+			expect(projected && "view" in projected ? projected.view : undefined).toEqual({
+				role: "system",
+				text,
+				truncated: false,
+			});
+			const read = await phone.query("content", { entryId: id });
+			if (read.type !== "result") throw new Error("Expected the notice's content");
+			expect((read.data as QueryResult<"content">).content).toMatchObject({ type: "text", text });
+		}
+		const wire = JSON.stringify(phone.frames);
+		expect(wire).not.toContain(JSON.stringify(prefix).slice(1, -1));
+		expect(wire).not.toContain("out.txt");
 	});
 
 	it("never carries work entries into a fork, a clone, or an import", async () => {

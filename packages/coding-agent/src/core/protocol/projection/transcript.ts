@@ -3,16 +3,23 @@
  * profile, a pure function of the entry and the log before it. Text is
  * bounded per entry by the profile (`truncated` says the `content` query has
  * the rest); tool items carry their tool call's arguments from the entry's
- * ancestors and, on full-fidelity profiles, diff and patch previews.
+ * ancestors and, on full-fidelity profiles, diff and patch previews. On a
+ * transcript profile, a work notice's text is rebuilt from its details.
  */
 
 import type { ImageContent, TextContent, ToolCall } from "@hansjm10/volt-ai";
-import type { TranscriptItem } from "@hansjm10/volt-protocol";
+import {
+	type TranscriptItem,
+	WORK_NOTICE_CUSTOM_TYPE,
+	WORK_TITLE_MAX_CHARS,
+	WorkNoticeDetailsSchema,
+} from "@hansjm10/volt-protocol";
+import { Check } from "typebox/value";
 import { extractVisibleTextContent } from "../../messages.ts";
 import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../subagents/tool-names.ts";
+import { workText } from "../../work/registry.ts";
 import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
-import { projectRpcBackgroundJobDetails } from "./background-jobs.ts";
 import {
 	boundSummaryWithMetadata,
 	boundText,
@@ -98,6 +105,35 @@ function customRole(customType: string): TranscriptItem["role"] {
 	return getRemoteVisibleCustomMessageRole(customType, true) ?? "system";
 }
 
+/**
+ * The text of a work notice as a transcript profile sends it, or undefined
+ * for any other entry and on a full-fidelity profile. The notice's content
+ * is not sent: it holds titles and results the host cut to a bound, where a
+ * cut can leave the start of a root that redaction cannot match, or a kind's
+ * own text. The text is rebuilt from the notice's details instead, each cut
+ * field losing such a start; a notice whose details are not a work notice's
+ * has no text.
+ */
+export function transcriptWorkNoticeText(entry: CommittedSessionEntry, profile: Profile): string | undefined {
+	if (profile.fidelity !== "transcript") return undefined;
+	const notice =
+		entry.type === "custom_message"
+			? entry
+			: entry.type === "message" && entry.message.role === "custom"
+				? entry.message
+				: undefined;
+	if (notice?.customType !== WORK_NOTICE_CUSTOM_TYPE || !notice.display) return undefined;
+	const details = notice.details;
+	if (!Check(WorkNoticeDetailsSchema, details)) return "";
+	const cut = (text: string, max?: number): string => workText(profile.sourceCut(text), max);
+	const lines = [
+		`${cut(details.title, WORK_TITLE_MAX_CHARS)} (${details.kind} ${details.workId}) ${details.outcome}.`,
+	];
+	if (details.summary) lines.push(cut(details.summary));
+	if (details.error) lines.push(`Error: ${cut(details.error)}`);
+	return lines.join("\n");
+}
+
 function assistantItem(
 	content: ReadonlyArray<TextContent | { type: "thinking"; thinking: string; redacted?: boolean } | ToolCall>,
 	stopReason: TranscriptItem["stopReason"],
@@ -137,6 +173,35 @@ function assistantItem(
 	};
 }
 
+const JOB_STATUSES: ReadonlySet<unknown> = new Set([
+	"running",
+	"cancelling",
+	"completed",
+	"failed",
+	"cancelled",
+	"interrupted",
+]);
+
+/**
+ * The job a background start or `jobs` result names, as recorded with the
+ * result: its work id and state then. The job itself is a work item; its
+ * output is read by id, never from the transcript.
+ */
+function projectJobDetails(
+	details: Record<string, unknown> | undefined,
+): { workId: string; status: string } | undefined {
+	const job = details !== undefined && isRecord(details.job) ? details.job : undefined;
+	if (
+		job === undefined ||
+		typeof job.id !== "string" ||
+		!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(job.id) ||
+		!JOB_STATUSES.has(job.status)
+	) {
+		return undefined;
+	}
+	return { workId: job.id, status: job.status as string };
+}
+
 function toolResultItem(
 	entry: CommittedSessionEntry,
 	message: {
@@ -155,16 +220,13 @@ function toolResultItem(
 	const status = message.isError ? "failed" : "completed";
 	const path = getToolPath(toolName, args);
 	const details = isRecord(message.details) ? message.details : undefined;
-	const background = projectRpcBackgroundJobDetails(details);
-	const summary = background
-		? boundSummaryWithMetadata(
-				`Background job ${background.backgroundJob.id}: ${background.backgroundJob.status} (snapshot)`,
-				TOOL_SUMMARY_LIMIT,
-			)
+	const job = projectJobDetails(details);
+	const summary = job
+		? boundSummaryWithMetadata(`Background job ${job.workId}: ${job.status} (snapshot)`, TOOL_SUMMARY_LIMIT)
 		: summarizeToolResult(toolName, status, args, path);
 	const projectedArgs = projectToolArgs(toolName, args);
-	const projectedDetails = background
-		? background
+	const projectedDetails = job
+		? { job }
 		: toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME
 			? projectSubagentDetails(details)
 			: undefined;
@@ -229,7 +291,10 @@ export function projectTranscriptItem(
 	source: ProjectionSource,
 	profile: Profile,
 ): TranscriptItem | undefined {
-	return viewOf(profile.source(entry), source, profile);
+	const notice = transcriptWorkNoticeText(entry, profile);
+	if (notice === undefined) return viewOf(profile.source(entry), source, profile);
+	const text = boundScalars(notice, profile.limits.textScalars);
+	return { role: customRole(WORK_NOTICE_CUSTOM_TYPE), text: text.text, truncated: text.truncated };
 }
 
 function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile: Profile): TranscriptItem | undefined {

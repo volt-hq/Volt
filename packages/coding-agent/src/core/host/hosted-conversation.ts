@@ -17,7 +17,7 @@ import { wakingInputRecovery } from "../session/client-inputs.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
-import { WorkRegistry } from "../work/registry.ts";
+import type { WorkRegistry } from "../work/registry.ts";
 import { feedLiveState, type LiveFeed } from "./live-feed.ts";
 import type { LiveState } from "./live-state.ts";
 import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
@@ -141,13 +141,6 @@ export class HostedConversation {
 	 * host closes the conversation, which releases the lock. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
-	/**
-	 * The conversation's work (RFC §7): its kinds, the executors of the work
-	 * it runs, and the cancel, resume, and open paths every client shares.
-	 * The host reconciles the work a previous runtime left when it opens the
-	 * conversation; closing stops every executor.
-	 */
-	readonly work: WorkRegistry;
 	/** Feeds the live state from the session until the conversation closes. */
 	private readonly liveFeed: LiveFeed;
 	private _reviewWorkflows?: ReviewWorkflowManager;
@@ -165,28 +158,28 @@ export class HostedConversation {
 		this.lifetime = options.lifetime;
 		this.openedAs = options.openedAs;
 		this.liveFeed = feedLiveState(this.session);
-		const session = this.session;
-		this.work = new WorkRegistry({
-			conversationId: () => session.sessionId,
-			work: () => session.conversationWork,
-			state: () => session.sessionManager.getConversationState(),
-			live: () => session.liveState,
-			turnId: () => session.turnId,
-		});
-		void session.lost.then((error) => {
+		void this.session.lost.then((error) => {
 			if (this.closePromise) return;
-			// Reviews and work persist through the lost session's manager and cannot finish; the next open reconciles the work.
+			// Reviews persist through the lost session's manager and cannot finish; the session stops its work.
 			void this._reviewWorkflows?.abortAll().catch(() => undefined);
-			void this.work.cancelAll("closed").catch(() => undefined);
 			this.lostSignal.resolve(error);
 		});
+	}
+
+	/**
+	 * The conversation's work (RFC §7): its session's work registry. The host
+	 * reconciles the work a previous runtime left when it opens the
+	 * conversation; closing stops every executor.
+	 */
+	get work(): WorkRegistry {
+		return this.session.work;
 	}
 
 	/**
 	 * The conversation's live state: extension status, widgets, and title,
 	 * dialogs, approvals, MCP authorization flows, the run phase, Git and
 	 * prompt-cache status, token use, intent availability, work progress,
-	 * background jobs, review workflows, and what streams. The host attaches each client's
+	 * review workflows, and what streams. The host attaches each client's
 	 * `live` view when the client joins; it closes with the session.
 	 */
 	get liveState(): LiveState {

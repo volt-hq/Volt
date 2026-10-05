@@ -10,7 +10,6 @@
 
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
-import { RpcBackgroundJobSnapshotSchema } from "./background-jobs.ts";
 import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
@@ -218,10 +217,6 @@ export const QUERY_SCHEMAS = {
 		result: Type.Object({ webSearch: RpcWebSearchStatusSchema }, closed),
 	},
 	subagent_definitions: { params: EmptyInputSchema, result: RpcListSubagentsResponseSchema },
-	job_output: {
-		params: Type.Object({ jobId: RpcConversationIdentifierSchema }, closed),
-		result: Type.Object({ job: RpcBackgroundJobSnapshotSchema }, closed),
-	},
 	/**
 	 * A work item's output as plain text without terminal control sequences:
 	 * what running work produced so far, or what its result kept. Only the

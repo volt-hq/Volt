@@ -1822,18 +1822,18 @@ export class IntegratedRuntimeRegistry {
 		// rather than restarting a full TTL, so a flaky reconnect-then-abort loop
 		// cannot keep resetting the clock and pin a detached runtime open forever.
 		const ttlMs = ttlOverrideMs ?? this.options.detachedRuntimeTtlMs();
-		// Detached jobs and review workflows count as activity: their work must
+		// Running work and review workflows count as activity: their work must
 		// pin the runtime until it reaches a terminal state.
 		const conversation = entry.runtime.conversation;
 		const isEntryActive = () =>
 			conversation.session.isBusy ||
-			conversation.session.hasBackgroundJobs ||
+			conversation.session.hasRunningWork ||
 			conversation.reviewWorkflows.hasActiveWorkflows ||
 			this.reviewDiscussions.hasPendingWork(conversation);
 		// Each wait must block while its own activity check above is true.
 		const waitForEntryIdle = async () => {
 			await conversation.session.waitForNotBusy();
-			await conversation.session.waitForBackgroundJobs();
+			await conversation.work.waitForIdle();
 			await conversation.reviewWorkflows.waitForIdle();
 			await this.reviewDiscussions.waitForIdle(conversation);
 		};

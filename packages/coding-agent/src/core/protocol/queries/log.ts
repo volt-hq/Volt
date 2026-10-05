@@ -11,6 +11,7 @@ import { targetOf } from "../intents/conversation.ts";
 import type { IntentContext } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../projection/entries.ts";
+import { transcriptWorkNoticeText } from "../projection/transcript.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
 
 const observe = ["conversation.observe.v1"] as const;
@@ -122,7 +123,10 @@ export const contentQuery = defineQuery({
 		if (!entry || !profile.includes(entry)) {
 			throw new QueryRejectedError("invalid_input", `Unknown entry: ${params.entryId}`);
 		}
-		const parts = contentParts(profile.source(entry));
+		// A work notice's content is its view's text, as the subscription projects it.
+		const notice = transcriptWorkNoticeText(entry, profile);
+		const parts: ContentPart[] =
+			notice === undefined ? contentParts(profile.source(entry)) : [{ type: "text", text: notice }];
 		const index = params.part ?? 0;
 		const part = parts[index];
 		if (!part) throw new QueryRejectedError("invalid_input", `Entry ${params.entryId} has no content part ${index}`);

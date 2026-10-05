@@ -18,8 +18,7 @@ export interface BackgroundJobDiagnosticEvent {
 		| "job_cancel"
 		| "wait_start"
 		| "wait_end"
-		| "job_read"
-		| "job_collected";
+		| "job_read";
 	runId?: string;
 	requestId?: string;
 	toolCallId?: string;
@@ -60,7 +59,6 @@ const KINDS = new Set([
 	"wait_start",
 	"wait_end",
 	"job_read",
-	"job_collected",
 ]);
 const ENUMS = {
 	status: ["running", "cancelling", "completed", "failed", "cancelled"],

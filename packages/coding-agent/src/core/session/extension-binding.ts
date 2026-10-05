@@ -43,8 +43,8 @@ import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { theme } from "../theme/runtime.ts";
-import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
+import type { SessionJobs } from "./jobs.ts";
 import type { ModelSettings } from "./model-settings.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
 
@@ -113,11 +113,11 @@ export interface SessionExtensionBindingHost {
 	conversation(): Conversation<AgentTool>;
 	tools(): SessionToolRuntime;
 	extensionServices(): SessionExtensionServices;
-	background(): SessionBackgroundContinuation;
+	jobs(): SessionJobs;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */
 	assertActive(): void;
-	/** Whether active session work owns the runtime: a turn, a bash run, a session mutation, or background jobs. */
+	/** Whether active session work owns the runtime: a turn, a bash run, a session mutation, or running work. */
 	hasActiveWork(): boolean;
 	/** Whether an extension command handler is running. */
 	extensionCommandRunning(): boolean;
@@ -694,7 +694,7 @@ export class SessionExtensionBinding {
 				getModel: () => session.model,
 				isIdle: () => !session.isBusy,
 				isProjectTrusted: () => this.host.settingsManager.isProjectTrusted(),
-				getSignal: () => this.host.background().hookSignal(),
+				getSignal: () => this.host.jobs().hookSignal(),
 				abort: () => {
 					const abortHandler = this.actionClient()?.abortHandler;
 					if (abortHandler) {

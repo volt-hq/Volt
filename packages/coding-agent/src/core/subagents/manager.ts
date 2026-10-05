@@ -1783,13 +1783,13 @@ export class SubagentManager {
 				waitForIdle: async () => {
 					idleActivityRevision = runtime.session.activityRevision;
 					await runtime.session.waitForIdle();
-					await runtime.session.waitForBackgroundJobs();
+					await runtime.session.work.waitForIdle();
 					await runtime.session.waitForIdle();
 				},
 				isIdle: () =>
 					idleActivityRevision === runtime.session.activityRevision &&
 					!runtime.session.isStreaming &&
-					!runtime.session.hasBackgroundJobs,
+					!runtime.session.hasRunningWork,
 			});
 			delegation.reservation.commit(id, () => {
 				markRunAbortRequested();

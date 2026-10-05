@@ -12,11 +12,10 @@
  * and a gap in `seq` means the client must resubscribe after its position.
  *
  * Keys name a value family and, for keyed families, an id:
- * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, `jobs`, or
+ * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
  * `host_request/<requestId>`, `ext_status/<key>`, `ext_widget/<key>`,
  * `work/<workId>`, `workflow/<workflowId>`, `subagent/<subagentId>`,
- * `host_action/<id>`. A value's `kind` is its key's family. `jobs`,
- * `workflow`, `subagent`, and `host_action` are interim values until work
+ * `host_action/<id>`. A value's `kind` is its key's family. `workflow`, `subagent`, and `host_action` are interim values until work
  * items replace them (Phase 4).
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
@@ -31,7 +30,6 @@ import {
 	ToolCallSchema,
 } from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
-import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
@@ -238,9 +236,6 @@ export const LiveExtensionTitleValueSchema = Type.Object(
 	closed,
 );
 
-/** The conversation's background jobs (interim until work items). */
-export const LiveJobsValueSchema = Type.Object({ kind: Type.Literal("jobs"), jobs: RpcBackgroundJobsSchema }, closed);
-
 /**
  * Work this host runs (RFC §7.1): set when the work's executor attaches and
  * cleared once it detaches, so open work without this value is suspended.
@@ -306,7 +301,6 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_widget: LiveExtensionWidgetValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
-	jobs: LiveJobsValueSchema,
 	workflow: LiveWorkflowValueSchema,
 	subagent: LiveSubagentValueSchema,
 	host_action: LiveHostActionValueSchema,
@@ -325,7 +319,6 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionWidgetValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
-	LiveJobsValueSchema,
 	LiveWorkflowValueSchema,
 	LiveSubagentValueSchema,
 	LiveHostActionValueSchema,
@@ -340,7 +333,6 @@ export const LIVE_SINGLETON_KINDS = [
 	"usage",
 	"intents",
 	"ext_title",
-	"jobs",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Families with one value per id: the key is `<kind>/<id>`. */
