@@ -83,6 +83,7 @@ const identifier = Type.String({
 	pattern: "^[^\\s\\u0000-\\u001f\\u007f]+$",
 });
 const key = Type.Optional(UiNodeKeySchema);
+const epochMs = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
 
 // ============================================================================
 // Intents and actions
@@ -216,7 +217,7 @@ export const UiKeyValueNodeSchema = Type.Object(
 	closed,
 );
 
-/** Determinate progress (`value` of `max`, default 1) or a list of steps. */
+/** Determinate progress (`value` of `max`, default 1) or a list of steps, each optionally timed. */
 export const UiProgressNodeSchema = Type.Union([
 	Type.Object(
 		{
@@ -243,6 +244,9 @@ export const UiProgressNodeSchema = Type.Union([
 						label: UiNodeStyledTextSchema,
 						status: stringEnum(["pending", "active", "done", "failed", "skipped"]),
 						detail: Type.Optional(UiNodeStyledTextSchema),
+						/** When the step started and ended, in epoch milliseconds: clients show its duration. */
+						startedAt: Type.Optional(epochMs),
+						endedAt: Type.Optional(epochMs),
 					},
 					closed,
 				),
