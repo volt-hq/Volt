@@ -1,6 +1,4 @@
-import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
-
-export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v4";
+export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v5";
 
 export const SESSION_STORE_TABLE_NAMES = [
 	"store_metadata",
@@ -9,10 +7,8 @@ export const SESSION_STORE_TABLE_NAMES = [
 	"client_inputs",
 	"search_chunks",
 	"transaction_commits",
-	"review_anchors",
-	"review_anchor_aliases",
-	"review_discussions",
-	"review_discussion_children",
+	"review_run_index",
+	"review_discussion_index",
 ] as const;
 
 export const SESSION_STORE_INDEX_NAMES = [
@@ -22,8 +18,9 @@ export const SESSION_STORE_INDEX_NAMES = [
 	"client_inputs_state_idx",
 	"search_chunks_entry_idx",
 	"transaction_commits_session_ordinal_idx",
-	"review_anchors_source_idx",
-	"review_discussions_run_idx",
+	"review_run_index_session_idx",
+	"review_discussion_index_finding_idx",
+	"review_discussion_index_session_idx",
 ] as const;
 
 /** Commit evidence fenced on the session's last entry ordinal. Every commit appends at least one entry. */
@@ -79,7 +76,50 @@ CREATE TABLE client_inputs (
 CREATE INDEX client_inputs_state_idx ON client_inputs (session_id, state, client_message_id);
 `;
 
-export const SESSION_STORE_SCHEMA_SQL = `
+/**
+ * Derived indexes of the review records in the logs (RFC §14 Q7), maintained
+ * by the store as it commits them: the conversation that anchors each review
+ * run (its `work_started` of review work) and the run's current General (the
+ * source until its latest `review_general`), and each discussion child a
+ * source records (`review_discussion` and `review_discussion_reset`). They answer
+ * lookups across sessions and enforce how logs may relate; they grant no
+ * write authority, and a row leaves with the log it derives from.
+ */
+export const SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL = `
+CREATE TABLE review_run_index (
+	run_id TEXT PRIMARY KEY NOT NULL CHECK (length(run_id) BETWEEN 1 AND 512),
+	session_id TEXT NOT NULL,
+	session_generation TEXT NOT NULL,
+	general_session_id TEXT NOT NULL CHECK (length(general_session_id) BETWEEN 1 AND 512),
+	general_session_generation TEXT NOT NULL CHECK (length(general_session_generation) BETWEEN 1 AND 512),
+	FOREIGN KEY (session_id, session_generation) REFERENCES sessions(id, session_generation) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX review_run_index_session_idx ON review_run_index (session_id, session_generation);
+
+CREATE TABLE review_discussion_index (
+	discussion_id TEXT NOT NULL CHECK (length(discussion_id) BETWEEN 1 AND 512),
+	ordinal INTEGER NOT NULL CHECK (ordinal >= 1),
+	run_id TEXT NOT NULL,
+	finding_id TEXT NOT NULL CHECK (length(finding_id) BETWEEN 1 AND 512),
+	session_id TEXT NOT NULL,
+	session_generation TEXT NOT NULL,
+	child_session_id TEXT NOT NULL CHECK (length(child_session_id) BETWEEN 1 AND 512),
+	child_session_generation TEXT NOT NULL CHECK (length(child_session_generation) BETWEEN 1 AND 512),
+	request_id TEXT NOT NULL CHECK (length(request_id) BETWEEN 1 AND 512),
+	PRIMARY KEY (discussion_id, ordinal),
+	UNIQUE (child_session_id, child_session_generation),
+	UNIQUE (discussion_id, request_id),
+	FOREIGN KEY (run_id) REFERENCES review_run_index(run_id) ON DELETE CASCADE,
+	FOREIGN KEY (session_id, session_generation) REFERENCES sessions(id, session_generation) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX review_discussion_index_finding_idx ON review_discussion_index (run_id, finding_id) WHERE ordinal = 1;
+CREATE INDEX review_discussion_index_session_idx ON review_discussion_index (session_id, session_generation);
+`;
+
+/** Every table but the review indexes: unchanged since v4. */
+export const SESSION_STORE_BASE_SCHEMA_SQL = `
 CREATE TABLE store_metadata (
 	key TEXT PRIMARY KEY NOT NULL,
 	value_json TEXT NOT NULL CHECK (json_valid(value_json) = 1)
@@ -159,5 +199,6 @@ CREATE TABLE search_chunks (
 
 CREATE INDEX search_chunks_entry_idx ON search_chunks (session_id, entry_id);
 
-${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}${REVIEW_DISCUSSION_SCHEMA_SQL}
-`;
+${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}`;
+
+export const SESSION_STORE_SCHEMA_SQL = `${SESSION_STORE_BASE_SCHEMA_SQL}${SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL}`;

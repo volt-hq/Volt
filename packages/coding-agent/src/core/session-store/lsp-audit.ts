@@ -11,7 +11,8 @@ import {
 	type AuditSnapshotOptions,
 	runLspAuditSnapshot,
 } from "./lsp-audit-snapshot.ts";
-import { SESSION_STORE_SCHEMA_SQL } from "./schema.ts";
+import { SESSION_STORE_SCHEMA_ID, SESSION_STORE_SCHEMA_SQL } from "./schema.ts";
+import { SESSION_STORE_SCHEMA_VERSION } from "./types.ts";
 
 export const LSP_AUDIT_LIMITS = {
 	maxStores: 128,
@@ -457,6 +458,8 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 			{
 				path,
 				schemaSql: SESSION_STORE_SCHEMA_SQL,
+				schemaId: SESSION_STORE_SCHEMA_ID,
+				schemaVersion: SESSION_STORE_SCHEMA_VERSION,
 				maxSessions: limits.maxSessions - coverage.sessionsScanned,
 				maxEntries: limits.maxEntries - coverage.entriesScanned,
 				maxBytes: limits.maxBytes - coverage.bytesScanned,

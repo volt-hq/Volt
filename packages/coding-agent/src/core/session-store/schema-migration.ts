@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { parseCanonicalSessionStoreJson, stringifyCanonicalSessionStoreJson } from "./canonical-json.ts";
-import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
 import {
 	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
+	SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL,
 	SESSION_STORE_SCHEMA_ID,
 	SESSION_STORE_SCHEMA_SQL,
 	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
@@ -11,6 +11,7 @@ import {
 import { SESSION_STORE_V1_SCHEMA_ID, SESSION_STORE_V1_SCHEMA_SQL } from "./schema-v1.ts";
 import { SESSION_STORE_V2_SCHEMA_ID, SESSION_STORE_V2_SCHEMA_SQL } from "./schema-v2.ts";
 import { SESSION_STORE_V3_SCHEMA_ID, SESSION_STORE_V3_SCHEMA_SQL } from "./schema-v3.ts";
+import { SESSION_STORE_V4_SCHEMA_ID, SESSION_STORE_V4_SCHEMA_SQL } from "./schema-v4.ts";
 import { SESSION_STORE_SCHEMA_VERSION, SessionStoreError } from "./types.ts";
 
 /** The v3 client input columns, copied into the rebuilt v4 table (which adds `origin`). */
@@ -24,6 +25,19 @@ export const SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL = [
 	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
 	`INSERT INTO main.client_inputs (${V3_CLIENT_INPUT_COLUMNS}) SELECT ${V3_CLIENT_INPUT_COLUMNS} FROM temp.client_inputs_v3`,
 	"DROP TABLE temp.client_inputs_v3",
+] as const;
+
+/**
+ * The review tables v2 added, dropped by the v5 upgrade in this order (a
+ * table before the tables it references). Their rows are carried nowhere:
+ * review state is now log entries, and runs from before v5 stay unanchored
+ * reports. The v5 review indexes start empty.
+ */
+export const SESSION_STORE_V5_REVIEW_UPGRADE_SQL = [
+	"DROP TABLE main.review_discussion_children",
+	"DROP TABLE main.review_discussions",
+	"DROP TABLE main.review_anchor_aliases",
+	"DROP TABLE main.review_anchors",
 ] as const;
 
 function schemaDigest(db: DatabaseSync): string {
@@ -53,7 +67,8 @@ const SCHEMAS = {
 	1: { schemaId: SESSION_STORE_V1_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V1_SCHEMA_SQL) },
 	2: { schemaId: SESSION_STORE_V2_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V2_SCHEMA_SQL) },
 	3: { schemaId: SESSION_STORE_V3_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V3_SCHEMA_SQL) },
-	4: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
+	4: { schemaId: SESSION_STORE_V4_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V4_SCHEMA_SQL) },
+	5: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
 } as const;
 
 function mismatch(message: string): never {
@@ -105,7 +120,7 @@ function validateIntegrity(db: DatabaseSync): void {
 	}
 }
 
-/** Only the exact frozen v1, v2, and v3 schemas can upgrade. All DDL and metadata commit together. */
+/** Only the exact frozen v1 to v4 schemas can upgrade. All DDL and metadata commit together. */
 export function initializeSessionStoreSchema(db: DatabaseSync): string {
 	// Re-read after the write lock: another opener may have initialized/upgraded while we waited.
 	db.exec("BEGIN IMMEDIATE");
@@ -119,18 +134,17 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 			const insert = db.prepare("INSERT INTO store_metadata (key, value_json) VALUES (?, ?)");
 			for (const [key, value] of Object.entries({
 				schema_id: SESSION_STORE_SCHEMA_ID,
-				schema_digest: SCHEMAS[4].digest,
+				schema_digest: SCHEMAS[5].digest,
 				store_id: randomUUID(),
 				schema_version: SESSION_STORE_SCHEMA_VERSION,
 				created_at: new Date().toISOString(),
 			}))
 				insert.run(key, stringifyCanonicalSessionStoreJson(value, "Store metadata"));
 			db.exec(`PRAGMA user_version = ${SESSION_STORE_SCHEMA_VERSION}`);
-		} else if (version === 1 || version === 2 || version === 3) {
+		} else if (version === 1 || version === 2 || version === 3 || version === 4) {
 			validateSchema(db, version);
 			validateIntegrity(db);
-			if (version === 1) db.exec(REVIEW_DISCUSSION_SCHEMA_SQL);
-			if (version !== 3) {
+			if (version === 1 || version === 2) {
 				// v3 fences on entry ordinals. Revision-keyed commit evidence has no ordinal form; it only
 				// reconciles a live writer's uncertain commit, and no pre-v3 writer can commit after this.
 				db.exec("ALTER TABLE sessions DROP COLUMN revision");
@@ -138,10 +152,13 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 				db.exec(SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL);
 			}
 			// v4 client inputs record the receipt's origin and the terminal `withdrawn` state.
-			for (const sql of SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL) db.exec(sql);
+			if (version !== 4) for (const sql of SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL) db.exec(sql);
+			// v5 keeps review state in the logs; v1 never had the review tables.
+			if (version !== 1) for (const sql of SESSION_STORE_V5_REVIEW_UPGRADE_SQL) db.exec(sql);
+			db.exec(SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL);
 			const update = db.prepare("UPDATE store_metadata SET value_json = ? WHERE key = ?");
 			update.run(stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_ID, "Schema id"), "schema_id");
-			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[4].digest, "Schema digest"), "schema_digest");
+			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[5].digest, "Schema digest"), "schema_digest");
 			update.run(
 				stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_VERSION, "Schema version"),
 				"schema_version",

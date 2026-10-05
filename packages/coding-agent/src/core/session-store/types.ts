@@ -1,7 +1,5 @@
 export const SESSION_STORE_DATABASE_FILENAME = "sessions.sqlite";
-export const SESSION_STORE_SCHEMA_VERSION = 4;
-export const SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES = 65_536;
-export const SESSION_STORE_REVIEW_LIST_MAX = 100;
+export const SESSION_STORE_SCHEMA_VERSION = 5;
 export const SESSION_STORE_READ_ENTRIES_MAX = 1_000;
 export const SESSION_STORE_BUSY_TIMEOUT_MS = 5_000;
 
@@ -222,87 +220,28 @@ export interface SessionStoreSessionIdentity {
 	readonly sessionGeneration: string;
 }
 
-export interface SessionStoreReviewSource extends SessionStoreSessionIdentity {
-	readonly cwd: string;
-}
-
-export interface SessionStoreRegisterReviewAnchorInput {
+/**
+ * A review run's anchor, from the store's derived run index: the conversation
+ * that ran it, its source, and its current General discussion.
+ */
+export interface SessionStoreReviewRun {
 	readonly runId: string;
-	readonly source: SessionStoreReviewSource;
-	readonly createdAt: string;
-}
-
-export interface SessionStoreReviewAnchor extends SessionStoreRegisterReviewAnchorInput {
-	readonly sourceAvailable: boolean;
+	readonly source: SessionStoreSessionIdentity;
 	readonly general: SessionStoreSessionIdentity;
-	readonly generalRevision: number;
-	readonly generalAvailable: boolean;
 }
 
-export interface SessionStoreReplaceReviewGeneralInput {
-	readonly runId: string;
-	readonly member: SessionStoreReviewSource;
-	readonly expectedRevision: number;
-	readonly replacement: SessionStoreReviewSource;
-}
-
-export interface SessionStoreCreateReviewDiscussionInput {
-	readonly source: SessionStoreReviewSource;
-	readonly runId: string;
-	readonly findingId: string;
-	readonly discussionId: string;
-	readonly child: SessionStoreCreateSessionInput;
-	readonly contextSnapshot: SessionStoreJsonValue;
-	readonly createdAt: string;
-	readonly requestId: string;
-	readonly kickoffClientMessageId: string;
-}
-
-export interface SessionStoreResetReviewDiscussionInput {
-	readonly source: SessionStoreReviewSource;
-	readonly discussionId: string;
-	readonly expectedChild: SessionStoreSessionIdentity;
-	readonly child: SessionStoreCreateSessionInput;
-	readonly createdAt: string;
-	readonly requestId: string;
-	readonly kickoffClientMessageId: string;
-}
-
+/**
+ * One child of a finding discussion, from the store's derived discussion
+ * index: its discussion, finding, and source, and its place in the
+ * discussion's children (1 is the first; each reset adds the next).
+ */
 export interface SessionStoreReviewDiscussionChild {
 	readonly discussionId: string;
-	readonly ordinal: number;
-	readonly child: SessionStoreSessionIdentity;
-	readonly createdAt: string;
-	readonly requestId: string;
-	readonly kickoffClientMessageId: string;
-	readonly available: boolean;
-}
-
-export interface SessionStoreReviewDiscussion {
-	readonly discussionId: string;
 	readonly runId: string;
 	readonly findingId: string;
-	readonly source: SessionStoreReviewSource;
-	readonly sourceAvailable: boolean;
-	readonly contextSnapshot: SessionStoreJsonValue;
-	readonly createdAt: string;
-	readonly current: SessionStoreReviewDiscussionChild;
-}
-
-export interface SessionStoreReviewDiscussionLookup {
-	readonly discussion: SessionStoreReviewDiscussion;
-	readonly child: SessionStoreReviewDiscussionChild;
-}
-
-export type SessionStoreResetReviewDiscussionResult = {
-	readonly status: "reset" | "conflict";
-	readonly child: SessionStoreReviewDiscussionChild;
-};
-
-/** Deterministic bounded pages; defaults are limit=100, offset=0. */
-export interface SessionStoreReviewListOptions {
-	readonly limit?: number;
-	readonly offset?: number;
+	readonly source: SessionStoreSessionIdentity;
+	readonly child: SessionStoreSessionIdentity;
+	readonly ordinal: number;
 }
 
 export type SessionStoreErrorCode =
@@ -314,11 +253,6 @@ export type SessionStoreErrorCode =
 	| "store_busy"
 	| "store_io_error"
 	| "store_full"
-	| "review_anchor_not_found"
-	| "review_identity_conflict"
-	| "review_source_unavailable"
-	| "review_cwd_mismatch"
-	| "review_discussion_not_found"
 	| "session_already_exists"
 	| "session_not_found"
 	| "commit_identity_conflict"

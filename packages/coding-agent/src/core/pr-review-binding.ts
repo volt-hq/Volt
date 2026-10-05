@@ -13,7 +13,7 @@ import {
 import { terminateProcessTree } from "../utils/shell.ts";
 import type { ReviewPullRequestIdentity } from "./code-host/types.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
-import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-anchors.ts";
+import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
 import { listReviewRuns } from "./review-state.ts";
 import { SessionManager } from "./session-manager.ts";
 

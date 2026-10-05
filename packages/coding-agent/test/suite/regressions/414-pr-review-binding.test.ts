@@ -16,7 +16,7 @@ import {
 } from "../../../src/core/pr-review-binding.ts";
 import type { PrReviewPlacement } from "../../../src/core/pr-review-placement.ts";
 import { executeReviewWorkflow, prepareReviewWorkflow } from "../../../src/core/review.ts";
-import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
+import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-links.ts";
 import * as snapshots from "../../../src/core/review-snapshot.ts";
 import { appendReviewRun, appendReviewRunDurably, type ReviewRunRecord } from "../../../src/core/review-state.ts";
 import {
@@ -25,6 +25,7 @@ import {
 } from "../../../src/core/session-entry-codec.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { connectTestClient, openTestHost } from "../../utilities/host-client.ts";
+import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -443,15 +444,16 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("resolves official handoff aliases through the exact canonical source, never copied entries", async () => {
-		const { manager, writer, placement, cwd, directory, managers, record, prepare, root } = await fixture();
+		const { manager, writer, placement, cwd, directory, managers, record, prepare, root, harness } = await fixture();
 		await writer.recordPrReviewBinding(placement);
+		await anchorLiveReviewRun(harness.session, record.runId);
 		await appendReviewRunDurably(writer, record);
 		const alias = await SessionManager.create(cwd, directory);
 		const copied = await SessionManager.create(cwd, directory);
 		managers.push(alias, copied);
 		await appendReviewRun(alias.logWriter, record);
 		await appendReviewRun(copied.logWriter, record);
-		await registerReviewHandoffAliases(manager, alias, [record.runId]);
+		await registerReviewHandoffAliases(manager, alias.logWriter, [record.runId]);
 		expect(alias.getPrReviewBinding()).toBeUndefined();
 		expect(await readPrReviewBinding(alias, record.runId)).toEqual(placement);
 		expect(await readPrReviewBinding(alias)).toEqual(placement);
@@ -491,6 +493,7 @@ describe("#414 host-owned PR review bindings", () => {
 					},
 				},
 			};
+			await anchorLiveReviewRun(harness.session, record.runId);
 			await appendReviewRunDurably(writer, record);
 			const original = manager.getSessionRef()!;
 			// The binding must already be durable when the new session becomes observable.
@@ -527,6 +530,7 @@ describe("#414 host-owned PR review bindings", () => {
 					previousRun: { runId: record.runId },
 				});
 				record = { ...record, runId: prepared.workflowId, parentRunId: record.runId, endedAt: 2 + index };
+				await anchorLiveReviewRun(client.session, record.runId);
 				await appendReviewRunDurably(client.session.sessionWriter, record);
 				await prepared.resolution.dispose();
 				expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(target.getSessionRef());
@@ -564,8 +568,9 @@ describe("#414 host-owned PR review bindings", () => {
 	);
 
 	it("persists the binding through repeated General replacements without changing the canonical source", async () => {
-		const { manager, writer, placement, client, record } = await hostedFixture();
+		const { manager, writer, placement, client, record, harness } = await hostedFixture();
 		await writer.recordPrReviewBinding(placement);
+		await anchorLiveReviewRun(harness.session, record.runId);
 		await appendReviewRunDurably(writer, record);
 		const original = manager.getSessionRef();
 		for (const _ of [1, 2]) {
@@ -580,9 +585,12 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it.each(["empty", "copied", "unbound"])("leaves %s session handoffs unbound", async (kind) => {
-		const { writer, placement, client, record } = await hostedFixture();
+		const { writer, placement, client, record, harness } = await hostedFixture();
 		if (kind !== "unbound") await writer.recordPrReviewBinding(placement);
-		if (kind === "unbound") await appendReviewRunDurably(writer, record);
+		if (kind === "unbound") {
+			await anchorLiveReviewRun(harness.session, record.runId);
+			await appendReviewRunDurably(writer, record);
+		}
 		await client.newSession({
 			setup: async (target) => {
 				if (kind !== "empty") await appendReviewRun(target, record);

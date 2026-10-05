@@ -26,7 +26,7 @@ import { type WorkEntryPayload, workPayloadBoundsError } from "@hansjm10/volt-pr
 import { Check } from "typebox/value";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { parsePlanningState } from "./planning.ts";
-import { SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
+import { REVIEW_DISCUSSION_CONTEXT_MAX_BYTES, SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import type {
 	ClientInputCommand,
 	ClientInputPayload,
@@ -371,6 +371,42 @@ function validateWorkEntry(entry: Record<string, unknown>, type: WorkEntryPayloa
 	}
 }
 
+type ReviewEntryType =
+	| "review_general"
+	| "review_alias"
+	| "review_discussion"
+	| "review_discussion_reset"
+	| "review_discussion_link";
+
+/** A review record's payload against its schema, and the bounds and identities JSON Schema cannot express. */
+function validateReviewEntry(
+	entry: Record<string, unknown>,
+	type: ReviewEntryType,
+	mode: "admission" | "persisted",
+): void {
+	const { type: _type, id: _id, parentId: _parentId, timestamp: _timestamp, ordinal: _ordinal, ...fields } = entry;
+	if (!Check(SESSION_ENTRY_TYPES[type].payload, fields)) fail("$", `invalid ${type} payload`);
+	const payload: Record<string, unknown> = entry;
+	for (const key of ["source", "general", "child"]) {
+		const identity = payload[key] as { sessionId: unknown } | undefined;
+		if (identity !== undefined) assertValidSessionIdValue(identity.sessionId, `$.${key}.sessionId`);
+	}
+	if (payload.kickoffClientMessageId !== undefined) {
+		assertClientMessageIdValue(payload.kickoffClientMessageId, "$.kickoffClientMessageId");
+	}
+	if (
+		payload.contextSnapshot !== undefined &&
+		Buffer.byteLength(JSON.stringify(payload.contextSnapshot), "utf8") > REVIEW_DISCUSSION_CONTEXT_MAX_BYTES
+	) {
+		fail("$.contextSnapshot", `exceeds ${REVIEW_DISCUSSION_CONTEXT_MAX_BYTES} bytes`);
+	}
+	if (type === "review_discussion_link") {
+		// A discussion's link is the first entry of its child's log.
+		if (entry.parentId !== null) fail("$.parentId", "a discussion link must be a root entry");
+		if (mode === "persisted" && entry.ordinal !== 1) fail("$.ordinal", "a discussion link must be the first entry");
+	}
+}
+
 function baseKeys(mode: "admission" | "persisted"): string[] {
 	return mode === "persisted"
 		? ["type", "id", "parentId", "timestamp", "ordinal"]
@@ -506,6 +542,13 @@ function parseSessionEntry(
 		case "work_checkpoint":
 		case "work_finished":
 			validateWorkEntry(entry, type);
+			break;
+		case "review_general":
+		case "review_alias":
+		case "review_discussion":
+		case "review_discussion_reset":
+		case "review_discussion_link":
+			validateReviewEntry(entry, type, mode);
 			break;
 		default:
 			fail("$.type", `unsupported entry type ${JSON.stringify(type)}`);

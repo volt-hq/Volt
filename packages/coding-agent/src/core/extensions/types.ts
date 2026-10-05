@@ -62,7 +62,7 @@ import type {
 	SessionEntry,
 	SessionReference,
 } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
+import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -466,7 +466,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	newSession(options?: {
 		parentSessionRef?: SessionReference;
 		/** Write the new session before it opens, such as entries to seed it with. */
-		setup?: (writer: SessionWriter) => Promise<void>;
+		setup?: (writer: ExtensionSessionWriter) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<SessionIntentResult>;
 
@@ -1796,7 +1796,7 @@ export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
 	newSession: (options?: {
 		parentSessionRef?: SessionReference;
-		setup?: (writer: SessionWriter) => Promise<void>;
+		setup?: (writer: ExtensionSessionWriter) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}) => Promise<SessionIntentResult>;
 	fork: (

@@ -29,7 +29,9 @@ import {
 } from "./messages.ts";
 import { type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
+import type { ReviewLogState } from "./review-log-state.ts";
 import { digestClientInputPayload, parseSessionEntryForAdmission } from "./session-entry-codec.ts";
+import { REVIEW_SESSION_ENTRY_TYPE_NAMES } from "./session-entry-types.ts";
 import type {
 	BranchSummaryEntry,
 	ClientInputQueuedEntry,
@@ -42,6 +44,11 @@ import type {
 	ModelChangeEntry,
 	PlanningStateChangeEntry,
 	PrReviewBindingEntry,
+	ReviewAliasEntry,
+	ReviewDiscussionEntry,
+	ReviewDiscussionLinkEntry,
+	ReviewDiscussionResetEntry,
+	ReviewGeneralEntry,
 	SessionEntry,
 	SessionInfoEntry,
 	SessionManager,
@@ -50,6 +57,22 @@ import type {
 	SessionWrite,
 	ThinkingLevelChangeEntry,
 } from "./session-manager.ts";
+
+type RecordOf<E extends SessionEntry> = Omit<E, "id" | "parentId" | "timestamp">;
+
+/** A review record (session-entry-types.ts), without its envelope. */
+export type ReviewRecord =
+	| RecordOf<ReviewGeneralEntry>
+	| RecordOf<ReviewAliasEntry>
+	| RecordOf<ReviewDiscussionEntry>
+	| RecordOf<ReviewDiscussionResetEntry>
+	| RecordOf<ReviewDiscussionLinkEntry>;
+
+/** What a review write appends, built from the committed review state, and what it resolves with. */
+export interface ReviewRecords<T> {
+	readonly records: readonly ReviewRecord[];
+	readonly result: T;
+}
 
 /**
  * The writes of one session, before or while it is live. Each resolves after
@@ -94,6 +117,14 @@ export interface SessionWriter {
 	 * again is a no-op, and a different one is refused.
 	 */
 	recordPrReviewBinding(placement: PrReviewPlacement): Promise<void>;
+	/**
+	 * Append review records, host records that never move the leaf, which
+	 * `build` makes from this session's committed review state; no other
+	 * review record of the session commits between that read and the append,
+	 * so a check `build` makes holds when its records commit. Resolves with
+	 * `build`'s result.
+	 */
+	recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T>;
 }
 
 /** Placeholder envelope of an entry admitted before its writer assigns its id and parent. */
@@ -203,6 +234,35 @@ function prReviewBindingEntry(placement: PrReviewPlacement, sessionManager: Sess
 		throw new Error("PR review binding cwd does not match the session");
 	}
 	return entry;
+}
+
+/** A review record admitted as an entry. Only the review types are review records. */
+export function admitReviewRecord(record: ReviewRecord): SessionEntry {
+	if (!REVIEW_SESSION_ENTRY_TYPE_NAMES.has(record.type)) {
+		throw new Error(`Entry type ${JSON.stringify(record.type)} is not a review record`);
+	}
+	return admitEntry({ ...record, ...pendingEnvelope() } as SessionEntry);
+}
+
+/** The writes code outside the host may make: every write but review records, which only the host writes. */
+export type ExtensionSessionWriter = Omit<SessionWriter, "recordReviewState">;
+
+/** `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method. */
+export function extensionSessionWriter(writer: ExtensionSessionWriter): ExtensionSessionWriter {
+	return Object.freeze({
+		sessionManager: writer.sessionManager,
+		appendMessage: writer.appendMessage.bind(writer),
+		appendCustomEntry: writer.appendCustomEntry.bind(writer),
+		appendCustomMessageEntry: writer.appendCustomMessageEntry.bind(writer),
+		appendModelChange: writer.appendModelChange.bind(writer),
+		appendThinkingLevelChange: writer.appendThinkingLevelChange.bind(writer),
+		appendFastModeChange: writer.appendFastModeChange.bind(writer),
+		appendPlanningState: writer.appendPlanningState.bind(writer),
+		appendSessionInfo: writer.appendSessionInfo.bind(writer),
+		appendLabelChange: writer.appendLabelChange.bind(writer),
+		recordStartingGitContext: writer.recordStartingGitContext.bind(writer),
+		recordPrReviewBinding: writer.recordPrReviewBinding.bind(writer),
+	});
 }
 
 /** Whether `existing` already records `entry`'s placement; throws when it records another one. */
@@ -347,6 +407,15 @@ export class LogWriter implements SessionWriter {
 		});
 	}
 
+	async recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T> {
+		// Built on the lane, against the committed view, so earlier writes are in the state it reads.
+		return this.lane.commit((write) => {
+			const { records, result } = build(this.sessionManager.getReviewState());
+			for (const record of records) write.place(admitReviewRecord(record));
+			return result;
+		}, true);
+	}
+
 	/** Append a compaction summary as a child of the leaf; resolves with its entry id. */
 	async appendCompaction<T = JsonValue>(
 		summary: string,
@@ -453,6 +522,8 @@ export class ConversationSessionWriter implements SessionWriter {
 	private capturesStartingGitContext: boolean;
 	/** PR review bindings record one at a time, so a repeat sees the binding before it. */
 	private bindings: Promise<unknown> = Promise.resolve();
+	/** Review records commit one write at a time, so each write reads the review state the previous one left. */
+	private reviews: Promise<unknown> = Promise.resolve();
 
 	constructor(sessionManager: SessionManager, intents: ConversationWriteIntents) {
 		this.sessionManager = sessionManager;
@@ -537,5 +608,18 @@ export class ConversationSessionWriter implements SessionWriter {
 		});
 		this.bindings = recording.catch(() => undefined);
 		await recording;
+	}
+
+	async recordReviewState<T>(build: (state: ReviewLogState) => ReviewRecords<T>): Promise<T> {
+		const recording = this.reviews.then(async () => {
+			const { records, result } = build(this.sessionManager.getReviewState());
+			if (records.length > 0) {
+				const drafts = records.map((record) => toLogEntryDraft(admitReviewRecord(record)));
+				await this.intents.append(drafts.map((draft) => ({ type: draft.type, payload: draft.payload })));
+			}
+			return result;
+		});
+		this.reviews = recording.catch(() => undefined);
+		return recording;
 	}
 }

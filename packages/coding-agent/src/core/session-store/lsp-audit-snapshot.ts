@@ -7,6 +7,9 @@ import type * as threads from "node:worker_threads";
 export interface AuditSnapshotOptions {
 	path: string;
 	schemaSql: string;
+	/** The supported store schema's id and version; any other store is unsupported. */
+	schemaId: string;
+	schemaVersion: number;
 	maxSessions: number;
 	maxEntries: number;
 	maxBytes: number;
@@ -85,7 +88,7 @@ export function runLspAuditSnapshot(loadBuiltin: (name: string) => unknown): voi
 		location.search = hasWal ? "?mode=ro" : "?mode=ro&immutable=1";
 		db = new DatabaseSync(location, { readOnly: true, timeout: 50, allowExtension: false });
 		db.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF; BEGIN DEFERRED TRANSACTION");
-		if (db.prepare("PRAGMA user_version").get()?.user_version !== 4) {
+		if (db.prepare("PRAGMA user_version").get()?.user_version !== options.schemaVersion) {
 			result.status = "unsupported";
 			return;
 		}
@@ -119,8 +122,8 @@ export function runLspAuditSnapshot(loadBuiltin: (name: string) => unknown): voi
 		const createdAt = metadata.get("created_at");
 		if (
 			metadata.size !== 5 ||
-			metadata.get("schema_id") !== "volt-session-store-v4" ||
-			metadata.get("schema_version") !== 4 ||
+			metadata.get("schema_id") !== options.schemaId ||
+			metadata.get("schema_version") !== options.schemaVersion ||
 			metadata.get("schema_digest") !== digest ||
 			typeof storeId !== "string" ||
 			storeId.length === 0 ||

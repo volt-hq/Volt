@@ -171,6 +171,8 @@ A forked, cloned, or imported session does not read its source. Its log starts w
 
 An imported session gets a new ID. With `--fork <path>`, `--session-id` chooses it instead. A snapshot's parent locator is not carried into the imported session; its lineage names the snapshot.
 
+Only the branch's public entries are copied. Host records stay with the source: a copy carries no work items, and the review runs it copies are local reports, linked to neither the source review's General nor its finding discussions. A review finding discussion cannot be forked or cloned; reset it from the source review instead.
+
 ## Branch Summaries
 
 When `/tree` switches away from one branch to another, volt can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
@@ -185,6 +187,6 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 ## Session Format
 
-Each session in the SQLite store is a log of entries: messages, model, thinking-level, and Fast mode changes, plan state, labels, compactions, branch summaries, extension entries, and host-only records such as branch moves, queued input, and fork lineage. Explicit JSONL snapshots serialize the public session tree for interchange; they are not reopened as live storage.
+Each session in the SQLite store is a log of entries: messages, model, thinking-level, and Fast mode changes, plan state, labels, compactions, branch summaries, extension entries, and host-only records such as branch moves, queued input, fork lineage, work items, and review state. Explicit JSONL snapshots serialize the public session tree for interchange; they are not reopened as live storage.
 
 For the log format, snapshot parsers, and the full `SessionManager` API, see [Session Format](session-format.md).

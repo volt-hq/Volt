@@ -13302,7 +13302,6 @@
 				"sourceSessionId",
 				"generalSessionId",
 				"generalSessionGeneration",
-				"generalRevision",
 				"generalAvailable"
 			],
 			"properties": {
@@ -13317,10 +13316,6 @@
 				},
 				"generalSessionGeneration": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"generalRevision": {
-					"type": "integer",
-					"minimum": 0
 				},
 				"generalAvailable": {
 					"type": "boolean"

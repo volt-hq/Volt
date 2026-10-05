@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -21,13 +20,11 @@ import {
 import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import {
-	type SessionStoreCreateSessionInput,
-	SQLiteSessionStoreClient,
-} from "../../../src/core/session-store/index.ts";
+import { SQLiteSessionStoreClient } from "../../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, type SubagentResult } from "../../../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../../../src/core/tools/subagent.ts";
 import { attachApprover } from "../../host-action-doubles.ts";
+import { anchorReviewRun, recordReviewDiscussion, resetRecordedReviewDiscussion } from "../../utilities/review-runs.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
 
@@ -36,52 +33,27 @@ const managers: SessionManager[] = [];
 const harnesses: Harness[] = [];
 const sdkSessions: AgentSession[] = [];
 
-function childInput(id: string, cwd: string): SessionStoreCreateSessionInput {
-	return {
-		id,
-		cwd,
-		sessionGeneration: randomUUID(),
-		formatVersion: 5,
-		createdAt: new Date().toISOString(),
-		parentSessionDirectory: null,
-		parentStoreId: null,
-		parentSessionId: null,
-		parentSessionGeneration: null,
-		origin: null,
-	};
-}
-
 async function fixture(tools?: string[]) {
 	const root = mkdtempSync(join(tmpdir(), "volt-341-policy-"));
 	roots.push(root);
 	const directory = join(root, "sessions");
 	const source = await SessionManager.create(root, directory);
 	const sourceRef = source.getSessionRef()!;
-	await source.closePersistence();
-	const store = await SQLiteSessionStoreClient.open(directory);
 	try {
-		const sourceIdentity = {
-			sessionId: sourceRef.sessionId,
-			sessionGeneration: sourceRef.sessionGeneration,
-			cwd: root,
-		};
-		const createdAt = new Date().toISOString();
-		await store.registerReviewAnchor({ runId: "run", source: sourceIdentity, createdAt });
-		const discussion = await store.createOrGetReviewDiscussion({
-			source: sourceIdentity,
+		await anchorReviewRun(source, "run");
+		const discussion = {
+			discussionId: "discussion",
 			runId: "run",
 			findingId: "finding",
-			discussionId: "discussion",
-			child: childInput("child", root),
 			contextSnapshot: { finding: "Canonical finding", ...(tools ? { tools } : {}) },
-			createdAt,
+		};
+		const childRef = await recordReviewDiscussion(source, discussion, {
 			requestId: "create",
 			kickoffClientMessageId: "kickoff",
 		});
-		const childRef: SessionReference = { ...sourceRef, ...discussion.current.child };
-		return { root, directory, sourceRef, childRef, discussion };
+		return { root, directory, sourceRef, childRef, discussion, source };
 	} finally {
-		await store.close();
+		await source.closePersistence();
 	}
 }
 
@@ -184,47 +156,31 @@ describe("Regression #341: persisted review discussion policy", () => {
 	});
 
 	it("keeps historical children source-linked and writable after source-controlled reset and source deletion", async () => {
-		const { childRef, sourceRef, root, directory, discussion } = await fixture();
-		const store = await SQLiteSessionStoreClient.open(directory);
-		try {
-			const reset = await store.resetReviewDiscussion({
-				source: discussion.source,
-				discussionId: discussion.discussionId,
-				expectedChild: discussion.current.child,
-				child: childInput("next-child", root),
-				createdAt: new Date().toISOString(),
-				requestId: "reset",
-				kickoffClientMessageId: "next-kickoff",
+		const { childRef, sourceRef, root, discussion } = await fixture();
+		const source = await open(sourceRef);
+		const nextRef = await resetRecordedReviewDiscussion(source, discussion, "reset");
+		await source.closePersistence();
+		expect(await SessionManager.delete(sourceRef)).toBe(true);
+		for (const ref of [childRef, nextRef]) {
+			const item = await harness({ sessionManager: await open(ref) });
+			expect(item.session.isReviewDiscussion).toBe(true);
+			// The link is the child's own first entry: it outlives its source and the reset.
+			expect(item.sessionManager.getReviewDiscussion()).toEqual({
+				...discussion,
+				source: { sessionId: sourceRef.sessionId, sessionGeneration: sourceRef.sessionGeneration },
 			});
-			await store.deleteSession({
-				sessionId: sourceRef.sessionId,
-				sessionGeneration: sourceRef.sessionGeneration,
-				expectedOrdinal: 0,
-			});
-			for (const ref of [childRef, { ...childRef, ...reset.child.child }]) {
-				const item = await harness({ sessionManager: await open(ref) });
-				expect(item.session.isReviewDiscussion).toBe(true);
-				expect(item.sessionManager.getReviewDiscussion()?.discussion.sourceAvailable).toBe(false);
-				expect(item.sessionManager.getReviewDiscussion()?.discussion.current.child).toEqual(reset.child.child);
-				expect(item.sessionManager.getReviewDiscussion()?.child.child).toEqual({
-					sessionId: ref.sessionId,
-					sessionGeneration: ref.sessionGeneration,
-				});
-				await item.session.setAgentMode("plan");
-				expect(item.session.getActiveToolNames()).not.toContain("bash");
-				await item.session.setAgentMode("build");
-				const path = join(root, `${ref.sessionId}.txt`);
-				await item.session.state.tools
-					.find((tool) => tool.name === "write")!
-					.execute("write", { path, content: "fixed" });
-				expect(readFileSync(path, "utf8")).toBe("fixed");
-			}
-		} finally {
-			await store.close();
+			await item.session.setAgentMode("plan");
+			expect(item.session.getActiveToolNames()).not.toContain("bash");
+			await item.session.setAgentMode("build");
+			const path = join(root, `${ref.sessionId}.txt`);
+			await item.session.state.tools
+				.find((tool) => tool.name === "write")!
+				.execute("write", { path, content: "fixed" });
+			expect(readFileSync(path, "utf8")).toBe("fixed");
 		}
 	});
 
-	it("does not rebind a deleted child's id to a new generation and fails closed on lookup errors", async () => {
+	it("does not rebind a deleted child's id to a new generation", async () => {
 		const { childRef, root, directory } = await fixture();
 		const snapshot = join(root, "child.jsonl");
 		await SessionManager.exportJsonlSnapshot(childRef, snapshot);
@@ -237,24 +193,35 @@ describe("Regression #341: persisted review discussion policy", () => {
 		expect(imported.getReviewDiscussion()).toBeNull();
 		const newRef = imported.getSessionRef()!;
 		await imported.closePersistence();
-		vi.spyOn(SQLiteSessionStoreClient.prototype, "findReviewDiscussionByChild").mockRejectedValueOnce(
-			new Error("lookup unavailable"),
-		);
-		await expect(SessionManager.open(newRef)).rejects.toThrow("lookup unavailable");
 		expect((await open(newRef)).getReviewDiscussion()).toBeNull();
+		const store = await SQLiteSessionStoreClient.open(directory);
+		try {
+			expect(
+				await store.findReviewDiscussionChild({
+					sessionId: newRef.sessionId,
+					sessionGeneration: newRef.sessionGeneration,
+				}),
+			).toBeNull();
+		} finally {
+			await store.close();
+		}
 	});
 
 	it("loads exact binding before runtime construction, including continuation and reopen, without hiding Build tools", async () => {
-		const { childRef, root, directory, discussion } = await fixture();
+		const { childRef, sourceRef, root, directory, discussion } = await fixture();
+		const link = {
+			...discussion,
+			source: { sessionId: sourceRef.sessionId, sessionGeneration: sourceRef.sessionGeneration },
+		};
 		const first = await open(childRef);
-		expect(first.getReviewDiscussion()).toEqual({ discussion, child: discussion.current });
-		expect(Object.isFrozen(first.getReviewDiscussion()?.discussion.current.child)).toBe(true);
+		expect(first.getReviewDiscussion()).toEqual(link);
+		expect(Object.isFrozen(first.getReviewDiscussion()?.source)).toBe(true);
 		await first.logWriter.appendMessage({ role: "user", content: "Discuss the finding", timestamp: Date.now() });
 		await first.closePersistence();
 		const continued = await SessionManager.continueRecent(root, directory);
 		managers.push(continued);
 		expect(continued.getSessionRef()).toEqual(childRef);
-		expect(continued.getReviewDiscussion()?.child.child).toEqual(discussion.current.child);
+		expect(continued.getReviewDiscussion()).toEqual(link);
 		await continued.closePersistence();
 		const item = await harness({
 			sessionManager: await open(childRef),
@@ -267,13 +234,13 @@ describe("Regression #341: persisted review discussion policy", () => {
 	});
 
 	it("keeps source, general, in-memory and metadata-only imported/forked sessions independent", async () => {
-		const { root, directory, sourceRef, discussion } = await fixture();
+		const { root, directory, sourceRef, childRef, discussion } = await fixture();
 		const source = await open(sourceRef);
 		const metadata = {
 			discussionId: discussion.discussionId,
 			runId: discussion.runId,
 			findingId: discussion.findingId,
-			child: { ...discussion.current.child },
+			child: { sessionId: childRef.sessionId, sessionGeneration: childRef.sessionGeneration },
 			isReviewDiscussion: true,
 		};
 		await source.logWriter.appendCustomEntry("review_discussion", metadata);
@@ -282,6 +249,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 		const fork = await SessionManager.forkFrom(sourceRef, root, directory);
 		managers.push(fork);
 		expect(fork.getReviewDiscussion()).toBeNull();
+		expect(fork.getReviewState().discussions.size).toBe(0);
 		const snapshot = join(root, "import.jsonl");
 		await SessionManager.exportJsonlSnapshot(sourceRef, snapshot);
 		const imported = await SessionManager.importFromJsonl(snapshot, root, directory, { id: "imported" });

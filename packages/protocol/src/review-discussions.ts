@@ -8,7 +8,6 @@ export const RpcReviewGeneralSchema = Type.Object(
 		sourceSessionId: Identifier,
 		generalSessionId: Identifier,
 		generalSessionGeneration: Identifier,
-		generalRevision: Type.Integer({ minimum: 0 }),
 		generalAvailable: Type.Boolean(),
 	},
 	{ additionalProperties: false },

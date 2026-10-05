@@ -10,7 +10,7 @@ import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
-import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
+import { registerReviewHandoffAliases } from "../../../src/core/review-links.ts";
 import {
 	appendReviewRun,
 	appendReviewRunDurably,
@@ -32,6 +32,7 @@ import {
 } from "../../../src/daemon/review-sibling-admission.ts";
 import type { IrohRemoteAgentRuntime } from "../../../src/modes/rpc/iroh-remote-agent-runtime.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
+import { anchorLiveReviewRun, anchorReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 
 /** Open a review discussion beside `source`, in its host, without moving any client. */
@@ -157,6 +158,7 @@ async function fixture() {
 			},
 		},
 	};
+	await anchorLiveReviewRun(source.conversation.session, record.runId);
 	await appendReviewRunDurably(source.conversation.session.sessionWriter, record);
 	const validate = vi.fn(async () => {});
 	const published = vi.fn((_entry: IntegratedRuntimeEntry) => {});
@@ -528,9 +530,10 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const canonical = await SessionManager.create(f.root, join(f.root, "sessions"));
 		const originalId = canonical.getSessionId();
 		const coldRecord = { ...f.record, runId: "cold-run" };
+		await anchorReviewRun(canonical, "cold-run");
 		await appendReviewRunDurably(canonical.logWriter, coldRecord);
 		await appendReviewRun(f.source.conversation.session.sessionWriter, coldRecord);
-		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionManager, ["cold-run"]);
+		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionWriter, ["cold-run"]);
 		await canonical.closePersistence();
 		let release!: () => void;
 		f.validate.mockImplementationOnce(

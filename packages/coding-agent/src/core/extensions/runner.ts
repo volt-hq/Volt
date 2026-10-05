@@ -10,7 +10,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
+import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
 import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
@@ -198,7 +198,7 @@ export class ExtensionMessageRoleMismatchError extends Error {
 
 export type NewSessionHandler = (options?: {
 	parentSessionRef?: SessionReference;
-	setup?: (writer: SessionWriter) => Promise<void>;
+	setup?: (writer: ExtensionSessionWriter) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 }) => Promise<SessionIntentResult>;
 

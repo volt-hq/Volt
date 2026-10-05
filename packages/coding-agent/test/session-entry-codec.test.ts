@@ -256,7 +256,15 @@ describe("session entry codec", () => {
 			expect(sessionEntryEnvelope(parsed).isHostOnly).toBe(definition.visibility === "host");
 		}
 		expect(Object.keys(SESSION_ENTRY_TYPES).sort()).toEqual(
-			[...Object.keys(REQUIRED_TYPE_FIELD), "pr_review_binding"].sort(),
+			[
+				...Object.keys(REQUIRED_TYPE_FIELD),
+				"pr_review_binding",
+				"review_general",
+				"review_alias",
+				"review_discussion",
+				"review_discussion_reset",
+				"review_discussion_link",
+			].sort(),
 		);
 	});
 
