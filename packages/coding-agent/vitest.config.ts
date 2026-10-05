@@ -30,8 +30,8 @@ export default defineConfig({
 			VOLT_CODING_AGENT_DIR: testAgentDir,
 			VOLT_CODING_AGENT_SESSION_DIR: "",
 		},
-		// Keep local runs within a shared host budget; CLI and pool overrides still apply.
-		maxWorkers: process.env.CI && process.env.CI !== "false" ? 8 : 2,
+		// Local runs use half the host's cores; set VITEST_MAX_WORKERS to share a busy host. CLI and pool overrides still apply.
+		maxWorkers: process.env.CI && process.env.CI !== "false" ? 8 : "50%",
 		server: {
 			deps: {
 				external: [/@silvia-odwyer\/photon-node/],
