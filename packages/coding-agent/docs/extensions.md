@@ -1386,7 +1386,7 @@ export default function (volt: ExtensionAPI) {
 
 ### volt.on(event, handler)
 
-Subscribe to events. See [Events](#events) for event types and return values.
+Subscribe to events. See [Events](#events) for event types and return values. An event name Volt does not define throws, so a misspelled subscription fails the extension's load instead of never running.
 
 ### volt.registerTool(definition)
 
