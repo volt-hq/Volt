@@ -176,6 +176,7 @@ describe("Conversation work", () => {
 		expect(finished.notice?.wake).toBe(false);
 		expect(faux.state.callCount).toBe(0);
 		expect(conversation.queue.steer).toHaveLength(1);
+		expect(conversation.queueWakes).toBe(false);
 		expect(
 			conversation.state.clientInputs.inputs.get(finished.notice?.clientMessageId ?? "")?.queuedInput,
 		).toMatchObject({ wake: false });
@@ -258,6 +259,7 @@ describe("Conversation work", () => {
 
 		const second = await openConversation({ log: await copyLog(entries), faux, queueModes: { steer: "all" } });
 		expect(second.conversation.queue.steer).toHaveLength(2);
+		expect(second.conversation.queueWakes).toBe(true);
 		const requests: string[][] = [];
 		faux.setResponses([
 			(context: Context) => {

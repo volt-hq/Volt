@@ -328,6 +328,41 @@ describe("work in hosted conversations", () => {
 		await conversation.work.cancelAll("closed");
 	});
 
+	it("refuses a paired device the output of work whose extension kind the host no longer knows", async () => {
+		const harness = await harnessFor();
+		const conversation = await harness.openStartup();
+		const remove = conversation.work.register(kind({ requires: ["conversation.observe.v1"] }));
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: harness.tempDir },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		const record = await conversation.work.start("ext:test/run", null, async (ctx) => {
+			ctx.output("kept\n");
+			return { outcome: "completed" };
+		});
+		await conversation.work.waitForIdle();
+		expect((await phone.query("work_output", { workId: record.workId })).type).toBe("result");
+		await remove();
+		expect(await phone.query("work_output", { workId: record.workId })).toMatchObject({
+			type: "query_error",
+			reason: { code: "not_allowed" },
+		});
+		// The local profile still reads it.
+		expect(conversation.work.output(record.workId)).toMatchObject({ text: "kept\n", final: true });
+	});
+
 	it("shows a paired device no part of a root that a host cut or the output bound left", async () => {
 		const harness = await harnessFor();
 		const workspace = harness.tempDir;

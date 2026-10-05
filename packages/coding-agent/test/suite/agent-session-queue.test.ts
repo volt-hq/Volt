@@ -1,6 +1,7 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
+import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getClientMessageId } from "../../src/core/messages.ts";
@@ -755,6 +756,43 @@ describe("AgentSession queue characterization", () => {
 		expect(getUserTexts(harness)).toEqual(["start"]);
 		expect(harness.session.getFollowUpMessages().map((message) => message.text)).toEqual(["retained follow-up"]);
 		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("starts no turn after a delivering stop when only a quiet work notice is queued", async () => {
+		const notice = {
+			role: "custom" as const,
+			customType: WORK_NOTICE_CUSTOM_TYPE,
+			content: "Sweep (ext:test/run w1) completed.",
+			display: true,
+			details: { workId: "w1", kind: "ext:test/run", title: "Sweep", outcome: "completed" },
+			timestamp: Date.now(),
+		};
+		const harness = await createHarness({
+			seed: (log) => {
+				log.user("hello").assistant("hi");
+				log.clientInput("host-notice-1", "steer", { message: "" }, { origin: "host" });
+				log.hostRecord("client_input_queued", {
+					receiptId: log.lastId,
+					clientMessageId: "host-notice-1",
+					queuedInput: { delivery: "steer", message: "", images: [], messages: [notice], wake: false },
+				});
+			},
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("answered")]);
+
+		await harness.session.abort("remote_request", { deliverQueuedMessages: true });
+		await harness.session.waitForIdle();
+		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
+		expect(harness.faux.state.callCount).toBe(0);
+		expect(harness.control.conversation.queue.steer).toHaveLength(1);
+
+		// The notice rides the next turn.
+		await harness.session.prompt("next");
+		await harness.session.waitForIdle();
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.control.conversation.queue.steer).toHaveLength(0);
+		expect(harness.sessionManager.getClientInput("host-notice-1")).toMatchObject({ state: "completed" });
 	});
 
 	it("delivers a queued admission that was still committing when a delivering stop settled", async () => {

@@ -11,21 +11,26 @@
  * Without a target option it reviews uncommitted and untracked changes against HEAD. With --base it reviews
  * everything since the merge base with <ref>, including uncommitted changes. The reviewed state is frozen into a
  * throwaway checkout, so edits made during the review do not affect it.
+ *
+ * A review runs in the background as `ext:swarm-review/run` work: every client sees its progress (a step per wave
+ * and for verification) and can cancel it (`cancel_work`; Escape in the TUI). Its report rides the next turn as the
+ * work's notice, and is the work's output.
  */
 
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
 import {
-	BorderedLoader,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
 	getAgentDir,
 	SettingsManager,
+	type WorkRunContext,
+	type WorkRunResult,
 } from "@hansjm10/volt-coding-agent";
 import { clusterWave } from "./cluster.ts";
 import { loadContextFiles, resolveTarget } from "./git.ts";
 import { type Dismissal, loadDismissals, recordDismissals } from "./memory.ts";
-import { buildReport, modelRef, phaseText, renderProgress, SwarmProgressView } from "./report.ts";
-import type { SwarmOptions, SwarmSetup, SwarmState, TargetSpec } from "./types.ts";
+import { buildReport, modelRef, reportSummary, workProgress } from "./report.ts";
+import type { ReviewTarget, SwarmOptions, SwarmSetup, SwarmState, TargetSpec } from "./types.ts";
 import { errorText, SwarmCancelled } from "./util.ts";
 import { verifyClusters } from "./verify.ts";
 import { createWorkerState, runWave } from "./workers.ts";
@@ -40,7 +45,8 @@ const DEFAULT_VERIFIER_CONCURRENCY = 6;
 const MAX_WORKERS = 32;
 const MAX_VERIFIER_CONCURRENCY = 16;
 const THINKING_LEVELS: readonly ModelThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-const WIDGET_KEY = "swarm-review";
+/** Live progress at most this often; worker sessions report every event. */
+const PROGRESS_INTERVAL_MS = 250;
 const VALUE_FLAGS = new Set([
 	"base",
 	"commit",
@@ -214,9 +220,14 @@ type SwarmResult = { status: "completed" } | { status: "cancelled" } | { status:
 
 /**
  * Runs waves until the worker budget is spent or a wave adds no new cluster (once every diff part has had a
- * successful worker), then verifies all clusters.
+ * successful worker), then verifies all clusters. `checkpoint` records each wave's start and the verification's.
  */
-async function runSwarm(setup: SwarmSetup, state: SwarmState, dismissals: Dismissal[]): Promise<SwarmResult> {
+async function runSwarm(
+	setup: SwarmSetup,
+	state: SwarmState,
+	dismissals: Dismissal[],
+	checkpoint: () => void,
+): Promise<SwarmResult> {
 	const { options, signal, target } = setup;
 	const maxWaves = Math.ceil(options.workers / options.waveSize);
 	let nextIndex = 0;
@@ -229,7 +240,7 @@ async function runSwarm(setup: SwarmSetup, state: SwarmState, dismissals: Dismis
 		state.workers.push(...workers);
 		state.currentWave = wave;
 		state.phase = "workers";
-		setup.onProgress();
+		checkpoint();
 		await runWave(setup, state, workers);
 		if (signal.aborted) return { status: "cancelled" };
 		if (!workers.some((worker) => worker.status === "done")) {
@@ -266,17 +277,110 @@ async function runSwarm(setup: SwarmSetup, state: SwarmState, dismissals: Dismis
 		return { status: "failed", error: `All workers failed. First error: ${error}` };
 	}
 	state.phase = "verifying";
-	setup.onProgress();
+	checkpoint();
 	await verifyClusters(setup, state);
 	if (signal.aborted) return { status: "cancelled" };
 	state.phase = "done";
 	return { status: "completed" };
 }
 
+interface SwarmRun {
+	target: ReviewTarget;
+	options: SwarmOptions;
+	workerModel: Model<Api>;
+	verifierModel: Model<Api>;
+	settingsManager: SettingsManager;
+	modelRegistry: ExtensionCommandContext["modelRegistry"];
+	contextFiles: Array<{ path: string; content: string }>;
+	dismissals: Dismissal[];
+}
+
+/** The work of one review: owns its checkout from here on. */
+async function runWork(work: WorkRunContext, run: SwarmRun): Promise<WorkRunResult> {
+	const { target, options } = run;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		const state: SwarmState = {
+			workers: [],
+			clusters: [],
+			waves: [],
+			phase: "workers",
+			currentWave: 0,
+			clusterPasses: [],
+			nextCandidate: 0,
+			cancelling: false,
+			saturated: false,
+		};
+		const report = (): void => {
+			if (timer !== undefined) clearTimeout(timer);
+			timer = undefined;
+			work.progress(workProgress(state, options));
+		};
+		const setup: SwarmSetup = {
+			target,
+			options,
+			workerModel: run.workerModel,
+			verifierModel: run.verifierModel,
+			settingsManager: run.settingsManager,
+			modelRegistry: run.modelRegistry,
+			contextFiles: run.contextFiles,
+			signal: work.signal,
+			onProgress: () => {
+				timer ??= setTimeout(report, PROGRESS_INTERVAL_MS);
+			},
+		};
+		const onAbort = (): void => {
+			state.cancelling = true;
+			report();
+		};
+		work.signal.addEventListener("abort", onAbort, { once: true });
+		const startedAt = Date.now();
+		const result = await runSwarm(setup, state, run.dismissals, () =>
+			work.checkpoint(workProgress(state, options)),
+		).catch(
+			(error: unknown): SwarmResult =>
+				error instanceof SwarmCancelled || work.signal.aborted
+					? { status: "cancelled" }
+					: { status: "failed", error: errorText(error) },
+		);
+		work.signal.removeEventListener("abort", onAbort);
+		if (result.status === "cancelled") return { outcome: "cancelled" };
+		if (result.status === "failed") return { outcome: "failed", error: result.error };
+
+		const remembered = await recordDismissals(
+			target,
+			state.clusters.filter((cluster) => cluster.outcome === "rejected"),
+		).catch(() => 0);
+		const built = buildReport(setup, state, Date.now() - startedAt, remembered);
+		return {
+			outcome: "completed",
+			result: {
+				summary: reportSummary(state, built.findings),
+				output: { text: built.markdown, truncated: false },
+				data: {
+					target: target.description,
+					workerModel: modelRef(run.workerModel),
+					verifierModel: modelRef(run.verifierModel),
+					workers: state.workers.length,
+					waves: state.waves.length,
+					clusters: state.clusters.length,
+					findings: built.findings.length,
+				},
+			},
+			// The model reads the whole report with its next turn.
+			notice: built.markdown,
+		};
+	} finally {
+		if (timer !== undefined) clearTimeout(timer);
+		await target.dispose();
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Command
 
 export default function swarmReview(volt: ExtensionAPI) {
+	volt.registerWorkKind("run", { delivery: "message" });
 	volt.registerCommand("swarm-review", {
 		description:
 			"Review with waves of cheap workers, cluster their claims, and verify each cluster with two independent verifiers",
@@ -328,126 +432,70 @@ export default function swarmReview(volt: ExtensionAPI) {
 			if ("error" in verifier) return notify(verifier.error, "error");
 			for (const warning of [worker.warning, verifier.warning]) if (warning) notify(warning, "warning");
 
-			const controller = new AbortController();
-			const onCommandAbort = (): void => controller.abort();
-			ctx.signal.addEventListener("abort", onCommandAbort, { once: true });
+			let resolved: Awaited<ReturnType<typeof resolveTarget>>;
 			try {
-				let resolved: Awaited<ReturnType<typeof resolveTarget>>;
+				resolved = await resolveTarget(ctx.cwd, options.target, options.scope, ctx.signal);
+			} catch (error) {
+				if (error instanceof SwarmCancelled) return notify("Swarm review cancelled.", "info");
+				throw error;
+			}
+			if (typeof resolved === "string") return notify(resolved, "warning");
+			const target = resolved;
+			let started = false;
+			try {
+				let contextFiles: Array<{ path: string; content: string }>;
 				try {
-					resolved = await resolveTarget(ctx.cwd, options.target, options.scope, controller.signal);
+					contextFiles = await loadContextFiles(target, ctx.cwd, ctx.signal);
 				} catch (error) {
 					if (error instanceof SwarmCancelled) return notify("Swarm review cancelled.", "info");
 					throw error;
 				}
-				if (typeof resolved === "string") return notify(resolved, "warning");
-				const target = resolved;
+				let dismissals: Dismissal[] = [];
 				try {
-					let contextFiles: Array<{ path: string; content: string }>;
-					try {
-						contextFiles = await loadContextFiles(target, ctx.cwd, controller.signal);
-					} catch (error) {
-						if (error instanceof SwarmCancelled) return notify("Swarm review cancelled.", "info");
-						throw error;
-					}
-					let dismissals: Dismissal[] = [];
-					try {
-						if (!options.fresh) dismissals = loadDismissals(target);
-					} catch {
-						// Unreadable memory must not block a review.
-					}
-					const state: SwarmState = {
-						workers: [],
-						clusters: [],
-						waves: [],
-						phase: "workers",
-						currentWave: 0,
-						clusterPasses: [],
-						nextCandidate: 0,
-						cancelling: false,
-						saturated: false,
-					};
-					const label = `waves of ${options.waveSize}, up to ${options.workers} × ${worker.model.id} (${options.thinking}) → 2 × ${verifier.model.id} (${options.verifierThinking})`;
-					let view: SwarmProgressView | undefined;
-					const setup: SwarmSetup = {
-						target,
-						options,
-						workerModel: worker.model,
-						verifierModel: verifier.model,
-						settingsManager,
-						modelRegistry: ctx.modelRegistry,
-						contextFiles,
-						signal: controller.signal,
-						onProgress: () => {
-							// Custom TUI components replace the view, which hides widgets; render progress inside it instead.
-							if (view) view.update(renderProgress(state, label, ctx.ui.theme), phaseText(state));
-							else if (ctx.hasUI && ctx.mode !== "tui") {
-								ctx.ui.setWidget(WIDGET_KEY, renderProgress(state, label, ctx.ui.theme));
-							}
-						},
-					};
-
-					const startedAt = Date.now();
-					setup.onProgress();
-					const run = runSwarm(setup, state, dismissals).catch(
-						(error: unknown): SwarmResult =>
-							error instanceof SwarmCancelled || controller.signal.aborted
-								? { status: "cancelled" }
-								: { status: "failed", error: errorText(error) },
-					);
-					if (ctx.mode === "tui") {
-						try {
-							await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
-								const loader = new BorderedLoader(tui, theme, phaseText(state));
-								loader.onAbort = () => {
-									state.cancelling = true;
-									controller.abort();
-									setup.onProgress();
-								};
-								view = new SwarmProgressView(loader);
-								setup.onProgress();
-								void run.then(() => done());
-								return view;
-							});
-						} catch (error) {
-							controller.abort();
-							await run;
-							throw error;
-						} finally {
-							view = undefined;
-						}
-					}
-
-					const result = await run;
-					if (result.status === "cancelled") return notify("Swarm review cancelled.", "info");
-					if (result.status === "failed") return notify(`Swarm review failed: ${result.error}`, "error");
-
-					const remembered = await recordDismissals(
-						target,
-						state.clusters.filter((cluster) => cluster.outcome === "rejected"),
-					).catch(() => 0);
-					const report = buildReport(setup, state, Date.now() - startedAt, remembered);
-					// The command may have started during an agent turn; post after it so the report is not steered into it.
-					await ctx.waitForIdle();
-					volt.sendMessage({
-						customType: "swarm-review",
-						content: report.markdown,
-						display: true,
-						details: {
-							target: target.description,
-							workerModel: modelRef(worker.model),
-							verifierModel: modelRef(verifier.model),
-							workers: state.workers.length,
-							waves: state.waves.length,
-							clusters: state.clusters.length,
-							findings: report.findings.map((finding) => ({ ...finding })),
-						},
-					});
-				} finally {
-					await target.dispose();
+					if (!options.fresh) dismissals = loadDismissals(target);
+				} catch {
+					// Unreadable memory must not block a review.
 				}
+				const run: SwarmRun = {
+					target,
+					options,
+					workerModel: worker.model,
+					verifierModel: verifier.model,
+					settingsManager,
+					modelRegistry: ctx.modelRegistry,
+					contextFiles,
+					dismissals,
+				};
+				try {
+					await ctx.startWork(
+						"run",
+						{
+							title: `Swarm review: ${target.description}`,
+							input: {
+								target: { ...options.target },
+								scope: options.scope,
+								workers: options.workers,
+								waveSize: options.waveSize,
+								model: modelRef(worker.model),
+								thinking: options.thinking,
+								verifier: modelRef(verifier.model),
+								verifierThinking: options.verifierThinking,
+								exec: options.exec,
+								...(options.focus ? { focus: options.focus } : {}),
+							},
+						},
+						(work) => runWork(work, run),
+					);
+					started = true;
+				} catch (error) {
+					return notify(`Swarm review did not start: ${errorText(error)}`, "error");
+				}
+				notify(
+					`Swarm review started: waves of ${options.waveSize}, up to ${options.workers} × ${worker.model.id} (${options.thinking}) → 2 × ${verifier.model.id} (${options.verifierThinking}). Its report rides your next message.`,
+					"info",
+				);
 			} finally {
-				ctx.signal.removeEventListener("abort", onCommandAbort);
-				if (ctx.hasUI) ctx.ui.setWidget(WIDGET_KEY, undefined);
+				if (!started) await target.dispose();
 			}
 		},
 	});

@@ -96,6 +96,7 @@ import type { BashOperations } from "./tools/bash.ts";
 import type { SubagentToolManager } from "./tools/index.ts";
 import type { JobSource } from "./tools/jobs.ts";
 import type { PlanStepInput } from "./tools/planning.ts";
+import { ExtensionKinds } from "./work/extension-kinds.ts";
 import { WorkRegistry } from "./work/registry.ts";
 
 // ============================================================================
@@ -455,6 +456,8 @@ export class AgentSession {
 	});
 	/** Host actions (an LSP server install) wait in the live state for a client's approval, then run as `host_action` work. */
 	private readonly _hostActions = new SessionHostActions({ liveState: this.liveState, work: () => this._work });
+	/** The work kinds the extensions declare, registered while their runner generation is current. */
+	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
 
 	// Extension system
 	private _extensionServices!: SessionExtensionServices;
@@ -656,6 +659,7 @@ export class AgentSession {
 				conversation: () => this._conversation,
 				tools: () => this._tools,
 				extensionServices: () => this._extensionServices,
+				extensionKinds: () => this._extensionKinds,
 				jobs: () => this._jobs,
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),
@@ -1219,16 +1223,16 @@ export class AgentSession {
 	 * Starts input queued before a delivering stop as a fresh turn once that
 	 * stop has settled. The stop leaves a terminal aborted assistant message, so
 	 * the turn delivers steering first, then follow-ups, and never resumes the
-	 * interrupted work on its own.
+	 * interrupted work on its own. Quiet host input (a `message` work notice)
+	 * alone starts none: it rides the next turn.
 	 */
 	private _deliverQueuedMessagesAfterStop(): void {
-		const queue = this._conversation.queue;
 		if (
 			this._disposed ||
 			!this._admissionGate.isOpen ||
 			this._lostError !== undefined ||
 			this._conversation.operation !== undefined ||
-			(queue.steer.length === 0 && queue.followUp.length === 0)
+			!this._conversation.queueWakes
 		)
 			return;
 		const work = this._conversation.continue().catch((error: unknown) => {

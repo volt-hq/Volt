@@ -13,6 +13,7 @@ import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
+import type { DeclaredWorkKind, StartWorkHandler } from "../work/extension-kinds.ts";
 import {
 	type ExtensionServicesManager,
 	extensionServicesForbidden,
@@ -332,6 +333,7 @@ export class ExtensionRunner {
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
+	private startWorkFn: StartWorkHandler = () => Promise.reject(new Error("Work is not available in this runtime"));
 
 	constructor(
 		extensions: Extension[],
@@ -356,6 +358,15 @@ export class ExtensionRunner {
 		};
 	}
 
+	/** Start the extensions' work through `start`; `refresh` registers the work kinds they declare after binding. */
+	bindWork(start: StartWorkHandler, refresh: () => void): void {
+		this.startWorkFn = start;
+		this.runtime.refreshWorkKinds = () => {
+			this.assertActive();
+			refresh();
+		};
+	}
+
 	emitRequestBoundary(event: RequestBoundaryEvent): void {
 		this.emitServicesObservation(event);
 	}
@@ -377,7 +388,7 @@ export class ExtensionRunner {
 						error: "Extension services observer failed",
 					});
 				try {
-					const ctx = this.createContext(event.type === "request_boundary" ? ext.path : undefined);
+					const ctx = this.createContext(ext.path, event.type === "request_boundary");
 					void Promise.resolve(handler(cloneCanonicalData(event, "Extension services observation"), ctx)).catch(
 						report,
 					);
@@ -522,6 +533,13 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/** The work kinds every extension declared, in load order. */
+	getWorkKinds(): DeclaredWorkKind[] {
+		return this.extensions.flatMap((ext) =>
+			[...ext.workKinds].map(([name, kind]) => ({ extensionPath: ext.path, name, kind })),
+		);
 	}
 
 	getFlags(): Map<string, ExtensionFlag> {
@@ -684,12 +702,12 @@ export class ExtensionRunner {
 	}
 
 	private resolveRegisteredCommands(): ResolvedCommand[] {
-		const commands: RegisteredCommand[] = [];
+		const commands: Array<{ command: RegisteredCommand; extensionPath: string }> = [];
 		const counts = new Map<string, number>();
 
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
-				commands.push(command);
+				commands.push({ command, extensionPath: ext.path });
 				counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
 			}
 		}
@@ -697,7 +715,7 @@ export class ExtensionRunner {
 		const seen = new Map<string, number>();
 		const takenInvocationNames = new Set<string>();
 
-		return commands.map((command) => {
+		return commands.map(({ command, extensionPath }) => {
 			const occurrence = (seen.get(command.name) ?? 0) + 1;
 			seen.set(command.name, occurrence);
 
@@ -715,6 +733,7 @@ export class ExtensionRunner {
 			return {
 				...command,
 				invocationName,
+				extensionPath,
 			};
 		});
 	}
@@ -776,15 +795,18 @@ export class ExtensionRunner {
 	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
+	 *
+	 * @param owner The path of the extension the context belongs to: `startWork` starts only its kinds.
+	 * @param services Whether the owner's managed services are part of the context.
 	 */
-	createContext(owner?: string): ExtensionContext {
+	createContext(owner?: string, services = false): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
-		const services = owner ? this.servicesManager?.getContext(owner) : undefined;
+		const servicesContext = owner && services ? this.servicesManager?.getContext(owner) : undefined;
 		return {
 			get services() {
 				runner.assertActive();
-				return extensionServicesForbidden() ? undefined : services;
+				return extensionServicesForbidden() ? undefined : servicesContext;
 			},
 			get ui() {
 				runner.assertActive();
@@ -850,23 +872,29 @@ export class ExtensionRunner {
 				runner.assertActive();
 				return runner.getSystemPromptFn();
 			},
+			startWork: (kind, options, run) => {
+				runner.assertActive();
+				return runner.startWorkFn(owner, kind, options, run);
+			},
 		};
 	}
 
 	/**
 	 * @param signal Session-lifetime signal exposed as the command's `ctx.signal`. The owning
 	 *   session aborts it when it loses its log or is disposed.
+	 * @param owner The path of the extension whose command runs.
 	 */
 	createCommandContext(
 		waitForIdle: () => Promise<void> = this.waitForIdleFn,
 		signal: AbortSignal = new AbortController().signal,
+		owner?: string,
 	): ExtensionCommandContext {
 		// Use property descriptors instead of object spread so the guarded getters from
 		// createContext() stay lazy. A spread would eagerly read them once and freeze the
 		// old values into the returned object, bypassing stale-instance checks.
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this.createContext()),
+			Object.getOwnPropertyDescriptors(this.createContext(owner)),
 		) as ExtensionCommandContext;
 		Object.defineProperty(context, "signal", {
 			get: () => {
@@ -928,7 +956,7 @@ export class ExtensionRunner {
 
 			for (const handler of handlers) {
 				try {
-					const ctx = this.createContext(event.type === "tool_execution_end" ? ext.path : undefined);
+					const ctx = this.createContext(ext.path, event.type === "tool_execution_end");
 					const handlerResult = await handler(event, ctx);
 
 					if (this.isSessionBeforeEvent(event) && handlerResult) {
@@ -966,13 +994,13 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return undefined;
 		}
-		const ctx = this.createContext();
 		let currentMessage = cloneCanonicalData(event.message, "Extension message_end input");
 		let modified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("message_end");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1053,8 +1081,6 @@ export class ExtensionRunner {
 			if (options?.strict) throw new Error("Extension runtime is stale");
 			return undefined;
 		}
-		const ctx = this.createContext();
-		if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 		const currentEvent = cloneCanonicalData(
 			{ ...event, ...(options?.origin ? { origin: options.origin } : {}) },
 			`Tool result input for ${event.toolName}`,
@@ -1064,6 +1090,8 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_result");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
+			if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 
 			for (const handler of handlers) {
 				try {
@@ -1125,8 +1153,6 @@ export class ExtensionRunner {
 			if (options?.strict) throw new Error("Extension runtime is stale");
 			return undefined;
 		}
-		const ctx = this.createContext();
-		if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 		const attributedEvent = event;
 		if (options?.origin)
 			Object.defineProperty(attributedEvent, "origin", {
@@ -1138,6 +1164,8 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("tool_call");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
+			if (options) Object.defineProperty(ctx, "signal", { value: options.signal });
 
 			for (const handler of handlers) {
 				const handlerResult = await withoutExtensionServices(() => handler(attributedEvent, ctx));
@@ -1158,11 +1186,10 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return undefined;
 		}
-		const ctx = this.createContext();
-
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("user_bash");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1190,12 +1217,12 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return messages;
 		}
-		const ctx = this.createContext();
 		let currentMessages = structuredClone(messages);
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("context");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1225,12 +1252,12 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return payload;
 		}
-		const ctx = this.createContext();
 		let currentPayload = payload;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1268,20 +1295,20 @@ export class ExtensionRunner {
 			return undefined;
 		}
 		let currentSystemPrompt = systemPrompt;
-		const ctx = Object.defineProperties(
-			{},
-			Object.getOwnPropertyDescriptors(this.createContext()),
-		) as ExtensionContext;
-		ctx.getSystemPrompt = () => {
-			this.assertActive();
-			return currentSystemPrompt;
-		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_agent_start");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = Object.defineProperties(
+				{},
+				Object.getOwnPropertyDescriptors(this.createContext(ext.path)),
+			) as ExtensionContext;
+			ctx.getSystemPrompt = () => {
+				this.assertActive();
+				return currentSystemPrompt;
+			};
 
 			for (const handler of handlers) {
 				try {
@@ -1341,7 +1368,6 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return { skillPaths: [], promptPaths: [], themePaths: [] };
 		}
-		const ctx = this.createContext();
 		const skillPaths: Array<{ path: string; extensionPath: string }> = [];
 		const promptPaths: Array<{ path: string; extensionPath: string }> = [];
 		const themePaths: Array<{ path: string; extensionPath: string }> = [];
@@ -1349,6 +1375,7 @@ export class ExtensionRunner {
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("resources_discover");
 			if (!handlers || handlers.length === 0) continue;
+			const ctx = this.createContext(ext.path);
 
 			for (const handler of handlers) {
 				try {
@@ -1391,11 +1418,11 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return { action: "continue" };
 		}
-		const ctx = this.createContext();
 		let currentText = text;
 		let currentImages = images;
 
 		for (const ext of this.extensions) {
+			const ctx = this.createContext(ext.path);
 			for (const handler of ext.handlers.get("input") ?? []) {
 				try {
 					const event: InputEvent = {

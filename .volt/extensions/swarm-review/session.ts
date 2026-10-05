@@ -35,7 +35,7 @@ function isolatedResourceLoader(
 function lastAssistantError(session: AgentSession): string | undefined {
 	const last = session.messages.findLast((message) => message.role === "assistant");
 	return last?.role === "assistant" && last.stopReason === "error"
-		? (last.errorMessage ?? "Model request failed.")
+		? (last.error?.message ?? "Model request failed.")
 		: undefined;
 }
 
@@ -74,8 +74,6 @@ export interface PassOptions {
 export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<void> {
 	const checkout = pass.checkout ?? setup.target.checkout;
 	const sessionManager = SessionManager.inMemory(checkout);
-	// A named session skips the automatic naming request.
-	sessionManager.appendSessionInfo(pass.label);
 	const inspect = pass.inspect ?? true;
 	const { session } = await createAgentSession({
 		cwd: checkout,
@@ -125,6 +123,8 @@ export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<voi
 	};
 	setup.signal.addEventListener("abort", onAbort, { once: true });
 	try {
+		// A named session skips the automatic naming request.
+		await session.setSessionName(pass.label);
 		if (setup.signal.aborted) throw new SwarmCancelled();
 		await session.prompt(pass.prompt, { expandPromptTemplates: false });
 		if (setup.signal.aborted) throw new SwarmCancelled();

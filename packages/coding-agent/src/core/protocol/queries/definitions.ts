@@ -216,12 +216,17 @@ export const workOutputQuery = defineQuery({
 	async run(ctx, params) {
 		const { work } = targetOf(ctx).conversation;
 		// A remote client needs what the work's kind requires too: a host action's output takes host management.
-		const missing =
-			ctx.profile.name === "local" ? undefined : missingCapability(ctx.profile.grant, work.requires(params.workId));
-		if (missing !== undefined) {
-			throw new QueryRejectedError("not_allowed", `Remote capability required: ${missing}`, {
-				requiredCapability: missing,
-			});
+		if (ctx.profile.name !== "local") {
+			const required = work.requires(params.workId);
+			if (required === undefined) {
+				throw new QueryRejectedError("not_allowed", `Work ${params.workId} is of a kind this host does not know`);
+			}
+			const missing = missingCapability(ctx.profile.grant, required);
+			if (missing !== undefined) {
+				throw new QueryRejectedError("not_allowed", `Remote capability required: ${missing}`, {
+					requiredCapability: missing,
+				});
+			}
 		}
 		const output = work.output(params.workId);
 		if (!output) throw new QueryRejectedError("invalid_input", `Unknown work ${JSON.stringify(params.workId)}`);

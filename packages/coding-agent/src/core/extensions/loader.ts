@@ -31,6 +31,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { EXTENSION_KINDS_MAX, validateWorkKind } from "../work/extension-kinds.ts";
 import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
 import type {
 	Extension,
@@ -42,6 +43,7 @@ import type {
 	ProviderConfig,
 	RegisteredCommand,
 	ToolDefinition,
+	WorkKindDeclaration,
 } from "./types.ts";
 
 /** Host module instances served to every extension instead of per-extension copies. */
@@ -177,6 +179,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		setActiveTools: notInitialized,
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
+		// Likewise registerWorkKind(): the session registers declared kinds when the runner binds.
+		refreshWorkKinds: () => {},
 		getCommands: notInitialized,
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
@@ -227,6 +231,7 @@ function createExtensionAPI(
 			extension.tools.set(tool.name, {
 				definition: tool,
 				sourceInfo: extension.sourceInfo,
+				extensionPath: extension.path,
 			});
 			runtime.refreshTools();
 		},
@@ -252,7 +257,8 @@ function createExtensionAPI(
 			},
 		): void {
 			runtime.assertActive();
-			extension.shortcuts.set(shortcut, { shortcut, extensionPath: extension.path, ...options });
+			// The extension path comes last: it names the extension a shortcut's ctx belongs to.
+			extension.shortcuts.set(shortcut, { ...options, shortcut, extensionPath: extension.path });
 		},
 
 		registerFlag(
@@ -264,6 +270,17 @@ function createExtensionAPI(
 			if (options.default !== undefined && !runtime.flagValues.has(name)) {
 				runtime.flagValues.set(name, options.default);
 			}
+		},
+
+		registerWorkKind(name: string, kind?: WorkKindDeclaration): void {
+			runtime.assertActive();
+			const declaration = validateWorkKind(name, kind);
+			if (extension.workKinds.has(name)) throw new Error(`Work kind ${name} is already registered`);
+			if (extension.workKinds.size >= EXTENSION_KINDS_MAX) {
+				throw new Error(`An extension registers at most ${EXTENSION_KINDS_MAX} work kinds`);
+			}
+			extension.workKinds.set(name, declaration);
+			runtime.refreshWorkKinds();
 		},
 
 		registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
@@ -423,6 +440,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
+		workKinds: new Map(),
 	};
 }
 

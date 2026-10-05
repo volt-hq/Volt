@@ -1,7 +1,6 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
-import type { BorderedLoader, Theme } from "@hansjm10/volt-coding-agent";
-import { Container, Text } from "@hansjm10/volt-tui";
-import type { Cluster, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
+import type { WorkProgress, WorkProgressStep } from "@hansjm10/volt-protocol";
+import type { Cluster, SwarmOptions, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
 import { addUsage, emptyUsage, formatCost, formatDuration, lineRange, usageText } from "./util.ts";
 
 export function modelRef(model: Model<Api>): string {
@@ -270,66 +269,47 @@ export function phaseText(state: SwarmState): string {
 	return `Wave ${state.currentWave}: ${finished}/${wave.length} workers finished · ${claims} claim(s) · ${clusters} cluster(s)`;
 }
 
-export function renderProgress(state: SwarmState, label: string, theme: Theme): string[] {
-	const lines = [theme.fg("accent", theme.bold("Swarm review")) + theme.fg("muted", ` · ${label}`)];
-	for (const summary of state.waves) {
-		lines.push(
-			theme.fg(
-				"muted",
-				`  wave ${summary.wave}: ${summary.workers} workers, ${summary.candidates} claim(s), ${summary.newClusters} new cluster(s)${summary.clusteringFallback ? " (proximity fallback)" : ""}`,
-			),
-		);
-	}
-	if (state.phase === "workers") {
-		for (const worker of state.workers) {
-			if (worker.wave !== state.currentWave) continue;
-			const name = theme.fg("muted", `  worker ${String(worker.index + 1).padStart(2)}`);
-			if (worker.status === "running") {
-				lines.push(`${name} ${theme.fg("accent", `● turn ${worker.turns + 1}, ${worker.toolCalls} tool calls`)}`);
-			} else if (worker.status === "failed")
-				lines.push(`${name} ${theme.fg("error", `✗ ${worker.error ?? "failed"}`)}`);
-		}
-	}
-	if (state.phase === "verifying") {
-		for (const cluster of state.clusters) {
-			const running = cluster.verifiers.filter((pass) => pass.status === "running");
-			if (running.length === 0) continue;
-			const tools = running.reduce((sum, pass) => sum + pass.toolCalls, 0);
-			lines.push(
-				`${theme.fg("muted", `  ${cluster.id.padEnd(4)}`)} ${theme.fg("accent", `● ${running.length} verifier(s), ${tools} tool calls`)} ${theme.fg("dim", cluster.title.slice(0, 80))}`,
-			);
-		}
-	}
+/** The run's progress: the phase, the estimated cost so far, and a step per wave and for verification. */
+export function workProgress(state: SwarmState, options: SwarmOptions): WorkProgress {
 	const spent = emptyUsage();
 	for (const worker of state.workers) addUsage(spent, worker.usage);
 	for (const pass of state.clusterPasses) addUsage(spent, pass.usage);
 	for (const cluster of state.clusters) for (const pass of cluster.verifiers) addUsage(spent, pass.usage);
-	if (spent.cost > 0) lines.push(theme.fg("dim", `  estimated cost of finished passes: ${formatCost(spent.cost)}`));
-	return lines;
+	const ended = state.phase === "verifying" || state.phase === "done";
+	const steps: WorkProgressStep[] = [];
+	for (let wave = 1; wave <= Math.ceil(options.workers / options.waveSize); wave++) {
+		const summary = state.waves.find((entry) => entry.wave === wave);
+		const status: WorkProgressStep["status"] = summary
+			? summary.failed
+				? "failed"
+				: "done"
+			: wave === state.currentWave
+				? "active"
+				: ended || wave < state.currentWave
+					? "skipped"
+					: "pending";
+		const detail = summary
+			? `: ${summary.candidates} claim(s), ${summary.newClusters} new cluster(s)${summary.clusteringFallback ? " (proximity fallback)" : ""}`
+			: "";
+		steps.push({ key: `wave-${wave}`, label: `Wave ${wave}${detail}`, status });
+	}
+	steps.push({
+		key: "verify",
+		label: `Verify ${state.clusters.filter((cluster) => cluster.outcome !== "suppressed").length} cluster(s)`,
+		status: state.phase === "done" ? "done" : state.phase === "verifying" ? "active" : "pending",
+	});
+	const cost = spent.cost > 0 ? ` · est. ${formatCost(spent.cost)}` : "";
+	return { text: `${phaseText(state)}${cost}`, steps };
 }
 
-/** Progress above a cancellable loader; Escape reaches the loader. */
-export class SwarmProgressView extends Container {
-	readonly progress = new Text("", 1, 0);
-	readonly loader: BorderedLoader;
-
-	constructor(loader: BorderedLoader) {
-		super();
-		this.loader = loader;
-		this.addChild(this.progress);
-		this.addChild(loader);
-	}
-
-	update(lines: string[], message: string): void {
-		this.progress.setText(lines.join("\n"));
-		this.loader.setMessage(message);
-	}
-
-	handleInput(data: string): void {
-		this.loader.handleInput(data);
-	}
-
-	dispose(): void {
-		this.loader.dispose();
-	}
+/** The counts and the confirmed findings, one line each: what a notice shows where the report does not fit. */
+export function reportSummary(state: SwarmState, findings: readonly ReportedFinding[]): string {
+	const count = (kind: string): number => state.clusters.filter((cluster) => effectiveKind(cluster) === kind).length;
+	return [
+		`${findings.length} confirmed finding(s), ${count("disputed")} disputed, ${count("uncertain")} uncertain, ${count("rejected")} rejected.`,
+		...findings.map(
+			(finding, index) =>
+				`${index + 1}. [P${finding.priority}] ${finding.title} (${finding.file}:${lineRange(finding.line, finding.endLine)})`,
+		),
+	].join("\n");
 }
