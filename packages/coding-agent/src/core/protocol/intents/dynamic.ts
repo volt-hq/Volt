@@ -117,42 +117,39 @@ function createExtensionIntent(registered: RegisteredIntent): ExtensionIntent {
 	};
 }
 
-/** Schema keywords whose text an intent descriptor shows a client, path-like text redacted. */
-const DESCRIPTIVE_SCHEMA_KEYWORDS: ReadonlySet<string> = new Set([
-	"title",
-	"description",
-	"$comment",
-	"default",
-	"examples",
+/** Schema keywords whose strings describe structure, not text a user reads: a descriptor keeps them. */
+const STRUCTURAL_SCHEMA_KEYWORDS: ReadonlySet<string> = new Set([
+	"type",
+	"pattern",
+	"format",
+	"required",
+	"$ref",
+	"$id",
+	"$schema",
+	"contentEncoding",
+	"contentMediaType",
 ]);
-
-/** `value` with path-like text in its strings redacted. */
-function redactStrings(value: unknown): unknown {
-	if (typeof value === "string") return redactPathLikeText(value);
-	if (Array.isArray(value)) return value.map(redactStrings);
-	if (typeof value !== "object" || value === null) return value;
-	return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, redactStrings(entry)]));
-}
 
 /**
  * An extension intent's input schema as its descriptor carries it: a copy
- * whose descriptive text (titles, descriptions, comments, defaults, and
- * examples) has path-like text redacted.
+ * with path-like text redacted from every string but structural keywords
+ * (titles, descriptions, defaults, examples, enum and const values, and
+ * custom keywords alike). Field names stay as they are.
  */
 export function describedInputSchema(schema: unknown): Record<string, unknown> {
 	const describe = (value: unknown): unknown => {
+		if (typeof value === "string") return redactPathLikeText(value);
 		if (Array.isArray(value)) return value.map(describe);
 		if (typeof value !== "object" || value === null) return value;
 		return Object.fromEntries(
-			Object.entries(value).map(([key, entry]) => [
-				key,
-				DESCRIPTIVE_SCHEMA_KEYWORDS.has(key)
-					? redactStrings(entry)
-					: // Property names are field names, not keywords: each value is a schema.
-						key === "properties" && typeof entry === "object" && entry !== null && !Array.isArray(entry)
-						? Object.fromEntries(Object.entries(entry).map(([field, schema]) => [field, describe(schema)]))
-						: describe(entry),
-			]),
+			Object.entries(value).map(([key, entry]) => {
+				if (STRUCTURAL_SCHEMA_KEYWORDS.has(key)) return [key, entry];
+				// Property names are field names, not keywords: each value is a schema.
+				if (key === "properties" && typeof entry === "object" && entry !== null && !Array.isArray(entry)) {
+					return [key, Object.fromEntries(Object.entries(entry).map(([field, item]) => [field, describe(item)]))];
+				}
+				return [key, describe(entry)];
+			}),
 		);
 	};
 	return describe(schema) as Record<string, unknown>;

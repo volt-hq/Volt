@@ -82,6 +82,18 @@ const PRESERVED_KEYS: ReadonlySet<string> = new Set([...CLIENT_KEYS, ...HOST_KEY
 /** Largest value of one keyed live item, in bytes. */
 const LIVE_VALUE_MAX_BYTES = 64 * 1024;
 const PATCHABLE_KINDS: ReadonlySet<string> = new Set(LIVE_PATCHABLE_KINDS);
+const SPAN_KEYS: ReadonlySet<string> = new Set(["text", "token", "bold", "italic", "underline", "code"]);
+
+/** Whether `value` is styled text as spans: `{text, token?, bold?, italic?, underline?, code?}`. */
+function isStyledSpans(value: readonly unknown[]): value is ReadonlyArray<{ readonly text: string }> {
+	return (
+		value.length > 1 &&
+		value.every(
+			(span) =>
+				isRecord(span) && typeof span.text === "string" && Object.keys(span).every((key) => SPAN_KEYS.has(key)),
+		)
+	);
+}
 
 /** The node tree a patch of `value` applies to: a panel's node, or a work item's detail. */
 function patchTree(value: LiveValue): UiNode[] | undefined {
@@ -505,8 +517,30 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		return visit(value, undefined) as T;
 	};
 
-	/** Redaction of UI data and other values: roots replaced, and roots a cut split dropped. */
-	const sanitizeUi = <T>(value: T): T => cutAware(sanitize(value));
+	/**
+	 * `value` with each run of styled spans whose joined text spells a root, or
+	 * ends a cut at the start of one, as one string: styling may split a path
+	 * into spans (a dimmed directory, a highlighted match), which redaction must
+	 * see whole. Such text loses its styling.
+	 */
+	const joinRootedSpans = <T>(value: T): T => {
+		const visit = (entry: unknown): unknown => {
+			if (Array.isArray(entry)) {
+				if (isStyledSpans(entry)) {
+					const joined = entry.map((span) => span.text).join("");
+					const cut = joined.endsWith("…") && sanitizer.rootPrefixSuffix(joined.slice(0, -1)) > 0;
+					if (cut || sanitizer.containsRoot(joined)) return joined;
+				}
+				return entry.map(visit);
+			}
+			if (!isRecord(entry)) return entry;
+			return Object.fromEntries(Object.entries(entry).map(([name, item]) => [name, visit(item)]));
+		};
+		return visit(value) as T;
+	};
+
+	/** Redaction of UI data and other values: roots replaced, also across styled spans, and roots a cut split dropped. */
+	const sanitizeUi = <T>(value: T): T => cutAware(sanitize(joinRootedSpans(value)));
 
 	const redactValue = (value: LiveValue): LiveValue | undefined => {
 		// Work progress the host cut loses a root's start the cut left; the value keeps the host's bound for it.
@@ -598,10 +632,17 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 		const kept: LiveItem[] = [];
 		sent.forEach((each, index) => {
 			const key = each.held?.key;
-			// A later clear still withdraws what the client holds: afterwards it holds nothing.
-			if (key !== undefined && diverged.has(key) && each.item.type === "clear" && fitting.has(index)) {
+			// A later clear or whole value starts over from nothing the client holds: it is sent, and held.
+			if (
+				key !== undefined &&
+				diverged.has(key) &&
+				(each.item.type === "clear" || each.item.type === "set") &&
+				fitting.has(index)
+			) {
 				diverged.delete(key);
-				view.held.delete(key);
+				const after = each.held?.after;
+				if (after === undefined) view.held.delete(key);
+				else view.held.set(key, after);
 				kept.push(each.item);
 				return;
 			}

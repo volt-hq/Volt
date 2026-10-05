@@ -443,6 +443,50 @@ describe("remote redaction of patched panels", () => {
 		expect(sent).toContain(`${"x".repeat(UI_NODE_LINE_MAX_CHARS - 12)}…`);
 	});
 
+	it("redacts a root that styling split across spans", () => {
+		const redactor = redactorFor(workspacePath);
+		// As ANSI styling converts: a dimmed directory, then a bold file name.
+		const text = [
+			{ text: "see " },
+			{ text: workspacePath.slice(0, 10), token: "muted" as const },
+			{ text: `${workspacePath.slice(10)}/a.ts`, bold: true },
+		];
+		const sent = JSON.stringify([
+			redactor.redact(
+				live(
+					1,
+					[{ type: "set", key: "ext_status/ci/s", value: { kind: "ext_status", extension: "ci", text } }],
+					true,
+				),
+			),
+			redactor.redact(
+				live(2, [
+					{ type: "set", key, value: { ...panel([]), node: { type: "terminal", key: "out", lines: [text] } } },
+				]),
+			),
+		]);
+		expect(sent).not.toContain(workspacePath.slice(10));
+		expect(sent).toContain("see /workspace/a.ts");
+	});
+
+	it("sends a later whole value of a panel after a patch the frame could not carry", () => {
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			limits: { frameBytes: 2_000 },
+		}).redactor();
+		let fold = emptyLiveFold();
+		const send = (frame: HostFrame): void => {
+			const redacted = redactor.redact(frame);
+			if (redacted?.type === "live") fold = foldLiveFrame(fold, redacted);
+		};
+		send(live(1, [{ type: "set", key, value: panel(["start"]) }], true));
+		send(live(2, [append(["x".repeat(3_000)]), { type: "set", key, value: panel(["fresh"]) }]));
+		expect(fold.values.get(key)).toEqual(panel(["fresh"]));
+		send(live(3, [append(["next"])]));
+		expect(fold.values.get(key)).toEqual(panel(["fresh", "next"]));
+	});
+
 	it("never replays a value from before its patches on a reset", () => {
 		const redactor = redactorFor(workspacePath);
 		redactor.redact(live(1, [{ type: "set", key, value: panel(["one"]) }], true));

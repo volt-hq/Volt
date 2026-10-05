@@ -89,6 +89,8 @@ export type ResolvedIntent =
 const DYNAMIC_INPUT_VALIDATOR = Compile(DynamicIntentInputSchema);
 const DYNAMIC_INTENT_NAME = new RegExp(DYNAMIC_INTENT_PATTERN);
 const EXTENSION_INTENT_PREFIX = "extension.intent.";
+/** Largest input of an extension intent, in characters of JSON. */
+export const EXTENSION_INTENT_INPUT_MAX_CHARS = 64 * 1024;
 
 /** Compiled input schemas of extension intents. */
 const extensionValidators = new WeakMap<RegisteredIntent, Validator>();
@@ -327,6 +329,16 @@ export class IntentRegistry {
 		const name = nameOf(resolved);
 		assertProfileAllows(metadata, ctx, name);
 		const admittedInput = input ?? {};
+		// An extension's schema checks the input's shape; the host bounds its size before testing it.
+		if (
+			resolved.kind === "extension" &&
+			(JSON.stringify(admittedInput) ?? "").length > EXTENSION_INTENT_INPUT_MAX_CHARS
+		) {
+			throw new IntentRejectedError(
+				"invalid_input",
+				`Invalid ${name} input: larger than ${EXTENSION_INTENT_INPUT_MAX_CHARS} characters of JSON`,
+			);
+		}
 		const validator =
 			resolved.kind === "builtin"
 				? this.validator(resolved.definition.name)

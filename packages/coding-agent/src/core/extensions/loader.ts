@@ -207,10 +207,17 @@ function deepFreeze<T>(value: T): T {
 	return value;
 }
 
+/** Whether `pattern` is anchored at both ends: it starts with `^` and ends with an unescaped `$`. */
+function isAnchored(pattern: string): boolean {
+	const escapes = /\\*\$$/.exec(pattern)?.[0].length ?? 0;
+	return pattern.startsWith("^") && escapes > 0 && (escapes - 1) % 2 === 0;
+}
+
 /**
  * Refuse schema keywords that test client input with patterns which may
- * backtrack without bound: every `pattern` must be safe to test (as a form
- * field's is), and `patternProperties` is not supported.
+ * backtrack without bound: every `pattern` must be anchored (`^…$`, as JSON
+ * Schema tests patterns unanchored) and safe to test, as a form field's is;
+ * `patternProperties` is not supported.
  */
 function checkSchemaPatterns(name: string, value: unknown): void {
 	if (Array.isArray(value)) {
@@ -222,9 +229,9 @@ function checkSchemaPatterns(name: string, value: unknown): void {
 		if (key === "patternProperties") {
 			throw new TypeError(`Intent ${name}: input schemas do not support patternProperties`);
 		}
-		if (key === "pattern" && typeof entry === "string" && !isSafeFormPattern(entry)) {
+		if (key === "pattern" && typeof entry === "string" && !(isAnchored(entry) && isSafeFormPattern(entry))) {
 			throw new TypeError(
-				`Intent ${name}: input pattern ${JSON.stringify(entry)} must not repeat a repeating group or use backreferences`,
+				`Intent ${name}: input pattern ${JSON.stringify(entry)} must be anchored with ^ and $, and must not repeat a repeating group or use backreferences`,
 			);
 		}
 		checkSchemaPatterns(name, entry);

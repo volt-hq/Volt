@@ -3703,7 +3703,7 @@ export class InteractiveMode {
 			const stackLines = stack
 				.split("\n")
 				.slice(1) // Skip first line (duplicates error message)
-				.map((line) => theme.fg("dim", `  ${line.trim()}`))
+				.map((line) => theme.fg("dim", `  ${stripTerminalControls(line).trim()}`))
 				.join("\n");
 			if (stackLines) {
 				this.chatContainer.addChild(new Text(stackLines, 1, 0));

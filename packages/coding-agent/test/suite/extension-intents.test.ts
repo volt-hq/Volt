@@ -63,7 +63,8 @@ describe("extension intents", () => {
 		let name = "";
 		const input = Type.Object(
 			{
-				target: Type.String({ description: "A target such as /home/ada/deploys/prod" }),
+				target: Type.String({ description: "A target such as /home/ada/deploys/prod", pattern: "^[a-z/]+$" }),
+				region: Type.Optional(Type.Union([Type.Literal("eu"), Type.Literal("/home/ada/regions/us")])),
 				dryRun: Type.Optional(Type.Boolean()),
 			},
 			{ additionalProperties: false },
@@ -130,8 +131,14 @@ describe("extension intents", () => {
 			input: { type: "object", required: ["target"] },
 			enabled: true,
 		});
-		// Its descriptive text reaches clients with host paths redacted.
+		// Its text reaches clients with host paths redacted, its patterns as they are.
 		expect(JSON.stringify(descriptor?.input)).not.toContain("/home/ada");
+		expect(descriptor?.input).toMatchObject({ properties: { target: { pattern: "^[a-z/]+$" } } });
+		// Input over the host's bound is refused before the schema tests it.
+		await expect(intentRegistry.invokeFrame(context(), name, { target: "a".repeat(70_000) })).rejects.toMatchObject({
+			code: "invalid_input",
+			message: expect.stringContaining("larger than"),
+		});
 		expect(descriptor?.input).toMatchObject({
 			properties: { target: { description: "A target such as [redacted path]" } },
 		});
@@ -288,6 +295,13 @@ describe("extension intents", () => {
 			attempt(() =>
 				volt.registerIntent("ok", {
 					label: "x",
+					input: Type.Object({ s: Type.String({ pattern: "a+b" }) }),
+					handler: () => {},
+				}),
+			);
+			attempt(() =>
+				volt.registerIntent("ok", {
+					label: "x",
 					input: { type: "object", properties: {}, patternProperties: { "^x": {} } } as never,
 					handler: () => {},
 				}),
@@ -318,6 +332,7 @@ describe("extension intents", () => {
 			expect.stringContaining("TypeBox object schema"),
 			expect.stringContaining("remote capabilities"),
 			expect.stringContaining("must not repeat a repeating group"),
+			expect.stringContaining("must be anchored"),
 			expect.stringContaining("patternProperties"),
 			expect.stringContaining("larger than"),
 			"Intent ok is already registered",
