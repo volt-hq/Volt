@@ -25,6 +25,7 @@ import {
 	releaseLocalSessionWorktree,
 	restoreLocalSessionWorktree,
 	retainLocalSessionWorktree,
+	type SessionWorktreeDaemon,
 } from "../../daemon/session-worktree.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type {
@@ -99,6 +100,8 @@ export interface ConversationHostOptions {
 	readonly whenUnattached?: WhenUnattached;
 	/** Runs before each conversation a client's structural intent opens, such as a host taking the target's lease. */
 	readonly openGate?: OpenGate;
+	/** How a managed checkout is restored: a conversation worker's daemon, else a control connection of the host's own. */
+	readonly worktreeDaemon?: SessionWorktreeDaemon;
 }
 
 export interface OpenConversationOptions {
@@ -235,6 +238,7 @@ export class ConversationHost {
 	private readonly extensionMode: ExtensionMode;
 	private readonly whenUnattached: WhenUnattached;
 	private readonly openGate: OpenGate | undefined;
+	private readonly worktreeDaemon: SessionWorktreeDaemon | undefined;
 	private readonly conversations = new Set<HostedConversation>();
 	private readonly closing = new Map<HostedConversation, Promise<void>>();
 	private readonly attachments = new Map<string, Attachment>();
@@ -257,6 +261,7 @@ export class ConversationHost {
 		this.extensionMode = options.extensionMode;
 		this.whenUnattached = options.whenUnattached ?? "close";
 		this.openGate = options.openGate;
+		this.worktreeDaemon = options.worktreeDaemon;
 		this.onOpened((conversation) => this.watchSettings(conversation));
 		this.onClosed((conversation) => {
 			this.settingsWatches.get(conversation)?.();
@@ -596,7 +601,7 @@ export class ConversationHost {
 		let cwd: string;
 		try {
 			if (from) retainLocalSessionWorktree(from.session.sessionManager, sessionManager);
-			await restoreLocalSessionWorktree(sessionManager, this.agentDir);
+			await restoreLocalSessionWorktree(sessionManager, this.agentDir, this.worktreeDaemon);
 			const fallbackCwd = (target.kind === "adopt" ? target.cwd : undefined) ?? from?.cwd ?? process.cwd();
 			assertSessionCwdExists(sessionManager, fallbackCwd);
 			cwd = (target.kind === "adopt" ? target.cwd : undefined) ?? sessionManager.getCwd();

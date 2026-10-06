@@ -50,7 +50,7 @@ import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
-import { InProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
+import { InProcessWorkerLauncher } from "./suite/in-process-worker-launcher.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "./utilities/remote-phone.ts";
 

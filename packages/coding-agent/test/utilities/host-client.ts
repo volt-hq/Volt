@@ -29,6 +29,7 @@ import {
 import type { HostClient, HostClientMove } from "../../src/core/host/targets.ts";
 import type { PlanExecutionStrategy } from "../../src/core/planning.ts";
 import type { SessionManager, SessionReference } from "../../src/core/session-manager.ts";
+import type { SessionWorktreeDaemon } from "../../src/daemon/session-worktree.ts";
 
 export interface OpenTestHostOptions {
 	cwd: string;
@@ -41,6 +42,8 @@ export interface OpenTestHostOptions {
 	subagentContext?: SubagentRuntimeContext;
 	workspaceName?: string;
 	baseRef?: string;
+	/** A conversation worker's route to its daemon for managed checkouts. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 }
 
 export interface TestHost {
@@ -55,6 +58,7 @@ export async function openTestHost(factory: ConversationFactory, options: OpenTe
 		agentDir: options.agentDir,
 		extensionMode: options.extensionMode ?? "print",
 		...(options.whenUnattached === undefined ? {} : { whenUnattached: options.whenUnattached }),
+		...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 	});
 	const opened = await host.open(
 		{ kind: "adopt", sessionManager: options.sessionManager, cwd: options.cwd },

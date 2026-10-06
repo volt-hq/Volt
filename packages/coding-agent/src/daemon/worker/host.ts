@@ -27,9 +27,15 @@
  * connection stops it the same way: a worker never outlives its daemon. It
  * also exits once its primary conversation closed on its own (it lost its
  * log).
+ *
+ * For its whole run it holds a share of the daemon's worker gate
+ * (`worker-gate.ts`), so a restarted daemon admits nothing until it exited.
+ * The log of its primary may still be locked by a previous holder that is
+ * exiting: the open retries for up to 75 s, then fails `conversation_locked`.
  */
 
 import { realpath } from "node:fs/promises";
+import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../core/protocol/server/connection.ts";
@@ -37,12 +43,13 @@ import {
 	type IrohRemoteHostHandshakeFailureOutcome,
 	isIrohRemoteHostHandshakeFailureOutcome,
 } from "../../core/remote/iroh/protocol.ts";
-import { SessionManager } from "../../core/session-manager.ts";
+import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import type { WorkerSpawnSpec } from "../control-protocol.ts";
 import { createDaemonLogger } from "../log.ts";
 import { getDaemonPaths } from "../paths.ts";
 import { admitRemoteIntent } from "../remote-intents.ts";
 import { resolveIrohRemoteSessionTarget } from "../session-target.ts";
+import { holdWorkerGate } from "../worker-gate.ts";
 import type { WorkerExit, WorkerExitReason, WorkerLaunchRequest } from "../worker-launcher.ts";
 import { isPathInside } from "../workspace-directory.ts";
 import {
@@ -59,6 +66,19 @@ const SPAWN_SPEC_TIMEOUT_MS = 30_000;
 const ACTIVITY_SAMPLE_MS = 250;
 /** How long a forced stop, or the daemon's loss, lets a running turn finish. */
 export const WORKER_TURN_CAP_MS = 60_000;
+/** How long a starting worker retries the lock of its primary's log while another holder has it. */
+export const WORKER_LOCK_RETRY_MS = 75_000;
+const LOCK_RETRY_FIRST_DELAY_MS = 50;
+const LOCK_RETRY_MAX_DELAY_MS = 2_000;
+
+export interface RunWorkerOptions {
+	/** How long the primary's open retries a held lock; `WORKER_LOCK_RETRY_MS` by default. */
+	readonly lockRetryMs?: number;
+	/** Once aborted, the worker stops as on a forced stop: a running turn finishes, for at most 60 s. */
+	readonly signal?: AbortSignal;
+	/** The worker began to stop. */
+	onStopping?(reason: WorkerExitReason): void;
+}
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -87,10 +107,41 @@ async function assertInsideRoot(root: string, cwd: string): Promise<void> {
 	}
 }
 
+/**
+ * Open `ref` for writing, retrying while another holder has its lock: a
+ * replacement opens once the previous holder exited. Gives up at `retryMs`,
+ * or once `signal` aborts, with the lock's error.
+ */
+async function openRetryingLock(ref: SessionReference, retryMs: number, signal: AbortSignal): Promise<SessionManager> {
+	const deadline = Date.now() + retryMs;
+	let delayMs = LOCK_RETRY_FIRST_DELAY_MS;
+	for (;;) {
+		try {
+			return await SessionManager.open(ref);
+		} catch (error) {
+			if (!(error instanceof ConversationLockedError) || signal.aborted || Date.now() + delayMs > deadline) {
+				throw error;
+			}
+		}
+		await new Promise<void>((resolve) => {
+			const wake = () => {
+				clearTimeout(timer);
+				signal.removeEventListener("abort", wake);
+				resolve();
+			};
+			const timer = setTimeout(wake, delayMs);
+			signal.addEventListener("abort", wake, { once: true });
+		});
+		delayMs = Math.min(delayMs * 2, LOCK_RETRY_MAX_DELAY_MS);
+	}
+}
+
 /** Open the spawn's stored conversation in a host of its own. */
 async function openPrimary(
 	spec: WorkerSpawnSpec,
 	agentDir: string,
+	client: WorkerDaemonClient,
+	lock: { readonly retryMs: number; readonly signal: AbortSignal },
 	onSubagentRuntimeCreated: (
 		event: IrohRemoteSubagentRuntimeCreatedEvent,
 	) => ReturnType<WorkerConversations["registerChild"]>,
@@ -102,7 +153,7 @@ async function openPrimary(
 		{
 			list: async () => [{ id: ref.sessionId, ref }],
 			find: async (sessionId) => (sessionId === ref.sessionId ? ref : undefined),
-			open: (opened) => SessionManager.open(opened),
+			open: (opened) => openRetryingLock(opened, lock.retryMs, lock.signal),
 			create: () => Promise.reject(new Error("A worker opens a stored conversation")),
 		},
 	);
@@ -118,15 +169,33 @@ async function openPrimary(
 		resolvedSessionTarget: target,
 		validateCwd: (cwd) => assertInsideRoot(spec.root, cwd),
 		onSubagentRuntimeCreated,
+		// Managed checkouts are restored by the daemon over the worker's own connection.
+		worktreeDaemon: { restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd) },
 	});
 	return runtime;
 }
 
 /**
- * Run one conversation worker until it stops. Resolves how it exited; never
- * rejects.
+ * Run one conversation worker until it stops, holding its share of the
+ * daemon's worker gate throughout. Resolves how it exited; never rejects.
  */
-export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExit> {
+export async function runWorker(request: WorkerLaunchRequest, options: RunWorkerOptions = {}): Promise<WorkerExit> {
+	let gate: ReturnType<typeof holdWorkerGate>;
+	try {
+		gate = holdWorkerGate(request.agentDir);
+	} catch (error) {
+		return { reason: "failed", error: errorMessage(error) };
+	}
+	// A daemon holds the gate while it waits for an earlier daemon's workers: this worker's daemon is gone.
+	if (!gate) return { reason: "failed", error: "the daemon that spawned this worker is gone" };
+	try {
+		return await serveWorker(request, options);
+	} finally {
+		gate.close();
+	}
+}
+
+async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptions): Promise<WorkerExit> {
 	let host: ConversationHost | undefined;
 	let conversations: WorkerConversations | undefined;
 	/** Settles once the primary opened, or failed to: a stop meanwhile closes what opened. */
@@ -136,6 +205,8 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 	let reportedActive = false;
 	let sampler: ReturnType<typeof setInterval> | undefined;
 	const exit = Promise.withResolvers<WorkerExit>();
+	/** Aborted once the worker stops: an open still retrying its primary's lock gives up. */
+	const halted = new AbortController();
 	/** The streams the worker serves, by relay. */
 	const served = new Map<string, ProtocolConnection>();
 	/** Relays whose client lost its authority, with the fatal code their stream ends with. */
@@ -147,6 +218,8 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 	/** Admit nothing new, let a running turn finish (at most `capMs` when given), end the streams, close every conversation, and exit. */
 	const stop = (reason: WorkerExitReason, capMs: number | undefined, shutdown = false): Promise<WorkerExit> => {
 		shuttingDown ||= shutdown;
+		if (!stopping) options.onStopping?.(reason);
+		halted.abort();
 		stopping ??= (async (): Promise<WorkerExit> => {
 			clearInterval(sampler);
 			await opening.catch(() => undefined);
@@ -303,6 +376,9 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 		await client.close().catch(() => undefined);
 		return { reason: "failed", error: errorMessage(error) };
 	}
+	// The worker's process was asked to exit: it stops as on a forced stop.
+	if (options.signal?.aborted) void stop("stopped", WORKER_TURN_CAP_MS);
+	options.signal?.addEventListener("abort", () => void stop("stopped", WORKER_TURN_CAP_MS), { once: true });
 
 	let opened: { host: ConversationHost; conversation: HostedConversation };
 	try {
@@ -313,7 +389,13 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 				log: createDaemonLogger({ logPath: getDaemonPaths(request.agentDir).logPath }).child("compaction"),
 			});
 			conversations = hosted;
-			const result = await openPrimary(spec, request.agentDir, (event) => hosted.registerChild(event));
+			const result = await openPrimary(
+				spec,
+				request.agentDir,
+				client,
+				{ retryMs: options.lockRetryMs ?? WORKER_LOCK_RETRY_MS, signal: halted.signal },
+				(event) => hosted.registerChild(event),
+			);
 			host = result.host;
 			hosted.adoptPrimary(result.host, result.conversation);
 			return result;

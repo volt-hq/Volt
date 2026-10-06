@@ -5,13 +5,10 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import { PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
-import {
-	InProcessWorkerLauncher,
-	type LaunchedWorker,
-	type WorkerLaunchRequest,
-} from "../src/daemon/worker-launcher.ts";
+import type { LaunchedWorker, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { WorkerOpenError } from "../src/daemon/worker-registry.ts";
 import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.ts";
+import { InProcessWorkerLauncher } from "./suite/in-process-worker-launcher.ts";
 
 const harnesses: DaemonHarness[] = [];
 
@@ -178,8 +175,8 @@ describe("daemon conversation workers", () => {
 		expect(messages).toEqual([expect.objectContaining({ type: "hello_ack", ok: false, error: "auth_failed" })]);
 	}, 30_000);
 
-	it("fails the open when the worker cannot take the conversation's lock", async () => {
-		const harness = await startHarness();
+	it("fails the open when the worker cannot take the conversation's lock within its retry window", async () => {
+		const harness = await startHarness({ workerLauncher: new InProcessWorkerLauncher({ lockRetryMs: 300 }) });
 		const ref = await harness.createSession();
 		const holder = await SessionManager.open(ref);
 		try {
@@ -188,6 +185,20 @@ describe("daemon conversation workers", () => {
 		} finally {
 			await holder.closePersistence();
 		}
+	}, 30_000);
+
+	it("opens once the previous holder of the conversation's lock released it", async () => {
+		const harness = await startHarness();
+		const ref = await harness.createSession();
+		const holder = await SessionManager.open(ref);
+		const opened = harness.openWorker(ref, { attach: "remote" });
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect((await harness.status()).workers).toEqual([expect.objectContaining({ state: "starting" })]);
+		await holder.closePersistence();
+		const { worker, release } = await opened;
+		expect(worker.spec.session).toEqual(ref);
+		expect(await lockIsFree(ref)).toBe(false);
+		release();
 	}, 30_000);
 
 	it("retires a fenced workspace's workers before the fence settles", async () => {

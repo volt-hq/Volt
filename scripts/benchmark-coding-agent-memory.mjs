@@ -13,6 +13,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const sourceCliPath = join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
 const workerPath = join(scriptDir, "benchmark-coding-agent-memory-worker.mjs");
+const daemonWorkerDriverPath = join(scriptDir, "benchmark-coding-agent-memory-daemon-worker.mjs");
 const preloadPath = join(scriptDir, "benchmark-coding-agent-memory-preload.cjs");
 const REPORT_SCHEMA_VERSION = 1;
 const SNAPSHOT_PROTOCOL_VERSION = 1;
@@ -24,6 +25,7 @@ const PROCESS_EXIT_GRACE_MS = 5_000;
 
 export const MEMORY_BENCHMARK_SCENARIOS = Object.freeze([
 	"daemon-idle",
+	"worker-idle",
 	"rpc-idle",
 	"runtime-idle",
 	"conversation",
@@ -35,6 +37,7 @@ export const MEMORY_BENCHMARK_SCENARIOS = Object.freeze([
 
 export const MEMORY_BENCHMARK_CHECKPOINTS = Object.freeze({
 	"daemon-idle": ["idle"],
+	"worker-idle": ["idle"],
 	"rpc-idle": ["idle"],
 	"runtime-idle": ["baseline", "post-disposal"],
 	conversation: ["baseline", "populated", "post-disposal"],
@@ -1047,8 +1050,70 @@ async function runRpcScenario(options, setActiveCleanup) {
 	}
 }
 
+/**
+ * A daemon (in the driver's process) opens a stored, empty conversation in a
+ * conversation worker process; the snapshot is the worker's, once it is ready
+ * and idle, with the spawn's latency from the open to its readiness.
+ */
+async function runDaemonWorkerScenario(options, setActiveCleanup) {
+	const context = await createRunContext("conversation-worker");
+	setActiveCleanup(() => context.cleanup.run());
+	const startedAt = performance.now();
+	let running;
+	try {
+		running = spawnLongRunning(
+			process.execPath,
+			[
+				// No --expose-gc in argv: the session store's worker threads inherit argv and refuse it. The
+				// snapshot is the conversation worker's, which has it from NODE_OPTIONS.
+				"--experimental-strip-types",
+				"--conditions",
+				"volt-source",
+				daemonWorkerDriverPath,
+				"--root",
+				context.paths.root,
+			],
+			{ cwd: repoRoot, env: context.env },
+		);
+		// The worker is the driver's child: terminating the driver's tree ends it too.
+		context.cleanup.add("terminate worker-idle driver", () => terminateProcessTree(running.child.pid, running.child));
+		const events = new WorkerEventQueue(running.child.stdout, running.exit);
+		const event = await events.next();
+		if (event?.type !== "checkpoint" || event.name !== "idle" || typeof event.id !== "string") {
+			throw new Error(`Expected worker-idle/idle checkpoint, received ${JSON.stringify(event)}`);
+		}
+		const workerPid = event.details?.workerPid;
+		const spawnLatencyMs = event.details?.spawnLatencyMs;
+		if (!Number.isInteger(workerPid) || !Number.isFinite(spawnLatencyMs)) {
+			throw new Error(`worker-idle checkpoint lacks the worker: ${JSON.stringify(event.details)}`);
+		}
+		const hello = await context.snapshotServer.waitForHello();
+		assert.equal(hello.pid, workerPid);
+		const checkpoint = await captureCheckpoint(context.snapshotServer, "idle", startedAt, options.settleMs);
+		checkpoint.invariants = event.details;
+		checkpoint.metrics = { "worker.spawnLatencyMs": spawnLatencyMs };
+		await context.snapshotServer.release();
+		running.child.stdin.write(`${JSON.stringify({ type: "continue", id: event.id })}\n`);
+		const done = await events.next();
+		if (done?.type !== "done") throw new Error(`Expected worker-idle completion, received ${JSON.stringify(done)}`);
+		running.child.stdin.end();
+		await waitForExit(running, WORKER_TIMEOUT_MS);
+		if (!(await waitForProcessExit(workerPid, PROCESS_EXIT_GRACE_MS))) {
+			throw new Error(`worker pid ${workerPid} remained after its daemon stopped`);
+		}
+		return { checkpoints: [checkpoint], durationMs: performance.now() - startedAt };
+	} finally {
+		try {
+			await context.cleanup.run();
+		} finally {
+			setActiveCleanup(undefined);
+		}
+	}
+}
+
 async function runOneScenario(scenario, options, setActiveCleanup) {
 	if (scenario === "daemon-idle") return runDaemonScenario(options, setActiveCleanup);
+	if (scenario === "worker-idle") return runDaemonWorkerScenario(options, setActiveCleanup);
 	if (scenario === "rpc-idle") return runRpcScenario(options, setActiveCleanup);
 	return runWorkerScenario(scenario, options, setActiveCleanup);
 }
@@ -1061,6 +1126,7 @@ function flattenCheckpointMetrics(checkpoint) {
 		metrics[`activeResources.${name}`] = value;
 	}
 	for (const [name, value] of Object.entries(checkpoint.snapshot.timing)) metrics[`timing.${name}`] = value;
+	for (const [name, value] of Object.entries(checkpoint.metrics ?? {})) metrics[name] = value;
 	if (checkpoint.processTree.supported) {
 		metrics["processTree.aggregateRssBytes"] = checkpoint.processTree.aggregateRssBytes;
 		metrics["processTree.processCount"] = checkpoint.processTree.processCount;
@@ -1143,6 +1209,7 @@ function createReport(options, runs) {
 				extension: { schemaVersion: 1, language: "typescript", loader: "jiti" },
 				mcp: { schemaVersion: 1, transport: "stdio", calls: 1 },
 				lsp: { schemaVersion: 1, transport: "stdio", queries: 1 },
+				workerIdle: { schemaVersion: 1, launcher: "process", conversation: "stored-empty", clients: 0 },
 			},
 		},
 		runs,

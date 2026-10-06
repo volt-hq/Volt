@@ -28,6 +28,7 @@ import {
 	type ResolvedSessionTargetWithManager,
 	resolveIrohRemoteSessionTarget,
 } from "../session-target.ts";
+import type { SessionWorktreeDaemon } from "../session-worktree.ts";
 
 export interface IrohRemoteAgentRuntimeOptions {
 	/** Legacy unresolved grant used by direct callers. Daemon runtimes pass toolPolicy instead. */
@@ -58,6 +59,8 @@ export interface IrohRemoteAgentRuntimeOptions {
 	sessionDir?: string;
 	/** Validate the resolved session cwd before services/tools are created. */
 	validateCwd?: (cwd: string) => Promise<void> | void;
+	/** The worker's route to its daemon for managed checkouts. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 }
 
 export interface IrohRemoteSubagentRuntimeCreatedEvent extends SubagentRuntimeCreatedEvent {
@@ -246,6 +249,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			agentDir,
 			extensionMode: "rpc",
 			whenUnattached: "keep",
+			...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 		});
 		const opened = await host.open(
 			{ kind: "adopt", sessionManager: sessionTarget.sessionManager, cwd: runtimeCwd },

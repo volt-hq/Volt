@@ -149,6 +149,7 @@ Comparison requires identical Node version, platform, architecture, selected sce
 | Scenario | Checkpoints | Lifecycle exercised |
 | --- | --- | --- |
 | `daemon-idle` | `idle` | Shared source daemon launch, including `--optimize-for-size`, authenticated empty status, Iroh relay-disabled readiness, graceful shutdown |
+| `worker-idle` | `idle` | A daemon in the driver's process opens a stored, empty conversation in a conversation worker process (`volt daemon worker` from source, a generated faux provider extension, the phones' default tools), no client attached; the snapshot is the worker's, and `worker.spawnLatencyMs` is the time from the open to the worker's readiness |
 | `rpc-idle` | `idle` | Protocol `hello` and a snapshot subscription while stdin and the benchmark snapshot channel remain open, then clean EOF shutdown |
 | `runtime-idle` | `baseline`, `post-disposal` | Persisted conversation in a `ConversationHost` with the faux provider |
 | `conversation` | `baseline`, `populated`, `post-disposal` | Schema-v1 fixed conversation: 20 user/assistant turns, exactly 2 KiB of text per message |

@@ -3,10 +3,11 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
-import { relative, resolve, sep } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
-import { createAgentSessionServices } from "../core/agent-session-services.ts";
+import { AuthStorage } from "../core/auth-storage.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
+import { ModelRegistry } from "../core/model-registry.ts";
 import { intentRegistry } from "../core/protocol/intents/index.ts";
 import { type IntentContext, WorkspaceIntentError } from "../core/protocol/intents/types.ts";
 import { queryRegistry } from "../core/protocol/queries/index.ts";
@@ -176,7 +177,7 @@ import {
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
-import type { LiveWorker, WorkerRegistry } from "./worker-registry.ts";
+import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import {
 	evaluateWorktreeRelayGate,
@@ -185,6 +186,7 @@ import {
 	getWorktreesRoot,
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
+	WorktreeCapacityError,
 	WorktreeManager,
 	type WorktreeResult,
 	WorktreeRetentionSweeper,
@@ -952,6 +954,11 @@ class IrohDaemonService {
 	private readonly workerClients = new Map<string, Set<string>>();
 	/** Workers spawned in a managed worktree: their exit lets the worktree's retention run. */
 	private readonly workerWorktrees = new Map<string, { workspaceName: string; worktreeId: string }>();
+	/** Checkouts workers restored, by pin id: pinned until the worker releases them or its connection ends. */
+	private readonly workerWorktreePins = new Map<
+		string,
+		{ readonly connectionId: string; readonly release: () => void }
+	>();
 	private readonly tuiChangeAuthorities = new Map<string, TuiChangeAuthorityClaim>();
 	private readonly tuiChangeRetirementTasks = new Set<Promise<void>>();
 	private tuiChangeReceiptRevision = 0n;
@@ -3381,14 +3388,10 @@ class IrohDaemonService {
 			profile: this.profile,
 			projectTrusted,
 		});
-		const services = await createAgentSessionServices({
-			cwd: workspace.path,
-			projectCwd: workspace.path,
-			agentDir: this.services.agentDir,
-			settingsManager,
-			workspaceName: workspace.name,
-		});
-		return createIrohRemoteAgentOptions(workspace.name, services, signal);
+		// The daemon runs no extension code: the models of the built-in catalog and models.json.
+		const authStorage = AuthStorage.create(join(this.services.agentDir, "auth.json"));
+		const modelRegistry = ModelRegistry.create(authStorage, join(this.services.agentDir, "models.json"));
+		return createIrohRemoteAgentOptions(workspace.name, { modelRegistry, settingsManager }, signal);
 	}
 
 	private prReviewAuthority(
@@ -5072,6 +5075,8 @@ class IrohDaemonService {
 			case "worker_moved":
 			case "worker_last_session":
 			case "worker_authority":
+			case "worker_worktree_restore":
+			case "worker_worktree_release":
 				await this.handleWorkerRequest(connection, request);
 				return true;
 			case "lease_acquire": {
@@ -5588,7 +5593,9 @@ class IrohDaemonService {
 					| "worker_notification_delivery"
 					| "worker_moved"
 					| "worker_last_session"
-					| "worker_authority";
+					| "worker_authority"
+					| "worker_worktree_restore"
+					| "worker_worktree_release";
 			}
 		>,
 	): Promise<void> {
@@ -5677,6 +5684,54 @@ class IrohDaemonService {
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}
+			case "worker_worktree_restore": {
+				const workerId = this.workers.workerOf(connection.connectionId);
+				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
+				// Only a checkout of the worker's own workspace, under its current authority. The worktree manager
+				// requires the session's stored cwd to be `path` and the checkout to be one of that workspace's.
+				const generation = this.services.state
+					.getHostState()
+					.workspaceGenerations?.find((record) => record.workspaceName === key?.workspaceName)?.generation;
+				if (key === undefined || generation !== key.workspaceGeneration) {
+					return refuse("not_current", "the worker's workspace authority changed");
+				}
+				const held = [...this.workerWorktreePins.values()].filter(
+					(pin) => pin.connectionId === connection.connectionId,
+				).length;
+				if (held >= MAX_WORKER_HOSTED_SESSIONS) return refuse("too_many", "the worker holds too many pins");
+				let unpin: () => void;
+				try {
+					unpin = await this.worktrees.acquireLocalSessionWorktree(
+						key.workspaceName,
+						request.sessionRef,
+						request.path,
+					);
+				} catch (error) {
+					return refuse(
+						error instanceof WorktreeCapacityError ? error.code : "worktree_restore_failed",
+						error instanceof Error ? error.message : String(error),
+					);
+				}
+				// The pin ends with the worker's connection, if the worker does not release it first.
+				if (this.workers.workerOf(connection.connectionId) !== workerId) {
+					unpin();
+					return refuse("not_registered", "the worker's connection closed");
+				}
+				const pinId = randomUUID();
+				this.workerWorktreePins.set(pinId, { connectionId: connection.connectionId, release: unpin });
+				connection.send({ type: "worker_worktree_pinned", id: request.id, pinId });
+				return;
+			}
+			case "worker_worktree_release": {
+				const pin = this.workerWorktreePins.get(request.pinId);
+				if (pin === undefined || pin.connectionId !== connection.connectionId) {
+					return refuse("not_found", "the worker holds no such pin");
+				}
+				this.workerWorktreePins.delete(request.pinId);
+				pin.release();
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
 		}
 	}
 
@@ -5739,6 +5794,11 @@ class IrohDaemonService {
 
 	onControlConnectionClosed(connection: ControlConnection): void {
 		this.leaseBroker.releaseAllForConnection(connection.connectionId);
+		for (const [pinId, pin] of this.workerWorktreePins) {
+			if (pin.connectionId !== connection.connectionId) continue;
+			this.workerWorktreePins.delete(pinId);
+			pin.release();
+		}
 		const changeRetirements: Promise<void>[] = [];
 		for (const [key, claim] of this.tuiChangeAuthorities) {
 			if (claim.connectionId !== connection.connectionId) continue;

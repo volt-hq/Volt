@@ -170,6 +170,13 @@ const REQUESTS: ByType<ControlRequest> = {
 	worker_hosts: { type: "worker_hosts", id: "32", sessionId: "s-2", kind: "child", parentSessionId: "s-1" },
 	worker_released: { type: "worker_released", id: "33", sessionId: "s-2" },
 	worker_stop_result: { type: "worker_stop_result", id: "34", stopId: "stop-1", outcome: "refused_active" },
+	worker_worktree_restore: {
+		type: "worker_worktree_restore",
+		id: "40",
+		path: "/agent/worktrees/ws/amber-basin",
+		sessionRef: { sessionDirectory: "/sessions", storeId: "store", sessionId: "session", sessionGeneration: "gen" },
+	},
+	worker_worktree_release: { type: "worker_worktree_release", id: "41", pinId: "pin-1" },
 	worker_forward: {
 		type: "worker_forward",
 		id: "35",
@@ -294,6 +301,8 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_hosts: [{ kind: "primary" }, { sessionId: undefined }],
 	worker_released: [{ sessionId: 1 }],
 	worker_stop_result: [{ outcome: "maybe" }, { stopId: undefined }],
+	worker_worktree_restore: [{ path: "" }, { path: "p".repeat(4097) }, { sessionRef: undefined }],
+	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
 	worker_forward: [{ frame: undefined }, { relayId: 1 }],
 	worker_notification_delivery: [{ notification: { ...REVIEW_NOTIFICATION, title: "r".repeat(129) } }],
 	worker_moved: [{ to: undefined }],
@@ -402,6 +411,7 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-2", ordinals: [], result: { registered: true } },
 	},
 	worker_authority_result: { type: "worker_authority_result", id: "18", authority: "current" },
+	worker_worktree_pinned: { type: "worker_worktree_pinned", id: "19", pinId: "pin-1" },
 };
 
 const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string, unknown>> } = {
@@ -447,6 +457,7 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	relay_push_delivery_result: [{ status: "maybe" }],
 	worker_forward_result: [{ frame: undefined }, { frame: { type: "changed", catalog: "host" } }],
 	worker_authority_result: [{ authority: "lost" }],
+	worker_worktree_pinned: [{ pinId: undefined }],
 };
 
 const EVENTS: ByType<ControlEvent> = {

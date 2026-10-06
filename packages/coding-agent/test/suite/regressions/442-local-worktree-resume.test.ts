@@ -22,6 +22,11 @@ import { createDaemonClient } from "../../../src/daemon/control-client.ts";
 import { admitControlRequest } from "../../../src/daemon/control-protocol.ts";
 import { startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
+import {
+	closeLocalSessionManager,
+	restoreLocalSessionWorktree,
+	type SessionWorktreeDaemon,
+} from "../../../src/daemon/session-worktree.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
 import { tryAcquireWorktreeLock } from "../../../src/daemon/worktree-lock.ts";
 import {
@@ -227,6 +232,34 @@ describe("#442 local archived-worktree resume", () => {
 		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
 	});
+
+	it.each([false, true])(
+		"a conversation worker restores through its own daemon route, only an archived checkout (archived=%s)",
+		async (archive) => {
+			const f = await fixture(archive);
+			const restores: string[] = [];
+			const route: SessionWorktreeDaemon = {
+				restore: async (sessionRef, cwd) => {
+					restores.push(cwd);
+					const release = await f.manager.acquireLocalSessionWorktree(f.workspace.name, sessionRef, cwd);
+					return async () => release();
+				},
+			};
+			const manager = await SessionManager.open(f.ref);
+			cleanups.push(() => closeLocalSessionManager(manager));
+			await restoreLocalSessionWorktree(manager, f.agentDir, route);
+			// A worker never reaches for a daemon of its own.
+			expect(f.ensureDaemon).not.toHaveBeenCalled();
+			expect(restores).toEqual(archive ? [f.record.path] : []);
+			expect(existsSync(f.record.path)).toBe(true);
+			expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+				removed: false,
+				reason: "busy",
+			});
+			await closeLocalSessionManager(manager);
+			expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+		},
+	);
 
 	it("does not leak a local pin when the restored session subdirectory is missing", async () => {
 		const f = await fixture();
@@ -617,23 +650,20 @@ describe("#442 local archived-worktree resume", () => {
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
 	});
 
-	it("does not re-enter local restoration for a runtime owned by the same daemon process", async () => {
+	it("does not re-enter restoration for a worker's conversation the daemon prepared", async () => {
 		const f = await fixture();
 		const preparation = await f.manager.beginRuntimePreparation(f.workspace.name, f.record.id, f.ref.sessionId);
 		cleanups.push(() => preparation.release());
-		f.ensureDaemon.mockResolvedValue({
-			healthy: true,
-			state: "healthy",
-			spawned: false,
-			socketPath: f.server.socketPath,
-			pid: process.pid,
+		const restores: string[] = [];
+		const manager = await SessionManager.open(f.ref);
+		cleanups.push(() => closeLocalSessionManager(manager));
+		await restoreLocalSessionWorktree(manager, f.agentDir, {
+			restore: async (_sessionRef, cwd) => {
+				restores.push(cwd);
+				throw new Error("A prepared checkout needs no restoration");
+			},
 		});
-		const runtime = await createRuntime(f.factory, {
-			cwd: f.record.path,
-			agentDir: f.agentDir,
-			sessionManager: await SessionManager.open(f.ref),
-		});
-		cleanups.push(() => runtime.dispose());
+		expect(restores).toEqual([]);
 		expect(f.requests).not.toContain("worktree_restore");
 		await preparation.release();
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({

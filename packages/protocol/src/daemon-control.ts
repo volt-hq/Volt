@@ -247,6 +247,8 @@ export const ControlWorkerStatusSchema = Type.Object(
 		sessionIds: Type.Array(LogSessionIdSchema),
 		/** Relayed streams, offered or open, by client kind. */
 		clients: Type.Object({ local: NonNegativeIntegerSchema, remote: NonNegativeIntegerSchema }, closed),
+		/** The worker process's log (its stdout and stderr); absent for a worker in the daemon's own process. */
+		logPath: Type.Optional(Type.String()),
 	},
 	closed,
 );
@@ -677,6 +679,17 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		stopId: Type.String(),
 		outcome: stringEnum(["stopped", "refused_active"]),
 	}),
+	/**
+	 * Worker: restore the managed checkout `path` of a session of its
+	 * workspace, and pin it until `worker_worktree_release` or the end of the
+	 * connection. Answered by `worker_worktree_pinned`.
+	 */
+	worker_worktree_restore: withId("worker_worktree_restore", {
+		path: codePoints(1, 4096),
+		sessionRef: SessionReferenceSchema,
+	}),
+	/** Worker: release a pin `worker_worktree_restore` took. */
+	worker_worktree_release: withId("worker_worktree_release", { pinId: Type.String({ maxLength: 64 }) }),
 } as const;
 
 /** The requests a worker connection may send; a control connection may send none of them. */
@@ -692,6 +705,8 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_last_session",
 	"worker_authority",
 	"worker_stop_result",
+	"worker_worktree_restore",
+	"worker_worktree_release",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 
@@ -735,6 +750,8 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_last_session,
 	CONTROL_REQUEST_SCHEMAS.worker_authority,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_restore,
+	CONTROL_REQUEST_SCHEMAS.worker_worktree_release,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
 
@@ -808,6 +825,8 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	relay_rpc_result: withId("relay_rpc_result", { frame: ControlRelayOutcomeSchema }),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
+	/** The checkout a worker restored is pinned until it releases `pinId`. */
+	worker_worktree_pinned: withId("worker_worktree_pinned", { pinId: Type.String() }),
 	relay_push_delivery_result: withId("relay_push_delivery_result", {
 		status: IrohRemotePushNotificationDeliveryStatusSchema,
 	}),
@@ -831,6 +850,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.relay_rpc_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
+	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,
 	CONTROL_RESPONSE_SCHEMAS.relay_push_delivery_result,
 ]);
 export type ControlResponse = Static<typeof ControlResponseSchema>;

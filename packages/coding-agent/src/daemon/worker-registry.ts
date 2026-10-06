@@ -361,12 +361,18 @@ export class WorkerRegistry {
 				workerToken: record.token.toString("base64url"),
 				socketPath: this.options.socketPath(),
 				agentDir: this.options.agentDir,
+				cwd: input.cwd,
 			});
 		} catch (error) {
 			this.finish(record, { reason: "failed", error: errorMessage(error) }, error);
 			throw error;
 		}
 		record.launched = launched;
+		this.options.log?.("info", "worker started", {
+			workerId: record.workerId,
+			pid: launched.pid,
+			...(launched.logPath === undefined ? {} : { logPath: launched.logPath }),
+		});
 		// A worker that never reports ready (a lock it cannot take) is retired.
 		record.readyTimer = setTimeout(() => {
 			if (record.state === "starting") void this.retire(record, "authority");
@@ -927,6 +933,7 @@ export class WorkerRegistry {
 					local: kinds.filter((kind) => kind === "local").length,
 					remote: kinds.filter((kind) => kind === "remote").length,
 				},
+				...(record.launched?.logPath === undefined ? {} : { logPath: record.launched.logPath }),
 			};
 		});
 	}

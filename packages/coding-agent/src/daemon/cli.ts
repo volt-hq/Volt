@@ -23,7 +23,8 @@ import {
 	waitForDaemonExit,
 } from "./spawn.ts";
 import { inspectVoltdStateFiles, regenerateInvalidVoltdState } from "./state.ts";
-import { InProcessWorkerLauncher } from "./worker-launcher.ts";
+import { runWorkerProcess } from "./worker/process.ts";
+import { ProcessWorkerLauncher } from "./worker-launcher.ts";
 
 const STOP_TIMEOUT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS; // 60s drain cap + margin
 const STOP_SIGNAL_GRACE_TIMEOUT_MS = 5_000;
@@ -371,6 +372,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 		console.error(
 			`  ${worker.workerId} (pid ${worker.pid}): ${worker.state}, opened by ${worker.origin}, ${worker.workspaceName}/${worker.sessionIds.join(", ")} (clients ${clients})`,
 		);
+		if (worker.logPath !== undefined) console.error(`    log: ${worker.logPath}`);
 	}
 	console.error(`leases: ${status.leases.length}`);
 	for (const lease of status.leases) {
@@ -631,7 +633,7 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 					agentDir,
 					foreground: true,
 					prepareEnvironment: () => resolveDaemonEnvironment({ serviceStart: rest.includes("--service") }),
-					workerLauncher: new InProcessWorkerLauncher(),
+					workerLauncher: new ProcessWorkerLauncher(),
 				},
 				[createIrohDaemonService()],
 			);
@@ -639,6 +641,13 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 			// the native iroh handle can keep the event loop alive afterwards (notably
 			// on Windows), leaving a zombie that clients still probe as "draining".
 			// Exit deterministically now that teardown is complete.
+			process.exit(code);
+			return true;
+		}
+		case "worker": {
+			// Internal and unlisted: the daemon starts one per conversation worker.
+			const code = await runWorkerProcess(agentDir);
+			// Language servers, watchers, and pools may outlive the conversations; the worker is done.
 			process.exit(code);
 			return true;
 		}
