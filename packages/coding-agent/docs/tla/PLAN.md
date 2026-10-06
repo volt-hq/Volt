@@ -6,6 +6,12 @@ be written, and the shared abstraction strategy. Predicates are written in
 near-TLA prose; each ties back to a named prose invariant (I1…I7) or a §4.8 race
 row from the RFC.
 
+> **`WorkerRegistry` (section 4) is the model of record for the host/worker
+> protocol** (daemon-hosted conversations, architecture rewrite Phase 7).
+> `LeaseBroker` and `RelayViewer` model the ownership-transfer design it
+> replaces; they are superseded and are deleted with that code in Phase 7
+> slice 9.
+
 > Plain-first: every module below starts from one question a user would
 > recognize ("did my phone reconnect to the right chat?", "why did two things run
 > at once?"). The formal invariants are just those questions written precisely
@@ -22,23 +28,27 @@ to its states and the close reasons it mints.
 
 | # | Module | Plain question it answers | Key state | Bug classes |
 |---|--------|---------------------------|-----------|-------------|
-| 1 | **`LeaseBroker`** | Who's doing the work for this chat, and how does it hand off? | lease state, owner, streamCount, relays, drain, `runtimeEntry`, pendingAttaches | split-brain runtime (I1), runtime/state coherence (I2), stuck hand-off (I5), lost turn (I6), rekey orphan (I7), relays-only-in-tui (I3), grant never settled (I4). **Written — see README.** |
-| 2 | **`RelayViewer`** | While handing off, does the relay token stay single-use and does "watch the turn finish" ever leak or wedge? | relay `{Pending,Active,Invalidated,Settled}` + `used`/`expiresAt`; feed `{Buffering,Truncated,Live,Ended}` + `subscribed`/`seq`/`connId` | lost turn (event after end; silent-cancel emits nothing), token replay/expiry, double-settle, viewer feed leaking to a non-owner, stuck drain. |
+| 1 | **`LeaseBroker`** | Who's doing the work for this chat, and how does it hand off? | lease state, owner, streamCount, relays, drain, `runtimeEntry`, pendingAttaches | split-brain runtime (I1), runtime/state coherence (I2), stuck hand-off (I5), lost turn (I6), rekey orphan (I7), relays-only-in-tui (I3), grant never settled (I4). **Written — see README. Superseded by `WorkerRegistry`; deleted in Phase 7 slice 9.** |
+| 2 | **`RelayViewer`** | While handing off, does the relay token stay single-use and does "watch the turn finish" ever leak or wedge? | relay `{Pending,Active,Invalidated,Settled}` + `used`/`expiresAt`; feed `{Buffering,Truncated,Live,Ended}` + `subscribed`/`seq`/`connId` | lost turn (event after end; silent-cancel emits nothing), token replay/expiry, double-settle, viewer feed leaking to a non-owner, stuck drain. **Superseded by `WorkerRegistry`; deleted in Phase 7 slice 9.** |
 | 3 | **`SessionTarget`** | On connect, does the phone pin the *right* session — never a stale one? | `target ∈ {last_noId,last_withId,new,session}`; `hostSession ∈ {exists,missing,liveMoved}`; wire `selection`; `requestedId?`; client `{Validated,StreamOpened,PinCommitted,RolledBack}` | ghost pin (pinned to requested vs canonical id), rekey without requestedId, requestedId leaking onto created/resumed, `target=session` silently creating a session, producer/validator tuple mismatch. |
 | 4 | **`ClientAuth`** | Can a revoked or stale phone ever get back in? Is a one-time secret really one-time? | `clients`; `revoked[node]`; `pending[secretHash]`; `tomb ∈ {consumed(node),expired}`; logical `clock`; per-hello workspace authz | revoked-client re-entry, one-time secret replayed to a *different* node, expired-secret pairing, workspace-authz cached-at-pairing, check-order regressions. |
 | 5 | **`ClientConn`** | Does the phone reconnect exactly once, never when the user said disconnect, and never confuse abort with detach? | app status; `userRequestedDisconnect`; background flag; per-pin status lattice; closure ledger; monotonic `operationToken`/`reconnectGen`/`attemptId` | ghost reconnect while user-disconnected, double reconnect loop, expected-closure marker mis-consume, abort-conflated-with-detach, stale continuation commit. |
+| 6 | **`WorkerRegistry`** | Which worker hosts this chat, and can two processes ever write it, or an open wait forever? | registry worker state, key generation, hosts (spawn + claims), process, open logs, per-log lock, activity, stop acceptance; client target, relay offer, attachment; one durable input id; daemon up, workspace generation, fence in flight | two hosts or two writers per log, attach to a dead or retiring worker, offer reuse, lost or doubled input across crashes and daemon loss, retiring an attached or active worker, fenced authority acting, a wedged open, spawn, retirement, or fence. **Written — model of record; see README and section 4.** |
 
 **Build order.** `LeaseBroker` → `RelayViewer` (shares the connection-drop
 trigger; compose the two once each is green solo) → `SessionTarget` → `ClientAuth`
 → `ClientConn` (largest state space; consumes close reasons from 1–3 as an
-abstract input alphabet).
+abstract input alphabet). `WorkerRegistry` (6) later replaced 1 and 2 as the
+spine; the planned composition of 1 and 2 is dropped.
 
 ---
 
-## 2. `LeaseBroker` (written)
+## 2. `LeaseBroker` (written; superseded)
 
-Full detail is in [`README.md`](README.md#the-leasebroker-module) and the header
-comment of `LeaseBroker.tla`. Summary of what it checks:
+Superseded by `WorkerRegistry` (section 4); deleted with the lease code in Phase 7
+slice 9. Full detail is in
+[`README.md`](README.md#the-leasebroker-module-superseded) and the header comment
+of `LeaseBroker.tla`. Summary of what it checks:
 
 - **Safety:** `OwnershipUnique` (I1), `RuntimeIffDaemon` (I2), `TuiOwnerWellFormed`
   (I3a), `DisposePendingOnlyTui`, `RelaysOnlyWhenTui` (I3b), `DrainHasAcquirer`
@@ -60,7 +70,10 @@ runner, disposal, ack handlers) and on "the environment eventually satisfies the
 network / eventually idles"; revocation and user-disconnect are adversarial (no
 fairness — they are choices, not obligations).
 
-### 3.2 `RelayViewer` — written + verified green
+### 3.2 `RelayViewer` — written + verified green (superseded)
+
+Superseded: relay offers are modeled in `WorkerRegistry` (section 4), and the
+viewer feed is deleted. The module goes in Phase 7 slice 9.
 
 Implemented in `RelayViewer.tla` (207,025 states). The prose below is the design
 intent; the shipped module realizes it with `FeedOwnerSet`, `BufferCoherent`,
@@ -187,3 +200,34 @@ design intent.
 `lease_transferred` on the selected agent re-establishes a live stream — ties back
 to `LeaseBroker`/`RelayViewer` close reasons), `BoundedRetryLoops` (duplicate ≤5,
 lease_draining ≤3 both terminate).
+
+---
+
+## 4. `WorkerRegistry` (written; model of record)
+
+Implemented in `WorkerRegistry.tla` from the Phase 7 plan (#585, sections 1 and 6)
+and daemon-hosted conversations RFC §4–§5; full detail, model decisions, bounds,
+and results are in [`README.md`](README.md#the-workerregistry-module-model-of-record).
+It models the daemon's worker registry keyed by `(workspace, generation,
+session)`, coalesced spawns, claims, single-use relay offers, the per-log lock
+and exit-ordered replacement, retention with a refusable stop handshake, worker
+crashes, workspace fences, and daemon loss with orphaned workers.
+
+**Safety:** `OneHost`, `OneWriter`, `LockCoherent`, `ReadyHoldsLocks`,
+`AttachOnlyToLive`, `NoOfferToRetiring`, `NoLostInput`, `ExactlyOnce`,
+`RetireOnlyDetachedIdle`, and the action properties `OfferAdmittedOnce`,
+`ClaimRespectsHost`, `FencedWorkersInert`. Off in the baseline because the plan's
+design does not satisfy them (an orphan of a dead daemon can outlive a workspace
+mutation; see the README finding): `RetireReportsAfterExit` (W4) and
+`NoGenerationOverlap` (W5), checked by `WorkerRegistryOrphans.cfg` (trace) and
+`WorkerRegistryRestartWaits.cfg` (the proposed fix, green).
+
+**Liveness:** `OpenServed`, `RetiringExits`, `StartingSettles`,
+`DetachedIdleRetires`, `OrphansExit`, `WorkspaceRetireCompletes`, under weak
+fairness on daemon and worker steps, with faults (worker crash, offer expiry,
+daemon crash) bounded by `MaxFaults`.
+
+**Upkeep.** Every Phase 7 slice that changes registry semantics updates the model
+first and re-runs `./check.sh WorkerRegistry`, pasting the TLC summary in its pull
+request. A trace TLC finds is fixed in the model and the code, with a regression
+test.
