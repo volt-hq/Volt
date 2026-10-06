@@ -12,7 +12,7 @@ import type { HostedConversation } from "../../core/host/hosted-conversation.ts"
 import { type IntentContext, intentRegistry } from "../../core/protocol/intents/index.ts";
 import { queryRegistry } from "../../core/protocol/queries/index.ts";
 import { SessionManager } from "../../core/session-manager.ts";
-import { linkedSubagentConversation } from "../../core/subagents/work.ts";
+import { linkedChildConversation } from "../../core/work/children.ts";
 import type {
 	LiveWorkValue,
 	WorkConversation,
@@ -256,7 +256,7 @@ export class TuiWorkSource implements WorkSource {
 		const conversation = this.host.conversation();
 		const record = conversation.work.get(workId);
 		const title = record?.title ?? outcome.conversation;
-		const child = linkedSubagentConversation(conversation, outcome.conversation);
+		const child = linkedChildConversation(conversation, outcome.conversation);
 		if (child) return { kind: "view", conversation: openConversationView(title, child) };
 		if (!record || record.child?.conversation !== outcome.conversation) {
 			throw new Error("The conversation of this work is not open");

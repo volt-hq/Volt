@@ -120,6 +120,17 @@ describe("Conversation work", () => {
 		expect(conversation.state).toEqual(fold(await readLog(log)));
 	});
 
+	it("moves open work to the conversation a checkpoint names", async () => {
+		const { conversation, log } = await reconciled({ withModel: false });
+		await conversation.work.start({ ...JOB, workId: "w" });
+		await conversation.work.checkpoint("w", { child: { conversation: "pass-1" } });
+		await conversation.work.checkpoint("w", { progress: { text: "verifying" } });
+		expect(conversation.state.work.get("w")).toMatchObject({ child: { conversation: "pass-1" }, checkpoints: 2 });
+		await conversation.work.checkpoint("w", { child: { conversation: "pass-2" } });
+		expect(conversation.state.work.get("w")?.child).toEqual({ conversation: "pass-2" });
+		expect(conversation.state).toEqual(fold(await readLog(log)));
+	});
+
 	it("wakes an idle conversation with a delivered result's notice", async () => {
 		const { conversation, faux, events } = await reconciled();
 		const requests: string[][] = [];

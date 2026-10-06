@@ -401,7 +401,10 @@ export const ForkedFromEntryPayloadSchema = Type.Object(
 // Work (RFC §7; vocabulary and bounds in work.ts)
 // ============================================================================
 
-/** The conversation work runs in: a subagent's child log. `ref` locates it when the child is persisted. */
+/**
+ * The conversation work runs in: a subagent's child log, or the pass a review
+ * runs now. `ref` locates it when the child is persisted.
+ */
 export const WorkChildSchema = Type.Object(
 	{ conversation: LogSessionIdSchema, ref: Type.Optional(SessionReferenceSchema) },
 	closed,
@@ -476,13 +479,18 @@ export const WorkStartedEntryPayloadSchema = Type.Object(
 	closed,
 );
 
-/** A coarse checkpoint: a state transition or a kind phase. Fine-grained progress uses the live lane. */
+/**
+ * A coarse checkpoint: a state transition, a kind phase, or the conversation
+ * the work runs in from now on (a review's next pass). Fine-grained progress
+ * uses the live lane.
+ */
 export const WorkCheckpointEntryPayloadSchema = Type.Object(
 	{
 		workId: LogEntryIdSchema,
 		state: Type.Optional(stringEnum(["running", "cancelling"])),
 		progress: Type.Optional(WorkProgressSchema),
 		detail: Type.Optional(UiNodeSchema),
+		child: Type.Optional(WorkChildSchema),
 	},
 	{ ...closed, "x-volt-max-serialized-bytes": WORK_CHECKPOINT_MAX_SERIALIZED_BYTES },
 );

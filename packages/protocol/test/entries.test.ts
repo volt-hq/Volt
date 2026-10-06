@@ -357,6 +357,16 @@ describe("work entries", () => {
 		expect(Check(LogEntrySchema, withPayload("work_checkpoint", { state: "awaiting_approval" }))).toBe(false);
 		expect(Check(LogEntrySchema, withPayload("work_checkpoint", { progress: { value: -1 } }))).toBe(false);
 		expect(Check(LogEntrySchema, entryOf("work_checkpoint", { payload: { workId: "sa_1" } }))).toBe(true);
+		// A checkpoint names the conversation the work runs in from now on, such as a review's next pass.
+		expect(
+			Check(
+				LogEntrySchema,
+				entryOf("work_checkpoint", { payload: { workId: "sa_1", child: { conversation: "pass-2" } } }),
+			),
+		).toBe(true);
+		expect(
+			Check(LogEntrySchema, entryOf("work_checkpoint", { payload: { workId: "sa_1", child: { session: "x" } } })),
+		).toBe(false);
 		for (const outcome of ["completed", "failed", "cancelled", "interrupted"]) {
 			expect(Check(LogEntrySchema, withPayload("work_finished", { outcome })), outcome).toBe(true);
 		}
