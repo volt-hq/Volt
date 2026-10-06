@@ -138,7 +138,7 @@ describe("the TUI's transcript from its store", () => {
 		async (tuiMode) => {
 			const { harness, tui, session } = await start({ tuiMode });
 			harness.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'first\\n'; sleep 1; printf 'second\\n'" }), {
+				fauxAssistantMessage(fauxToolCall("bash", { command: "printf 'first\\n'; sleep 3; printf 'second\\n'" }), {
 					stopReason: "toolUse",
 				}),
 				fauxAssistantMessage("finished"),
@@ -150,7 +150,7 @@ describe("the TUI's transcript from its store", () => {
 			await session.waitForIdle();
 			const shown = await waitForScreen(tui, "[success]", "second", "finished");
 			expect(shown).not.toContain("[running]");
-			expect(occurrences(shown, "sleep 1")).toBe(1);
+			expect(occurrences(shown, "sleep 3")).toBe(1);
 		},
 	);
 
