@@ -162,6 +162,47 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		await expect.poll(async () => (await harness.status()).workers[0]?.clients.remote).toBe(0);
 	}, 60_000);
 
+	it("stops the running turn at once when the client that opened the worker is revoked", async () => {
+		const harness = await startHarness();
+		const ref = await harness.createSession();
+		const started = Promise.withResolvers<void>();
+		let aborted = false;
+		// A turn that answers only once aborted.
+		harness.faux.setResponses([
+			async (_context, options) => {
+				started.resolve();
+				await new Promise<void>((resolve) => {
+					if (options?.signal?.aborted) resolve();
+					options?.signal?.addEventListener("abort", () => resolve(), { once: true });
+				});
+				aborted = true;
+				return fauxAssistantMessage("aborted");
+			},
+		]);
+		const paired = await pair(harness);
+		const opened = await paired.openConversation({ target: "session", sessionId: ref.sessionId });
+		const phone = opened.phone!;
+		await phone.hello();
+		await phone.subscribe(ref.sessionId);
+		expect(await phone.intent("prompt", { message: "run" })).toMatchObject({ type: "accepted" });
+		await started.promise;
+
+		const revokedAt = Date.now();
+		expect(await harness.control.request({ type: "client_revoke", clientNodeId: paired.nodeId })).toMatchObject({
+			type: "ok",
+		});
+		// The worker retires for the lost authority without waiting out the 60 s turn cap.
+		await expect.poll(async () => (await harness.status()).workers, { timeout: 10_000 }).toEqual([]);
+		expect(aborted).toBe(true);
+		expect(Date.now() - revokedAt).toBeLessThan(10_000);
+		expect(harness.audit()).toContainEqual(
+			expect.objectContaining({
+				type: "worker_stop",
+				details: expect.objectContaining({ reason: "authority", force: true }),
+			}),
+		);
+	}, 60_000);
+
 	it("forwards the phone's daemon-backed queries, and its completion pushes, with the relay's authority", async () => {
 		const harness = await startHarness();
 		const ref = await harness.createSession();
@@ -293,7 +334,8 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 			other = scripted.client;
 			return scripted.worker;
 		});
-		await harness.openWorker(await harness.createSession());
+		const otherRef = await harness.createSession();
+		await harness.openWorker(otherRef);
 		if (!other) throw new Error("The scripted worker did not launch");
 		const client = await other;
 
@@ -327,6 +369,19 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 			type: "error",
 			code: "not_hosted",
 		});
+		// A move from its own conversation leads only to a stored session of its workspace.
+		expect(
+			await client.request({
+				type: "worker_moved",
+				from: otherRef.sessionId,
+				to: "01a00000-0000-7000-8000-000000000000",
+			}),
+		).toMatchObject({ type: "error", code: "invalid_session" });
+		expect(await client.request({ type: "worker_moved", from: otherRef.sessionId, to: ref.sessionId })).toMatchObject(
+			{
+				type: "ok",
+			},
+		);
 	}, 60_000);
 
 	it("opens an extension command's new session in the phone's worker and seeds it once the phone reconnects (D1)", async () => {

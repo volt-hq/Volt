@@ -198,8 +198,15 @@ export class WorkerConversations {
 			if (this.observations.get(sessionId) === binding) this.observations.delete(sessionId);
 			if (this.hosted.get(sessionId) !== hosted) return;
 			this.hosted.delete(sessionId);
-			// The primary closes with the worker; the daemon drops it then.
-			if (hosted.kind !== "primary") void this.client.released(sessionId).catch(() => undefined);
+			// The primary closes with the worker; the daemon drops it then. A claimed one's
+			// observation ends before its claim does: the daemon accepts it only from its host.
+			if (hosted.kind !== "primary") {
+				void this.client
+					.changeObserve(this.workspaceName, sessionId, null)
+					.catch(() => undefined)
+					.then(() => this.client.released(sessionId))
+					.catch(() => undefined);
+			}
 		});
 	}
 

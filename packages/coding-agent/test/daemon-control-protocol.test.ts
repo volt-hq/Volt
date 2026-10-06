@@ -605,6 +605,12 @@ describe("daemon control contract", () => {
 		expect(admitControlRequest({ ...request, notification: { ...request.notification, title: `${title}a` } })).toBe(
 			false,
 		);
+		// A worker's relayed push is held to the same budgets.
+		const forwarded = REQUESTS.worker_notification_delivery;
+		expect(admitControlRequest({ ...forwarded, notification: { ...forwarded.notification, title } })).toBe(true);
+		expect(
+			admitControlRequest({ ...forwarded, notification: { ...forwarded.notification, title: `${title}a` } }),
+		).toBe(false);
 		expect(
 			admitControlRequest(
 				mutate(request, {
@@ -660,6 +666,7 @@ describe("daemon control contract", () => {
 			{ type: "create_worktree", intentId: "i-4", expectedOrdinal: 3 },
 			{ type: "set_keep_awake", intentId: "i-5", input: { enabled: true } },
 			{ type: "set_web_search_key", intentId: "i-6", input: { apiKey: null } },
+			{ type: "upload_device_logs", intentId: "i-7", input: { fileName: "phone.log", content: "line\n" } },
 			{ type: "query", queryId: "q-1", query: "sessions", params: { limit: 5, cursor: "10" } },
 			{ type: "query", queryId: "q-2", query: "worktrees" },
 			{ type: "query", queryId: "q-3", query: "host_status", params: {} },

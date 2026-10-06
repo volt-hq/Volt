@@ -948,6 +948,8 @@ class IrohDaemonService {
 	private readonly workerRelays = new Map<string, WorkerRelay>();
 	/** The client whose open spawned each worker: revoking it, or changing its access, retires the worker. */
 	private readonly workerSpawners = new Map<string, string>();
+	/** Every client each worker served a relay for: revoking one, or changing its access, retires the worker too. */
+	private readonly workerClients = new Map<string, Set<string>>();
 	/** Workers spawned in a managed worktree: their exit lets the worktree's retention run. */
 	private readonly workerWorktrees = new Map<string, { workspaceName: string; worktreeId: string }>();
 	private readonly tuiChangeAuthorities = new Map<string, TuiChangeAuthorityClaim>();
@@ -1099,6 +1101,7 @@ class IrohDaemonService {
 				this.workerRelays.delete(relayId);
 			}
 			this.workerSpawners.delete(workerId);
+			this.workerClients.delete(workerId);
 			const worktree = this.workerWorktrees.get(workerId);
 			this.workerWorktrees.delete(workerId);
 			if (worktree !== undefined)
@@ -1304,10 +1307,21 @@ class IrohDaemonService {
 		request: Extract<ControlRequest, { type: "change_observe" }>,
 	): Promise<void> {
 		const workerId = connection.client === "worker" ? this.workers.workerOf(connection.connectionId) : undefined;
+		// A worker observes the sessions it hosts, under its workspace's current authority only.
+		const workerKeyCurrent = (): boolean => {
+			const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
+			return (
+				key !== undefined &&
+				key.workspaceName === request.workspaceName &&
+				this.services.state
+					.getHostState()
+					.workspaceGenerations?.find((record) => record.workspaceName === request.workspaceName)?.generation ===
+					key.workspaceGeneration
+			);
+		};
 		const assertLease = (): boolean =>
 			workerId !== undefined
-				? this.workers.workerHosts(workerId, request.sessionId) &&
-					this.workers.keyOf(workerId)?.workspaceName === request.workspaceName
+				? this.workers.workerHosts(workerId, request.sessionId) && workerKeyCurrent()
 				: isExactTuiChangeObservationLeaseHolder(
 						connection,
 						this.leaseBroker.lookup(request.workspaceName, request.sessionId),
@@ -4439,6 +4453,9 @@ class IrohDaemonService {
 			throw error;
 		}
 		this.workerRelays.set(relay.relayId, { relay, authorization, workerId: worker.workerId });
+		const clients = this.workerClients.get(worker.workerId) ?? new Set<string>();
+		clients.add(authorization.client.nodeId);
+		this.workerClients.set(worker.workerId, clients);
 		this.syncWorkerLease(workspaceName, resolved.sessionId);
 		const delivered = this.services.controlServer.sendTo(worker.connectionId, {
 			type: "relay_offer",
@@ -4514,9 +4531,8 @@ class IrohDaemonService {
 	private async retireClientWorkers(clientNodeId: string, workspaceName?: string): Promise<number> {
 		const workerIds = new Set<string>();
 		for (const [workerId, spawner] of this.workerSpawners) if (spawner === clientNodeId) workerIds.add(workerId);
-		for (const entry of this.workerRelays.values()) {
-			if (entry.relay.clientNodeId === clientNodeId) workerIds.add(entry.workerId);
-		}
+		// Every worker that served the client, whether or not its relay is still open: a turn it started may still run.
+		for (const [workerId, clients] of this.workerClients) if (clients.has(clientNodeId)) workerIds.add(workerId);
 		const retired = [...workerIds].filter(
 			(workerId) => workspaceName === undefined || this.workers.keyOf(workerId)?.workspaceName === workspaceName,
 		);
@@ -4695,31 +4711,29 @@ class IrohDaemonService {
 			}
 			this.endWorkerRelay(relayId, "workspace_unregistered");
 		}
-		const workerCount = this.workers.workersOf(workspaceName).length;
+		const workerIds = this.workers.workersOf(workspaceName);
 		this.closeRelaysForWorkspace(workspaceName, exclusions.relayIds);
-		// The requesting relay is answered first (its answer waits for this
-		// call), then its worker retires with the rest once the relay ended.
-		const fenced = (async () => {
-			if (kept.length > 0) {
+		if (kept.length === 0) {
+			await this.workers.fenceWorkspace(workspaceName, { all: true, reason: "authority" });
+		} else {
+			// The requesting relay is answered first (its answer waits for this
+			// call); then the workers the unregister found retire, and only those:
+			// a registration of the same name meanwhile keeps its own.
+			void (async () => {
 				await Promise.race([
 					Promise.allSettled(kept),
 					new Promise((resolve) => setTimeout(resolve, STREAM_FINAL_FRAME_TIMEOUT_MS).unref()),
 				]);
-			}
-			await this.workers.fenceWorkspace(workspaceName, { all: true, reason: "authority" });
-		})();
-		if (kept.length === 0) await fenced;
-		else
-			void fenced.catch((error: unknown) =>
-				this.log("warn", `workspace worker retirement failed: ${String(error)}`),
-			);
+				await Promise.allSettled(workerIds.map((workerId) => this.workers.retireWorker(workerId, "authority")));
+			})();
+		}
 		if (exclusions.workspacePath !== undefined) {
 			await this.worktrees
 				.cleanupUnregisteredWorkspace({ name: workspaceName, path: exclusions.workspacePath })
 				.catch(() => {});
 		}
 		await changeRetirement;
-		return { closedStreamCount, stoppedRuntimeCount: workerCount };
+		return { closedStreamCount, stoppedRuntimeCount: workerIds.length };
 	}
 
 	private async closeActiveStreamsForClientWorkspace(
@@ -5584,6 +5598,9 @@ class IrohDaemonService {
 			case "worker_forward": {
 				const relay = this.workerRelayOf(connection, request.relayId);
 				if (!relay.ok) return refuse(relay.code, relay.message);
+				if (getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), relay.entry.authorization)) {
+					return refuse("revoked", "the relay's authority changed");
+				}
 				const result = await this.runRelayFrame(relay.entry.relay, request.frame, new Set([request.relayId]));
 				if (!result.ok) return refuse(result.code, result.message);
 				connection.send({ type: "worker_forward_result", id: request.id, frame: result.frame });
@@ -5592,6 +5609,9 @@ class IrohDaemonService {
 			case "worker_notification_delivery": {
 				const relay = this.workerRelayOf(connection, request.relayId);
 				if (!relay.ok) return refuse(relay.code, relay.message);
+				if (getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), relay.entry.authorization)) {
+					return refuse("revoked", "the relay's authority changed");
+				}
 				const result = await this.deliverRelayNotification(relay.entry.relay, request.notification);
 				if (!result.ok) return refuse(result.code, result.message);
 				connection.send({ type: "relay_push_delivery_result", id: request.id, status: result.status });
@@ -5610,8 +5630,13 @@ class IrohDaemonService {
 			case "worker_last_session": {
 				const relay = this.workerRelayOf(connection, request.relayId);
 				if (!relay.ok) return refuse(relay.code, relay.message);
-				if (!isIrohRemoteSessionId(request.sessionId)) return refuse("invalid_session", "not a session id");
 				const { clientNodeId, workspaceName, sessionId: previousSessionId } = relay.entry.relay;
+				if (
+					!isIrohRemoteSessionId(request.sessionId) ||
+					!(await this.isStoredSession(workspaceName, request.sessionId))
+				) {
+					return refuse("invalid_session", "not a stored session of the relay's workspace");
+				}
 				try {
 					await this.requireEngine().setClientLastSessionId(clientNodeId, workspaceName, request.sessionId);
 				} catch (error) {
@@ -5642,7 +5667,9 @@ class IrohDaemonService {
 				if (workerId === undefined || key === undefined || !this.workers.workerHosts(workerId, request.from)) {
 					return refuse("not_hosted", "the worker does not host that conversation");
 				}
-				if (!isIrohRemoteSessionId(request.to)) return refuse("invalid_session", "not a session id");
+				if (!isIrohRemoteSessionId(request.to) || !(await this.isStoredSession(key.workspaceName, request.to))) {
+					return refuse("invalid_session", "not a stored session of the worker's workspace");
+				}
 				// The new conversation carries the source's change and pull-request association; the source keeps its own.
 				void this.services.changes
 					.inheritSession(key.workspaceName, key.workspaceGeneration, request.from, request.to)
@@ -5651,6 +5678,14 @@ class IrohDaemonService {
 				return;
 			}
 		}
+	}
+
+	/** Whether `sessionId` is a stored session of the registered workspace `workspaceName`. */
+	private async isStoredSession(workspaceName: string, sessionId: string): Promise<boolean> {
+		const workspace = this.services.state.getHostState().workspaces.find((entry) => entry.name === workspaceName);
+		if (!workspace) return false;
+		const sessionDir = getDefaultSessionDirPath(workspace.path, this.services.agentDir);
+		return (await SessionManager.findForResume(sessionDir, sessionId).catch(() => undefined)) !== undefined;
 	}
 
 	private async requireEngineSafe(): Promise<

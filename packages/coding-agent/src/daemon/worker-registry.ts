@@ -598,7 +598,11 @@ export class WorkerRegistry {
 		if (owner) {
 			// A review source or discussion a detached, idle worker keeps only until its TTL runs: retention
 			// retires that worker now, and the claimant retries once it exited.
-			if (kind === "sibling" && (owner.state === "retiring" || this.expire(owner, "sibling_claim"))) {
+			if (
+				kind === "sibling" &&
+				owner.workspaceName === record.workspaceName &&
+				(owner.state === "retiring" || this.expire(owner, "sibling_claim"))
+			) {
 				return { code: "retiring", message: "the worker hosting that conversation is retiring; retry" };
 			}
 			return { code: "claimed", message: "another worker hosts that conversation" };

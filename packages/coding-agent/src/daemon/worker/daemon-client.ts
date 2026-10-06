@@ -13,7 +13,12 @@ import type {
 	IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationIntent,
 } from "../../core/remote/iroh/push.ts";
-import { createDaemonClient, type DaemonClient, type DistributiveOmit } from "../control-client.ts";
+import {
+	ControlRequestTooLargeError,
+	createDaemonClient,
+	type DaemonClient,
+	type DistributiveOmit,
+} from "../control-client.ts";
 import {
 	type ControlEvent,
 	type ControlRequest,
@@ -165,7 +170,17 @@ export class WorkerDaemonClient {
 		try {
 			const response = await this.request({ type: "worker_forward", relayId, frame });
 			return response.type === "worker_forward_result" ? response.frame : undefined;
-		} catch {
+		} catch (error) {
+			// The frame or its answer does not fit a control line: the phone is told, and the connection stays.
+			if (
+				error instanceof ControlRequestTooLargeError ||
+				(error instanceof WorkerRequestError && error.code === "too_large")
+			) {
+				const reason = { code: "invalid_input" as const, message: "Too large to relay to the host" };
+				return frame.type === "query"
+					? { type: "query_error", queryId: frame.queryId, reason }
+					: { type: "rejected", intentId: frame.intentId, reason };
+			}
 			return undefined;
 		}
 	}

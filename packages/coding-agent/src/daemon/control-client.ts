@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import {
+	CONTROL_MAX_LINE_BYTES,
 	type ControlClientKind,
 	type ControlEvent,
 	ControlLineDecoder,
@@ -61,6 +62,14 @@ export class DaemonClientClosedError extends Error {
 	constructor(message = "daemon connection closed") {
 		super(message);
 		this.name = "DaemonClientClosedError";
+	}
+}
+
+/** A request whose line the daemon could not read (it would end the connection): refused before it is sent. */
+export class ControlRequestTooLargeError extends Error {
+	constructor(byteLength: number) {
+		super(`The control request is ${byteLength} bytes, over the ${CONTROL_MAX_LINE_BYTES}-byte line limit`);
+		this.name = "ControlRequestTooLargeError";
 	}
 }
 
@@ -387,11 +396,11 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		return connectPromise;
 	};
 
-	const send = (request: ControlRequest): void => {
+	const send = (line: Buffer): void => {
 		if (!socket || socket.destroyed) {
 			throw new DaemonClientClosedError("not connected to daemon");
 		}
-		socket.write(encodeControlLine(request));
+		socket.write(line);
 	};
 
 	const registerPending = (id: string): Promise<ControlResponse> => {
@@ -427,8 +436,10 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				await this.connect();
 			}
 			const id = randomUUID();
+			const line = encodeControlLine({ ...req, id } as ControlRequest);
+			if (line.byteLength - 1 > CONTROL_MAX_LINE_BYTES) throw new ControlRequestTooLargeError(line.byteLength - 1);
 			const responsePromise = registerPending(id);
-			send({ ...req, id } as ControlRequest);
+			send(line);
 			return responsePromise;
 		},
 		waitForResponse(id: string) {

@@ -48,14 +48,19 @@ function setup(options: { ttlMs?: number } = {}) {
 		},
 		currentGeneration: (workspaceName) => generations.get(workspaceName),
 		detachedRuntimeTtlMs: () => options.ttlMs ?? 60_000,
-		// Sessions s1-s9 are the workspace's.
-		sessionInWorkspace: async (workspaceName, sessionId) => workspaceName === "ws" && /^s\d$/.test(sessionId),
+		// Sessions s1-s9 are the workspace's; "ws2" is registered at the same path, sharing its store.
+		sessionInWorkspace: async (workspaceName, sessionId) =>
+			(workspaceName === "ws" || workspaceName === "ws2") && /^s\d$/.test(sessionId),
 		audit: (event) => audits.push(event),
 	});
 
-	const spawnInput = (sessionId: string, generation = generations.get("ws") ?? 0): WorkerSpawnInput => ({
+	const spawnInput = (
+		sessionId: string,
+		generation = generations.get("ws") ?? 0,
+		workspaceName = "ws",
+	): WorkerSpawnInput => ({
 		origin: "phone",
-		workspace: { name: "ws", path: "/ws", generation },
+		workspace: { name: workspaceName, path: "/ws", generation },
 		session: ref(sessionId),
 		cwd: "/ws",
 		root: "/ws",
@@ -64,13 +69,13 @@ function setup(options: { ttlMs?: number } = {}) {
 		projectTrusted: false,
 	});
 
-	const open = (sessionId: string, attach?: "remote" | "local") => {
-		const generation = generations.get("ws") ?? 0;
+	const open = (sessionId: string, attach?: "remote" | "local", workspaceName = "ws") => {
+		const generation = generations.get(workspaceName) ?? 0;
 		return registry.open(
-			{ workspaceName: "ws", workspaceGeneration: generation, sessionId },
+			{ workspaceName, workspaceGeneration: generation, sessionId },
 			{
 				origin: "phone",
-				prepare: async () => spawnInput(sessionId, generation),
+				prepare: async () => spawnInput(sessionId, generation, workspaceName),
 				attach: (worker: LiveWorker) => ({
 					worker,
 					release: attach === undefined ? () => {} : worker.attach(attach),
@@ -264,6 +269,21 @@ describe("worker registry", () => {
 		await waitUntil(() => registry.size === 1);
 		expect(await claimSource()).toMatchObject({ type: "ok" });
 		expect(registry.hosts("ws", "s1")).toBe(true);
+	});
+
+	it("leaves a detached idle worker of another workspace alone for a sibling claim", async () => {
+		const { open, start, send, stops, generations } = setup();
+		generations.set("ws2", 1);
+		const opened = open("s1", undefined, "ws2");
+		const owner = await start(0);
+		await opened;
+		const handoff = open("s9");
+		const claimant = await start(1);
+		await handoff;
+		expect(
+			await send(claimant, { type: "worker_hosts", sessionId: "s1", kind: "sibling", parentSessionId: "s9" }),
+		).toMatchObject({ code: "claimed" });
+		expect(stops(owner)).toEqual([]);
 	});
 
 	it("retires a detached idle worker after its TTL, unless it refuses the stop because it turned active", async () => {

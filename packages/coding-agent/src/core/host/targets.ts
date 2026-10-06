@@ -125,7 +125,8 @@ export type HostClientMove =
 	| {
 			/** The client is told to reconnect to the new conversation and leaves this host's registry. */
 			readonly kind: "redirect";
-			redirect(sessionId: string): Promise<void> | void;
+			/** `created`: the move wrote the target's log (a new, forked, or imported conversation), not a switch to a stored one. */
+			redirect(sessionId: string, created: boolean): Promise<void> | void;
 			/**
 			 * Host the conversations the moves an extension starts for the
 			 * client lead it to (`ctx.newSession`, `ctx.fork`,

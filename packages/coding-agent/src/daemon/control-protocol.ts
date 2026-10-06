@@ -200,7 +200,8 @@ export function isRequestAllowedFor(client: "tui" | "cli" | "worker", type: stri
 export function admitControlRequest(value: unknown): value is ControlRequest {
 	return (
 		requestValidator().Check(value) &&
-		(value.type !== "relay_notification_delivery" || isWithinNotificationBudgets(value.notification))
+		((value.type !== "relay_notification_delivery" && value.type !== "worker_notification_delivery") ||
+			isWithinNotificationBudgets(value.notification))
 	);
 }
 

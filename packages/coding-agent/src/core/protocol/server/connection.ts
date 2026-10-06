@@ -209,8 +209,8 @@ export interface ServeConnectionOptions {
 		readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect | undefined>;
 		readonly hostsClientMoves?: boolean;
 		readonly hostsStoredSessions?: boolean;
-		/** The client's intent redirected it to `sessionId`. */
-		readonly onRedirected?: (sessionId: string) => void;
+		/** The client's intent redirected it to `sessionId`; `created` when the move wrote that conversation's log. */
+		readonly onRedirected?: (sessionId: string, created: boolean) => void;
 	};
 	/**
 	 * Runs once the client attached to its conversation, before the client's
@@ -708,10 +708,10 @@ export function serveConnection(
 	const move: HostClientMove = redirectClient
 		? {
 				kind: "redirect",
-				redirect: (sessionId) => {
+				redirect: (sessionId, created) => {
 					if (!home) return;
 					redirected = true;
-					options.redirect?.onRedirected?.(sessionId);
+					options.redirect?.onRedirected?.(sessionId, created);
 					moves.push({ from: home, to: sessionId });
 					if (!laneBusy) flushMoves();
 				},

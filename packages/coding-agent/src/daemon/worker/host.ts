@@ -21,7 +21,8 @@
  * It stops when the daemon asks: a stop that is not forced is refused when a
  * hosted conversation is active as it arrives; otherwise the worker admits
  * no new work in any conversation, lets a running turn finish for at most
- * 60 s on a forced stop (then aborts it), ends its clients' streams, closes
+ * 60 s on a forced stop (then aborts it; a stop for lost authority aborts it
+ * at once), ends its clients' streams, closes
  * its conversations (`session_shutdown{quit}`), and exits. Losing its daemon
  * connection stops it the same way: a worker never outlives its daemon. It
  * also exits once its primary conversation closed on its own (it lost its
@@ -194,8 +195,17 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 		return stopping;
 	};
 
+	/** Stop every running turn now. */
+	const abortTurns = (): void => {
+		for (const { conversation } of conversations?.list() ?? [])
+			void conversation.session.abort().catch(() => undefined);
+	};
+
 	const onStop = (event: WorkerStopEvent): void => {
+		// Lost authority stops the turns at once: the clients it served may no longer act here.
+		const authority = event.force && event.reason === "authority";
 		if (stopping) {
+			if (authority) abortTurns();
 			void client.stopResult(event.stopId, "stopped").catch(() => undefined);
 			return;
 		}
@@ -206,7 +216,7 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 			return;
 		}
 		void client.stopResult(event.stopId, "stopped").catch(() => undefined);
-		void stop("stopped", event.force ? WORKER_TURN_CAP_MS : undefined, event.reason === "shutdown");
+		void stop("stopped", authority ? 0 : event.force ? WORKER_TURN_CAP_MS : undefined, event.reason === "shutdown");
 	};
 
 	/** Serve a relay the daemon offered for a client of a conversation this worker hosts. */
@@ -239,9 +249,10 @@ export async function runWorker(request: WorkerLaunchRequest): Promise<WorkerExi
 				redirect: {
 					hostTarget: (moved) => hosted.hostMoved(conversation, moved),
 					hostsStoredSessions: true,
-					onRedirected: (sessionId) => {
+					onRedirected: (sessionId, created) => {
 						void client.lastSession(relayId, sessionId).catch(() => undefined);
-						void client.moved(conversation.id, sessionId).catch(() => undefined);
+						// A conversation the move created carries the source's change association; a stored one keeps its own.
+						if (created) void client.moved(conversation.id, sessionId).catch(() => undefined);
 					},
 				},
 				admit: (intent, admitted) =>
