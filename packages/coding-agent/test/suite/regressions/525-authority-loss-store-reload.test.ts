@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import type { HostRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { Component, TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
@@ -15,7 +16,6 @@ import type { ConversationFactory } from "../../../src/core/host/hosted-conversa
 import type { HostActionRequest } from "../../../src/core/session/host-actions.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
-import type { UserInputRequest, UserInputResponse } from "../../../src/core/user-input.ts";
 import type { WorkContext, WorkExecution } from "../../../src/core/work/registry.ts";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
@@ -46,7 +46,7 @@ type InteractiveAccess = {
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
 	connect(): Promise<void>;
-	terminalSurface(): { userInput?: (request: UserInputRequest, signal?: AbortSignal) => Promise<UserInputResponse> };
+	showLiveRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined>;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
 };
@@ -334,24 +334,28 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const select = access.showExtensionSelector("Select dialog", ["a", "b"]);
 		const input = access.showExtensionInput("Input dialog");
 		const editor = access.showExtensionEditor("Editor dialog", "prefill");
-		const userInput = access.terminalSurface().userInput;
-		if (!userInput) throw new Error("The TUI asks no questions");
-		const question = userInput({
-			questions: [
+		const question = access
+			.showLiveRequest(
 				{
-					id: "target",
-					header: "Target",
-					question: "Question dialog?",
-					options: [
-						{ label: "Staging", description: "The staging target." },
-						{ label: "Production", description: "The production target." },
+					kind: "user_input",
+					questions: [
+						{
+							id: "target",
+							header: "Target",
+							question: "Question dialog?",
+							options: [
+								{ label: "Staging", description: "The staging target." },
+								{ label: "Production", description: "The production target." },
+							],
+						},
 					],
 				},
-			],
-		}).then(
-			(value) => ({ status: "fulfilled" as const, value }),
-			(reason: unknown) => ({ status: "rejected" as const, reason }),
-		);
+				new AbortController().signal,
+			)
+			.then(
+				(value) => ({ status: "fulfilled" as const, value }),
+				(reason: unknown) => ({ status: "rejected" as const, reason }),
+			);
 		await terminal.waitForRender();
 		expect(viewport(terminal)).toContain("Question dialog?");
 

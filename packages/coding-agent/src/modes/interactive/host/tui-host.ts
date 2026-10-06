@@ -104,7 +104,6 @@ export class TuiHost implements TuiConnection {
 				this.stopServing();
 				options.onLost?.(error);
 			},
-			...(options.terminal === undefined ? {} : { terminal: options.terminal }),
 		});
 		this.clientConversation = () => connection.conversation;
 		const client = new LoopbackClient(

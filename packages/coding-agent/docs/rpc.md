@@ -41,7 +41,7 @@ The client's first frame is `hello`; the host answers `welcome`:
 {"type":"welcome","protocol":1,"connectionId":"6f0c…","profile":"local","server":{"name":"volt","version":"0.2.3"},"conversation":"01990f6e-…"}
 ```
 
-- `accepts.hostRequests` lists the host request kinds the client shows and answers (`select`, `confirm`, `input`, `editor`, `form`, `dialog`, `approval`, `mcp_auth`, `provider_auth`, `editor_text`). It is asked only those; an extension dialog no attached client accepts resolves to its default at once.
+- `accepts.hostRequests` lists the host request kinds the client shows and answers (`select`, `confirm`, `input`, `editor`, `form`, `dialog`, `approval`, `mcp_auth`, `provider_auth`, `editor_text`, `user_input`). It is asked only those; an extension dialog no attached client accepts resolves to its default at once.
 - `welcome.conversation` is the conversation the host attached the client to. Subscribe to it.
 - The host attaches the client when it says hello, which binds the conversation's extensions (`session_start` runs then). The client may subscribe and answer host requests at once; its intents and queries run once the extensions are bound.
 - The prompts a client sends reach extensions' `input` event with `source: "rpc"`; the TUI's connection sets `"interactive"`.
@@ -121,7 +121,7 @@ Long-running work of a conversation is a work item: a background job (`job`), a 
 - **Streaming items** (`assistant_start`, `assistant_delta`, `assistant_end`, `tool`) build on `basedOn`. Discard them when a frame arrives with another `basedOn` (the host repeats what still streams in that frame), and when you apply the entry that commits them: an assistant message entry ends the streaming message, a tool result entry ends its tool call.
 - **Keyed values** (`set{key, value}`, `clear{key}`) persist until the host clears or replaces them, or a reset. A commit never drops one.
 - `patch{key, ops}` changes the node of a panel (`ext_panel/…`), the detail of a work item (`work/…`), or a shell command's output (`bash`) in place, with the `UiNode` patch operations of the contract (`replace`, `remove`, `insert`, `append_lines`). A reset carries the patched value. A patch that does not apply to the value you hold means your state diverged: resubscribe after your position.
-- `notice{level, message, source?, detail?}` (`message` is styled text: a string or styled spans) and `directive{directive: "set_editor_text" | "insert_editor_text", text}` leave no state. A notice's `source` is the extension's manifest id, or `host` for the host's own notices (a compaction that failed or was cancelled, a retry that gave up, an Anthropic subscription login that bills extra usage); `detail`, such as the stack of an extension's error, reaches local clients only. `set_editor_text` replaces the client's editor text (an extension command's `ctx.fork()` or `ctx.navigateTree()` before a user message, `ctx.abort()` returning the queued input, an extension's `setEditorText`); `insert_editor_text` pastes at the cursor.
+- `notice{level, message, source?, detail?}` (`message` is styled text: a string or styled spans) and directives (`directive{directive: "set_editor_text" | "insert_editor_text", text}`, `directive{directive: "set_theme", name}`) leave no state. A notice's `source` is the extension's manifest id, or `host` for the host's own notices (a compaction that failed or was cancelled, a retry that gave up, an Anthropic subscription login that bills extra usage); `detail`, such as the stack of an extension's error, reaches local clients only. `set_editor_text` replaces the client's editor text (an extension command's `ctx.fork()` or `ctx.navigateTree()` before a user message, `ctx.abort()` returning the queued input, an extension's `setEditorText`); `insert_editor_text` pastes at the cursor. `set_theme` asks the client to show the theme `name` (an extension's `ctx.ui.setTheme`); a client that shows no themes ignores it, the TUI keeps a theme its user picked, and remote clients never receive it. A theme set after a local client's `hello` and before it subscribes (from `session_start`) reaches its first subscription.
 
 The live fold (`foldLiveFrame`, `foldLiveCommit` in `@hansjm10/volt-protocol`) applies these rules; the host's live state is the same fold of the items it published.
 
@@ -308,6 +308,7 @@ Dialogs, forms, approvals, and sign-ins the host asks are keyed live values `hos
 | `form` | `title, fields, timeoutMs?` | `{values}` |
 | `dialog` | `title, body (UiNode[]), actions: [{id, label, token?, destructive?}], timeoutMs?` | `{value}` (an action id) |
 | `editor_text` | `timeoutMs?`: asked only of the client whose request is running, or of the first attached client | `{value}`: the client's editor text, without asking the user |
+| `user_input` | `questions: [{id, header, question, options: [{label, description}]}]` (one to three questions, two or three options each): the `request_user_input` tool's preference questions. Offer a free-form answer and skipping beside the options; there is no timeout | `{status: "answered", answers: {<id>: {answers}}}` for every question, where `answers` is a chosen label, optionally followed by the user's notes, or the user's own answer; or `{status: "skipped", answers: {}}`. `{cancelled: true}` stops the run |
 | `approval` | `action, title, message?, commandPreview?, blocking?, destructive?, …`: a host action, such as an LSP server install, whose `requestId` is its `host_action` work id; or (`action: "enable_extension"`) acknowledging the permissions of an extension being enabled, asked only of the client that enables it | `{decision: approved|denied|dismissed, message?}` |
 | `mcp_auth` | `server, flow, authorizationUrl?, userCode?, …` | completes through the `mcp.auth_*` intents |
 | `provider_auth` | `provider, flow: browser|device|manual, url?, userCode?, instructions?`: a provider sign-in `auth.login` started, waiting for the user: open `url` and sign in (`browser`), enter `userCode` at `url` (`device`), or open `url`, then paste the redirect URL or code it shows (`manual`, unless the host receives it first). Asked only of the client that invoked the login, and never sent to a remote client; the host ends it when the sign-in ends | `{value}` for `manual`; `{cancelled: true}` cancels the sign-in |
@@ -319,7 +320,7 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true`. The data-only UI reaches the client through the live lane:
 
 - `select`, `confirm`, `input`, `editor`, `dialog`, `form`, and `getEditorText()` (`editor_text`) are host requests;
-- `notify` is a `notice` whose `source` is the extension's manifest id; `setStatus`, `setPanel`, and `setTitle` are keyed values; `setEditorText` and `pasteToEditor` are `set_editor_text` and `insert_editor_text` directives;
+- `notify` is a `notice` whose `source` is the extension's manifest id; `setStatus`, `setPanel`, and `setTitle` are keyed values; `setEditorText` and `pasteToEditor` are `set_editor_text` and `insert_editor_text` directives, and `setTheme` a `set_theme` directive;
 - tool calls carry the presentations of their tools' `present()`, custom messages those of their types' message presenters, and extension work the detail its kind presents;
 - the extension's intents and commands are [dynamic intents](#dynamic-intents), its completion providers answer the `editor_completions` query, and its shortcuts are TUI keybindings of its intents;
 - extension errors are `notice{level: "error", message: "<event>: <error>", source: <extension id>, detail?}`, with the error's stack as `detail` for local clients;
@@ -327,7 +328,7 @@ Every kind may be answered `{cancelled: true}`. The first valid answer wins; the
 - `ctx.abort()` in a command a local client with an editor invoked (it accepts `editor_text` and is subscribed to the conversation's live lane) takes the queued input back, stops the run, and returns the input's text to that client as a `set_editor_text` directive ahead of the draft its `editor_text` answer reports (an `insert_editor_text` directive when it reports none); otherwise the run stops and the queue stays;
 - the `bash` intent's command reaches extensions' `user_bash` hook first, which may return its result or the operations it runs with.
 
-RPC mode has no terminal client, so `getAllThemes()` returns `[]`, `setTheme()` fails, and the `request_user_input` tool is not offered.
+`getAllThemes()` lists the host's themes (built-in, the user's, and the ones the conversation loaded), and `setTheme()` fails for any other name. The `request_user_input` tool is offered to the model while an attached client accepts `user_input` host requests.
 
 ## Example session
 

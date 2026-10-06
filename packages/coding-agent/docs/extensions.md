@@ -2570,6 +2570,7 @@ Extension UI is data: [styled text](#styled-text) and [`UiNode`](ui-nodes.md) tr
 | Panels | `ctx.ui.setPanel(name, panel)` | `ext_panel/<id>/<name>` |
 | Window title | `ctx.ui.setTitle(title)` | `ext_title` |
 | Editor text | `ctx.ui.setEditorText`, `pasteToEditor`, `getEditorText` | `directive` items and an `editor_text` host request |
+| Theme | `ctx.ui.setTheme(name)` | a `set_theme` directive (local clients only) |
 | Tool presentation | a tool's [`present()`](#tool-presentation) | a tool call's `presentation` |
 | Message presentation | [`volt.registerMessagePresenter()`](#message-presentation) | a custom message's `presentation` |
 | Work detail | a work kind's [`detail`](#work-detail) | `work/<workId>` `detail` |
@@ -2579,8 +2580,8 @@ Extension UI is data: [styled text](#styled-text) and [`UiNode`](ui-nodes.md) tr
 
 A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
-- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` and `setTheme()` reach the most recently attached client with a terminal.
-- **The `request_user_input` tool** is offered to the model only while a client that asks its questions is attached: the local TUI. Subagents, RPC and print runs, and phones never offer it.
+- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` lists the host's themes; `setTheme()` asks every attached local client to show one, and a TUI whose user picked a theme keeps it.
+- **The `request_user_input` tool** is offered to the model only while an attached client answers its questions (`user_input` host requests): the TUI, an RPC client that accepts them, or a phone that accepts them and is granted conversation control. Its questions go to every such client, and the first answer wins. Subagents and print runs never offer it.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 - A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, and its extensions start when the phone reconnects; for a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects. `withSession` does not run for a phone, so the result reports `seeded: false`.
@@ -2789,15 +2790,15 @@ ctx.ui.pasteToEditor("pasted content");
 // The editor text of the client the call runs for; undefined when it has no editor or does not answer within 2 s
 const current = await ctx.ui.getEditorText();
 
-// Themes of the most recently attached client with a terminal (see themes.md)
+// The host's themes: built-in, the user's, and the ones the conversation loaded (see themes.md)
 const themes = ctx.ui.getAllThemes();  // [{ name: "dark", path: "/..." | undefined }, ...]
-const result = ctx.ui.setTheme("light");  // switches the theme and saves it as the user's theme
+const result = ctx.ui.setTheme("light");  // asks the attached terminals to show it; not saved as the user's theme
 if (!result.success) {
   ctx.ui.notify(`Failed: ${result.error}`, "error");
 }
 ```
 
-`getEditorText()` sends an `editor_text` host request to the client whose request is running (outside any client's request, the conversation's first client), which answers without asking the user. `setTheme()` fails without a terminal client. See [qna.ts](../examples/extensions/qna.ts) and [mac-system-theme.ts](../examples/extensions/mac-system-theme.ts).
+`getEditorText()` sends an `editor_text` host request to the client whose request is running (outside any client's request, the conversation's first client), which answers without asking the user. `setTheme()` fails for a theme the host does not know; a TUI whose user picked a theme in it keeps that theme, and phones never receive it. See [qna.ts](../examples/extensions/qna.ts) and [mac-system-theme.ts](../examples/extensions/mac-system-theme.ts).
 
 ### Intents, Shortcuts, and Completions
 

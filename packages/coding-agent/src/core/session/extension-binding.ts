@@ -10,21 +10,23 @@
  * extensions run in line with settings: an extension enabled or disabled
  * while the session runs starts or stops alone, and what it declared here
  * (UI, dialogs, providers, services tasks, work) goes with it.
- * The UI calls (dialogs, forms, notifications, status, panels, title, and
- * editor text) write the conversation's live state, which every attached
- * client that accepts them sees; the first answer to a dialog wins. Each
- * extension's `ctx.ui` is its own: its status items and panels are keyed by
- * its manifest id (core/ui/extension-ui.ts). Reading the editor text asks
+ * The UI calls (dialogs, forms, notifications, status, panels, title,
+ * editor text, and theme) write the conversation's live state, which every
+ * attached client that accepts them sees; the first answer to a dialog wins.
+ * Each extension's `ctx.ui` is its own: its status items and panels are keyed
+ * by its manifest id (core/ui/extension-ui.ts). Reading the editor text asks
  * only the client the call runs for, or the anchor outside any client's call.
- * Theme calls go to the last attached client with themes. Errors go to every
- * client. Command context actions, abort, and shutdown go to the client the
- * call runs for (its client scope); calls outside any client scope go to the
- * anchor, the oldest attached client, and calls for a client that has left
- * go nowhere. A command's `ctx.invokedBy` says whether the client it runs for
- * is a paired remote device. A stopped instance's `ctx.ui` stays stopped
- * when its id runs again: the new instance gets a `ctx.ui` of its own.
+ * The themes listed are the host's; setting one asks the attached clients to
+ * show it. Errors go to every client. Command context actions, abort, and
+ * shutdown go to the client the call runs for (its client scope); calls
+ * outside any client scope go to the anchor, the oldest attached client, and
+ * calls for a client that has left go nowhere. A command's `ctx.invokedBy`
+ * says whether the client it runs for is a paired remote device. A stopped
+ * instance's `ctx.ui` stays stopped when its id runs again: the new instance
+ * gets a `ctx.ui` of its own.
  */
 
+import { join } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../agent-session.ts";
@@ -57,6 +59,9 @@ import type { SessionManager } from "../session-manager.ts";
 import { type ExtensionSessionWriter, extensionSessionWriter, type SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
+import { getAvailableThemesWithPaths } from "../theme/discovery.ts";
+import type { Theme } from "../theme/theme.ts";
+import type { ThemeInfo } from "../theme/types.ts";
 import { stripTerminalControls } from "../ui/ansi-tokens.ts";
 import {
 	dialogRequest,
@@ -69,7 +74,6 @@ import {
 	setExtensionTitle,
 } from "../ui/extension-ui.ts";
 import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
-import type { UserInputPrompt, UserInputRequest, UserInputResponse } from "../user-input.ts";
 import type { ExtensionKinds, WorkKindRefusal } from "../work/extension-kinds.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionJobs } from "./jobs.ts";
@@ -177,9 +181,6 @@ export interface SessionExtensionBindingHost {
 	extensionsChanged(): void;
 }
 
-/** A client's themes: the ones `ctx.ui.getAllThemes` lists and `ctx.ui.setTheme` switches to. */
-export type ExtensionClientThemes = Pick<ExtensionUIContext, "getAllThemes" | "setTheme">;
-
 /**
  * A client's surface on the session's extensions. A client keeps its id across
  * the sessions it attaches to.
@@ -194,8 +195,6 @@ export interface ExtensionClient {
 	readonly mode: ExtensionMode;
 	/** A paired remote device: the commands it invokes see `ctx.invokedBy` as `"remote"`. */
 	readonly remote?: boolean;
-	/** The client's themes: theme calls go to the last attached client with them. */
-	readonly themes?: ExtensionClientThemes;
 	/** Session control for the commands the client invoked. */
 	readonly commandContextActions?: ExtensionCommandContextActions;
 	/** Replaces the session abort for the `ctx.abort()` calls the client invoked. */
@@ -204,12 +203,6 @@ export interface ExtensionClient {
 	readonly shutdownHandler?: ShutdownHandler;
 	/** Receives every extension error. */
 	readonly onError?: ExtensionErrorListener;
-	/**
-	 * Asks the user the request_user_input tool's questions in the client's
-	 * terminal. The last attached client with it asks them; while none is
-	 * attached, the tool is not offered.
-	 */
-	readonly userInput?: UserInputPrompt;
 }
 
 /**
@@ -409,14 +402,9 @@ export class SessionExtensionBinding {
 		return this.extensionRunnerRef;
 	}
 
-	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
+	/** The UI contexts no extension owns see, while an attached client answers dialogs. */
 	get uiContext(): ExtensionUIContext | undefined {
-		return this.terminalClient() ? this.uiFor(undefined, undefined) : undefined;
-	}
-
-	/** Ask the user `request`'s questions in the terminal client; undefined when none is attached. */
-	askUserInput(request: UserInputRequest, signal?: AbortSignal): Promise<UserInputResponse> | undefined {
-		return this.terminalClient()?.userInput?.(request, signal);
+		return this.acceptsDialogs() ? this.uiFor(undefined, undefined) : undefined;
 	}
 
 	/** The mode the first attached client fixed. */
@@ -441,11 +429,9 @@ export class SessionExtensionBinding {
 	 */
 	attach(client: ExtensionClient): ExtensionClientAttachment {
 		this.host.assertActive();
-		const previousTerminal = this.terminalClient();
 		const index = this.clients.findIndex((attached) => attached.id === client.id);
 		if (index === -1) this.clients.push(client);
 		else this.clients[index] = client;
-		this.terminalClientChanged(previousTerminal);
 		const detach = (): void => this.detach(client);
 		const bound = this.bound ?? this.bind(client.mode);
 		this.bound = bound;
@@ -462,9 +448,7 @@ export class SessionExtensionBinding {
 		// A later attachment under the same id replaced this one and owns the slot.
 		const index = this.clients.indexOf(client);
 		if (index === -1) return;
-		const previousTerminal = this.terminalClient();
 		this.clients.splice(index, 1);
-		this.terminalClientChanged(previousTerminal);
 	}
 
 	private bind(mode: ExtensionMode): Promise<void> {
@@ -485,16 +469,6 @@ export class SessionExtensionBinding {
 		});
 	}
 
-	/** The terminal client: the last attached client that asks the request_user_input questions. */
-	private terminalClient(): ExtensionClient | undefined {
-		return this.clients.findLast((client) => client.userInput !== undefined);
-	}
-
-	/** The client theme calls go to: the last attached client with themes. */
-	private themeClient(): ExtensionClient | undefined {
-		return this.clients.findLast((client) => client.themes !== undefined);
-	}
-
 	/** The attached client the current call runs for, if any. */
 	private scopedClient(): ExtensionClient | undefined {
 		const clientId = ClientScope.current();
@@ -510,13 +484,6 @@ export class SessionExtensionBinding {
 		return ClientScope.current() === undefined ? this.clients[0] : this.scopedClient();
 	}
 
-	private terminalClientChanged(previous: ExtensionClient | undefined): void {
-		// request_user_input is offered only while a client that asks its questions is attached.
-		if (this.bound && (this.terminalClient() === undefined) !== (previous === undefined)) {
-			this.host.tools().syncPlanningRuntime();
-		}
-	}
-
 	/** Forget what the extensions declared: their live status, panels, and title. */
 	private clearDeclaredUI(): void {
 		this.host.liveState.clearMatching(["ext_status/", "ext_panel/", "ext_title"]);
@@ -525,7 +492,18 @@ export class SessionExtensionBinding {
 	/** Whether an attached client answers dialogs. */
 	private acceptsDialogs(): boolean {
 		const live = this.host.liveState;
-		return (["select", "confirm", "input", "editor", "form", "dialog"] as const).some((kind) => live.accepts(kind));
+		return (["select", "confirm", "input", "editor", "form", "dialog", "user_input"] as const).some((kind) =>
+			live.accepts(kind),
+		);
+	}
+
+	/** The host's themes: the built-in ones, the user's, and the ones the conversation's resources loaded. */
+	private themes(): ThemeInfo[] {
+		const loaded = new Map<string, Theme>();
+		for (const theme of this.host.resourceLoader.getThemes().themes) {
+			if (theme.name) loaded.set(theme.name, theme);
+		}
+		return getAvailableThemesWithPaths(loaded, { customThemesDir: join(this.host.agentDir, "themes") });
 	}
 
 	/**
@@ -672,11 +650,10 @@ export class SessionExtensionBinding {
 	/**
 	 * The UI one extension sees (`owner`, its manifest id), or contexts no
 	 * extension owns (`undefined`). UI calls write the live state; status
-	 * items, panels, and the title need an owner. Theme calls go to the theme
-	 * client, and do nothing without one.
+	 * items, panels, and the title need an owner. Setting a theme the host
+	 * knows asks the attached clients to show it.
 	 */
 	private createUIRouter(owner: string | undefined): ExtensionUIContext {
-		const themes = () => this.themeClient()?.themes;
 		// The router is built before the binding's host is set.
 		const live = () => this.host.liveState;
 		const owned = (member: string): string => {
@@ -748,8 +725,14 @@ export class SessionExtensionBinding {
 			pasteToEditor: (text) => live().insertEditorText(stripTerminalControls(text)),
 			setEditorText: (text) => live().setEditorText(stripTerminalControls(text)),
 			getEditorText: () => this.editorText(owner),
-			getAllThemes: () => themes()?.getAllThemes() ?? [],
-			setTheme: (name) => themes()?.setTheme(name) ?? { success: false, error: "UI not available" },
+			getAllThemes: () => this.themes(),
+			setTheme: (name) => {
+				if (!this.themes().some((theme) => theme.name === name)) {
+					return { success: false, error: `Theme not found: ${name}` };
+				}
+				live().setTheme(name);
+				return { success: true };
+			},
 		};
 	}
 
@@ -785,10 +768,7 @@ export class SessionExtensionBinding {
 		runner.setUIContext(
 			(owner, instance) => this.uiFor(owner, instance),
 			this.extensionMode,
-			() =>
-				this.terminalClient() !== undefined ||
-				this.acceptsDialogs() ||
-				(this.extensionMode !== "print" && this.extensionMode !== "json"),
+			() => this.acceptsDialogs() || (this.extensionMode !== "print" && this.extensionMode !== "json"),
 		);
 		runner.bindCommandContext(this.commandActions);
 		runner.bindInvoker(() => this.invoker());

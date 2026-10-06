@@ -146,7 +146,7 @@ Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.m
 
 ### Questions from Volt
 
-When a material preference cannot be discovered from the workspace, the built-in `request_user_input` tool opens a question panel in place of the editor. It is available in local interactive Build and Plan sessions; print, JSON, RPC/phone, and subagent runtimes do not expose it.
+When a material preference cannot be discovered from the workspace, the built-in `request_user_input` tool opens a question panel in place of the editor. It is offered in Build and Plan sessions while a client that answers its questions is attached: the TUI, an RPC client, or a paired phone that accepts them. Print, JSON, and subagent runtimes do not expose it.
 
 - Use the arrow keys to choose an option and Enter to answer. The recommendation appears first.
 - Start typing to write your own answer, or press Ctrl+N to add notes to a selected option. Shift+Enter inserts a newline.
@@ -673,7 +673,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `request_user_input` (root local TUI only), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
+Available built-in tools: `request_user_input` (while a client that answers it is attached; not in subagents), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
 
 ### Resource Options
 

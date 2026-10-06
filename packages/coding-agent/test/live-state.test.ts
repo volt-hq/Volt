@@ -442,6 +442,39 @@ describe("LiveState host requests", () => {
 		await expect(auth).resolves.toMatchObject({ status: "answered", response: { cancelled: true } });
 	});
 
+	it("takes an answer to every request_user_input question by its id, or a skip with none", async () => {
+		const live = new LiveState();
+		live.attach("client", createLiveRecorder(["user_input"]));
+		const option = (label: string) => ({ label, description: `${label}.` });
+		const question = (id: string) => ({ id, header: id, question: `${id}?`, options: [option("A"), option("B")] });
+		const asked = live.request(
+			{ kind: "user_input", questions: [question("scope"), question("storage")] },
+			{ id: "u" },
+		);
+		for (const response of [
+			{ status: "answered", answers: {} },
+			{ status: "answered", answers: { scope: { answers: ["A"] } } },
+			{ status: "answered", answers: { scope: { answers: ["A"] }, other: { answers: ["B"] } } },
+			{ status: "answered", answers: { scope: { answers: ["A"] }, storage: { answers: [] } } },
+			{ status: "skipped", answers: { scope: { answers: ["A"] } } },
+			{ status: "cancelled", answers: {} },
+			{ value: "A" },
+		]) {
+			expect(live.answer("u", response as never, "client")).toBe("invalid");
+		}
+		const answered = {
+			status: "answered" as const,
+			answers: { scope: { answers: ["A", "notes"] }, storage: { answers: ["mine"] } },
+		};
+		expect(live.answer("u", answered, "client")).toBe("accepted");
+		await expect(asked).resolves.toMatchObject({ status: "answered", response: answered });
+
+		const skipped = live.request({ kind: "user_input", questions: [question("scope")] }, { id: "s" });
+		expect(live.answer("s", { status: "skipped", answers: {} }, "client")).toBe("accepted");
+		await expect(skipped).resolves.toMatchObject({ response: { status: "skipped", answers: {} } });
+		await expect(live.request({ kind: "user_input", questions: [] })).rejects.toThrow(TypeError);
+	});
+
 	it("asks a provider sign-in or a secret input of one client only, and takes a pasted code only for a manual sign-in", async () => {
 		const live = new LiveState();
 		live.attach("client", createLiveRecorder(["input", "provider_auth"]));
@@ -525,6 +558,43 @@ type Step =
 	| { op: "status"; key: number; text?: string };
 
 const CLIENT_KINDS: HostRequestKind[][] = [[...DIALOGS, "approval"], DIALOGS, []];
+
+describe("LiveState clients and theme directives", () => {
+	it("tells subscribers when a client attaches or detaches, until they stop or the live state closes", () => {
+		const live = new LiveState();
+		const seen: boolean[] = [];
+		const stop = live.subscribeClients(() => seen.push(live.accepts("user_input")));
+		live.subscribeClients(() => {
+			throw new Error("A failing listener reaches no one");
+		});
+		const detach = live.attach("tui", createLiveRecorder(["user_input"]));
+		const detachOther = live.attach("phone", createLiveRecorder([]));
+		detach();
+		stop();
+		detachOther();
+		expect(seen).toEqual([true, true, false]);
+		const late = vi.fn();
+		live.subscribeClients(late);
+		live.close();
+		live.attach("after", createLiveRecorder([]));
+		expect(late).not.toHaveBeenCalled();
+	});
+
+	it("sends a theme directive to every attached client, and keeps none for a client that attaches later", () => {
+		const live = new LiveState();
+		const first = createLiveRecorder();
+		const second = createLiveRecorder();
+		live.attach("first", first);
+		live.attach("second", second);
+		live.setTheme("light");
+		const later = createLiveRecorder();
+		live.attach("later", later);
+		for (const client of [first, second]) {
+			expect(client.items()).toEqual([{ type: "directive", directive: "set_theme", name: "light" }]);
+		}
+		expect(later.items()).toEqual([]);
+	});
+});
 
 describe("LiveState properties", () => {
 	it("each client's view is the live state it may see, and each request has at most one accepted answer", async () => {

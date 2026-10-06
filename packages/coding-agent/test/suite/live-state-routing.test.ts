@@ -1,24 +1,17 @@
 /**
  * The extensions' UI calls write the conversation's live state, which every
- * attached client sees; theme calls go to the client with themes.
+ * attached client sees; theme calls list the host's themes and ask the
+ * clients to show one.
  */
 
 import type { HostRequestKind } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
-import type { ExtensionClientThemes } from "../../src/core/session/extension-binding.ts";
 import { connectTestClient } from "../utilities/host-client.ts";
 import { createLiveRecorder, type LiveRecorder, SESSION_FED_LIVE_KEYS } from "../utilities/live-recorder.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "./extension-runtime.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];
-
-function createThemes(): ExtensionClientThemes {
-	return {
-		getAllThemes: vi.fn(() => [{ name: "light", path: undefined }]),
-		setTheme: vi.fn(() => ({ success: true })),
-	};
-}
 
 /** Answer the client's oldest pending request once one arrives. */
 async function answerNext(
@@ -42,7 +35,7 @@ describe("the extensions' UI through the live state", () => {
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	it("writes UI calls to the live state and sends theme calls to the client with themes", async () => {
+	it("writes UI calls to the live state, themes as directives to show one the host knows", async () => {
 		let ui: ExtensionUIContext | undefined;
 		const fixture = await createExtensionRuntime(
 			(volt) => {
@@ -54,8 +47,7 @@ describe("the extensions' UI through the live state", () => {
 		);
 		cleanups.push(() => fixture.dispose());
 		const live = createLiveRecorder(DIALOGS);
-		const themes = createThemes();
-		await connectTestClient(fixture.host, fixture.conversation, { id: "tui", live, surface: { themes } });
+		await connectTestClient(fixture.host, fixture.conversation, { id: "tui", live, surface: {} });
 		if (!ui) throw new Error("session_start did not run");
 
 		ui.setStatus("build", "building");
@@ -87,9 +79,11 @@ describe("the extensions' UI through the live state", () => {
 			// Pasted text never carries terminal controls into the editor.
 			{ type: "directive", directive: "insert_editor_text", text: "pasted" },
 		]);
-		expect(ui.getAllThemes()).toEqual([{ name: "light", path: undefined }]);
+		// The host's themes: the built-in ones at least.
+		expect(ui.getAllThemes().map((theme) => theme.name)).toEqual(expect.arrayContaining(["dark", "light"]));
 		expect(ui.setTheme("light")).toEqual({ success: true });
-		expect(themes.setTheme).toHaveBeenCalledWith("light");
+		expect(ui.setTheme("no-such-theme")).toEqual({ success: false, error: "Theme not found: no-such-theme" });
+		expect(live.uiItems().slice(-1)).toEqual([{ type: "directive", directive: "set_theme", name: "light" }]);
 		expect(() => ui?.setStatus("", "empty key")).toThrow(TypeError);
 	});
 

@@ -84,9 +84,9 @@ import type { ExtensionError, InputSource } from "../../extensions/index.ts";
 import { ClientScope } from "../../host/client-scope.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
+import type { LiveUpdate } from "../../host/live-state.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
-import type { ExtensionClient } from "../../session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../session-cwd.ts";
 import { SessionManager } from "../../session-manager.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
@@ -226,13 +226,6 @@ export interface ServeConnectionOptions {
 	readonly onInputAccepted?: (conversation: HostedConversation) => void;
 	/** The source of the `input` event the client's prompts raise; `rpc` by default. */
 	readonly inputSource?: InputSource;
-	/**
-	 * What a client in the host's own process offers its conversation's
-	 * extensions beyond the protocol: its terminal's themes, and the dialog
-	 * that asks the request_user_input tool's questions (the TUI until its
-	 * host runs in a worker).
-	 */
-	readonly terminal?: Pick<ExtensionClient, "themes" | "userInput">;
 }
 
 export interface ProtocolConnection {
@@ -704,6 +697,23 @@ export function serveConnection(
 	let pendingEditorText: { readonly conversation: string; readonly text: string } | undefined;
 
 	/**
+	 * The theme an extension asked the local client's conversation to show
+	 * before a subscription of the client showed its live lane (from its
+	 * `session_start`, as the client attached): it reaches the client once one does.
+	 */
+	let pendingTheme: { readonly conversation: HostedConversation; readonly name: string } | undefined;
+
+	/** The client's own view of its conversation's live state, before and beside its subscriptions. */
+	const applyOwnLive = (update: LiveUpdate): void => {
+		const conversation = home;
+		if (profile.name !== "local" || !conversation || showsLive(conversation)) return;
+		for (const item of update.items) {
+			if (item.type === "directive" && item.directive === "set_theme")
+				pendingTheme = { conversation, name: item.name };
+		}
+	};
+
+	/**
 	 * Replace the client's editor text with `text` once it shows the
 	 * conversation `conversationId`: at once when a subscription shows it,
 	 * else when the client subscribes there after its move.
@@ -795,9 +805,8 @@ export function serveConnection(
 		...(profile.name === "remote" ? { remote: true } : {}),
 		recoversInput: true,
 		// Keeps the client asked the host requests it accepts before it subscribes; each subscription shows them.
-		live: { acceptsHostRequest: (kind) => accepts.has(kind), apply: () => {} },
+		live: { acceptsHostRequest: (kind) => accepts.has(kind), apply: applyOwnLive },
 		surface: {
-			...options.terminal,
 			commandContextActions: {
 				waitForIdle: () => currentHome().session.waitForIdle(),
 				newSession: (newSessionOptions) => openNewSession(currentHost(), client, newSessionOptions),
@@ -1394,6 +1403,12 @@ export function serveConnection(
 		if (editorText?.conversation === conversation.id && target !== undefined && subscription.receivesLive) {
 			pendingEditorText = undefined;
 			conversation.liveState.setEditorText(editorText.text, { client: client.id });
+		}
+		// The theme an extension asked for before the client subscribed.
+		const theme = pendingTheme;
+		if (theme?.conversation === conversation && subscription.receivesLive) {
+			pendingTheme = undefined;
+			conversation.liveState.setTheme(theme.name, { client: client.id });
 		}
 	};
 

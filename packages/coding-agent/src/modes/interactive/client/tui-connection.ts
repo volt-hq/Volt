@@ -7,7 +7,6 @@
 
 import type { HostRequestKind } from "@hansjm10/volt-protocol";
 import type { ProtocolClient, ProtocolClientOptions } from "../../../client/protocol-client.ts";
-import type { ExtensionClient } from "../../../core/session/extension-binding.ts";
 
 export interface TuiConnectOptions {
 	/** The host request kinds the TUI answers. */
@@ -22,12 +21,6 @@ export interface TuiConnectOptions {
 	readonly onLost?: (error: Error) => void;
 	/** Called with the client before it says hello, so the TUI observes its changes from the first. */
 	readonly onClient?: (client: ProtocolClient) => void;
-	/**
-	 * What the TUI's terminal offers the conversation's extensions beyond the
-	 * protocol: its themes and the request_user_input dialog. In process only,
-	 * until a host request kind and a directive carry them (Phase 7).
-	 */
-	readonly terminal?: Pick<ExtensionClient, "themes" | "userInput">;
 }
 
 /** The TUI's connection to its host. */

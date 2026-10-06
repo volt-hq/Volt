@@ -87,7 +87,7 @@ function resultFor(
 }
 
 export interface RequestUserInputToolOptions {
-	/** Ask the questions in the client that shows them; undefined when no client can. */
+	/** Ask the questions of the clients that show them; undefined when no client can. */
 	ask?: (request: UserInputRequest, signal?: AbortSignal) => ReturnType<UserInputPrompt> | undefined;
 }
 
@@ -98,7 +98,7 @@ export function createRequestUserInputToolDefinition(
 		name: "request_user_input",
 		label: "ask user",
 		description:
-			"Ask the user one to three short, structured preference questions and wait for their response. Available in the root local TUI only. The user can select a choice, write an answer, add notes, or skip. Not for permission requests, secrets, or facts you can discover with tools.",
+			"Ask the user one to three short, structured preference questions and wait for their response. The user can select a choice, write an answer, add notes, or skip. Not for permission requests, secrets, or facts you can discover with tools.",
 		promptSnippet: "Ask a material preference question with selectable choices or a free-form answer",
 		promptGuidelines: [
 			"Explore before asking: never ask the user for facts you can discover from the repository or available tools.",
