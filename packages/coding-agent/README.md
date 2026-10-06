@@ -612,8 +612,8 @@ Supported interactive Volt sessions connect to an already-running daemon, allowi
 Use `/remote` for interactive management, including registering Volt's current directory, QR pairing, confirmed device revocation, and explicit approval before a revoked identity can re-pair. Equivalent shell commands are:
 
 ```bash
-volt daemon status                        # exits 0 only when phone transport and relay access are ready
-volt remote status                        # same readiness contract as daemon status
+volt daemon status                        # exits 0 when remote access is ready or the build has no phone transport
+volt remote status                        # exits 0 only when phone transport and relay access are ready
 volt remote clients                       # paired client JSON
 volt remote revoke <node-id>              # revoke one client and close its connections
 volt remote workspace add . --name volt
@@ -628,7 +628,7 @@ Security defaults and limitations:
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise project resources run untrusted.
 - Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
-- The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) plus managed `relayCredential` access, and exits nonzero unless transport is ready and relay access is not expired, suspended, or pending reset. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon runs for local clients and workers, with phone transport unavailable.
+- The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) plus managed `relayCredential` access, and exits nonzero unless transport is ready and relay access is not expired, suspended, or pending reset, or the build has no phone transport (`native_binding_missing`); `volt remote status` exits nonzero even then. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon runs for local clients and workers, with phone transport unavailable.
 
 See [Background daemon](docs/daemon.md), [Iroh remote protocol v1](docs/iroh-remote-protocol.md), and [Security](docs/security.md#remote-access-over-iroh-preview).
 
