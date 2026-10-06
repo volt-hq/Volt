@@ -102,8 +102,11 @@ export interface SessionLifecycleHost {
 	disposeMcpManager(): Promise<void>;
 	/** Stop observing the conversation's events and the session's entries. */
 	detachConversation(): void;
-	/** Release the session's observers: git context, event listeners, and generation listeners. */
-	releaseObservers(): void;
+	/**
+	 * Release the session's observers: git context, event listeners, and
+	 * generation listeners. Resolves once Git commands the release stopped have exited.
+	 */
+	releaseObservers(): Promise<void>;
 	closeDiagnostics(): Promise<void>;
 }
 
@@ -219,10 +222,17 @@ export class SessionLifecycle {
 			if (closeError) throw closeError;
 		})();
 		this.fenceExtensionGeneration();
-		this.host.releaseObservers();
+		const observersDrain = this.host.releaseObservers();
 		cleanupSessionResources(this.host.sessionManager.getSessionId());
 
-		const results = await Promise.allSettled([persistenceDrain, subagentDrain, mcpDrain, settingsDrain, workDrain]);
+		const results = await Promise.allSettled([
+			persistenceDrain,
+			subagentDrain,
+			mcpDrain,
+			settingsDrain,
+			workDrain,
+			observersDrain,
+		]);
 		await this.host.closeDiagnostics();
 		await this.host.promptCache().close();
 		const rejected = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");

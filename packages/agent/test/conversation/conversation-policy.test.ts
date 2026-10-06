@@ -313,11 +313,19 @@ describe("Conversation retry and failed deliveries", () => {
 			fauxAssistantMessage("", { stopReason: "error", error: { kind: "server", retryable: true, message: "down" } }),
 			fauxAssistantMessage("must remain unused"),
 		]);
-		conversation.subscribe((event) => {
-			if (event.type === "retry_start") void conversation.steer({ message: "steer during backoff" });
-		});
-		await promptAndSettle(conversation, "hello");
-		await conversation.waitForIdle();
+		// The backoff ends once the steer is admitted, however long admission takes, so the retried
+		// request is the one that delivers it.
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		try {
+			conversation.subscribe((event) => {
+				if (event.type === "retry_start")
+					void conversation.steer({ message: "steer during backoff" }).finally(() => vi.advanceTimersByTime(20));
+			});
+			await promptAndSettle(conversation, "hello");
+			await conversation.waitForIdle();
+		} finally {
+			vi.useRealTimers();
+		}
 
 		expect(events.filter((event) => event.type === "retry_end")).toMatchObject([
 			{ success: false, error: "Injected rollback" },

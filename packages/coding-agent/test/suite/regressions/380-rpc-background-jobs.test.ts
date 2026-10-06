@@ -135,6 +135,17 @@ function liveWorkItems(frames: readonly HostFrame[], workId: string) {
 	);
 }
 
+/** The progress texts the `work/<id>` values of `frames` carried, and the values without them. */
+function liveWorkProgress(frames: readonly HostFrame[], workId: string) {
+	const values = liveWorkItems(frames, workId).flatMap((item) =>
+		item.type === "set" && item.value.kind === "work" ? [item.value] : [],
+	);
+	return {
+		texts: [...new Set(values.flatMap((value) => (value.progress?.text === undefined ? [] : [value.progress.text])))],
+		rest: values.map(({ progress: _progress, ...rest }) => rest),
+	};
+}
+
 async function startJob(harness: Harness, command = "first") {
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command, background: true }), { stopReason: "toolUse" }),
@@ -162,7 +173,15 @@ describe("background jobs over protocol frames", () => {
 		await vi.waitFor(() =>
 			expect(client.state.work.get(job.id)).toMatchObject({ kind: "job", state: "running", cancellable: true }),
 		);
-		expect(client.live.values.get(`work/${job.id}`)).toMatchObject({ kind: "work", workId: job.id });
+		// A running job's last output line is its progress, which its live value carries a coalescing
+		// interval after the output: wait for it, so the frames are read as they settle.
+		await vi.waitFor(() =>
+			expect(client.live.values.get(`work/${job.id}`)).toMatchObject({
+				kind: "work",
+				workId: job.id,
+				progress: { text: "output for first" },
+			}),
+		);
 		await client.waitForIdle();
 		expect(client.phase).toMatchObject({ busy: false });
 		const read = await client.query("work_output", { workId: job.id });
@@ -171,6 +190,9 @@ describe("background jobs over protocol frames", () => {
 		executions.get("first")!.output("\u001b[31mnew output\u001b[0m\r\n\u0000");
 		await vi.waitFor(async () =>
 			expect((await client.query("work_output", { workId: job.id })).text).toContain("new output\n"),
+		);
+		await vi.waitFor(() =>
+			expect(client.live.values.get(`work/${job.id}`)).toMatchObject({ progress: { text: "new output" } }),
 		);
 		expect((await client.query("work_output", { workId: job.id })).text).not.toContain("\u001b");
 		// Reading output runs no inference.
@@ -185,9 +207,12 @@ describe("background jobs over protocol frames", () => {
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(3);
 		await vi.waitFor(() => expect(client.live.values.has(`work/${job.id}`)).toBe(false));
-		// The live value carries no output text, and is cleared once the job finished.
+		// The live value carries the output only as its last line, the progress, and is cleared
+		// once the job finished; the output itself is read with work_output.
 		expect(liveWorkItems(frames, job.id).at(-1)).toMatchObject({ type: "clear" });
-		expect(JSON.stringify(liveWorkItems(frames, job.id))).not.toContain("output for first");
+		const live = liveWorkProgress(frames, job.id);
+		expect(live.texts).toEqual(["output for first", "new output"]);
+		expect(JSON.stringify(live.rest)).not.toMatch(/output for first|new output/);
 	});
 
 	it("cancels only one job and reports cancelling until cleanup finishes", async () => {
@@ -285,7 +310,12 @@ describe("background jobs over protocol frames", () => {
 		expect(output.truncated).toBe(true);
 		expect(Buffer.byteLength(output.text, "utf8")).toBeLessThanOrEqual(50 * 1024);
 		expect(output.text).not.toContain("�");
-		expect(JSON.stringify(liveWorkItems(phone.frames, job.id))).not.toContain("界");
+		// The live value carries the last line, cut to the job progress bound, as its progress: wait for it,
+		// so the frames are read as they settle.
+		await vi.waitFor(() => expect(liveWorkProgress(phone.frames, job.id).texts.at(-1)).toMatch(/^界+…$/));
+		const live = liveWorkProgress(phone.frames, job.id);
+		expect(Math.max(...live.texts.map((text) => text.length))).toBeLessThanOrEqual(300);
+		expect(JSON.stringify(live.rest)).not.toContain("界");
 	});
 
 	it("leaves the jobs behind when the client moves to a new session", async () => {
