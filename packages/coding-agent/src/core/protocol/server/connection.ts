@@ -12,8 +12,11 @@
  * `abort_retry`, `cancel_work`) run in a lane of their own, in arrival order
  * among themselves but not after the other frames before them, so a stop
  * never waits behind a long intent such as `compact`; a client that needs an
- * earlier intent admitted first waits for its `accepted`. A stopping intent
- * is checked against the connection's authority like any other. Non-input intents are deduplicated per
+ * earlier intent admitted first waits for its `accepted`. User shell commands
+ * (`bash`) run in a lane of their own the same way: a command runs as
+ * conversation activity, so the prompts and intents sent while it runs do not
+ * wait for it. A stopping intent is checked against the connection's
+ * authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
  * answers `accepted{conversation}`, then ends the subscriptions on the
@@ -118,6 +121,12 @@ const STRUCTURAL_INTENTS: ReadonlySet<string> = new Set([
  * stop never waits behind the long intent it stops.
  */
 const STOPPING_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_bash", "abort_retry", "cancel_work"]);
+
+/**
+ * Intents that run as conversation activity: one at a time in a lane of
+ * their own, so a long shell command never holds the frames after it.
+ */
+const ACTIVITY_INTENTS: ReadonlySet<string> = new Set(["bash"]);
 
 /** Intents whose acceptance changes the `sessions` catalog without moving the client. */
 const SESSIONS_INTENTS: ReadonlySet<string> = new Set(["delete_session", "set_session_name"]);
@@ -502,8 +511,11 @@ export function serveConnection(
 	/** A fatal frame was written: nothing follows it. */
 	let fatalWritten = false;
 	let lane: Promise<void> = Promise.resolve();
-	/** Stopping intents, in order, beside the lane. */
-	let stopLane: Promise<void> = Promise.resolve();
+	/** Stopping intents, and activity intents, each in order, beside the lane. */
+	const besideLanes: Record<"stop" | "activity", Promise<void>> = {
+		stop: Promise.resolve(),
+		activity: Promise.resolve(),
+	};
 	/** Subscribe, unsubscribe, and answers, in order, each after the authority check. */
 	let controlLane: Promise<void> = Promise.resolve();
 	let pendingFrames = 0;
@@ -1153,19 +1165,20 @@ export function serveConnection(
 	};
 
 	/**
-	 * Run a stopping intent in the stop lane, once the client is attached:
-	 * beside the intent and query lane, so it never waits behind a long
-	 * intent, and one at a time in arrival order, so stops re-read the
-	 * connection's authority one at a time. It counts toward the pending
+	 * Run a stopping intent in the stop lane, or an activity intent in the
+	 * activity lane, once the client is attached: beside the intent and query
+	 * lane, so it never waits behind a long intent nor holds the frames after
+	 * it, and one at a time in arrival order within its lane, so stops re-read
+	 * the connection's authority one at a time. It counts toward the pending
 	 * frames as a lane frame does.
 	 */
-	const enqueueStop = (task: () => Promise<void>): void => {
+	const enqueueBeside = (lane: "stop" | "activity", task: () => Promise<void>): void => {
 		if (pendingFrames >= MAX_PENDING_FRAMES) {
 			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
 			return;
 		}
 		pendingFrames++;
-		stopLane = stopLane.then(async () => {
+		besideLanes[lane] = besideLanes[lane].then(async () => {
 			try {
 				await attached;
 				if (closing) return;
@@ -1386,8 +1399,10 @@ export function serveConnection(
 				return;
 			default:
 				if (RESERVED.has(type) || !intentEnvelopeValidator(type).Check(value)) break;
-				if (STOPPING_INTENTS.has(type)) enqueueStop(() => runIntent(value as unknown as IntentEnvelope));
-				else enqueue(() => runIntent(value as unknown as IntentEnvelope));
+				if (STOPPING_INTENTS.has(type)) enqueueBeside("stop", () => runIntent(value as unknown as IntentEnvelope));
+				else if (ACTIVITY_INTENTS.has(type)) {
+					enqueueBeside("activity", () => runIntent(value as unknown as IntentEnvelope));
+				} else enqueue(() => runIntent(value as unknown as IntentEnvelope));
 				return;
 		}
 		void close({ code: "invalid_frame", message: `Invalid ${type} frame` });

@@ -151,6 +151,7 @@ export const resourcesQuery = defineQuery({
 					extensions.errors.map((error) => ({ type: "error" as const, message: error.error, path: error.path })),
 				),
 				...diagnosticsOf("extension", session.extensionRunner.getCommandDiagnostics()),
+				...diagnosticsOf("extension", session.extensionRunner.getShortcutDiagnostics()),
 			],
 			notices,
 		};

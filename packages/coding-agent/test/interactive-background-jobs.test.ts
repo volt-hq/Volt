@@ -66,7 +66,6 @@ type InteractiveTestAccess = {
 	workRowsCoalescer: StreamingRenderCoalescer<void>;
 	followWork(): void;
 	isInitialized: boolean;
-	pendingUserInputs: string[];
 	setupKeyHandlers(): void;
 	setupEditorSubmitHandler(): void;
 	showExtensionConfirm(title: string, message: string): Promise<boolean>;
@@ -393,7 +392,6 @@ describe("interactive background jobs", () => {
 			);
 			expect(waitSettled).toBe(false);
 			expect(prompt).not.toHaveBeenCalled();
-			expect(access.pendingUserInputs).toEqual([]);
 
 			terminal.sendInput("\x1b");
 			terminal.sendInput("\x1b");

@@ -148,18 +148,6 @@ export class IntentRegistry {
 		return this.intents.definitions;
 	}
 
-	/** The slash aliases that invoke one built-in intent, with that intent's description. */
-	slashCommands(): { name: string; description: string }[] {
-		const { definitions, slashAliases } = this.intents;
-		return [...slashAliases].map(([name, intent]) => {
-			const definition: AnyIntentDefinition = definitions[intent];
-			return {
-				name,
-				description: typeof definition.description === "string" ? definition.description : definition.label,
-			};
-		});
-	}
-
 	/** Every built-in intent name, in definition order. */
 	names(): BuiltinIntentName[] {
 		return Object.keys(this.definitions) as BuiltinIntentName[];

@@ -685,7 +685,10 @@ export class SessionPrompting {
 		clientMessageId: string | undefined,
 	): Promise<void> {
 		this.host.assertActive();
-		if (this.host.hasSessionOperationBarrier()) {
+		// Input sent while a compaction or a tree navigation holds the conversation waits in the queue until it
+		// ends. A reload replaces the prompt templates and skills input expands with: input waits for it outside.
+		const operation = this.host.conversation().operation?.kind;
+		if (this.host.hasSessionOperationBarrier() && operation !== "compaction" && operation !== "navigation") {
 			throw new Error("Cannot queue input while a session mutation is active");
 		}
 		const clientInputs = this.host.clientInputs();

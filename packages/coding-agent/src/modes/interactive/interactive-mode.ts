@@ -2,15 +2,16 @@
  * Interactive mode for the coding agent: the TUI as a client of its host
  * (TuiHost) over a loopback protocol connection. Its transcript and status
  * (footer, indicators, alerts, plan, work, extension UI) draw the store that
- * follows the client, and their actions go out as intents; its input and
- * commands still read and drive the session in process until they move to
- * the store and intents (architecture rewrite Phase 6).
+ * follows the client, and their actions go out as intents; its input (the
+ * editor, its keys, and the slash menu) goes out as the client's intents
+ * (client/input.ts); its commands still read and drive the session in process
+ * until they move to the store and intents (architecture rewrite Phase 6).
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentAbortSource, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -20,6 +21,7 @@ import {
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
 import {
+	type ClientQueuedInput,
 	type ClientState,
 	type ExtensionState,
 	type ExtensionSummary,
@@ -29,6 +31,7 @@ import {
 	type LiveValue,
 	type ProjectedEntry,
 	type UiNodeStyledText,
+	type WithdrawnInput,
 } from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
@@ -83,7 +86,6 @@ import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.t
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
 	ExtensionCommandContext,
-	ExtensionRunner,
 	ExtensionUIDialogOptions,
 	SessionIntentResult,
 	ToolInfo,
@@ -94,7 +96,6 @@ import {
 	permissionRequestLines,
 	reviewPackagePermissions,
 } from "../../core/extensions/permissions.ts";
-import { ClientScope } from "../../core/host/client-scope.ts";
 import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
@@ -124,7 +125,6 @@ import {
 	runReviewWorkflow,
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
-import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import type { ExtensionClient } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
@@ -133,7 +133,6 @@ import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
-import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
@@ -167,7 +166,6 @@ import {
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
 import { createPrivateTempDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
@@ -175,6 +173,7 @@ import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
 import { footerViewModel, withTransientUsage } from "./client/footer-model.ts";
+import { type Delivery, type InputDiagnostic, type Interruptible, TuiInput } from "./client/input.ts";
 import { TranscriptView } from "./client/transcript-view.ts";
 import { TuiCatalogs } from "./client/tui-catalogs.ts";
 import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
@@ -182,7 +181,6 @@ import { ConversationWork } from "./client/work-view.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
-import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
@@ -207,7 +205,11 @@ import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
 import { DaemonLeaseUnavailableError } from "./host/daemon-link.ts";
 import type { TuiHost } from "./host/tui-host.ts";
 import { TUI_HOST_REQUESTS, TuiLiveView } from "./live-view.ts";
-import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
+import {
+	collectPromptImageAttachments,
+	MAX_PROMPT_IMAGE_ATTACHMENTS,
+	mayAttachImages,
+} from "./prompt-image-attachments.ts";
 import { createClientIntentSink } from "./ui-node/intents.ts";
 import { PanelFocus, UiPanels } from "./ui-node/panels.ts";
 import { TUI_SEMANTIC_THEME } from "./ui-node/semantic-theme.ts";
@@ -289,11 +291,6 @@ class ExpandableText extends Text implements Expandable {
 	}
 }
 
-type CompactionQueuedMessage = {
-	text: string;
-	mode: "steer" | "followUp";
-};
-
 /** Display-only renderer for an isolated child session streamed inline into the transcript. */
 interface InlineSessionRenderer {
 	onSessionEvent: (event: AgentSessionEvent) => void;
@@ -327,6 +324,13 @@ const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
+/**
+ * How long the TUI's client waits for an intent's or query's answer: as long
+ * as a timer lasts. Its host runs in this process, and an intent answers when
+ * it ran, which takes as long as a shell command runs or the user takes to
+ * answer an extension command's dialog.
+ */
+const TUI_REQUEST_TIMEOUT_MS = 2_147_483_647;
 /** Width of fullscreen's panel sidebar, in columns. */
 /** How `/extensions` shows an extension's state. */
 const EXTENSION_STATE_LABELS: Readonly<Record<ExtensionState, string>> = {
@@ -477,8 +481,14 @@ export class InteractiveMode {
 	private readonly store = new TuiStore();
 	/** The store's transcript in the chat: messages, tool calls as the host presents them, and what streams. */
 	private readonly transcript: TranscriptView;
+	/** What the editor, the TUI's keys, and the slash menu send through the TUI's client. */
+	private readonly input = new TuiInput(this.store);
+	/** What the TUI could not bind or list as the catalog asks: shortcuts and commands its own keys and commands take. */
+	private inputDiagnostics: readonly InputDiagnostic[] = [];
 	/** The TUI's client connected: the store's conversation shows from then on. */
 	private connected = false;
+	/** Settles once the TUI's client connected: what the user sends before then waits for it. */
+	private readonly clientConnected = Promise.withResolvers<void>();
 	/** Why the conversation the TUI shows lost its log, as its host reported it. */
 	private lostCause: Error | undefined;
 	/** The live state of the conversation the TUI shows: extension panels and title, notices, dialogs, and approvals. */
@@ -488,7 +498,14 @@ export class InteractiveMode {
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private sessionRenderSuspension: RenderSuspensionLease | undefined;
 	private chatContainer: Container;
+	/** Below the chat: shell commands run while a turn holds the conversation, then the queued input. */
 	private pendingMessagesContainer: Container;
+	/** Shell commands run while a turn holds the conversation, until their entries commit. */
+	private readonly pendingShellRows = new Container();
+	/** The input queued for the next turn. */
+	private readonly queueContainer = new Container();
+	/** The client fold's queue the queued input shows. */
+	private shownQueue: readonly ClientQueuedInput[] | undefined;
 	private statusContainer: Container;
 	/** The work of the conversation the TUI shows, for the footer's work line, tool calls, and the work inspector. */
 	private readonly work: ConversationWork;
@@ -531,8 +548,6 @@ export class InteractiveMode {
 	private keybindings: KeybindingsManager;
 	private version: string;
 	private isInitialized = false;
-	private onInputCallback?: (text: string) => void;
-	private pendingUserInputs: string[] = [];
 	private loadingAnimation: Loader | undefined = undefined;
 	private turnStartedAt: number | undefined = undefined;
 	private workingElapsedTimer: ReturnType<typeof setInterval> | undefined = undefined;
@@ -570,9 +585,6 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 
-	// Skill commands: command name -> skill file path
-	private skillCommands = new Map<string, string>();
-
 	private signalCleanupHandlers: Array<() => void> = [];
 	private scratchDirectories = new Set<string>();
 	private clipboardScratchFiles = new Map<string, string>();
@@ -582,26 +594,14 @@ export class InteractiveMode {
 	private isBashMode = false;
 	private editorHasText = false;
 
-	// Track current bash execution component
-	private bashComponent: BashExecutionComponent | undefined = undefined;
-	/** The rows of user shell commands shown while they ran, waiting for their entries, which they stand for. */
-	private localBashRows: Array<{ readonly command: string; readonly component: BashExecutionComponent }> = [];
-
-	// Track pending bash components (shown in pending area, moved to chat on submit)
-	private pendingBashComponents: BashExecutionComponent[] = [];
-
-	// The compaction and retry indicators, and the editor's Escape handler they replaced while they show.
+	// The compaction and retry indicators.
 	private autoCompactionLoader: Loader | undefined = undefined;
 	private retryLoader: Loader | undefined = undefined;
 	private retryCountdown: CountdownTimer | undefined = undefined;
-	private indicatorEscape: { readonly previous: (() => void) | undefined } | undefined;
 	/** The attempt start the retry indicator counts down to. */
 	private retryShownFor: number | undefined;
 	/** Whether the terminal shows progress for a run or compaction. */
 	private progressShown = false;
-
-	// Messages queued while compaction is running
-	private compactionQueuedMessages: CompactionQueuedMessage[] = [];
 
 	// Shutdown state
 	private shutdownRequested = false;
@@ -699,6 +699,8 @@ export class InteractiveMode {
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
+		this.pendingMessagesContainer.addChild(this.pendingShellRows);
+		this.pendingMessagesContainer.addChild(this.queueContainer);
 		this.statusContainer = new Container();
 		this.work = new ConversationWork({ client: () => this.store.client, holder: this.store });
 		this.workStatus = new WorkStatus(() => this.work);
@@ -717,7 +719,7 @@ export class InteractiveMode {
 			showImages: () => this.settingsManager.getShowImages(),
 			imageWidthCells: () => this.settingsManager.getImageWidthCells(),
 			toolCallWork: (toolCallId) => this.toolCallWork(toolCallId),
-			takeLocalBashRow: (command) => this.takeLocalBashRow(command),
+			pendingShellRows: this.pendingShellRows,
 			workNoticeShown: () => this.updatePendingMessagesDisplay(),
 		});
 		this.catalogs = new TuiCatalogs(this.store, () => {
@@ -872,56 +874,13 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	private getAutocompleteSourceTag(sourceInfo?: SourceInfo): string | undefined {
-		if (!sourceInfo) {
-			return undefined;
-		}
-
-		const scopePrefix = sourceInfo.scope === "user" ? "u" : sourceInfo.scope === "project" ? "p" : "t";
-		const source = sourceInfo.source.trim();
-
-		if (source === "auto" || source === "local" || source === "cli") {
-			return scopePrefix;
-		}
-
-		if (source.startsWith("npm:")) {
-			return `${scopePrefix}:${source}`;
-		}
-
-		const gitSource = parseGitUrl(source);
-		if (gitSource) {
-			const ref = gitSource.ref ? `@${gitSource.ref}` : "";
-			return `${scopePrefix}:git:${gitSource.host}/${gitSource.path}${ref}`;
-		}
-
-		return scopePrefix;
-	}
-
-	private prefixAutocompleteDescription(description: string | undefined, sourceInfo?: SourceInfo): string | undefined {
-		const sourceTag = this.getAutocompleteSourceTag(sourceInfo);
-		if (!sourceTag) {
-			return description;
-		}
-		return description ? `[${sourceTag}] ${description}` : `[${sourceTag}]`;
-	}
-
-	private getBuiltInCommandConflictDiagnostics(extensionRunner: ExtensionRunner): ResourceDiagnostic[] {
-		const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
-		return extensionRunner
-			.getRegisteredCommands()
-			.filter((command) => builtinNames.has(command.name))
-			.map((command) => ({
-				type: "warning" as const,
-				message:
-					command.invocationName === command.name
-						? `Extension command '/${command.name}' conflicts with built-in interactive command. Skipping in autocomplete.`
-						: `Extension command '/${command.name}' conflicts with built-in interactive command. Available as '/${command.invocationName}'.`,
-				path: command.sourceInfo.path,
-			}));
-	}
-
+	/**
+	 * The editor's completions: the TUI's own slash commands, then those the
+	 * conversation's intents catalog offers (intent aliases, extension
+	 * commands, prompt templates, and skills when skill commands are on), and
+	 * `@` paths in the conversation's working directory.
+	 */
 	private createBaseAutocompleteProvider(): AutocompleteProvider {
-		// Define commands for autocomplete
 		const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 			name: command.name,
 			description: command.description,
@@ -929,30 +888,20 @@ export class InteractiveMode {
 
 		const modelCommand = slashCommands.find((command) => command.name === "model");
 		if (modelCommand) {
-			modelCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				// Get available models (scoped or from registry)
-				const models =
-					this.session.scopedModels.length > 0
-						? this.session.scopedModels.map((s) => s.model)
-						: this.session.modelRegistry.getAvailable();
-
-				if (models.length === 0) return null;
-
-				// Create items with provider/id format
-				const items = models.map((m) => ({
-					id: m.id,
-					provider: m.provider,
-					label: `${m.provider}/${m.id}`,
-				}));
-
+			modelCommand.getArgumentCompletions = async (prefix: string): Promise<AutocompleteItem[] | null> => {
+				// The models the cycle steps through: the scoped ones, or every available one.
+				let scope: readonly { provider: string; modelId: string }[];
+				try {
+					scope = (await this.store.client.query("models")).cycleScope;
+				} catch {
+					return null;
+				}
 				// Fuzzy filter by model ID + provider (allows "opus anthropic" to match)
-				const filtered = fuzzyFilter(items, prefix, (item) => `${item.id} ${item.provider}`);
-
+				const filtered = fuzzyFilter([...scope], prefix, (item) => `${item.modelId} ${item.provider}`);
 				if (filtered.length === 0) return null;
-
 				return filtered.map((item) => ({
-					value: item.label,
-					label: item.id,
+					value: `${item.provider}/${item.modelId}`,
+					label: item.modelId,
 					description: item.provider,
 				}));
 			};
@@ -960,18 +909,19 @@ export class InteractiveMode {
 
 		const profileCommand = slashCommands.find((command) => command.name === "profile");
 		if (profileCommand) {
-			profileCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const currentProfile = this.settingsManager.getActiveProfile();
-				const items = this.settingsManager.getProfileNames().map((name) => ({
-					name,
-					isCurrent: name === currentProfile,
-				}));
-				const filtered = fuzzyFilter(items, prefix, (item) => item.name);
+			profileCommand.getArgumentCompletions = async (prefix: string): Promise<AutocompleteItem[] | null> => {
+				let settings: { profile: string; profiles?: string[] };
+				try {
+					settings = await this.store.client.query("settings");
+				} catch {
+					return null;
+				}
+				const filtered = fuzzyFilter(settings.profiles ?? [], prefix, (name) => name);
 				if (filtered.length === 0) return null;
-				return filtered.map((item) => ({
-					value: item.name,
-					label: item.name,
-					description: item.isCurrent ? "current profile" : "profile",
+				return filtered.map((name) => ({
+					value: name,
+					label: name,
+					description: name === settings.profile ? "current profile" : "profile",
 				}));
 			};
 		}
@@ -987,41 +937,12 @@ export class InteractiveMode {
 			};
 		}
 
-		// Convert prompt templates to SlashCommand format for autocomplete
-		const templateCommands: SlashCommand[] = this.session.promptTemplates.map((cmd) => ({
-			name: cmd.name,
-			description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
-			...(cmd.argumentHint && { argumentHint: cmd.argumentHint }),
-		}));
-
-		// Convert extension commands to SlashCommand format
-		const builtinCommandNames = new Set(slashCommands.map((c) => c.name));
-		const extensionCommands: SlashCommand[] = this.session.extensionRunner
-			.getRegisteredCommands()
-			.filter((cmd) => !builtinCommandNames.has(cmd.name))
-			.map((cmd) => ({
-				name: cmd.invocationName,
-				description: this.prefixAutocompleteDescription(cmd.description, cmd.sourceInfo),
-				getArgumentCompletions: cmd.getArgumentCompletions,
-			}));
-
-		// Build skill commands from session.skills (if enabled)
-		this.skillCommands.clear();
-		const skillCommandList: SlashCommand[] = [];
-		if (this.settingsManager.getEnableSkillCommands()) {
-			for (const skill of this.session.resourceLoader.getSkills().skills) {
-				const commandName = `skill:${skill.name}`;
-				this.skillCommands.set(commandName, skill.filePath);
-				skillCommandList.push({
-					name: commandName,
-					description: this.prefixAutocompleteDescription(skill.description, skill.sourceInfo),
-				});
-			}
-		}
-
+		const catalogCommands = this.input.slashCommands(new Set(slashCommands.map((command) => command.name)), {
+			skills: this.settingsManager.getEnableSkillCommands(),
+		});
 		return new CombinedAutocompleteProvider(
-			[...slashCommands, ...templateCommands, ...extensionCommands, ...skillCommandList],
-			this.sessionManager.getCwd(),
+			[...slashCommands, ...catalogCommands],
+			this.input.catalog.cwd ?? process.cwd(),
 			this.fdPath,
 		);
 	}
@@ -1029,10 +950,31 @@ export class InteractiveMode {
 	private setupAutocompleteProvider(): void {
 		// The extensions' completion providers answer through the host's editor_completions query.
 		const provider = withEditorCompletions(this.createBaseAutocompleteProvider(), {
-			triggers: this.session.extensionRunner.getCompletionProviders().map((completion) => completion.trigger),
-			complete: (text, cursor) => queryRegistry.run(this.intentContext(), "editor_completions", { text, cursor }),
+			triggers: this.input.catalog.completionTriggers,
+			complete: (text, cursor) => this.store.client.query("editor_completions", { text, cursor }),
 		});
 		this.defaultEditor.setAutocompleteProvider(provider);
+	}
+
+	/**
+	 * Load the input catalog of the conversation the store shows, and offer
+	 * what it holds: slash commands, completions, and shortcuts. A catalog the
+	 * TUI could not load leaves the TUI's own commands and keys.
+	 */
+	private async refreshInput(): Promise<void> {
+		try {
+			if (!(await this.input.load())) return;
+		} catch (error) {
+			if (this.store.conversation !== undefined) {
+				this.showWarning(
+					`Could not load the conversation's commands: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+			return;
+		}
+		this.setupAutocompleteProvider();
+		this.setupExtensionShortcuts();
+		this.ui.requestRender();
 	}
 
 	private showStartupNoticesIfNeeded(): void {
@@ -1187,11 +1129,13 @@ export class InteractiveMode {
 	 * Connect the TUI's client to its host and show its conversation. The UI
 	 * runs first: the conversation's session_start dialogs show through the
 	 * live view before the conversation is ready. What its extensions
-	 * contribute shows before its messages.
+	 * contribute shows before its messages, its slash commands and shortcuts
+	 * as its intents catalog lists them.
 	 */
 	private async connect(): Promise<void> {
 		await this.tuiHost.connect({
 			hostRequests: TUI_HOST_REQUESTS,
+			requestTimeoutMs: TUI_REQUEST_TIMEOUT_MS,
 			onClient: (client) => this.store.attach(client),
 			onShutdownRequested: () => this.onShutdownRequested(),
 			onLost: (error) => {
@@ -1199,7 +1143,13 @@ export class InteractiveMode {
 			},
 			terminal: this.terminalSurface(),
 		});
+		await this.input.load().catch((error: unknown) => {
+			this.showWarning(
+				`Could not load the conversation's commands: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		});
 		this.connected = true;
+		this.clientConnected.resolve();
 		this.showConversation({ afresh: false });
 	}
 
@@ -1283,33 +1233,23 @@ export class InteractiveMode {
 
 		await this.showResourceNotices();
 
-		// Process initial messages
-		if (initialMessage) {
-			try {
-				await this.session.prompt(initialMessage, { images: initialImages });
-			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-				this.showError(errorMessage);
-			}
-		}
+		await this.sendInitialMessages([
+			...(initialMessage ? [{ text: initialMessage, images: initialImages }] : []),
+			...(initialMessages ?? []).map((text) => ({ text })),
+		]);
 
-		if (initialMessages) {
-			for (const message of initialMessages) {
-				try {
-					await this.session.prompt(message);
-				} catch (error: unknown) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-					this.showError(errorMessage);
-				}
-			}
-		}
+		// What the user sends goes out from the editor; the TUI runs until it shuts down, which ends the process.
+		await new Promise<never>(() => {});
+	}
 
-		// Main interactive loop
-		while (true) {
-			const userInput = await this.getUserInput();
+	/** Send the messages the TUI started with, one after another, each as a prompt once the one before settled. */
+	private async sendInitialMessages(messages: readonly { text: string; images?: ImageContent[] }[]): Promise<void> {
+		for (const { text, images } of messages) {
 			try {
-				const images = await this.collectPromptImages(userInput);
-				await this.session.prompt(userInput, images ? { images } : undefined);
+				await this.store.client.promptAndWait(text, {
+					...(images === undefined ? {} : { images }),
+					timeoutMs: TUI_REQUEST_TIMEOUT_MS,
+				});
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
@@ -1868,10 +1808,9 @@ export class InteractiveMode {
 
 			const commandDiagnostics = this.session.extensionRunner.getCommandDiagnostics();
 			extensionDiagnostics.push(...commandDiagnostics);
-			extensionDiagnostics.push(...this.getBuiltInCommandConflictDiagnostics(this.session.extensionRunner));
-
-			const shortcutDiagnostics = this.session.extensionRunner.getShortcutDiagnostics();
-			extensionDiagnostics.push(...shortcutDiagnostics);
+			extensionDiagnostics.push(...this.session.extensionRunner.getShortcutDiagnostics());
+			// The commands and shortcuts the TUI's own commands and keys take.
+			extensionDiagnostics.push(...this.inputDiagnostics);
 
 			if (extensionDiagnostics.length > 0) {
 				const warningLines = this.formatDiagnostics(extensionDiagnostics, sourceInfos);
@@ -1924,9 +1863,7 @@ export class InteractiveMode {
 	private showSessionExtensions(session: AgentSession): void {
 		setRegisteredThemes(session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
-
-		const extensionRunner = session.extensionRunner;
-		this.setupExtensionShortcuts(extensionRunner);
+		this.setupExtensionShortcuts();
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();
 	}
@@ -1964,13 +1901,6 @@ export class InteractiveMode {
 	/** The plan state of the conversation the TUI shows, as its client fold holds it. */
 	private planning(): PlanningState {
 		return this.store.state.planning ?? DEFAULT_PLANNING_STATE;
-	}
-
-	/** Send `name` through the TUI's client, reporting a failure. */
-	private sendIntent(name: string, input: Record<string, unknown> = {}): void {
-		void this.store.client.intent(name, input).catch((error: unknown) => {
-			this.showError(error instanceof Error ? error.message : String(error));
-		});
 	}
 
 	/**
@@ -2024,24 +1954,30 @@ export class InteractiveMode {
 				if (!this.connected || this.store.conversation === undefined) return;
 				this.transcript.sync();
 				for (const entry of change.entries) if (entry.type === "compaction") this.showCompacted(entry);
+				this.showQueueIfChanged();
 				this.syncStatus();
 				return;
 			case "reset":
 				// Before the client connected, the conversation shows once it did.
 				if (!this.connected) return;
-				if (change.moved) this.showConversation({ afresh: true });
-				else {
+				if (change.moved) {
+					this.showConversation({ afresh: true });
+					void this.refreshInput();
+				} else {
 					this.transcript.refresh();
+					this.showQueueIfChanged();
 					this.syncStatus();
 				}
 				return;
 			case "moving":
-				// The live state of the conversation the client left is not its own anymore.
+				// The live state and the catalog of the conversation the client left are not its own anymore.
 				this.liveView.apply({ reset: true, items: [] });
+				this.input.clear();
 				this.leaveConversation();
 				return;
 			case "changed":
 				if (change.catalog === "resources") this.refreshExtensionContributions();
+				else if (change.catalog === "intents" && this.connected) void this.refreshInput();
 				return;
 			case "ended":
 				this.liveView.apply({ reset: true, items: [] });
@@ -2065,9 +2001,6 @@ export class InteractiveMode {
 		this.clearPromptCacheAlertTimer();
 		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
-		this.pendingMessagesContainer.clear();
-		this.compactionQueuedMessages = [];
-		this.localBashRows = [];
 		this.showSessionExtensions(session);
 		this.followWork();
 		this.closePlanDetails();
@@ -2150,13 +2083,12 @@ export class InteractiveMode {
 
 	/**
 	 * The conversation's extensions changed (enabled, disabled, or reloaded):
-	 * their commands and shortcuts change, and the transcript is projected
-	 * afresh, so a disabled extension's presentations no longer show.
+	 * the transcript is projected afresh, so a disabled extension's
+	 * presentations no longer show. Their commands and shortcuts follow the
+	 * intents catalog, which changed with them.
 	 */
 	private refreshExtensionContributions(): void {
 		if (!this.connected) return;
-		this.setupAutocompleteProvider();
-		this.setupExtensionShortcuts(this.session.extensionRunner);
 		this.store.resync();
 		this.ui.requestRender();
 	}
@@ -2171,8 +2103,6 @@ export class InteractiveMode {
 		const id = this.conversation.id;
 		if (this.store.conversation === id) this.transcript.rebuild();
 		else await this.store.showing(id);
-		this.pendingMessagesContainer.clear();
-		this.compactionQueuedMessages = [];
 		this.updatePendingMessagesDisplay();
 		this.refreshPlanningUi();
 	}
@@ -2236,19 +2166,23 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Bind the extensions' shortcuts: each key invokes its extension's intent
-	 * through the intent registry, as this client.
+	 * Bind the extensions' shortcuts the intents catalog lists, off the TUI's
+	 * reserved keys: each key invokes its intent through the TUI's client.
+	 * What the TUI's own commands and keys take shows with the loaded
+	 * resources.
 	 */
-	private setupExtensionShortcuts(extensionRunner: ExtensionRunner): void {
-		this.extensionShortcuts.bind(extensionRunner);
+	private setupExtensionShortcuts(): void {
+		const shortcutDiagnostics = this.extensionShortcuts.bind(this.input.catalog.shortcuts);
+		this.inputDiagnostics = [
+			...this.input.commandConflicts(new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name))),
+			...shortcutDiagnostics,
+		];
 		this.defaultEditor.onExtensionShortcut = (data: string) => {
 			const intent = this.extensionShortcuts.intentFor(data);
 			if (intent === undefined) return false;
 			if (isKeyRelease(data) || isKeyRepeat(data)) return true;
 			// Invoke async, without blocking input.
-			void ClientScope.run(this.hostClient.id, () =>
-				intentRegistry.invokeFrame(this.intentContext(), intent, {}),
-			).catch((error: unknown) => {
+			this.input.invokeShortcut(intent).catch((error: unknown) => {
 				this.showError(`Shortcut failed: ${error instanceof Error ? error.message : String(error)}`);
 			});
 			return true;
@@ -3021,13 +2955,9 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			// Preserve foreground Bash's interrupt priority when only background work remains.
-			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.work.busy())) {
-				void this.restoreQueuedMessagesToEditor({ abortSource: "keyboard_interrupt" }).catch((error) => {
-					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
-				});
-			} else if (this.session.isBashRunning) {
-				this.session.abortBash();
+			const target = this.connected ? this.input.interruptible() : undefined;
+			if (target !== undefined) {
+				this.runKeyAction(() => this.interrupt(target));
 			} else if (this.isBashMode) {
 				this.editor.setText("");
 				this.isBashMode = false;
@@ -3055,7 +2985,7 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
 		this.defaultEditor.onAction("app.suspend", () => this.handleCtrlZ());
-		this.defaultEditor.onAction("app.thinking.cycle", () => this.cycleThinkingLevel());
+		this.defaultEditor.onAction("app.thinking.cycle", () => this.runKeyAction(() => this.cycleThinkingLevel()));
 		this.defaultEditor.onAction("app.mode.toggle", () => this.runKeyAction(() => this.toggleAgentMode()));
 		this.defaultEditor.onAction("app.model.cycleForward", () => this.runKeyAction(() => this.cycleModel("forward")));
 		this.defaultEditor.onAction("app.model.cycleBackward", () =>
@@ -3216,15 +3146,13 @@ export class InteractiveMode {
 	/**
 	 * Scan submitted prompt text for image file paths and load them as
 	 * attachments. Returns undefined for text-only models (paths stay plain
-	 * text) and for extension commands, which manage their own input.
+	 * text), which the conversation's model in the `models` catalog says.
 	 */
 	private async collectPromptImages(text: string): Promise<ImageContent[] | undefined> {
-		if (this.isExtensionCommand(text)) {
-			return undefined;
-		}
+		if (!mayAttachImages(text)) return undefined;
 		let result: Awaited<ReturnType<typeof collectPromptImageAttachments>>;
 		try {
-			result = await collectPromptImageAttachments(text, process.cwd(), this.session.model);
+			result = await collectPromptImageAttachments(text, process.cwd(), await this.input.model());
 		} catch {
 			return undefined;
 		}
@@ -3473,58 +3401,31 @@ export class InteractiveMode {
 				return;
 			}
 
-			// Handle bash command (! for normal, !! for excluded from context)
+			// Handle bash command (! for normal, !! for excluded from context): the host runs it.
 			if (text.startsWith("!")) {
 				const isExcluded = text.startsWith("!!");
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
-					if (this.session.isBashRunning) {
+					await this.clientConnected.promise;
+					if (this.input.bashRunning()) {
 						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
 						this.editor.setText(text);
 						return;
 					}
 					this.editor.addToHistory?.(text);
-					await this.handleBashCommand(command, isExcluded);
 					this.isBashMode = false;
 					this.updateEditorBorderColor();
+					try {
+						await this.input.runBash(command, isExcluded);
+					} catch (error) {
+						this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+					}
 					return;
 				}
 			}
 
-			// Queue input during compaction (extension commands execute immediately)
-			if (this.session.isCompacting) {
-				if (this.isExtensionCommand(text)) {
-					this.editor.addToHistory?.(text);
-					this.editor.setText("");
-					await this.session.prompt(text);
-				} else {
-					this.queueCompactionMessage(text, "steer");
-				}
-				return;
-			}
-
-			// If streaming, use prompt() with steer behavior
-			// This handles extension commands (execute immediately), prompt template expansion, and queueing
-			if (this.session.isStreaming) {
-				this.editor.addToHistory?.(text);
-				this.editor.setText("");
-				const images = await this.collectPromptImages(text);
-				await this.session.prompt(text, { streamingBehavior: "steer", images });
-				this.updatePendingMessagesDisplay();
-				this.ui.requestRender();
-				return;
-			}
-
-			// Normal message submission
-			// First, move any pending bash components to chat
-			this.flushPendingBashComponents();
-
-			if (this.onInputCallback) {
-				this.onInputCallback(text);
-			} else {
-				this.pendingUserInputs.push(text);
-			}
 			this.editor.addToHistory?.(text);
+			await this.sendText(text, { followUp: false });
 		};
 		this.defaultEditor.onSubmit = async (text: string) => {
 			try {
@@ -3563,7 +3464,7 @@ export class InteractiveMode {
 	 * Follow the store in the TUI's status: the working, retry, and compaction
 	 * indicators, the turn-done alert, the work summary, and settlement from
 	 * the run phase; the prompt-cache alert from the live prompt-cache value;
-	 * and the plan, title, queue, and editor border from the client fold.
+	 * and the plan, title, and editor border from the client fold.
 	 * While the store shows no conversation (its client moves), nothing shows.
 	 */
 	private syncStatus(): void {
@@ -3586,10 +3487,7 @@ export class InteractiveMode {
 		const run = phase?.run;
 		const wasRun = previous?.run;
 		if (run !== undefined && run.startedAt !== wasRun?.startedAt) this.runStarted(run.startedAt);
-		if (phase?.compaction !== undefined && previous?.compaction === undefined) {
-			this.compactionStarted();
-		}
-		if (phase?.compaction === undefined && previous?.compaction !== undefined) this.compactionEnded(phase, showing);
+		if ((phase?.compaction === undefined) !== (previous?.compaction === undefined)) this.compactionChanged();
 		if (run === undefined && wasRun !== undefined) this.runEnded(showing);
 		const progress = run !== undefined || phase?.compaction !== undefined;
 		if (progress !== this.progressShown) {
@@ -3634,22 +3532,11 @@ export class InteractiveMode {
 		return undefined;
 	}
 
-	/** A compaction started: Escape stops it while it runs. */
-	private compactionStarted(): void {
+	/** A compaction started or ended: how it ended shows as the host's notice, its summary once its entry commits (showCompacted). */
+	private compactionChanged(): void {
 		this.quitConfirmation = undefined;
 		this.lastSigintTime = 0;
 		this.clearWorkSummaryTimer();
-		this.overrideEscape(() => this.sendIntent("abort", { operation: "compaction" }));
-	}
-
-	/**
-	 * A compaction ended: how it ended shows as the host's notice, its summary
-	 * once its entry commits (showCompacted); input queued meanwhile goes out.
-	 */
-	private compactionEnded(phase: PhaseValue | undefined, showing: boolean): void {
-		this.quitConfirmation = undefined;
-		this.lastSigintTime = 0;
-		if (showing) void this.flushCompactionQueue({ willRetry: phase?.operation === "turn" });
 	}
 
 	/** The run settled: a ready plan is offered, the work summary waits, and a requested shutdown runs. */
@@ -3665,8 +3552,7 @@ export class InteractiveMode {
 
 	/**
 	 * Show the indicator `phase` calls for: a running compaction, a retry
-	 * counting down to its attempt, or the working indicator of a run. Escape
-	 * stops what the compaction and retry indicators show.
+	 * counting down to its attempt, or the working indicator of a run.
 	 */
 	private showPhaseIndicator(phase: PhaseValue | undefined): void {
 		const retry = phase?.retry;
@@ -3690,7 +3576,6 @@ export class InteractiveMode {
 			this.retryLoader = undefined;
 			this.retryShownFor = undefined;
 		}
-		if (wanted !== "compaction" && wanted !== "retry") this.restoreEscape();
 		switch (wanted) {
 			case "working":
 				if (!this.loadingAnimation) {
@@ -3718,7 +3603,6 @@ export class InteractiveMode {
 			case "retry": {
 				if (!waiting || this.retryShownFor === waiting.retryAt) return;
 				this.retryShownFor = waiting.retryAt;
-				this.overrideEscape(() => this.sendIntent("abort_retry"));
 				const retryMessage = (seconds: number) =>
 					`Retrying (${waiting.attempt}/${waiting.maxAttempts}) in ${seconds}s... (${keyText("app.interrupt")} to cancel)`;
 				const delayMs = Math.max(0, (waiting.retryAt ?? 0) - Date.now());
@@ -3750,20 +3634,7 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Have Escape stop what an indicator shows; the editor's own handler returns when it goes. */
-	private overrideEscape(handler: () => void): void {
-		this.indicatorEscape ??= { previous: this.defaultEditor.onEscape };
-		this.defaultEditor.onEscape = handler;
-	}
-
-	private restoreEscape(): void {
-		const saved = this.indicatorEscape;
-		if (!saved) return;
-		this.indicatorEscape = undefined;
-		this.defaultEditor.onEscape = saved.previous;
-	}
-
-	/** The client fold changed: the plan, the title, the queue, and the editor border follow it. */
+	/** The client fold changed: the plan, the title, and the editor border follow it; the queue shows on its own (showQueueIfChanged). */
 	private syncFold(): void {
 		const previous = this.shownFold;
 		if (this.store.conversation === undefined || previous === undefined) return;
@@ -3773,7 +3644,6 @@ export class InteractiveMode {
 		if (state.planning !== previous.planning) this.handlePlanningStateChanged(this.planning());
 		if (state.name !== previous.name) this.updateTerminalTitle();
 		if (state.thinkingLevel !== previous.thinkingLevel) this.updateEditorBorderColor();
-		if (state.queue !== previous.queue) this.updatePendingMessagesDisplay();
 	}
 
 	/**
@@ -3820,20 +3690,6 @@ export class InteractiveMode {
 				0,
 			),
 		);
-	}
-
-	async getUserInput(): Promise<string> {
-		const queuedInput = this.pendingUserInputs.shift();
-		if (queuedInput !== undefined) {
-			return queuedInput;
-		}
-
-		return new Promise((resolve) => {
-			this.onInputCallback = (text: string) => {
-				this.onInputCallback = undefined;
-				resolve(text);
-			};
-		});
 	}
 
 	// =========================================================================
@@ -4128,32 +3984,43 @@ export class InteractiveMode {
 			return;
 		}
 
-		// Queue input during compaction (extension commands execute immediately)
-		if (this.session.isCompacting) {
-			if (this.isExtensionCommand(text)) {
-				this.editor.addToHistory?.(text);
+		// Alt+Enter queues a follow-up while the conversation runs; while it is idle, it acts like Enter.
+		if (!this.connected || (this.store.phase?.operation ?? null) === null) {
+			if (this.editor.onSubmit) {
 				this.editor.setText("");
-				await this.session.prompt(text);
-			} else {
-				this.queueCompactionMessage(text, "followUp");
+				this.editor.onSubmit(text);
 			}
 			return;
 		}
+		this.editor.addToHistory?.(text);
+		this.editor.setText("");
+		await this.sendText(text, { followUp: true });
+	}
 
-		// Alt+Enter queues a follow-up message (waits until agent finishes)
-		// This handles extension commands (execute immediately), prompt template expansion, and queueing
-		if (this.session.isStreaming) {
-			this.editor.addToHistory?.(text);
-			this.editor.setText("");
-			const images = await this.collectPromptImages(text);
-			await this.session.prompt(text, { streamingBehavior: "followUp", images });
-			this.updatePendingMessagesDisplay();
-			this.ui.requestRender();
+	/**
+	 * Send what the user wrote: an extension command runs at once; other text
+	 * goes out with the images it names, as a prompt while the conversation is
+	 * idle, else queued as steering (or `followUp`) until the host delivers it.
+	 */
+	private async sendText(text: string, options: { followUp: boolean }): Promise<void> {
+		await this.clientConnected.promise;
+		const command = this.input.extensionCommand(text);
+		if (command !== undefined) {
+			await this.input.runCommand(command);
+			return;
 		}
-		// If not streaming, Alt+Enter acts like regular Enter (trigger onSubmit)
-		else if (this.editor.onSubmit) {
-			this.editor.setText("");
-			this.editor.onSubmit(text);
+		const images = await this.collectPromptImages(text);
+		const operation = this.store.phase?.operation;
+		const delivery: Delivery = await this.input.send(text, {
+			followUp: options.followUp,
+			...(images === undefined ? {} : { images }),
+		});
+		if (delivery === "operation") {
+			this.showStatus(
+				operation === "compaction" || operation === "navigation"
+					? "Queued message for after compaction"
+					: "Queued message for after the current operation",
+			);
 		}
 	}
 
@@ -4169,18 +4036,10 @@ export class InteractiveMode {
 		});
 	}
 
+	/** Take the queued input back into the editor without stopping the run. */
 	private async handleDequeue(): Promise<void> {
-		let restored: number;
-		try {
-			restored = await this.restoreQueuedMessagesToEditor();
-		} catch (error) {
-			if (error instanceof QueueClearPersistenceError) {
-				// The text is back in the editor; only its cancellation is unrecorded.
-				this.showError(`Failed to persist queued-message cancellation: ${error.message}`);
-				return;
-			}
-			throw error;
-		}
+		await this.clientConnected.promise;
+		const restored = this.putQueuedTextInEditor(await this.input.withdraw());
 		if (restored === 0) {
 			this.showStatus("No queued messages to restore");
 		} else {
@@ -4204,10 +4063,15 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	/** Stop what the interrupt key stops now; a stopped run's queued input comes back into the editor. */
+	private async interrupt(target: Interruptible): Promise<void> {
+		this.putQueuedTextInEditor(await this.input.interrupt(target));
+	}
+
 	private async toggleAgentMode(): Promise<void> {
-		const planning = await this.session.toggleAgentMode();
-		this.refreshPlanningUi(planning);
-		this.showStatus(planning.mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+		await this.clientConnected.promise;
+		const mode = await this.input.toggleAgentMode();
+		this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
 	}
 
 	private handlePlanningStateChanged(planning: PlanningState): void {
@@ -4486,8 +4350,9 @@ export class InteractiveMode {
 		}
 	}
 
-	private cycleThinkingLevel(): void {
-		const newLevel = this.session.cycleThinkingLevel();
+	private async cycleThinkingLevel(): Promise<void> {
+		await this.clientConnected.promise;
+		const newLevel = await this.input.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.showStatus("Current model does not support thinking");
 		} else {
@@ -4497,20 +4362,16 @@ export class InteractiveMode {
 	}
 
 	private async cycleModel(direction: "forward" | "backward"): Promise<void> {
-		try {
-			const result = await this.session.cycleModel(direction);
-			if (result === undefined) {
-				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
-				this.showStatus(msg);
-			} else {
-				this.updateEditorBorderColor();
-				const thinkingStr =
-					result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
-				this.showStatus(`Switched to ${result.model.name || result.model.id}${thinkingStr}`);
-			}
-		} catch (error) {
-			this.showError(error instanceof Error ? error.message : String(error));
+		await this.clientConnected.promise;
+		const cycle = await this.input.cycleModel(direction);
+		if (cycle.kind === "single") {
+			this.showStatus(cycle.scoped ? "Only one model in scope" : "Only one model available");
+			return;
 		}
+		this.updateEditorBorderColor();
+		const thinkingStr =
+			cycle.model.reasoning && cycle.thinkingLevel !== "off" ? ` (thinking: ${cycle.thinkingLevel})` : "";
+		this.showStatus(`Switched to ${cycle.model.name || cycle.model.id}${thinkingStr}`);
 	}
 
 	private toggleToolOutputExpansion(): void {
@@ -4667,242 +4528,50 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Get all queued messages (read-only).
-	 * Combines session queue and compaction queue.
+	 * Show the input queued for the next turn, as the client fold holds it:
+	 * the notices of finished work, then the user's steering and follow-up text.
 	 */
-	private getAllQueuedMessages(): { steering: string[]; followUp: string[] } {
-		return {
-			steering: [
-				...this.session.getSteeringMessages().map((message) => message.text),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text),
-			],
-			followUp: [
-				...this.session.getFollowUpMessages().map((message) => message.text),
-				...this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text),
-			],
-		};
-	}
-
-	/** Drain the compaction queue, which is local state and cannot fail to clear. */
-	private drainCompactionQueue(): { steering: string[]; followUp: string[] } {
-		const steering = this.compactionQueuedMessages.filter((msg) => msg.mode === "steer").map((msg) => msg.text);
-		const followUp = this.compactionQueuedMessages.filter((msg) => msg.mode === "followUp").map((msg) => msg.text);
-		this.compactionQueuedMessages = [];
-		return { steering, followUp };
-	}
-
-	/**
-	 * Clear all queued messages and return their contents.
-	 * Clears both session queue and compaction queue.
-	 *
-	 * When the session queue was revoked but its cancellation could not be
-	 * persisted, the compaction queue is drained too and both sets are re-thrown
-	 * on the error, so a caller recovering the text sees every queued message
-	 * rather than half of them.
-	 */
-	private async clearAllQueues(): Promise<{ steering: string[]; followUp: string[] }> {
-		let session: { steering: string[]; followUp: string[] };
-		try {
-			session = await this.session.clearQueue();
-		} catch (error) {
-			if (error instanceof QueueClearPersistenceError) {
-				const compaction = this.drainCompactionQueue();
-				throw new QueueClearPersistenceError(error, {
-					steering: [...error.steering, ...compaction.steering],
-					followUp: [...error.followUp, ...compaction.followUp],
-				});
-			}
-			// The session queue was never revoked, so nothing was lost and the
-			// compaction queue stays where it is.
-			throw error;
-		}
-		const compaction = this.drainCompactionQueue();
-		return {
-			steering: [...session.steering, ...compaction.steering],
-			followUp: [...session.followUp, ...compaction.followUp],
-		};
-	}
-
 	private updatePendingMessagesDisplay(): void {
-		this.pendingMessagesContainer.clear();
-		const { steering: steeringMessages, followUp: followUpMessages } = this.getAllQueuedMessages();
+		this.queueContainer.clear();
+		this.shownQueue = this.store.state.queue;
+		const { steering, followUp, notices } = this.input.queue();
 		// Notices of finished work wait for the next turn too; they leave with it.
-		const notices = this.session.getQueuedWorkNotices();
 		if (notices.length > 0) {
-			this.pendingMessagesContainer.addChild(new Spacer(1));
+			this.queueContainer.addChild(new Spacer(1));
 			for (const notice of notices) {
-				this.pendingMessagesContainer.addChild(new TruncatedText(queuedWorkNoticeLine(notice), 1, 0));
+				this.queueContainer.addChild(new TruncatedText(queuedWorkNoticeLine(notice), 1, 0));
 			}
 		}
-		if (steeringMessages.length > 0 || followUpMessages.length > 0) {
-			this.pendingMessagesContainer.addChild(new Spacer(1));
-			for (const message of steeringMessages) {
+		if (steering.length > 0 || followUp.length > 0) {
+			this.queueContainer.addChild(new Spacer(1));
+			for (const message of steering) {
 				const text = theme.fg("dim", `Steering: ${message}`);
-				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+				this.queueContainer.addChild(new TruncatedText(text, 1, 0));
 			}
-			for (const message of followUpMessages) {
+			for (const message of followUp) {
 				const text = theme.fg("dim", `Follow-up: ${message}`);
-				this.pendingMessagesContainer.addChild(new TruncatedText(text, 1, 0));
+				this.queueContainer.addChild(new TruncatedText(text, 1, 0));
 			}
 			const dequeueHint = this.getAppKeyDisplay("app.message.dequeue");
 			const hintText = theme.fg("dim", `↳ ${dequeueHint} to edit all queued messages`);
-			this.pendingMessagesContainer.addChild(new TruncatedText(hintText, 1, 0));
+			this.queueContainer.addChild(new TruncatedText(hintText, 1, 0));
 		}
 	}
 
-	private async restoreQueuedMessagesToEditor(options?: {
-		abortSource?: AgentAbortSource;
-		currentText?: string;
-	}): Promise<number> {
-		let queues: Awaited<ReturnType<InteractiveMode["clearAllQueues"]>>;
-		try {
-			queues = await this.clearAllQueues();
-		} catch (error) {
-			if (error instanceof QueueClearPersistenceError) {
-				// The queues were already revoked when persistence failed, so the
-				// error carries the only remaining copy of what the user typed. Put
-				// it back before letting the caller report the failure.
-				this.putQueuedTextInEditor([...error.steering, ...error.followUp], options?.currentText);
-			}
-			throw error;
-		} finally {
-			if (options?.abortSource) {
-				void this.session.abort(options.abortSource).catch((error: unknown) => {
-					this.showError(`Failed to abort the active run: ${String(error)}`);
-				});
-			}
-		}
-		return this.putQueuedTextInEditor([...queues.steering, ...queues.followUp], options?.currentText);
+	/** Show the queued input again when the client fold's queue changed. */
+	private showQueueIfChanged(): void {
+		if (this.store.state.queue === this.shownQueue) return;
+		this.updatePendingMessagesDisplay();
+		this.ui.requestRender();
 	}
 
-	/** Prepend cleared queue text to the editor, keeping any draft already there. */
-	private putQueuedTextInEditor(allQueued: string[], currentText?: string): number {
-		if (allQueued.length === 0) {
-			this.updatePendingMessagesDisplay();
-			return 0;
-		}
-		const queuedText = allQueued.join("\n\n");
-		const draftText = currentText ?? this.editor.getText();
-		const combinedText = [queuedText, draftText].filter((t) => t.trim()).join("\n\n");
+	/** Put withdrawn queued text before the editor's draft; the count of inputs it put back. */
+	private putQueuedTextInEditor(withdrawn: readonly WithdrawnInput[]): number {
+		if (withdrawn.length === 0) return 0;
+		const queuedText = withdrawn.map((input) => input.text).join("\n\n");
+		const combinedText = [queuedText, this.editor.getText()].filter((t) => t.trim()).join("\n\n");
 		this.editor.setText(combinedText);
-		this.updatePendingMessagesDisplay();
-		return allQueued.length;
-	}
-
-	private queueCompactionMessage(text: string, mode: "steer" | "followUp"): void {
-		this.compactionQueuedMessages.push({ text, mode });
-		this.editor.addToHistory?.(text);
-		this.editor.setText("");
-		this.updatePendingMessagesDisplay();
-		this.showStatus("Queued message for after compaction");
-	}
-
-	private isExtensionCommand(text: string): boolean {
-		if (!text.startsWith("/")) return false;
-
-		const extensionRunner = this.session.extensionRunner;
-
-		const spaceIndex = text.indexOf(" ");
-		const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-		return !!extensionRunner.getCommand(commandName);
-	}
-
-	private async flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void> {
-		if (this.compactionQueuedMessages.length === 0) {
-			return;
-		}
-
-		const queuedMessages = [...this.compactionQueuedMessages];
-		this.compactionQueuedMessages = [];
-		this.updatePendingMessagesDisplay();
-
-		const restoreQueue = (error: unknown) => {
-			void this.session.clearQueue().catch((clearError) => {
-				this.showError(`Failed to persist queued-message cancellation: ${String(clearError)}`);
-			});
-			this.compactionQueuedMessages = queuedMessages;
-			this.updatePendingMessagesDisplay();
-			this.showError(
-				`Failed to send queued message${queuedMessages.length > 1 ? "s" : ""}: ${
-					error instanceof Error ? error.message : String(error)
-				}`,
-			);
-		};
-
-		try {
-			if (!options?.willRetry) {
-				// compaction_end is emitted before the active prompt transaction is
-				// released. Wait for that boundary so the first queued input is not
-				// rejected as a concurrent prompt and left without another flush trigger.
-				await this.session.waitForIdle();
-			}
-
-			if (options?.willRetry) {
-				// When retry is pending, queue messages for the retry turn
-				for (const message of queuedMessages) {
-					if (this.isExtensionCommand(message.text)) {
-						await this.session.prompt(message.text);
-					} else if (message.mode === "followUp") {
-						await this.session.followUp(message.text, await this.collectPromptImages(message.text));
-					} else {
-						await this.session.steer(message.text, await this.collectPromptImages(message.text));
-					}
-				}
-				this.updatePendingMessagesDisplay();
-				return;
-			}
-
-			// Find first non-extension-command message to use as prompt
-			const firstPromptIndex = queuedMessages.findIndex((message) => !this.isExtensionCommand(message.text));
-			if (firstPromptIndex === -1) {
-				// All extension commands - execute them all
-				for (const message of queuedMessages) {
-					await this.session.prompt(message.text);
-				}
-				return;
-			}
-
-			// Execute any extension commands before the first prompt
-			const preCommands = queuedMessages.slice(0, firstPromptIndex);
-			const firstPrompt = queuedMessages[firstPromptIndex];
-			const rest = queuedMessages.slice(firstPromptIndex + 1);
-
-			for (const message of preCommands) {
-				await this.session.prompt(message.text);
-			}
-
-			// Send first prompt (starts streaming)
-			const firstPromptImages = await this.collectPromptImages(firstPrompt.text);
-			const promptPromise = this.session
-				.prompt(firstPrompt.text, firstPromptImages ? { images: firstPromptImages } : undefined)
-				.catch((error) => {
-					restoreQueue(error);
-				});
-
-			// Queue remaining messages
-			for (const message of rest) {
-				if (this.isExtensionCommand(message.text)) {
-					await this.session.prompt(message.text);
-				} else if (message.mode === "followUp") {
-					await this.session.followUp(message.text, await this.collectPromptImages(message.text));
-				} else {
-					await this.session.steer(message.text, await this.collectPromptImages(message.text));
-				}
-			}
-			this.updatePendingMessagesDisplay();
-			void promptPromise;
-		} catch (error) {
-			restoreQueue(error);
-		}
-	}
-
-	/** Move pending bash components from pending area to chat */
-	private flushPendingBashComponents(): void {
-		for (const component of this.pendingBashComponents) {
-			this.pendingMessagesContainer.removeChild(component);
-			this.chatContainer.addChild(component);
-		}
-		this.pendingBashComponents = [];
+		return withdrawn.length;
 	}
 
 	// =========================================================================
@@ -6748,7 +6417,6 @@ export class InteractiveMode {
 							this.editor.setText(result.editorText);
 						}
 						this.showStatus("Navigated to selected point");
-						void this.flushCompactionQueue({ willRetry: false });
 					} catch (error) {
 						this.showError(error instanceof Error ? error.message : String(error));
 					} finally {
@@ -7361,9 +7029,10 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.applyFullscreenScrollbarSetting();
+			// The reloaded commands and shortcuts, as the conversation's intents catalog lists them now.
+			await this.input.load().catch(() => false);
 			this.setupAutocompleteProvider();
-			const runner = this.session.extensionRunner;
-			this.setupExtensionShortcuts(runner);
+			this.setupExtensionShortcuts();
 			this.transcript.rebuild();
 			dismissReloadBox(this.editor as Component);
 			this.showLoadedResources({
@@ -8166,106 +7835,6 @@ export class InteractiveMode {
 		if (model.provider === "opencode" && model.id.toLowerCase().includes("kimi-k2.5")) {
 			this.handleDaxnuts();
 		}
-	}
-
-	private async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {
-		const extensionRunner = this.session.extensionRunner;
-
-		// Emit user_bash event to let extensions intercept
-		const eventResult = await extensionRunner.emitUserBash({
-			type: "user_bash",
-			command,
-			excludeFromContext,
-			cwd: this.sessionManager.getCwd(),
-		});
-
-		// If extension returned a full result, use it directly
-		if (eventResult?.result) {
-			const result = eventResult.result;
-
-			// Create UI component for display
-			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-			this.localBashRows.push({ command, component: this.bashComponent });
-			if (this.session.isStreaming) {
-				this.pendingMessagesContainer.addChild(this.bashComponent);
-				this.pendingBashComponents.push(this.bashComponent);
-			} else {
-				this.chatContainer.addChild(this.bashComponent);
-			}
-
-			// Show output and complete
-			if (result.output) {
-				this.bashComponent.appendOutput(result.output);
-			}
-			this.bashComponent.setComplete(
-				result.exitCode,
-				result.cancelled,
-				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-				result.fullOutputPath,
-			);
-
-			// Record the result in session
-			await this.session.recordBashResult(command, result, { excludeFromContext });
-			this.bashComponent = undefined;
-			this.ui.requestRender();
-			return;
-		}
-
-		// Normal execution path (possibly with custom operations)
-		const isDeferred = this.session.isStreaming;
-		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
-		const local = { command, component: this.bashComponent };
-		this.localBashRows.push(local);
-
-		if (isDeferred) {
-			// Show in pending area when agent is streaming
-			this.pendingMessagesContainer.addChild(this.bashComponent);
-			this.pendingBashComponents.push(this.bashComponent);
-		} else {
-			// Show in chat immediately when agent is idle
-			this.chatContainer.addChild(this.bashComponent);
-		}
-		this.ui.requestRender();
-
-		try {
-			const result = await this.session.executeBash(
-				command,
-				(chunk) => {
-					if (this.bashComponent) {
-						this.bashComponent.appendOutput(chunk);
-						this.ui.requestRender();
-					}
-				},
-				{ excludeFromContext, operations: eventResult?.operations },
-			);
-
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(
-					result.exitCode,
-					result.cancelled,
-					result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
-					result.fullOutputPath,
-				);
-			}
-		} catch (error) {
-			if (this.bashComponent) {
-				this.bashComponent.setComplete(undefined, false);
-			}
-			// No entry follows a command that failed to run.
-			this.localBashRows = this.localBashRows.filter((row) => row !== local);
-			this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-		}
-
-		this.bashComponent = undefined;
-		this.ui.requestRender();
-	}
-
-	/** The row a user shell command showed in while it ran: it stands for the command's entry, which committed. */
-	private takeLocalBashRow(command: string): BashExecutionComponent | undefined {
-		const index = this.localBashRows.findIndex((row) => row.command === command);
-		if (index === -1) return undefined;
-		const [row] = this.localBashRows.splice(index, 1);
-		return row?.component;
 	}
 
 	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {

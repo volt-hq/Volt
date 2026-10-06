@@ -18,7 +18,6 @@ function createCompactionContext() {
 		getMarkdownThemeWithSettings: () => undefined,
 		showError: vi.fn(),
 		showStatus: vi.fn(),
-		flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
 		settingsManager: { getShowTerminalProgress: () => false },
 		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 	};
@@ -139,41 +138,5 @@ describe("InteractiveMode compaction", () => {
 			"Native compaction request 4 (stop): cache usage unavailable",
 		]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
-	});
-
-	test("waits for the compaction transaction to settle before flushing a new prompt", async () => {
-		let releaseIdle: () => void = () => undefined;
-		const idle = new Promise<void>((resolve) => {
-			releaseIdle = resolve;
-		});
-		const session = {
-			waitForIdle: vi.fn(() => idle),
-			prompt: vi.fn(async () => undefined),
-			followUp: vi.fn(async () => undefined),
-			steer: vi.fn(async () => undefined),
-			clearQueue: vi.fn(),
-		};
-		const fakeThis = {
-			compactionQueuedMessages: [{ text: "queued after compaction", mode: "steer" as const }],
-			updatePendingMessagesDisplay: vi.fn(),
-			showError: vi.fn(),
-			session,
-			isExtensionCommand: vi.fn(() => false),
-			collectPromptImages: vi.fn(async () => undefined),
-		};
-		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
-			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
-		) => Promise<void>;
-
-		const flushing = flushCompactionQueue.call(fakeThis, { willRetry: false });
-		await Promise.resolve();
-		expect(session.waitForIdle).toHaveBeenCalledOnce();
-		expect(session.prompt).not.toHaveBeenCalled();
-
-		releaseIdle();
-		await flushing;
-		expect(session.prompt).toHaveBeenCalledWith("queued after compaction", undefined);
-		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 	});
 });

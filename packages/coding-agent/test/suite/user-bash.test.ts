@@ -6,7 +6,7 @@
  */
 
 import type { LiveValue } from "@hansjm10/volt-protocol";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
@@ -105,5 +105,29 @@ describe("user shell commands", () => {
 		await client.intent("bash", { command: "printf ran" });
 		expect(handled).toEqual(["handled-by-extension:true", "printf ran:false"]);
 		expect(bashEntries(conversation).at(-1)).toMatchObject({ command: "printf ran", output: "ran" });
+	});
+
+	it("runs commands one at a time beside the connection's other intents, which do not wait for them", async () => {
+		const { conversation, client, seen } = await setup();
+		const first = client.intent("bash", { command: "sleep 1; printf first" });
+		const second = client.intent("bash", { command: "printf second" });
+		await vi.waitFor(() =>
+			expect(client.live.values.get("bash")).toMatchObject({ command: "sleep 1; printf first" }),
+		);
+		// A prompt sent while the command runs is admitted, and its turn runs, at once.
+		await client.prompt("while it runs");
+		await vi.waitFor(() => expect(conversation.session.getLastAssistantText()).toBe("one"));
+		expect(client.live.values.get("bash")).toMatchObject({ command: "sleep 1; printf first" });
+		expect(client.live.values.get("bash")).not.toHaveProperty("exitCode");
+		await Promise.all([first, second]);
+		// The second command started once the first one ended.
+		expect(seen.map((value) => value.command)).toEqual([
+			...seen.filter((value) => value.command === "sleep 1; printf first").map((value) => value.command),
+			...seen.filter((value) => value.command === "printf second").map((value) => value.command),
+		]);
+		expect(bashEntries(conversation).map((entry) => entry.command)).toEqual([
+			"sleep 1; printf first",
+			"printf second",
+		]);
 	});
 });

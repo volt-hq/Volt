@@ -10,6 +10,11 @@
  * `view.presentation`. The view runs no presenter; a call the host has not
  * presented yet shows its tool's name.
  *
+ * A user shell command the live `bash` value shows has a row from when it
+ * starts: at the end of the transcript, or below it while a turn holds the
+ * conversation (its entry commits once the turn settles). The row stands for
+ * the command's `bashExecution` entry once that commits.
+ *
  * Entries appended to the transcript append rows; any other change of the
  * transcript (a compaction, another branch) draws it afresh. A snapshot of
  * the same conversation keeps the rows of the entries it still shows and
@@ -26,6 +31,7 @@ import {
 import {
 	type LiveItem,
 	type LiveStreamingTool,
+	type LiveValue,
 	type MessagePresentation,
 	type ProjectedEntry,
 	type ToolPresentation,
@@ -53,6 +59,8 @@ import type { ToolCardWork } from "../ui-node/tool-card.ts";
 import type { TuiStore } from "./tui-store.ts";
 
 type MessageEntry = Extract<ProjectedEntry, { type: "message" }>;
+type ShellMessage = Extract<NonNullable<MessageEntry["payload"]>["message"], { role: "bashExecution" }>;
+type ShellValue = Extract<LiveValue, { kind: "bash" }>;
 
 /** What the transcript draws with, from the TUI. */
 export interface TranscriptViewHost {
@@ -64,11 +72,8 @@ export interface TranscriptViewHost {
 	imageWidthCells(): number;
 	/** The work a tool call started, read at every render of its row. */
 	toolCallWork(toolCallId: string): readonly ToolCardWork[];
-	/**
-	 * The row the TUI showed a user shell command in while it ran, which
-	 * stands for the command's entry once it commits; none when it showed none.
-	 */
-	takeLocalBashRow(command: string): Component | undefined;
+	/** Where a user shell command run while a turn holds the conversation shows until its entry commits. */
+	readonly pendingShellRows: Container;
 	/** A work notice entered the transcript: it left the queue. */
 	workNoticeShown(): void;
 }
@@ -80,6 +85,21 @@ interface Streaming {
 	readonly timestamp: number;
 	/** The tool calls the message made so far, whose rows leave with it unless it commits. */
 	readonly calls: string[];
+}
+
+/** A user shell command shown before its entry commits. */
+interface ShellRow {
+	readonly command: string;
+	readonly component: BashExecutionComponent;
+	/** Whether it shows in the transcript, or below it while a turn holds the conversation. */
+	readonly inTranscript: boolean;
+	/** The live value it shows. */
+	value: ShellValue;
+}
+
+/** Whether a shell command's live value says how it ended. */
+function shellEnded(value: ShellValue): boolean {
+	return value.exitCode !== undefined || value.cancelled === true;
 }
 
 function textOf(content: string | readonly (TextContent | ImageContent)[]): string {
@@ -142,6 +162,10 @@ export class TranscriptView {
 	/** The running calls as their rows show them: a call the live lane did not change draws nothing new. */
 	private readonly shownTools = new Map<string, LiveStreamingTool>();
 	private streaming: Streaming | undefined;
+	/** Shell commands shown before their entries commit, oldest first. */
+	private shellRows: ShellRow[] = [];
+	/** The row of the shell command the live `bash` value shows. */
+	private liveShell: ShellRow | undefined;
 
 	constructor(store: TuiStore, container: Container, host: TranscriptViewHost) {
 		this.store = store;
@@ -213,10 +237,13 @@ export class TranscriptView {
 		for (const row of this.tools.values()) change(row);
 	}
 
-	/** Release the rows' timers and coalescers. */
+	/** Release the rows' timers and coalescers; shell rows waiting for their entries leave. */
 	dispose(): void {
 		this.streaming?.coalescer.dispose();
 		this.streaming = undefined;
+		for (const row of this.shellRows) this.removeShell(row);
+		this.shellRows = [];
+		this.liveShell = undefined;
 		for (const row of this.tools.values()) row.dispose();
 		for (const message of this.messages.values()) message.dispose();
 		this.tools.clear();
@@ -315,19 +342,9 @@ export class TranscriptView {
 				});
 				return;
 			}
-			case "bashExecution": {
-				if (live && this.host.takeLocalBashRow(message.command)) return;
-				const component = new BashExecutionComponent(message.command, this.host.ui, message.excludeFromContext);
-				if (message.output) component.appendOutput(message.output);
-				component.setComplete(
-					message.exitCode,
-					message.cancelled,
-					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
-					message.fullOutputPath,
-				);
-				this.add(component);
+			case "bashExecution":
+				this.appendShell(message, live);
 				return;
-			}
 			case "custom":
 				if (message.display) this.appendCustom(entry, { ...message, display: true });
 				return;
@@ -372,6 +389,86 @@ export class TranscriptView {
 				});
 			}
 		}
+	}
+
+	/**
+	 * A user shell command's entry: the row that showed the command while it
+	 * ran stands for it, moved into the transcript when it waited below it;
+	 * without one, a new row.
+	 */
+	private appendShell(message: ShellMessage, live: boolean): void {
+		const index = live ? this.shellRows.findIndex((row) => row.command === message.command) : -1;
+		const row = index === -1 ? undefined : this.shellRows[index];
+		if (row !== undefined) {
+			this.shellRows.splice(index, 1);
+			if (this.liveShell === row) this.liveShell = undefined;
+		}
+		const component =
+			row?.component ?? new BashExecutionComponent(message.command, this.host.ui, message.excludeFromContext);
+		component.setOutput(message.output);
+		component.setComplete(
+			message.exitCode,
+			message.cancelled,
+			message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
+			message.fullOutputPath,
+		);
+		if (row?.inTranscript === true) return;
+		if (row !== undefined) this.host.pendingShellRows.removeChild(row.component);
+		this.addExpandable(component);
+	}
+
+	/**
+	 * The shell command the live `bash` value shows: a row from when it
+	 * starts, showing its output and how it ended. A value that leaves before
+	 * the command's entry commits (the command failed to run or record) takes
+	 * its row along.
+	 */
+	private showShell(): void {
+		const value = this.store.live.values.get("bash");
+		const shell = value?.kind === "bash" ? value : undefined;
+		const row = this.liveShell;
+		if (shell === undefined) {
+			if (row !== undefined) {
+				this.shellRows = this.shellRows.filter((candidate) => candidate !== row);
+				this.removeShell(row);
+				this.liveShell = undefined;
+			}
+			return;
+		}
+		if (row !== undefined && row.value === shell) return;
+		// Another command replaced the one the value showed, which waits for its entry where it shows.
+		const current =
+			row === undefined || row.command !== shell.command || (shellEnded(row.value) && !shellEnded(shell))
+				? this.createShell(shell)
+				: row;
+		current.value = shell;
+		current.component.setOutput(shell.output.lines.join("\n"));
+		if (shellEnded(shell)) {
+			current.component.setComplete(
+				shell.exitCode,
+				shell.cancelled === true,
+				shell.truncated === true ? ({ truncated: true } as TruncationResult) : undefined,
+			);
+		}
+	}
+
+	private createShell(value: ShellValue): ShellRow {
+		const component = new BashExecutionComponent(value.command, this.host.ui, value.excludeFromContext === true);
+		component.setExpanded(this.host.toolsExpanded());
+		// While a turn holds the conversation, the command's entry commits after the turn's.
+		const inTranscript = this.store.phase?.operation !== "turn";
+		if (inTranscript) this.add(component);
+		else this.host.pendingShellRows.addChild(component);
+		const row: ShellRow = { command: value.command, component, inTranscript, value };
+		this.shellRows.push(row);
+		this.liveShell = row;
+		return row;
+	}
+
+	private removeShell(row: ShellRow): void {
+		row.component.setComplete(undefined, false);
+		if (row.inTranscript) this.container.removeChild(row.component);
+		else this.host.pendingShellRows.removeChild(row.component);
 	}
 
 	/** A row's presentation: `presentation`, else the one it shows, else none (its tool's name). */
@@ -423,8 +520,9 @@ export class TranscriptView {
 		return row;
 	}
 
-	/** What streams: the assistant message the live lane builds, with its calls, and the calls that run. */
+	/** What streams: the assistant message the live lane builds, with its calls, the calls that run, and the shell command that runs. */
 	private showLive(items: readonly LiveItem[]): void {
+		this.showShell();
 		const live = this.store.live;
 		const assistant = live.assistant;
 		let streaming = this.streaming;
