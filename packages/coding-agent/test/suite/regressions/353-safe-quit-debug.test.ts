@@ -7,7 +7,7 @@ import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../../src/core/slash-commands.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
-import { createTuiHarness, type TuiHarness, type TuiModeFixture } from "../tui-harness.ts";
+import { createTuiHarness, type TuiHarness, type TuiModeFixture, waitForScreen } from "../tui-harness.ts";
 
 interface ModeControl {
 	ui: TUI;
@@ -463,6 +463,8 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		await startGeneration();
 		control.showSessionSelector();
 		const selector = control.ui.getFocusedComponent() as unknown as { sessionList: { onExit(): void } };
+		// The selector lists the folder's sessions as it opens; the listing reads the session store until it shows them.
+		await waitForScreen(tui, "◉ Current Folder");
 		selector.sessionList.onExit();
 		expect(control.shutdown).not.toHaveBeenCalled();
 		expect(control.showWarning).toHaveBeenCalledTimes(1);
