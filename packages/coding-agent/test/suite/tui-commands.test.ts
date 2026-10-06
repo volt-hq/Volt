@@ -405,7 +405,7 @@ describe("TUI sign-in commands", () => {
 		const { harness, tui } = await start();
 		const live = harness.startup.liveState;
 		// The TUI's client, as its host attached it: the anchor of the conversation it shows.
-		const client = harness.host.clientsOf(harness.tuiHost.conversation).find((attached) => attached.anchor)?.id;
+		const client = harness.host.clientsOf(harness.connector.conversation).find((attached) => attached.anchor)?.id;
 		if (client === undefined) throw new Error("The TUI's client is not attached");
 		const ask = (url: string) =>
 			live.request({ kind: "provider_auth", provider: "acme", flow: "manual", url }, { client });

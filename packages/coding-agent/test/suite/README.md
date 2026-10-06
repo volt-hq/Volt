@@ -1,6 +1,6 @@
 # Coding agent suite tests
 
-Use `test/suite/` for the new harness-based test suite around `AgentSession` and `ConversationHost` (`test/suite/host-harness.ts`). For the TUI's host (`TuiHost`: daemon leases, relayed phones, the TUI's client over loopback, InteractiveMode on a virtual terminal), use `test/suite/tui-harness.ts`.
+Use `test/suite/` for the new harness-based test suite around `AgentSession` and `ConversationHost` (`test/suite/host-harness.ts`). For the TUI's connector (`InProcessConnector`, and the CLI's `LeasedConnector`: daemon leases, relayed phones, the TUI's client connected through it and following its moves, InteractiveMode on a virtual terminal), use `test/suite/tui-harness.ts`.
 
 Rules:
 - Use `test/suite/harness.ts`

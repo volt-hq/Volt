@@ -18,6 +18,7 @@ import type { Component, OverlayHandle, TUI, TuiMode } from "@hansjm10/volt-tui"
 import { type Container, Text } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { InProcessConnector } from "../src/client/in-process-connector.ts";
 import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { liveKey } from "../src/core/host/live-state.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
@@ -44,7 +45,6 @@ import type { StreamingRenderCoalescer } from "../src/modes/interactive/componen
 import { ToolCallRow } from "../src/modes/interactive/components/tool-call-row.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
 import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
-import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
@@ -184,7 +184,7 @@ async function createFixture(
 	const host = createFakeHost({ extensionMode: "rpc" });
 	// The conversation runs where its session does: `conversation_info` tells the TUI its cwd.
 	const { conversation } = createFakeConversation(harness.session, { cwd: harness.session.sessionManager.getCwd() });
-	const tuiHost = TuiHost.start({ host: host.host, conversation });
+	const connector = InProcessConnector.start({ host: host.host, conversation });
 	// Nothing here connects the TUI's client: the fixture's client runs its intents (cancel_work) as a client of its own.
 	const tuiClient: HostClient = { id: "tui", move: { kind: "in_place", onMoved: () => {} } };
 	// The TUI's client runs the work queries and intents on the conversation, as its host does.
@@ -202,7 +202,7 @@ async function createFixture(
 		},
 	};
 	vi.spyOn(TuiStore.prototype, "client", "get").mockReturnValue(client as unknown as ProtocolClient);
-	const mode = new InteractiveMode(tuiHost, {
+	const mode = new InteractiveMode(connector, {
 		tuiMode,
 		settingsScope: {
 			cwd: harness.session.sessionManager.getCwd(),
@@ -278,7 +278,7 @@ async function createFixture(
 		...fixture,
 		harness,
 		access,
-		tuiHost,
+		connector,
 		terminal,
 		jobs,
 		job,
@@ -1041,7 +1041,7 @@ describe("interactive background jobs", () => {
 			harnesses.push(replacement);
 			// The conversation it moved to shows from its snapshot: the store's `reset`.
 			const moved = createFakeConversation(replacement.session).conversation;
-			vi.spyOn(fixture.tuiHost, "conversation", "get").mockReturnValue(moved);
+			vi.spyOn(fixture.connector, "conversation", "get").mockReturnValue(moved);
 			fixture.showSession(replacement.session);
 			access.showConversation({ afresh: true });
 			expect(dispose).toHaveBeenCalledOnce();

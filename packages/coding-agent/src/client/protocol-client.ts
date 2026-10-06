@@ -5,11 +5,12 @@
  * frames. It sends intents and queries and answers host requests.
  *
  * When an intent moves it to another conversation, it follows: the old
- * subscription ends `moved` and it subscribes to the target from a snapshot.
- * On a gap in the live lane it resubscribes after its position. `connect`
- * again on a new transport resumes after its position. Beside it, `observe`
- * subscribes to a conversation the client may read but not act on, such as a
- * child its conversation's work links, open or closed.
+ * subscription ends `moved` and it subscribes to the target from a snapshot,
+ * on the same connection or, following moves by reconnecting, on the next
+ * one. On a gap in the live lane it resubscribes after its position.
+ * `connect` again on a new transport resumes after its position. Beside it,
+ * `observe` subscribes to a conversation the client may read but not act on,
+ * such as a child its conversation's work links, open or closed.
  *
  * `createLoopbackClient` serves a conversation of an in-process host on the
  * local profile; `spawnRpcClient` runs `volt --mode rpc` as a child process.
@@ -98,6 +99,18 @@ export interface ProtocolClientOptions {
 	readonly errorContext?: () => string;
 	/** Observes every host frame from the first, `welcome` included. */
 	readonly onFrame?: (frame: HostFrame, client: ProtocolClient) => void;
+	/**
+	 * How the client follows a move to another conversation: on the same
+	 * connection (`"subscribe"`, the default), or, for a host that redirects
+	 * its clients (a daemon worker, the TUI's host), by reconnecting
+	 * (`"reconnect"`): the client lets go of the connection after
+	 * `ended{moved}`, and the next `connect` subscribes to the target from a
+	 * snapshot. Intents and queries pending at the move, and those sent while
+	 * the client moves, go out again on that connection with their ids, in the
+	 * order they were sent; a host that knows the client across connections
+	 * (`clientKey`) answers a retried intent as it answered it.
+	 */
+	readonly followMoves?: "subscribe" | "reconnect";
 }
 
 /**
@@ -254,6 +267,10 @@ class Observation implements ConversationObservation {
 
 interface Pending<T> {
 	readonly name: string;
+	/** The frame that asked, sent again on the next connection when the client moves before its answer. */
+	readonly frame: Record<string, unknown>;
+	/** The order the client asked in, across intents and queries. */
+	readonly order: number;
 	readonly resolve: (value: T) => void;
 	readonly reject: (error: Error) => void;
 	readonly timer: ReturnType<typeof setTimeout>;
@@ -289,6 +306,9 @@ export class ProtocolClient {
 	/** The `basedOn` of the newest live frame that set the run phase. */
 	private phaseBasedOn = -1;
 	private failure: Error | undefined;
+	/** The conversation a move redirected the client to, until the next `connect` subscribes to it. */
+	private movingTo: string | undefined;
+	private requestOrder = 0;
 
 	constructor(options: ProtocolClientOptions = {}) {
 		this.options = options;
@@ -306,9 +326,17 @@ export class ProtocolClient {
 		return this.liveState;
 	}
 
-	/** The conversation the client is subscribed to. */
+	/** The conversation the client is subscribed to, or moves to. */
 	get conversation(): string | undefined {
-		return this.subscription?.conversation;
+		return this.movingTo ?? this.subscription?.conversation;
+	}
+
+	/**
+	 * The conversation a move redirected the client to, while the client has
+	 * no connection to it yet (it follows moves by reconnecting).
+	 */
+	get moving(): string | undefined {
+		return this.movingTo;
 	}
 
 	get connectionId(): string | undefined {
@@ -333,8 +361,10 @@ export class ProtocolClient {
 
 	/**
 	 * Say hello on `transport` and subscribe: from a snapshot to the conversation
-	 * the host attached the client to, or, reconnecting, after the position the
-	 * client holds. Resolves once the subscription caught up with the log.
+	 * the host attached the client to, or to the one a move redirected it to;
+	 * reconnecting, after the position the client holds. The intents and
+	 * queries still waiting for an answer go out again. Resolves once the
+	 * subscription caught up with the log.
 	 */
 	async connect(transport: RpcTransport): Promise<void> {
 		if (this.transport) throw new Error("The client is connected");
@@ -368,10 +398,19 @@ export class ProtocolClient {
 				});
 			}),
 		);
-		const resume = this.subscription;
-		const conversation = resume?.conversation ?? welcome.conversation;
+		const moving = this.movingTo;
+		const resume = moving === undefined ? this.subscription : undefined;
+		const conversation = moving ?? resume?.conversation ?? welcome.conversation;
 		if (conversation === undefined) throw new Error("The host attached the client to no conversation");
+		this.movingTo = undefined;
 		this.subscribe(conversation, resume ? this.clientState.ordinal : "snapshot");
+		if (moving !== undefined) {
+			// What the client asked before its move or while it moved, in the order it asked.
+			const waiting = [...this.intents.values(), ...this.queries.values()].sort(
+				(left, right) => left.order - right.order,
+			);
+			for (const pending of waiting) this.send(pending.frame);
+		}
 		await this.withTimeout("the subscription", this.caughtUp());
 	}
 
@@ -451,8 +490,9 @@ export class ProtocolClient {
 		);
 	}
 
-	/** Answer a host request the client was asked. */
+	/** Answer a host request the client was asked; a client that moved away from the request's conversation answers nothing. */
 	answer(requestId: string, response: HostResponse): void {
+		if (this.movingTo !== undefined) return;
 		this.send({ type: "host_response", requestId, response });
 	}
 
@@ -539,10 +579,11 @@ export class ProtocolClient {
 		return observation;
 	}
 
-	/** Close the transport; pending intents and queries fail. */
-	async stop(): Promise<void> {
+	/** Close the transport; pending intents and queries fail, with `reason` when given. A stopped client moves nowhere. */
+	async stop(reason: Error = new Error("The client stopped")): Promise<void> {
 		const transport = this.transport ?? this.failedTransport;
-		this.fail(new Error("The client stopped"));
+		this.movingTo = undefined;
+		this.fail(reason);
 		this.failedTransport = undefined;
 		await transport?.close();
 	}
@@ -569,15 +610,17 @@ export class ProtocolClient {
 		frame: Record<string, unknown>,
 	): Promise<T> {
 		if (this.failure) return Promise.reject(this.failure);
-		if (!this.transport) return Promise.reject(new Error("The client is not connected"));
+		// A client that moves holds what it asks until it connected to the target.
+		const held = this.movingTo !== undefined;
+		if (!this.transport && !held) return Promise.reject(new Error("The client is not connected"));
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				pending.delete(id);
 				reject(new Error(this.withContext(`Timeout waiting for ${name}`)));
 			}, this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 			timer.unref?.();
-			pending.set(id, { name, resolve, reject, timer });
-			this.send(frame);
+			pending.set(id, { name, frame, order: this.requestOrder++, resolve, reject, timer });
+			if (!held) this.send(frame);
 		});
 	}
 
@@ -683,7 +726,8 @@ export class ProtocolClient {
 					this.liveState = emptyLiveFold();
 					this.queueChangedAt = 0;
 					this.phaseBasedOn = -1;
-					this.subscribe(frame.target, "snapshot");
+					if (this.options.followMoves === "reconnect") this.redirected(frame.target);
+					else this.subscribe(frame.target, "snapshot");
 				} else if (frame.reason !== "unsubscribed") {
 					this.fail(new Error(this.withContext(`The subscription ended: ${frame.reason}`)));
 				}
@@ -724,6 +768,24 @@ export class ProtocolClient {
 			default:
 				return;
 		}
+	}
+
+	/**
+	 * The host redirected the client to `target` and ends this connection: let
+	 * go of it without failing. What the client asked and was not answered
+	 * waits for the next connection, which subscribes to `target`.
+	 */
+	private redirected(target: string): void {
+		const transport = this.transport;
+		this.movingTo = target;
+		this.subscription = undefined;
+		for (const detach of this.detachTransport.splice(0)) detach();
+		this.transport = undefined;
+		// What the client observed beside the conversation it left ends with it.
+		const observations = [...this.observations.values()];
+		this.observations.clear();
+		for (const observation of observations) observation.end("stopped");
+		if (transport) void (async () => transport.close())().catch(() => undefined);
 	}
 
 	private resubscribeFromSnapshot(): void {

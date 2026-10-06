@@ -238,7 +238,7 @@ A client (`HostClient`) has:
 - `remote`: a paired remote device: the conversation's live `presence` counts it, it is never asked the project trust question of a conversation it opens, and the commands it invokes see `ctx.invokedBy` as `"remote"` (every other client's see `"local"`)
 - `surface`: the client's session actions (`commandContextActions`) and error listener on the extensions of each conversation it joins. The host attaches it on every join. The first join of a client with a surface binds the conversation's extensions in the host's `extensionMode` (`ctx.mode`) and fires `session_start` once; later clients only add their surface. Errors go to every client. Everything else extensions show is data in the conversation's live state (`live`), themes (`set_theme` directives) and the `request_user_input` tool's questions (`user_input` host requests) included.
 - `live`: the client's view of each conversation's live state (`conversation.liveState`), attached on every join before the surface: the extensions' status items, panels, title, notifications, editor text, and themes, running tools' presentations, work, and the host requests (`select`, `confirm`, `input`, `editor`, `form`, and `dialog` dialogs, `editor_text`, `user_input`, `approval`s, MCP authorization, provider sign-ins) of the kinds its `acceptsHostRequest(kind)` takes. The data is [`UiNode`](ui-nodes.md) data and styled text, as RPC clients receive it ([rpc.md](rpc.md#extension-ui)). `apply(update)` receives the current state as a reset when the client joins, then every change; leaving delivers an empty reset. Answer a request with `conversation.liveState.answer(requestId, response, client.id)`: the first valid answer from an attached client that accepts the request's kind wins. A request stays pending when its clients leave, so a client that joins later finds it.
-- `move`: how the client follows its structural intents. `{ kind: "in_place", prepare?, onMoved }` moves the client: `prepare(to, from)` runs once it left the source, before it joins `to` and `to`'s extensions start; `onMoved(to, from)` runs once it joined. `{ kind: "redirect", redirect(sessionId), hostTarget? }` keeps the client on its conversation and tells it where to reconnect; it never anchors.
+- `move`: how the client follows its structural intents. `{ kind: "in_place", prepare?, onMoved }` moves the client: `prepare(to, from)` runs once it left the source, before it joins `to` and `to`'s extensions start; `onMoved(to, from)` runs once it joined. `{ kind: "redirect", redirect(sessionId), hostTarget?, hostsStoredSessions? }` keeps the client on its conversation and tells it where to reconnect; `hostTarget` takes the new, forked, and imported conversations its intents open in this host (with `hostsStoredSessions`, the stored ones a switch resumes too), and its `withSession` runs once a client joined the target there. A redirect client that anchors its conversation (the TUI's) leaves it fenced until the target started, then closes it.
 - `recoversInput`: an in-place client replays the durable queued input of each conversation it moves to before anything it runs there
 
 The intents `openNewSession()`, `openStoredSession()`, `openStoredSessionById()`, `openFork()`, and `openImport()` open the target, move the client, then close the source per its anchor. Important behavior:
@@ -246,7 +246,7 @@ The intents `openNewSession()`, `openStoredSession()`, `openStoredSessionById()`
 - They resolve with `{ cancelled: true }` when a source extension cancels (`session_before_switch` or `session_before_fork`), else with `{ cancelled: false, sessionId, seeded }`, where `sessionId` is the conversation the client moved to and `seeded` says whether `withSession` ran (`openFork()` also returns `selectedText` for a fork before a user message).
 - The new conversation opens before the source closes: if it fails to open, the intent throws and the client stays on the source.
 - Lifecycle order: `session_before_switch` or `session_before_fork` on the source, then the new conversation's `session_start`, then the source's `session_shutdown` (reason `new`, `resume`, or `fork`, with `targetSessionRef`).
-- An in-place client may not leave a conversation that is running a turn, a bash command, a session mutation, or a detached review, or that holds queued durable input. The extension command that asks for the move is the exception: its own durable input is settled as completed before the check.
+- An in-place client, or one that anchors its conversation, may not leave a conversation that is running a turn, a bash command, a session mutation, or a detached review, or that holds queued durable input. The extension command that asks for the move is the exception: its own durable input is settled as completed before the check.
 - One client's intents run one at a time. An intent that waited while the client moved, or while its conversation's branch changed, fails as stale.
 - Inside a subagent's conversation (lifetime `owner`) and a review finding discussion, intents reject.
 - Event subscriptions belong to one `AgentSession`: re-subscribe in `onMoved`.
@@ -1303,13 +1303,13 @@ const conversation = opened.conversation;
 
 ### InteractiveMode
 
-Full TUI interactive mode with editor, chat history, and all built-in commands. The TUI is a protocol client: `new InteractiveMode(connection, options)` connects its client through a `TuiConnection` and reaches its conversations only through that client's intents, queries, and subscription. `TuiHost` is the in-process connection: it serves the TUI's client over a loopback connection on the local profile, the client anchors the conversation it shows, and quitting closes the host's conversations. Started without `daemon`, it runs without the Volt daemon (no leases, no relayed phones); `DaemonLeases` is internal to the `volt` CLI and not exported.
+Full TUI interactive mode with editor, chat history, and all built-in commands. The TUI is a protocol client: `new InteractiveMode(connector, options)` connects its client through a `ConversationConnector` and reaches its conversations only through that client's intents, queries, and subscription. `InProcessConnector` is the in-process connector: it serves the TUI's client over a loopback connection on the local profile, with no daemon, no phones, and no background work outliving the host. The client follows its moves by reconnecting: a structural intent (`/new`, `/resume`, `/fork`, ...) opens the target in the host, ends the client's connection, and the client opens the target through the connector again, subscribing from a snapshot. The conversation the client leaves closes once the target started, and quitting closes the host's conversations.
 
 ```typescript
-import { InteractiveMode, TuiHost } from "@hansjm10/volt-coding-agent";
+import { InProcessConnector, InteractiveMode } from "@hansjm10/volt-coding-agent";
 
-const tuiHost = TuiHost.start({ host, conversation, modelScopePatterns: ["claude-*"] });
-const mode = new InteractiveMode(tuiHost, {
+const connector = InProcessConnector.start({ host, conversation, modelScopePatterns: ["claude-*"] });
+const mode = new InteractiveMode(connector, {
   settingsScope: {
     cwd: conversation.cwd,
     projectTrusted: conversation.session.settingsManager.isProjectTrusted(),
@@ -1322,7 +1322,8 @@ const mode = new InteractiveMode(tuiHost, {
 await mode.run();
 ```
 
-- `TuiHost.start({host, conversation, daemon?, modelScopePatterns?})`: `modelScopePatterns` are the `--models` patterns a profile switch keeps.
+- `InProcessConnector.start({host, conversation, modelScopePatterns?})`: `modelScopePatterns` are the `--models` patterns a profile switch keeps. `connector.conversation` is the conversation the client shows.
+- `ConversationConnector` is `{open(target, options?), stopServing(), dispose(options?), daemonWorkspaceName(), onThemeSnapshot(listener)}`: `open({kind: "startup"} | {kind: "session", sessionId})` resolves `{transport, sessionId, workspaceName?, notices}`. `connectThrough(connector, options)` connects a `ProtocolClient` through it (with `followMoves: "reconnect"`) and follows its moves; the intents and queries the client sends while it moves go out on the new connection, and the connector's host answers an intent the client retries there as it answered it.
 - `settingsScope: {cwd, projectTrusted, profile?}` says where the TUI reads its own display settings (theme, editor, alerts, and the other keys [Settings](settings.md#who-reads-a-setting) lists) until its client tells it where the conversation runs; from then on it follows the `conversation_info` and `settings` queries. Without it, the TUI starts with the process's cwd, untrusted, and no profile.
 - Other options: `migratedProviders`, `autoTrustOnReloadCwd`, `initialMessage`, `initialImages`, `initialMessages`, `verbose`, and `tuiMode`.
 

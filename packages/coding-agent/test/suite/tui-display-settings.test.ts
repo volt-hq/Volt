@@ -127,13 +127,13 @@ describe("the TUI's host", () => {
 	it("closes the language server traces of its conversations as the process exits, until it is disposed", async () => {
 		const before = new Set(process.listeners("exit"));
 		const { harness } = await start();
-		const close = vi.spyOn(harness.tuiHost.conversation.session, "closeLspTraceSync");
+		const close = vi.spyOn(harness.connector.conversation.session, "closeLspTraceSync");
 		const added = process.listeners("exit").filter((listener) => !before.has(listener));
 		expect(added).toHaveLength(1);
 		for (const listener of added) (listener as () => void)();
 		expect(close).toHaveBeenCalledOnce();
 
-		await harness.tuiHost.dispose();
+		await harness.connector.dispose();
 		for (const listener of added) expect(process.listeners("exit")).not.toContain(listener);
 	});
 });
