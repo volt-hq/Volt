@@ -129,13 +129,17 @@ describe("AgentSession background jobs", () => {
 
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		// The TUI shows the harness session; nothing here attaches it to a host.
-		const mode = new InteractiveMode(
-			TuiHost.start({
-				host: {} as ConversationHost,
-				conversation: createFakeConversation(harness.session).conversation,
-			}),
-		);
+		// The TUI shows the harness session; nothing here connects it to a host, so its in-process intents act
+		// as a client of its own.
+		const tuiHost = TuiHost.start({
+			host: {} as ConversationHost,
+			conversation: createFakeConversation(harness.session).conversation,
+		});
+		vi.spyOn(tuiHost, "hostClient", "get").mockReturnValue({
+			id: "tui",
+			move: { kind: "in_place", onMoved: () => {} },
+		});
+		const mode = new InteractiveMode(tuiHost);
 		modes.push(mode);
 		const control = mode as unknown as {
 			renderer: TuiMainScreen;
@@ -143,7 +147,7 @@ describe("AgentSession background jobs", () => {
 			isInitialized: boolean;
 			setupKeyHandlers(): void;
 			setupEditorSubmitHandler(): void;
-			subscribeToAgent(session: Harness["session"]): void;
+			observeSessionStatus(session: Harness["session"]): void;
 			shutdown(): Promise<void>;
 			showWarning(message: string): void;
 			showError(message: string): void;
@@ -156,7 +160,7 @@ describe("AgentSession background jobs", () => {
 		control.renderer.setFocus(control.defaultEditor);
 		control.renderer.start();
 		control.isInitialized = true;
-		control.subscribeToAgent(harness.session);
+		control.observeSessionStatus(harness.session);
 		vi.spyOn(control, "shutdown").mockResolvedValue();
 		vi.spyOn(control, "showWarning");
 		vi.spyOn(control, "showError");

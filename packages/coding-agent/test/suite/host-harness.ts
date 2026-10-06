@@ -4,7 +4,7 @@
  * records its lifecycle events.
  */
 
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
@@ -31,6 +31,7 @@ import type { ConversationFactory, HostedConversation } from "../../src/core/hos
 import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import type { Settings } from "../../src/core/settings-manager.ts";
 import { type SubagentDefinition, SubagentManager } from "../../src/core/subagents/index.ts";
 
 /** A lifecycle event an extension instance saw, tagged with the session it belongs to. */
@@ -66,6 +67,8 @@ export interface HostHarnessOptions {
 	extensions?: readonly ExtensionDefinition[];
 	/** The host's open gate. */
 	openGate?: OpenGate;
+	/** Global settings every session reads (the agent directory's `settings.json`). */
+	globalSettings?: Partial<Settings>;
 }
 
 export interface HostHarness {
@@ -84,6 +87,9 @@ export interface HostHarness {
 
 export async function createHostHarness(options: HostHarnessOptions = {}): Promise<HostHarness> {
 	const tempDir = mkdtempSync(join(tmpdir(), "volt-host-"));
+	if (options.globalSettings !== undefined) {
+		writeFileSync(join(tempDir, "settings.json"), JSON.stringify(options.globalSettings));
+	}
 	const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 	faux.setResponses((options.responses ?? ["one", "two", "three"]).map((text) => fauxAssistantMessage(text)));
 	const authStorage = AuthStorage.inMemory();

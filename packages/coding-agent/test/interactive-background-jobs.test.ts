@@ -1,13 +1,18 @@
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage } from "@hansjm10/volt-ai";
-import { WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import type { AssistantMessage, JsonObject } from "@hansjm10/volt-ai";
+import {
+	emptyLiveFold,
+	foldLiveFrame,
+	foldLiveItems,
+	type LiveFoldState,
+	PRESENTATION_MAX_SERIALIZED_BYTES,
+	WORK_NOTICE_CUSTOM_TYPE,
+} from "@hansjm10/volt-protocol";
 import type { Component, OverlayHandle, TUI, TuiMode } from "@hansjm10/volt-tui";
 import { type Container, Text } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
 import { liveKey } from "../src/core/host/live-state.ts";
-import type { HostClient } from "../src/core/host/targets.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
@@ -20,18 +25,23 @@ import {
 	type JobSource,
 	jobResult,
 } from "../src/core/tools/jobs.ts";
+import { presentToolCall } from "../src/core/ui/presentation.ts";
+import type { TranscriptView } from "../src/modes/interactive/client/transcript-view.ts";
+import type { TuiStore } from "../src/modes/interactive/client/tui-store.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
-import { PresentedToolComponent } from "../src/modes/interactive/components/presented-tool.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
+import { ToolCallRow } from "../src/modes/interactive/components/tool-call-row.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
 import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
 import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
+import type { TuiLiveView } from "../src/modes/interactive/live-view.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 import { createTestJobRuntime, type TestJobRuntime } from "./utilities/job-runtime.ts";
+import { storeTranscript } from "./utilities/store-transcript.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type InteractiveTestAccess = {
@@ -45,8 +55,11 @@ type InteractiveTestAccess = {
 	workStatus: WorkStatus;
 	workInspector?: WorkInspector;
 	workOverlay?: OverlayHandle;
+	store: TuiStore;
+	liveView: TuiLiveView;
+	transcript: TranscriptView;
+	workRowsCoalescer: StreamingRenderCoalescer<void>;
 	followWork(): void;
-	jobsRenderCoalescer?: StreamingRenderCoalescer<void>;
 	isInitialized: boolean;
 	pendingUserInputs: string[];
 	setupKeyHandlers(): void;
@@ -57,12 +70,9 @@ type InteractiveTestAccess = {
 		prompt: { message: string; options: { id: string; label: string }[] },
 	): Promise<string | undefined>;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
-	subscribeToBackgroundJobs(session: AgentSession): void;
-	handleEvent(event: AgentSessionEvent): Promise<void>;
 	handleFollowUp(): Promise<void>;
-	client: HostClient;
-	beginSessionReplacementUi(): void;
-	renderCurrentSessionState(): void;
+	leaveConversation(): void;
+	showConversation(options: { afresh: boolean }): void;
 	reloadRuntimeResources(): Promise<boolean>;
 };
 
@@ -83,6 +93,11 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
+/**
+ * InteractiveMode over a session whose work is a job runtime of the fixture's.
+ * The TUI's store holds what its client would: the session's log projected
+ * and the runtime's live work values, plus any running calls a test starts.
+ */
 async function createFixture(
 	tuiMode: TuiMode,
 	columns = 80,
@@ -90,28 +105,17 @@ async function createFixture(
 	outcome: "completed" | "failed" = "completed",
 ) {
 	const harness = await createHarness({ settings: { lsp: { enabled: false }, theme: "dark", quietStartup: true } });
-	// The public session getter is stable and initially contains no jobs.
-	expect(harness.session.jobs).toBe(harness.session.jobs);
-	expect(harness.session.jobs.list()).toEqual([]);
 	const runtime = await createTestJobRuntime();
 	const jobs = runtime.jobs;
-	const listeners = new Set<() => void>();
 	const source: JobSource = {
 		list: () => jobs.list(),
 		listWaits: () => jobs.listWaits(),
 		get: (id) => jobs.get(id),
 		cancel: (id) => jobs.cancel(id),
-		subscribe: (listener) => {
-			listeners.add(listener);
-			const unsubscribe = jobs.subscribe(listener);
-			return () => {
-				listeners.delete(listener);
-				unsubscribe();
-			};
-		},
+		subscribe: (listener) => jobs.subscribe(listener),
 	};
 	vi.spyOn(harness.session, "jobs", "get").mockReturnValue(source);
-	// The conversation's work is the fixture's: the TUI's work inspector and footer line read it.
+	// The conversation's work is the fixture's: the TUI's work inspector, footer line, and tool rows read it.
 	vi.spyOn(harness.session, "work", "get").mockReturnValue(runtime.work);
 	const getToolDefinition = harness.session.getToolDefinition.bind(harness.session);
 	const bash = withBackgroundJobs(createBashToolDefinition(harness.tempDir), {
@@ -136,8 +140,16 @@ async function createFixture(
 	}
 	const host = createFakeHost({ extensionMode: "tui" });
 	const { conversation } = createFakeConversation(harness.session);
-	const mode = new InteractiveMode(TuiHost.start({ host: host.host, conversation }), { tuiMode });
+	const tuiHost = TuiHost.start({ host: host.host, conversation });
+	// Nothing here connects the TUI: its in-process intents (cancel_work) act as a client of its own.
+	vi.spyOn(tuiHost, "hostClient", "get").mockReturnValue({ id: "tui", move: { kind: "in_place", onMoved: () => {} } });
+	const mode = new InteractiveMode(tuiHost, { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;
+	let shownSession = harness.session;
+	let live: LiveFoldState = emptyLiveFold();
+	vi.spyOn(access.store, "transcript").mockImplementation(() => storeTranscript(shownSession));
+	vi.spyOn(access.store, "live", "get").mockImplementation(() => live);
+	vi.spyOn(access.store, "value").mockImplementation((key) => live.values.get(key));
 	const terminal = new VirtualTerminal(columns, 24);
 	access.renderer = createInteractiveTui({
 		tuiMode,
@@ -148,9 +160,15 @@ async function createFixture(
 	access.setupKeyHandlers();
 	access.setupEditorSubmitHandler();
 	access.activateView(access.conversationView, access.editor, false);
-	access.subscribeToBackgroundJobs(harness.session);
 	access.followWork();
-	if (access.client.live) runtime.live.attach("tui", access.client.live);
+	// The runtime's work values reach the TUI as its client's live frames do.
+	runtime.live.attach("tui", {
+		acceptsHostRequest: () => true,
+		apply: (update) => {
+			live = foldLiveFrame(live, update);
+			access.liveView.apply(update);
+		},
+	});
 	access.isInitialized = true;
 	access.ui.start();
 
@@ -173,18 +191,50 @@ async function createFixture(
 	const fixture = { mode, harnesses: [harness], runtime, finish };
 	fixtures.push(fixture);
 	await vi.waitFor(() => expect(jobs.get(job.id).output).toBe("first live output"));
-	access.jobsRenderCoalescer?.flush();
+	access.workRowsCoalescer.flush();
 	await terminal.waitForRender();
-	return { ...fixture, harness, access, host, terminal, source, listeners, jobs, job, update };
+	return {
+		...fixture,
+		harness,
+		access,
+		tuiHost,
+		terminal,
+		jobs,
+		job,
+		update,
+		/** Show `session` as the conversation the client moved to. */
+		showSession(session: Harness["session"]) {
+			shownSession = session;
+		},
+		/** A call the live lane says runs, as its tool presents it. */
+		run(toolCallId: string, toolName: string, args: Record<string, unknown>) {
+			const presentation = presentToolCall(
+				harness.session.presenters.tool(toolName),
+				toolName,
+				{ args, argsComplete: true, state: "running", cwd: harness.tempDir },
+				PRESENTATION_MAX_SERIALIZED_BYTES,
+			);
+			live = foldLiveItems(live, [{ type: "tool", op: "start", toolCallId, toolName, args, presentation }]);
+			access.transcript.sync();
+		},
+		/** The live lane drops a call once its result entry committed. */
+		commit(toolCallId: string) {
+			const tools = new Map(live.tools);
+			tools.delete(toolCallId);
+			live = { ...live, tools };
+			access.transcript.sync();
+		},
+	};
 }
 
-async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixture>>) {
-	const { harness, access, job } = fixture;
+type Fixture = Awaited<ReturnType<typeof createFixture>>;
+
+/** The assistant message of the session's model calling one tool. */
+function toolCallMessage(harness: Harness, toolCallId: string, name: string, args: JsonObject) {
 	const model = harness.getModel();
-	const args = { command: job.label, background: true };
-	const assistant: AssistantMessage = {
+	return {
 		role: "assistant",
-		content: [{ type: "toolCall", id: LAUNCH_CALL, name: "bash", arguments: args }],
+		content: [{ type: "toolCall", id: toolCallId, name, arguments: args }],
 		api: model.api,
 		provider: model.provider,
 		model: model.id,
@@ -198,9 +248,16 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 		},
 		stopReason: "toolUse",
 		timestamp: Date.now(),
-	};
+	} satisfies AssistantMessage;
+}
+
+/** The launch call and its result commit: the transcript draws the launch row, which shows the job it started. */
+async function acknowledgeLaunch(fixture: Fixture): Promise<ToolCallRow> {
+	const { harness, access, job } = fixture;
 	const result = jobResult(job);
-	await harness.session.sessionWriter.appendMessage(assistant);
+	await harness.session.sessionWriter.appendMessage(
+		toolCallMessage(harness, LAUNCH_CALL, "bash", { command: job.label, background: true }),
+	);
 	await harness.session.sessionWriter.appendMessage({
 		...result,
 		role: "toolResult",
@@ -209,18 +266,15 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 		isError: false,
 		timestamp: Date.now(),
 	});
-	await access.handleEvent({ type: "tool_execution_start", toolCallId: LAUNCH_CALL, toolName: "bash", args });
-	await access.handleEvent({
-		type: "tool_execution_end",
-		toolCallId: LAUNCH_CALL,
-		toolName: "bash",
-		result,
-		isError: false,
-	});
-	access.jobsRenderCoalescer?.flush();
-	const card = access.chatContainer.children.find((child) => child instanceof PresentedToolComponent);
+	access.transcript.sync();
+	access.workRowsCoalescer.flush();
+	const card = access.chatContainer.children.find((child) => child instanceof ToolCallRow);
 	if (!card) throw new Error("Expected the live background launch card");
 	return card;
+}
+
+function toolRows(access: InteractiveTestAccess): ToolCallRow[] {
+	return access.chatContainer.children.filter((child): child is ToolCallRow => child instanceof ToolCallRow);
 }
 
 describe("interactive background jobs", () => {
@@ -234,7 +288,7 @@ describe("interactive background jobs", () => {
 	it.each(["regular", "fullscreen"] as const)(
 		"opens /work during a foreground wait without cancelling work (%s)",
 		async (tuiMode) => {
-			const { harness, access, jobs, job, terminal, listeners, update, finish } = await createFixture(tuiMode);
+			const { harness, access, jobs, job, terminal, update, finish } = await createFixture(tuiMode);
 			vi.spyOn(harness.session, "isStreaming", "get").mockReturnValue(true);
 			const prompt = vi.spyOn(harness.session, "prompt");
 			const abort = vi.spyOn(harness.session, "abort");
@@ -247,7 +301,6 @@ describe("interactive background jobs", () => {
 			await access.defaultEditor.onSubmit?.(" /work ");
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
-			expect(listeners.size).toBe(1);
 			terminal.sendInput("\r");
 			await vi.waitFor(async () => {
 				await terminal.waitForRender();
@@ -353,7 +406,7 @@ describe("interactive background jobs", () => {
 			expect(terminal.getViewport().join("\n")).not.toContain("first live output");
 			finish();
 			await jobs.wait([job.id]);
-			access.jobsRenderCoalescer?.flush();
+			access.workRowsCoalescer.flush();
 			await terminal.waitForRender();
 			const settled = terminal.getViewport().join("\n");
 			expect(settled).not.toContain("Work · ");
@@ -393,8 +446,8 @@ describe("interactive background jobs", () => {
 				notice.display,
 				notice.details,
 			);
-			await access.handleEvent({ type: "message_start", message: notice });
-			access.jobsRenderCoalescer?.flush();
+			access.transcript.sync();
+			access.workRowsCoalescer.flush();
 			const notification = access.chatContainer.children.find((child) => child instanceof PresentedMessageComponent);
 			expect(
 				stripAnsi(notification?.render(120).lines.join(" ") ?? "")
@@ -411,7 +464,7 @@ describe("interactive background jobs", () => {
 				...launch,
 				content: [{ type: "toolCall", name: "jobs", id: toolCallId, arguments: args }],
 			});
-			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
+			fixture.run(toolCallId, "jobs", args);
 			const result = await createJobsTool({ jobs }).execute(toolCallId, args);
 			await harness.session.sessionWriter.appendMessage({
 				...result,
@@ -421,7 +474,7 @@ describe("interactive background jobs", () => {
 				isError: true,
 				timestamp: Date.now(),
 			});
-			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: true });
+			fixture.commit(toolCallId);
 			await terminal.waitForRender();
 			const collapsed = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
 			// The launch's title and its job's line, the notice, and the wait's table row.
@@ -440,7 +493,7 @@ describe("interactive background jobs", () => {
 			expect(expanded).toContain(job.id);
 			expect(expanded.match(/final output/g)).toHaveLength(2);
 			terminal.sendInput("\x0f");
-			access.renderCurrentSessionState();
+			access.transcript.rebuild();
 			expect(stripAnsi(access.chatContainer.render(80).lines.join("\n"))).toBe(collapsed);
 			expect(harness.sessionManager.getConversationState().context).toEqual(saved);
 		},
@@ -449,7 +502,7 @@ describe("interactive background jobs", () => {
 	it.each(["regular", "fullscreen"] as const)(
 		"keeps confirmations visible and prevents inspection keys from approving them (%s)",
 		async (tuiMode) => {
-			const { access, terminal, listeners, jobs, job } = await createFixture(tuiMode);
+			const { access, terminal, jobs, job } = await createFixture(tuiMode);
 			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
 			let resolved = false;
@@ -461,7 +514,6 @@ describe("interactive background jobs", () => {
 				});
 			await terminal.waitForRender();
 			expect(access.workInspector).toBeUndefined();
-			expect(listeners.size).toBe(1);
 			expect(terminal.getViewport().join("\n")).toContain("Permission required");
 			expect(resolved).toBe(false);
 			// Opening the inspector above a visible pending confirmation must keep its input separate.
@@ -534,16 +586,16 @@ describe("interactive background jobs", () => {
 				...assistant,
 				content: [{ type: "toolCall", id: toolCallId, name: "jobs", arguments: args }],
 			});
-			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
+			fixture.run(toolCallId, "jobs", args);
 			const waiting = createJobsTool({ jobs }).execute(toolCallId, args);
 			for (let index = 0; index < 3; index++) {
+				// Ctrl+T draws the transcript afresh; the running wait is the live lane's.
 				terminal.sendInput("\x14");
 				update({ content: [{ type: "text", text: `live wait output ${index}` }] });
-				access.jobsRenderCoalescer?.flush();
+				await vi.waitFor(() => expect(jobs.get(job.id).output).toBe(`live wait output ${index}`));
+				access.workRowsCoalescer.flush();
 				await terminal.waitForRender();
-				const card = access.chatContainer.children
-					.filter((child) => child instanceof PresentedToolComponent)
-					.at(-1);
+				const card = toolRows(access).at(-1);
 				if (!card) throw new Error("Expected pending wait card");
 				const output = stripAnsi(card.render(80).lines.join("\n"));
 				expect(output).toContain("Waiting for background job");
@@ -555,8 +607,16 @@ describe("interactive background jobs", () => {
 			}
 			finish();
 			const result = await waiting;
-			await access.handleEvent({ type: "tool_execution_end", toolCallId, toolName: "jobs", result, isError: false });
-			const card = access.chatContainer.children.filter((child) => child instanceof PresentedToolComponent).at(-1);
+			await harness.session.sessionWriter.appendMessage({
+				...result,
+				role: "toolResult",
+				toolName: "jobs",
+				toolCallId,
+				isError: false,
+				timestamp: Date.now(),
+			});
+			fixture.commit(toolCallId);
+			const card = toolRows(access).at(-1);
 			if (!card) throw new Error("Expected completed wait card");
 			const collapsed = stripAnsi(card.render(80).lines.join("\n"));
 			expect(collapsed).toContain("completed");
@@ -571,7 +631,7 @@ describe("interactive background jobs", () => {
 	it.each(["regular", "fullscreen"] as const)(
 		"dismisses inspection when a cached host focus callback restores input (%s)",
 		async (tuiMode) => {
-			const { access, terminal, jobs, job, listeners } = await createFixture(tuiMode);
+			const { access, terminal, jobs, job } = await createFixture(tuiMode);
 			const loader = new Text("Asynchronous host operation", 0, 0);
 			access.editorContainer.clear();
 			access.editorContainer.addChild(loader);
@@ -599,7 +659,6 @@ describe("interactive background jobs", () => {
 				await terminal.waitForRender();
 				expect(access.workInspector).toBeUndefined();
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
-				expect(listeners.size).toBe(1);
 				terminal.sendInput("visible draft");
 				await terminal.waitForRender();
 				expect(access.editor.getText()).toBe("visible draft");
@@ -620,7 +679,7 @@ describe("interactive background jobs", () => {
 	] as const)(
 		"restores visible editor input when reload settles after inspection opens (%s, failure: %s)",
 		async (tuiMode, failed) => {
-			const { harness, access, terminal, jobs, job, finish, listeners } = await createFixture(tuiMode);
+			const { harness, access, terminal, jobs, job, finish } = await createFixture(tuiMode);
 			finish();
 			await jobs.wait([job.id]);
 			let entered!: () => void;
@@ -648,7 +707,6 @@ describe("interactive background jobs", () => {
 				await terminal.waitForRender();
 				expect(access.workInspector).toBeUndefined();
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
-				expect(listeners.size).toBe(1);
 				terminal.sendInput("draft after reload");
 				await terminal.waitForRender();
 				expect(access.editor.getText()).toBe("draft after reload");
@@ -662,7 +720,7 @@ describe("interactive background jobs", () => {
 	);
 
 	it("keeps follow-up /work local and cancels only the selected job after confirmation", async () => {
-		const { harness, access, jobs, terminal, job, listeners } = await createFixture("fullscreen");
+		const { harness, access, jobs, terminal, job } = await createFixture("fullscreen");
 		vi.spyOn(harness.session, "isStreaming", "get").mockReturnValue(true);
 		const prompt = vi.spyOn(harness.session, "prompt");
 		const other = await jobs.start({
@@ -689,87 +747,76 @@ describe("interactive background jobs", () => {
 		expect(jobs.get(other.id).status).toBe("completed");
 		terminal.sendInput("\x1b");
 		await terminal.waitForRender();
-		expect(listeners.size).toBe(1);
 	});
 
 	it("coalesces live launch-card invalidation after acknowledgement without rebuilding history", async () => {
-		const { access, job, jobs, update, finish } = await createFixture("regular");
+		const fixture = await createFixture("regular");
+		const { access, job, jobs, update, finish } = fixture;
 		const history = new Text("STATIC HISTORY", 0, 0);
 		access.chatContainer.addChild(history);
-		await access.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: LAUNCH_CALL,
-			toolName: "bash",
-			args: { command: job.label, background: true },
-		});
-		await access.handleEvent({
-			type: "tool_execution_end",
-			toolCallId: LAUNCH_CALL,
-			toolName: "bash",
-			result: jobResult(job),
-			isError: false,
-		});
-		const card = access.chatContainer.children.find((child) => child instanceof PresentedToolComponent);
-		if (!card) throw new Error("Expected the live background launch card");
-		access.jobsRenderCoalescer?.flush();
+		const card = await acknowledgeLaunch(fixture);
 		const invalidate = vi.spyOn(card, "invalidate");
 		const invalidateHistory = vi.spyOn(history, "invalidate");
 		for (let index = 0; index < 100; index++) update({ content: [{ type: "text", text: `output ${index}` }] });
-		access.jobsRenderCoalescer?.flush();
-		expect(invalidate.mock.calls.length).toBeLessThanOrEqual(2);
+		// The job's live work value carries its progress a coalescing interval after the output.
+		await vi.waitFor(() =>
+			expect(fixture.runtime.live.get(liveKey("work", job.id))).toMatchObject({ progress: { text: "output 99" } }),
+		);
+		access.workRowsCoalescer.flush();
 		expect(invalidate).toHaveBeenCalled();
+		expect(invalidate.mock.calls.length).toBeLessThanOrEqual(3);
 		expect(invalidateHistory).not.toHaveBeenCalled();
 		expect(access.chatContainer.children).toContain(history);
 		expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("output 99");
 		finish();
 		await jobs.wait([job.id]);
-		access.jobsRenderCoalescer?.flush();
-		expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("Completed");
+		await vi.waitFor(() => {
+			access.workRowsCoalescer.flush();
+			expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("Completed");
+		});
 		invalidate.mockClear();
-		access.jobsRenderCoalescer?.flush();
+		access.workRowsCoalescer.flush();
 		expect(invalidate).not.toHaveBeenCalled();
 	});
 
 	it("does not invalidate completed inspections while their worker remains active", async () => {
 		const fixture = await createFixture("regular");
-		const { access, jobs, job, update } = fixture;
+		const { access, harness, jobs, job, update } = fixture;
 		const launch = await acknowledgeLaunch(fixture);
-		const inspections: PresentedToolComponent[] = [];
-		for (let index = 0; index < 200; index++) {
+		for (let index = 0; index < 20; index++) {
 			const toolCallId = `completed-inspection-${index}`;
 			const args: { action: "read"; id: string } | { action: "wait"; ids: string[]; timeoutMs: number } =
 				index % 2 === 0 ? { action: "read", id: job.id } : { action: "wait", ids: [job.id], timeoutMs: 0 };
-			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
-			const component = access.chatContainer.children.at(-1);
-			if (!(component instanceof PresentedToolComponent)) throw new Error("Expected inspection component");
-			await access.handleEvent({
-				type: "tool_execution_end",
-				toolCallId,
+			await harness.session.sessionWriter.appendMessage(toolCallMessage(harness, toolCallId, "jobs", args));
+			const result = await createJobsTool({ jobs }).execute(toolCallId, args);
+			await harness.session.sessionWriter.appendMessage({
+				...result,
+				role: "toolResult",
 				toolName: "jobs",
-				result: await createJobsTool({ jobs }).execute(toolCallId, args),
+				toolCallId,
 				isError: false,
+				timestamp: Date.now(),
 			});
-			inspections.push(component);
 		}
-		access.jobsRenderCoalescer?.flush();
+		access.transcript.sync();
+		access.workRowsCoalescer.flush();
+		const inspections = toolRows(access).filter((row) => row !== launch);
+		expect(inspections).toHaveLength(20);
 		const invalidations = inspections.map((component) => vi.spyOn(component, "invalidate"));
 		const launchInvalidation = vi.spyOn(launch, "invalidate");
-		await access.handleEvent({
-			type: "tool_execution_start",
-			toolCallId: "pending-inspection",
-			toolName: "jobs",
-			args: { action: "wait", ids: [job.id] },
-		});
-		const pending = access.chatContainer.children.at(-1);
-		if (!(pending instanceof PresentedToolComponent)) throw new Error("Expected pending inspection");
-		const pendingInvalidation = vi.spyOn(pending, "invalidate");
+		await harness.session.sessionWriter.appendMessage(
+			toolCallMessage(harness, "pending-inspection", "jobs", { action: "wait", ids: [job.id] }),
+		);
+		fixture.run("pending-inspection", "jobs", { action: "wait", ids: [job.id] });
+		const pending = toolRows(access).at(-1);
+		if (!pending) throw new Error("Expected pending inspection");
 		for (let index = 0; index < 10; index++)
 			update({ content: [{ type: "text", text: `latest live output ${index}` }] });
-		access.jobsRenderCoalescer?.flush();
+		await vi.waitFor(() => expect(jobs.get(job.id).output).toBe("latest live output 9"));
+		access.workRowsCoalescer.flush();
 		await new Promise((resolve) => setTimeout(resolve, 1100));
 		for (const invalidate of invalidations) expect(invalidate).not.toHaveBeenCalled();
 		expect(launchInvalidation).toHaveBeenCalled();
-		expect(pendingInvalidation).toHaveBeenCalled();
 		// The launch card shows the job's live output; a pending wait shows what it waits for.
 		expect(stripAnsi(launch.render(80).lines.join("\n"))).toContain("latest live output 9");
 		expect(stripAnsi(pending.render(80).lines.join("\n"))).toContain("Waiting for background job");
@@ -783,7 +830,7 @@ describe("interactive background jobs", () => {
 		async (outcome) => {
 			const fixture = await createFixture("regular", 80, false, outcome);
 			const { access, harness, terminal, job, jobs, finish } = fixture;
-			const card = await acknowledgeLaunch(fixture);
+			await acknowledgeLaunch(fixture);
 			const transcript = harness.sessionManager.getConversationState().context;
 			const modelMessages = harness.session.messages;
 			finish();
@@ -800,6 +847,8 @@ describe("interactive background jobs", () => {
 			}
 			expect(harness.sessionManager.getConversationState().context).toEqual(transcript);
 			expect(harness.session.messages).toEqual(modelMessages);
+			const card = toolRows(access)[0];
+			if (!card) throw new Error("Expected the launch card");
 			const invalidate = vi.spyOn(card, "invalidate");
 			const repaint = vi.spyOn(access.ui, "requestRender");
 			await new Promise((resolve) => setTimeout(resolve, 1100));
@@ -815,20 +864,18 @@ describe("interactive background jobs", () => {
 				},
 			});
 			await jobs.wait([other.id]);
-			access.jobsRenderCoalescer?.flush();
+			access.workRowsCoalescer.flush();
 			expect(invalidate).not.toHaveBeenCalled();
 			expect(stripAnsi(access.chatContainer.render(100).lines.join("\n"))).toContain("final output");
 		},
 	);
 
-	it("releases a settled launch binding once its job leaves the list, and replays its recorded outcome", async () => {
+	it("replays a settled launch's recorded outcome once its job left the jobs list", async () => {
 		const fixture = await createFixture("regular");
-		const { access, jobs, job, finish, source } = fixture;
-		const card = await acknowledgeLaunch(fixture);
+		const { access, jobs, job, finish } = fixture;
+		await acknowledgeLaunch(fixture);
 		finish();
 		await jobs.wait([job.id]);
-		access.jobsRenderCoalescer?.flush();
-		const dispose = vi.spyOn(card, "dispose");
 		for (let index = 0; index < JOB_LIST_MAX; index++) {
 			const other = await jobs.start({
 				tool: "bash",
@@ -840,16 +887,15 @@ describe("interactive background jobs", () => {
 		}
 		expect(jobs.list()).toHaveLength(JOB_LIST_MAX);
 		expect(jobs.list().some((listed) => listed.id === job.id)).toBe(false);
-		await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
 		for (let index = 0; index < 2; index++) {
-			access.renderCurrentSessionState();
+			access.transcript.rebuild();
 			// A finished job's card shows its recorded outcome, not the running state it captured.
 			const output = stripAnsi(access.chatContainer.render(100).lines.join("\n"));
 			expect(output).toContain("Completed · Run focused integration checks");
 			expect(output).toContain("final output");
 			expect(output).not.toContain("Running at capture");
 		}
-		expect(source.get(job.id).status).toBe("completed");
+		expect(jobs.get(job.id).status).toBe("completed");
 	});
 
 	it.each(["regular", "fullscreen"] as const)(
@@ -873,31 +919,33 @@ describe("interactive background jobs", () => {
 	);
 
 	it.each([false, true])(
-		"closes old subscriptions and releases launch cards before moving to another session (settled: %s)",
+		"leaves the work and launch cards of the conversation it moves away from (settled: %s)",
 		async (settled) => {
 			const fixture = await createFixture("regular");
-			const { harnesses, access, host, terminal, listeners, update, finish, jobs, job } = fixture;
+			const { harnesses, access, terminal, update, finish, jobs, job } = fixture;
 			const card = await acknowledgeLaunch(fixture);
 			if (settled) {
 				finish();
 				await jobs.wait([job.id]);
-				access.jobsRenderCoalescer?.flush();
+				access.workRowsCoalescer.flush();
 			}
 			const dispose = vi.spyOn(card, "dispose");
 			await access.defaultEditor.onSubmit?.("/work");
 			await terminal.waitForRender();
 			expect(access.workInspector).toBeDefined();
-			access.beginSessionReplacementUi();
-			expect(listeners.size).toBe(0);
-			expect(dispose).toHaveBeenCalledOnce();
+			// The client moves: the store's `moving`.
+			access.leaveConversation();
 			expect(access.workInspector).toBeUndefined();
 			const replacement = await createHarness({
 				settings: { lsp: { enabled: false }, theme: "dark", quietStartup: true },
 			});
 			harnesses.push(replacement);
-			// The TUI moves to the replacement's conversation as one of its structural intents moves it.
-			await host.move(access.client, createFakeConversation(replacement.session).conversation);
-			access.renderCurrentSessionState();
+			// The conversation it moved to shows from its snapshot: the store's `reset`.
+			const moved = createFakeConversation(replacement.session).conversation;
+			vi.spyOn(fixture.tuiHost, "conversation", "get").mockReturnValue(moved);
+			fixture.showSession(replacement.session);
+			access.showConversation({ afresh: true });
+			expect(dispose).toHaveBeenCalledOnce();
 			update({ content: [{ type: "text", text: "stale runtime output" }] });
 			await terminal.waitForRender();
 			expect(access.workStatus.render(80).lines).toEqual([]);

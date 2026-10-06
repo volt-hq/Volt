@@ -26,22 +26,23 @@ import { BorderedLoader } from "../src/modes/interactive/components/bordered-loa
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 interface ReviewContext {
-	conversation: {
-		session: Record<string, unknown>;
-		services: { agentDir: string };
-		/** The conversation's work registry; the review runs as its `review` work. */
-		work: object;
+	tuiHost: {
+		conversation: {
+			session: Record<string, unknown>;
+			services: { agentDir: string };
+			/** The conversation's work registry; the review runs as its `review` work. */
+			work: object;
+		};
+		hostClient: object;
 	};
 	host: object;
-	client: object;
 	/** The TUI's `openNewSession` intent. */
 	newSession: ReturnType<typeof vi.fn>;
 	ui: TUI;
 	editorContainer: Container;
 	chatContainer: Container;
 	pendingMessagesContainer: Container;
-	pendingTools: Map<string, never>;
-	renderInitialMessages: ReturnType<typeof vi.fn>;
+	renderCurrentConversation: ReturnType<typeof vi.fn>;
 	refreshPlanningUi: ReturnType<typeof vi.fn>;
 	editor: Text;
 	footer: { setTransientUsage: ReturnType<typeof vi.fn> };
@@ -84,13 +85,15 @@ function createContext(): ReviewContext {
 	const chatContainer = new Container();
 	const view = { regularComponents: [editorContainer], fullscreenRoot: editorContainer };
 	return Object.assign(Object.create(InteractiveMode.prototype), {
-		conversation: {
-			session,
-			services: { agentDir: "/workspace/.volt" },
-			work: {},
+		tuiHost: {
+			conversation: {
+				session,
+				services: { agentDir: "/workspace/.volt" },
+				work: {},
+			},
+			hostClient: {},
 		},
 		host: {},
-		client: {},
 		// The review's progress is its work's: none reported here.
 		workSource: { subscribe: () => () => undefined, items: () => [] },
 		newSession: openNewSession,
@@ -98,8 +101,11 @@ function createContext(): ReviewContext {
 		editorContainer,
 		chatContainer,
 		pendingMessagesContainer: new Container(),
-		pendingTools: new Map(),
-		renderInitialMessages: vi.fn(() => chatContainer.addChild(new Text("Seeded review findings"))),
+		// The transcript of the conversation the TUI shows, drawn afresh.
+		renderCurrentConversation: vi.fn(async () => {
+			chatContainer.clear();
+			chatContainer.addChild(new Text("Seeded review findings"));
+		}),
 		refreshPlanningUi: vi.fn(),
 		editor,
 		footer: { setTransientUsage: vi.fn() },
@@ -197,16 +203,16 @@ describe("InteractiveMode review workflow", () => {
 			expect(rendered.match(/Warning: Could not retain optional private review diagnostics\./g)).toHaveLength(1);
 			if (outcome === "handoff") {
 				expect(context.newSession).toHaveBeenCalledOnce();
-				expect(context.renderInitialMessages).toHaveBeenCalledOnce();
+				expect(context.renderCurrentConversation).toHaveBeenCalledOnce();
 				expect(rendered).toContain("Seeded review findings");
 				expect(rendered).not.toContain("Original session");
 				expect(rendered).not.toContain("Replacement session before render");
 				expect(rendered.indexOf("Warning:")).toBeGreaterThan(rendered.indexOf("Seeded review findings"));
 			} else if (outcome === "cancelled handoff") {
-				expect(context.renderInitialMessages).not.toHaveBeenCalled();
+				expect(context.renderCurrentConversation).not.toHaveBeenCalled();
 				expect(rendered).toContain("Original session");
 			} else {
-				expect(context.renderInitialMessages).toHaveBeenCalledOnce();
+				expect(context.renderCurrentConversation).toHaveBeenCalledOnce();
 				expect(rendered).toContain("Seeded review findings");
 				expect(rendered.indexOf("Warning:")).toBeGreaterThan(rendered.indexOf("Seeded review findings"));
 			}
@@ -430,7 +436,7 @@ describe("InteractiveMode review workflow", () => {
 
 		await run(context);
 		expect(reviewMocks.runReviewWorkflow).toHaveBeenCalledOnce();
-		expect(reviewMocks.runReviewWorkflow.mock.calls[0]?.[0].work).toBe(context.conversation.work);
+		expect(reviewMocks.runReviewWorkflow.mock.calls[0]?.[0].work).toBe(context.tuiHost.conversation.work);
 	});
 
 	it("rejects a duplicate local start while the first review is active", async () => {

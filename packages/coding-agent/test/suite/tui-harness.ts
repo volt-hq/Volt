@@ -2,7 +2,8 @@
  * TUI host harness for suite tests: the TUI's host (`TuiHost`) over a
  * conversation host on the faux provider (host-harness.ts), with daemon leases
  * over a link the test scripts or a real one, the TUI's client over a loopback
- * connection, and InteractiveMode rendering into a virtual terminal.
+ * connection, and InteractiveMode rendering into a virtual terminal as that
+ * client, its store following it.
  */
 
 import { duplexPair } from "node:stream";
@@ -12,7 +13,6 @@ import { expect, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../../src/core/host/targets.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { readIrohJsonlLine } from "../../src/core/protocol/transport/iroh-transport.ts";
 import { createIrohRemotePresetAccess } from "../../src/core/remote/iroh/access-grant.ts";
@@ -21,6 +21,7 @@ import { IROH_REMOTE_ALPN } from "../../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { RelayPreamble } from "../../src/daemon/control-protocol.ts";
+import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
 import {
 	type AcquireOutcome,
 	createDisabledDaemonLink,
@@ -32,20 +33,9 @@ import {
 import { adaptRelaySocketToIrohStream } from "../../src/modes/interactive/host/relay-serving.ts";
 import { type TuiConnectOptions, TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
+import { TUI_HOST_REQUESTS } from "../../src/modes/interactive/live-view.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./host-harness.ts";
-
-/** Every host request kind the TUI answers. */
-export const TUI_HOST_REQUESTS: readonly HostRequestKind[] = [
-	"select",
-	"confirm",
-	"input",
-	"editor",
-	"form",
-	"dialog",
-	"approval",
-	"editor_text",
-];
 
 export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "openGate" | "extensionMode"> {
 	/** The link the TUI host's daemon leases serve through; without one, the TUI runs without the daemon. */
@@ -60,8 +50,8 @@ export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "openGate" |
 export interface TuiModeFixture {
 	readonly mode: InteractiveMode;
 	readonly terminal: VirtualTerminal;
-	/** The mode's in-process client of the TUI host. */
-	readonly client: HostClient;
+	/** What the mode's client holds of the conversation it shows. */
+	readonly store: TuiStore;
 	readonly ui: TUI;
 	/** Resume `ref` as `/resume` does. */
 	resume(ref: SessionReference): Promise<{ cancelled: boolean }>;
@@ -77,7 +67,7 @@ export interface TuiHarness extends HostHarness {
 	readonly sessionDir: string;
 	/** Connect the TUI's client over loopback, answering every host request kind the TUI answers by default. */
 	connect(options?: TuiConnectOptions): Promise<LoopbackClient>;
-	/** InteractiveMode over the TUI host, its client attached and served. */
+	/** InteractiveMode over the TUI host, its client connected and its conversation shown. */
 	startMode(options?: { tuiMode?: TuiMode; columns?: number; rows?: number }): Promise<TuiModeFixture>;
 	/** Store a session in the startup conversation's session directory, for a resume. */
 	storeSession(name?: string): Promise<SessionReference>;
@@ -89,14 +79,13 @@ interface ModeAccess {
 	editor: unknown;
 	conversationView: unknown;
 	isInitialized: boolean;
-	client: HostClient;
+	store: TuiStore;
 	renderWidgets(): void;
 	setupKeyHandlers(): void;
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	activateView(view: unknown, focus: unknown, forceRender?: boolean): void;
-	showSessionExtensions(session: HostedConversation["session"]): void;
-	subscribeToAgent(session: HostedConversation["session"]): void;
+	connect(): Promise<void>;
 	handleResumeSession(ref: SessionReference): Promise<{ cancelled: boolean }>;
 }
 
@@ -158,15 +147,12 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 				access.activateView(access.conversationView, access.editor, false);
 				access.isInitialized = true;
 				access.ui.start();
-				await tuiHost.attach(access.client);
-				access.showSessionExtensions(startup.session);
-				access.subscribeToAgent(startup.session);
-				await tuiHost.clientReady();
+				await access.connect();
 				await terminal.waitForRender();
 				return {
 					mode,
 					terminal,
-					client: access.client,
+					store: access.store,
 					ui: access.ui,
 					resume: (ref) => access.handleResumeSession(ref),
 					screen: () => terminal.getViewport().join("\n"),

@@ -1,31 +1,30 @@
 /**
- * Interactive mode for the coding agent.
- * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
+ * Interactive mode for the coding agent: the TUI as a client of its host
+ * (TuiHost) over a loopback protocol connection. Its transcript draws the
+ * store that follows the client; its status, input, and commands still read
+ * and drive the session in process until they move to the store and intents
+ * (architecture rewrite Phase 6).
  */
 
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentAbortSource, AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { AgentAbortSource, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	type AssistantMessage,
-	createProviderError,
 	type ImageContent,
-	type Message,
 	type Model,
 	modelsAreEqual,
 	type OAuthSelectPrompt,
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
-import {
-	type ExtensionState,
-	type ExtensionSummary,
-	type HostRequest,
-	type HostResponse,
-	PRESENTATION_MAX_SERIALIZED_BYTES,
-	type UiNodeStyledText,
-	WORK_NOTICE_CUSTOM_TYPE,
+import type {
+	ExtensionState,
+	ExtensionSummary,
+	HostRequest,
+	HostResponse,
+	ProjectedEntry,
+	UiNodeStyledText,
 } from "@hansjm10/volt-protocol";
 import type {
 	AutocompleteItem,
@@ -76,7 +75,7 @@ import {
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
-import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
+import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.ts";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
 	ExtensionCommandContext,
@@ -125,6 +124,7 @@ import {
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
+import type { ExtensionClient } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -134,7 +134,6 @@ import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
-import { presentCustomMessage } from "../../core/ui/presentation.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
 import { LocalSessionWorktreeRestoreError } from "../../daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
@@ -173,12 +172,13 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
+import { TranscriptView } from "./client/transcript-view.ts";
+import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
-import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
 import { CustomEditor } from "./components/custom-editor.ts";
@@ -201,7 +201,7 @@ import { withEditorCompletions } from "./editor-completions.ts";
 import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
 import { DaemonLeaseUnavailableError } from "./host/daemon-link.ts";
 import type { TuiHost } from "./host/tui-host.ts";
-import { TuiLiveView } from "./live-view.ts";
+import { TUI_HOST_REQUESTS, TuiLiveView } from "./live-view.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
 import { createRegistryIntentSink } from "./ui-node/intents.ts";
 import { UiPanels } from "./ui-node/panels.ts";
@@ -240,17 +240,14 @@ import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { StartupHeaderComponent } from "./components/logo.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
-import { PresentedMessageComponent } from "./components/presented-message.ts";
 import { PresentedToolComponent } from "./components/presented-tool.ts";
 import { type ReviewToolSelectorOption, ReviewToolsSelectorComponent } from "./components/review-tools-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
-import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { promptUserInput, type UserInputDialogFactory } from "./components/user-input-dialog.ts";
-import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import { WorkInspector } from "./components/work-inspector.ts";
 import { queuedWorkNoticeLine, workOutcomeLine } from "./components/work-notice.ts";
@@ -472,10 +469,14 @@ export class InteractiveMode {
 	/** The TUI's host: its conversations, its daemon leases, and the relayed phones it serves. */
 	private readonly tuiHost: TuiHost;
 	private readonly host: ConversationHost;
-	/** The conversation the TUI shows; a move points it at the next one before that one's extensions start. */
-	private conversation: HostedConversation;
-	/** The TUI as a client of its host: it anchors the conversation it shows and moves in place. */
-	private readonly client: HostClient;
+	/** What the TUI's protocol client holds of the conversation it shows: the fold of its log and its live lane. */
+	private readonly store = new TuiStore();
+	/** The store's transcript in the chat: messages, tool calls as the host presents them, and what streams. */
+	private readonly transcript: TranscriptView;
+	/** The TUI's client connected: the store's conversation shows from then on. */
+	private connected = false;
+	/** Why the conversation the TUI shows lost its log, as its host reported it. */
+	private lostCause: Error | undefined;
 	/** The live state of the conversation the TUI shows: extension status, widgets, title, dialogs, and approvals. */
 	private readonly liveView: TuiLiveView;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -540,21 +541,12 @@ export class InteractiveMode {
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
 
-	// Streaming message tracking
-	private streamingComponent: AssistantMessageComponent | undefined = undefined;
-	private streamingMessage: AssistantMessage | undefined = undefined;
-	private streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined = undefined;
-
-	// Tool execution tracking: toolCallId -> component
-	private pendingTools = new Map<string, PresentedToolComponent>();
-	/**
-	 * Rows of running tool calls, and of calls that launched a background job: they show the work their call
-	 * started live. A launch card outlives settlement only while its bounded current-runtime record remains
-	 * accessible; a row whose call started no job leaves once the call ended.
-	 */
-	private liveBackgroundJobTools = new Map<string, { component: PresentedToolComponent; settled?: boolean }>();
-	private unsubscribeBackgroundJobs: (() => void) | undefined;
-	private jobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
+	/** What the rows of tool calls that started work show of it, by tool call id: a row whose work changed draws again. */
+	private workRows: ReadonlyMap<string, string> = new Map();
+	/** Draws the tool call rows whose work changed at most every streaming render interval. */
+	private readonly workRowsCoalescer = new StreamingRenderCoalescer<void>(() => this.showToolCallWork());
+	/** Ticks the elapsed time of the running work tool call rows show. */
+	private workTicker: ReturnType<typeof setInterval> | undefined;
 	private workInspector: WorkInspector | undefined;
 	private workOverlay: OverlayHandle | undefined;
 	private dismissWorkInspector: (() => void) | undefined;
@@ -569,8 +561,8 @@ export class InteractiveMode {
 	// Skill commands: command name -> skill file path
 	private skillCommands = new Map<string, string>();
 
-	// Agent subscription unsubscribe function
-	private unsubscribe?: () => void;
+	/** Stops following the status events of the session the TUI shows. */
+	private unsubscribeStatus?: () => void;
 	private signalCleanupHandlers: Array<() => void> = [];
 	private scratchDirectories = new Set<string>();
 	private clipboardScratchFiles = new Map<string, string>();
@@ -582,6 +574,8 @@ export class InteractiveMode {
 
 	// Track current bash execution component
 	private bashComponent: BashExecutionComponent | undefined = undefined;
+	/** The rows of user shell commands shown while they ran, waiting for their entries, which they stand for. */
+	private localBashRows: Array<{ readonly command: string; readonly component: BashExecutionComponent }> = [];
 
 	// Track pending bash components (shown in pending area, moved to chat on submit)
 	private pendingBashComponents: BashExecutionComponent[] = [];
@@ -646,6 +640,14 @@ export class InteractiveMode {
 	private readonly subscriptionUsageService = new SubscriptionUsageService();
 
 	// Convenience accessors
+	/** The conversation the TUI's client is on. */
+	private get conversation(): HostedConversation {
+		return this.tuiHost.conversation;
+	}
+	/** The TUI's client as its host knows it: the paths that still act in process (until the end of Phase 6) act as it. */
+	private get hostClient(): HostClient {
+		return this.tuiHost.hostClient;
+	}
 	private get session(): AgentSession {
 		return this.conversation.session;
 	}
@@ -659,28 +661,10 @@ export class InteractiveMode {
 	constructor(tuiHost: TuiHost, options: InteractiveModeOptions = {}) {
 		this.tuiHost = tuiHost;
 		this.host = tuiHost.host;
-		this.conversation = tuiHost.conversation;
 		this.liveView = this.createLiveView();
-		this.client = {
-			id: randomUUID(),
-			anchor: true,
-			recoversInput: true,
-			live: this.liveView,
-			surface: this.createExtensionSurface(),
-			move: {
-				kind: "in_place",
-				prepare: (to) => {
-					this.conversation = to;
-					this.beginSessionReplacementUi();
-					this.enterSession(to.session);
-				},
-				onMoved: (to) => this.followMove(to),
-			},
-		};
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
 		this.autoTrustOnReloadCwd = options.autoTrustOnReloadCwd;
-		this.observeLoss(this.conversation);
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
 			tuiMode,
@@ -715,6 +699,18 @@ export class InteractiveMode {
 		this.documentContainer = new Container();
 		this.documentContainer.addChild(this.headerContainer);
 		this.documentContainer.addChild(this.chatContainer);
+		this.transcript = new TranscriptView(this.store, this.chatContainer, {
+			ui: this.ui,
+			markdownTheme: () => this.getMarkdownThemeWithSettings(),
+			hideThinkingBlock: () => this.hideThinkingBlock,
+			toolsExpanded: () => this.toolOutputExpanded,
+			showImages: () => this.settingsManager.getShowImages(),
+			imageWidthCells: () => this.settingsManager.getImageWidthCells(),
+			toolCallWork: (toolCallId) => this.toolCallWork(toolCallId),
+			takeLocalBashRow: (command) => this.takeLocalBashRow(command),
+			workNoticeShown: () => this.updatePendingMessagesDisplay(),
+		});
+		this.store.subscribe((change) => this.onStoreChange(change));
 		this.footerContainer = new Container();
 		this.keybindings = KeybindingsManager.create();
 		setKeybindings(this.keybindings);
@@ -1160,13 +1156,7 @@ export class InteractiveMode {
 		}
 		this.ui.requestRender();
 
-		// Initialize extensions first so resources are shown before messages
-		this.enterSession(this.session);
-		await this.tuiHost.attach(this.client);
-		await this.followSession(this.session);
-
-		// Render initial messages AFTER showing loaded resources
-		this.renderInitialMessages();
+		await this.connect();
 
 		// Set up theme file watcher
 		onThemeChange(() => {
@@ -1185,9 +1175,26 @@ export class InteractiveMode {
 
 		this.tuiHost.onRelayCountChange(() => this.updatePhoneFooterIndicator());
 		this.tuiHost.onThemeSnapshot((themeName) => this.applyDaemonThemeSnapshot(themeName));
-		// The host takes the daemon lease, serves relayed phones, and recovers the
-		// conversation's queued input. Never blocks startup: failures are silent no-ops.
-		await this.tuiHost.clientReady().catch(() => {});
+	}
+
+	/**
+	 * Connect the TUI's client to its host and show its conversation. The UI
+	 * runs first: the conversation's session_start dialogs show through the
+	 * live view before the conversation is ready. What its extensions
+	 * contribute shows before its messages.
+	 */
+	private async connect(): Promise<void> {
+		await this.tuiHost.connect({
+			hostRequests: TUI_HOST_REQUESTS,
+			onClient: (client) => this.store.attach(client),
+			onShutdownRequested: () => this.onShutdownRequested(),
+			onLost: (error) => {
+				this.lostCause = error;
+			},
+			terminal: this.terminalSurface(),
+		});
+		this.connected = true;
+		this.showConversation({ afresh: false });
 	}
 
 	/**
@@ -1884,11 +1891,11 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * The TUI's surface on each conversation's extensions, which its host
-	 * attaches whenever the TUI joins a conversation. The TUI attaches before any
-	 * relayed phone and keeps the extensions' UI.
+	 * What the TUI's terminal offers each conversation's extensions beyond the
+	 * protocol: its themes, and the dialog that asks the request_user_input
+	 * tool's questions.
 	 */
-	private createExtensionSurface(): NonNullable<HostClient["surface"]> {
+	private terminalSurface(): Pick<ExtensionClient, "themes" | "userInput"> {
 		return {
 			themes: {
 				getAllThemes: () => getAvailableThemesWithPaths(),
@@ -1904,83 +1911,13 @@ export class InteractiveMode {
 			},
 			userInput: (request, signal) =>
 				promptUserInput((create) => this.mountUserInputDialog(create), request, signal),
-			abortHandler: () => {
-				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
-					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
-				});
-			},
-			commandContextActions: {
-				waitForIdle: () => this.session.waitForIdle(),
-				newSession: async (options) => {
-					if (this.loadingAnimation) {
-						this.loadingAnimation.stop();
-						this.loadingAnimation = undefined;
-					}
-					this.statusContainer.clear();
-					const source = this.session;
-					try {
-						const result = await openNewSession(this.host, this.client, options);
-						if (!result.cancelled) {
-							this.renderCurrentSessionState();
-							this.ui.requestRender();
-						}
-						return result;
-					} catch (error: unknown) {
-						await this.reportSessionChangeFailure("Failed to create session", error, source);
-						return { cancelled: true };
-					}
-				},
-				fork: async (entryId, options) => {
-					const source = this.session;
-					try {
-						const result = await openFork(this.host, this.client, entryId, options);
-						if (result.cancelled) return result;
-						this.renderCurrentSessionState();
-						this.editor.setText(result.selectedText ?? "");
-						this.showStatus("Forked to new session");
-						return { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
-					} catch (error: unknown) {
-						await this.reportSessionChangeFailure("Failed to fork session", error, source);
-						return { cancelled: true };
-					}
-				},
-				navigateTree: async (targetId, options) => {
-					const result = await this.session.navigateTree(targetId, {
-						summarize: options?.summarize,
-						customInstructions: options?.customInstructions,
-						replaceInstructions: options?.replaceInstructions,
-						label: options?.label,
-					});
-					if (result.cancelled) {
-						return { cancelled: true };
-					}
-
-					this.chatContainer.clear();
-					this.renderInitialMessages();
-					if (result.editorText && !this.editor.getText().trim()) {
-						this.editor.setText(result.editorText);
-					}
-					this.showStatus("Navigated to selected point");
-					void this.flushCompactionQueue({ willRetry: false });
-					return { cancelled: false };
-				},
-				switchSession: async (sessionRef, options) => {
-					return this.handleResumeSession(sessionRef, options);
-				},
-				reload: async () => {
-					await this.handleReloadCommand();
-				},
-			},
-			shutdownHandler: () => {
-				this.shutdownRequested = true;
-				if (!this.session.isBusy) {
-					void this.shutdown();
-				}
-			},
-			onError: (error) => {
-				this.showExtensionError(error.extensionId, error.error, error.stack);
-			},
 		};
+	}
+
+	/** An extension asked to shut down: at once when the conversation is idle, else once it settles. */
+	private onShutdownRequested(): void {
+		this.shutdownRequested = true;
+		if (!this.session.isBusy) void this.shutdown();
 	}
 
 	/** Show what the session's bound extensions provide: themes, autocomplete, shortcuts, and loaded resources. */
@@ -2040,64 +1977,163 @@ export class InteractiveMode {
 		this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
 	}
 
-	private beginSessionReplacementUi(): void {
-		this.sessionRenderSuspension ??= this.ui.suspendRendering();
-		this.dismissWorkInspector?.();
-		this.unsubscribeBackgroundJobs?.();
-		this.unsubscribeBackgroundJobs = undefined;
-		this.unsubscribeWorkSource?.();
-		this.unsubscribeWorkSource = undefined;
-		this.resetExtensionUI();
+	/** What the store changed: draw it. */
+	private onStoreChange(change: TuiStoreChange): void {
+		switch (change.type) {
+			case "live":
+				this.liveView.apply(change);
+				if (this.connected && this.store.conversation !== undefined) this.transcript.sync(change.items);
+				return;
+			case "entries":
+				if (!this.connected || this.store.conversation === undefined) return;
+				this.transcript.sync();
+				for (const entry of change.entries) if (entry.type === "compaction") this.showCompacted(entry);
+				return;
+			case "reset":
+				// Before the client connected, the conversation shows once it did.
+				if (!this.connected) return;
+				if (change.moved) this.showConversation({ afresh: true });
+				else this.transcript.refresh();
+				return;
+			case "moving":
+				// The live state of the conversation the client left is not its own anymore.
+				this.liveView.apply({ reset: true, items: [] });
+				this.leaveConversation();
+				return;
+			case "changed":
+				if (change.catalog === "resources") this.refreshExtensionContributions();
+				return;
+			case "ended":
+				this.liveView.apply({ reset: true, items: [] });
+				if (change.reason === "lost") void this.endLostConversation();
+				return;
+		}
 	}
 
 	/**
-	 * The TUI moved to `to`, whose extensions its host just bound: show the
-	 * session and let it render again. The host's daemon lease follows once the
-	 * conversation the TUI left closed.
+	 * Show the conversation the store shows as the TUI's: what its extensions
+	 * contribute, its status and plan, and its transcript, `afresh` in a
+	 * cleared chat (a conversation the client moved to) or after what the chat
+	 * shows (at startup). Rendering resumes once it shows.
 	 */
-	private async followMove(to: HostedConversation): Promise<void> {
-		this.observeLoss(to);
-		await this.followSession(to.session);
+	private showConversation(options: { afresh: boolean }): void {
+		const session = this.session;
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
+		this.clearWorkSummaryTimer();
+		this.clearPromptCacheAlertTimer();
+		this.workSummary = undefined;
+		this.applyRuntimeSettings(session);
+		this.pendingMessagesContainer.clear();
+		this.compactionQueuedMessages = [];
+		this.localBashRows = [];
+		this.showSessionExtensions(session);
+		this.observeSessionStatus(session);
+		this.followWork();
+		void this.updateAvailableProviderCount();
+		this.closePlanDetails();
+		// A conversation the TUI moved to is a fresh presentation, so a ready plan is offered again.
+		this.readyPlanFocusKey = undefined;
+		this.refreshPlanningUi();
+		this.updateTerminalTitle();
+		this.renderTranscript({ afresh: options.afresh });
+		this.updatePendingMessagesDisplay();
 		this.ui.requestRender(true);
 		const suspension = this.sessionRenderSuspension;
 		this.sessionRenderSuspension = undefined;
 		suspension?.release();
 	}
 
-	/** End the TUI when the conversation it shows loses its log. */
-	private observeLoss(conversation: HostedConversation): void {
-		void conversation.lost.then((error) => {
-			if (conversation === this.conversation) void this.handleRuntimeLost(error);
-		});
-	}
-
-	/** Point the TUI's own state at `session`, before its extensions bind. */
-	private enterSession(session: AgentSession): void {
-		this.quitConfirmation = undefined;
-		this.lastSigintTime = 0;
-		this.unsubscribe?.();
-		this.unsubscribe = undefined;
+	/**
+	 * The TUI leaves the conversation it shows: its client moves, or the TUI
+	 * quits. Rendering stops until the next conversation shows; what the TUI
+	 * showed for the conversation's extensions and work is released.
+	 */
+	private leaveConversation(): void {
+		this.sessionRenderSuspension ??= this.ui.suspendRendering();
 		this.dismissWorkInspector?.();
-		this.unsubscribeBackgroundJobs?.();
-		this.unsubscribeBackgroundJobs = undefined;
-		this.clearWorkSummaryTimer();
-		this.clearPromptCacheAlertTimer();
-		this.workSummary = undefined;
-		this.applyRuntimeSettings(session);
+		this.unsubscribeWorkSource?.();
+		this.unsubscribeWorkSource = undefined;
+		this.unsubscribeStatus?.();
+		this.unsubscribeStatus = undefined;
+		this.stopWorkTicker();
+		this.resetExtensionUI();
 	}
 
-	/** Present `session`, whose extensions are bound, as the TUI's session. */
-	private async followSession(session: AgentSession): Promise<void> {
-		this.showSessionExtensions(session);
-		this.subscribeToAgent(session);
-		this.subscribeToBackgroundJobs(session);
-		this.followWork();
-		await this.updateAvailableProviderCount();
-		this.closePlanDetails();
-		// A session the TUI moved to is a fresh presentation, so a ready plan is offered again.
-		this.readyPlanFocusKey = undefined;
+	/**
+	 * Draw the store's transcript, `afresh` in a cleared chat, with its user
+	 * messages in the editor's history, the project trust warning, and how
+	 * often the conversation was compacted.
+	 */
+	private renderTranscript(options: { afresh: boolean }): void {
+		if (options.afresh) this.transcript.rebuild();
+		else this.transcript.show();
+		for (const entry of this.store.transcript()) {
+			const message = entry.type === "message" ? entry.payload?.message : undefined;
+			if (message?.role !== "user") continue;
+			const text =
+				typeof message.content === "string"
+					? message.content
+					: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+			if (text) this.editor.addToHistory?.(text);
+		}
+		this.renderProjectTrustWarningIfNeeded();
+		const compactionCount = this.store.state.entries.filter((entry) => entry.type === "compaction").length;
+		if (compactionCount > 0) {
+			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
+			this.showStatus(`Session compacted ${times}`);
+		}
+	}
+
+	/**
+	 * A compaction committed while the TUI showed the conversation: the
+	 * transcript now starts from it, and its summary and request usage show
+	 * where the conversation goes on.
+	 */
+	private showCompacted(entry: Extract<ProjectedEntry, { type: "compaction" }>): void {
+		const payload = entry.payload;
+		if (!payload) return;
+		this.chatContainer.addChild(new Spacer(1));
+		const summary = new CompactionSummaryMessageComponent(
+			createCompactionSummaryMessage(payload.summary, payload.tokensBefore, entry.timestamp),
+			this.getMarkdownThemeWithSettings(),
+		);
+		summary.setExpanded(this.toolOutputExpanded);
+		this.chatContainer.addChild(summary);
+		for (const line of formatCompactionUsage(payload.details)) {
+			this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+		}
+		this.footer.invalidate();
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The conversation's extensions changed (enabled, disabled, or reloaded):
+	 * their commands and shortcuts change, and the transcript is projected
+	 * afresh, so a disabled extension's presentations no longer show.
+	 */
+	private refreshExtensionContributions(): void {
+		if (!this.connected) return;
+		this.setupAutocompleteProvider();
+		this.setupExtensionShortcuts(this.session.extensionRunner);
+		this.store.resync();
+		this.ui.requestRender();
+	}
+
+	/** Wait until the TUI shows the conversation its client is on: after a move, once its snapshot drew it. */
+	private async showMovedConversation(): Promise<void> {
+		await this.store.showing(this.conversation.id);
+	}
+
+	/** Draw the transcript of the conversation the TUI's client is on afresh, once it shows. */
+	private async renderCurrentConversation(): Promise<void> {
+		const id = this.conversation.id;
+		if (this.store.conversation === id) this.transcript.rebuild();
+		else await this.store.showing(id);
+		this.pendingMessagesContainer.clear();
+		this.compactionQueuedMessages = [];
+		this.updatePendingMessagesDisplay();
 		this.refreshPlanningUi();
-		this.updateTerminalTitle();
 	}
 
 	/**
@@ -2128,52 +2164,6 @@ export class InteractiveMode {
 			process.stderr.write(`Unsent input (not submitted before volt exited):\n${unsentDraft}\n`);
 		}
 		process.exit(1);
-	}
-
-	private renderCurrentSessionState(): void {
-		this.chatContainer.clear();
-		this.pendingMessagesContainer.clear();
-		this.compactionQueuedMessages = [];
-		this.streamingRenderCoalescer?.dispose();
-		this.streamingRenderCoalescer = undefined;
-		this.streamingComponent = undefined;
-		this.streamingMessage = undefined;
-		this.disposePendingTools();
-		this.renderInitialMessages();
-		this.refreshPlanningUi();
-	}
-
-	/**
-	 * Discarded tool rows never see a terminal render, so their renderer
-	 * resources (e.g. the subagent repaint interval) must be released here.
-	 */
-	private disposePendingTools(): void {
-		for (const [toolCallId, component] of this.pendingTools) {
-			component.dispose();
-			this.liveBackgroundJobTools.delete(toolCallId);
-		}
-		this.pendingTools.clear();
-	}
-
-	/**
-	 * The transcript row of a tool call, drawn from its presentation with the
-	 * session's presenters. `live` calls tick their elapsed time.
-	 */
-	private createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): PresentedToolComponent {
-		const session = this.session;
-		return new PresentedToolComponent(
-			toolName,
-			args,
-			() => session.presenters,
-			this.ui,
-			this.sessionManager.getCwd(),
-			{
-				showImages: this.settingsManager.getShowImages(),
-				imageWidthCells: this.settingsManager.getImageWidthCells(),
-				liveProgress: live,
-				work: () => this.toolCallWork(toolCallId),
-			},
-		);
 	}
 
 	/**
@@ -2216,11 +2206,11 @@ export class InteractiveMode {
 			if (intent === undefined) return false;
 			if (isKeyRelease(data) || isKeyRepeat(data)) return true;
 			// Invoke async, without blocking input.
-			void ClientScope.run(this.client.id, () => intentRegistry.invokeFrame(this.intentContext(), intent, {})).catch(
-				(error: unknown) => {
-					this.showError(`Shortcut failed: ${error instanceof Error ? error.message : String(error)}`);
-				},
-			);
+			void ClientScope.run(this.hostClient.id, () =>
+				intentRegistry.invokeFrame(this.intentContext(), intent, {}),
+			).catch((error: unknown) => {
+				this.showError(`Shortcut failed: ${error instanceof Error ? error.message : String(error)}`);
+			});
 			return true;
 		};
 	}
@@ -2437,9 +2427,7 @@ export class InteractiveMode {
 	private createLiveView(): TuiLiveView {
 		return new TuiLiveView({
 			showRequest: (request, signal) => this.showLiveRequest(request, signal),
-			answer: (requestId, response) => {
-				this.conversation.liveState.answer(requestId, response, this.client.id);
-			},
+			answer: (requestId, response) => this.store.client.answer(requestId, response),
 			setStatus: (key, text) =>
 				this.setExtensionStatus(
 					key,
@@ -2459,6 +2447,7 @@ export class InteractiveMode {
 				this.workSource.setLive(workId, value);
 				if (!value) this.showWorkEnd(workId);
 			},
+			liveValue: (key) => this.store.value(key),
 		});
 	}
 
@@ -2582,10 +2571,51 @@ export class InteractiveMode {
 		this.unsubscribeWorkSource = this.workSource.subscribe(() => {
 			this.workStatus.invalidate();
 			this.updatePendingMessagesDisplay();
-			// Tool calls show the work they started live.
-			this.jobsRenderCoalescer?.update(undefined);
+			this.workRowsCoalescer.update(undefined);
 			this.ui.requestRender();
 		});
+		this.workRows = new Map();
+		this.showToolCallWork();
+	}
+
+	/**
+	 * Tool calls show the work they started live: a row reads its work again
+	 * when it changed, and every second while it runs.
+	 */
+	private showToolCallWork(): void {
+		const shown = new Map<string, string>();
+		const running = new Set<string>();
+		for (const { item, live } of this.workSource.items()) {
+			if (item.toolCallId === undefined) continue;
+			if (item.outcome === undefined) running.add(item.toolCallId);
+			const state = [
+				item.workId,
+				item.state,
+				item.outcome,
+				item.updatedOrdinal,
+				live?.progress?.text,
+				live?.output?.bytes,
+			];
+			shown.set(item.toolCallId, `${shown.get(item.toolCallId) ?? ""}${JSON.stringify(state)}`);
+		}
+		const changed = new Set<string>();
+		for (const [toolCallId, state] of shown) if (this.workRows.get(toolCallId) !== state) changed.add(toolCallId);
+		for (const toolCallId of this.workRows.keys()) if (!shown.has(toolCallId)) changed.add(toolCallId);
+		this.workRows = shown;
+		if (changed.size > 0) this.transcript.invalidateWork(changed);
+		this.stopWorkTicker();
+		if (running.size > 0) {
+			this.workTicker = setInterval(() => {
+				this.transcript.invalidateWork(running);
+				this.ui.requestRender();
+			}, 1000);
+			this.workTicker.unref?.();
+		}
+	}
+
+	private stopWorkTicker(): void {
+		if (this.workTicker !== undefined) clearInterval(this.workTicker);
+		this.workTicker = undefined;
 	}
 
 	/**
@@ -2855,27 +2885,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/**
-	 * Show an extension error in the UI.
-	 */
-	private showExtensionError(extensionId: string, error: string, stack?: string): void {
-		const errorMsg = `Extension "${extensionId}" error: ${stripTerminalControls(error)}`;
-		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
-		this.chatContainer.addChild(errorText);
-		if (stack) {
-			// Show stack trace in dim color, indented
-			const stackLines = stack
-				.split("\n")
-				.slice(1) // Skip first line (duplicates error message)
-				.map((line) => theme.fg("dim", `  ${stripTerminalControls(line).trim()}`))
-				.join("\n");
-			if (stackLines) {
-				this.chatContainer.addChild(new Text(stackLines, 1, 0));
-			}
-		}
-		this.ui.requestRender();
-	}
-
 	private createScratchDirectory(prefix: string): string {
 		const directoryPath = createPrivateTempDirectorySync(path.join(os.tmpdir(), prefix));
 		this.scratchDirectories.add(directoryPath);
@@ -3060,7 +3069,7 @@ export class InteractiveMode {
 	/** This client's intent context: its conversation, and how the TUI aborts and reviews. */
 	private intentContext(): IntentContext {
 		return {
-			target: { session: this.session, conversation: this.conversation, host: this.host, client: this.client },
+			target: { session: this.session, conversation: this.conversation, host: this.host, client: this.hostClient },
 			services: {
 				abortRun: (session) => session.abort("host_action"),
 				runReview: (target, reviewOptions) =>
@@ -3437,44 +3446,28 @@ export class InteractiveMode {
 		};
 	}
 
-	private subscribeToAgent(session: AgentSession): void {
-		const unsubscribeEvents = session.subscribe(async (event) => {
-			await this.handleEvent(event);
+	/**
+	 * Follow the status events of the session the TUI shows: the working,
+	 * compaction, and retry indicators, the turn-done alert, the queue, the
+	 * plan, and the title. The transcript reads the store; these read the
+	 * session until the TUI's status reads the store too.
+	 */
+	private observeSessionStatus(session: AgentSession): void {
+		this.unsubscribeStatus?.();
+		this.unsubscribeStatus = session.subscribe(async (event) => {
+			await this.handleStatusEvent(event);
 		});
-		// An extension enabled or disabled while the session runs brings or takes its commands, shortcuts,
-		// and presenters: the transcript presents again, so a disabled extension's presenters draw nothing.
-		const unsubscribeExtensions = session.subscribeReloads(() => {
-			if (this.session !== session) return;
-			this.setupAutocompleteProvider();
-			this.setupExtensionShortcuts(session.extensionRunner);
-			this.refreshPresentations(this.chatContainer);
-			this.ui.requestRender();
-		});
-		this.unsubscribe = () => {
-			unsubscribeEvents();
-			unsubscribeExtensions();
-		};
-	}
-
-	/** Present the tool calls and custom messages under `container` again with the session's current presenters. */
-	private refreshPresentations(container: Container): void {
-		for (const child of container.children) {
-			if (child instanceof PresentedToolComponent || child instanceof PresentedMessageComponent) {
-				child.refreshPresentation();
-			} else if (child instanceof Container) {
-				this.refreshPresentations(child);
-			}
-		}
 	}
 
 	/**
-	 * The runtime ended: its session could not confirm a commit (a fence
-	 * conflict, a missing session, or an outcome that could not be resolved), so
-	 * it may no longer be the only writer of its log. The TUI disposes the
-	 * runtime, which releases the session's lock, and exits. The store keeps what
-	 * was committed; /resume reopens it.
+	 * The conversation the TUI shows lost its log (`ended{lost}`): its session
+	 * could not confirm a commit (a fence conflict, a missing session, or an
+	 * outcome that could not be resolved), so it may no longer be the only
+	 * writer of its log. The TUI disposes its host, which releases the
+	 * session's lock, and exits. The store keeps what was committed; /resume
+	 * reopens it.
 	 */
-	private async handleRuntimeLost(error: Error): Promise<void> {
+	private async endLostConversation(): Promise<void> {
 		if (this.isShuttingDown || this.endingLostSession) return;
 		this.endingLostSession = true;
 		this.tuiHost.stopServing();
@@ -3482,87 +3475,21 @@ export class InteractiveMode {
 		// Pending dialogs settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
 		await this.disposeRuntimeHost().catch(() => {});
+		const cause = this.lostCause?.message ?? "Its log could not be confirmed";
 		await this.handleFatalRuntimeError(
 			"Volt stopped this session because its saved state could not be confirmed",
-			new Error(`${error.message}. Run volt again and /resume the session to continue from what was saved.`),
+			new Error(`${cause}. Run volt again and /resume the session to continue from what was saved.`),
 			{ unsentDraft },
 		);
 	}
 
-	private subscribeToBackgroundJobs(session: AgentSession): void {
-		this.unsubscribeBackgroundJobs?.();
-		const source = session.jobs;
-		let elapsedTimer: ReturnType<typeof setInterval> | undefined;
-		const coalescer = new StreamingRenderCoalescer<void>(() => {
-			if (this.session !== session || this.isShuttingDown) return;
-			const jobs = source.list();
-			const launchJobs = new Map(jobs.map((job) => [job.toolCallId, job]));
-			const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "cancelling");
-			const activeToolCalls = new Set(activeJobs.map((job) => job.toolCallId));
-			// Settled launch cards survive reconstruction, but no longer need live invalidation.
-			// Retain only one launch per accessible manager record, not every jobs inspection.
-			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
-				const { component } = binding;
-				const launchJob = launchJobs.get(toolCallId);
-				if (launchJob) {
-					if (!binding.settled) component.invalidate();
-					binding.settled = launchJob.status !== "running" && launchJob.status !== "cancelling";
-				} else if (this.pendingTools.has(toolCallId)) {
-					component.invalidate();
-				} else {
-					if (binding.settled !== undefined) {
-						component.invalidate();
-						component.dispose();
-					}
-					this.liveBackgroundJobTools.delete(toolCallId);
-				}
-			}
-			this.ui.requestRender();
-			if (activeToolCalls.size > 0 && elapsedTimer === undefined) {
-				elapsedTimer = setInterval(() => coalescer.update(undefined), 1000);
-				elapsedTimer.unref();
-			} else if (activeToolCalls.size === 0 && elapsedTimer !== undefined) {
-				clearInterval(elapsedTimer);
-				elapsedTimer = undefined;
-			}
-		});
-		this.jobsRenderCoalescer = coalescer;
-		const unsubscribe = source.subscribe(() => {
-			// Release settled bindings as soon as their job leaves the list, before the next
-			// coalesced repaint.
-			const accessibleToolCalls = new Set(source.list().map((job) => job.toolCallId));
-			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
-				if (binding.settled && !accessibleToolCalls.has(toolCallId)) {
-					binding.component.invalidate();
-					binding.component.dispose();
-					this.liveBackgroundJobTools.delete(toolCallId);
-				}
-			}
-			coalescer.update(undefined);
-		});
-		this.unsubscribeBackgroundJobs = () => {
-			unsubscribe();
-			coalescer.dispose();
-			clearInterval(elapsedTimer);
-			this.jobsRenderCoalescer = undefined;
-			for (const { component } of this.liveBackgroundJobTools.values()) component.dispose();
-			this.liveBackgroundJobTools.clear();
-		};
-		coalescer.update(undefined);
-	}
-
-	private async handleEvent(event: AgentSessionEvent): Promise<void> {
-		if (!this.isInitialized) {
-			await this.init();
-		}
-
+	private async handleStatusEvent(event: AgentSessionEvent): Promise<void> {
 		this.footer.invalidate();
 
 		switch (event.type) {
 			case "agent_start":
 				this.quitConfirmation = undefined;
 				this.lastSigintTime = 0;
-				this.disposePendingTools();
 				this.turnStartedAt = event.startedAt;
 				this.clearWorkSummaryTimer();
 				this.workSummary = { startedAt: event.startedAt, aborted: false };
@@ -3621,139 +3548,12 @@ export class InteractiveMode {
 				break;
 
 			case "message_start":
-				if (event.message.role === "custom") {
-					this.addMessageToChat(event.message);
-					this.ui.requestRender();
-				} else if (event.message.role === "user") {
-					this.addMessageToChat(event.message);
+				// A user message left the queue.
+				if (event.message.role === "user") {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
-				} else if (event.message.role === "assistant") {
-					this.streamingRenderCoalescer?.dispose();
-					this.streamingComponent = new AssistantMessageComponent(
-						undefined,
-						this.hideThinkingBlock,
-						this.getMarkdownThemeWithSettings(),
-					);
-					this.streamingMessage = event.message;
-					this.chatContainer.addChild(this.streamingComponent);
-					this.streamingRenderCoalescer = new StreamingRenderCoalescer((message) => {
-						this.streamingComponent?.updateContent(message);
-						this.ui.requestRender();
-					});
-					this.streamingRenderCoalescer.commitNow(this.streamingMessage);
 				}
 				break;
-
-			case "message_update":
-				if (this.streamingComponent && event.message.role === "assistant") {
-					this.streamingMessage = event.message;
-					if (isCoalescableAssistantUpdate(event.assistantMessageEvent.type)) {
-						this.streamingRenderCoalescer?.update(this.streamingMessage);
-					} else {
-						this.streamingRenderCoalescer?.commitNow(this.streamingMessage);
-					}
-
-					if (event.assistantMessageEvent.type.startsWith("toolcall_")) {
-						for (const content of this.streamingMessage.content) {
-							if (content.type === "toolCall") {
-								if (!this.pendingTools.has(content.id)) {
-									const component = this.createToolRow(content.name, content.id, content.arguments, true);
-									component.setExpanded(this.toolOutputExpanded);
-									this.chatContainer.addChild(component);
-									this.pendingTools.set(content.id, component);
-								} else {
-									const component = this.pendingTools.get(content.id);
-									component?.updateArgs(content.arguments);
-								}
-							}
-						}
-					}
-				}
-				break;
-
-			case "message_end":
-				if (event.message.role === "user") break;
-				if (this.streamingComponent && event.message.role === "assistant") {
-					this.streamingMessage = event.message;
-					let errorMessage: string | undefined;
-					if (this.streamingMessage.stopReason === "aborted") {
-						const retryAttempt = this.session.retryAttempt;
-						errorMessage =
-							retryAttempt > 0
-								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-								: "Operation aborted";
-						this.streamingMessage = {
-							...this.streamingMessage,
-							error: createProviderError("aborted", errorMessage),
-						};
-					}
-					if (this.streamingRenderCoalescer) {
-						this.streamingRenderCoalescer.finish(this.streamingMessage);
-					} else {
-						this.streamingComponent.updateContent(this.streamingMessage);
-					}
-
-					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						if (!errorMessage) {
-							errorMessage = this.streamingMessage.error?.message || "Error";
-						}
-						for (const [, component] of this.pendingTools.entries()) {
-							component.updateResult({
-								content: [{ type: "text", text: errorMessage }],
-								isError: true,
-							});
-						}
-						this.disposePendingTools();
-					} else {
-						// Args are now complete - trigger diff computation for edit tools
-						for (const [, component] of this.pendingTools.entries()) {
-							component.setArgsComplete();
-						}
-					}
-					this.streamingRenderCoalescer = undefined;
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-					this.footer.invalidate();
-				}
-				this.ui.requestRender();
-				break;
-
-			case "tool_execution_start": {
-				let component = this.pendingTools.get(event.toolCallId);
-				if (!component) {
-					component = this.createToolRow(event.toolName, event.toolCallId, event.args, true);
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-					this.pendingTools.set(event.toolCallId, component);
-				}
-				// Any call can start work, which its row shows live.
-				this.liveBackgroundJobTools.set(event.toolCallId, { component });
-				component.markExecutionStarted();
-				this.ui.requestRender();
-				break;
-			}
-
-			case "tool_execution_update": {
-				const component = this.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.partialResult, isError: false }, true);
-					this.ui.requestRender();
-				}
-				break;
-			}
-
-			case "tool_execution_end": {
-				const component = this.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError });
-					this.pendingTools.delete(event.toolCallId);
-					// The row keeps following a job its call launched; any other row leaves the live set.
-					if (this.liveBackgroundJobTools.has(event.toolCallId)) this.jobsRenderCoalescer?.update(undefined);
-					this.ui.requestRender();
-				}
-				break;
-			}
 
 			case "agent_end":
 				this.stopWorkingElapsedTicker();
@@ -3766,14 +3566,6 @@ export class InteractiveMode {
 					this.loadingAnimation = undefined;
 					this.statusContainer.clear();
 				}
-				this.streamingRenderCoalescer?.dispose();
-				this.streamingRenderCoalescer = undefined;
-				if (this.streamingComponent) {
-					this.chatContainer.removeChild(this.streamingComponent);
-					this.streamingComponent = undefined;
-					this.streamingMessage = undefined;
-				}
-				this.disposePendingTools();
 				if (this.workSummary && !event.willRetry) {
 					const lastAssistant = event.messages.findLast(
 						(message): message is AssistantMessage => message.role === "assistant",
@@ -3842,27 +3634,14 @@ export class InteractiveMode {
 					this.autoCompactionLoader = undefined;
 					this.statusContainer.clear();
 				}
+				// A compaction's summary shows once its entry commits (showCompacted).
 				if (event.aborted) {
 					if (event.reason === "manual") {
 						this.showError("Compaction cancelled");
 					} else {
 						this.showStatus("Auto-compaction cancelled");
 					}
-				} else if (event.result) {
-					this.chatContainer.clear();
-					this.rebuildChatFromMessages();
-					this.addMessageToChat(
-						createCompactionSummaryMessage(
-							event.result.summary,
-							event.result.tokensBefore,
-							new Date().toISOString(),
-						),
-					);
-					for (const line of formatCompactionUsage(event.result.details)) {
-						this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
-					}
-					this.footer.invalidate();
-				} else if (event.errorMessage) {
+				} else if (!event.result && event.errorMessage) {
 					if (event.reason === "manual") {
 						this.showError(event.errorMessage);
 					} else {
@@ -3933,16 +3712,6 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Extract text content from a user message */
-	private getUserMessageText(message: Message): string {
-		if (message.role !== "user") return "";
-		const textBlocks =
-			typeof message.content === "string"
-				? [{ type: "text", text: message.content }]
-				: message.content.filter((c: { type: string }) => c.type === "text");
-		return textBlocks.map((c) => (c as { text: string }).text).join("");
-	}
-
 	/**
 	 * Show a status message in the chat.
 	 *
@@ -3967,208 +3736,6 @@ export class InteractiveMode {
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
 		this.ui.requestRender();
-	}
-
-	private addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void {
-		switch (message.role) {
-			case "bashExecution": {
-				const component = new BashExecutionComponent(message.command, this.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
-				component.setComplete(
-					message.exitCode,
-					message.cancelled,
-					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
-					message.fullOutputPath,
-				);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "custom": {
-				if (message.display) {
-					const session = this.session;
-					const component = new PresentedMessageComponent(
-						message,
-						() =>
-							presentCustomMessage(
-								session.presenters.message(message.customType),
-								{
-									customType: message.customType,
-									content: message.content,
-									...(message.details === undefined ? {} : { details: message.details }),
-								},
-								PRESENTATION_MAX_SERIALIZED_BYTES,
-							),
-						this.getMarkdownThemeWithSettings(),
-					);
-					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
-					// A notice in the transcript left the queue.
-					if (message.customType === WORK_NOTICE_CUSTOM_TYPE) this.updatePendingMessagesDisplay();
-				}
-				break;
-			}
-			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
-				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
-				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
-				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
-				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
-				break;
-			}
-			case "user": {
-				const textContent = this.getUserMessageText(message);
-				if (textContent) {
-					if (this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
-					}
-					const skillBlock = parseSkillBlock(textContent);
-					if (skillBlock) {
-						// Render skill block (collapsible)
-						const component = new SkillInvocationMessageComponent(
-							skillBlock,
-							this.getMarkdownThemeWithSettings(),
-						);
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-						// Render user message separately if present
-						if (skillBlock.userMessage) {
-							this.chatContainer.addChild(new Spacer(1));
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-							);
-							this.chatContainer.addChild(userComponent);
-						}
-					} else {
-						const userComponent = new UserMessageComponent(textContent, this.getMarkdownThemeWithSettings());
-						this.chatContainer.addChild(userComponent);
-					}
-					if (options?.populateHistory) {
-						this.editor.addToHistory?.(textContent);
-					}
-				}
-				break;
-			}
-			case "assistant": {
-				const assistantComponent = new AssistantMessageComponent(
-					message,
-					this.hideThinkingBlock,
-					this.getMarkdownThemeWithSettings(),
-				);
-				this.chatContainer.addChild(assistantComponent);
-				break;
-			}
-			case "toolResult": {
-				// Tool results are rendered inline with tool calls, handled separately
-				break;
-			}
-			default: {
-				const _exhaustive: never = message;
-			}
-		}
-	}
-
-	/**
-	 * Render the branch's context messages to chat. Used for initial load and rebuild after compaction.
-	 * @param messages The branch's model context messages
-	 * @param options.updateFooter Update footer state
-	 * @param options.populateHistory Add user messages to editor history
-	 */
-	private renderSessionContext(
-		messages: readonly AgentMessage[],
-		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
-	): void {
-		this.jobsRenderCoalescer?.flush();
-		const liveBackgroundJobTools = new Map(this.liveBackgroundJobTools);
-		// Pending waits have live render state too. Re-register them below instead of disposing them.
-		for (const toolCallId of liveBackgroundJobTools.keys()) this.pendingTools.delete(toolCallId);
-		this.disposePendingTools();
-		this.liveBackgroundJobTools.clear();
-		const renderedPendingTools = new Map<string, PresentedToolComponent>();
-
-		if (options.updateFooter) {
-			this.footer.invalidate();
-			this.updateEditorBorderColor();
-		}
-
-		for (const message of messages) {
-			// Assistant messages need special handling for tool calls
-			if (message.role === "assistant") {
-				this.addMessageToChat(message);
-				// Render tool call components
-				for (const content of message.content) {
-					if (content.type === "toolCall") {
-						// Reuse this runtime's retained launch cards across compaction/display rebuilds.
-						// Other rows use replay options rather than live progress.
-						const liveCard = liveBackgroundJobTools.get(content.id);
-						const component =
-							liveCard?.component ?? this.createToolRow(content.name, content.id, content.arguments, false);
-						if (liveCard) {
-							this.liveBackgroundJobTools.set(content.id, liveCard);
-							liveBackgroundJobTools.delete(content.id);
-						}
-						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
-
-						if (message.stopReason === "aborted" || message.stopReason === "error") {
-							let errorMessage: string;
-							if (message.stopReason === "aborted") {
-								const retryAttempt = this.session.retryAttempt;
-								errorMessage =
-									retryAttempt > 0
-										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-										: "Operation aborted";
-							} else {
-								errorMessage = message.error?.message || "Error";
-							}
-							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-						} else {
-							renderedPendingTools.set(content.id, component);
-						}
-					}
-				}
-			} else if (message.role === "toolResult") {
-				// Match tool results to pending tool components
-				const component = renderedPendingTools.get(message.toolCallId);
-				if (component) {
-					component.updateResult(message);
-					renderedPendingTools.delete(message.toolCallId);
-				}
-			} else {
-				// All other messages use standard rendering
-				this.addMessageToChat(message, options);
-			}
-		}
-
-		for (const { component } of liveBackgroundJobTools.values()) component.dispose();
-		for (const [toolCallId, component] of renderedPendingTools) {
-			this.pendingTools.set(toolCallId, component);
-		}
-		this.ui.requestRender();
-	}
-
-	renderInitialMessages(): void {
-		this.renderSessionContext(this.session.messages, {
-			updateFooter: true,
-			populateHistory: true,
-		});
-		this.renderProjectTrustWarningIfNeeded();
-
-		// Show compaction info if session was compacted
-		const allEntries = this.sessionManager.getEntries();
-		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
-		if (compactionCount > 0) {
-			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-			this.showStatus(`Session compacted ${times}`);
-		}
 	}
 
 	private renderProjectTrustWarningIfNeeded(): void {
@@ -4203,11 +3770,6 @@ export class InteractiveMode {
 				resolve(text);
 			};
 		});
-	}
-
-	private rebuildChatFromMessages(): void {
-		this.chatContainer.clear();
-		this.renderSessionContext(this.session.messages);
 	}
 
 	// =========================================================================
@@ -4274,7 +3836,7 @@ export class InteractiveMode {
 	 */
 	private disposeRuntimeHost(): Promise<void> {
 		// The TUI's conversation closes with its UI still attached; extension UI is released before disposal.
-		return this.tuiHost.dispose({ beforeDispose: () => this.beginSessionReplacementUi() });
+		return this.tuiHost.dispose({ beforeDispose: () => this.leaveConversation() });
 	}
 
 	private async flushStdout(): Promise<void> {
@@ -4302,8 +3864,6 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		this.tuiHost.stopServing();
 		this.dismissWorkInspector?.();
-		this.unsubscribeBackgroundJobs?.();
-		this.unsubscribeBackgroundJobs = undefined;
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
@@ -4847,7 +4407,7 @@ export class InteractiveMode {
 				return;
 			}
 			this.closePlanDetails();
-			const result = await executePlan(this.host, this.client, plan.id, plan.revision, action);
+			const result = await executePlan(this.host, this.hostClient, plan.id, plan.revision, action);
 			this.showStatus(
 				action === "new_session"
 					? `Executing plan in session ${result.selectedSessionId}`
@@ -4914,18 +4474,8 @@ export class InteractiveMode {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 
-		// Rebuild chat from session messages
-		this.chatContainer.clear();
-		this.rebuildChatFromMessages();
-
-		// If streaming, re-add the streaming component with updated visibility and re-render
-		if (this.streamingComponent && this.streamingMessage) {
-			this.streamingRenderCoalescer?.commitNow(this.streamingMessage);
-			this.streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
-			this.streamingComponent.updateContent(this.streamingMessage);
-			this.chatContainer.addChild(this.streamingComponent);
-		}
-
+		// The transcript draws afresh, what streams included.
+		this.transcript.rebuild();
 		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
 	}
 
@@ -5550,19 +5100,11 @@ export class InteractiveMode {
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof PresentedToolComponent) {
-								child.setShowImages(enabled);
-							}
-						}
+						this.transcript.forEachToolRow((row) => row.setShowImages(enabled));
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof PresentedToolComponent) {
-								child.setImageWidthCells(width);
-							}
-						}
+						this.transcript.forEachToolRow((row) => row.setImageWidthCells(width));
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
@@ -5617,13 +5159,7 @@ export class InteractiveMode {
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
 						this.settingsManager.setHideThinkingBlock(hidden);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof AssistantMessageComponent) {
-								child.setHideThinkingBlock(hidden);
-							}
-						}
-						this.chatContainer.clear();
-						this.rebuildChatFromMessages();
+						this.transcript.rebuild();
 					},
 					onCollapseChangelogChange: (collapsed) => {
 						this.settingsManager.setCollapseChangelog(collapsed);
@@ -6873,7 +6409,7 @@ export class InteractiveMode {
 			}
 
 			const sessionDir = getDefaultSessionDir(control.workspacePath, agentDir);
-			const result = await openNewSession(this.host, this.client, {
+			const result = await openNewSession(this.host, this.hostClient, {
 				cwd: target.path,
 				sessionDir,
 				workspaceName: control.workspaceName,
@@ -6887,7 +6423,7 @@ export class InteractiveMode {
 				this.showStatus("Worktree session cancelled");
 				return;
 			}
-			this.renderCurrentSessionState();
+			await this.showMovedConversation();
 			this.showStatus(`New session in worktree ${target.id} (branch ${target.branch}) — ${target.path}`);
 			this.ui.requestRender();
 		} catch (error) {
@@ -7058,14 +6594,14 @@ export class InteractiveMode {
 				async (entryId) => {
 					const source = this.session;
 					try {
-						const result = await openFork(this.host, this.client, entryId);
+						const result = await openFork(this.host, this.hostClient, entryId);
 						if (result.cancelled) {
 							done();
 							this.ui.requestRender();
 							return;
 						}
 
-						this.renderCurrentSessionState();
+						await this.showMovedConversation();
 						this.editor.setText(result.selectedText ?? "");
 						done();
 						this.showStatus("Forked to new session");
@@ -7093,13 +6629,13 @@ export class InteractiveMode {
 
 		const source = this.session;
 		try {
-			const result = await openFork(this.host, this.client, leafId, { position: "at" });
+			const result = await openFork(this.host, this.hostClient, leafId, { position: "at" });
 			if (result.cancelled) {
 				this.ui.requestRender();
 				return;
 			}
 
-			this.renderCurrentSessionState();
+			await this.showMovedConversation();
 			this.editor.setText("");
 			this.showStatus("Cloned to new session");
 		} catch (error: unknown) {
@@ -7203,9 +6739,7 @@ export class InteractiveMode {
 							return;
 						}
 
-						// Update UI
-						this.chatContainer.clear();
-						this.renderInitialMessages();
+						// The transcript drew the branch from its leaf entry.
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
 						}
@@ -7322,7 +6856,7 @@ export class InteractiveMode {
 		// frees the session's lock when the daemon hosts it. The lease of the
 		// session left behind is released once that session closed.
 		const switchSession = (cwdOverride?: string): Promise<SessionIntentResult> =>
-			openStoredSession(this.host, this.client, sessionRef, {
+			openStoredSession(this.host, this.hostClient, sessionRef, {
 				...(cwdOverride === undefined ? {} : { cwdOverride }),
 				withSession: options?.withSession,
 			});
@@ -7331,7 +6865,7 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return result;
 			}
-			this.renderCurrentSessionState();
+			await this.showMovedConversation();
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
@@ -7362,7 +6896,7 @@ export class InteractiveMode {
 				if (result.cancelled) {
 					return result;
 				}
-				this.renderCurrentSessionState();
+				await this.showMovedConversation();
 				this.showStatus("Resumed session in current cwd");
 				return result;
 			}
@@ -7832,7 +7366,7 @@ export class InteractiveMode {
 			this.setupAutocompleteProvider();
 			const runner = this.session.extensionRunner;
 			this.setupExtensionShortcuts(runner);
-			this.rebuildChatFromMessages();
+			this.transcript.rebuild();
 			dismissReloadBox(this.editor as Component);
 			this.showLoadedResources({
 				force: false,
@@ -7926,12 +7460,12 @@ export class InteractiveMode {
 				this.loadingAnimation = undefined;
 			}
 			this.statusContainer.clear();
-			const result = await openImport(this.host, this.client, inputPath);
+			const result = await openImport(this.host, this.hostClient, inputPath);
 			if (result.cancelled) {
 				this.showStatus("Import cancelled");
 				return;
 			}
-			this.renderCurrentSessionState();
+			await this.showMovedConversation();
 			this.showStatus(`Session imported from: ${inputPath}`);
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
@@ -7940,12 +7474,12 @@ export class InteractiveMode {
 					this.showStatus("Import cancelled");
 					return;
 				}
-				const result = await openImport(this.host, this.client, inputPath, selectedCwd);
+				const result = await openImport(this.host, this.hostClient, inputPath, selectedCwd);
 				if (result.cancelled) {
 					this.showStatus("Import cancelled");
 					return;
 				}
-				this.renderCurrentSessionState();
+				await this.showMovedConversation();
 				this.showStatus(`Session imported from: ${inputPath}`);
 				return;
 			}
@@ -8581,7 +8115,7 @@ export class InteractiveMode {
 			if (outcome.cancelled) {
 				return;
 			}
-			this.renderCurrentSessionState();
+			await this.showMovedConversation();
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
@@ -8651,6 +8185,7 @@ export class InteractiveMode {
 
 			// Create UI component for display
 			this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+			this.localBashRows.push({ command, component: this.bashComponent });
 			if (this.session.isStreaming) {
 				this.pendingMessagesContainer.addChild(this.bashComponent);
 				this.pendingBashComponents.push(this.bashComponent);
@@ -8679,6 +8214,8 @@ export class InteractiveMode {
 		// Normal execution path (possibly with custom operations)
 		const isDeferred = this.session.isStreaming;
 		this.bashComponent = new BashExecutionComponent(command, this.ui, excludeFromContext);
+		const local = { command, component: this.bashComponent };
+		this.localBashRows.push(local);
 
 		if (isDeferred) {
 			// Show in pending area when agent is streaming
@@ -8714,11 +8251,21 @@ export class InteractiveMode {
 			if (this.bashComponent) {
 				this.bashComponent.setComplete(undefined, false);
 			}
+			// No entry follows a command that failed to run.
+			this.localBashRows = this.localBashRows.filter((row) => row !== local);
 			this.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
 
 		this.bashComponent = undefined;
 		this.ui.requestRender();
+	}
+
+	/** The row a user shell command showed in while it ran: it stands for the command's entry, which committed. */
+	private takeLocalBashRow(command: string): BashExecutionComponent | undefined {
+		const index = this.localBashRows.findIndex((row) => row.command === command);
+		if (index === -1) return undefined;
+		const [row] = this.localBashRows.splice(index, 1);
+		return row?.component;
 	}
 
 	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
@@ -9022,6 +8569,14 @@ export class InteractiveMode {
 		const pending = new Map<string, PresentedToolComponent>();
 
 		const forDisplay = options.transformAssistantMessage ?? ((message: AssistantMessage) => message);
+		// The review's pass sessions run in this process, so their calls present here, with the session's presenters.
+		const session = this.session;
+		const createToolRow = (toolName: string, args: unknown): PresentedToolComponent =>
+			new PresentedToolComponent(toolName, args, () => session.presenters, this.ui, this.sessionManager.getCwd(), {
+				showImages: this.settingsManager.getShowImages(),
+				imageWidthCells: this.settingsManager.getImageWidthCells(),
+				liveProgress: true,
+			});
 
 		const upsertToolCalls = (message: AssistantMessage): void => {
 			for (const part of message.content) {
@@ -9031,7 +8586,7 @@ export class InteractiveMode {
 					existing.updateArgs(part.arguments);
 					continue;
 				}
-				const component = this.createToolRow(part.name, part.id, part.arguments, true);
+				const component = createToolRow(part.name, part.arguments);
 				component.setExpanded(this.toolOutputExpanded);
 				group.addChild(component);
 				pending.set(part.id, component);
@@ -9081,7 +8636,7 @@ export class InteractiveMode {
 				case "tool_execution_start": {
 					let component = pending.get(event.toolCallId);
 					if (!component) {
-						component = this.createToolRow(event.toolName, event.toolCallId, event.args, true);
+						component = createToolRow(event.toolName, event.args);
 						component.setExpanded(this.toolOutputExpanded);
 						group.addChild(component);
 						pending.set(event.toolCallId, component);
@@ -9148,7 +8703,7 @@ export class InteractiveMode {
 				cwd: this.sessionManager.getCwd(),
 				agentDir: this.conversation.services.agentDir,
 				session: this.session,
-				newSession: (newSessionOptions) => openNewSession(this.host, this.client, newSessionOptions),
+				newSession: (newSessionOptions) => openNewSession(this.host, this.hostClient, newSessionOptions),
 				authStorage: this.session.modelRegistry.authStorage,
 				settingsManager: this.settingsManager,
 				tools: options.tools,
@@ -9165,7 +8720,7 @@ export class InteractiveMode {
 			});
 
 			if (result.status !== "completed") {
-				this.renderCurrentSessionState();
+				await this.renderCurrentConversation();
 				this.showStatus("Review cancelled");
 				return result;
 			}
@@ -9174,11 +8729,11 @@ export class InteractiveMode {
 				this.showStatus("Session switch cancelled; review added to this session.");
 				return result;
 			}
-			this.renderCurrentSessionState();
+			await this.renderCurrentConversation();
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.renderCurrentSessionState();
+			await this.renderCurrentConversation();
 			this.showError(
 				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
 			);
@@ -9187,7 +8742,7 @@ export class InteractiveMode {
 			this.activeInteractiveReview = false;
 			this.quitConfirmation = undefined;
 			this.lastSigintTime = 0;
-			// Handoff and renderCurrentSessionState clear transient chat rows. Warn only
+			// Handoff and renderCurrentConversation clear transient chat rows. Warn only
 			// after they settle, including cancellation and failure paths, without persistence.
 			if (diagnosticRetentionWarning) {
 				try {
@@ -9233,8 +8788,8 @@ export class InteractiveMode {
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
 		this.dismissWorkInspector?.();
-		this.unsubscribeBackgroundJobs?.();
-		this.unsubscribeBackgroundJobs = undefined;
+		this.stopWorkTicker();
+		this.workRowsCoalescer.dispose();
 		this.unsubscribeWorkSource?.();
 		this.unsubscribeWorkSource = undefined;
 		this.workSource.dispose();
@@ -9242,8 +8797,7 @@ export class InteractiveMode {
 		this.clearPromptCacheAlertTimer();
 		this.clearWorkSummaryTimer();
 		this.stopWorkingElapsedTicker();
-		this.streamingRenderCoalescer?.dispose();
-		this.streamingRenderCoalescer = undefined;
+		this.transcript.dispose();
 		if (this.settingsManager.getShowTerminalProgress()) {
 			this.ui.terminal.setProgress(false);
 		}
@@ -9257,9 +8811,8 @@ export class InteractiveMode {
 		this.planPaneInputUnsubscribe = undefined;
 		this.footer.dispose();
 		this.footerDataProvider.dispose();
-		if (this.unsubscribe) {
-			this.unsubscribe();
-		}
+		this.unsubscribeStatus?.();
+		this.unsubscribeStatus = undefined;
 		if (this.isInitialized) {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;

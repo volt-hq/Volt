@@ -1,11 +1,12 @@
 /**
- * The TUI's view of the live state of the conversation it shows: extension
- * status, panels, and title; notices and editor directives; the progress of
- * the work this host runs; and the dialogs, forms, and approvals it answers in
- * process, shown one at a time in the order they were asked. A request
- * another client answered, or that ended, closes without an answer. An
- * `editor_text` request is answered at once with the editor's text. Patches
- * change the panels and work it holds in place.
+ * The TUI's view of the live state of the conversation it shows, as its
+ * client's live frames change it: extension status, panels, and title;
+ * notices and editor directives; the progress of the work the host runs; and
+ * the dialogs, forms, and approvals the TUI answers, shown one at a time in
+ * the order they were asked. A request another client answered, or that
+ * ended, closes without an answer. An `editor_text` request is answered at
+ * once with the editor's text. A patched panel or work item shows as the
+ * client's live fold holds it.
  */
 
 import {
@@ -15,11 +16,8 @@ import {
 	type HostResponse,
 	type LiveItem,
 	type LiveValue,
-	patchLiveValue,
 	type UiNodeStyledText,
-	type UiPatchOp,
 } from "@hansjm10/volt-protocol";
-import type { LiveClient, LiveUpdate } from "../../core/host/live-state.ts";
 import type { UiPanel } from "./ui-node/panels.ts";
 
 type WorkValue = Extract<LiveValue, { kind: "work" }>;
@@ -44,9 +42,12 @@ export interface LiveViewHost {
 	editorText(): string | undefined;
 	/** Work `workId` reported progress, or, without a value, its executor detached. */
 	showWork(workId: string, value: WorkValue | undefined): void;
+	/** The live value under `key` as the client's live fold holds it, patches applied. */
+	liveValue(key: string): LiveValue | undefined;
 }
 
-const TUI_HOST_REQUESTS: ReadonlySet<HostRequestKind> = new Set([
+/** The host request kinds the TUI answers. */
+export const TUI_HOST_REQUESTS: readonly HostRequestKind[] = [
 	"select",
 	"confirm",
 	"input",
@@ -55,7 +56,7 @@ const TUI_HOST_REQUESTS: ReadonlySet<HostRequestKind> = new Set([
 	"dialog",
 	"approval",
 	"editor_text",
-]);
+];
 
 function panelOf(value: Extract<LiveValue, { kind: "ext_panel" }>): UiPanel {
 	return {
@@ -65,7 +66,7 @@ function panelOf(value: Extract<LiveValue, { kind: "ext_panel" }>): UiPanel {
 	};
 }
 
-export class TuiLiveView implements LiveClient {
+export class TuiLiveView {
 	private readonly host: LiveViewHost;
 	private readonly statuses = new Set<string>();
 	/** Panels shown, by live key. */
@@ -81,11 +82,8 @@ export class TuiLiveView implements LiveClient {
 		this.host = host;
 	}
 
-	acceptsHostRequest(kind: HostRequestKind): boolean {
-		return TUI_HOST_REQUESTS.has(kind);
-	}
-
-	apply(update: LiveUpdate): void {
+	/** Apply a live frame: a reset replaces what the view shows. */
+	apply(update: { readonly reset: boolean; readonly items: readonly LiveItem[] }): void {
 		if (update.reset) this.clearAll();
 		for (const item of update.items) this.applyItem(item);
 		this.showNext();
@@ -99,11 +97,13 @@ export class TuiLiveView implements LiveClient {
 			case "clear":
 				this.clear(item.key);
 				return;
-			case "patch":
-				this.patch(item.key, item.ops);
+			case "patch": {
+				const value = this.host.liveValue(item.key);
+				if (value !== undefined) this.set(item.key, value);
 				return;
+			}
 			case "notice":
-				// The host's own notices: the TUI shows them from its session's events until it is a protocol client.
+				// The host's own notices: the TUI shows them from its session's status events until its status reads the store.
 				if (item.source !== HOST_NOTICE_SOURCE) this.host.notify(item.level, item.message);
 				return;
 			case "directive":
@@ -111,7 +111,7 @@ export class TuiLiveView implements LiveClient {
 				else this.host.setEditorText(item.text);
 				return;
 			default:
-				// Streaming items: the TUI renders its session's events until it is a protocol client.
+				// Streaming items: the transcript draws them.
 				return;
 		}
 	}
@@ -147,21 +147,6 @@ export class TuiLiveView implements LiveClient {
 			default:
 				return;
 		}
-	}
-
-	/** Apply a patch to the panel or work held under `key`; one that does not apply leaves it as it is. */
-	private patch(key: string, ops: readonly UiPatchOp[]): void {
-		const workId = key.startsWith("work/") ? key.slice("work/".length) : undefined;
-		const value = workId === undefined ? this.panels.get(key) : this.works.get(workId);
-		if (value === undefined) return;
-		let patched: LiveValue;
-		try {
-			patched = patchLiveValue(value, ops);
-		} catch {
-			// The in-process live state applied it first; a patch that does not apply here changes nothing.
-			return;
-		}
-		this.set(key, patched);
 	}
 
 	private clear(key: string): void {

@@ -679,8 +679,7 @@ describe("#442 local archived-worktree resume", () => {
 		const showError = vi.fn();
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			host: runtime.host,
-			conversation: runtime.conversation,
-			client: runtime.client,
+			tuiHost: { conversation: runtime.conversation, hostClient: runtime.client },
 			statusContainer: { clear: vi.fn() },
 			showError,
 		}) as InteractiveMode;

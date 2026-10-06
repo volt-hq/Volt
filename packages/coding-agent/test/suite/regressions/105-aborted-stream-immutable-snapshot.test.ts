@@ -1,26 +1,11 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { emptyLiveFold, foldLiveItems, type LiveFoldState, type ProjectedEntry } from "@hansjm10/volt-protocol";
+import { Container, type TUI } from "@hansjm10/volt-tui";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-
-type ToolResult = Parameters<PresentedToolComponent["updateResult"]>[0];
-type PendingTool = Pick<PresentedToolComponent, "updateResult">;
-
-type HandleEventThis = {
-	isInitialized: boolean;
-	init(): Promise<void>;
-	footer: { invalidate(): void };
-	streamingComponent: { updateContent(message: AssistantMessage): void } | undefined;
-	streamingMessage: AssistantMessage | undefined;
-	streamingRenderCoalescer: { finish(message: AssistantMessage): void } | undefined;
-	session: { retryAttempt: number };
-	pendingTools: Map<string, PendingTool>;
-	disposePendingTools(): void;
-	ui: { requestRender(): void };
-};
-
-type HandleEvent = (this: HandleEventThis, event: AgentSessionEvent) => Promise<void>;
+import { getMarkdownTheme, initTheme } from "../../../src/core/theme/runtime.ts";
+import { TranscriptView } from "../../../src/modes/interactive/client/transcript-view.ts";
+import type { TuiStore } from "../../../src/modes/interactive/client/tui-store.ts";
+import { stripAnsi } from "../../../src/utils/ansi.ts";
 
 function createAbortedAssistantMessage(): AssistantMessage {
 	const toolCall = { type: "toolCall" as const, id: "tool-105", name: "slow_tool", arguments: {} };
@@ -51,39 +36,63 @@ function createAbortedAssistantMessage(): AssistantMessage {
 }
 
 describe("InteractiveMode aborted stream snapshots (#105)", () => {
-	test("renders a retry message without mutating a frozen terminal snapshot", async () => {
+	test("renders a retry message without mutating the frozen committed message", () => {
+		initTheme("dark");
 		const message = createAbortedAssistantMessage();
-		const finish = vi.fn<(message: AssistantMessage) => void>();
-		const updateResult = vi.fn<(result: ToolResult) => void>();
-		const pendingTools = new Map<string, PendingTool>([["tool-105", { updateResult }]]);
-		const context: HandleEventThis = {
-			isInitialized: true,
-			init: async () => undefined,
-			footer: { invalidate: vi.fn() },
-			streamingComponent: { updateContent: vi.fn() },
-			streamingMessage: undefined,
-			streamingRenderCoalescer: { finish },
-			session: { retryAttempt: 2 },
-			pendingTools,
-			disposePendingTools() {
-				this.pendingTools.clear();
+		const entry = Object.freeze({
+			ordinal: 2,
+			id: "assistant-105",
+			parentId: null,
+			type: "message",
+			timestamp: new Date(0).toISOString(),
+			payload: Object.freeze({ message }),
+		}) as ProjectedEntry;
+		// The run retried twice before it was aborted; the message streamed before it committed.
+		let live: LiveFoldState = foldLiveItems(emptyLiveFold(1), [
+			{
+				type: "set",
+				key: "phase",
+				value: { kind: "phase", busy: true, operation: "turn", retry: { attempt: 2, maxAttempts: 3 } },
 			},
-			ui: { requestRender: vi.fn() },
-		};
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
-
-		await handleEvent.call(context, { type: "message_end", message });
-
-		const displayedMessage = finish.mock.calls[0]?.[0];
-		expect(displayedMessage).toEqual(
-			expect.objectContaining({ error: expect.objectContaining({ message: "Aborted after 2 retry attempts" }) }),
-		);
-		expect(displayedMessage).not.toBe(message);
-		expect(message.error?.message).toBe("Request was aborted");
-		expect(updateResult).toHaveBeenCalledWith({
-			content: [{ type: "text", text: "Aborted after 2 retry attempts" }],
-			isError: true,
+			{ type: "assistant_start", message: { ...message, content: [], stopReason: "stop" } },
+		]);
+		let transcript: ProjectedEntry[] = [];
+		const store = {
+			transcript: () => transcript,
+			get live() {
+				return live;
+			},
+			get phase() {
+				const phase = live.values.get("phase");
+				return phase?.kind === "phase" ? phase : undefined;
+			},
+		} as unknown as TuiStore;
+		const container = new Container();
+		const view = new TranscriptView(store, container, {
+			ui: { requestRender: vi.fn() } as unknown as TUI,
+			markdownTheme: () => getMarkdownTheme(),
+			hideThinkingBlock: () => false,
+			toolsExpanded: () => false,
+			showImages: () => true,
+			imageWidthCells: () => 60,
+			toolCallWork: () => [],
+			takeLocalBashRow: () => undefined,
+			workNoticeShown: () => {},
 		});
-		expect(pendingTools.size).toBe(0);
+		view.sync([]);
+
+		// The aborted message commits: the stream ends, and its call never ran.
+		transcript = [entry];
+		live = { ...live, assistant: undefined };
+		expect(() => view.sync([])).not.toThrow();
+
+		const text = container
+			.render(100)
+			.lines.map((line) => stripAnsi(line))
+			.join("\n");
+		expect(text).toContain("slow_tool");
+		expect(text).toContain("[failure]");
+		expect(text).toContain("Aborted after 2 retry attempts");
+		expect(message.error?.message).toBe("Request was aborted");
 	});
 });

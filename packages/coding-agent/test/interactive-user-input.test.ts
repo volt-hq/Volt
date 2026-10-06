@@ -1,22 +1,16 @@
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall, type Model } from "@hansjm10/volt-ai";
 import { type Component, type Container, Text, type TUI, type TuiMode } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import type { AgentSession } from "../src/core/agent-session.ts";
-import type { HostClient } from "../src/core/host/targets.ts";
-import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
+import type { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import { UserInputDialog } from "../src/modes/interactive/components/user-input-dialog.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
-import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
-import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import { createHarness, type Harness } from "./suite/harness.ts";
-import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import { createTuiHarness, type TuiHarness } from "./suite/tui-harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type TestAccess = {
-	renderer: ReturnType<typeof createInteractiveTui>;
 	ui: TUI;
 	editor: CustomEditor;
 	conversationView: View;
@@ -24,17 +18,17 @@ type TestAccess = {
 	editorContainer: Container;
 	planInspector: PlanInspectorComponent;
 	pendingUserInputs: string[];
-	isInitialized: boolean;
-	setupKeyHandlers(): void;
-	setupPlanPaneInputRouting(): void;
-	setupEditorSubmitHandler(): void;
-	renderWidgets(): void;
-	tuiHost: TuiHost;
-	client: HostClient;
-	showSessionExtensions(session: AgentSession): void;
-	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 };
+
+/** The TUI's conversation as these tests drive it: its session, the faux provider's turns, and the session's events. */
+interface Harness {
+	readonly session: AgentSession;
+	setResponses: TuiHarness["faux"]["setResponses"];
+	getModel(): Model<string>;
+	getPendingResponseCount(): number;
+	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
+}
 
 const request = {
 	questions: [
@@ -58,7 +52,7 @@ const request = {
 		},
 	],
 };
-const fixtures: Array<{ mode: InteractiveMode; harness: Harness }> = [];
+const harnesses: TuiHarness[] = [];
 
 /** The session's request_user_input tool, which asks through the client that shows a terminal. */
 function sessionTool(harness: Harness) {
@@ -68,54 +62,45 @@ function sessionTool(harness: Harness) {
 }
 
 afterEach(async () => {
-	for (const { mode, harness } of fixtures.splice(0)) {
-		await harness.session.abort();
-		mode.stop("resume-hint");
-		await harness.cleanupAsync();
+	for (const harness of harnesses.splice(0)) {
+		await harness.startup.session.abort();
+		await harness.cleanup();
 	}
-	stopThemeWatcher();
 	vi.restoreAllMocks();
 });
 
+/** InteractiveMode as the client of a conversation it shows in a virtual terminal. */
 async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
-	const harness = await createHarness({
-		settings: { theme: "dark", lsp: { enabled: false }, quietStartup: true, compaction: { enabled: false } },
+	const tuiHarness = await createTuiHarness({
+		globalSettings: { theme: "dark", lsp: { enabled: false }, quietStartup: true, compaction: { enabled: false } },
 	});
+	harnesses.push(tuiHarness);
+	const session = tuiHarness.startup.session;
 	if (withPlan) {
-		await harness.session.setAgentMode("plan");
-		const draft = await harness.session.updatePlan({ steps: [{ text: "Implement project search" }] });
-		await harness.session.submitPlan({
+		await session.setAgentMode("plan");
+		const draft = await session.updatePlan({ steps: [{ text: "Implement project search" }] });
+		await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Search implementation plan",
 			summary: "Keep storage local and respect ignored files.",
 		});
 	}
-	// The TUI's host binds the session's extensions in TUI mode when the TUI attaches.
-	const { host } = createFakeHost({ extensionMode: "tui" });
-	const { conversation } = createFakeConversation(harness.session);
-	const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode });
-	fixtures.push({ mode, harness });
-	const access = mode as unknown as TestAccess;
-	const terminal = new VirtualTerminal(columns, 24);
-	access.renderer = createInteractiveTui({
-		tuiMode,
-		showHardwareCursor: false,
-		logDirectory: harness.tempDir,
-		terminal,
+	const events: AgentSessionEvent[] = [];
+	session.subscribe((event) => {
+		events.push(event);
 	});
-	access.renderWidgets();
-	access.setupKeyHandlers();
-	access.setupPlanPaneInputRouting();
-	access.setupEditorSubmitHandler();
-	access.activateView(access.conversationView, access.editor, false);
-	access.isInitialized = true;
-	access.ui.start();
-	await access.tuiHost.attach(access.client);
-	access.showSessionExtensions(harness.session);
-	access.subscribeToAgent(harness.session);
-	await terminal.waitForRender();
-	return { harness, access, terminal };
+	const harness: Harness = {
+		session,
+		setResponses: (responses) => tuiHarness.faux.setResponses(responses),
+		getModel: () => tuiHarness.faux.getModel(),
+		getPendingResponseCount: () => tuiHarness.faux.getPendingResponseCount(),
+		eventsOfType: <T extends AgentSessionEvent["type"]>(type: T) =>
+			events.filter((event): event is Extract<AgentSessionEvent, { type: T }> => event.type === type),
+	};
+	const tui = await tuiHarness.startMode({ tuiMode, columns, rows: 24 });
+	const access = tui.mode as unknown as TestAccess;
+	return { harness, access, terminal: tui.terminal as VirtualTerminal };
 }
 
 async function ask({ harness, access, terminal }: Awaited<ReturnType<typeof fixture>>) {

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { Component, TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
+import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
 	createAgentSessionFromServices,
@@ -13,26 +13,25 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../../../src/core/host/targets.ts";
 import type { HostActionRequest } from "../../../src/core/session/host-actions.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
+import type { UserInputRequest, UserInputResponse } from "../../../src/core/user-input.ts";
 import type { WorkContext, WorkExecution } from "../../../src/core/work/registry.ts";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
-import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
-import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import type { createInteractiveTui } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestHost } from "../../utilities/host-client.ts";
 import { createLiveRecorder } from "../../utilities/live-recorder.ts";
 import { testExtension } from "../../utilities.ts";
 import { getMessageText } from "../harness.ts";
+import { createTuiHarness } from "../tui-harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type InteractiveAccess = {
-	followWork(): void;
 	renderer: ReturnType<typeof createInteractiveTui>;
 	ui: TUI;
 	editor: CustomEditor;
@@ -49,9 +48,8 @@ type InteractiveAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	client: HostClient;
-	showSessionExtensions(session: AgentSession): void;
-	subscribeToAgent(session: AgentSession): void;
+	connect(): Promise<void>;
+	terminalSurface(): { userInput?: (request: UserInputRequest, signal?: AbortSignal) => Promise<UserInputResponse> };
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
 };
@@ -188,35 +186,20 @@ describe("regression #525: ending a session whose saved state could not be confi
 		};
 	}
 
-	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
-	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
-		const { host, conversation, tempDir } = opened;
-		const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode: "regular" });
-		cleanups.push(() => mode.stop());
-		const access = mode as unknown as InteractiveAccess;
+	/** InteractiveMode as the client of a conversation over the faux provider, without the main input loop. */
+	async function startInteractiveMode(responses: string[], options: { extensionFactory?: ExtensionFactory } = {}) {
+		const harness = await createTuiHarness({
+			responses,
+			...(options.extensionFactory === undefined ? {} : { extension: options.extensionFactory }),
+		});
+		cleanups.push(() => harness.cleanup());
+		const tui = await harness.startMode({ columns: 140, rows: 30 });
+		const access = tui.mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});
 		access.handleFatalRuntimeError = handleFatalRuntimeError;
 		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		cleanups.push(() => exit.mockRestore());
-		const terminal = new VirtualTerminal(140, 30);
-		access.renderer = createInteractiveTui({
-			tuiMode: "regular",
-			showHardwareCursor: false,
-			logDirectory: tempDir,
-			terminal,
-		});
-		access.renderWidgets();
-		access.setupKeyHandlers();
-		access.setupPlanPaneInputRouting();
-		access.setupEditorSubmitHandler();
-		access.activateView(access.conversationView, access.editor, false);
-		access.isInitialized = true;
-		access.ui.start();
-		await host.attach(access.client, conversation);
-		access.showSessionExtensions(conversation.session);
-		access.subscribeToAgent(conversation.session);
-		access.followWork();
-		return { access, terminal, handleFatalRuntimeError, exit };
+		return { access, terminal: tui.terminal, conversation: harness.startup, handleFatalRuntimeError, exit };
 	}
 
 	it("keeps the footer rendering and wakes busy waiters after a lost lock fails the next commit", async () => {
@@ -268,16 +251,18 @@ describe("regression #525: ending a session whose saved state could not be confi
 			volt.on("session_start", (_event, ctx) => show(ctx));
 			volt.on("agent_end", (_event, ctx) => show(ctx));
 		};
-		const opened = await openConversationForTest(["tui reply"], { extensionFactory: extensionStatus });
-		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
+		const { access, terminal, conversation, handleFatalRuntimeError, exit } = await startInteractiveMode(
+			["tui reply"],
+			{ extensionFactory: extensionStatus },
+		);
 
-		await opened.conversation.session.prompt("tui prompt");
+		await conversation.session.prompt("tui prompt");
 		await vi.waitFor(async () => {
 			await terminal.waitForRender();
 			expect(extensionStatusEntries(terminal)).toBeGreaterThan(0);
 		});
 
-		const staleSession = opened.conversation.session;
+		const staleSession = conversation.session;
 		await loseConversationLock(staleSession.sessionManager);
 		access.editor.setText("unsent draft");
 
@@ -310,10 +295,12 @@ describe("regression #525: ending a session whose saved state could not be confi
 				},
 			});
 		};
-		const opened = await openConversationForTest(["tui reply"], { extensionFactory: pickCommand });
-		const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
-		await opened.conversation.session.prompt("tui prompt");
-		const staleSession = opened.conversation.session;
+		const { access, terminal, conversation, handleFatalRuntimeError, exit } = await startInteractiveMode(
+			["tui reply"],
+			{ extensionFactory: pickCommand },
+		);
+		await conversation.session.prompt("tui prompt");
+		const staleSession = conversation.session;
 
 		const command = staleSession.prompt("/pick");
 		await selectorShown.promise;
@@ -342,9 +329,10 @@ describe("regression #525: ending a session whose saved state could not be confi
 				},
 			});
 		};
-		const opened = await openConversationForTest([], { extensionFactory: stuckCommand });
-		const { handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
-		const staleSession = opened.conversation.session;
+		const { conversation, handleFatalRuntimeError, exit } = await startInteractiveMode([], {
+			extensionFactory: stuckCommand,
+		});
+		const staleSession = conversation.session;
 
 		void staleSession.prompt("/stuck");
 		const commandSignal = await commandStarted.promise;
@@ -358,14 +346,14 @@ describe("regression #525: ending a session whose saved state could not be confi
 	});
 
 	it("settles every pending TUI dialog and question when extension UI is reset", async () => {
-		const { access, terminal } = await startInteractiveMode(await openConversationForTest([]));
+		const { access, terminal } = await startInteractiveMode([]);
 		access.editor.setText("draft");
 
 		// One dialog of each kind, stacked in opening order, and a request_user_input question.
 		const select = access.showExtensionSelector("Select dialog", ["a", "b"]);
 		const input = access.showExtensionInput("Input dialog");
 		const editor = access.showExtensionEditor("Editor dialog", "prefill");
-		const userInput = access.client.surface?.userInput;
+		const userInput = access.terminalSurface().userInput;
 		if (!userInput) throw new Error("The TUI asks no questions");
 		const question = userInput({
 			questions: [
@@ -411,10 +399,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 	});
 
 	it("shows the live state's dialogs and approvals one at a time and answers them in process", async () => {
-		const opened = await openConversationForTest([]);
-		const { access, terminal } = await startInteractiveMode(opened);
-		const liveState = opened.conversation.liveState;
-		const actions = opened.conversation.session.hostActions;
+		const { access, terminal, conversation } = await startInteractiveMode([]);
+		const liveState = conversation.liveState;
+		const actions = conversation.session.hostActions;
 		const request: HostActionRequest = { action: "test.action", title: "Host action" };
 		let runs = 0;
 		// The install runs until the footer's work line showed its progress.
@@ -453,11 +440,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		await expect(aborted).resolves.toEqual({ status: "declined", message: "Host action cancelled" });
 		await vi.waitFor(() => expect(access.extensionSelector).toBeUndefined());
 		expect(runs).toBe(1);
-		expect(opened.conversation.work.list().map((record) => record.outcome)).toEqual([
-			"completed",
-			"cancelled",
-			"cancelled",
-		]);
+		expect(conversation.work.list().map((record) => record.outcome)).toEqual(["completed", "cancelled", "cancelled"]);
 
 		// Dialogs show oldest first; another client's answer closes the one that shows.
 		const phone = createLiveRecorder(["confirm", "select"]);

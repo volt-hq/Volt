@@ -98,6 +98,13 @@ export interface ProtocolClientOptions {
 	readonly onFrame?: (frame: HostFrame, client: ProtocolClient) => void;
 }
 
+/**
+ * What changed the client: the frame it applied (a snapshot, entry, head, or
+ * live frame, an `ended` subscription, or a `changed` catalog), or nothing
+ * when the client failed.
+ */
+export type ProtocolClientChange = HostFrame | undefined;
+
 export interface ProtocolIntentOptions {
 	/** The intent id; minted when absent. Input intents use it as their durable `clientMessageId`. */
 	readonly intentId?: string;
@@ -137,7 +144,7 @@ export class ProtocolClient {
 	private readonly intents = new Map<string, Pending<AcceptedFrame>>();
 	private readonly queries = new Map<string, Pending<unknown>>();
 	private readonly frameListeners = new Set<(frame: HostFrame) => void>();
-	private readonly changeListeners = new Set<() => void>();
+	private readonly changeListeners = new Set<(change: ProtocolClientChange) => void>();
 	private welcomeFrame: WelcomeFrame | undefined;
 	private welcomeWaiter: { resolve: (frame: WelcomeFrame) => void; reject: (error: Error) => void } | undefined;
 	private subscription: { readonly id: string; readonly conversation: string; caughtUp: boolean } | undefined;
@@ -182,8 +189,12 @@ export class ProtocolClient {
 		return () => this.frameListeners.delete(listener);
 	}
 
-	/** Called after the state or the live state changed. */
-	onChange(listener: () => void): () => void {
+	/**
+	 * Called after a frame changed the state or the live state, ended the
+	 * subscription, or told the client to refetch a catalog, with that frame;
+	 * and without one after the client failed.
+	 */
+	onChange(listener: (change: ProtocolClientChange) => void): () => void {
 		this.changeListeners.add(listener);
 		return () => this.changeListeners.delete(listener);
 	}
@@ -364,6 +375,15 @@ export class ProtocolClient {
 		await this.waitForIdle(options.timeoutMs);
 	}
 
+	/**
+	 * Start over on the conversation from a snapshot, as the host projects its
+	 * log now: with the presenters the host has now.
+	 */
+	resync(): void {
+		if (this.failure || !this.transport) return;
+		this.resubscribeFromSnapshot();
+	}
+
 	/** Close the transport; pending intents and queries fail. */
 	async stop(): Promise<void> {
 		const transport = this.transport ?? this.failedTransport;
@@ -444,7 +464,7 @@ export class ProtocolClient {
 				this.clientState = clientRestore(frame.ordinal, frame.state);
 				this.liveState = emptyLiveFold();
 				this.queueChangedAt = frame.ordinal;
-				this.changed();
+				this.changed(frame);
 				return;
 			case "entry": {
 				if (!ours) return;
@@ -460,13 +480,13 @@ export class ProtocolClient {
 				}
 				if (this.clientState.queue !== before) this.queueChangedAt = frame.entry.ordinal;
 				this.liveState = foldLiveCommit(this.liveState, liveCommitOf(frame.entry));
-				this.changed();
+				this.changed(frame);
 				return;
 			}
 			case "head":
 				if (!ours) return;
 				this.clientState = clientAdvance(this.clientState, frame.ordinal);
-				this.changed();
+				this.changed(frame);
 				return;
 			case "live":
 				if (!ours || !subscription) return;
@@ -493,7 +513,7 @@ export class ProtocolClient {
 					for (const waiter of this.caughtUpWaiters) waiter.resolve();
 					this.caughtUpWaiters.clear();
 				}
-				this.changed();
+				this.changed(frame);
 				return;
 			case "ended":
 				if (!ours) return;
@@ -506,7 +526,7 @@ export class ProtocolClient {
 				} else if (frame.reason !== "unsubscribed") {
 					this.fail(new Error(this.withContext(`The subscription ended: ${frame.reason}`)));
 				}
-				this.changed();
+				this.changed(frame);
 				return;
 			case "accepted":
 			case "rejected": {
@@ -528,6 +548,9 @@ export class ProtocolClient {
 				else pending.reject(new ProtocolQueryError(pending.name, frame.reason));
 				return;
 			}
+			case "changed":
+				this.changed(frame);
+				return;
 			case "fatal":
 				this.fail(
 					new Error(
@@ -551,10 +574,10 @@ export class ProtocolClient {
 		this.subscribe(subscription.conversation, "snapshot");
 	}
 
-	private changed(): void {
+	private changed(change?: HostFrame): void {
 		for (const listener of [...this.changeListeners]) {
 			try {
-				listener();
+				listener(change);
 			} catch {
 				// Listeners are observers.
 			}

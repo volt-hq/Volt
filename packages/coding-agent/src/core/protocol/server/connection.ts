@@ -80,6 +80,7 @@ import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
+import type { ExtensionClient } from "../../session/extension-binding.ts";
 import { SessionManager } from "../../session-manager.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { EDITOR_TEXT_TIMEOUT_MS } from "../../ui/extension-ui.ts";
@@ -211,10 +212,19 @@ export interface ServeConnectionOptions {
 	readonly onInputAccepted?: (conversation: HostedConversation) => void;
 	/** The source of the `input` event the client's prompts raise; `rpc` by default. */
 	readonly inputSource?: InputSource;
+	/**
+	 * What a client in the host's own process offers its conversation's
+	 * extensions beyond the protocol: its terminal's themes, and the dialog
+	 * that asks the request_user_input tool's questions (the TUI until its
+	 * host runs in a worker).
+	 */
+	readonly terminal?: Pick<ExtensionClient, "themes" | "userInput">;
 }
 
 export interface ProtocolConnection {
 	readonly id: string;
+	/** The connection's client on the host: in-process callers act as this client (the TUI's own paths until Phase 6 ends). */
+	readonly client: HostClient;
 	/** Resolves once the client said hello and its conversation's extensions are bound; rejects when that fails. */
 	readonly ready: Promise<void>;
 	/** Settles once the connection ended; rejects with the failure that ended it. */
@@ -713,6 +723,7 @@ export function serveConnection(
 		// Keeps the client asked the host requests it accepts before it subscribes; each subscription shows them.
 		live: { acceptsHostRequest: (kind) => accepts.has(kind), apply: () => {} },
 		surface: {
+			...options.terminal,
 			commandContextActions: {
 				waitForIdle: () => currentHome().session.waitForIdle(),
 				newSession: (newSessionOptions) => openNewSession(currentHost(), client, newSessionOptions),
@@ -1470,6 +1481,7 @@ export function serveConnection(
 
 	return {
 		id: connectionId,
+		client,
 		ready: ready.promise,
 		closed: closed.promise,
 		get conversation() {

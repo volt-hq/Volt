@@ -4,17 +4,13 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type Usage } from "@hansjm10/volt-ai";
-import { Container, setKeybindings, Text, type TUI } from "@hansjm10/volt-tui";
+import type { Container } from "@hansjm10/volt-tui";
 import { describe, expect, it, vi } from "vitest";
-import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import type { ReviewWorkflowResult } from "../../../src/core/review.ts";
 import { listReviewRuns } from "../../../src/core/review-state.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
-import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { BorderedLoader } from "../../../src/modes/interactive/components/bordered-loader.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createHarness } from "../harness.ts";
+import { createTuiHarness } from "../tui-harness.ts";
 
 const usage: Usage = {
 	availability: "complete",
@@ -26,6 +22,8 @@ const usage: Usage = {
 	cost: { input: 0.01, output: 0.02, cacheRead: 0.03, cacheWrite: 0.04, total: 0.1 },
 };
 
+const cleanups: Array<() => Promise<void>> = [];
+
 describe("#409 interactive terminal review accounting", () => {
 	it.each(["failed", "cancelled"] as const)(
 		"shows final accounting once after a %s review clears transient usage",
@@ -33,12 +31,6 @@ describe("#409 interactive terminal review accounting", () => {
 			const root = mkdtempSync(join(tmpdir(), "volt-review-accounting-ui-"));
 			const cwd = join(root, "workspace");
 			mkdirSync(cwd);
-			// A live session database must not be part of the review snapshot.
-			const manager = await SessionManager.create(cwd, join(root, "sessions"));
-			const h = await createHarness({
-				sessionManager: manager,
-				settings: { retry: { enabled: false }, compaction: { enabled: false }, lsp: { enabled: false } },
-			});
 			try {
 				for (const args of [
 					["init", "--initial-branch=main"],
@@ -57,51 +49,37 @@ describe("#409 interactive terminal review accounting", () => {
 					if (result.status !== 0) throw new Error(result.stderr);
 				}
 				writeFileSync(join(cwd, "file.ts"), "export const value = 2;\n");
-				setKeybindings(KeybindingsManager.create());
-				initTheme("dark", true);
-				const chatContainer = new Container();
-				const editor = new Text("editor");
-				const editorContainer = new Container();
-				editorContainer.addChild(editor);
-				const footer = { setTransientUsage: vi.fn(), invalidate: vi.fn() };
-				// A review that opens no session reaches nothing on the TUI's host.
-				const newSession = vi.fn();
-				const context = Object.assign(Object.create(InteractiveMode.prototype), {
-					host: { conversationOf: newSession, openFor: newSession },
-					conversation: {
-						session: h.session,
-						services: { agentDir: h.tempDir },
-						work: h.session.work,
+				// The session database lives outside the workspace, so it is no part of the review snapshot.
+				const h = await createTuiHarness({
+					startup: { cwd },
+					globalSettings: {
+						theme: "dark",
+						quietStartup: true,
+						retry: { enabled: false },
+						compaction: { enabled: false },
+						lsp: { enabled: false },
 					},
-					ui: {
-						terminal: { rows: 24, columns: 120 },
-						requestRender: vi.fn(),
-						setFocus: vi.fn(),
-					} as unknown as TUI,
-					chatContainer,
-					editor,
-					editorContainer,
-					footer,
-					// The loader follows the review work's live progress; this test reads the transcript only.
-					workSource: { subscribe: () => () => undefined, items: () => [] },
-					pendingMessagesContainer: new Container(),
-					pendingTools: new Map(),
-					liveBackgroundJobTools: new Map(),
-					toolOutputExpanded: false,
-					updateEditorBorderColor: vi.fn(),
-					refreshPlanningUi: vi.fn(),
-					createInlineSessionRenderer: () => {
-						const transient = new Text("Transient review output");
-						chatContainer.addChild(transient);
-						return {
-							onSessionEvent: vi.fn(),
-							dispose: () => chatContainer.removeChild(transient),
-						};
-					},
-				}) as InteractiveMode;
-				await h.session.sessionWriter.appendCustomMessageEntry("test", "Original conversation", true);
-				context.renderInitialMessages();
-				h.setResponses([
+				});
+				cleanups.push(() => h.cleanup());
+				const session = h.startup.session;
+				const manager = session.sessionManager;
+				await session.sessionWriter.appendCustomMessageEntry("test", "Original conversation", true);
+				const tui = await h.startMode({ columns: 120, rows: 40 });
+				const access = tui.mode as unknown as {
+					chatContainer: Container;
+					editorContainer: Container;
+					editor: unknown;
+					footer: { setTransientUsage(usage: unknown): void };
+					runInteractiveReviewWorkflow(
+						target: { kind: "uncommitted" },
+						options: { tools: string[]; requireConfirmation: boolean; requireProjectTrust: boolean },
+					): Promise<ReviewWorkflowResult>;
+				};
+				const { chatContainer, editorContainer, editor } = access;
+				const setTransientUsage = vi.spyOn(access.footer, "setTransientUsage");
+				// A review that opens no session opens nothing on the TUI's host.
+				const open = vi.spyOn(h.host, "open");
+				h.faux.setResponses([
 					fauxAssistantMessage(
 						fauxToolCall("report_review_candidates", {
 							summary: "No candidates",
@@ -123,13 +101,7 @@ describe("#409 interactive terminal review accounting", () => {
 						});
 					},
 				]);
-				const run = Reflect.get(InteractiveMode.prototype, "runInteractiveReviewWorkflow") as (
-					this: InteractiveMode,
-					target: { kind: "uncommitted" },
-					options: { tools: string[]; requireConfirmation: boolean; requireProjectTrust: boolean },
-				) => Promise<ReviewWorkflowResult>;
-				await run.call(
-					context,
+				await access.runInteractiveReviewWorkflow(
 					{ kind: "uncommitted" },
 					{
 						tools: [],
@@ -143,19 +115,20 @@ describe("#409 interactive terminal review accounting", () => {
 				expect(record?.status, rendered).toBe(status);
 				expect(record?.usage?.summary.tokens?.input).toBeGreaterThanOrEqual(10);
 				// The review ran as the conversation's work and ended as its run did.
-				expect(h.session.work.get(record.runId)).toMatchObject({ kind: "review", outcome: status });
+				expect(session.work.get(record.runId)).toMatchObject({ kind: "review", outcome: status });
 				expect(
 					manager
 						.getEntries()
 						.some((entry) => entry.type === "custom" && entry.customType === "volt.review.usage"),
 				).toBe(false);
 				expect(h.faux.state.callCount).toBe(2);
-				expect(newSession).not.toHaveBeenCalled();
-				expect(footer.setTransientUsage.mock.calls.some(([value]) => value !== undefined)).toBe(true);
-				expect(footer.setTransientUsage).toHaveBeenLastCalledWith(undefined);
+				expect(open).not.toHaveBeenCalled();
+				expect(setTransientUsage.mock.calls.some(([value]) => value !== undefined)).toBe(true);
+				expect(setTransientUsage).toHaveBeenLastCalledWith(undefined);
 				expect(editorContainer.children).toEqual([editor]);
 				expect(rendered).toContain("Original conversation");
-				expect(rendered).not.toContain("Transient review output");
+				// The review's transient inline transcript left with it.
+				expect(rendered).not.toContain("Reviewing uncommitted changes");
 				expect(rendered.match(/Tokens: \d+ input/g)).toHaveLength(1);
 				expect(rendered).toContain(`Tokens: ${record.usage?.summary.tokens?.input} input`);
 				expect(rendered.match(/Model-priced estimate: \$/g)).toHaveLength(1);
@@ -171,7 +144,7 @@ describe("#409 interactive terminal review accounting", () => {
 						),
 				).toHaveLength(1);
 			} finally {
-				await h.cleanupAsync();
+				for (const cleanup of cleanups.splice(0)) await cleanup();
 				await rm(root, { recursive: true, force: true });
 			}
 		},
