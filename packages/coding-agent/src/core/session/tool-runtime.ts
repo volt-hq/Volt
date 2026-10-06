@@ -49,6 +49,7 @@ import {
 	type PlanningToolController,
 } from "../tools/planning.ts";
 import { createToolDefinitionFromAgentTool } from "../tools/tool-definition-wrapper.ts";
+import { userInputFromClients } from "../user-input.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
 import type { SessionExtensionServices } from "./extension-services.ts";
 import type { HostActions } from "./host-actions.ts";
@@ -99,7 +100,10 @@ export interface SessionToolRuntimeHost {
 	readonly lostSignal: AbortSignal;
 	/** The session, which the planning tools drive. */
 	readonly planningController: PlanningToolController;
-	/** The conversation's live state, where MCP authorization flows wait for the user. */
+	/**
+	 * The conversation's live state, where MCP authorization flows and the
+	 * request_user_input tool's questions wait for the user.
+	 */
 	readonly liveState: LiveState;
 	/** Runs host actions, such as LSP server installs, once a client approves them. */
 	readonly hostActions: HostActions;
@@ -163,6 +167,8 @@ export class SessionToolRuntime {
 	private requestedBuildToolNames: string[] = [];
 	private planningRuntimeInitialized = false;
 	private trustedHostToolNames: Set<string> = new Set();
+	/** Whether an attached client answered the request_user_input tool's questions when last checked. */
+	private userInputAnswered = false;
 
 	// Tool registry for extension getTools/setTools
 	private toolRegistry: Map<string, AgentTool> = new Map();
@@ -192,6 +198,15 @@ export class SessionToolRuntime {
 		this.mcpManager = options.mcpManager;
 		this.mcpManagerFactory = options.mcpManagerFactory;
 		this.mcpAuthRequests = new McpAuthRequests(host.liveState);
+		host.liveState.subscribeClients(() => this.liveClientsChanged());
+	}
+
+	/** request_user_input is offered only while an attached client answers its questions (`user_input`). */
+	private liveClientsChanged(): void {
+		const answered = this.host.liveState.accepts("user_input");
+		if (answered === this.userInputAnswered) return;
+		this.userInputAnswered = answered;
+		this.syncPlanningRuntime();
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -375,10 +390,8 @@ export class SessionToolRuntime {
 
 	private isToolAvailableToCurrentModel(name: string): boolean {
 		if (name === "request_user_input" && this.toolDefinitions.get(name)?.sourceInfo.source === "builtin") {
-			// Offered while a client that asks its questions is attached, whatever mode the session was bound in.
-			return (
-				this.host.extensions().uiContext !== undefined && this.subagentToolManager?.isSubagentRuntime?.() !== true
-			);
+			// Offered while an attached client answers its questions, whatever mode the session was bound in.
+			return this.host.liveState.accepts("user_input") && this.subagentToolManager?.isSubagentRuntime?.() !== true;
 		}
 		return name !== "image_gen" || isCodexImageGenerationModel(this.host.model());
 	}
@@ -811,7 +824,9 @@ export class SessionToolRuntime {
 					]),
 				)
 			: createAllToolDefinitions(this.host.cwd, {
-					requestUserInput: { ask: (request, signal) => this.host.extensions().askUserInput(request, signal) },
+					requestUserInput: {
+						ask: (request, signal) => userInputFromClients(this.host.liveState, request, signal),
+					},
 					jobs: { jobs: this.host.jobs().runtime },
 					read: { autoResizeImages },
 					bash: { commandPrefix: shellCommandPrefix, shellPath },

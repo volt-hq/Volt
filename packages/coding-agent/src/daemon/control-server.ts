@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, rmSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import {
@@ -108,6 +109,14 @@ export function retainControlConnectionResource(connection: ControlConnection, r
 
 let controlConnectionSequence = 0;
 
+/** Compare a presented token with the expected one in constant time. */
+function tokenMatches(presented: string | undefined, expected: string): boolean {
+	if (presented === undefined) return false;
+	const actual = Buffer.from(presented, "utf8");
+	const wanted = Buffer.from(expected, "utf8");
+	return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
 	const { socketPath, version, authToken, handlers } = options;
 	const connections = new Map<string, ControlConnectionImpl>();
@@ -170,6 +179,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		const decoder = new ControlLineDecoder();
 		let established: ControlConnectionImpl | undefined;
 		let handedOffToRelay = false;
+		/** A hello was refused: nothing more is read from the socket. */
+		let refused = false;
 
 		const fatal = (error: string) => {
 			try {
@@ -207,7 +218,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				socket.end(encodeControlLine(ack));
 				return false;
 			}
-			if (hello.role === "control" && authToken !== undefined && hello.controlToken !== authToken) {
+			if (hello.role === "control" && authToken !== undefined && !tokenMatches(hello.controlToken, authToken)) {
 				const ack: HelloAck = {
 					type: "hello_ack",
 					ok: false,
@@ -279,7 +290,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		const handleMessage = (message: unknown): void => {
 			const connection = established;
 			if (!connection) {
-				handleHello(message);
+				// One hello per connection: a refused one ends it.
+				if (!refused && !handleHello(message) && !handedOffToRelay) refused = true;
 				return;
 			}
 			if (!admitControlRequest(message)) {
@@ -344,7 +356,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				// any trailing bytes must stay undecoded (they are raw relay payload).
 				decoder.pushEach(chunk, (message) => {
 					handleMessage(message);
-					return handedOffToRelay ? "stop" : "continue";
+					return handedOffToRelay || refused ? "stop" : "continue";
 				});
 			} catch {
 				fatal("frame_too_large");

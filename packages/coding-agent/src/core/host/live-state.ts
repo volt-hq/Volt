@@ -6,14 +6,15 @@
  * work progress) persist until the host clears, replaces, or patches them: a
  * patch changes a panel's node or a work item's detail in place, and a client
  * that attaches later receives the patched value.
- * Notices and editor directives reach the clients attached when they are
- * raised and are not kept; a directive given for one host client reaches
- * only that client's views. A client attached with `attach` first receives the
- * current values as a reset, then every change in order; detaching it, or
- * closing the live state, delivers an empty reset.
+ * Notices and directives (editor text, a theme) reach the clients attached
+ * when they are raised and are not kept; a directive given for one host
+ * client reaches only that client's views. A client attached with `attach`
+ * first receives the current values as a reset, then every change in order;
+ * detaching it, or closing the live state, delivers an empty reset.
  *
- * Host requests (dialogs, forms, approvals, MCP authorization) are keyed
- * values `host_request/<requestId>` until they end. A request reaches only the
+ * Host requests (dialogs, forms, approvals, MCP authorization, the
+ * request_user_input tool's questions) are keyed values
+ * `host_request/<requestId>` until they end. A request reaches only the
  * attached clients that accept its kind (and, for a request asked of one host
  * client, only that client's views), and only such a client may answer it:
  * the first valid answer wins. A provider sign-in and a secret input are
@@ -660,6 +661,19 @@ function isFormAnswer(
 	return fields.every((field) => field.kind === "boolean" || !field.required || Object.hasOwn(values, field.id));
 }
 
+/** Whether a user_input answer answers every question by its id, or, skipped, none. */
+function isUserInputAnswer(
+	request: Extract<HostRequest, { kind: "user_input" }>,
+	response: Extract<HostResponse, { status: string }>,
+): boolean {
+	const answered = Object.keys(response.answers);
+	if (response.status === "skipped") return answered.length === 0;
+	return (
+		answered.length === request.questions.length &&
+		request.questions.every((question) => Object.hasOwn(response.answers, question.id))
+	);
+}
+
 /** Whether `response` answers `request`: a cancellation, or an answer of the request's shape. */
 function answers(request: HostRequest, response: HostResponse): boolean {
 	if (!isHostResponse(response)) return false;
@@ -685,6 +699,8 @@ function answers(request: HostRequest, response: HostResponse): boolean {
 		case "provider_auth":
 			// A sign-in completes on the host; only a manual one takes the pasted redirect URL or code.
 			return request.flow === "manual" && "value" in response;
+		case "user_input":
+			return "status" in response && isUserInputAnswer(request, response);
 	}
 }
 
@@ -730,6 +746,8 @@ export class LiveState {
 	private nextSeq = 0;
 	private delivering = false;
 	private closed = false;
+	/** Called after a client attaches or detaches. */
+	private readonly clientListeners = new Set<() => void>();
 
 	constructor(options: LiveStateOptions = {}) {
 		this.head = options.head ?? (() => 0);
@@ -773,12 +791,37 @@ export class LiveState {
 		}
 		items.push(...liveStreamingItems(this.fold));
 		this.deliver(attached, { reset: true, basedOn: this.readHead(), items });
+		this.clientsChanged();
 		return () => {
 			if (this.clients.get(clientId) !== attached) return;
 			this.clients.delete(clientId);
 			this.deliver(attached, { reset: true, basedOn: this.readHead(), items: [] });
 			this.endOrphanedRequests();
+			this.clientsChanged();
 		};
+	}
+
+	/**
+	 * Call `listener` after a client attaches or detaches, until the returned
+	 * function is called or the live state closes: what the attached clients
+	 * accept (`accepts`) may have changed.
+	 */
+	subscribeClients(listener: () => void): () => void {
+		if (this.closed) return () => {};
+		this.clientListeners.add(listener);
+		return () => {
+			this.clientListeners.delete(listener);
+		};
+	}
+
+	private clientsChanged(): void {
+		for (const listener of [...this.clientListeners]) {
+			try {
+				listener();
+			} catch {
+				// A listener's failure never reaches the client that attached or left.
+			}
+		}
 	}
 
 	/** End the requests asked of a host client none of whose views is attached any more: nobody can answer them. */
@@ -866,6 +909,16 @@ export class LiveState {
 	insertEditorText(text: string, options: { readonly client?: string } = {}): void {
 		if (this.closed) return;
 		this.publish([{ type: "directive", directive: "insert_editor_text", text }], options.client);
+	}
+
+	/**
+	 * Ask the attached interactive clients to show the theme `name`; with
+	 * `client`, only the views of that host client. A client keeps a theme its
+	 * user picked.
+	 */
+	setTheme(name: string, options: { readonly client?: string } = {}): void {
+		if (this.closed) return;
+		this.publish([{ type: "directive", directive: "set_theme", name }], options.client);
 	}
 
 	/** Publish streaming items: the streaming assistant message and tool progress. */
@@ -977,6 +1030,7 @@ export class LiveState {
 		if (this.closed) return;
 		for (const entry of [...this.pending.values()]) this.settle(entry, { status: "cancelled", reason: "closed" });
 		this.closed = true;
+		this.clientListeners.clear();
 		this.fold = emptyLiveFold(this.fold.basedOn);
 		const clients = [...this.clients.values()];
 		this.clients.clear();

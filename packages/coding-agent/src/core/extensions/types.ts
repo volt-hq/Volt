@@ -226,12 +226,13 @@ export interface ExtensionUIContext {
 	/** Show a multi-line editor for text editing. */
 	editor(title: string, prefill?: string): Promise<string | undefined>;
 
-	/** Get all available themes with their names and file paths. */
+	/** The host's themes (built-in, the user's, and the ones the conversation loaded), with their file paths. */
 	getAllThemes(): { name: string; path: string | undefined }[];
 
 	/**
-	 * Switch the terminal client to the theme `name` and save it as the user's
-	 * theme; fails without a terminal client.
+	 * Ask the attached local clients to show the theme `name` (a `set_theme`
+	 * directive); not saved as the user's theme, and a client whose user
+	 * picked a theme keeps it. Fails for a theme the host does not know.
 	 */
 	setTheme(name: string): { success: boolean; error?: string };
 }

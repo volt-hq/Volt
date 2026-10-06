@@ -3,9 +3,9 @@
  * clears, or that a reset no longer carries, detached; panels follow their
  * values and, patched, show as the client's live fold holds them; notices
  * reach the TUI with their source and detail, the host's own included; an
- * `editor_text` request is answered at once with the editor's text; a
- * provider sign-in shows beside the queue, so the prompts its login asks
- * show while it waits.
+ * `editor_text` request is answered at once with the editor's text; editor
+ * and theme directives reach the TUI; a provider sign-in shows beside the
+ * queue, so the prompts its login asks show while it waits.
  */
 
 import {
@@ -30,6 +30,7 @@ function createHost(overrides: Partial<LiveViewHost> = {}): LiveViewHost {
 		notify: () => {},
 		setEditorText: () => {},
 		insertEditorText: () => {},
+		setTheme: () => {},
 		editorText: () => undefined,
 		workDetached: () => {},
 		liveValue: () => undefined,
@@ -138,7 +139,7 @@ describe("TUI live view", () => {
 				insertEditorText: (value) => inserted.push(value),
 			}),
 		);
-		expect(TUI_HOST_REQUESTS).toEqual(expect.arrayContaining(["editor_text", "form", "dialog"]));
+		expect(TUI_HOST_REQUESTS).toEqual(expect.arrayContaining(["editor_text", "form", "dialog", "user_input"]));
 		const ask = (requestId: string): LiveItem => ({
 			type: "set",
 			key: `host_request/${requestId}`,
@@ -154,6 +155,26 @@ describe("TUI live view", () => {
 		]);
 		expect(shown).toEqual([]);
 		expect(inserted).toEqual(["pasted"]);
+	});
+
+	it("passes editor and theme directives to the TUI", () => {
+		const calls: string[] = [];
+		const view = new TuiLiveView(
+			createHost({
+				setEditorText: (text) => calls.push(`set:${text}`),
+				insertEditorText: (text) => calls.push(`insert:${text}`),
+				setTheme: (name) => calls.push(`theme:${name}`),
+			}),
+		);
+		view.apply({
+			reset: false,
+			items: [
+				{ type: "directive", directive: "set_editor_text", text: "draft" },
+				{ type: "directive", directive: "set_theme", name: "light" },
+				{ type: "directive", directive: "insert_editor_text", text: "pasted" },
+			],
+		});
+		expect(calls).toEqual(["set:draft", "theme:light", "insert:pasted"]);
 	});
 
 	it("shows a provider sign-in beside the queue until it is answered or ends", async () => {

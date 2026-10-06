@@ -142,7 +142,6 @@ export class InProcessConnector implements ConversationConnector {
 				this.stopServing();
 				options.onLost?.(error);
 			},
-			...(options.terminal === undefined ? {} : { terminal: options.terminal }),
 		});
 		this.shown = conversation;
 		const workspaceName = this.daemonWorkspaceName();

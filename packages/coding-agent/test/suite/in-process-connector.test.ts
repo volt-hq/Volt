@@ -239,7 +239,9 @@ describe("InProcessConnector", () => {
 		const client = await harness.connect({
 			onFrame: (frame) => {
 				if (frame.type !== "live") return;
-				for (const item of frame.items) if (item.type === "directive") editorTexts.push(item.text);
+				for (const item of frame.items) {
+					if (item.type === "directive" && item.directive !== "set_theme") editorTexts.push(item.text);
+				}
 			},
 		});
 		await client.promptAndWait("first question");

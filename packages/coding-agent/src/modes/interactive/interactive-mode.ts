@@ -77,11 +77,7 @@ import {
 } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
-import {
-	type ConnectorOpenOptions,
-	type ConversationConnector,
-	connectThrough,
-} from "../../client/conversation-connector.ts";
+import { type ConversationConnector, connectThrough } from "../../client/conversation-connector.ts";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -217,7 +213,6 @@ function isAsciiOnlyTerminal(): boolean {
 import {
 	detectTerminalBackgroundTheme,
 	getAvailableThemes,
-	getAvailableThemesWithPaths,
 	getCurrentThemeName,
 	getEditorTheme,
 	getMarkdownTheme,
@@ -645,8 +640,14 @@ export class InteractiveMode {
 
 	/** The conversation the TUI shows lost its log, and the TUI is exiting. */
 	private endingLostSession = false;
-	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
+	/**
+	 * Set once the user explicitly picks a theme this session; daemon
+	 * theme_snapshot broadcasts and extensions' `set_theme` directives then
+	 * stop applying (local explicit choice wins).
+	 */
 	private localThemeOverride = false;
+	/** The theme an extension last asked the TUI to show (`set_theme`), shown unless the user picked one here. */
+	private extensionTheme: string | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation: { warnedAt: number; activity: string } | undefined;
 
@@ -1161,7 +1162,6 @@ export class InteractiveMode {
 			onLost: (error) => {
 				this.lostCause = error;
 			},
-			terminal: this.terminalSurface(),
 		});
 		const client = this.store.client;
 		const [, resources, scope, models] = await Promise.all([
@@ -1847,30 +1847,6 @@ export class InteractiveMode {
 		}
 	}
 
-	/**
-	 * What the TUI's terminal offers each conversation's extensions beyond the
-	 * protocol: its themes, and the dialog that asks the request_user_input
-	 * tool's questions.
-	 */
-	private terminalSurface(): NonNullable<ConnectorOpenOptions["terminal"]> {
-		return {
-			themes: {
-				getAllThemes: () => getAvailableThemesWithPaths(),
-				setTheme: (name) => {
-					const result = setTheme(name, true);
-					if (result.success) {
-						if (this.settingsManager.getTheme() !== name) this.settingsManager.setTheme(name);
-						this.localThemeOverride = true;
-						this.ui.requestRender();
-					}
-					return result;
-				},
-			},
-			userInput: (request, signal) =>
-				promptUserInput((create) => this.mountUserInputDialog(create), request, signal),
-		};
-	}
-
 	/** An extension asked to shut down: at once when the conversation is idle, else once it settles. */
 	private onShutdownRequested(): void {
 		this.shutdownRequested = true;
@@ -1905,13 +1881,29 @@ export class InteractiveMode {
 		setRegisteredThemes(themes);
 	}
 
-	/** Apply the theme the TUI's settings name once it is registered, when another shows. */
+	/**
+	 * Apply the theme the TUI shows, when another shows: the one an extension
+	 * last asked for once the TUI has it, unless the user picked one here,
+	 * else the one its settings name once it is registered.
+	 */
 	private applyConfiguredTheme(): void {
-		const themeName = this.settingsManager.getTheme();
+		const requested = this.localThemeOverride ? undefined : this.extensionTheme;
+		const themeName =
+			requested !== undefined && getAvailableThemes().includes(requested)
+				? requested
+				: this.settingsManager.getTheme();
 		if (themeName === undefined || getCurrentThemeName() === themeName) return;
 		if (!setTheme(themeName, true).success) return;
 		this.ui.invalidate();
 		this.updateEditorBorderColor();
+	}
+
+	/** An extension asked the TUI to show a theme (`set_theme`): shown unless the user picked one here. */
+	private applyExtensionTheme(themeName: string): void {
+		this.extensionTheme = themeName;
+		if (this.localThemeOverride) return;
+		this.applyConfiguredTheme();
+		this.ui.requestRender();
 	}
 
 	/**
@@ -2549,6 +2541,7 @@ export class InteractiveMode {
 			},
 			notify: (level, message, source, detail) => this.showNotice(level, message, source, detail),
 			setEditorText: (text) => this.editor.setText(text),
+			setTheme: (themeName) => this.applyExtensionTheme(themeName),
 			// Pasted as one bracketed paste: text that ended the paste could type keys into the editor.
 			insertEditorText: (text) => this.editor.handleInput(`\x1b[200~${stripTerminalControls(text)}\x1b[201~`),
 			editorText: () => this.editor.getExpandedText?.() ?? this.editor.getText(),
@@ -2620,6 +2613,18 @@ export class InteractiveMode {
 			case "form":
 			case "dialog":
 				return this.showHostRequestDialog(request, options);
+			case "user_input": {
+				// The request_user_input tool's questions, in the conversation with keyboard focus.
+				const response = await promptUserInput(
+					(create) => this.mountUserInputDialog(create),
+					{ questions: request.questions },
+					signal,
+				);
+				if (signal.aborted) return undefined;
+				return response.status === "answered" || response.status === "skipped"
+					? { status: response.status, answers: response.answers }
+					: { cancelled: true };
+			}
 			default:
 				// MCP authorization is not shown in the TUI; a provider sign-in shows beside the queue
 				// (showProviderAuth), and the editor answers `editor_text` at once.

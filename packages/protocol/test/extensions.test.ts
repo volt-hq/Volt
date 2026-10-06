@@ -8,7 +8,14 @@ import {
 	RESERVED_EXTENSION_IDS,
 } from "../src/extensions.ts";
 import { ClientFrameSchema, HostFrameSchema } from "../src/frames.ts";
-import { HOST_REQUEST_KINDS, HostRequestSchema, LiveItemSchema, LiveKeySchema, LiveValueSchema } from "../src/live.ts";
+import {
+	HOST_REQUEST_KINDS,
+	HostRequestSchema,
+	HostResponseSchema,
+	LiveItemSchema,
+	LiveKeySchema,
+	LiveValueSchema,
+} from "../src/live.ts";
 import { MessagePresentationSchema, ToolPresentationSchema } from "../src/presentation.ts";
 import { EDITOR_COMPLETIONS_MAX_ITEMS, QUERY_SCHEMAS } from "../src/queries.ts";
 
@@ -303,9 +310,33 @@ describe("host requests", () => {
 		expect(Check(HostRequestSchema, { kind: "editor_text" })).toBe(true);
 	});
 
+	it("ask the request_user_input tool's questions, answered by question id or skipped", () => {
+		const question = {
+			id: "scope",
+			header: "Scope",
+			question: "Which clients?",
+			options: [
+				{ label: "CLI first (Recommended)", description: "Keep it focused." },
+				{ label: "All clients", description: "Include phones." },
+			],
+		};
+		expect(request({ kind: "user_input", questions: [question] })).toBe(true);
+		expect(request({ kind: "user_input", questions: [] })).toBe(false);
+		expect(request({ kind: "user_input", questions: [{ ...question, id: "Scope" }] })).toBe(false);
+		expect(request({ kind: "user_input", questions: [{ ...question, options: [question.options[0]] }] })).toBe(false);
+		expect(request({ kind: "user_input", questions: [{ ...question, question: "Which\nclients?" }] })).toBe(false);
+		expect(Check(HostResponseSchema, { status: "answered", answers: { scope: { answers: ["All clients"] } } })).toBe(
+			true,
+		);
+		expect(Check(HostResponseSchema, { status: "skipped", answers: {} })).toBe(true);
+		expect(Check(HostResponseSchema, { status: "cancelled", answers: {} })).toBe(false);
+		expect(Check(HostResponseSchema, { status: "answered", answers: { scope: { answers: [] } } })).toBe(false);
+	});
+
 	it("are kinds a client may accept", () => {
 		expect(HOST_REQUEST_KINDS).toContain("dialog");
 		expect(HOST_REQUEST_KINDS).toContain("editor_text");
+		expect(HOST_REQUEST_KINDS).toContain("user_input");
 		const hello = {
 			type: "hello",
 			protocol: 1,

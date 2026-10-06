@@ -153,9 +153,12 @@ describe("host frames", () => {
 					{ type: "notice", level: "info", message: [{ text: "done", token: "success" }], source: "ci" },
 					{ type: "directive", directive: "set_editor_text", text: "draft" },
 					{ type: "directive", directive: "insert_editor_text", text: "pasted" },
+					{ type: "directive", directive: "set_theme", name: "light" },
 				],
 			}),
 		).toBe(true);
+		expect(host({ ...live, items: [{ type: "directive", directive: "set_theme", text: "light" }] })).toBe(false);
+		expect(host({ ...live, items: [{ type: "directive", directive: "set_editor_text", name: "x" }] })).toBe(false);
 		expect(host({ ...live, seq: 0, items: [] })).toBe(false);
 		expect(host({ ...live, items: [{ type: "clear", key: "phase/extra" }] })).toBe(false);
 		expect(host({ ...live, items: [{ type: "clear", key: "host_request/" }] })).toBe(false);

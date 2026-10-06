@@ -331,6 +331,8 @@ async function main() {
 				return;
 			}
 			case "directive":
+				// A terminal theme is the TUI's to show.
+				if (item.directive === "set_theme") return;
 				// set_editor_text replaces the line being typed (Ctrl+E, Ctrl+U), insert_editor_text types at the cursor
 				if (item.directive === "set_editor_text") {
 					rl.write(null, { ctrl: true, name: "e" });

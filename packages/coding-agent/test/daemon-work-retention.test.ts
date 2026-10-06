@@ -30,10 +30,11 @@ async function liveWorker() {
 		},
 		currentGeneration: () => 1,
 		detachedRuntimeTtlMs: () => TTL_MS,
+		sessionInWorkspace: async () => true,
 		audit: () => {},
 	});
 	let requestId = 0;
-	const send = (request: Record<string, unknown>): ControlResponse =>
+	const send = (request: Record<string, unknown>): Promise<ControlResponse> =>
 		registry.handleWorkerRequest("c-1", { ...request, id: `${++requestId}` } as Parameters<
 			WorkerRegistry["handleWorkerRequest"]
 		>[1]);
@@ -76,7 +77,7 @@ async function liveWorker() {
 		),
 	).toBe(true);
 	await vi.waitFor(() => expect(events.some((event) => event.type === "worker_spawn")).toBe(true));
-	expect(send({ type: "worker_ready", sessionIds: [SESSION_ID] })).toMatchObject({ type: "ok" });
+	expect(await send({ type: "worker_ready", sessionIds: [SESSION_ID] })).toMatchObject({ type: "ok" });
 	const detach = await opened;
 	const stops = () =>
 		events.filter((event): event is Extract<ControlEvent, { type: "worker_stop" }> => event.type === "worker_stop");
@@ -88,27 +89,27 @@ describe("daemon running work retention", () => {
 		"retains a detached worker while its conversation is active, then for the full TTL (active at detach: %s)",
 		async (activeAtDetach) => {
 			const { registry, send, detach, stops, exit } = await liveWorker();
-			if (activeAtDetach) send({ type: "worker_activity", active: true });
+			if (activeAtDetach) await send({ type: "worker_activity", active: true });
 			vi.useFakeTimers();
 			detach();
 			if (!activeAtDetach) {
 				// The TTL started at detach; the conversation turning active cancels it.
 				await vi.advanceTimersByTimeAsync(TTL_MS / 2);
-				send({ type: "worker_activity", active: true });
+				await send({ type: "worker_activity", active: true });
 			}
 			await vi.advanceTimersByTimeAsync(5 * TTL_MS);
 			expect(stops()).toEqual([]);
 			expect(registry.list()).toMatchObject([{ state: "live", sessionIds: [SESSION_ID] }]);
 
 			// Idle again: the full TTL runs from now, not what was left of it.
-			send({ type: "worker_activity", active: false });
+			await send({ type: "worker_activity", active: false });
 			await vi.advanceTimersByTimeAsync(TTL_MS - 1);
 			expect(stops()).toEqual([]);
 			await vi.advanceTimersByTimeAsync(1);
 			expect(stops()).toMatchObject([{ reason: "retention", force: false }]);
 			expect(registry.list()[0]?.state).toBe("retiring");
 
-			send({ type: "worker_stop_result", stopId: stops()[0]!.stopId, outcome: "stopped" });
+			await send({ type: "worker_stop_result", stopId: stops()[0]!.stopId, outcome: "stopped" });
 			exit({ reason: "stopped" });
 			await vi.waitFor(() => expect(registry.size).toBe(0));
 		},

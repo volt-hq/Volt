@@ -87,7 +87,7 @@ The TUI is a protocol client of the host that runs its conversations ([architect
 - `components/` and `ui-node/`: terminal components, and the mapping of `UiNode` data to them.
 - `interactive-mode.ts`: the TUI itself, built from a `ConversationConnector` and its options only. What only the terminal has stays local: display settings (its own `SettingsManager`, read where `conversation_info` says the conversation runs), keybindings, themes, the clipboard, `$EDITOR`, `/trust`, and the daemon's control plane (`/remote`, `/worktree`).
 
-The in-process extension surface (`ConnectorOpenOptions.terminal`: the terminal's themes and the `request_user_input` dialog) is the one remaining path from extensions into the TUI's process; Phase 7 replaces it with a host request kind and a `set_theme` directive.
+Extensions reach the TUI only through the protocol: the `request_user_input` tool's questions are `user_input` host requests the TUI answers in its question dialog, and `ctx.ui.setTheme` is a `set_theme` directive the TUI applies unless its user picked a theme in it.
 
 TUI tests use [`test/suite/tui-harness.ts`](../test/suite/tui-harness.ts): an `InProcessConnector` (a `LeasedConnector` with a daemon link) over the faux-provider host harness (`test/suite/host-harness.ts`), the TUI's client connected through it, and InteractiveMode rendering into a `VirtualTerminal` (`startMode()`, `submit()`, `waitForScreen()`, `choose()`). Daemon behavior runs against a scripted link (`createScriptedDaemonLink()`) that records lease calls and offers relayed phones (`relayPreamble()`, `connectRelayedPhone()`).
 

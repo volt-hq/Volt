@@ -703,7 +703,7 @@ export {
 	type WorkspaceSessionSummary,
 } from "./core/sdk.ts";
 export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
-export type { ExtensionClient, ExtensionClientThemes } from "./core/session/extension-binding.ts";
+export type { ExtensionClient } from "./core/session/extension-binding.ts";
 export type { HostActionOutcome, HostActionRequest, HostActions } from "./core/session/host-actions.ts";
 export {
 	assertCurrentSessionSnapshot,

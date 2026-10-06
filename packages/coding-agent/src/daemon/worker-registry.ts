@@ -45,6 +45,12 @@ import type { LaunchedWorker, WorkerExit, WorkerLauncher } from "./worker-launch
 /** How long a forced stop may take before the daemon stops waiting for the worker: its 60 s turn cap, and margin. */
 export const WORKER_FORCED_STOP_TIMEOUT_MS = 75_000;
 
+/** How long a spawned worker may take to open its primary (a replacement retries a held lock for 75 s). */
+export const WORKER_READY_TIMEOUT_MS = 90_000;
+
+/** The conversations one worker may host at most: its primary and its claims. */
+export const MAX_WORKER_HOSTED_SESSIONS = 256;
+
 export type WorkerState = "starting" | "live" | "retiring";
 
 /** The registry key of an open. */
@@ -108,6 +114,8 @@ export interface WorkerRegistryOptions {
 	currentGeneration(workspaceName: string): number | undefined;
 	/** `remote.detachedRuntimeTtlMs`, read whenever a detached idle worker arms its timer. */
 	detachedRuntimeTtlMs(): number;
+	/** Whether `sessionId` is a stored session of `workspaceName`: a worker claims only its own workspace's sessions. */
+	sessionInWorkspace(workspaceName: string, sessionId: string): Promise<boolean>;
 	audit(event: WorkerRegistryAuditEvent): void;
 	log?(level: "info" | "warn" | "error", message: string, details?: Record<string, unknown>): void;
 }
@@ -150,6 +158,11 @@ interface WorkerRecord {
 	readonly ready: PromiseWithResolvers<void>;
 	readonly exited: PromiseWithResolvers<WorkerExit>;
 	readonly idle: Set<() => void>;
+	/** Settles at the worker's next state change (a refused stop, its exit); replaced after each. */
+	changed: PromiseWithResolvers<void>;
+	/** Claims refused once, audited once. */
+	readonly refusedClaims: Set<string>;
+	readyTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 function errorMessage(error: unknown): string {
@@ -229,19 +242,42 @@ export class WorkerRegistry {
 					this.updateRetention(host);
 				}
 			}
-			if (host.state === "starting" && host.workspaceGeneration === key.workspaceGeneration) {
-				host.routing++;
-				try {
-					await host.ready.promise;
-				} finally {
-					host.routing--;
-					this.updateRetention(host);
-				}
-				continue;
+			// Starting: wait for that same spawn. Retiring, or of a fenced generation: a replacement
+			// opens once it exited, unless it refused the stop and serves again. Either way the
+			// waiting open keeps it from being retired meanwhile.
+			const starting = host.state === "starting" && host.workspaceGeneration === key.workspaceGeneration;
+			host.routing++;
+			try {
+				await this.waitFor(starting ? host.ready.promise : host.changed.promise, options.signal);
+			} finally {
+				host.routing--;
+				this.updateRetention(host);
 			}
-			// Retiring, or of a fenced generation: a replacement opens once it exited.
-			await host.exited.promise;
 		}
+	}
+
+	/** Wait for `until`, or until `signal` aborts. */
+	private async waitFor(until: Promise<unknown>, signal: AbortSignal | undefined): Promise<void> {
+		if (!signal) {
+			await until;
+			return;
+		}
+		signal.throwIfAborted();
+		const aborted = Promise.withResolvers<never>();
+		const onAbort = () => aborted.reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			await Promise.race([until, aborted.promise]);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+		}
+	}
+
+	/** Wake the opens waiting on `record`'s state. */
+	private notifyChanged(record: WorkerRecord): void {
+		const changed = record.changed;
+		record.changed = Promise.withResolvers<void>();
+		changed.resolve();
 	}
 
 	/** Register a starting worker for `key` synchronously, so concurrent opens of the session wait for it. */
@@ -269,6 +305,9 @@ export class WorkerRegistry {
 			ready: Promise.withResolvers<void>(),
 			exited: Promise.withResolvers<WorkerExit>(),
 			idle: new Set(),
+			changed: Promise.withResolvers<void>(),
+			refusedClaims: new Set(),
+			readyTimer: undefined,
 		};
 		void record.ready.promise.catch(() => undefined);
 		this.workers.set(record.workerId, record);
@@ -328,6 +367,11 @@ export class WorkerRegistry {
 			throw error;
 		}
 		record.launched = launched;
+		// A worker that never reports ready (a lock it cannot take) is retired.
+		record.readyTimer = setTimeout(() => {
+			if (record.state === "starting") void this.retire(record, "authority");
+		}, WORKER_READY_TIMEOUT_MS);
+		record.readyTimer.unref?.();
 		void launched.exited.then(
 			(exit) => this.finish(record, exit),
 			(error: unknown) => this.finish(record, { reason: "crashed", error: errorMessage(error) }),
@@ -355,6 +399,10 @@ export class WorkerRegistry {
 			connectionId,
 			spec,
 			attach: (kind) => {
+				// Offers go only to a live worker (the model's NoOfferToRetiring).
+				if (this.workers.get(record.workerId) !== record || record.state !== "live" || record.forced) {
+					throw new WorkerOpenError("The worker is retiring; retry", "duplicate_conversation_connection");
+				}
 				const id = ++attachmentSequence;
 				record.attachments.set(id, kind);
 				this.updateRetention(record);
@@ -403,7 +451,7 @@ export class WorkerRegistry {
 	 * Answer one request of a worker connection. Every request acts only on
 	 * the worker the connection was admitted for.
 	 */
-	handleWorkerRequest(
+	async handleWorkerRequest(
 		connectionId: string,
 		request: Extract<
 			ControlRequest,
@@ -417,7 +465,7 @@ export class WorkerRegistry {
 					| "worker_stop_result";
 			}
 		>,
-	): ControlResponse {
+	): Promise<ControlResponse> {
 		const ok: ControlResponse = { type: "ok", id: request.id };
 		const refuse = (code: string, message: string): ControlResponse => ({
 			type: "error",
@@ -434,6 +482,7 @@ export class WorkerRegistry {
 					return refuse("invalid_sessions", "the worker reported conversations it was not spawned for");
 				}
 				record.state = "live";
+				clearTimeout(record.readyTimer);
 				this.options.audit({
 					type: "worker_ready",
 					workspace: record.workspaceName,
@@ -459,19 +508,32 @@ export class WorkerRegistry {
 				return ok;
 			}
 			case "worker_hosts": {
-				const refused = this.claim(record, request.sessionId, request.kind, request.parentSessionId);
-				this.options.audit({
-					type: "worker_hosts",
-					workspace: record.workspaceName,
-					success: refused === undefined,
-					...(refused === undefined ? {} : { error: refused.code }),
-					details: {
-						workerId: record.workerId,
-						sessionId: request.sessionId,
-						kind: request.kind,
-						...(request.parentSessionId === undefined ? {} : { parentSessionId: request.parentSessionId }),
-					},
-				});
+				if (record.hosts.has(request.sessionId)) return ok;
+				// A worker claims only its own workspace's stored sessions.
+				const owned = await this.options
+					.sessionInWorkspace(record.workspaceName, request.sessionId)
+					.catch(() => false);
+				const refused = owned
+					? this.claim(record, request.sessionId, request.kind, request.parentSessionId)
+					: { code: "not_found", message: "no such session in the worker's workspace" };
+				const repeated = refused !== undefined && record.refusedClaims.has(request.sessionId);
+				if (refused !== undefined && record.refusedClaims.size < MAX_WORKER_HOSTED_SESSIONS) {
+					record.refusedClaims.add(request.sessionId);
+				}
+				if (!repeated) {
+					this.options.audit({
+						type: "worker_hosts",
+						workspace: record.workspaceName,
+						success: refused === undefined,
+						...(refused === undefined ? {} : { error: refused.code }),
+						details: {
+							workerId: record.workerId,
+							sessionId: request.sessionId,
+							kind: request.kind,
+							parentSessionId: request.parentSessionId,
+						},
+					});
+				}
 				return refused === undefined ? ok : refuse(refused.code, refused.message);
 			}
 			case "worker_released": {
@@ -490,6 +552,7 @@ export class WorkerRegistry {
 					// It turned active, such as a job's wake: back to live; the TTL waits for idle again.
 					record.state = "live";
 					record.active = true;
+					this.notifyChanged(record);
 					this.options.audit({
 						type: "worker_stop",
 						workspace: record.workspaceName,
@@ -514,7 +577,7 @@ export class WorkerRegistry {
 		record: WorkerRecord,
 		sessionId: string,
 		kind: WorkerHostKind,
-		parentSessionId: string | undefined,
+		parentSessionId: string,
 	): { code: string; message: string } | undefined {
 		if (record.state !== "live" || record.forced || record.connectionId === undefined) {
 			return { code: "not_live", message: "the worker is not live" };
@@ -525,12 +588,15 @@ export class WorkerRegistry {
 		) {
 			return { code: "fenced", message: "the workspace authority changed" };
 		}
-		if (parentSessionId !== undefined && !record.hosts.has(parentSessionId)) {
+		if (!record.hosts.has(parentSessionId)) {
 			return { code: "not_hosted", message: "the worker does not host the parent conversation" };
 		}
 		if (record.hosts.has(sessionId)) return undefined;
 		if (this.hostOf(sessionId)) return { code: "claimed", message: "another worker hosts that conversation" };
-		record.hosts.set(sessionId, { kind, ...(parentSessionId === undefined ? {} : { parentSessionId }) });
+		if (record.hosts.size >= MAX_WORKER_HOSTED_SESSIONS) {
+			return { code: "too_many", message: "the worker hosts too many conversations" };
+		}
+		record.hosts.set(sessionId, { kind, parentSessionId });
 		this.hostsChanged(record.workspaceName, sessionId, true);
 		return undefined;
 	}
@@ -767,6 +833,7 @@ export class WorkerRegistry {
 		if (this.workers.get(record.workerId) !== record) return;
 		if (record.retention !== undefined) clearTimeout(record.retention);
 		record.retention = undefined;
+		clearTimeout(record.readyTimer);
 		this.workers.delete(record.workerId);
 		if (record.state === "starting") {
 			record.ready.reject(
@@ -790,6 +857,7 @@ export class WorkerRegistry {
 		record.hosts.clear();
 		for (const sessionId of hosted) this.hostsChanged(record.workspaceName, sessionId, false);
 		record.exited.resolve(exit);
+		this.notifyChanged(record);
 		for (const listener of [...this.exitListeners]) listener(record.workerId, exit);
 	}
 

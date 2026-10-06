@@ -315,7 +315,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			acceptsHostRequest: (kind) => kind === "input" || kind === "editor_text",
 			apply: (update) => {
 				for (const item of update.items) {
-					if (item.type === "directive") draft = item.text;
+					if (item.type === "directive" && item.directive !== "set_theme") draft = item.text;
 					else if (item.type === "notice") notify(item.message);
 					else if (item.type === "set" && item.value.kind === "host_request") {
 						const { requestId, request } = item.value;
