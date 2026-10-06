@@ -1,9 +1,11 @@
 import { setKeybindings } from "@hansjm10/volt-tui";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo } from "../src/core/session-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
+import {
+	SessionSelectorComponent,
+	type SessionSelectorItem,
+} from "../src/modes/interactive/components/session-selector.ts";
 
 async function flushPromises(): Promise<void> {
 	await new Promise<void>((resolve) => {
@@ -18,14 +20,10 @@ async function waitForDebouncedSearch(): Promise<void> {
 	await flushPromises();
 }
 
-function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionInfo {
+function makeSession(overrides: Partial<SessionSelectorItem> & { id: string }): SessionSelectorItem {
 	return {
-		ref: overrides.ref ?? {
-			sessionDirectory: "/tmp/sessions",
-			storeId: "store",
-			sessionGeneration: "generation-test",
-			sessionId: overrides.id,
-		},
+		key: overrides.key ?? overrides.id,
+		location: overrides.location ?? "/tmp/sessions",
 		id: overrides.id,
 		cwd: overrides.cwd ?? "",
 		name: overrides.name,
@@ -102,7 +100,7 @@ describe("session selector rename", () => {
 		});
 		let renamedName = target.name;
 		let searchCalls = 0;
-		const renameSession = vi.fn(async (_sessionRef: SessionInfo["ref"], nextName: string | undefined) => {
+		const renameSession = vi.fn(async (_session: SessionSelectorItem, nextName: string) => {
 			renamedName = nextName;
 		});
 		const keybindings = new KeybindingsManager();
@@ -127,17 +125,17 @@ describe("session selector rename", () => {
 		for (const character of "deepterm") list.handleInput(character);
 		await waitForDebouncedSearch();
 		expect(searchCalls).toBe(1);
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("target");
+		expect(list.getSelectedSession()?.id).toBe("target");
 
 		list.handleInput(CTRL_R);
 		selector.handleInput("X");
 		selector.handleInput("\r");
 		await flushPromises();
 
-		expect(renameSession).toHaveBeenCalledWith(target.ref, "XOld");
+		expect(renameSession).toHaveBeenCalledWith(expect.objectContaining({ key: "target" }), "XOld");
 		expect(searchCalls).toBe(2);
 		expect(list.getSearchQuery()).toBe("deepterm");
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("target");
+		expect(list.getSelectedSession()?.id).toBe("target");
 		const output = selector.render(120).lines.join("\n");
 		expect(output).toContain("XOld");
 		expect(output).toContain("Second Deep Match");
@@ -174,6 +172,6 @@ describe("session selector rename", () => {
 		await flushPromises();
 
 		expect(renameSession).toHaveBeenCalledTimes(1);
-		expect(renameSession).toHaveBeenCalledWith(sessions[0]!.ref, "XOld");
+		expect(renameSession).toHaveBeenCalledWith(sessions[0], "XOld");
 	});
 });

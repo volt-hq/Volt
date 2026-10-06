@@ -13,9 +13,10 @@
  * among themselves but not after the other frames before them, so a stop
  * never waits behind a long intent such as `compact`; a client that needs an
  * earlier intent admitted first waits for its `accepted`. User shell commands
- * (`bash`) run in a lane of their own the same way: a command runs as
- * conversation activity, so the prompts and intents sent while it runs do not
- * wait for it. A stopping intent is checked against the connection's
+ * (`bash`) and compactions (`compact`) run in a lane of their own the same
+ * way: each runs as conversation activity, so the prompts, the queue's
+ * withdrawal, and the intents sent while it runs do not wait for it. A
+ * stopping intent is checked against the connection's
  * authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
@@ -77,6 +78,7 @@ import {
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { VERSION } from "../../../config.ts";
+import { isPathUnderWorktreesRoot } from "../../../daemon/worktree-manager.ts";
 import type { ExtensionError, InputSource } from "../../extensions/index.ts";
 import { ClientScope } from "../../host/client-scope.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
@@ -84,6 +86,7 @@ import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
 import type { ExtensionClient } from "../../session/extension-binding.ts";
+import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../session-cwd.ts";
 import { SessionManager } from "../../session-manager.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { EDITOR_TEXT_TIMEOUT_MS } from "../../ui/extension-ui.ts";
@@ -124,9 +127,10 @@ const STOPPING_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_bash", "a
 
 /**
  * Intents that run as conversation activity: one at a time in a lane of
- * their own, so a long shell command never holds the frames after it.
+ * their own, so a long shell command or compaction never holds the frames
+ * after it.
  */
-const ACTIVITY_INTENTS: ReadonlySet<string> = new Set(["bash"]);
+const ACTIVITY_INTENTS: ReadonlySet<string> = new Set(["bash", "compact"]);
 
 /** Intents whose acceptance changes the `sessions` catalog without moving the client. */
 const SESSIONS_INTENTS: ReadonlySet<string> = new Set(["delete_session", "set_session_name"]);
@@ -685,6 +689,67 @@ export function serveConnection(
 		return home;
 	};
 
+	/** Whether the client edits input: a local client that answers `editor_text`. */
+	const hasEditor = (): boolean => profile.name === "local" && accepts.has("editor_text");
+
+	/** Whether a subscription of the client shows `conversation`'s live lane. */
+	const showsLive = (conversation: HostedConversation): boolean =>
+		[...subscriptions.values()].some(
+			(subscription) =>
+				subscription.conversation === conversation && subscription.receivesLive && !subscription.isEnded,
+		);
+
+	/** Editor text for the conversation the client moved to, set once a subscription of the client shows it. */
+	let pendingEditorText: { readonly conversation: string; readonly text: string } | undefined;
+
+	/**
+	 * Replace the client's editor text with `text` once it shows the
+	 * conversation `conversationId`: at once when a subscription shows it,
+	 * else when the client subscribes there after its move.
+	 */
+	const setEditorTextOn = (conversationId: string, text: string): void => {
+		pendingEditorText = undefined;
+		if (!hasEditor()) return;
+		const conversation = host?.get(conversationId);
+		if (conversation && showsLive(conversation)) conversation.liveState.setEditorText(text, { client: client.id });
+		else pendingEditorText = { conversation: conversationId, text };
+	};
+
+	/** Put `text` in the client's editor when the draft it reports is empty. */
+	const fillEmptyEditor = async (conversation: HostedConversation, text: string): Promise<void> => {
+		if (!hasEditor() || !showsLive(conversation)) return;
+		const draft = await conversation.liveState.request(
+			{ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS },
+			{ client: client.id },
+		);
+		if (draft.status !== "answered" || !("value" in draft.response) || draft.response.value.trim()) return;
+		conversation.liveState.setEditorText(text, { client: client.id });
+	};
+
+	/**
+	 * The working directory a stored session that lost its own runs in
+	 * instead: the current one, when the client confirms it; undefined when
+	 * it declines. Only a local client is asked: the question names host
+	 * paths. A session of a daemon-managed worktree whose checkout is gone
+	 * never runs elsewhere, and a client that is not asked gets the error.
+	 */
+	const continueInCurrentCwd = async (error: MissingSessionCwdError): Promise<string | undefined> => {
+		const conversation = currentHome();
+		if (isPathUnderWorktreesRoot(conversation.services.agentDir, error.issue.sessionCwd)) {
+			throw new Error(
+				`This session ran in a daemon-managed worktree whose checkout is missing: ${error.issue.sessionCwd}. ` +
+					"Recreate the worktree (volt remote worktree add) or remove the session; refusing to open it in another directory.",
+			);
+		}
+		if (profile.name !== "local" || !accepts.has("confirm")) throw error;
+		const outcome = await conversation.liveState.request(
+			{ kind: "confirm", title: "Session cwd not found", message: formatMissingSessionCwdPrompt(error.issue) },
+			{ client: client.id },
+		);
+		const confirmed = outcome.status === "answered" && "confirmed" in outcome.response && outcome.response.confirmed;
+		return confirmed ? error.issue.fallbackCwd : undefined;
+	};
+
 	/**
 	 * An extension's `ctx.abort()` in a command this client invoked: the
 	 * queued input is taken back, the run stops, and the input's text returns
@@ -698,11 +763,7 @@ export function serveConnection(
 		const conversation = home;
 		if (!conversation || conversation.closed) return;
 		const session = conversation.session;
-		const shows = [...subscriptions.values()].some(
-			(subscription) =>
-				subscription.conversation === conversation && subscription.receivesLive && !subscription.isEnded,
-		);
-		if (profile.name !== "local" || !accepts.has("editor_text") || !shows || ClientScope.current() !== client.id) {
+		if (!hasEditor() || !showsLive(conversation) || ClientScope.current() !== client.id) {
 			await session.abort();
 			return;
 		}
@@ -741,21 +802,33 @@ export function serveConnection(
 				newSession: (newSessionOptions) => openNewSession(currentHost(), client, newSessionOptions),
 				fork: async (entryId, forkOptions) => {
 					const result = await openFork(currentHost(), client, entryId, forkOptions);
-					return result.cancelled
-						? result
-						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+					if (result.cancelled) return result;
+					// The client's editor takes the text of the message the fork was taken before.
+					setEditorTextOn(result.sessionId, result.selectedText ?? "");
+					return { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, navigateOptions) => {
-					const result = await currentHome().session.navigateTree(targetId, {
+					const conversation = currentHome();
+					const result = await conversation.session.navigateTree(targetId, {
 						summarize: navigateOptions?.summarize,
 						customInstructions: navigateOptions?.customInstructions,
 						replaceInstructions: navigateOptions?.replaceInstructions,
 						label: navigateOptions?.label,
 					});
+					// Navigating to before a user message hands its text to an empty editor.
+					if (!result.cancelled && result.editorText) await fillEmptyEditor(conversation, result.editorText);
 					return { cancelled: result.cancelled };
 				},
-				switchSession: (sessionRef, switchOptions) =>
-					openStoredSession(currentHost(), client, sessionRef, switchOptions),
+				switchSession: async (sessionRef, switchOptions) => {
+					try {
+						return await openStoredSession(currentHost(), client, sessionRef, switchOptions);
+					} catch (error) {
+						if (!(error instanceof MissingSessionCwdError)) throw error;
+						const cwdOverride = await continueInCurrentCwd(error);
+						if (cwdOverride === undefined) return { cancelled: true };
+						return openStoredSession(currentHost(), client, sessionRef, { ...switchOptions, cwdOverride });
+					}
+				},
 				reload: () => currentHome().session.reload(),
 			},
 			abortHandler: () => void abortForCommand().catch(() => undefined),
@@ -1313,6 +1386,13 @@ export function serveConnection(
 		} catch {
 			subscriptions.delete(frame.subscriptionId);
 			subscription.end({ reason: "closed" });
+			return;
+		}
+		// The editor text the client's move left for the conversation it moved to.
+		const editorText = pendingEditorText;
+		if (editorText?.conversation === conversation.id && target !== undefined && subscription.receivesLive) {
+			pendingEditorText = undefined;
+			conversation.liveState.setEditorText(editorText.text, { client: client.id });
 		}
 	};
 

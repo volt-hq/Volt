@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
+import type { Resources } from "@hansjm10/volt-protocol";
 import { createRenderFrame, type RenderFrame, setKeybindings } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
@@ -1191,27 +1192,31 @@ describe("InteractiveMode.showLoadedResources", () => {
 			settingsManager: {
 				getQuietStartup: () => options.quietStartup,
 			},
-			sessionManager: {
-				getCwd: () => options.cwd ?? "/tmp/project",
-			},
-			session: {
+			// The conversation's resources, as the `resources` query answers.
+			resources: {
+				skills: (options.skills ?? []).map((skill) => ({ name: skill.name, path: skill.filePath })),
 				promptTemplates: [],
-				extensionRunner: {
-					getCommandDiagnostics: () => [],
-					getShortcutDiagnostics: () => [],
-				},
-				resourceLoader: {
-					getPathMetadata: () => new Map(),
-					getAgentsFiles: () => ({ agentsFiles: options.contextFiles ?? [] }),
-					getSkills: () => ({
-						skills: options.skills ?? [],
-						diagnostics: options.skillDiagnostics ?? [],
-					}),
-					getPrompts: () => ({ prompts: [], diagnostics: [] }),
-					getExtensions: () => ({ extensions: options.extensions ?? [], errors: [], runtime: {} }),
-					getThemes: () => ({ themes: [], diagnostics: [] }),
-				},
-			},
+				themes: [],
+				extensions: (options.extensions ?? []).map((extension, index) => ({
+					id: `extension-${index}`,
+					path: extension.path,
+					...(extension.sourceInfo === undefined
+						? {}
+						: {
+								source: {
+									source: extension.sourceInfo.source,
+									scope: extension.sourceInfo.scope,
+									origin: extension.sourceInfo.origin,
+									...(extension.sourceInfo.baseDir === undefined
+										? {}
+										: { baseDir: extension.sourceInfo.baseDir }),
+								},
+							}),
+				})),
+				contextFiles: (options.contextFiles ?? []).map((file) => ({ path: file.path })),
+				diagnostics: (options.skillDiagnostics ?? []).map((diagnostic) => ({ resource: "skill", ...diagnostic })),
+				notices: [],
+			} satisfies Resources,
 			formatDisplayPath: (p: string) => (InteractiveMode as any).prototype.formatDisplayPath.call(fakeThis, p),
 			formatExtensionDisplayPath: (p: string) =>
 				(InteractiveMode as any).prototype.formatExtensionDisplayPath.call(fakeThis, p),
@@ -1505,7 +1510,6 @@ describe("InteractiveMode.showLoadedResources", () => {
 		});
 
 		(InteractiveMode as any).prototype.showLoadedResources.call(fakeThis, {
-			extensions: [{ path: "/tmp/ext/index.ts" }],
 			force: false,
 			showDiagnosticsWhenQuiet: true,
 		});

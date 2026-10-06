@@ -1,9 +1,11 @@
 import { setKeybindings } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type { SessionInfo } from "../src/core/session-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
+import {
+	SessionSelectorComponent,
+	type SessionSelectorItem,
+} from "../src/modes/interactive/components/session-selector.ts";
 import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
 
 async function flushPromises(): Promise<void> {
@@ -19,14 +21,10 @@ async function waitForDebouncedSearch(): Promise<void> {
 	await flushPromises();
 }
 
-function makeSession(overrides: Partial<SessionInfo> & { id: string; modified: Date }): SessionInfo {
+function makeSession(overrides: Partial<SessionSelectorItem> & { id: string; modified: Date }): SessionSelectorItem {
 	return {
-		ref: overrides.ref ?? {
-			sessionDirectory: "/tmp/sessions",
-			storeId: "store",
-			sessionGeneration: "generation-test",
-			sessionId: overrides.id,
-		},
+		key: overrides.key ?? overrides.id,
+		location: overrides.location ?? "/tmp/sessions",
 		id: overrides.id,
 		cwd: overrides.cwd ?? "",
 		name: overrides.name,
@@ -122,8 +120,8 @@ describe("session selector search", () => {
 	});
 
 	it("does not let the initial unqueried load overwrite active deep-search results", async () => {
-		let resolveInitialLoad: (sessions: SessionInfo[]) => void = () => {};
-		const initialLoad = new Promise<SessionInfo[]>((resolve) => {
+		let resolveInitialLoad: (sessions: SessionSelectorItem[]) => void = () => {};
+		const initialLoad = new Promise<SessionSelectorItem[]>((resolve) => {
 			resolveInitialLoad = resolve;
 		});
 		const rankedSearchResults = [
@@ -164,7 +162,7 @@ describe("session selector search", () => {
 		await waitForDebouncedSearch();
 
 		expect(searchCalls).toBe(1);
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("best");
+		expect(list.getSelectedSession()?.id).toBe("best");
 
 		resolveInitialLoad([
 			makeSession({
@@ -177,7 +175,7 @@ describe("session selector search", () => {
 		await flushPromises();
 
 		const rendered = selector.render(120).lines.join("\n");
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("best");
+		expect(list.getSelectedSession()?.id).toBe("best");
 		expect(rendered).toContain("Best Deep Match");
 		expect(rendered).toContain("Second Deep Match");
 		expect(rendered).not.toContain("Shallow Summary Match");
@@ -218,15 +216,15 @@ describe("session selector search", () => {
 		list.setSessions(relevanceRanked, false, true);
 		list.setSortMode("relevance");
 
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("older");
+		expect(list.getSelectedSession()?.id).toBe("older");
 		const rendered = selector.render(100).lines.join("\n");
 		expect(rendered).toContain("Older");
 		expect(rendered).toContain("Newer");
 
 		list.setSortMode("recent");
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("newer");
+		expect(list.getSelectedSession()?.id).toBe("newer");
 		list.setSortMode("relevance");
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("older");
+		expect(list.getSelectedSession()?.id).toBe("older");
 	});
 
 	describe("name filter", () => {
