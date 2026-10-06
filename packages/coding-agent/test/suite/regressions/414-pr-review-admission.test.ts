@@ -737,7 +737,9 @@ describe("#414 PR review admission and worker spawn", () => {
 		expect(handoff.session.sessionId).not.toBe(generalId);
 		expect(handoff.cwd).toBe(placement.cwd);
 		expect(await readPrReviewBinding(handoff.session.sessionManager)).toEqual(placement);
-		// The workers the phone left retire once detached and idle; the review source is then written unloaded.
+		// The workers the phone left retire: the daemon retires a detached, idle worker for a sibling claim of the
+		// review source (341 covers it); this test's claims are granted without a registry, so it stops them. The
+		// review source is then written unloaded.
 		await host.stop(worker);
 		await host.stop(generalWorker);
 		const api = findingsWorker.hosted.reviewDiscussions(handoff);

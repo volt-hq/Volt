@@ -190,7 +190,7 @@ describe("worker registry", () => {
 
 	it("grants claims only for unhosted sessions, under a hosted parent, in the current generation", async () => {
 		const { registry, open, start, send, generations, launched } = setup();
-		const opened = open("s1");
+		const opened = open("s1", "remote");
 		const a = await start(0);
 		await opened;
 		const other = open("s9");
@@ -227,6 +227,43 @@ describe("worker registry", () => {
 			await send(b, { type: "worker_hosts", sessionId: "s4", kind: "moved", parentSessionId: "s9" }),
 		).toMatchObject({ code: "fenced" });
 		expect(launched).toHaveLength(2);
+	});
+
+	it("retires a detached idle worker for a sibling claim of a conversation it hosts; the claim waits for its exit", async () => {
+		const { registry, open, start, send, stops } = setup();
+		const opened = open("s1", "remote");
+		const source = await start(0);
+		const { release } = await opened;
+		const handoff = open("s9");
+		const claimant = await start(1);
+		await handoff;
+		const claimSource = () =>
+			send(claimant, { type: "worker_hosts", sessionId: "s1", kind: "sibling", parentSessionId: "s9" });
+
+		// A client is attached: the source stays where it is.
+		expect(await claimSource()).toMatchObject({ code: "claimed" });
+		expect(stops(source)).toEqual([]);
+		// Active: the worker would refuse the stop, so it is not asked.
+		release();
+		await send(source, { type: "worker_activity", active: true });
+		expect(await claimSource()).toMatchObject({ code: "claimed" });
+		expect(stops(source)).toEqual([]);
+
+		// Detached and idle: retired as its TTL would, and the claim is retried until it exited.
+		await send(source, { type: "worker_activity", active: false });
+		expect(await claimSource()).toMatchObject({ code: "retiring" });
+		expect(stops(source)).toMatchObject([{ reason: "retention", force: false }]);
+		expect(await claimSource()).toMatchObject({ code: "retiring" });
+		expect(stops(source)).toHaveLength(1);
+		// Only sibling claims retire the host.
+		expect(
+			await send(claimant, { type: "worker_hosts", sessionId: "s1", kind: "moved", parentSessionId: "s9" }),
+		).toMatchObject({ code: "claimed" });
+		await send(source, { type: "worker_stop_result", stopId: stops(source)[0]!.stopId, outcome: "stopped" });
+		source.exit({ reason: "stopped" });
+		await waitUntil(() => registry.size === 1);
+		expect(await claimSource()).toMatchObject({ type: "ok" });
+		expect(registry.hosts("ws", "s1")).toBe(true);
 	});
 
 	it("retires a detached idle worker after its TTL, unless it refuses the stop because it turned active", async () => {

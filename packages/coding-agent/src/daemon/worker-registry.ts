@@ -571,7 +571,9 @@ export class WorkerRegistry {
 	 * `worker_hosts`: the worker claims `sessionId` before opening it. Refused
 	 * unless the worker is live with a control connection, its generation is
 	 * current and its workspace admits, the parent it names is one it hosts,
-	 * and no registered worker hosts the session.
+	 * and no registered worker hosts the session. A sibling claim of a
+	 * session a detached, idle worker hosts retires that worker early, as its
+	 * TTL would (`retiring`: the claimant retries).
 	 */
 	private claim(
 		record: WorkerRecord,
@@ -592,7 +594,15 @@ export class WorkerRegistry {
 			return { code: "not_hosted", message: "the worker does not host the parent conversation" };
 		}
 		if (record.hosts.has(sessionId)) return undefined;
-		if (this.hostOf(sessionId)) return { code: "claimed", message: "another worker hosts that conversation" };
+		const owner = this.hostOf(sessionId);
+		if (owner) {
+			// A review source or discussion a detached, idle worker keeps only until its TTL runs: retention
+			// retires that worker now, and the claimant retries once it exited.
+			if (kind === "sibling" && (owner.state === "retiring" || this.expire(owner, "sibling_claim"))) {
+				return { code: "retiring", message: "the worker hosting that conversation is retiring; retry" };
+			}
+			return { code: "claimed", message: "another worker hosts that conversation" };
+		}
 		if (record.hosts.size >= MAX_WORKER_HOSTED_SESSIONS) {
 			return { code: "too_many", message: "the worker hosts too many conversations" };
 		}
@@ -641,8 +651,12 @@ export class WorkerRegistry {
 		record.retention.unref?.();
 	}
 
-	/** The TTL fired on a detached, idle worker: ask it to stop. It may refuse if it turned active. */
-	private expire(record: WorkerRecord, ttlMs: number): void {
+	/**
+	 * The TTL fired on a detached, idle worker, or a sibling claim needs a
+	 * conversation it hosts: ask it to stop. It may refuse if it turned active.
+	 * Whether it began retiring.
+	 */
+	private expire(record: WorkerRecord, why: number | "sibling_claim"): boolean {
 		if (
 			record.state !== "live" ||
 			record.forced ||
@@ -651,11 +665,17 @@ export class WorkerRegistry {
 			record.active ||
 			record.connectionId === undefined
 		) {
-			return;
+			return false;
 		}
+		if (record.retention !== undefined) clearTimeout(record.retention);
+		record.retention = undefined;
 		record.state = "retiring";
 		this.sendStop(record, "retention", false);
-		this.options.log?.("info", "retiring detached idle worker", { workerId: record.workerId, ttlMs });
+		this.options.log?.("info", "retiring detached idle worker", {
+			workerId: record.workerId,
+			...(why === "sibling_claim" ? { why } : { ttlMs: why }),
+		});
+		return true;
 	}
 
 	private sendStop(record: WorkerRecord, reason: WorkerStopReason, force: boolean): void {

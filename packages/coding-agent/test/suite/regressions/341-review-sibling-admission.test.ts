@@ -122,8 +122,14 @@ async function fixture() {
 			WorkerRegistry["handleWorkerRequest"]
 		>[1]);
 
-	/** Spawn a worker for `ref`, as a phone's open does: launched, admitted, and ready. */
-	const spawn = async (ref: SessionReference): Promise<{ launch: FakeLaunch; worker: LiveWorker }> => {
+	/**
+	 * Spawn a worker for `ref`, as a phone's open does: launched, admitted, and
+	 * ready; with `attached`, the phone stays attached to it.
+	 */
+	const spawn = async (
+		ref: SessionReference,
+		options: { attached?: boolean } = {},
+	): Promise<{ launch: FakeLaunch; worker: LiveWorker; exit: (exit: WorkerExit) => void }> => {
 		const index = launches.length;
 		const generation = generations.get("ws") ?? 0;
 		const opening = registry.open(
@@ -140,7 +146,10 @@ async function fixture() {
 					toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
 					projectTrusted: false,
 				}),
-				attach: (worker) => worker,
+				attach: (worker) => {
+					if (options.attached) worker.attach("remote");
+					return worker;
+				},
 			},
 		);
 		await waitUntil(() => launches.length > index);
@@ -161,7 +170,7 @@ async function fixture() {
 		expect(await send(launch.connectionId, { type: "worker_ready", sessionIds: [ref.sessionId] })).toMatchObject({
 			type: "ok",
 		});
-		return { launch, worker: await opening };
+		return { launch, worker: await opening, exit: exits[index]! };
 	};
 
 	// The source conversation, in the worker a phone's open spawned for it.
@@ -394,8 +403,8 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(first.results[0]!.outcome).toBe("failed");
 		const id = first.results[0]!.discussion!.sessionId;
 		const ref = await SessionManager.findForResume(f.sessionDir, id);
-		// A phone opened the discussion first: a worker of its own hosts it.
-		const other = await f.spawn(ref!);
+		// A phone opened the discussion first: a worker of its own hosts it, with the phone attached.
+		const other = await f.spawn(ref!, { attached: true });
 		const otherManager = await SessionManager.open(ref!);
 		try {
 			expect(otherManager.getEntries()).toHaveLength(0);
@@ -500,8 +509,8 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
 				?.status,
 		).toBe("fixed");
-		// Once a worker of its own hosts the source, this worker no longer writes it.
-		const other = await f.spawn(canonicalRef);
+		// Once a worker of its own hosts the source with a client attached, this worker no longer writes it.
+		const other = await f.spawn(canonicalRef, { attached: true });
 		await expect(
 			f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
 		).rejects.toMatchObject({ code: "claimed" });
@@ -511,6 +520,35 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 				?.status,
 		).toBe("fixed");
 		expect(f.launches).toHaveLength(2);
+	});
+
+	it("retires a detached, idle worker that keeps the canonical source, then writes the outcome", async () => {
+		const f = await fixture();
+		const canonical = await SessionManager.create(f.root, f.sessionDir);
+		const canonicalRef = canonical.getSessionRef()!;
+		const originalId = canonical.getSessionId();
+		const coldRecord = { ...f.record, runId: "cold-run" };
+		await anchorReviewRun(canonical, "cold-run");
+		await appendReviewRunDurably(canonical.logWriter, coldRecord);
+		await appendReviewRun(f.source.conversation.session.sessionWriter, coldRecord);
+		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionWriter, ["cold-run"]);
+		await canonical.closePersistence();
+		// The phone left the source's worker (a client move): detached and idle until its TTL runs.
+		const other = await f.spawn(canonicalRef);
+
+		const recorded = f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "fixed" });
+		// The claim retires that worker as its TTL would, and waits for its exit.
+		await waitUntil(() =>
+			f.registry.list().some((worker) => worker.workerId === other.worker.workerId && worker.state === "retiring"),
+		);
+		other.exit({ reason: "stopped" });
+		await recorded;
+		expect(f.client.released).toHaveBeenCalledWith(originalId);
+		expect(f.registry.host("ws", originalId)).toBeUndefined();
+		expect(
+			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
+				?.status,
+		).toBe("fixed");
 	});
 
 	it("keeps the worker active while a sibling launch is pending, so a retention stop is refused", async () => {

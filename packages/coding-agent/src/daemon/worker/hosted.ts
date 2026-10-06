@@ -25,6 +25,10 @@ import { observeCompactionFailures } from "./compaction-failure-log.ts";
 import type { IrohRemoteSubagentRuntimeCreatedEvent } from "./conversation-factory.ts";
 import { type WorkerDaemonClient, WorkerRequestError } from "./daemon-client.ts";
 
+/** How long a sibling claim waits for the worker that hosted the conversation to exit. */
+const SIBLING_CLAIM_WAIT_MS = 15_000;
+const SIBLING_CLAIM_RETRY_MS = 200;
+
 /** A hosted conversation, in the host it opened in. */
 export interface WorkerConversation {
 	readonly host: ConversationHost;
@@ -145,11 +149,22 @@ export class WorkerConversations {
 
 	/**
 	 * Claim `sessionId` from the daemon before it opens here. Rejects with code
-	 * `claimed` when another worker hosts it.
+	 * `claimed` when another worker hosts it. A sibling claim waits while the
+	 * daemon retires a detached, idle worker that hosted it (`retiring`).
 	 */
 	private async claim(sessionId: string, kind: WorkerHostKind, parentSessionId: string): Promise<void> {
-		if (this.stopping) throw new Error("The worker is stopping");
-		await this.client.hosts(sessionId, kind, parentSessionId);
+		const deadline = Date.now() + SIBLING_CLAIM_WAIT_MS;
+		for (;;) {
+			if (this.stopping) throw new Error("The worker is stopping");
+			try {
+				await this.client.hosts(sessionId, kind, parentSessionId);
+				break;
+			} catch (error) {
+				if (!(error instanceof WorkerRequestError) || error.code !== "retiring" || Date.now() >= deadline)
+					throw error;
+			}
+			await new Promise((resolve) => setTimeout(resolve, SIBLING_CLAIM_RETRY_MS));
+		}
 		this.pendingClaims.add(sessionId);
 	}
 
