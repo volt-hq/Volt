@@ -23,7 +23,7 @@ export const LAUNCHD_SERVICE_LABEL = "com.github.hansjm10.voltd";
 export const SYSTEMD_SERVICE_NAME = "voltd.service";
 
 export interface DaemonServiceInvocation {
-	/** Full program argv: node executable, entry, "daemon", "run", "--foreground", "--service". */
+	/** Full program argv: node executable and entry (or the standalone binary), "daemon", "run", "--foreground", "--service". */
 	programArguments: string[];
 	agentDir: string;
 	/** Captures pre-logger crashes; the daemon's own log is voltd.log. */
@@ -50,10 +50,18 @@ export function getServiceNodePath(execPath: string = process.execPath): string 
 }
 
 export function getDaemonServiceInvocation(agentDir: string = getAgentDir()): DaemonServiceInvocation {
-	const { nodeArgs, entry } = resolveDaemonCliInvocation();
+	const { command, nodeArgs, entryArgs } = resolveDaemonCliInvocation();
 	const paths = getDaemonPaths(agentDir);
 	return {
-		programArguments: [getServiceNodePath(), ...nodeArgs, entry, "daemon", "run", "--foreground", "--service"],
+		programArguments: [
+			getServiceNodePath(command),
+			...nodeArgs,
+			...entryArgs,
+			"daemon",
+			"run",
+			"--foreground",
+			"--service",
+		],
 		agentDir,
 		serviceLogPath: join(paths.daemonDir, "voltd.service.log"),
 	};

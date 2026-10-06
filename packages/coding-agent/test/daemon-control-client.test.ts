@@ -11,7 +11,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import { ControlLineDecoder, encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
-import { createTestSocketEndpoint, listenTestServer } from "./socket-test-helpers.ts";
+import { createTestSocketEndpoint, greetControlClient, listenTestServer } from "./socket-test-helpers.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -30,6 +30,7 @@ afterEach(async () => {
  */
 async function startCoalescingServer(socketPath: string, terminal: "lease_granted" | "error"): Promise<Server> {
 	const server = createServer((socket: Socket) => {
+		greetControlClient(socket);
 		const decoder = new ControlLineDecoder();
 		socket.on("data", (chunk) => {
 			for (const message of decoder.push(chunk)) {
@@ -114,6 +115,7 @@ describe("daemon control client response validation", () => {
 	it("rejects a request whose response fails the contract instead of waiting for disconnect", async () => {
 		const socketPath = tempSocketPath();
 		const server = createServer((socket: Socket) => {
+			greetControlClient(socket);
 			const decoder = new ControlLineDecoder();
 			socket.on("data", (chunk) => {
 				for (const message of decoder.push(chunk)) {
@@ -156,6 +158,7 @@ describe("daemon control client reconnect", () => {
 
 		let helloCount = 0;
 		const server = createServer((socket: Socket) => {
+			greetControlClient(socket);
 			const decoder = new ControlLineDecoder();
 			socket.on("data", (chunk) => {
 				for (const message of decoder.push(chunk)) {
@@ -191,6 +194,7 @@ describe("daemon control client reconnect", () => {
 		const socketPath = tempSocketPath();
 		let helloCount = 0;
 		const server = createServer((socket: Socket) => {
+			greetControlClient(socket);
 			const decoder = new ControlLineDecoder();
 			socket.on("data", (chunk) => {
 				for (const message of decoder.push(chunk)) {
@@ -237,6 +241,7 @@ describe("daemon control client reconnect", () => {
 		const socketPath = tempSocketPath();
 		const serverSockets: Socket[] = [];
 		const server = createServer((socket: Socket) => {
+			greetControlClient(socket);
 			serverSockets.push(socket);
 			const decoder = new ControlLineDecoder();
 			socket.on("error", () => {});
@@ -290,6 +295,7 @@ describe("daemon control client reconnect", () => {
 		const serverSockets: Socket[] = [];
 		let helloCount = 0;
 		const server = createServer((socket: Socket) => {
+			greetControlClient(socket);
 			serverSockets.push(socket);
 			const decoder = new ControlLineDecoder();
 			socket.on("data", (chunk) => {

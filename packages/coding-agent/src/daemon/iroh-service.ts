@@ -5,6 +5,7 @@ import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { join, relative, resolve, sep } from "node:path";
 import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
+import { isStandaloneBinary } from "../config.ts";
 import { AuthStorage } from "../core/auth-storage.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
 import { ModelRegistry } from "../core/model-registry.ts";
@@ -96,11 +97,14 @@ import {
 	type ControlRelayCredentialStatus,
 	type ControlRequest,
 	createControlClientStatus,
+	type HelloBinding,
+	type HelloProof,
 	isRemoteTransportPairingAvailable,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
 	type RelayCloseReason,
 	type RelayPreamble,
 	type RemoteTransportHealth,
+	STANDALONE_REMOTE_TRANSPORT_MESSAGE,
 } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
 import { ConversationCoordinatorRegistry } from "./conversation-coordinator.ts";
@@ -121,6 +125,7 @@ import {
 	type IrohEndpointBuilderLike,
 	type IrohEndpointLike,
 	type IrohModuleLike,
+	type IrohNativeLoadResult,
 	loadIrohModule,
 } from "./iroh-native.ts";
 import { IrohRelayRecoveryMonitor } from "./iroh-relay-recovery.ts";
@@ -807,10 +812,27 @@ async function closeStreamConnection(
 	await lifecycleSettled?.catch(() => {});
 }
 
+/** Remote health of a daemon whose Iroh binding did not load; a standalone binary never bundles it. */
+function bindingMissingTransport(wrapperVersion: string | undefined): RemoteTransportHealth {
+	return {
+		state: "unavailable",
+		reasonCode: "native_binding_missing",
+		message: isStandaloneBinary
+			? STANDALONE_REMOTE_TRANSPORT_MESSAGE
+			: REMOTE_TRANSPORT_REASON_MESSAGES.native_binding_missing,
+		...(wrapperVersion === undefined ? {} : { wrapperVersion }),
+	};
+}
+
 /**
  * The daemon's Iroh host: owns the endpoint identity, pairing, revocation,
  * headless integrated runtimes, workspace/device streams, push dispatch, and
  * the accept loop. Ported from the dissolved src/remote/iroh-host.mjs.
+ *
+ * Where the Iroh binding does not load (standalone binaries, `--omit=optional`
+ * installs, darwin x64) the service runs without an endpoint: TUIs, workers,
+ * workspaces, and worktrees are served as with one, its status reports phone
+ * transport unavailable, and pairing is refused with the same guidance.
  */
 export function createIrohDaemonService(
 	config: IrohDaemonServiceConfig = {},
@@ -818,30 +840,15 @@ export function createIrohDaemonService(
 ): VoltdServiceExtension {
 	return (services: VoltdRuntimeServices) => {
 		const log = services.logger.child("iroh");
-		const loaded = (dependencies.loadIrohModule ?? loadIrohModule)();
+		// A standalone binary never bundles the binding: nothing is looked up for it on disk.
+		const loaded: IrohNativeLoadResult = isStandaloneBinary ? {} : (dependencies.loadIrohModule ?? loadIrohModule)();
 		if (!loaded.iroh) {
-			log("warn", formatIrohLoadError(loaded.error));
-			const remoteTransport: RemoteTransportHealth = {
-				state: "unavailable",
-				reasonCode: "native_binding_missing",
-				message: REMOTE_TRANSPORT_REASON_MESSAGES.native_binding_missing,
-				...(loaded.packageVersion === undefined ? {} : { wrapperVersion: loaded.packageVersion }),
-			};
-			return {
-				async handleRequest(connection, request) {
-					if (request.type === "pair_request" || request.type === "relay_credential_check") {
-						connection.send({
-							type: "error",
-							id: request.id,
-							code: "iroh_unavailable",
-							message: remoteTransport.message!,
-						});
-						return true;
-					}
-					return false;
-				},
-				statusExtras: () => ({ remoteTransport, relayCredential: initialRelayCredentialStatus(config, services) }),
-			};
+			log(
+				"warn",
+				isStandaloneBinary
+					? "phone transport is not included in the standalone binary; serving local clients and workers only"
+					: formatIrohLoadError(loaded.error),
+			);
 		}
 
 		let service: IrohDaemonService;
@@ -857,12 +864,14 @@ export function createIrohDaemonService(
 			);
 		} catch (error) {
 			log("error", `failed to initialize iroh endpoint: ${error instanceof Error ? error.message : String(error)}`);
-			const remoteTransport: RemoteTransportHealth = {
-				state: "unavailable",
-				reasonCode: "endpoint_start_failed",
-				message: REMOTE_TRANSPORT_REASON_MESSAGES.endpoint_start_failed,
-				...(loaded.packageVersion === undefined ? {} : { wrapperVersion: loaded.packageVersion }),
-			};
+			const remoteTransport: RemoteTransportHealth = loaded.iroh
+				? {
+						state: "unavailable",
+						reasonCode: "endpoint_start_failed",
+						message: REMOTE_TRANSPORT_REASON_MESSAGES.endpoint_start_failed,
+						...(loaded.packageVersion === undefined ? {} : { wrapperVersion: loaded.packageVersion }),
+					}
+				: bindingMissingTransport(loaded.packageVersion);
 			return {
 				async handleRequest(connection, request) {
 					if (request.type !== "pair_request" && request.type !== "relay_credential_check") return false;
@@ -884,8 +893,8 @@ export function createIrohDaemonService(
 			onThemeChanged: () => service.onThemeChanged(),
 			onKeepAwakeChanged: () => service.onKeepAwakeChanged(),
 			statusExtras: () => service.statusExtras(),
-			admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
-				service.admitRelay(relayId, relayToken, socket, bufferedRemainder),
+			admitRelay: (relayId, proof, binding, socket, bufferedRemainder) =>
+				service.admitRelay(relayId, proof, binding, socket, bufferedRemainder),
 			quiesce: () => service.quiesce(),
 			dispose: () => service.dispose(),
 		};
@@ -893,7 +902,8 @@ export function createIrohDaemonService(
 }
 
 class IrohDaemonService {
-	private readonly iroh: IrohModuleLike;
+	/** The Iroh binding; absent where it did not load, and the service then runs without an endpoint. */
+	private readonly iroh: IrohModuleLike | undefined;
 	private readonly services: VoltdRuntimeServices;
 	private readonly dependencies: IrohDaemonServiceDependencies;
 	private readonly relayMode: IrohRelayMode;
@@ -975,7 +985,7 @@ class IrohDaemonService {
 	private readonly ready: { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void };
 
 	constructor(
-		iroh: IrohModuleLike,
+		iroh: IrohModuleLike | undefined,
 		services: VoltdRuntimeServices,
 		config: IrohDaemonServiceConfig,
 		wrapperVersion: string | undefined,
@@ -987,10 +997,10 @@ class IrohDaemonService {
 		this.services = services;
 		this.dependencies = dependencies;
 		this.wrapperVersion = wrapperVersion;
-		this.remoteTransport = {
-			state: "starting",
-			...(wrapperVersion === undefined ? {} : { wrapperVersion }),
-		};
+		this.remoteTransport =
+			iroh === undefined
+				? bindingMissingTransport(wrapperVersion)
+				: { state: "starting", ...(wrapperVersion === undefined ? {} : { wrapperVersion }) };
 		this.relayWatchApiSafe = dependencies.relayWatchApiSafe ?? nativeWatchApiSafe;
 		this.relayReconnectApiSafe = dependencies.relayReconnectApiSafe ?? nativeReconnectApiSafe;
 		const persistedRevocation = services.state.state.settings.relayCredentialRevocation;
@@ -1653,27 +1663,28 @@ class IrohDaemonService {
 
 	/** A fresh builder for one bind attempt; `bind()` consumes it. Production relay URLs are validated by the caller. */
 	private createEndpointBuilder(
+		iroh: IrohModuleLike,
 		secretKey: number[] | undefined,
 		pinnedPort: number | undefined,
 	): IrohEndpointBuilderLike {
-		const builder = this.iroh.Endpoint.builder();
+		const builder = iroh.Endpoint.builder();
 		if (this.relayMode === "development") {
-			this.iroh.presetN0(builder);
+			iroh.presetN0(builder);
 		} else if (this.relayMode === "production") {
-			this.iroh.presetN0DisableRelay(builder);
+			iroh.presetN0DisableRelay(builder);
 			const relayAuthToken = this.currentRelayAuthToken();
 			if (relayAuthToken !== undefined) {
-				const relayMap = this.iroh.RelayMap.empty();
+				const relayMap = iroh.RelayMap.empty();
 				for (const url of this.relayUrls) {
 					relayMap.insert({ url, authToken: relayAuthToken });
 				}
-				builder.relayMode(this.iroh.RelayMode.custom(relayMap));
+				builder.relayMode(iroh.RelayMode.custom(relayMap));
 			} else {
-				builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
+				builder.relayMode(iroh.RelayMode.customFromUrls(this.relayUrls));
 			}
 		} else {
-			this.iroh.presetMinimal(builder);
-			builder.relayMode(this.iroh.RelayMode.disabled());
+			iroh.presetMinimal(builder);
+			builder.relayMode(iroh.RelayMode.disabled());
 		}
 		if (secretKey) {
 			builder.secretKey(secretKey);
@@ -2419,6 +2430,9 @@ class IrohDaemonService {
 			startupAdmissionReleased = true;
 			startupAdmission.release();
 		};
+		const iroh = this.iroh;
+		// No endpoint will come up: what waits for one fails now.
+		if (iroh === undefined) this.ready.reject(new Error(this.remoteTransport.message));
 		if (this.relayConfigWarning !== undefined) {
 			this.log("warn", this.relayConfigWarning);
 		}
@@ -2446,6 +2460,8 @@ class IrohDaemonService {
 				this.ready.reject(new Error("iroh service shut down before endpoint startup"));
 				return;
 			}
+			// Without the binding the daemon serves its control plane and workers, and no phone.
+			if (iroh === undefined) return;
 			if (
 				this.managedRelayCredential !== undefined &&
 				this.managedRelayCredential.accessTokenExpiresAt <= Date.now()
@@ -2482,7 +2498,7 @@ class IrohDaemonService {
 				for (let attempt = 0; boundEndpoint === undefined && attempt < attempts; attempt++) {
 					if (attempt > 0 && !(await delayUnlessAborted(retryDelayMs, startupAdmission.signal))) break;
 					const bindTask = Promise.resolve().then(() =>
-						this.createEndpointBuilder(secretKey, savedBindPort).bind(),
+						this.createEndpointBuilder(iroh, secretKey, savedBindPort).bind(),
 					);
 					let bound: IrohBoundEndpointLike | undefined;
 					try {
@@ -2505,7 +2521,7 @@ class IrohDaemonService {
 			}
 			const pinnedBindFailed = savedBindPort !== undefined && boundEndpoint === undefined;
 			if (boundEndpoint === undefined) {
-				const bindTask = this.createEndpointBuilder(secretKey, undefined).bind();
+				const bindTask = this.createEndpointBuilder(iroh, secretKey, undefined).bind();
 				boundEndpoint = await waitUntilAdmissionCancelled(bindTask, startupAdmission.signal);
 				if (!boundEndpoint) {
 					this.retireLateBoundEndpoint(bindTask);
@@ -2625,7 +2641,7 @@ class IrohDaemonService {
 				return;
 			}
 			const endpointTicket = createIrohEndpointTicket(
-				this.iroh,
+				iroh,
 				endpoint.addr(),
 				this.relayMode === "production" ? this.relayUrls : [],
 			);
@@ -2686,6 +2702,11 @@ class IrohDaemonService {
 		} catch (error) {
 			if (endpoint) {
 				this.retireEndpoint(endpoint, "iroh endpoint disposal after startup failure failed");
+			}
+			// Without the binding, startup work that failed does not change why phone transport is unavailable.
+			if (iroh === undefined) {
+				this.log("error", `daemon startup work failed: ${error instanceof Error ? error.message : String(error)}`);
+				return;
 			}
 			if (isIrohRemoteHostStorageFullError(error)) {
 				this.markStorageCapacityUnavailable();
@@ -5065,6 +5086,16 @@ class IrohDaemonService {
 	// ==========================================================================
 
 	async handleRequest(connection: ControlConnection, request: ControlRequest): Promise<boolean> {
+		// Without the binding nothing pairs or reaches a relay: refused with the guidance status shows.
+		if (this.iroh === undefined && (request.type === "pair_request" || request.type === "relay_credential_check")) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "iroh_unavailable",
+				message: this.remoteTransport.message ?? REMOTE_TRANSPORT_REASON_MESSAGES.native_binding_missing,
+			});
+			return true;
+		}
 		switch (request.type) {
 			case "change_observe": {
 				await this.handleChangeObservation(connection, request);
@@ -5280,8 +5311,9 @@ class IrohDaemonService {
 				return true;
 			}
 			case "client_revoke": {
-				const result = await this.requireEngineSafe();
-				if (!result.ok) {
+				// Without the binding there is no engine to wait for: the revocation is the state change and its audit.
+				const result = this.iroh === undefined ? undefined : await this.requireEngineSafe();
+				if (result !== undefined && !result.ok) {
 					connection.send({ type: "error", id: request.id, code: "iroh_unavailable", message: result.error });
 					return true;
 				}
@@ -5292,7 +5324,18 @@ class IrohDaemonService {
 				// A TUI serves a relayed device on the grant it was relayed with: end those relays before the change.
 				this.closeClientRelays(request.clientNodeId);
 				const relayAppEndpoint = await this.stageManagedRelayAppEndpointRevocation(request.clientNodeId);
-				const revocation = await result.engine.revokeClient(request.clientNodeId);
+				const revocation =
+					result === undefined
+						? await this.stateManager.revokeClient(request.clientNodeId)
+						: await result.engine.revokeClient(request.clientNodeId);
+				if (result === undefined) {
+					await this.logAudit({
+						type: "client_revoked",
+						clientNodeId: request.clientNodeId,
+						success: revocation.revoked,
+						...(revocation.revoked ? {} : { error: "client not found" }),
+					});
+				}
 				if (!revocation.revoked) {
 					connection.send({ type: "error", id: request.id, code: "not_found", message: "client not found" });
 					return true;
@@ -5840,8 +5883,14 @@ class IrohDaemonService {
 		void Promise.all(cancellations).finally(() => admission.release());
 	}
 
-	admitRelay(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean {
-		return this.relays.admit(relayId, relayToken, socket, bufferedRemainder);
+	admitRelay(
+		relayId: string,
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean {
+		return this.relays.admit(relayId, proof, binding, socket, bufferedRemainder);
 	}
 
 	statusExtras(): {

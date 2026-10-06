@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
+import { type ControlEvent, type ControlResponse, createHelloProof } from "../src/daemon/control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { type LiveWorker, WorkerRegistry } from "../src/daemon/worker-registry.ts";
 
@@ -62,6 +62,7 @@ async function liveWorker() {
 	);
 	await vi.waitFor(() => expect(launched).toBeDefined());
 	const worker = launched!;
+	const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 	expect(
 		registry.admitWorker(
 			{
@@ -69,13 +70,14 @@ async function liveWorker() {
 				role: "worker",
 				protocolVersion: 4,
 				workerId: worker.request.workerId,
-				workerToken: worker.request.workerToken,
+				workerProof: createHelloProof("worker", worker.request.workerToken, binding),
 				pid: 4242,
 				version: "test",
 			},
+			binding,
 			"c-1",
 		),
-	).toBe(true);
+	).toBeDefined();
 	await vi.waitFor(() => expect(events.some((event) => event.type === "worker_spawn")).toBe(true));
 	expect(await send({ type: "worker_ready", sessionIds: [SESSION_ID] })).toMatchObject({ type: "ok" });
 	const detach = await opened;

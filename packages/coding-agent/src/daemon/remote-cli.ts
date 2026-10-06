@@ -822,11 +822,13 @@ async function handleWorktreeCommand(args: string[]): Promise<void> {
 	}
 }
 
-/** Router for `volt remote <command>` (daemon control clients); returns true when handled. */
-export async function handleRemoteControlCommand(
-	args: string[],
-	options: { isStandaloneBinary: boolean },
-): Promise<boolean> {
+/**
+ * Router for `volt remote <command>` (daemon control clients); returns true
+ * when handled. A daemon without phone transport (standalone binaries,
+ * `--omit=optional`, darwin x64) still manages workspaces and worktrees; it
+ * refuses pairing, and its status says why.
+ */
+export async function handleRemoteControlCommand(args: string[]): Promise<boolean> {
 	if (args[0] !== "remote") {
 		return false;
 	}
@@ -838,14 +840,6 @@ export async function handleRemoteControlCommand(
 	if (command === "host") {
 		console.error(
 			'"volt remote host" has been replaced by the background daemon. Run "volt daemon start" (or enable remote.background). See docs/daemon.md.',
-		);
-		process.exitCode = 1;
-		return true;
-	}
-	if (options.isStandaloneBinary) {
-		console.error("Error: volt remote is not available from the standalone binary release.");
-		console.error(
-			"Use a Node.js npm install or source checkout with the required Iroh wrapper and optional platform binding.",
 		);
 		process.exitCode = 1;
 		return true;

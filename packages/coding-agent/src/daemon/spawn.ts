@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { join } from "node:path";
-import { ENV_AGENT_DIR, getAgentDir, getPackageDir, VERSION } from "../config.ts";
+import { isAbsolute, join } from "node:path";
+import { ENV_AGENT_DIR, getAgentDir, getPackageDir, isStandaloneBinary, VERSION } from "../config.ts";
 import { type ControlSocketProbe, probeControlSocket } from "./control-server.ts";
 import { type PidfileContents, readPidfile, VOLTD_EXIT_STARTUP_CONTENDED } from "./main.ts";
 import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
@@ -130,21 +130,47 @@ export async function findRunningDaemon(agentDir: string = getAgentDir()): Promi
 	return undefined;
 }
 
-export function resolveDaemonCliInvocation(packageDir: string = getPackageDir()): {
-	nodeArgs: string[];
-	entry: string;
-} {
+/** How this installation runs `volt <args>` in a new process: `command`, then `nodeArgs` (daemons only), `entryArgs`, and the CLI's own. */
+export interface DaemonCliInvocation {
+	/** The executable, by absolute path: it is never looked up on PATH. */
+	readonly command: string;
+	/** Node options a daemon runs with; a standalone binary takes none. */
+	readonly nodeArgs: readonly string[];
+	/** The CLI entry script; none for a standalone binary, which is its own entry. */
+	readonly entryArgs: readonly string[];
+}
+
+export interface ResolveDaemonCliInvocationOptions {
+	/** The installation whose CLI runs; a standalone binary only ever runs itself. */
+	readonly packageDir?: string;
+	readonly standalone?: boolean;
+}
+
+/**
+ * The program and arguments that run this installation's CLI. Node runs the
+ * entry script of `packageDir` (the source runner in a checkout, else the
+ * bundled CLI). A standalone binary re-executes itself (`process.execPath`,
+ * the binary the OS started) with no Node options or entry script: neither
+ * PATH, the working directory, nor `VOLT_PACKAGE_DIR` chooses what runs.
+ */
+export function resolveDaemonCliInvocation(options: ResolveDaemonCliInvocationOptions = {}): DaemonCliInvocation {
+	const command = process.execPath;
+	if (!isAbsolute(command))
+		throw new Error(`Cannot re-execute Volt: its executable path is not absolute (${command})`);
+	if (options.standalone ?? isStandaloneBinary) return { command, nodeArgs: [], entryArgs: [] };
+	const packageDir = options.packageDir ?? getPackageDir();
 	const sourceEntry = join(packageDir, "src", "cli.ts");
 	const sourceRunner = join(packageDir, "..", "..", "scripts", "run-coding-agent-source.mjs");
 	if (existsSync(sourceEntry) && existsSync(sourceRunner)) {
 		// Use the same tsconfig path resolution as volt-test, even from the agent directory.
 		// Native Node execution otherwise resolves workspace dependencies to stale dist files.
-		return { nodeArgs: [...DAEMON_NODE_ARGS], entry: sourceRunner };
+		return { command, nodeArgs: [...DAEMON_NODE_ARGS], entryArgs: [sourceRunner] };
 	}
 	const bundledEntry = join(packageDir, "dist", "core", "npm", "cli.js");
 	return {
+		command,
 		nodeArgs: [...DAEMON_NODE_ARGS],
-		entry: existsSync(bundledEntry) ? bundledEntry : join(packageDir, "dist", "cli.js"),
+		entryArgs: [existsSync(bundledEntry) ? bundledEntry : join(packageDir, "dist", "cli.js")],
 	};
 }
 
@@ -162,9 +188,9 @@ export interface StartInstalledDaemonDependencies {
 
 /** Run a `volt daemon` command from the installation at `packageDir`; resolves whether it exited 0. */
 function runInstalledDaemonCommand(agentDir: string, packageDir: string, command: string): Promise<boolean> {
-	const { entry } = resolveDaemonCliInvocation(packageDir);
+	const invocation = resolveDaemonCliInvocation({ packageDir });
 	return new Promise<boolean>((resolve) => {
-		const child = spawn(process.execPath, [entry, "daemon", command], {
+		const child = spawn(invocation.command, [...invocation.entryArgs, "daemon", command], {
 			stdio: "inherit",
 			windowsHide: true,
 			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
@@ -310,15 +336,19 @@ export async function waitForDaemonExit(options: WaitForDaemonExitOptions = {}):
 export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Promise<SpawnDaemonResult> {
 	const paths: DaemonPaths = getDaemonPaths(agentDir);
 	ensureDaemonDirs(paths);
-	const { nodeArgs, entry } = resolveDaemonCliInvocation();
+	const invocation = resolveDaemonCliInvocation();
 	const logFd = openSync(paths.logPath, "a", 0o600);
-	const child = spawn(process.execPath, [...nodeArgs, entry, "daemon", "run", "--foreground"], {
-		detached: true,
-		windowsHide: true,
-		stdio: ["ignore", logFd, logFd],
-		cwd: agentDir,
-		env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
-	});
+	const child = spawn(
+		invocation.command,
+		[...invocation.nodeArgs, ...invocation.entryArgs, "daemon", "run", "--foreground"],
+		{
+			detached: true,
+			windowsHide: true,
+			stdio: ["ignore", logFd, logFd],
+			cwd: agentDir,
+			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+		},
+	);
 	// An unhandled "error" event would crash the calling CLI process; capture it
 	// and surface it through the health-wait result instead.
 	let spawnError: Error | undefined;

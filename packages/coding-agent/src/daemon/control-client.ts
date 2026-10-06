@@ -9,8 +9,14 @@ import {
 	type ControlRequest,
 	type ControlResponse,
 	ControlValidators,
+	createHelloProof,
+	daemonProofMatches,
 	encodeControlLine,
 	type HelloAck,
+	type HelloBinding,
+	type HelloMessage,
+	type HelloProof,
+	type HelloRole,
 	PROTOCOL_VERSION,
 	type RelayPreamble,
 } from "./control-protocol.ts";
@@ -26,7 +32,11 @@ export interface DaemonClientEndpoint {
 interface DaemonClientCommonOptions {
 	socketPath: string;
 	version: string;
-	/** Per-daemon instance token read from the local pidfile. */
+	/**
+	 * Per-daemon instance token read from the local pidfile. The hello proves
+	 * it without sending it, and a connection is adopted only once the
+	 * endpoint proved it back.
+	 */
 	authToken?: string;
 	/** Re-read daemon discovery metadata before every dial after the first. */
 	refreshEndpoint?(): DaemonClientEndpoint | undefined;
@@ -214,6 +224,51 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		const dialEndpoint = endpoint;
 		connectPromise = new Promise<void>((resolve, reject) => {
 			const dialed = createConnection(dialEndpoint.socketPath);
+			/** The hello's proof of its secret (the spawn's worker token, or the pidfile token), bound to the connection. */
+			let proven:
+				| {
+						readonly role: HelloRole;
+						readonly secret: string;
+						readonly binding: HelloBinding;
+						readonly proof: HelloProof;
+				  }
+				| undefined;
+			let greeted = false;
+			/** Answer the daemon's challenge with the hello, its proof bound to the challenge and the socket dialed. */
+			const sayHello = (challenge: string): void => {
+				const binding: HelloBinding = { challenge, socketPath: dialEndpoint.socketPath };
+				let hello: HelloMessage;
+				if ("worker" in options) {
+					const proof = createHelloProof("worker", options.worker.workerToken, binding);
+					proven = { role: "worker", secret: options.worker.workerToken, binding, proof };
+					hello = {
+						type: "hello",
+						role: "worker",
+						protocolVersion: PROTOCOL_VERSION,
+						workerId: options.worker.workerId,
+						workerProof: proof,
+						pid: process.pid,
+						version: options.version,
+					};
+				} else {
+					const token = dialEndpoint.authToken;
+					proven =
+						token === undefined
+							? undefined
+							: { role: "control", secret: token, binding, proof: createHelloProof("control", token, binding) };
+					hello = {
+						type: "hello",
+						role: "control",
+						protocolVersion: PROTOCOL_VERSION,
+						pid: process.pid,
+						version: options.version,
+						client: options.client,
+						...(proven === undefined ? {} : { controlProof: proven.proof }),
+						...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+					};
+				}
+				dialed.write(encodeControlLine(hello));
+			};
 			dialing = dialed;
 			const decoder = new ControlLineDecoder();
 			let acked = false;
@@ -245,32 +300,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				reject(error);
 			};
 
-			dialed.on("connect", () => {
-				dialed.write(
-					encodeControlLine(
-						"worker" in options
-							? {
-									type: "hello",
-									role: "worker",
-									protocolVersion: PROTOCOL_VERSION,
-									workerId: options.worker.workerId,
-									workerToken: options.worker.workerToken,
-									pid: process.pid,
-									version: options.version,
-								}
-							: {
-									type: "hello",
-									role: "control",
-									protocolVersion: PROTOCOL_VERSION,
-									pid: process.pid,
-									version: options.version,
-									client: options.client,
-									...(dialEndpoint.authToken === undefined ? {} : { controlToken: dialEndpoint.authToken }),
-									...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
-								},
-					),
-				);
-			});
 			dialed.on("data", (chunk) => {
 				let messages: unknown[];
 				try {
@@ -280,17 +309,36 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					return;
 				}
 				for (const message of messages) {
+					// The daemon speaks first: the challenge the hello's proof covers.
+					if (!greeted) {
+						if (!ControlValidators.helloChallenge.Check(message)) {
+							failDial(new Error("daemon did not greet with a challenge"));
+							return;
+						}
+						greeted = true;
+						sayHello(message.nonce);
+						continue;
+					}
 					if (!acked) {
 						if (!ControlValidators.helloAck.Check(message)) {
 							failDial(new Error("daemon did not answer hello"));
 							return;
 						}
 						const ack: HelloAck = message;
+						// An endpoint that cannot prove the secret is not the daemon (on Windows, a stale
+						// pipe name someone else took): nothing it sends is trusted, and its refusals end nothing.
+						const ackProven =
+							proven === undefined ||
+							daemonProofMatches(proven.role, proven.secret, proven.binding, proven.proof, ack.daemonProof);
 						if (!ack.ok) {
 							failDial(
-								new Error(`daemon rejected hello: ${ack.error ?? "unknown"}`),
-								ack.error === "protocol_mismatch" ? "protocol_mismatch" : undefined,
+								new Error(`daemon rejected hello: ${ack.error ?? "unknown"}${ackProven ? "" : " (unproven)"}`),
+								ackProven && ack.error === "protocol_mismatch" ? "protocol_mismatch" : undefined,
 							);
+							return;
+						}
+						if (!ackProven) {
+							failDial(new Error("the daemon endpoint did not prove it holds the daemon's token"));
 							return;
 						}
 						if (closed) {
@@ -457,14 +505,21 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			return new Promise((resolve, reject) => {
 				const relaySocket = createConnection(relayEndpoint.socketPath);
 				const decoder = new ControlLineDecoder();
+				// The hello proves the offer's token on this connection without sending it; only the daemon
+				// that minted the offer can prove it back.
+				let proven: { readonly binding: HelloBinding; readonly proof: HelloProof } | undefined;
 				let acked = false;
 				let settled = false;
+				// An endpoint that never greets, or never answers, is no daemon: the open fails like a dial would.
+				const handshakeTimer = setTimeout(() => fail(new Error("relay hello timed out")), helloTimeoutMs);
+				handshakeTimer.unref?.();
 
 				const fail = (error: Error) => {
 					if (settled) {
 						return;
 					}
 					settled = true;
+					clearTimeout(handshakeTimer);
 					relaySocket.destroy();
 					reject(error);
 				};
@@ -474,9 +529,43 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 						// One line at a time: bytes after the preamble are raw relay
 						// payload and must never be JSON-decoded.
 						decoder.pushEach(chunk, (message) => {
+							// The daemon speaks first: the challenge the hello's proof covers.
+							if (proven === undefined) {
+								if (!ControlValidators.helloChallenge.Check(message)) {
+									fail(new Error("daemon did not greet with a challenge"));
+									return "stop";
+								}
+								const binding: HelloBinding = {
+									challenge: message.nonce,
+									socketPath: relayEndpoint.socketPath,
+								};
+								proven = { binding, proof: createHelloProof("relay", offer.relayToken, binding) };
+								relaySocket.write(
+									encodeControlLine({
+										type: "hello",
+										role: "relay",
+										protocolVersion: PROTOCOL_VERSION,
+										relayId: offer.relayId,
+										relayProof: proven.proof,
+									}),
+								);
+								return "continue";
+							}
 							if (!acked) {
 								if (!ControlValidators.helloAck.Check(message) || !message.ok) {
 									fail(new Error("relay hello rejected"));
+									return "stop";
+								}
+								if (
+									!daemonProofMatches(
+										"relay",
+										offer.relayToken,
+										proven.binding,
+										proven.proof,
+										message.daemonProof,
+									)
+								) {
+									fail(new Error("the relay endpoint did not prove it holds the offer's token"));
 									return "stop";
 								}
 								acked = true;
@@ -487,6 +576,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 								return "stop";
 							}
 							settled = true;
+							clearTimeout(handshakeTimer);
 							relaySocket.removeListener("data", onData);
 							relaySocket.pause();
 							const remainder = decoder.drainRemainder();
@@ -501,17 +591,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					}
 				};
 
-				relaySocket.on("connect", () => {
-					relaySocket.write(
-						encodeControlLine({
-							type: "hello",
-							role: "relay",
-							protocolVersion: PROTOCOL_VERSION,
-							relayId: offer.relayId,
-							relayToken: offer.relayToken,
-						}),
-					);
-				});
 				relaySocket.on("data", onData);
 				relaySocket.on("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
 				relaySocket.on("close", () => fail(new DaemonClientClosedError("relay connection closed")));
