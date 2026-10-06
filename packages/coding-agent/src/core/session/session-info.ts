@@ -167,24 +167,6 @@ export class SessionInfo {
 		})();
 	}
 
-	/** Every user message in the session, for the fork selector. */
-	userMessagesForForking(): Array<{ entryId: string; text: string }> {
-		const entries = this.host.sessionManager.getEntries();
-		const result: Array<{ entryId: string; text: string }> = [];
-
-		for (const entry of entries) {
-			if (entry.type !== "message") continue;
-			if (entry.message.role !== "user") continue;
-
-			const text = extractUserMessageText(entry.message.content);
-			if (text) {
-				result.push({ entryId: entry.id, text });
-			}
-		}
-
-		return result;
-	}
-
 	/** Lifetime session statistics. */
 	stats(): SessionStats {
 		// Agent state is the retained model context after compaction. The append-only
@@ -306,34 +288,5 @@ export class SessionInfo {
 			themeName,
 			presenters: this.host.presenters(),
 		});
-	}
-
-	/**
-	 * Text content of the last assistant message, skipping aborted empty ones.
-	 * @returns Text content, or undefined if no assistant message exists
-	 */
-	lastAssistantText(): string | undefined {
-		const lastAssistant = this.host
-			.messages()
-			.slice()
-			.reverse()
-			.find((m) => {
-				if (m.role !== "assistant") return false;
-				const msg = m as AssistantMessage;
-				// Skip aborted messages with no content
-				if (msg.stopReason === "aborted" && msg.content.length === 0) return false;
-				return true;
-			});
-
-		if (!lastAssistant) return undefined;
-
-		let text = "";
-		for (const content of (lastAssistant as AssistantMessage).content) {
-			if (content.type === "text") {
-				text += content.text;
-			}
-		}
-
-		return text.trim() || undefined;
 	}
 }

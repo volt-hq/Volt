@@ -9,6 +9,17 @@ Volt uses JSON settings files with project settings overriding global settings.
 
 Edit directly or use `/settings` for common options.
 
+## Who reads a setting
+
+Settings belong to the side that reads them. The host (the process that runs the conversation) reads most of them; the interactive TUI, a client of its host, reads its display settings itself.
+
+- **Host settings change through the host, and apply to the running conversation at once.** `/settings` and protocol clients change them with intents: `personality`, `transport`, `reviewModel`, `promptCache` keepalive, `images.autoResize`, `images.blockImages`, `httpIdleTimeoutMs`, `enableInstallTelemetry`, and `warnings` (`set_settings`); `steeringMode` and `followUpMode`; auto-compaction and its per-model threshold; the thinking level; the model cycle (`enabledModels`, through `/scoped-models`); the default model and thinking level; the settings profile (`/profile`, which reloads the conversation's resources and extensions and applies the profile's model scope and default model); and extension settings and enablement. They save where the host keeps them: globally, or in the active profile for the keys a profile holds (extension settings in the scope the client names). Other conversations open in the same process take the change when they reload; extension settings reach every open conversation at once. See [Intents](rpc.md#intents).
+- **Display settings belong to the TUI**, which writes them itself and applies them at once: `theme`, `hideThinkingBlock`, `terminal.showImages`, `terminal.imageWidthCells`, `terminal.clearOnShrink`, `terminal.showTerminalProgress`, `terminal.turnDoneAlert`, `editorPaddingX`, `autocompleteMaxVisible`, `showHardwareCursor`, `quietStartup`, `collapseChangelog`, `doubleEscapeAction`, `treeFilterMode`, `branchSummary.skipPrompt`, `markdown.codeBlockIndent`, `tuiMode`, `fullscreenExitOutput`, `fullscreenScrollbar`, `enableSkillCommands`, `reviewTools`, and `defaultProjectTrust`. The TUI reads them where the conversation it shows runs: global settings, the active profile, and, for a trusted project, the project's `.volt/settings.json`. It reads them again when it moves to a conversation in another folder, another project trust, or another profile. `warnings.contextTokens` is a host setting the TUI's footer reads from the host.
+- **Credentials** are never settings: `/login` and `/logout` change them through the host.
+- **Packages** (`/store`) are installed by the TUI into the settings files, then load when the conversation reloads.
+
+Edits to the files themselves apply after `/reload`, which reloads the host's settings and the TUI's, or on the next start.
+
 ## Project Trust
 
 On interactive startup, volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.

@@ -17,6 +17,7 @@ import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
 import type { JobSummary } from "../../src/core/tools/jobs.ts";
 import { createSubagentTool } from "../../src/core/tools/subagent.ts";
+import { lastAssistantText } from "../utilities/session-reads.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -233,7 +234,7 @@ describe("native background subagents", () => {
 				const child = context.runtimes[0]!.conversation.session;
 				await child.waitForIdle();
 				await setImmediate();
-				expect(child.getLastAssistantText()).toBe("Child final report.");
+				expect(lastAssistantText(child)).toBe("Child final report.");
 				expect(child.isBusy).toBe(false);
 				expect(child.isStreaming).toBe(false);
 				expect(child.work.busy()).toBe(true);
@@ -289,7 +290,7 @@ describe("native background subagents", () => {
 				// Retention remains intentional after every delegated resource settles.
 				context.children[0]!.setResponses([fauxAssistantMessage("Retained runtime is usable.")]);
 				await child.prompt("Continue through the retained owner");
-				expect(child.getLastAssistantText()).toBe("Retained runtime is usable.");
+				expect(lastAssistantText(child)).toBe("Retained runtime is usable.");
 			} finally {
 				finish.resolve();
 				await abort;
@@ -452,7 +453,7 @@ describe("native background subagents", () => {
 					fauxAssistantMessage("Parent work continues."),
 				]);
 				await context.session.prompt("Delegate independent work");
-				expect(context.session.getLastAssistantText()).toBe("Parent work continues.");
+				expect(lastAssistantText(context.session)).toBe("Parent work continues.");
 				await vi.waitFor(() => expect(context.signals).toHaveLength(mode === "parallel" ? 2 : 1));
 				expect(context.signals.every((signal) => !signal.aborted)).toBe(true);
 				const result = context.session.messages.filter((message) => message.role === "toolResult").at(-1);
@@ -467,7 +468,7 @@ describe("native background subagents", () => {
 				]);
 				context.finish.resolve();
 				await vi.waitFor(() =>
-					expect(context.session.getLastAssistantText()).toBe("Parent collected the child report automatically."),
+					expect(lastAssistantText(context.session)).toBe("Parent collected the child report automatically."),
 				);
 				await context.session.waitForIdle();
 				const jobs = context.session.state.tools.find((tool) => tool.name === "jobs")!;

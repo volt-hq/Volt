@@ -76,13 +76,14 @@ Background jobs, subagents, reviews, host actions, and extension work are work i
 In the picker you can:
 
 - search by typing
+- switch between the current folder's sessions and all sessions with Tab
 - toggle path display with Ctrl+P
 - toggle sort mode with Ctrl+S
 - filter to named sessions with Ctrl+N
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-When available, volt exports a JSONL snapshot to the system trash before deleting the session from SQLite.
+Volt deletes only sessions of the current folder's workspace that no conversation has open: in the All view, another folder's sessions cannot be deleted from here, a session open in this process is refused, and one open in another process fails at its lock. Before deleting a session from SQLite, volt exports it as a JSONL recovery snapshot into `deleted-session-snapshots/` under its session directory, and moves the snapshot to the system trash when a `trash` command is available. Protocol clients delete with the `delete_session` intent and list sessions with the `sessions` query ([RPC](rpc.md#built-in-intents)).
 
 ## Naming Sessions
 
@@ -134,6 +135,10 @@ Example shape:
 | Ctrl+O | Cycle filter mode |
 
 Filter modes are: default, no-tools, user-only, labeled-only, and all. Configure the default with `treeFilterMode` in [Settings](settings.md).
+
+### Labels
+
+A label bookmarks an entry of the tree. Shift+L in `/tree` sets or clears the selected entry's label, which shows before the entry as `[label]`; the labeled-only filter lists the labeled entries. Labels are log entries of the session: forks and clones copy those on the copied branch, and a label stays when the active branch moves elsewhere. Protocol clients set them with the `set_label` intent (`null` clears one), and extensions with [`volt.setLabel()`](extensions.md#voltsetlabelentryid-label).
 
 ### Selection Behavior
 

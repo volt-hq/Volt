@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { ExtensionAPI } from "../../src/core/extensions/index.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import { lastAssistantText } from "../utilities/session-reads.ts";
 import { createHostHarness } from "./host-harness.ts";
 
 type BashValue = Extract<LiveValue, { kind: "bash" }>;
@@ -116,7 +117,7 @@ describe("user shell commands", () => {
 		);
 		// A prompt sent while the command runs is admitted, and its turn runs, at once.
 		await client.prompt("while it runs");
-		await vi.waitFor(() => expect(conversation.session.getLastAssistantText()).toBe("one"));
+		await vi.waitFor(() => expect(lastAssistantText(conversation.session)).toBe("one"));
 		expect(client.live.values.get("bash")).toMatchObject({ command: "sleep 1; printf first" });
 		expect(client.live.values.get("bash")).not.toHaveProperty("exitCode");
 		await Promise.all([first, second]);

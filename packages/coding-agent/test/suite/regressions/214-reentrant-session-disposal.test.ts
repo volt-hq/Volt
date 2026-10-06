@@ -108,7 +108,7 @@ describe("regression #214: reentrant session disposal", () => {
 			},
 		};
 
-		const bash = harness.session.executeBash("ignored abort", undefined, { operations }).catch(() => undefined);
+		const bash = harness.session.runUserBash("ignored abort", { operations }).catch(() => undefined);
 		await bashStarted.promise;
 		harness.session.dispose();
 		let closed = false;

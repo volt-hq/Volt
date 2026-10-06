@@ -355,7 +355,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 	it("allows direct shell, exports and LSP management but retains source-owned identity boundaries", async () => {
 		const { childRef, root, directory } = await fixture();
 		const item = await harness({ sessionManager: await open(childRef) });
-		expect(await item.session.executeBash("printf direct-shell")).toMatchObject({
+		expect(await item.session.runUserBash("printf direct-shell")).toMatchObject({
 			output: "direct-shell",
 			exitCode: 0,
 		});

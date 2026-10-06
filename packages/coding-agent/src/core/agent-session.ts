@@ -76,7 +76,7 @@ import { SessionExtensionServices } from "./session/extension-services.ts";
 import { HOST_ACTION_WORK_KIND, type HostActions, SessionHostActions } from "./session/host-actions.ts";
 import { SessionJobs } from "./session/jobs.ts";
 import { SessionLifecycle } from "./session/lifecycle.ts";
-import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
+import { type DefaultPersistenceOptions, type ModelSelectOptions, ModelSettings } from "./session/model-settings.ts";
 import { type NavigateTreeOptions, type NavigateTreeResult, SessionNavigation } from "./session/navigation.ts";
 import { SessionPlanning } from "./session/planning.ts";
 import { SessionPresenters } from "./session/presenters.ts";
@@ -309,14 +309,6 @@ export interface PromptOptions {
 	 * is still current before prompt admission can mutate durable branch state.
 	 */
 	assertConversationGenerationCurrent?: () => void;
-}
-
-/** Result from cycleModel() */
-export interface ModelCycleResult {
-	model: Model<any>;
-	thinkingLevel: ThinkingLevel;
-	/** Whether cycling through scoped models (--models flag) or all available */
-	isScoped: boolean;
 }
 
 /** Lifetime session statistics for /session and RPC consumers. */
@@ -1614,10 +1606,6 @@ export class AgentSession {
 		return this._planning.setAgentMode(mode);
 	}
 
-	toggleAgentMode(): Promise<PlanningState> {
-		return this._planning.toggleAgentMode();
-	}
-
 	/** Commit a draft plan update; resolves after the new revision commits. */
 	updatePlan(input: {
 		planId?: string;
@@ -1891,24 +1879,6 @@ export class AgentSession {
 		return steering.length + followUp.length;
 	}
 
-	/** Get pending steering messages (read-only) */
-	getSteeringMessages(): readonly AgentSessionQueuedMessage[] {
-		this._assertNotDisposed();
-		return this._clientInputs.queueView().steering;
-	}
-
-	/** Get pending follow-up messages (read-only) */
-	getFollowUpMessages(): readonly AgentSessionQueuedMessage[] {
-		this._assertNotDisposed();
-		return this._clientInputs.queueView().followUp;
-	}
-
-	/** The notices of finished work queued for the next turn, oldest first (read-only). */
-	getQueuedWorkNotices(): readonly WorkNoticeDetails[] {
-		this._assertNotDisposed();
-		return this._clientInputs.queueView().notices;
-	}
-
 	get resourceLoader(): ResourceLoader {
 		return this._resourceLoader;
 	}
@@ -1996,18 +1966,8 @@ export class AgentSession {
 	 * Validates that auth is configured, saves to session, and persists as the default unless disabled.
 	 * @throws Error if no auth is configured for the model
 	 */
-	setModel(model: Model<any>, options?: DefaultPersistenceOptions): Promise<void> {
+	setModel(model: Model<any>, options?: ModelSelectOptions): Promise<void> {
 		return this._trackAdmittedAncillaryWork(this._modelSettings.setModel(model, options));
-	}
-
-	/**
-	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
-	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
-	 */
-	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this._trackAdmittedAncillaryWork(this._modelSettings.cycleModel(direction));
 	}
 
 	// =========================================================================
@@ -2021,22 +1981,6 @@ export class AgentSession {
 	 */
 	setThinkingLevel(level: ThinkingLevel, options?: DefaultPersistenceOptions): Promise<void> {
 		return this._trackAdmittedAncillaryWork(this._modelSettings.setThinkingLevel(level, options));
-	}
-
-	/**
-	 * Cycle to next thinking level.
-	 * @returns New level, or undefined if model doesn't support thinking
-	 */
-	cycleThinkingLevel(): ThinkingLevel | undefined {
-		if (!this.supportsThinking()) return undefined;
-
-		const levels = this.getAvailableThinkingLevels();
-		const currentIndex = levels.indexOf(this.thinkingLevel);
-		const nextIndex = (currentIndex + 1) % levels.length;
-		const nextLevel = levels[nextIndex];
-
-		void this.setThinkingLevel(nextLevel);
-		return nextLevel;
 	}
 
 	/**
@@ -2263,39 +2207,17 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Execute a bash command.
-	 * Adds result to agent context and session.
-	 * @param command The bash command to execute
-	 * @param onChunk Optional streaming callback for output
-	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
-	 * @param options.operations Custom BashOperations for remote execution
-	 */
-	executeBash(
-		command: string,
-		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: BashOperations },
-	): Promise<BashResult> {
-		return this._trackAdmittedAncillaryWork(this._bash.execute(command, onChunk, options));
-	}
-
-	/**
 	 * Run a user shell command (`!`, or `!!` with `excludeFromContext`) for a
 	 * client: extensions see `user_bash` first and may return its result, which
-	 * is recorded as given, or the operations it runs with. The live `bash`
+	 * is recorded as given, or the operations it runs with; without either it
+	 * runs with `operations` (the local shell by default). The live `bash`
 	 * value shows it until its entry commits.
 	 */
-	runUserBash(command: string, options: { excludeFromContext?: boolean } = {}): Promise<BashResult> {
+	runUserBash(
+		command: string,
+		options: { excludeFromContext?: boolean; operations?: BashOperations } = {},
+	): Promise<BashResult> {
 		return this._trackAdmittedAncillaryWork(this._bash.runUserCommand(command, options));
-	}
-
-	/**
-	 * Record a bash execution result in session history.
-	 * Used by executeBash and by extensions that handle bash execution themselves.
-	 * Resolves after the result commits, or at once when it is deferred until
-	 * the streaming turn ends.
-	 */
-	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): Promise<void> {
-		return this._bash.record(command, result, options);
 	}
 
 	/**
@@ -2343,13 +2265,6 @@ export class AgentSession {
 	 */
 	navigateTree(targetId: string, options: NavigateTreeOptions = {}): Promise<NavigateTreeResult> {
 		return this._navigation.navigateTree(targetId, options);
-	}
-
-	/**
-	 * Get all user messages from session for fork selector.
-	 */
-	getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
-		return this._sessionInfo.userMessagesForForking();
 	}
 
 	/**
@@ -2402,19 +2317,6 @@ export class AgentSession {
 	exportToJsonl(outputPath?: string): string {
 		this._assertActive();
 		return exportSessionToJsonl(this.sessionManager, outputPath);
-	}
-
-	// =========================================================================
-	// Utilities
-	// =========================================================================
-
-	/**
-	 * Get text content of last assistant message.
-	 * Useful for /copy command.
-	 * @returns Text content, or undefined if no assistant message exists
-	 */
-	getLastAssistantText(): string | undefined {
-		return this._sessionInfo.lastAssistantText();
 	}
 
 	// =========================================================================

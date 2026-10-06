@@ -2,8 +2,13 @@
  * Run modes for the coding agent.
  */
 
+export type { TuiConnection, TuiConnectOptions } from "./interactive/client/tui-connection.ts";
 export { TuiHost, type TuiHostOptions } from "./interactive/host/tui-host.ts";
-export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
+export {
+	InteractiveMode,
+	type InteractiveModeOptions,
+	type TuiSettingsScope,
+} from "./interactive/interactive-mode.ts";
 export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
 export {
 	createIrohRemoteAgentRuntime,

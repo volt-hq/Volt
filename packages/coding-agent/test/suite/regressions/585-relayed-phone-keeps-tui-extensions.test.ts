@@ -89,7 +89,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 					},
 				});
 			},
-			{ extensionMode: "tui" },
+			{ extensionMode: "rpc" },
 		);
 		cleanups.push(() => fixture.dispose());
 
@@ -146,8 +146,8 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			["info", "asked"],
 		]);
 		expect(seen).toEqual([
-			{ event: "session_start", mode: "tui", hasUI: true },
-			{ event: "ask", mode: "tui", hasUI: true },
+			{ event: "session_start", mode: "rpc", hasUI: true },
+			{ event: "ask", mode: "rpc", hasUI: true },
 		]);
 		// Errors reach every client: the TUI and the phone.
 		expect(tuiErrors).toEqual([expect.objectContaining({ extensionId: "test-extension", event: "command" })]);
@@ -174,8 +174,8 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		await runtime.session.prompt("/ask");
 		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 		expect(seen.slice(2)).toEqual([
-			{ event: "session_start", mode: "tui", hasUI: true },
-			{ event: "ask", mode: "tui", hasUI: true },
+			{ event: "session_start", mode: "rpc", hasUI: true },
+			{ event: "ask", mode: "rpc", hasUI: true },
 		]);
 		expect(tuiLive.notices()).toEqual([
 			["info", "proceeding"],

@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getClientMessageId } from "../../src/core/messages.ts";
 import { appendsEntryType } from "../utilities/faulty-log.ts";
+import { queueOf } from "../utilities/session-reads.ts";
 import {
 	createHarness,
 	getAssistantTexts,
@@ -730,7 +731,7 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual(["start"]);
-		expect(harness.session.getFollowUpMessages().map((message) => message.text)).toEqual(["retained follow-up"]);
+		expect(queueOf(harness.session).followUp.map((message) => message.text)).toEqual(["retained follow-up"]);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
@@ -754,7 +755,7 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual(["start"]);
-		expect(harness.session.getFollowUpMessages().map((message) => message.text)).toEqual(["retained follow-up"]);
+		expect(queueOf(harness.session).followUp.map((message) => message.text)).toEqual(["retained follow-up"]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 

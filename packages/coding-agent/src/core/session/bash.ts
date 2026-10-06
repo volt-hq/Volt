@@ -229,9 +229,13 @@ export class SessionBash {
 	/**
 	 * Run a user shell command for a client: extensions see `user_bash` first
 	 * and may return its result, which is recorded as given, or the operations
-	 * it runs with.
+	 * it runs with; else it runs with `options.operations`, the local shell by
+	 * default.
 	 */
-	async runUserCommand(command: string, options: { excludeFromContext?: boolean } = {}): Promise<BashResult> {
+	async runUserCommand(
+		command: string,
+		options: { excludeFromContext?: boolean; operations?: BashOperations } = {},
+	): Promise<BashResult> {
 		const excludeFromContext = options.excludeFromContext === true;
 		const handled = await this.host.extensionRunner().emitUserBash({
 			type: "user_bash",
@@ -244,23 +248,19 @@ export class SessionBash {
 			await this.record(command, result, { excludeFromContext });
 			return result;
 		}
-		return this.execute(command, undefined, {
-			excludeFromContext,
-			...(handled?.operations === undefined ? {} : { operations: handled.operations }),
-		});
+		const operations = handled?.operations ?? options.operations;
+		return this.execute(command, { excludeFromContext, ...(operations === undefined ? {} : { operations }) });
 	}
 
 	/**
 	 * Execute a bash command and record its result.
 	 * @param command The bash command to execute
-	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
 	 * @param options.operations Custom BashOperations for remote execution
 	 */
-	async execute(
+	private async execute(
 		command: string,
-		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; operations?: BashOperations },
+		options: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
 		this.host.assertActive();
 		if (this.host.isDisposed()) {
@@ -281,20 +281,14 @@ export class SessionBash {
 		const resolvedCommand = prefix ? `${prefix}\n${command}` : command;
 
 		try {
-			const live = new LiveBashOutput(this.host.liveState, command, options?.excludeFromContext === true);
+			const live = new LiveBashOutput(this.host.liveState, command, options.excludeFromContext === true);
 			let result: BashResult;
 			try {
 				result = await executeBashWithOperations(
 					resolvedCommand,
 					this.host.sessionManager.getCwd(),
-					options?.operations ?? createLocalBashOperations({ shellPath }),
-					{
-						onChunk: (chunk) => {
-							live.append(chunk);
-							onChunk?.(chunk);
-						},
-						signal: this.abortController.signal,
-					},
+					options.operations ?? createLocalBashOperations({ shellPath }),
+					{ onChunk: (chunk) => live.append(chunk), signal: this.abortController.signal },
 				);
 			} catch (error) {
 				live.clear();
@@ -314,7 +308,7 @@ export class SessionBash {
 	 * Resolves after the result commits, or at once when it is deferred until
 	 * the streaming turn ends. The live `bash` value shows it until it commits.
 	 */
-	async record(
+	private async record(
 		command: string,
 		result: BashResult,
 		options?: { excludeFromContext?: boolean },

@@ -33,7 +33,6 @@ export {
 	type AgentSessionEventListener,
 	type AgentSessionState,
 	type CompactionReason,
-	type ModelCycleResult,
 	type PromptOptions,
 	type SessionStats,
 } from "./core/agent-session.ts";
@@ -86,6 +85,7 @@ export type {
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
+	CommandInvoker,
 	CompactOptions,
 	ContextEvent,
 	ContextUsage,
@@ -223,7 +223,6 @@ export {
 	defineTool,
 	discoverAndLoadExtensions,
 	ExtensionPermissionError,
-	ExtensionRunner,
 	ExtensionSettingsError,
 	isBashToolResult,
 	isEditToolResult,
@@ -945,8 +944,11 @@ export {
 	type RpcModeOptions,
 	runPrintMode,
 	runRpcMode,
+	type TuiConnection,
+	type TuiConnectOptions,
 	TuiHost,
 	type TuiHostOptions,
+	type TuiSettingsScope,
 } from "./modes/index.ts";
 export {
 	DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,

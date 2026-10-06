@@ -4,6 +4,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { CustomMessageInput } from "../../../src/core/messages.ts";
+import { queueOf } from "../../utilities/session-reads.ts";
 import { createHarness, getUserTexts, type Harness } from "../harness.ts";
 
 function getUserText(messages: readonly AgentMessage[]): string | undefined {
@@ -559,7 +560,7 @@ describe("regression #213: AgentSession observer isolation", () => {
 			try {
 				await entered;
 				await harness.session.steer("authoritative queue projection");
-				queuedSteering = harness.session.getSteeringMessages().map((entry) => entry.text);
+				queuedSteering = queueOf(harness.session).steering.map((entry) => entry.text);
 			} finally {
 				releaseTurn();
 				await run;

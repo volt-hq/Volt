@@ -369,12 +369,14 @@ describe("intent descriptors", () => {
 		expect(remoteNames.every((name) => intentRegistry.get(name as "prompt").remote === "safe")).toBe(true);
 	});
 
-	it("resolves the slash aliases that invoke one intent", () => {
-		expect(intentRegistry.resolveSlash("clear")).toBe("new_session");
-		expect(intentRegistry.resolveSlash("/name")).toBe("set_session_name");
-		expect(intentRegistry.resolveSlash("fast")).toBe("set_fast_mode");
-		expect(intentRegistry.resolveSlash("compact")).toBe("compact");
-		expect(intentRegistry.resolveSlash("review")).toBeUndefined();
+	it("names the slash aliases its intents take, one shared by the review intents", () => {
+		expect(intentRegistry.get("new_session").slash?.name).toBe("clear");
+		expect(intentRegistry.get("set_session_name").slash?.name).toBe("name");
+		expect(intentRegistry.get("set_fast_mode").slash?.name).toBe("fast");
+		expect(intentRegistry.get("compact").slash?.name).toBe("compact");
+		for (const name of ["review_uncommitted", "review_branch", "review_pr", "review_commit"] as const) {
+			expect(intentRegistry.get(name).slash?.name).toBe("review");
+		}
 	});
 
 	it("requires the selection and host management to persist a default", () => {

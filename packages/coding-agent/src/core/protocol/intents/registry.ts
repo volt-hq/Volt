@@ -109,15 +109,9 @@ function nameOf(resolved: ResolvedIntent): string {
 	return resolved.kind === "builtin" ? resolved.definition.name : resolved.intent.name;
 }
 
-interface LoadedIntents {
-	readonly definitions: BuiltinIntentDefinitions;
-	/** Slash aliases that invoke one built-in intent. */
-	readonly slashAliases: ReadonlyMap<string, BuiltinIntentName>;
-}
-
 export class IntentRegistry {
 	private readonly load: () => BuiltinIntentDefinitions;
-	private loaded: LoadedIntents | undefined;
+	private loaded: BuiltinIntentDefinitions | undefined;
 	private readonly validators = new Map<BuiltinIntentName, Validator>();
 
 	/** `load` returns the definitions; the registry reads them on first use. */
@@ -125,27 +119,15 @@ export class IntentRegistry {
 		this.load = load;
 	}
 
-	private get intents(): LoadedIntents {
+	private get definitions(): BuiltinIntentDefinitions {
 		if (this.loaded) return this.loaded;
 		const definitions = this.load();
-		const slashNames = new Map<string, BuiltinIntentName[]>();
 		for (const name of Object.keys(definitions) as BuiltinIntentName[]) {
 			const definition: AnyIntentDefinition = definitions[name];
 			if (definition.name !== name) throw new Error(`Intent ${name} is defined as ${definition.name}`);
-			const alias = definition.slash?.name;
-			if (alias !== undefined) slashNames.set(alias, [...(slashNames.get(alias) ?? []), name]);
 		}
-		// A slash name several intents share (`/review <target>`) names a command, not one intent.
-		const slashAliases = new Map<string, BuiltinIntentName>();
-		for (const [alias, names] of slashNames) {
-			if (names.length === 1) slashAliases.set(alias, names[0]!);
-		}
-		this.loaded = { definitions, slashAliases };
-		return this.loaded;
-	}
-
-	private get definitions(): BuiltinIntentDefinitions {
-		return this.intents.definitions;
+		this.loaded = definitions;
+		return definitions;
 	}
 
 	/** Every built-in intent name, in definition order. */
@@ -167,11 +149,6 @@ export class IntentRegistry {
 		}
 		const intent = findDynamicIntent(target.session, name);
 		return intent ? { kind: "dynamic", intent } : undefined;
-	}
-
-	/** The built-in intent a slash alias (`/clear`, `/name`, ...) invokes. */
-	resolveSlash(alias: string): BuiltinIntentName | undefined {
-		return this.intents.slashAliases.get(alias.startsWith("/") ? alias.slice(1) : alias);
 	}
 
 	/** Availability for a view: the review-discussion boundary, then the definition's own. */

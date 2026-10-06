@@ -20,13 +20,16 @@
  * client. Command context actions, abort, and shutdown go to the client the
  * call runs for (its client scope); calls outside any client scope go to the
  * anchor, the oldest attached client, and calls for a client that has left
- * go nowhere.
+ * go nowhere. A command's `ctx.invokedBy` says whether the client it runs for
+ * is a paired remote device. A stopped instance's `ctx.ui` stays stopped
+ * when its id runs again: the new instance gets a `ctx.ui` of its own.
  */
 
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../agent-session.ts";
 import {
+	type CommandInvoker,
 	type ExtensionCommandContextActions,
 	type ExtensionError,
 	type ExtensionErrorListener,
@@ -189,6 +192,8 @@ export interface ExtensionClient {
 	 * `ctx.mode`; a `ConversationHost` attaches every client in its own mode.
 	 */
 	readonly mode: ExtensionMode;
+	/** A paired remote device: the commands it invokes see `ctx.invokedBy` as `"remote"`. */
+	readonly remote?: boolean;
 	/** The client's themes: theme calls go to the last attached client with them. */
 	readonly themes?: ExtensionClientThemes;
 	/** Session control for the commands the client invoked. */
@@ -259,8 +264,10 @@ export class SessionExtensionBinding {
 	private started = false;
 	/** The extensions of the session, which run as settings enable them. */
 	readonly registry: ExtensionRegistry;
-	/** Each extension's `ctx.ui`, by manifest id; `undefined` for contexts no extension owns. */
+	/** The UI each extension's `ctx.ui` routes to, by manifest id; `undefined` for contexts no extension owns. */
 	private readonly uiRouters = new Map<string | undefined, ExtensionUIContext>();
+	/** Each extension instance's `ctx.ui`: it stops when its instance stops, whatever runs under its id later. */
+	private readonly instanceUIs = new WeakMap<Extension, ExtensionUIContext>();
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
@@ -404,7 +411,7 @@ export class SessionExtensionBinding {
 
 	/** The UI contexts no extension owns see, while an attached client shows a terminal. */
 	get uiContext(): ExtensionUIContext | undefined {
-		return this.terminalClient() ? this.uiFor(undefined) : undefined;
+		return this.terminalClient() ? this.uiFor(undefined, undefined) : undefined;
 	}
 
 	/** Ask the user `request`'s questions in the terminal client; undefined when none is attached. */
@@ -563,22 +570,29 @@ export class SessionExtensionBinding {
 	}
 
 	/**
-	 * The `ctx.ui` of the extension with manifest id `owner`, or of contexts no
-	 * extension owns. While the extension stops, it shows no UI and asks
-	 * nothing ({@link STOPPED_UI}).
+	 * The `ctx.ui` of `instance`, an instance of the extension with manifest id
+	 * `owner`, or of contexts no extension owns. Once the instance is no
+	 * longer the one that runs under its id (it stops, or another runs in its
+	 * place), it shows no UI and asks nothing ({@link STOPPED_UI}).
 	 */
-	private uiFor(owner: string | undefined): ExtensionUIContext {
+	private uiFor(owner: string | undefined, instance: Extension | undefined): ExtensionUIContext {
 		let router = this.uiRouters.get(owner);
 		if (!router) {
-			const created = this.createUIRouter(owner);
-			router = owner === undefined ? created : this.stoppableUI(owner, created);
+			router = this.createUIRouter(owner);
 			this.uiRouters.set(owner, router);
 		}
-		return router;
+		if (owner === undefined) return router;
+		if (instance === undefined) return this.stoppableUI(router, () => this.registry.stopped(owner));
+		let ui = this.instanceUIs.get(instance);
+		if (!ui) {
+			ui = this.stoppableUI(router, () => this.registry.instance(owner) !== instance);
+			this.instanceUIs.set(instance, ui);
+		}
+		return ui;
 	}
 
-	/** `ui` as the extension `owner` holds it: once it stops, each member answers as {@link STOPPED_UI} does when called. */
-	private stoppableUI(owner: string, ui: ExtensionUIContext): ExtensionUIContext {
+	/** `ui` as an extension holds it: once `stopped`, each member answers as {@link STOPPED_UI} does when called. */
+	private stoppableUI(ui: ExtensionUIContext, stopped: () => boolean): ExtensionUIContext {
 		const wrapped = new Map<string, (...args: unknown[]) => unknown>();
 		return new Proxy(ui, {
 			get: (target, key) => {
@@ -586,17 +600,26 @@ export class SessionExtensionBinding {
 				if (typeof key !== "string" || typeof value !== "function" || !Object.hasOwn(STOPPED_UI, key)) return value;
 				let member = wrapped.get(key);
 				if (!member) {
-					const stopped = STOPPED_UI[key as keyof ExtensionUIContext] as (...args: unknown[]) => unknown;
+					const answer = STOPPED_UI[key as keyof ExtensionUIContext] as (...args: unknown[]) => unknown;
 					// Checked at each call: a member taken before the extension stopped stops with it.
 					member = (...args) =>
-						this.registry.stopped(owner)
-							? stopped(...args)
-							: (Reflect.get(target, key) as (...args: unknown[]) => unknown)(...args);
+						stopped() ? answer(...args) : (Reflect.get(target, key) as (...args: unknown[]) => unknown)(...args);
 					wrapped.set(key, member);
 				}
 				return member;
 			},
 		});
+	}
+
+	/**
+	 * Who the call now running invokes a command for: a client the host
+	 * attached as a paired remote device, or one it does not know (it left),
+	 * is `"remote"`; an attached local client, or no client, is `"local"`.
+	 */
+	private invoker(): CommandInvoker {
+		if (ClientScope.current() === undefined) return "local";
+		const client = this.scopedClient();
+		return client !== undefined && client.remote !== true ? "local" : "remote";
 	}
 
 	/** Every attached client hears every extension error; one failing listener cannot silence the others. */
@@ -760,7 +783,7 @@ export class SessionExtensionBinding {
 		// Sessions clients drive keep UI while no client shows it: dialogs then resolve to their defaults.
 		// Print and JSON runs have none.
 		runner.setUIContext(
-			(owner) => this.uiFor(owner),
+			(owner, instance) => this.uiFor(owner, instance),
 			this.extensionMode,
 			() =>
 				this.terminalClient() !== undefined ||
@@ -768,6 +791,7 @@ export class SessionExtensionBinding {
 				(this.extensionMode !== "print" && this.extensionMode !== "json"),
 		);
 		runner.bindCommandContext(this.commandActions);
+		runner.bindInvoker(() => this.invoker());
 
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = runner.onError((error) => this.reportError(error));

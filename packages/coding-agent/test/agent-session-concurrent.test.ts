@@ -20,6 +20,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { queueOf } from "./utilities/session-reads.ts";
 import {
 	createTestAgentSessionRuntimeConfig,
 	createTestExtensionsResult,
@@ -382,7 +383,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		volt!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
 		// Steering admission commits durably before the queue reflects it.
 		await vi.waitFor(() => expect(session.pendingMessageCount).toBe(1));
-		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
+		expect(queueOf(session).steering.map((message) => message.text)).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
 		expect(
 			queueEvents.some((event) => event.steering.some((message) => message.text === "Steer from extension")),
@@ -392,7 +393,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 
 		expect(sawSteeringMessage).toBe(false);
-		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
+		expect(queueOf(session).steering.map((message) => message.text)).toContain("Steer from extension");
 	});
 
 	it("should allow prompt() after previous completes", async () => {

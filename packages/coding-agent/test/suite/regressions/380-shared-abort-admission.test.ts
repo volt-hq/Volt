@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI } from "../../../src/core/extensions/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
 
 function deferred() {
@@ -121,7 +122,7 @@ const starts: Array<{ name: string; start(harness: Harness, operations: BashOper
 	},
 	{
 		name: "host Bash",
-		start: (harness, operations) => harness.session.executeBash("must not start", undefined, { operations }),
+		start: (harness, operations) => harness.session.runUserBash("must not start", { operations }),
 	},
 ];
 
@@ -171,7 +172,7 @@ describe("PR #380: shared session abort admission", () => {
 		expect(harness.session.work.busy()).toBe(false);
 		harness.setResponses([fauxAssistantMessage("admission reopened")]);
 		await harness.session.sendCustomMessage({ ...message, content: "allowed after abort" }, { triggerTurn: true });
-		expect(harness.session.getLastAssistantText()).toBe("admission reopened");
+		expect(lastAssistantText(harness.session)).toBe("admission reopened");
 		expect(harness.faux.state.callCount).toBe(1);
 	});
 
@@ -237,7 +238,7 @@ describe("PR #380: shared session abort admission", () => {
 		}
 		harness.setResponses([fauxAssistantMessage("recovered after failure")]);
 		await harness.session.sendCustomMessage(message, { triggerTurn: true });
-		expect(harness.session.getLastAssistantText()).toBe("recovered after failure");
+		expect(lastAssistantText(harness.session)).toBe("recovered after failure");
 		await harness.session.abort();
 	});
 

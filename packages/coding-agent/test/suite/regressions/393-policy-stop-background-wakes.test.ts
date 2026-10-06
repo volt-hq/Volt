@@ -9,6 +9,7 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createHarness } from "../harness.ts";
 
 function deferred() {
@@ -102,7 +103,7 @@ describe("#393 subagent policy stops fence background wakes", () => {
 			await handle.prompt("Start independent background work and finish the report");
 			await vi.waitFor(() => expect(fixture.faux.state.callCount).toBe(2));
 			await child.waitForIdle();
-			expect(child.getLastAssistantText()).toBe("Child final report.");
+			expect(lastAssistantText(child)).toBe("Child final report.");
 			expect(child.work.busy()).toBe(true);
 			expect(exec).toHaveBeenCalledTimes(2);
 			const jobs = child.jobs.list();
@@ -124,12 +125,12 @@ describe("#393 subagent policy stops fence background wakes", () => {
 			}
 			expect((await handle.waitForEnd()).status).toBe("completed");
 			if (exhausted) {
-				expect(child.getLastAssistantText()).toBe("Child final report.");
+				expect(lastAssistantText(child)).toBe("Child final report.");
 				// Explicit new prompts are still allowed, but cannot execute tools after exhaustion.
 				fixture.setResponses([fauxAssistantMessage("Explicit report-only follow-up.")]);
 				await child.prompt("Answer one explicit follow-up");
 				expect(fixture.faux.state.callCount).toBe(3);
-				expect(child.getLastAssistantText()).toBe("Explicit report-only follow-up.");
+				expect(lastAssistantText(child)).toBe("Explicit report-only follow-up.");
 				fixture.setResponses([
 					fauxAssistantMessage(fauxToolCall("bash", { command: "must not run" }), { stopReason: "toolUse" }),
 				]);

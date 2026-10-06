@@ -37,6 +37,7 @@ import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 import { type SeedLogBuild, seedSession } from "./utilities/seed-log.ts";
+import { bashResultOperations, queueOf, userMessagesForForking } from "./utilities/session-reads.ts";
 import { testExtension } from "./utilities.ts";
 
 type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
@@ -205,11 +206,8 @@ describe("conversation host client session lifecycle events", () => {
 		expect(runtimeHost.session.sessionManager.getStartingGitContext()).toBeNull();
 
 		const scheduleRefresh = vi.spyOn(runtimeHost.session.gitContextProvider, "scheduleRefresh");
-		await runtimeHost.session.recordBashResult("touch changed", {
-			output: "",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
+		await runtimeHost.session.runUserBash("touch changed", {
+			operations: bashResultOperations({ output: "", exitCode: 0 }),
 		});
 		expect(scheduleRefresh).toHaveBeenCalledOnce();
 		unsubscribe();
@@ -436,7 +434,7 @@ describe("conversation host client session lifecycle events", () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		await runtimeHost.session.prompt("active branch");
 		const originalSession = runtimeHost.session;
-		const userEntryId = originalSession.getUserMessagesForForking()[0]?.entryId;
+		const userEntryId = userMessagesForForking(originalSession)[0]?.entryId;
 		expect(userEntryId).toBeDefined();
 
 		const targetManager = await SessionManager.create(
@@ -461,7 +459,7 @@ describe("conversation host client session lifecycle events", () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		await runtimeHost.session.prompt("active branch");
 		const originalSession = runtimeHost.session;
-		const userEntryId = originalSession.getUserMessagesForForking()[0]?.entryId;
+		const userEntryId = userMessagesForForking(originalSession)[0]?.entryId;
 		expect(userEntryId).toBeDefined();
 
 		const targetManager = await SessionManager.create(
@@ -484,8 +482,8 @@ describe("conversation host client session lifecycle events", () => {
 				return { exitCode: 0 };
 			},
 		};
-		const bash = originalSession.executeBash("held command", undefined, { operations });
-		expect(originalSession.isBashRunning).toBe(true);
+		const bash = originalSession.runUserBash("held command", { operations });
+		await vi.waitFor(() => expect(originalSession.isBashRunning).toBe(true));
 
 		const expectedError = "Cannot change sessions while a bash run is active; abort or wait for it to finish";
 		await expect(runtimeHost.newSession()).rejects.toThrow(expectedError);
@@ -732,7 +730,7 @@ describe("conversation host client session lifecycle events", () => {
 		await runtimeHost.session.prompt("first branch turn");
 		await runtimeHost.session.prompt("second branch turn");
 		const originalSession = runtimeHost.session;
-		const userEntryId = originalSession.getUserMessagesForForking()[0]?.entryId;
+		const userEntryId = userMessagesForForking(originalSession)[0]?.entryId;
 		expect(userEntryId).toBeDefined();
 
 		const targetManager = await SessionManager.create(
@@ -1161,9 +1159,7 @@ describe("conversation host client session lifecycle events", () => {
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(originalSession.sessionManager.getClientInput("replacement-queued-input")?.state).toBe("accepted");
 		expect(clientInputRecovery(originalSession.sessionManager.getConversationState()).records).toHaveLength(1);
-		expect(originalSession.getSteeringMessages().map((entry) => entry.text)).toEqual([
-			"must stay with old conversation",
-		]);
+		expect(queueOf(originalSession).steering.map((entry) => entry.text)).toEqual(["must stay with old conversation"]);
 	});
 
 	it("keeps the source when its turn starts while the new session opens", async () => {
@@ -1481,7 +1477,7 @@ describe("conversation host client session lifecycle events", () => {
 		events.length = 0;
 
 		await runtimeHost.session.prompt("hello");
-		const userMessage = runtimeHost.session.getUserMessagesForForking()[0];
+		const userMessage = userMessagesForForking(runtimeHost.session)[0];
 		const previousSessionRef = runtimeHost.session.sessionRef;
 
 		const successResult = await runtimeHost.fork(userMessage.entryId);

@@ -33,6 +33,7 @@ import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
+	CommandInvoker,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -331,7 +332,8 @@ const noOpUIContext: ExtensionUIContext = {
 };
 
 /** The UI of the extension with manifest id `owner`; `undefined` for a context no extension owns. */
-export type ExtensionUIFactory = (owner: string | undefined) => ExtensionUIContext;
+/** The `ctx.ui` of `instance`, an instance of the extension `owner`, or of contexts no extension owns. */
+export type ExtensionUIFactory = (owner: string | undefined, instance?: Extension) => ExtensionUIContext;
 
 const noOpUIFactory: ExtensionUIFactory = () => noOpUIContext;
 
@@ -464,6 +466,8 @@ export class ExtensionRunner {
 	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: true });
 	private reloadHandler: ReloadHandler = async () => {};
 	private shutdownHandler: ShutdownHandler = () => {};
+	/** Who the command now being invoked runs for. */
+	private invokerFn: () => CommandInvoker = () => "local";
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
@@ -609,6 +613,11 @@ export class ExtensionRunner {
 		};
 	}
 
+	/** Say who invokes commands: read when a command context is created, in the invoking client's scope. */
+	bindInvoker(invoker: () => CommandInvoker): void {
+		this.invokerFn = invoker;
+	}
+
 	bindCommandContext(actions?: ExtensionCommandContextActions): void {
 		if (actions) {
 			this.waitForIdleFn = actions.waitForIdle;
@@ -646,9 +655,9 @@ export class ExtensionRunner {
 		this.hasUIFn = hasUI ?? (() => this.uiFactory !== noOpUIFactory);
 	}
 
-	/** The UI of the extension with manifest id `owner`, or of a context no extension owns. */
-	getUIContext(owner?: string): ExtensionUIContext {
-		return this.uiFactory(owner);
+	/** The UI of `instance`, an instance of the extension with manifest id `owner`, or of a context no extension owns. */
+	getUIContext(owner?: string, instance?: Extension): ExtensionUIContext {
+		return this.uiFactory(owner, instance);
 	}
 
 	hasUI(): boolean {
@@ -1131,7 +1140,7 @@ export class ExtensionRunner {
 			},
 			get ui() {
 				assertActive();
-				return runner.guardContextObject(runner.getUIContext(owner), lifetime);
+				return runner.guardContextObject(runner.getUIContext(owner, instance), lifetime);
 			},
 			get mode() {
 				assertActive();
@@ -1230,6 +1239,15 @@ export class ExtensionRunner {
 			get: () => {
 				assertActive();
 				return signal;
+			},
+			enumerable: true,
+			configurable: true,
+		});
+		const invokedBy = this.invokerFn();
+		Object.defineProperty(context, "invokedBy", {
+			get: () => {
+				assertActive();
+				return invokedBy;
 			},
 			enumerable: true,
 			configurable: true,

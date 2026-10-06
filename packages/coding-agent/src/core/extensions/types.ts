@@ -255,18 +255,27 @@ export interface CompactOptions {
 }
 
 /**
+ * The mode of the host a session runs in: `"rpc"` for hosts clients drive
+ * (the interactive TUI, stdio RPC, daemon-hosted conversations, subagents),
+ * `"print"` or `"json"` for print runs.
+ */
+export type ExtensionMode = "rpc" | "json" | "print";
+
+/**
  * Context passed to extension event handlers.
  */
-export type ExtensionMode = "tui" | "rpc" | "json" | "print";
-
 export interface ExtensionContext {
 	/** Optional managed services for this captured conversational scope; absent in policy/idle contexts. */
 	readonly services?: ExtensionServicesContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
-	/** Run mode of the client that opened the session. */
+	/** Run mode of the host the session runs in: `"rpc"` wherever clients drive it, the TUI included. */
 	mode: ExtensionMode;
-	/** Whether dialog-capable UI is available (true in TUI and RPC modes) */
+	/**
+	 * Whether dialog-capable UI is available: always in `"rpc"` hosts (a dialog
+	 * no client takes resolves to its default); in print runs, only while a
+	 * client that answers dialogs is attached.
+	 */
 	hasUI: boolean;
 	/** Current working directory */
 	cwd: string;
@@ -377,10 +386,23 @@ export interface WorkRunResult {
 export type WorkRun = (ctx: WorkRunContext) => Promise<WorkRunResult>;
 
 /**
+ * Who invoked a command: a client in the host's trust domain (`"local"`: the
+ * TUI, a stdio RPC client, the SDK), or a paired remote device (`"remote"`).
+ */
+export type CommandInvoker = "local" | "remote";
+
+/**
  * Extended context for command handlers.
  * Includes session control methods only safe in user-initiated commands.
  */
 export interface ExtensionCommandContext extends ExtensionContext {
+	/**
+	 * Who invoked the command. Gate what only a user at the host may do on
+	 * `"local"`, with `hasUI` for a confirmation; an invoking client the host
+	 * no longer knows reads `"remote"`.
+	 */
+	readonly invokedBy: CommandInvoker;
+
 	/**
 	 * Aborted when this command's session ends: it loses its log (a write could not be
 	 * confirmed as saved) or is disposed, including replacement by newSession, fork, or

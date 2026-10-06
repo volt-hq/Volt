@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { AgentTool, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type Model, type ToolResultMessage } from "@hansjm10/volt-ai";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { fauxAssistantMessage, fauxToolCall, type ToolResultMessage } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BuildSystemPromptOptions, ExtensionAPI } from "../../src/index.ts";
@@ -206,38 +206,46 @@ describe("AgentSession model and extension characterization", () => {
 		expect(await readFile(expectedOutputPath)).toEqual(Buffer.from(PNG_BASE64, "base64"));
 	});
 
-	it("cycles through scoped models and preserves the scoped thinking preference", async () => {
+	it("reports a model a client stepped to through its cycle scope as a cycle, with the scope's thinking level", async () => {
+		const sources: string[] = [];
 		const harness = await createHarness({
 			models: [
 				{ id: "faux-1", name: "One", reasoning: true },
 				{ id: "faux-2", name: "Two", reasoning: false },
 			],
+			extensionFactories: [
+				(volt) => {
+					volt.on("model_select", (event) => {
+						sources.push(`${event.model.id}:${event.source}`);
+					});
+				},
+			],
 		});
 		harnesses.push(harness);
 		const modelOne = harness.getModel("faux-1")!;
 		const modelTwo = harness.getModel("faux-2")!;
-		harness.session.setScopedModels([{ model: modelOne, thinkingLevel: "high" }, { model: modelTwo }] as Array<{
-			model: Model<string>;
-			thinkingLevel?: ThinkingLevel;
-		}>);
 		await harness.session.setThinkingLevel("high");
 
-		await harness.session.cycleModel();
+		// A cycle step, as a client's model-cycle key sends it: the model, then the level the scope names for it.
+		await harness.session.setModel(modelTwo, { persistDefault: false, source: "cycle" });
 		expect(harness.session.model?.id).toBe("faux-2");
 		expect(harness.session.thinkingLevel).toBe("off");
 
-		await harness.session.cycleModel();
+		await harness.session.setModel(modelOne, { persistDefault: false, source: "cycle" });
+		await harness.session.setThinkingLevel("high", { persistDefault: false });
 		expect(harness.session.model?.id).toBe("faux-1");
 		expect(harness.session.thinkingLevel).toBe("high");
+		expect(sources).toEqual(["faux-2:cycle", "faux-1:cycle"]);
 	});
 
-	it("clamps thinking levels to model capabilities and cycles available levels", async () => {
+	it("clamps thinking levels to model capabilities and offers no levels to cycle through", async () => {
 		const harness = await createHarness({ models: [{ id: "faux-1", reasoning: false }] });
 		harnesses.push(harness);
 
 		await harness.session.setThinkingLevel("high");
 		expect(harness.session.thinkingLevel).toBe("off");
-		expect(harness.session.cycleThinkingLevel()).toBeUndefined();
+		expect(harness.session.supportsThinking()).toBe(false);
+		expect(harness.session.getAvailableThinkingLevels()).toEqual(["off"]);
 	});
 
 	it("clamps xhigh to the highest supported level and excludes xhigh from available levels", async () => {

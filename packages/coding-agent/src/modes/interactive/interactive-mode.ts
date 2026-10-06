@@ -1,11 +1,12 @@
 /**
- * Interactive mode for the coding agent: the TUI as a client of its host
- * (TuiHost) over a loopback protocol connection. Its transcript and status
- * (footer, indicators, alerts, plan, work, extension UI) draw the store that
- * follows the client, and their actions go out as intents; its input (the
- * editor, its keys, and the slash menu) goes out as the client's intents
- * (client/input.ts); its commands still read and drive the session in process
- * until they move to the store and intents (architecture rewrite Phase 6).
+ * Interactive mode for the coding agent: the TUI as a protocol client of the
+ * host it connects through (client/tui-connection.ts; `TuiHost` in process).
+ * Its transcript and status (footer, indicators, alerts, plan, work,
+ * extension UI) draw the store that follows the client, and their actions go
+ * out as intents; its input (the editor, its keys, and the slash menu) and
+ * its commands go out as the client's intents and queries (architecture
+ * rewrite §10). What only the terminal has stays local: its display
+ * settings, keybindings, themes, clipboard, and the daemon's control plane.
  */
 
 import * as fs from "node:fs";
@@ -84,7 +85,6 @@ import {
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
-import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
 import {
 	ExtensionPermissionStore,
@@ -92,9 +92,6 @@ import {
 	permissionRequestLines,
 	reviewPackagePermissions,
 } from "../../core/extensions/permissions.ts";
-import type { ConversationHost } from "../../core/host/conversation-host.ts";
-import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import type { HostClient } from "../../core/host/targets.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
@@ -109,7 +106,6 @@ import {
 	type ReviewRunControls,
 	type ReviewTarget,
 } from "../../core/review.ts";
-import type { ExtensionClient } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -170,6 +166,7 @@ import {
 } from "./client/session-commands.ts";
 import { TranscriptView } from "./client/transcript-view.ts";
 import { TuiCatalogs } from "./client/tui-catalogs.ts";
+import type { TuiConnection, TuiConnectOptions } from "./client/tui-connection.ts";
 import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
 import { ConversationWork } from "./client/work-view.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
@@ -195,7 +192,6 @@ import { StreamingRenderCoalescer } from "./components/streaming-render-coalesce
 import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
 import { withEditorCompletions } from "./editor-completions.ts";
 import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
-import type { TuiHost } from "./host/tui-host.ts";
 import { TUI_HOST_REQUESTS, TuiLiveView } from "./live-view.ts";
 import {
 	collectPromptImageAttachments,
@@ -221,10 +217,12 @@ import {
 	getEditorTheme,
 	getMarkdownTheme,
 	initTheme,
+	loadThemeFromPath,
 	onThemeChange,
 	setRegisteredThemes,
 	setTheme,
 	stopThemeWatcher,
+	type Theme,
 	theme,
 } from "../../core/theme/runtime.ts";
 import {
@@ -311,6 +309,13 @@ interface SignInView {
 interface ActiveViewDescriptor {
 	regularComponents: readonly Component[];
 	fullscreenRoot: Component;
+}
+
+/** Where the TUI reads its own settings: a conversation's cwd, its project trust, and the settings profile. */
+export interface TuiSettingsScope {
+	readonly cwd: string;
+	readonly projectTrusted: boolean;
+	readonly profile?: string;
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -410,8 +415,13 @@ function scopedModels(models: readonly RpcCatalogModel[], cycleScope: readonly S
 export interface InteractiveModeOptions {
 	/** Providers that were migrated to auth.json (shows warning) */
 	migratedProviders?: string[];
-	/** Explicit model scope patterns from CLI, preserved across profile switches. */
-	modelScopePatterns?: string[];
+	/**
+	 * Where the TUI reads its own settings until its client says where the
+	 * conversation runs (`conversation_info`): the startup conversation's cwd,
+	 * its project trust, and the settings profile. By default the process's
+	 * cwd, untrusted, without a profile.
+	 */
+	settingsScope?: TuiSettingsScope;
 	/** Cwd to trust after reload if it gained a .volt directory during this implicitly trusted session. */
 	autoTrustOnReloadCwd?: string;
 	/** Initial message to send on startup (can include @file content) */
@@ -489,9 +499,8 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 }
 
 export class InteractiveMode {
-	/** The TUI's host: its conversations, its daemon leases, and the relayed phones it serves. */
-	private readonly tuiHost: TuiHost;
-	private readonly host: ConversationHost;
+	/** What the TUI connects its client through: the host of its conversations. */
+	private readonly connection: TuiConnection;
 	/** What the TUI's protocol client holds of the conversation it shows: the fold of its log and its live lane. */
 	private readonly store = new TuiStore();
 	/** The store's transcript in the chat: messages, tool calls as the host presents them, and what streams. */
@@ -682,29 +691,14 @@ export class InteractiveMode {
 	 * host's intents.
 	 */
 	private settingsManager: SettingsManager;
-	/** The cwd and settings profile the TUI's settings were read for. */
-	private settingsScope: { cwd: string; profile: string | undefined };
+	/** Where the TUI's settings were read: the conversation's cwd, project trust, and settings profile. */
+	private settingsScope: TuiSettingsScope;
+	/** Whether the chat shows the project trust warning of the conversation it shows. */
+	private trustWarningShown = false;
 
-	// Convenience accessors
-	/** The conversation the TUI's client is on. */
-	private get conversation(): HostedConversation {
-		return this.tuiHost.conversation;
-	}
-	/** The TUI's client as its host knows it: the paths that still act in process (until the end of Phase 6) act as it. */
-	private get hostClient(): HostClient {
-		return this.tuiHost.hostClient;
-	}
-	private get session(): AgentSession {
-		return this.conversation.session;
-	}
-	private get sessionManager() {
-		return this.session.sessionManager;
-	}
-
-	constructor(tuiHost: TuiHost, options: InteractiveModeOptions = {}) {
-		this.tuiHost = tuiHost;
-		this.host = tuiHost.host;
-		this.settingsScope = { cwd: "", profile: undefined };
+	constructor(connection: TuiConnection, options: InteractiveModeOptions = {}) {
+		this.connection = connection;
+		this.settingsScope = options.settingsScope ?? { cwd: process.cwd(), projectTrusted: false };
 		this.settingsManager = this.createDisplaySettings();
 		this.liveView = this.createLiveView();
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
@@ -882,8 +876,7 @@ export class InteractiveMode {
 		// Load hide thinking block setting
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 
-		// Register themes from resource loader and initialize
-		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+		// The conversation's own themes register once its client lists them (registerThemes).
 		initTheme(this.settingsManager.getTheme(), true);
 	}
 
@@ -1044,28 +1037,10 @@ export class InteractiveMode {
 
 		this.registerSignalHandlers();
 
-		// Load changelog (only show new entries, skip for resumed sessions)
-		this.changelogMarkdown = this.getChangelogForDisplay();
-
 		// Ensure fd and rg are available (downloads if missing, adds to PATH via getBinDir)
 		// Both are needed: fd for autocomplete, rg for grep tool and bash commands
 		const [fdPath] = await Promise.all([ensureTool("fd"), ensureTool("rg")]);
 		this.fdPath = fdPath;
-
-		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
-			const modelList = this.session.scopedModels
-				.map((sm) => {
-					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
-					return `${sm.model.id}${thinkingStr}`;
-				})
-				.join(", ");
-			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
-			const cycleHint =
-				cycleKeys.length > 0
-					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
-					: "";
-			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
-		}
 
 		// Mount the conversation through the renderer-aware view descriptor.
 		this.renderWidgets(); // Initialize with default spacer
@@ -1154,19 +1129,20 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
-		this.tuiHost.onThemeSnapshot((themeName) => this.applyDaemonThemeSnapshot(themeName));
+		this.connection.onThemeSnapshot((themeName) => this.applyDaemonThemeSnapshot(themeName));
 	}
 
 	/**
 	 * Connect the TUI's client to its host and show its conversation. The UI
 	 * runs first: the conversation's session_start dialogs show through the
-	 * live view before the conversation is ready. What its extensions
-	 * contribute shows before its messages, its slash commands and shortcuts
-	 * as its intents catalog lists them, its resources as the `resources`
-	 * query lists them.
+	 * live view before the conversation is ready. The TUI reads its own
+	 * settings where the conversation runs; what its extensions contribute
+	 * shows before its messages, its slash commands and shortcuts as its
+	 * intents catalog lists them, its resources as the `resources` query
+	 * lists them; then the models its cycle steps through, when scoped.
 	 */
 	private async connect(): Promise<void> {
-		await this.tuiHost.connect({
+		await this.connection.connect({
 			hostRequests: TUI_HOST_REQUESTS,
 			requestTimeoutMs: TUI_REQUEST_TIMEOUT_MS,
 			onClient: (client) => this.store.attach(client),
@@ -1176,18 +1152,47 @@ export class InteractiveMode {
 			},
 			terminal: this.terminalSurface(),
 		});
-		const [, resources] = await Promise.all([
+		const client = this.store.client;
+		const [, resources, scope, models] = await Promise.all([
 			this.input.load().catch((error: unknown) => {
 				this.showWarning(
 					`Could not load the conversation's commands: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}),
-			this.store.client.query("resources").catch(() => undefined),
+			client.query("resources").catch(() => undefined),
+			this.readSettingsScope(),
+			client.query("models").catch(() => undefined),
 		]);
 		this.resources = resources;
+		if (scope) this.followSettings(scope);
+		// The changelog shows new entries in a new conversation only.
+		this.changelogMarkdown = this.getChangelogForDisplay();
 		this.connected = true;
 		this.clientConnected.resolve();
 		this.showConversation({ afresh: false });
+		this.showModelScope(models);
+	}
+
+	/**
+	 * The models the model cycle keys step through, when a scope limits them,
+	 * under the startup header unless startup is quiet.
+	 */
+	private showModelScope(catalog: QueryResult<"models"> | undefined): void {
+		if (catalog === undefined || (!this.options.verbose && this.settingsManager.getQuietStartup())) return;
+		const scope = scopedModels(catalog.models, catalog.cycleScope);
+		if (scope.length === 0) return;
+		const modelList = scope
+			.map((scoped) => `${scoped.modelId}${scoped.thinkingLevel ? `:${scoped.thinkingLevel}` : ""}`)
+			.join(", ");
+		const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
+		const cycleHint =
+			cycleKeys.length > 0
+				? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
+				: "";
+		// Under the startup header, as the cycle keys' hint shows there.
+		this.headerContainer.addChild(new Text(`${theme.fg("dim", `Model scope: ${modelList}`)}${cycleHint}`, 1, 0));
+		this.headerContainer.addChild(new Spacer(1));
+		this.ui.requestRender();
 	}
 
 	/**
@@ -1301,7 +1306,7 @@ export class InteractiveMode {
 
 		try {
 			const packageManager = new DefaultPackageManager({
-				cwd: this.sessionManager.getCwd(),
+				cwd: (await this.sessions.info()).cwd,
 				agentDir: getAgentDir(),
 				settingsManager: this.settingsManager,
 			});
@@ -1365,7 +1370,7 @@ export class InteractiveMode {
 	 */
 	private getChangelogForDisplay(): string | undefined {
 		// Skip changelog for resumed/continued sessions (already have messages)
-		if (this.session.state.messages.length > 0) {
+		if (this.store.state.entries.some((entry) => entry.type === "message")) {
 			return undefined;
 		}
 
@@ -1836,7 +1841,7 @@ export class InteractiveMode {
 	 * protocol: its themes, and the dialog that asks the request_user_input
 	 * tool's questions.
 	 */
-	private terminalSurface(): Pick<ExtensionClient, "themes" | "userInput"> {
+	private terminalSurface(): NonNullable<TuiConnectOptions["terminal"]> {
 		return {
 			themes: {
 				getAllThemes: () => getAvailableThemesWithPaths(),
@@ -1861,13 +1866,41 @@ export class InteractiveMode {
 		if (!this.store.phase?.busy) void this.shutdown();
 	}
 
-	/** Show what the session's bound extensions provide: themes, autocomplete, shortcuts, and loaded resources. */
-	private showSessionExtensions(session: AgentSession): void {
-		setRegisteredThemes(session.resourceLoader.getThemes().themes);
+	/** Show what the conversation's resources and extensions provide: themes, autocomplete, shortcuts, and the resources. */
+	private showSessionExtensions(): void {
+		this.registerThemes();
+		this.applyConfiguredTheme();
 		this.setupAutocompleteProvider();
 		this.setupExtensionShortcuts();
 		this.showLoadedResources({ force: false, showDiagnosticsWhenQuiet: true });
 		this.showStartupNoticesIfNeeded();
+	}
+
+	/**
+	 * Register the themes the conversation loaded, as the `resources` query
+	 * last listed them: the TUI loads each from its file. A theme without a
+	 * file (one an SDK embedder supplies in memory) does not register.
+	 */
+	private registerThemes(): void {
+		const themes: Theme[] = [];
+		for (const listed of this.resources?.themes ?? []) {
+			if (listed.path === undefined) continue;
+			try {
+				themes.push(loadThemeFromPath(listed.path));
+			} catch {
+				// The conversation reported the theme it could not load with its resources.
+			}
+		}
+		setRegisteredThemes(themes);
+	}
+
+	/** Apply the theme the TUI's settings name once it is registered, when another shows. */
+	private applyConfiguredTheme(): void {
+		const themeName = this.settingsManager.getTheme();
+		if (themeName === undefined || getCurrentThemeName() === themeName) return;
+		if (!setTheme(themeName, true).success) return;
+		this.ui.invalidate();
+		this.updateEditorBorderColor();
 	}
 
 	/**
@@ -1939,44 +1972,58 @@ export class InteractiveMode {
 		this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
 	}
 
-	/**
-	 * The TUI's settings for the conversation it shows: read from the settings
-	 * files of its cwd, with the host's project trust and active settings
-	 * profile, which the TUI reads in process until its protocol carries them.
-	 */
+	/** The TUI's settings where its settings scope says: the settings files of its cwd, for its trust and profile. */
 	private createDisplaySettings(): SettingsManager {
-		const session = this.tuiHost.conversation.session;
-		const host = session.settingsManager;
-		const cwd = session.sessionManager.getCwd();
-		const profile = host.getActiveProfile();
-		this.settingsScope = { cwd, profile };
+		const { cwd, projectTrusted, profile } = this.settingsScope;
 		return SettingsManager.create(cwd, getAgentDir(), {
-			projectTrusted: host.isProjectTrusted(),
+			projectTrusted,
 			...(profile === undefined ? {} : { profile }),
 		});
 	}
 
 	/**
-	 * Read the TUI's settings again when the conversation it shows runs in
-	 * another cwd, project trust, or settings profile; writes still queued
-	 * finish on their own.
+	 * Where the conversation the store shows runs, as its client tells: its
+	 * cwd and project trust (`conversation_info`), and the settings profile
+	 * (`settings`); undefined when the client could not tell.
 	 */
-	private followSettings(): boolean {
-		const host = this.session.settingsManager;
+	private async readSettingsScope(): Promise<TuiSettingsScope | undefined> {
+		const client = this.store.client;
+		try {
+			const [info, settings] = await Promise.all([client.query("conversation_info"), client.query("settings")]);
+			return {
+				cwd: info.cwd,
+				projectTrusted: info.projectTrusted,
+				...(settings.profile === "" ? {} : { profile: settings.profile }),
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Read the TUI's settings again when the conversation it shows runs in
+	 * another cwd, project trust, or settings profile (`scope`); writes still
+	 * queued finish on their own.
+	 */
+	private followSettings(scope: TuiSettingsScope): boolean {
+		const current = this.settingsScope;
 		if (
-			this.settingsScope.cwd === this.sessionManager.getCwd() &&
-			this.settingsScope.profile === host.getActiveProfile() &&
-			this.settingsManager.isProjectTrusted() === host.isProjectTrusted()
+			current.cwd === scope.cwd &&
+			current.projectTrusted === scope.projectTrusted &&
+			current.profile === scope.profile
 		) {
 			return false;
 		}
+		this.settingsScope = scope;
 		this.settingsManager = this.createDisplaySettings();
 		return true;
 	}
 
 	/** The host's settings changed: in another settings profile, the TUI reads that profile's display settings. */
-	private rereadSettings(): void {
-		if (!this.followSettings()) return;
+	private async rereadSettings(): Promise<void> {
+		const conversation = this.store.conversation;
+		const scope = await this.readSettingsScope();
+		if (scope === undefined || this.store.conversation !== conversation || !this.followSettings(scope)) return;
 		this.applyRuntimeSettings();
 		this.ui.requestRender();
 	}
@@ -1987,9 +2034,14 @@ export class InteractiveMode {
 	 * settings, keybindings, and themes again and applies them.
 	 */
 	private async reloadTuiResources(): Promise<void> {
-		if (!this.followSettings()) await this.settingsManager.reload();
+		const [scope, resources] = await Promise.all([
+			this.readSettingsScope(),
+			this.store.client.query("resources").catch(() => undefined),
+		]);
+		if (scope === undefined || !this.followSettings(scope)) await this.settingsManager.reload();
 		this.keybindings.reload();
-		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+		if (resources !== undefined) this.resources = resources;
+		this.registerThemes();
 		const themeName = this.settingsManager.getTheme();
 		if (themeName !== undefined) {
 			const result = setTheme(themeName, true);
@@ -2026,6 +2078,7 @@ export class InteractiveMode {
 				if (change.moved) {
 					this.showConversation({ afresh: true });
 					void this.refreshInput();
+					void this.loadMovedConversationScope();
 				} else {
 					this.transcript.refresh();
 					this.showQueueIfChanged();
@@ -2045,7 +2098,7 @@ export class InteractiveMode {
 				} else if (change.catalog === "intents" && this.connected) {
 					void this.refreshInput();
 				} else if (change.catalog === "settings" && this.connected) {
-					this.rereadSettings();
+					void this.rereadSettings();
 				}
 				return;
 			case "ended":
@@ -2057,21 +2110,42 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * The TUI shows a conversation its client moved to: once the client tells
+	 * where it runs and what it loaded, the TUI reads its own settings there
+	 * (with the project trust warning they call for) and registers its
+	 * themes. A later move follows its own conversation.
+	 */
+	private async loadMovedConversationScope(): Promise<void> {
+		const conversation = this.store.conversation;
+		const [scope, resources] = await Promise.all([
+			this.readSettingsScope(),
+			this.store.client.query("resources").catch(() => undefined),
+		]);
+		if (conversation === undefined || this.store.conversation !== conversation) return;
+		if (resources !== undefined) this.resources = resources;
+		if (scope !== undefined && this.followSettings(scope)) {
+			this.applyRuntimeSettings();
+			if (!this.trustWarningShown) this.renderProjectTrustWarningIfNeeded();
+		}
+		this.registerThemes();
+		this.applyConfiguredTheme();
+		this.ui.requestRender();
+	}
+
+	/**
 	 * Show the conversation the store shows as the TUI's: what its extensions
 	 * contribute, its status and plan, and its transcript, `afresh` in a
 	 * cleared chat (a conversation the client moved to) or after what the chat
 	 * shows (at startup). Rendering resumes once it shows.
 	 */
 	private showConversation(options: { afresh: boolean }): void {
-		const session = this.session;
 		this.quitConfirmation = undefined;
 		this.lastSigintTime = 0;
 		this.clearWorkSummaryTimer();
 		this.clearPromptCacheAlertTimer();
 		this.workSummary = undefined;
-		this.followSettings();
 		this.applyRuntimeSettings();
-		this.showSessionExtensions(session);
+		this.showSessionExtensions();
 		this.followWork();
 		this.closePlanDetails();
 		// A conversation the TUI moved to is a fresh presentation, so a ready plan is offered again.
@@ -2122,6 +2196,7 @@ export class InteractiveMode {
 					: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
 			if (text) this.editor.addToHistory?.(text);
 		}
+		this.trustWarningShown = false;
 		this.renderProjectTrustWarningIfNeeded();
 		const compactionCount = this.store.state.entries.filter((entry) => entry.type === "compaction").length;
 		if (compactionCount > 0) {
@@ -3098,7 +3173,7 @@ export class InteractiveMode {
 			const hadText = this.editorHasText;
 			this.isBashMode = text.trimStart().startsWith("!");
 			this.editorHasText = text.length > 0;
-			if (wasBashMode !== this.isBashMode || (this.session.isStreaming && hadText !== this.editorHasText)) {
+			if (wasBashMode !== this.isBashMode || (this.runActive() && hadText !== this.editorHasText)) {
 				this.updateEditorBorderColor();
 			}
 		};
@@ -3359,8 +3434,8 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/remote") {
-				this.showRemoteControlCenter();
 				this.editor.setText("");
+				await this.showRemoteControlCenter();
 				return;
 			}
 			if (text === "/fork") {
@@ -3379,8 +3454,8 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/trust") {
-				this.showTrustSelector();
 				this.editor.setText("");
+				await this.showTrustSelector();
 				return;
 			}
 			if (text === "/worktree" || text.startsWith("/worktree ")) {
@@ -3505,7 +3580,7 @@ export class InteractiveMode {
 	private async endLostConversation(): Promise<void> {
 		if (this.isShuttingDown || this.endingLostSession) return;
 		this.endingLostSession = true;
-		this.tuiHost.stopServing();
+		this.connection.stopServing();
 		const unsentDraft = this.editor.getText();
 		// Pending dialogs settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
@@ -3731,9 +3806,10 @@ export class InteractiveMode {
 	}
 
 	private renderProjectTrustWarningIfNeeded(): void {
-		if (this.settingsManager.isProjectTrusted() || !hasTrustRequiringProjectResources(this.sessionManager.getCwd())) {
+		if (this.settingsScope.projectTrusted || !hasTrustRequiringProjectResources(this.settingsScope.cwd)) {
 			return;
 		}
+		this.trustWarningShown = true;
 
 		if (this.chatContainer.children.length > 0) {
 			this.chatContainer.addChild(new Spacer(1));
@@ -3828,7 +3904,7 @@ export class InteractiveMode {
 	 */
 	private disposeRuntimeHost(): Promise<void> {
 		// The TUI's conversation closes with its UI still attached; extension UI is released before disposal.
-		return this.tuiHost.dispose({ beforeDispose: () => this.leaveConversation() });
+		return this.connection.dispose({ beforeDispose: () => this.leaveConversation() });
 	}
 
 	private async flushStdout(): Promise<void> {
@@ -3854,7 +3930,7 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
-		this.tuiHost.stopServing();
+		this.connection.stopServing();
 		this.dismissWorkInspector?.();
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
@@ -3909,7 +3985,7 @@ export class InteractiveMode {
 		this.isShuttingDown = true;
 		this.unregisterSignalHandlers();
 		killTrackedDetachedChildren();
-		this.session.closeLspTraceSync();
+		// The host closes the language server traces as the process exits.
 		this.cleanupAllScratchDirectories();
 		// The terminal is gone. Do not run normal shutdown because TUI and
 		// extension cleanup can write restore sequences and re-trigger EIO.
@@ -3941,7 +4017,7 @@ export class InteractiveMode {
 		try {
 			this.ui.stop();
 		} catch {}
-		this.session.closeLspTraceSync();
+		// The host closes the language server traces as the process exits.
 		this.cleanupAllScratchDirectories();
 		console.error("volt exiting due to uncaughtException:");
 		console.error(error);
@@ -4821,13 +4897,16 @@ export class InteractiveMode {
 		this.dismissWorkInspector = close;
 	}
 
-	private showRemoteControlCenter(): void {
+	/** `/remote`: the daemon's control center, for the conversation the TUI shows. */
+	private async showRemoteControlCenter(): Promise<void> {
+		await this.clientConnected.promise;
+		const conversation = await this.sessions.info();
 		this.showSelector((done) => {
 			const center = new RemoteControlCenterComponent(createRemoteControlBackend(getAgentDir()), {
 				getTerminalRows: () => this.ui.terminal.rows,
-				getCurrentWorkspaceName: () => this.tuiHost.daemonWorkspaceName(),
-				getCurrentWorkspacePath: () => this.conversation.services.cwd,
-				currentSessionId: this.session.sessionId,
+				getCurrentWorkspaceName: () => this.connection.daemonWorkspaceName(),
+				getCurrentWorkspacePath: () => conversation.cwd,
+				currentSessionId: conversation.id,
 				requestRender: () => this.ui.requestRender(),
 				copyText: copyToClipboard,
 				onClose: done,
@@ -6154,9 +6233,11 @@ export class InteractiveMode {
 		}
 	}
 
-	private showTrustSelector(): void {
-		const agentDir = this.conversation.services.agentDir;
-		const sessionCwd = this.sessionManager.getCwd();
+	/** `/trust`: save a trust decision for the project the conversation runs in, or its worktree's parent checkout. */
+	private async showTrustSelector(): Promise<void> {
+		await this.clientConnected.promise;
+		const agentDir = getAgentDir();
+		const sessionCwd = (await this.sessions.info()).cwd;
 		// Worktree sessions pin trust to the PARENT checkout; entries are never
 		// prompted for or persisted on worktree paths (§5.2.1).
 		const worktreeParent = resolveWorktreeParentCheckout(agentDir, sessionCwd);
@@ -6167,7 +6248,7 @@ export class InteractiveMode {
 			return;
 		}
 		const cwd = worktreeParent ?? sessionCwd;
-		const trustStore = new ProjectTrustStore(this.conversation.services.agentDir);
+		const trustStore = new ProjectTrustStore(agentDir);
 		const savedDecision = trustStore.getEntry(cwd);
 		this.showSelector((done) => {
 			const selector = new TrustSelectorComponent({
@@ -6854,12 +6935,19 @@ export class InteractiveMode {
 		try {
 			// The host reloads the conversation's resources and settings; the TUI reloads its own.
 			await this.sessions.reload();
-			if (!this.followSettings()) await this.settingsManager.reload();
+			// The reloaded commands and shortcuts, as the conversation's intents catalog lists them now, and its resources.
+			const [, resources, scope] = await Promise.all([
+				this.input.load().catch(() => false),
+				this.store.client.query("resources").catch(() => undefined),
+				this.readSettingsScope(),
+			]);
+			this.resources = resources;
+			if (scope === undefined || !this.followSettings(scope)) await this.settingsManager.reload();
 			this.keybindings.reload();
 			if (isExpandable(this.builtInHeader)) {
 				this.builtInHeader.setExpanded(this.toolOutputExpanded);
 			}
-			setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+			this.registerThemes();
 			this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 			this.catalogs.refresh("models", "settings");
 			const themeName = this.settingsManager.getTheme();
@@ -6878,12 +6966,6 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.applyFullscreenScrollbarSetting();
-			// The reloaded commands and shortcuts, as the conversation's intents catalog lists them now, and its resources.
-			const [, resources] = await Promise.all([
-				this.input.load().catch(() => false),
-				this.store.client.query("resources").catch(() => undefined),
-			]);
-			this.resources = resources;
 			this.setupAutocompleteProvider();
 			this.setupExtensionShortcuts();
 			this.transcript.rebuild();
@@ -8088,7 +8170,6 @@ export class InteractiveMode {
 			this.stopInteractiveTui(fullscreenExitOutput);
 			this.isInitialized = false;
 		}
-		this.session.closeLspTraceSync();
 		this.cleanupAllScratchDirectories();
 		this.unregisterSignalHandlers();
 	}

@@ -205,7 +205,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		const completed = deferred();
 		finish = completed.resolve;
 		pending = session
-			.executeBash("offline operation", undefined, {
+			.runUserBash("offline operation", {
 				operations: {
 					exec: async () => {
 						entered.resolve();
@@ -240,7 +240,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 				};
 				let operation: Promise<unknown>;
 				if (currentKind === "bash") {
-					operation = session.executeBash("offline", undefined, {
+					operation = session.runUserBash("offline", {
 						operations: {
 							exec: async () => {
 								await hold();

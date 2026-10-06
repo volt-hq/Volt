@@ -404,7 +404,9 @@ describe("TUI sign-in commands", () => {
 	it("answers a pasted sign-in code, or the sign-in's cancellation, to a provider_auth request it did not start", async () => {
 		const { harness, tui } = await start();
 		const live = harness.startup.liveState;
-		const client = harness.tuiHost.hostClient.id;
+		// The TUI's client, as its host attached it: the anchor of the conversation it shows.
+		const client = harness.host.clientsOf(harness.tuiHost.conversation).find((attached) => attached.anchor)?.id;
+		if (client === undefined) throw new Error("The TUI's client is not attached");
 		const ask = (url: string) =>
 			live.request({ kind: "provider_auth", provider: "acme", flow: "manual", url }, { client });
 

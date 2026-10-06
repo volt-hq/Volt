@@ -17,6 +17,7 @@ import { BUILTIN_PRESENTERS } from "../../../src/core/tools/presenters.ts";
 import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { createTestJobRuntime, type TestJobRuntime } from "../../utilities/job-runtime.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
 
 function deferred() {
@@ -336,7 +337,7 @@ describe("active-run waiting", () => {
 		finish.resolve();
 		await prompting;
 		expect(harness.faux.state.callCount).toBe(calls + 1);
-		expect(harness.session.getLastAssistantText()).toBe("Result received");
+		expect(lastAssistantText(harness.session)).toBe("Result received");
 		expect(harness.session.jobs.listWaits()).toEqual([]);
 		unsubscribe();
 		harness.session.dispose();
@@ -376,7 +377,7 @@ describe("active-run waiting", () => {
 			// The job's notice wakes the idle conversation once it completes.
 			finish.resolve();
 			await harness.session.work.waitForIdle();
-			await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Follow-up received"));
+			await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Follow-up received"));
 			await harness.session.waitForIdle();
 			expect(harness.faux.state.callCount).toBe(4);
 			unsubscribe();

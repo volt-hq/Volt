@@ -862,7 +862,7 @@ describe("native planning state", () => {
 		await session.waitForClosed();
 	});
 
-	it("serializes concurrent toggles so each derives its target from committed state", async () => {
+	it("serializes overlapping mode transitions, each applying once the one before committed", async () => {
 		const source = sourceForMcpConfigPath(join(agentDir, "mcp-toggle.json"), {
 			scope: "user",
 			label: "test",
@@ -912,8 +912,9 @@ describe("native planning state", () => {
 			if (event.type === "planning_state_changed") committedModes.push(event.planning.mode);
 		});
 
-		const firstToggle = session.toggleAgentMode();
-		const secondToggle = session.toggleAgentMode();
+		// Two transitions overlap, as a Build/Plan toggle pressed twice sends them: they apply one after the other.
+		const firstToggle = session.setAgentMode("build");
+		const secondToggle = session.setAgentMode("plan");
 		await metadataStarted.promise;
 		expect(session.agentMode).toBe("plan");
 		finishMetadata.resolve();

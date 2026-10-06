@@ -35,8 +35,9 @@ const request: RequestUserInputToolInput = {
 	],
 };
 
-function context(mode: ExtensionContext["mode"] = "tui"): ExtensionContext {
-	return { mode, hasUI: mode === "tui", abort: vi.fn() } as unknown as ExtensionContext;
+/** A tool context: an RPC host (the interactive TUI's included) has UI; a print run has none. */
+function context(mode: ExtensionContext["mode"] = "rpc"): ExtensionContext {
+	return { mode, hasUI: mode === "rpc", abort: vi.fn() } as unknown as ExtensionContext;
 }
 
 /** The tool, asking through `ask` as the TUI client would. */
@@ -108,7 +109,7 @@ describe("request_user_input", () => {
 		expect(custom).not.toHaveBeenCalled();
 	});
 
-	it.each(["print", "json", "rpc"] as const)("returns unavailable without waiting in %s", async (mode) => {
+	it.each(["print", "json"] as const)("returns unavailable without waiting in %s", async (mode) => {
 		const ask = vi.fn();
 		const result = await tool(ask).execute("q1", request, undefined, undefined, context(mode));
 		expect(result.details).toMatchObject({ status: "unavailable", answers: {} });

@@ -259,7 +259,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 ### Permissions
 
-`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `volt store install`, `/store install`) or updated (`volt update`, `volt store update`; see [Volt Store](packages.md#volt-store)), and when an extension is enabled, and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks, and an extension whose permissions you have not acknowledged still runs at startup: acknowledgment gates enabling it while a session runs, not starting with it.
+`permissions` lists what the extension does beyond the conversation. Volt shows them when a package is installed (`volt install`, `volt store install`, `/store install`) or updated (`volt update`, `volt store update`; see [Volt Store](packages.md#volt-store)), and when an extension is enabled, and records your acknowledgment in `~/.volt/agent/extension-permissions.json`, bound to the package's name and version (npm), commit (git), or path (local). An update that adds no permission is acknowledged with it; another package with the same id, or a new permission, asks again. Startup never asks or refuses: an extension whose permissions you have not acknowledged still runs at startup, since permissions are advisory (below); acknowledgment gates installing or updating it and enabling it while a session runs, not starting with it.
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
@@ -275,7 +275,7 @@ Permissions are advisory: extensions run in your process and can reach Node's ow
 
 `extensions.<id>.enabled` in global or (trusted) project settings decides whether an extension runs; it does by default. A disabled extension's factory never runs: a package's entry is not imported until it is enabled, and a single file is evaluated only to read its manifest. Toggle one with `/extensions` (pick it, then Enable or Disable), `/extensions enable <id>`, `/extensions disable <id>`, or the `set_extension_enabled` intent ([rpc.md](rpc.md)); every open conversation follows at once, without `/reload`.
 
-- **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have. A session runs an extension enabled meanwhile (by another client, conversation, or a settings edit) only once its permissions are acknowledged; until then it is listed as failed.
+- **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. The new instance gets contexts and a `ctx.ui` of its own; a stopped instance's `ctx.ui` stays stopped even when its id runs again. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have. A session runs an extension enabled meanwhile (by another client, conversation, or a settings edit) only once its permissions are acknowledged; until then it is listed as failed.
 - **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
 - Skills, prompts, and themes an extension adds through `resources_discover` change on the next `/reload`.
 
@@ -987,7 +987,7 @@ volt.on("tool_result", async (event, ctx) => {
 
 #### user_bash
 
-Fired when user executes `!` or `!!` commands. **Can intercept.**
+Fired when the user runs a shell command with `!` or `!!`: the TUI's `!` and `!!`, and an RPC client's `bash` intent. It runs in the host, for every client alike (paired devices cannot run shell commands). **Can intercept:** return the result to record it as given, or the operations the command runs with; otherwise it runs in the local shell, and the live `bash` value shows it to clients until its entry commits.
 
 ```typescript
 import { createLocalBashOperations } from "@hansjm10/volt-coding-agent";
@@ -1076,11 +1076,11 @@ All handlers receive `ctx: ExtensionContext`.
 
 ### ctx.mode
 
-Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"tui"` in the desktop TUI (also for phones relayed through it), `"rpc"` for stdio RPC, daemon-hosted conversations, and subagents, and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Extension UI is data every client renders, so UI calls need no mode check.
+Current run mode: `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"rpc"` wherever clients drive the host (the interactive TUI, which is a protocol client of its host, phones relayed through it, stdio RPC, daemon-hosted conversations, and subagents), and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Extension UI is data every client renders, so UI calls need no mode check. To tell whether a user at the host invoked a command, read [`ctx.invokedBy`](#ctxinvokedby) instead.
 
 ### ctx.hasUI
 
-`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), which resolve to their defaults without UI. Fire-and-forget methods (`notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`) need no guard: without a client that shows UI, nothing sees them (see [rpc.md](rpc.md#extensions-in-rpc-mode)).
+`true` in `"rpc"` hosts (the TUI and RPC mode), also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), which resolve to their defaults without UI. Fire-and-forget methods (`notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`) need no guard: without a client that shows UI, nothing sees them (see [rpc.md](rpc.md#extensions-in-rpc-mode)).
 
 ### ctx.cwd
 
@@ -1150,7 +1150,7 @@ volt.on("tool_result", async (event, ctx) => {
 
 ### ctx.isIdle() / ctx.abort() / ctx.hasPendingMessages()
 
-Control flow helpers.
+Control flow helpers. `ctx.abort()` stops the run. Called from a command that a local client with an editor invoked (the TUI, or an RPC client that answers `editor_text`), it first takes the queued steering and follow-up input back and returns its text to that client's editor, ahead of the draft there; for any other call the run stops and the queue stays.
 
 ### ctx.shutdown()
 
@@ -1220,6 +1220,15 @@ Starts background work of a kind the extension registered with [`volt.registerWo
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
+
+### ctx.invokedBy
+
+Who invoked the command (`CommandInvoker`): `"local"` for a client in the host's trust domain (the TUI, a stdio RPC client, the SDK, a print run), `"remote"` for a paired remote device, or for an invoking client the host no longer knows. A command run from text the model wrote, such as a subagent's task, is not one a user typed: it reads `"remote"` when a client's turn started it, and `"local"` when a run of the host's own did (a print run, the SDK, or queued input the host replays). Gate what only a user at the host may do on `"local"` and a confirmation the user answers (`ctx.hasUI` and `ctx.ui.confirm`). `/swarm-review` gives its verifiers a shell (`--exec`) only this way:
+
+```typescript
+if (ctx.invokedBy !== "local") return ctx.ui.notify("--exec is only available from a local client.", "error");
+if (!ctx.hasUI || !(await ctx.ui.confirm("Allow commands?", "Verifiers will run commands.", { signal: ctx.signal }))) return;
+```
 
 ### ctx.signal (commands)
 
@@ -2571,13 +2580,14 @@ Extension UI is data: [styled text](#styled-text) and [`UiNode`](ui-nodes.md) tr
 A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
 - **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` and `setTheme()` reach the most recently attached client with a terminal.
+- **The `request_user_input` tool** is offered to the model only while a client that asks its questions is attached: the local TUI. Subagents, RPC and print runs, and phones never offer it.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 - A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, and its extensions start when the phone reconnects; for a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects. `withSession` does not run for a phone, so the result reports `seeded: false`.
 
 How each client renders the data:
 
-- **TUI**: terminal components in the active theme's colors, in both screen modes. Status items show in the footer; panels above or below the editor, and `sidebar` panels in fullscreen mode's sidebar (above the editor in regular mode); dialogs and forms in place of the editor; tool calls as cards and custom messages under their label. A panel shows at most 12 rows, its title included, and a terminal node in a panel its newest 12 lines. The TUI hosts the conversation, so it presents tool calls itself with the same presenters.
+- **TUI**: terminal components in the active theme's colors, in both screen modes. Status items show in the footer; panels above or below the editor, and `sidebar` panels in fullscreen mode's sidebar (above the editor in regular mode); dialogs and forms in place of the editor; tool calls as cards and custom messages under their label. A panel shows at most 12 rows, its title included, and a terminal node in a panel its newest 12 lines. The TUI is a protocol client of its host on the local profile: it renders the presentations the host's presenters returned, as RPC clients receive them.
 - **RPC, JSON, and SDK clients** receive the data as live-lane items and in projected entries ([rpc.md](rpc.md#extension-ui)); [rpc-extension-ui.ts](../examples/rpc-extension-ui.ts) renders it as plain lines.
 - **Paired phones** render the same `UiNode` data. On the remote profile a presentation holds at most 16 KB, without image data, host paths are redacted from every frame, and a live work value holds at most 8 KB (its detail goes first). A phone invokes an extension's command, intent, or completion provider only when the extension opted it in (`remoteSafe: true` or `remote: true`) and the device's grant allows it.
 - **HTML export** (`/export`) renders presentations as HTML.
@@ -2856,7 +2866,7 @@ volt.registerWorkKind("scan", {
 
 | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
 |------|------------|-------------|-------|
-| Interactive | `"tui"` | `true` | The TUI renders extension UI with terminal components |
+| Interactive | `"rpc"` | `true` | The TUI is a local protocol client of its host and renders extension UI with terminal components |
 | RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs as host requests; notifications, status items, panels, and title on the protocol's live lane. See [rpc.md](rpc.md#extensions-in-rpc-mode) |
 | JSON (`--mode json`) | `"json"` | `false` | Protocol frames to stdout, extension status and notices included; dialogs resolve to their defaults |
 | Print (`-p`) | `"print"` | `false` | Extensions run but can't prompt |

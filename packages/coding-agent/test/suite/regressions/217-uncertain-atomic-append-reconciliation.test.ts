@@ -33,6 +33,7 @@ import {
 	lose,
 } from "../../utilities/faulty-log.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { queueOf } from "../../utilities/session-reads.ts";
 import { testExtension } from "../../utilities.ts";
 import {
 	createHarness,
@@ -565,9 +566,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		).rejects.toBeInstanceOf(ConversationLogLostError);
 		await expect(harness.session.steer("must not queue")).rejects.toBeInstanceOf(ConversationLogLostError);
 		await expect(harness.session.followUp("must not queue")).rejects.toBeInstanceOf(ConversationLogLostError);
-		await expect(
-			harness.session.executeBash("must-not-run", undefined, { operations: bashOperations }),
-		).rejects.toBeInstanceOf(ConversationLogLostError);
+		await expect(harness.session.runUserBash("must-not-run", { operations: bashOperations })).rejects.toBeInstanceOf(
+			ConversationLogLostError,
+		);
 		expect(() => harness.session.setAgentMode("build")).toThrow(ConversationLogLostError);
 		await expect(
 			harness.session.updatePlan({
@@ -593,8 +594,8 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			steering: [],
 			followUp: ["hand back later input"],
 		});
-		expect(harness.session.getSteeringMessages()).toEqual([]);
-		expect(harness.session.getFollowUpMessages()).toEqual([]);
+		expect(queueOf(harness.session).steering).toEqual([]);
+		expect(queueOf(harness.session).followUp).toEqual([]);
 		harness.session.dispose();
 		// The loss was reported through `lost`; closing does not report it again.
 		await expect(harness.session.waitForClosed()).resolves.toBeUndefined();

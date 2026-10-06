@@ -1030,6 +1030,7 @@ export class ConversationHost {
 				...client.surface,
 				id: client.id,
 				mode: this.extensionMode,
+				...(client.remote ? { remote: true } : {}),
 			});
 			attachment.detachSurface = extensions.detach;
 			await extensions.ready;

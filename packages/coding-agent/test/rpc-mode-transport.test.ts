@@ -261,7 +261,7 @@ describe("RPC mode on a caller-provided transport", () => {
 			vi.spyOn(session, "prompt"),
 			vi.spyOn(session, "steer"),
 			vi.spyOn(session, "followUp"),
-			vi.spyOn(session, "executeBash"),
+			vi.spyOn(session, "runUserBash"),
 		];
 		const entries = session.sessionManager.getEntries().length;
 		const { client } = await startMode(harness, conversation);

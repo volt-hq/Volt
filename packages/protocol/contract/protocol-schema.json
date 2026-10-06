@@ -3040,6 +3040,7 @@
 			"required": [
 				"id",
 				"cwd",
+				"projectTrusted",
 				"sessionDir",
 				"persisted",
 				"defaultSessionDir"
@@ -3052,6 +3053,9 @@
 				},
 				"cwd": {
 					"type": "string"
+				},
+				"projectTrusted": {
+					"type": "boolean"
 				},
 				"sessionDir": {
 					"type": "string"
@@ -9907,6 +9911,13 @@
 				"modelId": {
 					"type": "string",
 					"minLength": 1
+				},
+				"source": {
+					"type": "string",
+					"enum": [
+						"set",
+						"cycle"
+					]
 				}
 			},
 			"additionalProperties": false

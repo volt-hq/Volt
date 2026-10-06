@@ -11,6 +11,7 @@ import type { CustomEditor } from "../../../src/modes/interactive/components/cus
 import type { PlanInspectorComponent } from "../../../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsComponent } from "../../../src/modes/interactive/components/plan-status.ts";
 import type { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createTuiHarness, type TuiHarness } from "../tui-harness.ts";
 
 const executePlan = vi.hoisted(() => vi.fn());
@@ -178,7 +179,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 				),
 			).toBe(true),
 		);
-		await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("Revising the plan"));
+		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("Revising the plan"));
 		expect(fixture.executePlan).not.toHaveBeenCalled();
 	});
 

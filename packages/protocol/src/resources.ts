@@ -12,11 +12,13 @@ import { stringEnum } from "./helpers.ts";
 
 const closed = { additionalProperties: false } as const;
 
-/** Where a conversation's log lives. */
+/** Where a conversation's log lives, and the project it runs in. */
 export const ConversationInfoSchema = Type.Object(
 	{
 		id: LogSessionIdSchema,
 		cwd: Type.String(),
+		/** Whether the project at `cwd` is trusted: its `.volt` settings, resources, and packages load. */
+		projectTrusted: Type.Boolean(),
 		/** The session directory the log is stored in, or would be. */
 		sessionDir: Type.String(),
 		/** The session store's database file; absent for a log that is not stored. */

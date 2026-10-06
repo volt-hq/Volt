@@ -81,6 +81,7 @@ export const conversationInfoQuery = defineQuery({
 		return {
 			id: conversation.id,
 			cwd: conversation.cwd,
+			projectTrusted: session.settingsManager.isProjectTrusted(),
 			sessionDir,
 			...(persisted && sessionDir ? { sessionFile: join(sessionDir, SESSION_STORE_DATABASE_FILENAME) } : {}),
 			persisted,

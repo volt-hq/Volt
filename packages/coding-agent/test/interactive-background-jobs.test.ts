@@ -20,6 +20,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { liveKey } from "../src/core/host/live-state.ts";
+import type { HostClient } from "../src/core/host/targets.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
 import { queryRegistry } from "../src/core/protocol/queries/index.ts";
@@ -180,14 +181,15 @@ async function createFixture(
 	});
 	let state = foldState();
 	vi.spyOn(TuiStore.prototype, "state", "get").mockImplementation(() => state);
-	const host = createFakeHost({ extensionMode: "tui" });
-	const { conversation } = createFakeConversation(harness.session);
+	const host = createFakeHost({ extensionMode: "rpc" });
+	// The conversation runs where its session does: `conversation_info` tells the TUI its cwd.
+	const { conversation } = createFakeConversation(harness.session, { cwd: harness.session.sessionManager.getCwd() });
 	const tuiHost = TuiHost.start({ host: host.host, conversation });
-	// Nothing here connects the TUI: its in-process intents (cancel_work) act as a client of its own.
-	vi.spyOn(tuiHost, "hostClient", "get").mockReturnValue({ id: "tui", move: { kind: "in_place", onMoved: () => {} } });
+	// Nothing here connects the TUI's client: the fixture's client runs its intents (cancel_work) as a client of its own.
+	const tuiClient: HostClient = { id: "tui", move: { kind: "in_place", onMoved: () => {} } };
 	// The TUI's client runs the work queries and intents on the conversation, as its host does.
 	const context = (): IntentContext => ({
-		target: { session: harness.session, conversation, host: host.host, client: tuiHost.hostClient },
+		target: { session: harness.session, conversation, host: host.host, client: tuiClient },
 		services: {},
 		profile: LOCAL_INTENT_PROFILE,
 	});
@@ -200,7 +202,13 @@ async function createFixture(
 		},
 	};
 	vi.spyOn(TuiStore.prototype, "client", "get").mockReturnValue(client as unknown as ProtocolClient);
-	const mode = new InteractiveMode(tuiHost, { tuiMode });
+	const mode = new InteractiveMode(tuiHost, {
+		tuiMode,
+		settingsScope: {
+			cwd: harness.session.sessionManager.getCwd(),
+			projectTrusted: harness.settingsManager.isProjectTrusted(),
+		},
+	});
 	const access = mode as unknown as InteractiveTestAccess;
 	// The commands that wait for the TUI's client to connect go out through the fixture's client at once.
 	access.clientConnected.resolve();

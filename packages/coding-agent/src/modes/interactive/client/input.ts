@@ -360,7 +360,7 @@ export class TuiInput {
 		const model = models.find((candidate) => candidate.provider === next?.provider && candidate.id === next.modelId);
 		if (next === undefined || model === undefined) throw new Error("The model to cycle to is not available");
 		const selection = { provider: next.provider, modelId: next.modelId };
-		const selected = await client.intent("set_model", selection);
+		const selected = await client.intent("set_model", { ...selection, source: "cycle" });
 		const leveled =
 			next.thinkingLevel === undefined
 				? undefined

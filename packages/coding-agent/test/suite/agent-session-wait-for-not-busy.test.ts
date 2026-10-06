@@ -53,7 +53,7 @@ describe("AgentSession.waitForNotBusy", () => {
 	it("waits for a ! command that waitForIdle does not cover", async () => {
 		const harness = await create();
 		const exit = gate();
-		const bash = harness.session.executeBash("sleep", undefined, { operations: blockingBash(exit.promise) });
+		const bash = harness.session.runUserBash("sleep", { operations: blockingBash(exit.promise) });
 		await drain();
 		expect(harness.session.isBusy).toBe(true);
 
@@ -131,7 +131,7 @@ describe("AgentSession.waitForNotBusy", () => {
 	it("resolves when the session is disposed while busy", async () => {
 		const harness = await create();
 		const exit = gate();
-		const bash = harness.session.executeBash("sleep", undefined, { operations: blockingBash(exit.promise) });
+		const bash = harness.session.runUserBash("sleep", { operations: blockingBash(exit.promise) });
 		await drain();
 
 		const notBusy = track(harness.session.waitForNotBusy());
@@ -146,7 +146,7 @@ describe("AgentSession.waitForNotBusy", () => {
 	it("keeps detached runtime retention waiting, without spinning, while a ! command runs", async () => {
 		const harness = await create();
 		const exit = gate();
-		const bash = harness.session.executeBash("sleep", undefined, { operations: blockingBash(exit.promise) });
+		const bash = harness.session.runUserBash("sleep", { operations: blockingBash(exit.promise) });
 		await drain();
 
 		let waits = 0;

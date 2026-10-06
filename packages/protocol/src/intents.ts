@@ -251,7 +251,13 @@ export const INTENT_SCHEMAS = {
 	},
 
 	// Conversation settings (entries)
-	set_model: { input: Type.Object(RpcAgentOptionsModelSelectionSchema.properties, closed) },
+	/** `source: "cycle"` steps through the cycle scope, as a client's model-cycle key does; extensions see it on `model_select`. */
+	set_model: {
+		input: Type.Object(
+			{ ...RpcAgentOptionsModelSelectionSchema.properties, source: Type.Optional(stringEnum(["set", "cycle"])) },
+			closed,
+		),
+	},
 	set_thinking_level: {
 		input: Type.Object(
 			{ level: RpcThinkingLevelSchema },
