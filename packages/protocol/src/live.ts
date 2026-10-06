@@ -21,9 +21,10 @@
  * `bash` value in place (ui-patch.ts); a client that cannot apply it
  * resubscribes after its position.
  *
- * Host requests (dialogs, forms, approvals, MCP authorization) are live values
- * until answered; any client that accepts the request's kind may answer with
- * a `host_response` frame, and the first answer wins.
+ * Host requests (dialogs, forms, approvals, MCP authorization, the
+ * request_user_input tool's questions) are live values until answered; any
+ * client that accepts the request's kind may answer with a `host_response`
+ * frame, and the first answer wins.
  */
 
 import {
@@ -78,6 +79,7 @@ export const HOST_REQUEST_KINDS = [
 	"mcp_auth",
 	"provider_auth",
 	"editor_text",
+	"user_input",
 ] as const;
 
 /** The kinds of host request a client may accept in `hello.accepts.hostRequests`. */
@@ -95,12 +97,47 @@ export const HostDialogActionSchema = Type.Object(
 	closed,
 );
 
+/** One choice of a request_user_input question. */
+export const UserInputOptionSchema = Type.Object(
+	{
+		label: Type.String({ minLength: 1, maxLength: 100, pattern: UI_NODE_LINE_PATTERN }),
+		description: Type.String({ minLength: 1, maxLength: 300, pattern: UI_NODE_LINE_PATTERN }),
+	},
+	closed,
+);
+
+/**
+ * One question of the request_user_input tool: a short `header`, the
+ * `question`, and its choices. The client also offers a free-form answer and
+ * skipping; `id` keys the answer.
+ */
+export const UserInputQuestionSchema = Type.Object(
+	{
+		id: Type.String({ pattern: "^[a-z][a-z0-9_]*$", maxLength: 64 }),
+		header: Type.String({ minLength: 1, maxLength: 24, pattern: UI_NODE_LINE_PATTERN }),
+		question: Type.String({ minLength: 1, maxLength: 500, pattern: UI_NODE_LINE_PATTERN }),
+		options: Type.Array(UserInputOptionSchema, { minItems: 2, maxItems: 3 }),
+	},
+	closed,
+);
+
+/**
+ * The answer to one question: a choice's label, optionally followed by the
+ * user's notes on it, or the user's own answer.
+ */
+export const UserInputAnswerSchema = Type.Object(
+	{ answers: Type.Array(Type.String(), { minItems: 1, maxItems: 2 }) },
+	closed,
+);
+
 /**
  * A question the host asks a client. Answers: `select`, `input`, and `editor`
  * take `{value}`; `confirm` takes `{confirmed}`; `form` takes `{values}`;
  * `dialog` takes `{value}` with an action id; `approval` takes `{decision}`;
  * `provider_auth` takes `{value}` only for its `manual` flow; `editor_text`
- * takes `{value}` with the client's editor text; every kind may be answered
+ * takes `{value}` with the client's editor text; `user_input` takes
+ * `{status: "answered", answers}` with an answer to every question by its id,
+ * or `{status: "skipped", answers: {}}`; every kind may be answered
  * `{cancelled}`.
  */
 export const HostRequestSchema = Type.Union([
@@ -203,6 +240,14 @@ export const HostRequestSchema = Type.Union([
 	),
 	/** The text in the client's editor, which the client answers without asking the user. */
 	Type.Object({ kind: Type.Literal("editor_text"), timeoutMs }, closed),
+	/** The request_user_input tool's preference questions; an answer grants no tool or execution authority. */
+	Type.Object(
+		{
+			kind: Type.Literal("user_input"),
+			questions: Type.Array(UserInputQuestionSchema, { minItems: 1, maxItems: 3 }),
+		},
+		closed,
+	),
 ]);
 export type HostRequest = Static<typeof HostRequestSchema>;
 
@@ -216,6 +261,13 @@ export const HostResponseSchema = Type.Union([
 	),
 	Type.Object(
 		{ decision: stringEnum(["approved", "denied", "dismissed"]), message: Type.Optional(Type.String()) },
+		closed,
+	),
+	Type.Object(
+		{
+			status: stringEnum(["answered", "skipped"]),
+			answers: Type.Record(Type.String(), UserInputAnswerSchema),
+		},
 		closed,
 	),
 	Type.Object({ cancelled: Type.Literal(true) }, closed),
@@ -593,16 +645,24 @@ export const LiveNoticeItemSchema = Type.Object(
 
 /**
  * A one-shot instruction for an interactive client: `set_editor_text`
- * replaces its editor text, `insert_editor_text` pastes at the cursor.
+ * replaces its editor text, `insert_editor_text` pastes at the cursor, and
+ * `set_theme` asks it to show the theme `name` (an extension's
+ * `ctx.ui.setTheme`), unless its user picked a theme there. Local clients only.
  */
-export const LiveDirectiveItemSchema = Type.Object(
-	{
-		type: Type.Literal("directive"),
-		directive: stringEnum(["set_editor_text", "insert_editor_text"]),
-		text: Type.String(),
-	},
-	closed,
-);
+export const LiveDirectiveItemSchema = Type.Union([
+	Type.Object(
+		{
+			type: Type.Literal("directive"),
+			directive: stringEnum(["set_editor_text", "insert_editor_text"]),
+			text: Type.String(),
+		},
+		closed,
+	),
+	Type.Object(
+		{ type: Type.Literal("directive"), directive: Type.Literal("set_theme"), name: Type.String({ minLength: 1 }) },
+		closed,
+	),
+]);
 
 /** Every live item, keyed by type. */
 export const LIVE_ITEM_SCHEMAS = {

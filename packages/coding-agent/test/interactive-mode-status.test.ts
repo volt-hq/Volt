@@ -15,7 +15,7 @@ import {
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { getCurrentThemeName, initTheme } from "../src/core/theme/runtime.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function renderLastLine(container: Container, width = 120): string {
@@ -383,51 +383,47 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	});
 });
 
-describe("InteractiveMode.terminalSurface themes", () => {
-	test("persists theme changes to settings manager", () => {
-		initTheme("dark");
-
-		let currentTheme = "dark";
-		const settingsManager = {
-			getTheme: vi.fn(() => currentTheme),
-			setTheme: vi.fn((theme: string) => {
-				currentTheme = theme;
-			}),
-		};
+describe("InteractiveMode themes extensions ask for", () => {
+	/** The TUI's theme state as `applyExtensionTheme` and `applyConfiguredTheme` read it. */
+	function themeState(localThemeOverride = false) {
+		const settingsManager = { getTheme: vi.fn(() => "dark"), setTheme: vi.fn() };
+		const mode = InteractiveMode.prototype as any;
 		const fakeThis: any = {
-			session: { settingsManager },
 			settingsManager,
-			ui: { requestRender: vi.fn() },
+			localThemeOverride,
+			extensionTheme: undefined,
+			ui: { invalidate: vi.fn(), requestRender: vi.fn() },
+			updateEditorBorderColor: vi.fn(),
+			applyConfiguredTheme: mode.applyConfiguredTheme,
 		};
+		return { fakeThis, settingsManager, apply: (name: string) => mode.applyExtensionTheme.call(fakeThis, name) };
+	}
 
-		const surface = (InteractiveMode as any).prototype.terminalSurface.call(fakeThis);
-		const result = surface.themes.setTheme("light");
-
-		expect(result.success).toBe(true);
-		expect(settingsManager.setTheme).toHaveBeenCalledWith("light");
-		expect(currentTheme).toBe("light");
-		expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+	test("shows the theme without saving it, and keeps it when the configured theme applies again", () => {
+		initTheme("dark");
+		const { fakeThis, settingsManager, apply } = themeState();
+		apply("light");
+		expect(getCurrentThemeName()).toBe("light");
+		expect(settingsManager.setTheme).not.toHaveBeenCalled();
+		expect(fakeThis.ui.requestRender).toHaveBeenCalled();
+		// A conversation shown afresh applies the TUI's theme again: the extension's still wins over the settings'.
+		(InteractiveMode.prototype as any).applyConfiguredTheme.call(fakeThis);
+		expect(getCurrentThemeName()).toBe("light");
 	});
 
-	test("does not persist invalid theme names", () => {
+	test("keeps a theme the user picked in this TUI", () => {
 		initTheme("dark");
+		const { apply } = themeState(true);
+		apply("light");
+		expect(getCurrentThemeName()).toBe("dark");
+	});
 
-		const settingsManager = {
-			getTheme: vi.fn(() => "dark"),
-			setTheme: vi.fn(),
-		};
-		const fakeThis: any = {
-			session: { settingsManager },
-			settingsManager,
-			ui: { requestRender: vi.fn() },
-		};
-
-		const surface = (InteractiveMode as any).prototype.terminalSurface.call(fakeThis);
-		const result = surface.themes.setTheme("__missing_theme__");
-
-		expect(result.success).toBe(false);
-		expect(settingsManager.setTheme).not.toHaveBeenCalled();
-		expect(fakeThis.ui.requestRender).not.toHaveBeenCalled();
+	test("keeps the current theme for a theme the TUI does not have", () => {
+		initTheme("light");
+		const { fakeThis, apply } = themeState();
+		fakeThis.settingsManager.getTheme = vi.fn(() => "light");
+		apply("__missing_theme__");
+		expect(getCurrentThemeName()).toBe("light");
 	});
 });
 

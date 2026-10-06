@@ -670,6 +670,54 @@ describe("remote redaction of local-only live values", () => {
 		]);
 	});
 
+	it("never sends a theme directive, which only a terminal shows", () => {
+		const redactor = redactorFor(workspacePath);
+		const theme: LiveItem = { type: "directive", directive: "set_theme", name: "light" };
+		expect(redactor.redact(live(1, [theme]))).toBeUndefined();
+		expect(
+			items(redactor.redact(live(2, [theme, { type: "directive", directive: "set_editor_text", text: hostFile }]))),
+		).toEqual([{ type: "directive", directive: "set_editor_text", text: "/workspace/notes.md" }]);
+	});
+
+	it("asks request_user_input questions of a client granted conversation control, with paths redacted", () => {
+		const profile = (capabilities: Parameters<typeof remoteProfile>[0]["grant"]["capabilities"]) =>
+			remoteProfile({
+				grant: { schemaVersion: 1, revision: 1, capabilities },
+				redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+			});
+		expect([...profile(["conversation.control.v1"]).hostRequests(["user_input"])]).toEqual(["user_input"]);
+		expect([...profile([]).hostRequests(["user_input"])]).toEqual([]);
+		const question = (text: string): LiveItem => ({
+			type: "set",
+			key: "host_request/q1",
+			value: {
+				kind: "host_request",
+				requestId: "q1",
+				request: {
+					kind: "user_input",
+					questions: [
+						{
+							id: "target",
+							header: "Target",
+							question: text,
+							options: [
+								{ label: "Keep it", description: "Leave the file." },
+								{ label: "Move it", description: "Move the file." },
+							],
+						},
+					],
+				},
+			},
+		});
+		expect(
+			items(
+				profile(["conversation.control.v1"])
+					.redactor()
+					.redact(live(1, [question(`Where should ${hostFile} go?`)])),
+			),
+		).toEqual([question("Where should /workspace/notes.md go?")]);
+	});
+
 	it("never asks a remote client a provider sign-in, whatever it accepts and is granted", () => {
 		const profile = remoteProfile({
 			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },

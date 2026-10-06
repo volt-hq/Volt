@@ -190,6 +190,9 @@ import {
 	LivePatchKeySchema,
 	LiveToolPartialSchema,
 	LiveValueSchema,
+	UserInputAnswerSchema,
+	UserInputOptionSchema,
+	UserInputQuestionSchema,
 } from "./live.ts";
 import {
 	RpcMcpAuthResponseSchema,
@@ -745,6 +748,9 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	// Live lane and host requests
 	HostRequestKind: HostRequestKindSchema,
 	HostDialogAction: HostDialogActionSchema,
+	UserInputOption: UserInputOptionSchema,
+	UserInputQuestion: UserInputQuestionSchema,
+	UserInputAnswer: UserInputAnswerSchema,
 	HostRequest: HostRequestSchema,
 	HostResponse: HostResponseSchema,
 	LiveKey: LiveKeySchema,

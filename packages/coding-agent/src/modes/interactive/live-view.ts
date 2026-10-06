@@ -1,15 +1,15 @@
 /**
  * The TUI's view of the live state of the conversation it shows, as its
  * client's live frames change it: extension panels and title; notices (the
- * host's own and its extensions') and editor directives; the end of the work
- * the host runs; and the dialogs, forms, and approvals the TUI answers, shown
- * one at a time in the order they were asked. A request another client
- * answered, or that ended, closes without an answer. An `editor_text` request
- * is answered at once with the editor's text. A provider sign-in
- * (`provider_auth`) shows beside the queue, so the prompts its login asks
- * show while it waits. A patched panel shows as the client's live fold holds
- * it. Status items, phase, and work progress are read from the store where
- * they show.
+ * host's own and its extensions') and editor and theme directives; the end of
+ * the work the host runs; and the dialogs, forms, approvals, and
+ * request_user_input questions the TUI answers, shown one at a time in the
+ * order they were asked. A request another client answered, or that ended,
+ * closes without an answer. An `editor_text` request is answered at once with
+ * the editor's text. A provider sign-in (`provider_auth`) shows beside the
+ * queue, so the prompts its login asks show while it waits. A patched panel
+ * shows as the client's live fold holds it. Status items, phase, and work
+ * progress are read from the store where they show.
  */
 
 import type {
@@ -42,6 +42,8 @@ export interface LiveViewHost {
 	setEditorText(text: string): void;
 	/** Paste text into the editor at the cursor. */
 	insertEditorText(text: string): void;
+	/** Show the theme an extension asked for, unless the user picked one. */
+	setTheme(name: string): void;
 	/** The editor's text, or undefined when the TUI shows no editor. */
 	editorText(): string | undefined;
 	/** The executor of work `workId` detached: the work ended, or suspended. */
@@ -61,6 +63,7 @@ export const TUI_HOST_REQUESTS: readonly HostRequestKind[] = [
 	"approval",
 	"provider_auth",
 	"editor_text",
+	"user_input",
 ];
 
 function panelOf(value: Extract<LiveValue, { kind: "ext_panel" }>): UiPanel {
@@ -115,7 +118,8 @@ export class TuiLiveView {
 				this.host.notify(item.level, item.message, item.source, item.detail);
 				return;
 			case "directive":
-				if (item.directive === "insert_editor_text") this.host.insertEditorText(item.text);
+				if (item.directive === "set_theme") this.host.setTheme(item.name);
+				else if (item.directive === "insert_editor_text") this.host.insertEditorText(item.text);
 				else this.host.setEditorText(item.text);
 				return;
 			default:

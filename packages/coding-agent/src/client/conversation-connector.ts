@@ -16,7 +16,6 @@
  */
 
 import type { RpcTransport } from "../core/protocol/transport/transport.ts";
-import type { ExtensionClient } from "../core/session/extension-binding.ts";
 import { ProtocolClient, type ProtocolClientOptions } from "./protocol-client.ts";
 
 /** What a connector opens for its client. */
@@ -32,12 +31,6 @@ export interface ConnectorOpenOptions {
 	readonly onShutdownRequested?: () => void;
 	/** The conversation the client is on lost its log. */
 	readonly onLost?: (error: Error) => void;
-	/**
-	 * What the TUI's terminal offers the conversation's extensions beyond the
-	 * protocol: its themes and the request_user_input dialog. In process only,
-	 * until a host request kind and a directive carry them (Phase 7).
-	 */
-	readonly terminal?: Pick<ExtensionClient, "themes" | "userInput">;
 }
 
 /** A conversation a connector opened for its client. */
@@ -87,11 +80,10 @@ export async function connectThrough(
 	connector: ConversationConnector,
 	options: ConnectThroughOptions = {},
 ): Promise<ProtocolClient> {
-	const { onClient, onOpened, onShutdownRequested, onLost, terminal, ...clientOptions } = options;
+	const { onClient, onOpened, onShutdownRequested, onLost, ...clientOptions } = options;
 	const openOptions: ConnectorOpenOptions = {
 		...(onShutdownRequested === undefined ? {} : { onShutdownRequested }),
 		...(onLost === undefined ? {} : { onLost }),
-		...(terminal === undefined ? {} : { terminal }),
 	};
 	const client = new ProtocolClient({ ...clientOptions, followMoves: "reconnect" });
 	onClient?.(client);

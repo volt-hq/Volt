@@ -50,18 +50,52 @@ describe("native structured questions", () => {
 		return harness;
 	}
 
+	/**
+	 * Attach a client that answers `user_input` host requests as the TUI does:
+	 * in a dialog `mount` shows, closed when the host ends the request.
+	 */
 	async function bind(harness: Harness, mount: MountUserInputDialog = async () => answered): Promise<() => void> {
-		const attachment = harness.session.attachExtensionClient({
-			id: "tui",
-			mode: "rpc",
-			// As the TUI's surface asks: in a dialog its terminal mounts.
-			userInput: (asked, signal) => promptUserInput(mount, asked, signal),
+		const live = harness.session.liveState;
+		const shown = new Map<string, AbortController>();
+		const close = (requestId: string): void => {
+			shown.get(requestId)?.abort();
+			shown.delete(requestId);
+		};
+		const detachLive = live.attach("tui", {
+			acceptsHostRequest: (kind) => kind === "user_input",
+			apply: (update) => {
+				if (update.reset) for (const requestId of [...shown.keys()]) close(requestId);
+				for (const item of update.items) {
+					if (item.type === "clear" && item.key.startsWith("host_request/")) {
+						close(item.key.slice("host_request/".length));
+					}
+					if (item.type !== "set" || item.value.kind !== "host_request") continue;
+					const { requestId, request } = item.value;
+					if (request.kind !== "user_input") continue;
+					const controller = new AbortController();
+					shown.set(requestId, controller);
+					void promptUserInput(mount, { questions: request.questions }, controller.signal).then((response) => {
+						if (controller.signal.aborted) return;
+						live.answer(
+							requestId,
+							response.status === "answered" || response.status === "skipped"
+								? { status: response.status, answers: response.answers }
+								: { cancelled: true },
+							"tui",
+						);
+					});
+				}
+			},
 		});
+		const attachment = harness.session.attachExtensionClient({ id: "tui", mode: "rpc" });
 		await attachment.ready;
-		return attachment.detach;
+		return () => {
+			attachment.detach();
+			detachLive();
+		};
 	}
 
-	it("advertises questions only while a local TUI is attached, preserving policy across mode changes and reload", async () => {
+	it("advertises questions only while a client that answers them is attached, preserving policy across mode changes and reload", async () => {
 		const h = await setup();
 		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
 		const detach = await bind(h);
@@ -72,7 +106,11 @@ describe("native structured questions", () => {
 		expect(h.session.getActiveToolNames()).not.toContain("write");
 		await h.session.reload();
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
-		// A client without UI keeps the TUI's mode and surface.
+		// A client that does not answer them keeps them offered while the TUI stays.
+		h.session.liveState.attach("relayed-phone", {
+			acceptsHostRequest: (kind) => kind === "confirm",
+			apply: () => {},
+		});
 		await h.session.attachExtensionClient({ id: "relayed-phone", mode: "rpc" }).ready;
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
 		detach();
@@ -82,7 +120,7 @@ describe("native structured questions", () => {
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
 	});
 
-	it("advertises questions while a client that asks them is attached, whatever mode bound the session", async () => {
+	it("advertises questions while a client that answers them is attached, whatever mode bound the session", async () => {
 		const h = await setup();
 		await h.session.attachExtensionClient({ id: "rpc-client", mode: "rpc" }).ready;
 		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
