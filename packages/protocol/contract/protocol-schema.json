@@ -201,6 +201,7 @@
 				"steer",
 				"follow_up",
 				"abort",
+				"withdraw_queued",
 				"abort_retry",
 				"bash",
 				"abort_bash",
@@ -217,7 +218,13 @@
 				"switch_session",
 				"fork",
 				"clone",
+				"import_session",
 				"export_html",
+				"export_jsonl",
+				"delete_session",
+				"navigate_tree",
+				"set_label",
+				"reload",
 				"cancel_work",
 				"open_work",
 				"resume_work",
@@ -279,7 +286,8 @@
 				"mcp",
 				"extensions",
 				"settings",
-				"host"
+				"host",
+				"resources"
 			]
 		},
 		"ClientFrame": {
@@ -613,6 +621,9 @@
 				"child": {
 					"$ref": "#/$defs/WorkChild"
 				},
+				"opens": {
+					"type": "boolean"
+				},
 				"state": {
 					"$ref": "#/$defs/WorkState"
 				},
@@ -645,6 +656,16 @@
 					"type": "integer",
 					"minimum": 1,
 					"maximum": 9007199254740991
+				},
+				"startedAt": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"finishedAt": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
 				}
 			},
 			"additionalProperties": false
@@ -3014,6 +3035,42 @@
 			},
 			"additionalProperties": false
 		},
+		"ConversationInfo": {
+			"type": "object",
+			"required": [
+				"id",
+				"cwd",
+				"sessionDir",
+				"persisted",
+				"defaultSessionDir"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"cwd": {
+					"type": "string"
+				},
+				"sessionDir": {
+					"type": "string"
+				},
+				"sessionFile": {
+					"type": "string"
+				},
+				"persisted": {
+					"type": "boolean"
+				},
+				"defaultSessionDir": {
+					"type": "boolean"
+				},
+				"parentSessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
 		"CustomMessage": {
 			"type": "object",
 			"required": [
@@ -3216,6 +3273,25 @@
 			},
 			"maxItems": 5,
 			"uniqueItems": true
+		},
+		"ExtensionResource": {
+			"type": "object",
+			"required": [
+				"id",
+				"path"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"path": {
+					"type": "string"
+				},
+				"source": {
+					"$ref": "#/$defs/ResourceSource"
+				}
+			},
+			"additionalProperties": false
 		},
 		"ExtensionSetting": {
 			"anyOf": [
@@ -3503,6 +3579,9 @@
 					"type": "string",
 					"maxLength": 2000,
 					"pattern": "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$"
+				},
+				"fingerprint": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -3781,6 +3860,9 @@
 					"$ref": "#/$defs/Frame.intent.abort"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.withdraw_queued"
+				},
+				{
 					"$ref": "#/$defs/Frame.intent.abort_retry"
 				},
 				{
@@ -3829,7 +3911,25 @@
 					"$ref": "#/$defs/Frame.intent.clone"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.import_session"
+				},
+				{
 					"$ref": "#/$defs/Frame.intent.export_html"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.export_jsonl"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.delete_session"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.navigate_tree"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_label"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.reload"
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.cancel_work"
@@ -4012,7 +4112,7 @@
 					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
 				},
 				"input": {
-					"$ref": "#/$defs/EmptyInput"
+					"$ref": "#/$defs/IntentInput.abort"
 				}
 			},
 			"additionalProperties": false
@@ -4273,6 +4373,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.delete_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "delete_session"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.delete_session"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.dynamic": {
 			"type": "object",
 			"required": [
@@ -4327,6 +4456,34 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.export_html"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.export_jsonl": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "export_jsonl"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.export_jsonl"
 				}
 			},
 			"additionalProperties": false
@@ -4412,6 +4569,35 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.fork"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.import_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "import_session"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.import_session"
 				}
 			},
 			"additionalProperties": false
@@ -4763,6 +4949,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.navigate_tree": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "navigate_tree"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.navigate_tree"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.new_session": {
 			"type": "object",
 			"required": [
@@ -4990,6 +5205,34 @@
 				},
 				"input": {
 					"$ref": "#/$defs/RpcRegisterPushTargetArgs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.reload": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "reload"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
 				}
 			},
 			"additionalProperties": false
@@ -5715,6 +5958,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.set_label": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_label"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_label"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.set_model": {
 			"type": "object",
 			"required": [
@@ -6090,6 +6362,34 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.withdraw_queued": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "withdraw_queued"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.live": {
 			"type": "object",
 			"required": [
@@ -6179,6 +6479,15 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.query.auth.providers"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.conversation_info"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.resources"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.tools"
 				},
 				{
 					"$ref": "#/$defs/Frame.query.work_output"
@@ -6332,6 +6641,36 @@
 				},
 				"params": {
 					"$ref": "#/$defs/QueryParams.content"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.conversation_info": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "conversation_info"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
 				}
 			},
 			"additionalProperties": false
@@ -6977,6 +7316,36 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.query.resources": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "resources"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.query.review.discussion_source": {
 			"type": "object",
 			"required": [
@@ -7269,6 +7638,36 @@
 				"query": {
 					"type": "string",
 					"const": "subscription_usage"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.tools": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "tools"
 				},
 				"conversation": {
 					"type": "string",
@@ -8311,7 +8710,20 @@
 			]
 		},
 		"IntentInput.abort": {
-			"$ref": "#/$defs/EmptyInput"
+			"type": "object",
+			"properties": {
+				"withdrawQueued": {
+					"type": "boolean"
+				},
+				"operation": {
+					"type": "string",
+					"enum": [
+						"compaction",
+						"navigation"
+					]
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentInput.abort_bash": {
 			"$ref": "#/$defs/EmptyInput"
@@ -8409,11 +8821,36 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.delete_session": {
+			"type": "object",
+			"required": [
+				"sessionId"
+			],
+			"properties": {
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.export_html": {
 			"type": "object",
 			"properties": {
 				"outputPath": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.export_jsonl": {
+			"type": "object",
+			"properties": {
+				"outputPath": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096
 				}
 			},
 			"additionalProperties": false
@@ -8445,6 +8882,25 @@
 					"minLength": 1,
 					"maxLength": 512,
 					"pattern": "^[^\\u0000]+$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.import_session": {
+			"type": "object",
+			"required": [
+				"path"
+			],
+			"properties": {
+				"path": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096
+				},
+				"cwdOverride": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096
 				}
 			},
 			"additionalProperties": false
@@ -8610,6 +9066,34 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.navigate_tree": {
+			"type": "object",
+			"required": [
+				"entryId"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"summarize": {
+					"type": "boolean"
+				},
+				"customInstructions": {
+					"type": "string"
+				},
+				"replaceInstructions": {
+					"type": "boolean"
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 1024
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.new_session": {
 			"type": "object",
 			"properties": {
@@ -8623,6 +9107,21 @@
 				},
 				"replaceReviewGeneral": {
 					"type": "boolean"
+				},
+				"cwd": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096
+				},
+				"workspaceName": {
+					"$ref": "#/$defs/IrohRemoteWorkspaceName"
+				},
+				"baseRef": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 1024,
+					"pattern": "^[^-\\s\\u0000-\\u001f\\u007f-\\u009f][^\\s\\u0000-\\u001f\\u007f-\\u009f]*$",
+					"x-volt-expected": "be a Git ref"
 				}
 			},
 			"additionalProperties": false,
@@ -8793,6 +9292,9 @@
 		},
 		"IntentInput.register_push_target": {
 			"$ref": "#/$defs/RpcRegisterPushTargetArgs"
+		},
+		"IntentInput.reload": {
+			"$ref": "#/$defs/EmptyInput"
 		},
 		"IntentInput.remove_worktree": {
 			"type": "object",
@@ -9306,6 +9808,32 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.set_label": {
+			"type": "object",
+			"required": [
+				"entryId",
+				"label"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"label": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.set_model": {
 			"type": "object",
 			"required": [
@@ -9333,7 +9861,7 @@
 				"models": {
 					"type": "array",
 					"items": {
-						"$ref": "#/$defs/ModelScopeEntry"
+						"$ref": "#/$defs/ScopedModel"
 					},
 					"maxItems": 512
 				},
@@ -9369,6 +9897,11 @@
 			"properties": {
 				"name": {
 					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -9461,6 +9994,11 @@
 					"type": "string",
 					"maxLength": 512,
 					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"cwdOverride": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096
 				}
 			},
 			"additionalProperties": false
@@ -9492,6 +10030,9 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.withdraw_queued": {
+			"$ref": "#/$defs/EmptyInput"
+		},
 		"IntentName": {
 			"anyOf": [
 				{
@@ -9519,6 +10060,9 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"IntentOutput.abort": {
+			"$ref": "#/$defs/WithdrawnQueue"
 		},
 		"IntentOutput.auth.login": {
 			"anyOf": [
@@ -9623,7 +10167,32 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentOutput.delete_session": {
+			"type": "object",
+			"required": [
+				"trashed"
+			],
+			"properties": {
+				"trashed": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentOutput.export_html": {
+			"type": "object",
+			"required": [
+				"path"
+			],
+			"properties": {
+				"path": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.export_jsonl": {
 			"type": "object",
 			"required": [
 				"path"
@@ -9654,6 +10223,9 @@
 					"additionalProperties": false
 				}
 			]
+		},
+		"IntentOutput.import_session": {
+			"$ref": "#/$defs/IntentCancelled"
 		},
 		"IntentOutput.lsp.restart": {
 			"type": "object",
@@ -9706,6 +10278,24 @@
 		},
 		"IntentOutput.mcp.set_enabled": {
 			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"IntentOutput.navigate_tree": {
+			"type": "object",
+			"required": [
+				"cancelled"
+			],
+			"properties": {
+				"cancelled": {
+					"type": "boolean"
+				},
+				"aborted": {
+					"type": "boolean"
+				},
+				"editorText": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentOutput.new_session": {
 			"$ref": "#/$defs/IntentCancelled"
@@ -10064,6 +10654,9 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentOutput.withdraw_queued": {
+			"$ref": "#/$defs/WithdrawnQueue"
+		},
 		"IntentPresentation": {
 			"type": "object",
 			"required": [
@@ -10100,6 +10693,26 @@
 				"conversation",
 				"host"
 			]
+		},
+		"IntentShortcut": {
+			"type": "object",
+			"required": [
+				"key",
+				"intent"
+			],
+			"properties": {
+				"key": {
+					"type": "string",
+					"minLength": 1
+				},
+				"intent": {
+					"$ref": "#/$defs/IntentName"
+				},
+				"description": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
 		},
 		"IntentSlashAlias": {
 			"type": "object",
@@ -10859,7 +11472,7 @@
 		},
 		"LiveKey": {
 			"type": "string",
-			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title|bash)|(?:host_request|work)/[^\\u0000-\\u001f\\u007f]{1,256}|(?:ext_status|ext_panel)/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|presence|ext_title|bash)|(?:host_request|work)/[^\\u0000-\\u001f\\u007f]{1,256}|(?:ext_status|ext_panel)/(?!(?:volt|core|builtin|host|ext)/)[a-z0-9][a-z0-9-]{0,63}/[^\\u0000-\\u001f\\u007f]{1,128})$",
 			"x-volt-expected": "be a live key"
 		},
 		"LivePatchKey": {
@@ -10923,6 +11536,9 @@
 				},
 				{
 					"$ref": "#/$defs/LiveValue.intents"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.presence"
 				},
 				{
 					"$ref": "#/$defs/LiveValue.host_request"
@@ -11153,6 +11769,24 @@
 				},
 				"retry": {
 					"$ref": "#/$defs/RpcActiveRetry"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.presence": {
+			"type": "object",
+			"required": [
+				"kind",
+				"remote"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "presence"
+				},
+				"remote": {
+					"type": "integer",
+					"minimum": 0
 				}
 			},
 			"additionalProperties": false
@@ -12900,6 +13534,9 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"opens": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -13121,23 +13758,24 @@
 			},
 			"additionalProperties": false
 		},
-		"ModelScopeEntry": {
+		"NamedResource": {
 			"type": "object",
 			"required": [
-				"provider",
-				"modelId"
+				"name",
+				"path"
 			],
 			"properties": {
-				"provider": {
-					"type": "string",
-					"minLength": 1
+				"name": {
+					"type": "string"
 				},
-				"modelId": {
-					"type": "string",
-					"minLength": 1
+				"path": {
+					"type": "string"
 				},
-				"thinkingLevel": {
-					"$ref": "#/$defs/RpcThinkingLevel"
+				"description": {
+					"type": "string"
+				},
+				"source": {
+					"$ref": "#/$defs/ResourceSource"
 				}
 			},
 			"additionalProperties": false
@@ -14303,6 +14941,9 @@
 				"lsp.status",
 				"debug_report",
 				"auth.providers",
+				"conversation_info",
+				"resources",
+				"tools",
 				"work_output",
 				"agent_options",
 				"session_contexts",
@@ -14354,6 +14995,9 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"QueryParams.conversation_info": {
+			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.debug_report": {
 			"$ref": "#/$defs/EmptyInput"
@@ -14601,6 +15245,9 @@
 				]
 			}
 		},
+		"QueryParams.resources": {
+			"$ref": "#/$defs/EmptyInput"
+		},
 		"QueryParams.review.discussion_source": {
 			"$ref": "#/$defs/EmptyInput"
 		},
@@ -14692,6 +15339,16 @@
 				"cursor": {
 					"type": "string",
 					"minLength": 1
+				},
+				"scope": {
+					"type": "string",
+					"enum": [
+						"workspace",
+						"all"
+					]
+				},
+				"search": {
+					"$ref": "#/$defs/RpcGitRef"
 				}
 			},
 			"additionalProperties": false
@@ -14703,6 +15360,9 @@
 			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.subscription_usage": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.tools": {
 			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.web_search_status": {
@@ -14847,6 +15507,9 @@
 			},
 			"additionalProperties": false
 		},
+		"QueryResult.conversation_info": {
+			"$ref": "#/$defs/ConversationInfo"
+		},
 		"QueryResult.debug_report": {
 			"type": "object",
 			"required": [
@@ -14969,13 +15632,28 @@
 		"QueryResult.intents": {
 			"type": "object",
 			"required": [
-				"intents"
+				"intents",
+				"shortcuts",
+				"completionTriggers"
 			],
 			"properties": {
 				"intents": {
 					"type": "array",
 					"items": {
 						"$ref": "#/$defs/IntentDescriptor"
+					}
+				},
+				"shortcuts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IntentShortcut"
+					}
+				},
+				"completionTriggers": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1
 					}
 				}
 			},
@@ -15024,237 +15702,13 @@
 				"models": {
 					"type": "array",
 					"items": {
-						"type": "object",
-						"required": [
-							"id",
-							"name",
-							"api",
-							"provider",
-							"baseUrl",
-							"reasoning",
-							"input",
-							"cost",
-							"contextWindow",
-							"maxTokens",
-							"availableThinkingLevels",
-							"supportsFastMode"
-						],
-						"properties": {
-							"id": {
-								"type": "string"
-							},
-							"name": {
-								"type": "string"
-							},
-							"api": {
-								"$ref": "#/$defs/RpcApi"
-							},
-							"provider": {
-								"type": "string"
-							},
-							"baseUrl": {
-								"type": "string"
-							},
-							"reasoning": {
-								"type": "boolean"
-							},
-							"thinkingLevelMap": {
-								"type": "object",
-								"properties": {
-									"off": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"minimal": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"low": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"medium": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"high": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"xhigh": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									},
-									"max": {
-										"anyOf": [
-											{
-												"type": "string"
-											},
-											{
-												"type": "null"
-											}
-										]
-									}
-								},
-								"additionalProperties": false
-							},
-							"input": {
-								"type": "array",
-								"items": {
-									"type": "string",
-									"enum": [
-										"text",
-										"image"
-									]
-								}
-							},
-							"promptCache": {
-								"type": "object",
-								"required": [
-									"modes",
-									"retention"
-								],
-								"properties": {
-									"modes": {
-										"type": "array",
-										"items": {
-											"type": "string",
-											"enum": [
-												"implicit",
-												"explicit"
-											]
-										}
-									},
-									"retention": {
-										"type": "object",
-										"required": [
-											"short"
-										],
-										"properties": {
-											"short": {
-												"type": "object",
-												"properties": {
-													"ttlSeconds": {
-														"type": "number"
-													}
-												},
-												"additionalProperties": false
-											},
-											"long": {
-												"type": "object",
-												"properties": {
-													"ttlSeconds": {
-														"type": "number"
-													}
-												},
-												"additionalProperties": false
-											}
-										},
-										"additionalProperties": false
-									},
-									"refreshesOnHit": {
-										"type": "boolean"
-									}
-								},
-								"additionalProperties": false
-							},
-							"cost": {
-								"type": "object",
-								"required": [
-									"input",
-									"output",
-									"cacheRead",
-									"cacheWrite"
-								],
-								"properties": {
-									"input": {
-										"type": "number"
-									},
-									"output": {
-										"type": "number"
-									},
-									"cacheRead": {
-										"type": "number"
-									},
-									"cacheWrite": {
-										"type": "number"
-									}
-								},
-								"additionalProperties": false
-							},
-							"contextWindow": {
-								"type": "number"
-							},
-							"maxTokens": {
-								"type": "number"
-							},
-							"headers": {
-								"type": "object",
-								"patternProperties": {
-									"^.*$": {
-										"type": "string"
-									}
-								}
-							},
-							"compat": {
-								"x-volt-opaque": "provider compatibility tuning; clients never interpret this"
-							},
-							"availableThinkingLevels": {
-								"type": "array",
-								"items": {
-									"$ref": "#/$defs/RpcThinkingLevel"
-								}
-							},
-							"supportsFastMode": {
-								"type": "boolean"
-							},
-							"auth": {
-								"$ref": "#/$defs/ProviderAuthMethod"
-							}
-						},
-						"additionalProperties": false
+						"$ref": "#/$defs/RpcCatalogModel"
 					}
 				},
 				"cycleScope": {
 					"type": "array",
 					"items": {
-						"$ref": "#/$defs/ClientModelRef"
+						"$ref": "#/$defs/ScopedModel"
 					}
 				}
 			},
@@ -15322,6 +15776,9 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"QueryResult.resources": {
+			"$ref": "#/$defs/Resources"
 		},
 		"QueryResult.review.discussion_source": {
 			"type": "object",
@@ -15542,6 +15999,21 @@
 		},
 		"QueryResult.subscription_usage": {
 			"$ref": "#/$defs/RpcSubscriptionUsageReport"
+		},
+		"QueryResult.tools": {
+			"type": "object",
+			"required": [
+				"tools"
+			],
+			"properties": {
+				"tools": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ToolSummary"
+					}
+				}
+			},
+			"additionalProperties": false
 		},
 		"QueryResult.web_search_status": {
 			"type": "object",
@@ -16491,6 +16963,171 @@
 			"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
 			"x-volt-expected": "match lowercase worktree id syntax"
 		},
+		"ResourceDiagnostic": {
+			"type": "object",
+			"required": [
+				"resource",
+				"type",
+				"message"
+			],
+			"properties": {
+				"resource": {
+					"type": "string",
+					"enum": [
+						"skill",
+						"prompt",
+						"theme",
+						"extension"
+					]
+				},
+				"type": {
+					"type": "string",
+					"enum": [
+						"warning",
+						"error",
+						"collision"
+					]
+				},
+				"message": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"collision": {
+					"type": "object",
+					"required": [
+						"name",
+						"winnerPath",
+						"loserPath"
+					],
+					"properties": {
+						"name": {
+							"type": "string"
+						},
+						"winnerPath": {
+							"type": "string"
+						},
+						"loserPath": {
+							"type": "string"
+						},
+						"winnerSource": {
+							"type": "string"
+						},
+						"loserSource": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"ResourceNotice": {
+			"type": "object",
+			"required": [
+				"level",
+				"message"
+			],
+			"properties": {
+				"level": {
+					"type": "string",
+					"enum": [
+						"info",
+						"warning",
+						"error"
+					]
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ResourceSource": {
+			"type": "object",
+			"required": [
+				"source",
+				"scope",
+				"origin"
+			],
+			"properties": {
+				"source": {
+					"type": "string"
+				},
+				"scope": {
+					"$ref": "#/$defs/RpcMcpSourceScope"
+				},
+				"origin": {
+					"type": "string",
+					"enum": [
+						"package",
+						"top-level"
+					]
+				},
+				"baseDir": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Resources": {
+			"type": "object",
+			"required": [
+				"skills",
+				"promptTemplates",
+				"themes",
+				"extensions",
+				"contextFiles",
+				"diagnostics",
+				"notices"
+			],
+			"properties": {
+				"skills": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/NamedResource"
+					}
+				},
+				"promptTemplates": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/NamedResource"
+					}
+				},
+				"themes": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ThemeResource"
+					}
+				},
+				"extensions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ExtensionResource"
+					}
+				},
+				"contextFiles": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/QueryResult.debug_report"
+					}
+				},
+				"diagnostics": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ResourceDiagnostic"
+					}
+				},
+				"notices": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ResourceNotice"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
 		"ReviewStarted": {
 			"type": "object",
 			"required": [
@@ -16551,6 +17188,12 @@
 				},
 				"maxAttempts": {
 					"type": "number"
+				},
+				"retryAt": {
+					"type": "number"
+				},
+				"error": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -16982,6 +17625,9 @@
 				},
 				"supportsFastMode": {
 					"type": "boolean"
+				},
+				"auth": {
+					"$ref": "#/$defs/ProviderAuthMethod"
 				}
 			},
 			"additionalProperties": false
@@ -20429,6 +21075,12 @@
 				},
 				"workingDirectory": {
 					"type": "string"
+				},
+				"cwd": {
+					"type": "string"
+				},
+				"parentSessionId": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -20991,6 +21643,25 @@
 			},
 			"additionalProperties": false
 		},
+		"ScopedModel": {
+			"type": "object",
+			"required": [
+				"provider",
+				"modelId"
+			],
+			"properties": {
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
+				},
+				"thinkingLevel": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				}
+			},
+			"additionalProperties": false
+		},
 		"SessionReference": {
 			"type": "object",
 			"required": [
@@ -21021,6 +21692,24 @@
 					"minLength": 1,
 					"maxLength": 512,
 					"pattern": "^[^\\u0000]+$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ThemeResource": {
+			"type": "object",
+			"required": [
+				"name"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"source": {
+					"$ref": "#/$defs/ResourceSource"
 				}
 			},
 			"additionalProperties": false
@@ -21135,6 +21824,30 @@
 				},
 				"timestamp": {
 					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ToolSummary": {
+			"type": "object",
+			"required": [
+				"name",
+				"description",
+				"source",
+				"active"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string"
+				},
+				"active": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -22471,6 +23184,36 @@
 				},
 				"timestamp": {
 					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"WithdrawnInput": {
+			"type": "object",
+			"required": [
+				"text"
+			],
+			"properties": {
+				"text": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				}
+			},
+			"additionalProperties": false
+		},
+		"WithdrawnQueue": {
+			"type": "object",
+			"required": [
+				"messages"
+			],
+			"properties": {
+				"messages": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/WithdrawnInput"
+					}
 				}
 			},
 			"additionalProperties": false

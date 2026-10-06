@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Require build, checks, and both Linux test shards
+      - name: Require build, checks, and every Linux test shard
         env:
           BUILD_RESULT: ${{ needs.build-check.result }}
           TEST_RESULT: ${{ needs.test-linux.result }}
@@ -86,13 +86,13 @@ jobs:
           ./test.sh --prefix packages/coding-agent/examples/remote/firebase-push-relay/functions test
 
   test-linux:
-    name: Linux tests (${{ matrix.shard }}/2)
+    name: Linux tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     permissions:
       contents: read
     env:
@@ -128,7 +128,7 @@ jobs:
       - name: Test coding-agent shard
         env:
           SHARD: ${{ matrix.shard }}
-        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/2"
+        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/4"
 
   relay-credential-broker:
     runs-on: ubuntu-24.04
@@ -176,13 +176,13 @@ jobs:
         run: go vet ./...
 
   test-windows:
-    name: Windows tests (${{ matrix.shard }}/3)
+    name: Windows tests (${{ matrix.shard }}/6)
     runs-on: windows-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2, 3, 4, 5, 6]
     permissions:
       contents: read
     env:
@@ -231,7 +231,7 @@ jobs:
           TEMP: ${{ runner.temp }}
           TMP: ${{ runner.temp }}
           SHARD: ${{ matrix.shard }}
-        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/3"
+        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/6"
 
   iroh-native-darwin-arm64:
     name: Iroh native load (Darwin arm64)

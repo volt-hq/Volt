@@ -10,11 +10,17 @@
  */
 
 import { resolve } from "node:path";
-import { clientFold, clientSnapshot, type HostFrame, type LiveItem } from "@hansjm10/volt-protocol";
+import {
+	clientFold,
+	clientSnapshot,
+	emptyLiveFold,
+	foldLiveFrame,
+	type HostFrame,
+	type LiveItem,
+} from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { toLogEntry } from "../../src/core/conversation-log/entry-codec.ts";
-import { emptyLiveFold, foldLiveFrame } from "../../src/core/protocol/live-fold.ts";
 import { localProfile, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";

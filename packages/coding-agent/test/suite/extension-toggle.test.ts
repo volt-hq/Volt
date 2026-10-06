@@ -189,6 +189,8 @@ describe("extension runtime toggle", () => {
 			permissions: [],
 			permissionsAcknowledged: true,
 			hasSettings: false,
+			// A local client reads where the extension's code came from.
+			fingerprint: "sdk:toggled",
 		});
 		expect(session.getActiveToolNames()).toContain("toggled_tool");
 		expect(conversation.liveState.get("ext_status/toggled/state")).toBeDefined();

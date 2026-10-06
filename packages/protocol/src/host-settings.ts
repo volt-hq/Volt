@@ -11,6 +11,7 @@
  */
 
 import { type Static, Type } from "typebox";
+import { ClientModelRefSchema } from "./client-fold.ts";
 import { stringEnum } from "./helpers.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 
@@ -56,16 +57,12 @@ export const HostSettingsValuesSchema = Type.Object(
 );
 export type HostSettingsValues = Static<typeof HostSettingsValuesSchema>;
 
-/** One model of a model scope, with the thinking level selecting it applies. */
-export const ModelScopeEntrySchema = Type.Object(
-	{
-		provider: Type.String({ minLength: 1 }),
-		modelId: Type.String({ minLength: 1 }),
-		thinkingLevel: Type.Optional(RpcThinkingLevelSchema),
-	},
+/** A model of a cycle scope, with the thinking level the scope gives it. */
+export const ScopedModelSchema = Type.Object(
+	{ ...ClientModelRefSchema.properties, thinkingLevel: Type.Optional(RpcThinkingLevelSchema) },
 	closed,
 );
-export type ModelScopeEntry = Static<typeof ModelScopeEntrySchema>;
+export type ScopedModel = Static<typeof ScopedModelSchema>;
 
 // ============================================================================
 // Language servers

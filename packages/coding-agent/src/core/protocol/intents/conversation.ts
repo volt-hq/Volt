@@ -3,15 +3,28 @@
  * (entries on its branch), agent mode and plans, and structural moves.
  */
 
+import { statSync } from "node:fs";
 import type { Api, Model } from "@hansjm10/volt-ai";
+import type { WithdrawnInput } from "@hansjm10/volt-protocol";
+import { resolvePath } from "../../../utils/paths.ts";
 import type { AgentSession } from "../../agent-session.ts";
 import { executePlan } from "../../host/plan-handoff.ts";
-import { openFork, openNewSession, openStoredSessionById } from "../../host/session-intents.ts";
+import { findStoredSession, openFork, openNewSession, openStoredSessionById } from "../../host/session-intents.ts";
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
+import { QueueClearPersistenceError } from "../../session/client-inputs.ts";
+import { MissingSessionCwdError } from "../../session-cwd.ts";
 import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
 import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
-import { defineIntent, INTENT_ENABLED, type IntentContext, IntentRejectedError, type IntentTarget } from "./types.ts";
+import {
+	defineIntent,
+	INTENT_ENABLED,
+	type IntentAvailability,
+	type IntentContext,
+	IntentRejectedError,
+	type IntentTarget,
+	type IntentView,
+} from "./types.ts";
 
 const control = ["conversation.control.v1"] as const;
 const modelSelect = ["model.select.v1"] as const;
@@ -20,6 +33,59 @@ const modelSelect = ["model.select.v1"] as const;
 export function targetOf(ctx: IntentContext): IntentTarget {
 	if (!ctx.target) throw new IntentRejectedError("unavailable", "This intent needs a conversation");
 	return ctx.target;
+}
+
+/**
+ * Availability that refuses a remote profile the input fields only local
+ * clients may send: host paths and the host's own records.
+ */
+export function localOnlyInput<I extends object>(
+	fields: readonly (keyof I & string)[],
+): (view: IntentView, input?: I) => IntentAvailability {
+	return (view, input) => {
+		if (view.profile.name !== "remote" || input === undefined) return INTENT_ENABLED;
+		const field = fields.find((name) => input[name] !== undefined);
+		return field === undefined
+			? INTENT_ENABLED
+			: { enabled: false, code: "not_allowed", reason: `${field} is not available over remote host` };
+	};
+}
+
+/** `path`, resolved against `cwd`, when it names an existing directory; rejected `invalid_input` otherwise. */
+export function existingDirectory(path: string, cwd: string): string {
+	const resolved = resolvePath(path, cwd);
+	let directory = false;
+	try {
+		directory = statSync(resolved).isDirectory();
+	} catch {
+		directory = false;
+	}
+	if (!directory) throw new IntentRejectedError("invalid_input", `Not a directory: ${resolved}`);
+	return resolved;
+}
+
+/** An open that failed on a missing cwd is rejected `unavailable`: the client may ask for another and retry. */
+export async function rejectingMissingCwd<T>(open: () => Promise<T>): Promise<T> {
+	try {
+		return await open();
+	} catch (error) {
+		if (error instanceof MissingSessionCwdError) throw new IntentRejectedError("unavailable", error.message);
+		throw error;
+	}
+}
+
+/**
+ * Take the conversation's queued input back, steering first. When the
+ * withdrawal could not be recorded, the input is still taken back: the
+ * error carries its text, the only copy left.
+ */
+export async function withdrawQueuedInput(session: AgentSession): Promise<WithdrawnInput[]> {
+	try {
+		return await session.withdrawQueue();
+	} catch (error) {
+		if (!(error instanceof QueueClearPersistenceError)) throw error;
+		return [...error.steering, ...error.followUp].map((text) => ({ text }));
+	}
 }
 
 // ============================================================================
@@ -82,7 +148,7 @@ export const promptIntent = defineIntent({
 					images: input.images,
 					streamingBehavior: input.streamingBehavior,
 					clientMessageId,
-					source: "rpc",
+					source: ctx.inputSource ?? "rpc",
 					...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 					preflightResult: (result) => {
 						if (!result.success || admitted) return;
@@ -136,6 +202,11 @@ export const followUpIntent = defineIntent({
 // Run control
 // ============================================================================
 
+/**
+ * With `operation`, only a compaction or a tree navigation's branch summary
+ * stops. With `withdrawQueued` (local clients), the queued input is taken
+ * back before the stop, which then has none to deliver.
+ */
 export const abortIntent = defineIntent({
 	name: "abort",
 	label: "Cancel run",
@@ -147,11 +218,34 @@ export const abortIntent = defineIntent({
 	requires: control,
 	whileBusy: "run",
 	presentation: { kind: "button", group: "Session" },
-	async run(ctx) {
+	available: localOnlyInput(["withdrawQueued"]),
+	async run(ctx, input): Promise<{ messages: WithdrawnInput[] } | undefined> {
+		const { session } = targetOf(ctx);
 		const abortRun = ctx.services.abortRun;
-		if (!abortRun) throw new Error("Cancelling a run is not available in this host");
-		await abortRun(targetOf(ctx).session);
+		if (input.operation === undefined && !abortRun) throw new Error("Cancelling a run is not available in this host");
+		const withdrawn = input.withdrawQueued === true ? { messages: await withdrawQueuedInput(session) } : undefined;
+		if (input.operation === "compaction") session.abortCompaction();
+		else if (input.operation === "navigation") session.abortBranchSummary();
+		else await abortRun?.(session);
+		return withdrawn;
 	},
+	accept: (withdrawn) => (withdrawn === undefined ? {} : { result: withdrawn }),
+});
+
+export const withdrawQueuedIntent = defineIntent({
+	name: "withdraw_queued",
+	label: "Edit queued messages",
+	description: "Take the queued steering and follow-up messages back without stopping the run",
+	category: "session",
+	scope: "conversation",
+	fence: "none",
+	remote: "unsafe",
+	requires: control,
+	whileBusy: "run",
+	async run(ctx) {
+		return { messages: await withdrawQueuedInput(targetOf(ctx).session) };
+	},
+	accept: (result) => ({ result }),
 });
 
 export const abortRetryIntent = defineIntent({
@@ -299,6 +393,11 @@ export const setFastModeIntent = defineIntent({
 	},
 });
 
+/**
+ * `sessionId` renames another session: one open in this host through its
+ * own log, a stored one of any session directory the `sessions` query lists
+ * by writing its log.
+ */
 export const setSessionNameIntent = defineIntent({
 	name: "set_session_name",
 	label: "Rename session",
@@ -314,7 +413,21 @@ export const setSessionNameIntent = defineIntent({
 	async run(ctx, input) {
 		const name = input.name.trim();
 		if (!name) throw new Error("Session name cannot be empty");
-		await targetOf(ctx).session.setSessionName(name);
+		const { conversation, host } = targetOf(ctx);
+		const sessionId = input.sessionId ?? conversation.id;
+		const open = host.get(sessionId);
+		if (open) {
+			await open.whileOpen((session) => session.setSessionName(name));
+			return name;
+		}
+		const stored = await findStoredSession(conversation, sessionId, "all");
+		if (!stored) throw new IntentRejectedError("invalid_input", `Session not found: ${sessionId}`);
+		const manager = await SessionManager.open(stored.ref);
+		try {
+			await manager.logWriter.appendSessionInfo(name);
+		} finally {
+			await manager.closePersistence();
+		}
 		return name;
 	},
 });
@@ -416,6 +529,10 @@ function acceptMove<O extends { cancelled: true } | { cancelled: false; sessionI
 	return outcome.cancelled ? { result: { cancelled: true as const } } : { conversation: outcome.sessionId };
 }
 
+/**
+ * `cwd` (an existing directory; local clients only) starts the session
+ * there, with `workspaceName` and `baseRef` for its Git context.
+ */
 export const newSessionIntent = defineIntent({
 	name: "new_session",
 	label: "New session",
@@ -429,8 +546,10 @@ export const newSessionIntent = defineIntent({
 	presentation: { kind: "palette", group: "Session" },
 	slash: { name: "clear", example: "/clear" },
 	sourceOwned: true,
+	available: localOnlyInput(["cwd", "workspaceName", "baseRef"]),
 	async run(ctx, input) {
 		const { host, client, session } = targetOf(ctx);
+		const cwd = input.cwd === undefined ? undefined : existingDirectory(input.cwd, session.sessionManager.getCwd());
 		const preservedReviewRun = input.preserveReviewRunId
 			? await getCanonicalReviewRun(session.sessionManager, input.preserveReviewRunId)
 			: undefined;
@@ -461,12 +580,21 @@ export const newSessionIntent = defineIntent({
 						},
 					}
 				: {}),
+			...(cwd === undefined ? {} : { cwd }),
+			...(input.workspaceName === undefined ? {} : { workspaceName: input.workspaceName }),
+			...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
 			...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 		});
 	},
 	accept: acceptMove,
 });
 
+/**
+ * A local client opens a stored session of any session directory the
+ * `sessions` query lists; a remote one only its workspace's. A session whose
+ * cwd is gone is rejected `unavailable` unless `cwdOverride` (local clients
+ * only) names an existing directory to run it in.
+ */
 export const switchSessionIntent = defineIntent({
 	name: "switch_session",
 	label: "Switch session",
@@ -478,11 +606,20 @@ export const switchSessionIntent = defineIntent({
 	requires: control,
 	whileBusy: "reject",
 	sourceOwned: true,
+	available: localOnlyInput(["cwdOverride"]),
 	run(ctx, input) {
-		const { host, client } = targetOf(ctx);
-		return openStoredSessionById(host, client, input.sessionId, {
-			...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
-		});
+		const { host, client, session } = targetOf(ctx);
+		const cwdOverride =
+			input.cwdOverride === undefined
+				? undefined
+				: existingDirectory(input.cwdOverride, session.sessionManager.getCwd());
+		return rejectingMissingCwd(() =>
+			openStoredSessionById(host, client, input.sessionId, {
+				scope: ctx.profile.name === "local" ? "all" : "workspace",
+				...(cwdOverride === undefined ? {} : { cwdOverride }),
+				...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
+			}),
+		);
 	},
 	accept: acceptMove,
 });

@@ -18,7 +18,12 @@ import type { SubagentRegistry } from "../subagents/registry.ts";
 import type { WorkRegistry } from "../work/registry.ts";
 import { feedLiveState, type LiveFeed } from "./live-feed.ts";
 import type { LiveState } from "./live-state.ts";
-import { listWorkspaceSessions, summarizeOpenSession, type WorkspaceSessionSummary } from "./session-summaries.ts";
+import {
+	listSessionSummaries,
+	type SessionListingOptions,
+	summarizeOpenSession,
+	type WorkspaceSessionSummary,
+} from "./session-summaries.ts";
 
 /**
  * Result returned by the conversation factory: the created session, its
@@ -244,9 +249,13 @@ export class HostedConversation {
 		return summarizeOpenSession(this.session, this.cwd);
 	}
 
-	/** The stored sessions of the conversation's workspace, with this conversation's live summary. */
-	listSessions(): Promise<WorkspaceSessionSummary[]> {
-		return listWorkspaceSessions(this.session, this.cwd);
+	/**
+	 * The stored sessions of the conversation's workspace, or of every session
+	 * directory with `scope: "all"`, possibly searched, with this
+	 * conversation's live summary.
+	 */
+	listSessions(options?: SessionListingOptions): Promise<WorkspaceSessionSummary[]> {
+		return listSessionSummaries(this.session, this.cwd, options);
 	}
 
 	/**

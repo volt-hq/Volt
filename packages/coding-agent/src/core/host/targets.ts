@@ -143,6 +143,12 @@ export interface HostClient {
 	/** A conversation closes when its anchor leaves, whatever other clients remain. */
 	readonly anchor?: boolean;
 	/**
+	 * A paired remote device: the conversation's live `presence` counts it, and
+	 * it is never asked the project trust question of a conversation it opens
+	 * (trusting a project lets its extensions run on the host).
+	 */
+	readonly remote?: boolean;
+	/**
 	 * The client's surface on each conversation's extensions, attached whenever
 	 * the client joins one. The host binds the extensions in its own mode.
 	 */
@@ -160,11 +166,5 @@ export interface HostClient {
 	 * conversation it moves to, before anything it runs there afterwards.
 	 */
 	readonly recoversInput?: boolean;
-	/**
-	 * A paired device on the remote profile. It is never asked the project
-	 * trust question of a conversation it opens: trusting a project lets its
-	 * extensions run on the host.
-	 */
-	readonly remote?: boolean;
 	readonly move: HostClientMove;
 }

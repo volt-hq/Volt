@@ -88,6 +88,10 @@ export const RpcSessionListItemSchema = Type.Object(
 		worktreeId: Type.Optional(Type.String()),
 		/** The session's working directory relative to its workspace or worktree root; absent at the root. */
 		workingDirectory: Type.Optional(Type.String()),
+		/** The session's absolute working directory; local clients only. */
+		cwd: Type.Optional(Type.String()),
+		/** The session the session was started from; local clients only. */
+		parentSessionId: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );
@@ -114,6 +118,10 @@ export const RpcActiveRetrySchema = Type.Object(
 	{
 		attempt: Type.Number(),
 		maxAttempts: Type.Number(),
+		/** Unix epoch milliseconds when the attempt starts, after its backoff. */
+		retryAt: Type.Optional(Type.Number()),
+		/** What failed the attempt before it. */
+		error: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );
@@ -157,6 +165,8 @@ export const RpcCatalogModelSchema = Type.Object(
 		...RpcModelSchema.properties,
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
 		supportsFastMode: Type.Boolean(),
+		/** How the host authenticates the model's provider: a subscription's OAuth login, or an API key. */
+		auth: Type.Optional(stringEnum(["oauth", "api_key"])),
 	},
 	{ additionalProperties: false },
 );

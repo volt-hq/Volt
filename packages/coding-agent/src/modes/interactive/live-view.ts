@@ -8,17 +8,18 @@
  * change the panels and work it holds in place.
  */
 
-import type {
-	HostRequest,
-	HostRequestKind,
-	HostResponse,
-	LiveItem,
-	LiveValue,
-	UiNodeStyledText,
-	UiPatchOp,
+import {
+	HOST_NOTICE_SOURCE,
+	type HostRequest,
+	type HostRequestKind,
+	type HostResponse,
+	type LiveItem,
+	type LiveValue,
+	patchLiveValue,
+	type UiNodeStyledText,
+	type UiPatchOp,
 } from "@hansjm10/volt-protocol";
 import type { LiveClient, LiveUpdate } from "../../core/host/live-state.ts";
-import { patchLiveValue } from "../../core/protocol/live-fold.ts";
 import type { UiPanel } from "./ui-node/panels.ts";
 
 type WorkValue = Extract<LiveValue, { kind: "work" }>;
@@ -102,7 +103,8 @@ export class TuiLiveView implements LiveClient {
 				this.patch(item.key, item.ops);
 				return;
 			case "notice":
-				this.host.notify(item.level, item.message);
+				// The host's own notices: the TUI shows them from its session's events until it is a protocol client.
+				if (item.source !== HOST_NOTICE_SOURCE) this.host.notify(item.level, item.message);
 				return;
 			case "directive":
 				if (item.directive === "insert_editor_text") this.host.insertEditorText(item.text);

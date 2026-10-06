@@ -8,7 +8,12 @@
  * conversations by position (subscription.ts), invokes intents, runs queries,
  * and answers host requests. Intents and queries run one at a time in arrival
  * order; input intents (prompts) and dynamic intents answer once admitted
- * without holding later frames. Non-input intents are deduplicated per
+ * without holding later frames. Stopping intents (`abort`, `abort_bash`,
+ * `abort_retry`, `cancel_work`) run in a lane of their own, in arrival order
+ * among themselves but not after the other frames before them, so a stop
+ * never waits behind a long intent such as `compact`; a client that needs an
+ * earlier intent admitted first waits for its `accepted`. A stopping intent
+ * is checked against the connection's authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
  * answers `accepted{conversation}`, then ends the subscriptions on the
@@ -57,11 +62,12 @@ import {
 	RpcSafeNonNegativeIntegerSchema,
 	SubscribeFrameSchema,
 	UnsubscribeFrameSchema,
+	type WithdrawnInput,
 } from "@hansjm10/volt-protocol";
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { VERSION } from "../../../config.ts";
-import type { ExtensionError } from "../../extensions/index.ts";
+import type { ExtensionError, InputSource } from "../../extensions/index.ts";
 import { ClientScope } from "../../host/client-scope.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
@@ -70,6 +76,8 @@ import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from 
 import { SessionManager } from "../../session-manager.ts";
 import { linkedSubagentConversation, linkingSubagentWork } from "../../subagents/work.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
+import { EDITOR_TEXT_TIMEOUT_MS } from "../../ui/extension-ui.ts";
+import { withdrawQueuedInput } from "../intents/conversation.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
@@ -89,9 +97,19 @@ const STRUCTURAL_INTENTS: ReadonlySet<string> = new Set([
 	"switch_session",
 	"fork",
 	"clone",
+	"import_session",
 	"review_open_session",
 	"open_work",
 ]);
+
+/**
+ * Intents that stop what runs: they run on arrival, outside the lane, so a
+ * stop never waits behind the long intent it stops.
+ */
+const STOPPING_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_bash", "abort_retry", "cancel_work"]);
+
+/** Intents whose acceptance changes the `sessions` catalog without moving the client. */
+const SESSIONS_INTENTS: ReadonlySet<string> = new Set(["delete_session", "set_session_name"]);
 
 /** Intents whose acceptance changes the `settings` catalog. */
 const SETTINGS_INTENTS: ReadonlySet<string> = new Set([
@@ -181,6 +199,8 @@ export interface ServeConnectionOptions {
 	readonly clientKey?: string;
 	/** An intent of this client that starts a run (a prompt, a dynamic intent) was accepted on `conversation`. */
 	readonly onInputAccepted?: (conversation: HostedConversation) => void;
+	/** The source of the `input` event the client's prompts raise; `rpc` by default. */
+	readonly inputSource?: InputSource;
 }
 
 export interface ProtocolConnection {
@@ -454,6 +474,8 @@ export function serveConnection(
 	/** A fatal frame was written: nothing follows it. */
 	let fatalWritten = false;
 	let lane: Promise<void> = Promise.resolve();
+	/** Stopping intents, in order, beside the lane. */
+	let stopLane: Promise<void> = Promise.resolve();
 	/** Subscribe, unsubscribe, and answers, in order, each after the authority check. */
 	let controlLane: Promise<void> = Promise.resolve();
 	let pendingFrames = 0;
@@ -546,6 +568,8 @@ export function serveConnection(
 		const unsubscribeReloads = session.subscribeReloads(() => {
 			write({ type: "changed", catalog: "intents" });
 			write({ type: "changed", catalog: "extensions" });
+			// Only local clients read the conversation's resources and tools.
+			if (profile.name === "local") write({ type: "changed", catalog: "resources" });
 		});
 		// A client in the host's trust domain slows the agent loop to its pace. A
 		// remote client never does: its transport bounds what it queues instead.
@@ -621,6 +645,48 @@ export function serveConnection(
 		return home;
 	};
 
+	/**
+	 * An extension's `ctx.abort()` in a command this client invoked: the
+	 * queued input is taken back, the run stops, and the input's text returns
+	 * to this client's editor, before the draft the client reports (pasted at
+	 * its cursor when it reports none). Only a local client with an editor (it
+	 * answers `editor_text`) that shows the conversation's live lane takes the
+	 * queue back, and only for a call in its own scope; otherwise the run stops
+	 * and the queue stays.
+	 */
+	const abortForCommand = async (): Promise<void> => {
+		const conversation = home;
+		if (!conversation || conversation.closed) return;
+		const session = conversation.session;
+		const shows = [...subscriptions.values()].some(
+			(subscription) =>
+				subscription.conversation === conversation && subscription.receivesLive && !subscription.isEnded,
+		);
+		if (profile.name !== "local" || !accepts.has("editor_text") || !shows || ClientScope.current() !== client.id) {
+			await session.abort();
+			return;
+		}
+		let withdrawn: WithdrawnInput[] = [];
+		try {
+			withdrawn = await withdrawQueuedInput(session);
+		} finally {
+			void session.abort("host_action").catch(() => undefined);
+		}
+		const queued = withdrawn.map((input) => input.text).join("\n\n");
+		if (!queued.trim()) return;
+		const draft = await conversation.liveState.request(
+			{ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS },
+			{ client: client.id },
+		);
+		if (draft.status !== "answered" || !("value" in draft.response)) {
+			// No draft reported: paste the queue where the editor's cursor is rather than replace what it holds.
+			conversation.liveState.insertEditorText(queued, { client: client.id });
+			return;
+		}
+		const text = [queued, draft.response.value].filter((part) => part.trim()).join("\n\n");
+		conversation.liveState.setEditorText(text, { client: client.id });
+	};
+
 	const client: HostClient = {
 		id: connectionId,
 		...(anchor ? { anchor: true } : {}),
@@ -651,6 +717,7 @@ export function serveConnection(
 					openStoredSession(currentHost(), client, sessionRef, switchOptions),
 				reload: () => currentHome().session.reload(),
 			},
+			abortHandler: () => void abortForCommand().catch(() => undefined),
 			shutdownHandler: () => options.onShutdownRequested?.(),
 			onError: onExtensionError,
 		},
@@ -705,6 +772,7 @@ export function serveConnection(
 		profile: profile.intents,
 		subscriber: profile,
 		...(intentId === undefined ? {} : { intentId }),
+		...(options.inputSource === undefined ? {} : { inputSource: options.inputSource }),
 	});
 
 	/** Re-read the connection's authority; a lost one ends the connection. */
@@ -827,7 +895,9 @@ export function serveConnection(
 			if (SETTINGS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "settings" });
 			if (MODELS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "models" });
 			if (HOST_INTENTS.has(frame.type)) write({ type: "changed", catalog: "host" });
-			if (result.conversation !== undefined) write({ type: "changed", catalog: "sessions" });
+			if (result.conversation !== undefined || SESSIONS_INTENTS.has(frame.type)) {
+				write({ type: "changed", catalog: "sessions" });
+			}
 			// Prompts and dynamic intents (prompt templates, skills, extension commands) start runs.
 			if ((input || !isBuiltinIntentName(frame.type)) && conversation) options.onInputAccepted?.(conversation);
 		};
@@ -930,6 +1000,32 @@ export function serveConnection(
 				laneBusy = false;
 				pendingFrames--;
 				flushMoves();
+			}
+		});
+	};
+
+	/**
+	 * Run a stopping intent in the stop lane, once the client is attached:
+	 * beside the intent and query lane, so it never waits behind a long
+	 * intent, and one at a time in arrival order, so stops re-read the
+	 * connection's authority one at a time. It counts toward the pending
+	 * frames as a lane frame does.
+	 */
+	const enqueueStop = (task: () => Promise<void>): void => {
+		if (pendingFrames >= MAX_PENDING_FRAMES) {
+			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
+			return;
+		}
+		pendingFrames++;
+		stopLane = stopLane.then(async () => {
+			try {
+				await attached;
+				if (closing) return;
+				await task();
+			} catch {
+				// Each frame answers its own failure.
+			} finally {
+				pendingFrames--;
 			}
 		});
 	};
@@ -1150,7 +1246,8 @@ export function serveConnection(
 				return;
 			default:
 				if (RESERVED.has(type) || !intentEnvelopeValidator(type).Check(value)) break;
-				enqueue(() => runIntent(value as unknown as IntentEnvelope));
+				if (STOPPING_INTENTS.has(type)) enqueueStop(() => runIntent(value as unknown as IntentEnvelope));
+				else enqueue(() => runIntent(value as unknown as IntentEnvelope));
 				return;
 		}
 		void close({ code: "invalid_frame", message: `Invalid ${type} frame` });

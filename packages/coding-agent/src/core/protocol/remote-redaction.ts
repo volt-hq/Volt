@@ -22,6 +22,11 @@
  * as a patch from the redacted presentation the client holds when that is
  * smaller.
  *
+ * The host's own error notices (source `host`) may quote an error that names
+ * host paths outside the workspace, such as the agent directory: a client
+ * receives the summary before the quoted error. The live `presence` value is
+ * for local clients only and never sent.
+ *
  * A user shell command's live output and a provider sign-in or secret input
  * asked of a local client never reach a remote client, nor do their patches
  * and clears.
@@ -42,7 +47,14 @@ import type {
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	diffUiTree,
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveFrame,
+	foldLiveItems,
+	HOST_NOTICE_SOURCE,
 	LIVE_PATCHABLE_KINDS,
+	type LiveFoldState,
+	liveCommitOf,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 } from "@hansjm10/volt-protocol";
@@ -50,14 +62,6 @@ import { createIrohRemoteProjectionSanitizer, type IrohRemoteSanitizerOptions } 
 import { fitPresentation } from "../ui/presentation.ts";
 import { presentationChange } from "../ui/presentation-state.ts";
 import { redactedWorkPhase } from "../work/phase.ts";
-import {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveFrame,
-	foldLiveItems,
-	type LiveFoldState,
-	liveCommitOf,
-} from "./live-fold.ts";
 import { withoutImages } from "./projection/presentation.ts";
 
 type LiveFrame = Extract<HostFrame, { type: "live" }>;
@@ -677,6 +681,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				return redactToolItem(view, item);
 			case "set": {
 				if (item.key.startsWith("host_request/") && item.value.kind !== "host_request") return [];
+				// Who else is attached is the host's to tell local clients only.
+				if (item.value.kind === "presence") return [];
 				if (isLocalOnlyValue(item.value)) {
 					view.withheld.add(item.key);
 					return [];
@@ -688,6 +694,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				return [PATCHABLE_KINDS.has(value.kind) ? { item: set, held: hold(view, item.key, value) } : { item: set }];
 			}
 			case "clear": {
+				if (item.key === "presence") return [];
 				if (view.withheld.delete(item.key)) return [];
 				if (item.key.startsWith("host_request/")) optionMaps.delete(item.key.slice("host_request/".length));
 				const clear: LiveItem = { type: "clear", key: redactKey(item.key) };
@@ -696,6 +703,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "patch":
 				return redactPatch(view, item.key);
 			case "notice":
+				if (item.source === HOST_NOTICE_SOURCE && item.level === "error" && typeof item.message === "string") {
+					return sent([{ ...item, message: sanitizeText(item.message.split(": ")[0] ?? item.message) }]);
+				}
 				return sent([sanitizeUi(item)]);
 			case "directive":
 				return sent([sanitize(item)]);

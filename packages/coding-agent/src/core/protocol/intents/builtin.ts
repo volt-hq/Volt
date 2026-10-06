@@ -21,6 +21,7 @@ import {
 	setThinkingLevelIntent,
 	steerIntent,
 	switchSessionIntent,
+	withdrawQueuedIntent,
 } from "./conversation.ts";
 import { setExtensionEnabledIntent, setExtensionSettingsIntent } from "./extensions.ts";
 import {
@@ -65,6 +66,14 @@ import {
 	reviewUncommittedIntent,
 } from "./review.ts";
 import {
+	deleteSessionIntent,
+	exportJsonlIntent,
+	importSessionIntent,
+	navigateTreeIntent,
+	reloadIntent,
+	setLabelIntent,
+} from "./session.ts";
+import {
 	authLoginIntent,
 	authLogoutIntent,
 	lspRestartIntent,
@@ -87,6 +96,7 @@ export function createBuiltinIntents() {
 		steer: steerIntent,
 		follow_up: followUpIntent,
 		abort: abortIntent,
+		withdraw_queued: withdrawQueuedIntent,
 		abort_retry: abortRetryIntent,
 		bash: bashIntent,
 		abort_bash: abortBashIntent,
@@ -103,7 +113,13 @@ export function createBuiltinIntents() {
 		switch_session: switchSessionIntent,
 		fork: forkIntent,
 		clone: cloneIntent,
+		import_session: importSessionIntent,
 		export_html: exportHtmlIntent,
+		export_jsonl: exportJsonlIntent,
+		delete_session: deleteSessionIntent,
+		navigate_tree: navigateTreeIntent,
+		set_label: setLabelIntent,
+		reload: reloadIntent,
 		cancel_work: cancelWorkIntent,
 		open_work: openWorkIntent,
 		resume_work: resumeWorkIntent,

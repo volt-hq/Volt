@@ -12,7 +12,7 @@
  * and a gap in `seq` means the client must resubscribe after its position.
  *
  * Keys name a value family and, for keyed families, an id:
- * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, `bash`, or
+ * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `presence`, `ext_title`, `bash`, or
  * `host_request/<requestId>`, `ext_status/<extension>/<name>`,
  * `ext_panel/<extension>/<name>`, `work/<workId>`. A value's `kind` is its
  * key's family, and an extension's status items and panels are keyed by its
@@ -285,6 +285,12 @@ export const LiveIntentsValueSchema = Type.Object(
 	closed,
 );
 
+/** Who else is attached to the conversation: how many paired remote devices. */
+export const LivePresenceValueSchema = Type.Object(
+	{ kind: Type.Literal("presence"), remote: Type.Integer({ minimum: 0 }) },
+	closed,
+);
+
 /** A pending host request; the host clears it once answered, cancelled, or timed out. */
 export const LiveHostRequestValueSchema = Type.Object(
 	{ kind: Type.Literal("host_request"), requestId: RpcConversationIdentifierSchema, request: HostRequestSchema },
@@ -372,6 +378,7 @@ export const LIVE_VALUE_SCHEMAS = {
 	prompt_cache: LivePromptCacheValueSchema,
 	usage: LiveUsageValueSchema,
 	intents: LiveIntentsValueSchema,
+	presence: LivePresenceValueSchema,
 	host_request: LiveHostRequestValueSchema,
 	ext_status: LiveExtensionStatusValueSchema,
 	ext_panel: LiveExtensionPanelValueSchema,
@@ -388,6 +395,7 @@ export const LiveValueSchema = Type.Union([
 	LivePromptCacheValueSchema,
 	LiveUsageValueSchema,
 	LiveIntentsValueSchema,
+	LivePresenceValueSchema,
 	LiveHostRequestValueSchema,
 	LiveExtensionStatusValueSchema,
 	LiveExtensionPanelValueSchema,
@@ -404,6 +412,7 @@ export const LIVE_SINGLETON_KINDS = [
 	"prompt_cache",
 	"usage",
 	"intents",
+	"presence",
 	"ext_title",
 	"bash",
 ] as const satisfies readonly LiveValueKind[];
@@ -549,13 +558,20 @@ export const LivePatchItemSchema = Type.Object(
 	closed,
 );
 
+/**
+ * The `source` of a notice the host raised itself, such as a failed
+ * compaction or a retry that gave up; a reserved extension id, so no
+ * extension's notice carries it.
+ */
+export const HOST_NOTICE_SOURCE = "host";
+
 /** A transient message for the user: a notification or an error. */
 export const LiveNoticeItemSchema = Type.Object(
 	{
 		type: Type.Literal("notice"),
 		level: stringEnum(["info", "warning", "error"]),
 		message: UiNodeStyledTextSchema,
-		/** What raised it, such as an extension. */
+		/** What raised it: an extension's id, or {@link HOST_NOTICE_SOURCE}. */
 		source: Type.Optional(Type.String()),
 	},
 	closed,

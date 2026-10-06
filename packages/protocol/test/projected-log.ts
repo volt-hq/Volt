@@ -260,12 +260,13 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 	const work = new Map<string, ClientWorkItem>();
 	const openWork = () => [...work.values()].filter((item) => item.outcome === undefined);
 
+	const timestampAt = (ordinal: number): string => new Date(Date.UTC(2026, 0, 1) + ordinal * 1000).toISOString();
 	const append = (draft: Draft): ProjectedEntry => {
 		const ordinal = entries.length + 1;
 		const entry = {
 			ordinal,
 			id: `e${ordinal}`,
-			timestamp: new Date(Date.UTC(2026, 0, 1) + ordinal * 1000).toISOString(),
+			timestamp: timestampAt(ordinal),
 			...draft,
 		} as ProjectedEntry;
 		entries.push(entry);
@@ -511,11 +512,16 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 					delivery: WORK_DELIVERIES[op.delivery] ?? "none",
 					resume: op.resume,
 					state: op.awaiting ? ("awaiting_approval" as const) : ("running" as const),
-					...(kind === "subagent" ? { child: { conversation: `child-${ordinal}` } } : {}),
+					...(kind === "subagent" ? { child: { conversation: `child-${ordinal}` }, opens: true } : {}),
 				};
 				append({ parentId: leafId, type: "work_started", payload });
 				const { input: _input, ...item } = payload;
-				work.set(workId, { ...item, startedOrdinal: ordinal, updatedOrdinal: ordinal });
+				work.set(workId, {
+					...item,
+					startedOrdinal: ordinal,
+					updatedOrdinal: ordinal,
+					startedAt: timestampAt(ordinal),
+				});
 				break;
 			}
 			case "work_checkpoint": {
@@ -567,6 +573,7 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 					...(op.result ? { result: { summary: "done", output: { truncated: true } } } : {}),
 					updatedOrdinal: ordinal,
 					finishedOrdinal: ordinal,
+					finishedAt: timestampAt(ordinal),
 				});
 				const finished = [...work.values()]
 					.filter((candidate) => candidate.finishedOrdinal !== undefined)

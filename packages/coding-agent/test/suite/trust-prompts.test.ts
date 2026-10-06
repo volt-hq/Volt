@@ -5,6 +5,8 @@
  * leaves the factory without UI.
  */
 
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostRequest } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +24,7 @@ afterEach(async () => {
 });
 
 interface Asked {
+	readonly cwd?: string;
 	readonly hasUI: boolean;
 	readonly mode: string;
 	readonly answer: string | undefined;
@@ -38,7 +41,12 @@ async function setup() {
 			const answer = trust.hasUI
 				? await trust.ui.select("Trust project folder?", ["Trust", "Do not trust"])
 				: undefined;
-			asked.push({ hasUI: trust.hasUI, mode: trust.mode, answer });
+			asked.push({
+				...(trust.cwd === options.cwd ? {} : { cwd: trust.cwd }),
+				hasUI: trust.hasUI,
+				mode: trust.mode,
+				answer,
+			});
 		}
 		return harness.factory(options);
 	};
@@ -85,6 +93,25 @@ describe("trust prompts of a conversation a client opens", () => {
 		opener.answer(prompt!.requestId, { value: "Trust" });
 		expect((await moved).conversation).toBeDefined();
 		expect(asked).toEqual([{ hasUI: true, mode: "rpc", answer: "Trust" }]);
+	});
+
+	it("asks the client that starts a new session in another project", async () => {
+		const { host, conversation, asked } = await setup();
+		const opener = await createLoopbackClient(host, conversation, { hostRequests: ["select"] });
+		cleanups.push(() => opener.stop());
+		const project = mkdtempSync(join(tmpdir(), "volt-trust-project-"));
+		cleanups.push(async () => rmSync(project, { recursive: true, force: true }));
+
+		const moved = opener.intent("new_session", { cwd: project });
+		let prompt: { requestId: string; request: HostRequest } | undefined;
+		await vi.waitFor(() => {
+			prompt = selects(opener)[0];
+			expect(prompt).toBeDefined();
+		});
+		opener.answer(prompt!.requestId, { value: "Do not trust" });
+		expect((await moved).conversation).toBeDefined();
+		expect(asked).toEqual([{ hasUI: true, mode: "rpc", answer: "Do not trust" }]);
+		expect(host.list().map((open) => open.cwd)).toContain(project);
 	});
 
 	it("never asks a remote client, which leaves the project untrusted", async () => {

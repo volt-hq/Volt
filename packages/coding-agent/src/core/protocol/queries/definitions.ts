@@ -1,5 +1,14 @@
 import { stripVTControlCharacters } from "node:util";
-import { CONTENT_TEXT_MAX_SCALARS, type QueryName, type QueryResult } from "@hansjm10/volt-protocol";
+import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import {
+	CONTENT_TEXT_MAX_SCALARS,
+	type IntentShortcut,
+	type QueryName,
+	type QueryResult,
+	type RpcSessionListItem,
+} from "@hansjm10/volt-protocol";
+import type { ExtensionRunner } from "../../extensions/runner.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { listAuthProviders } from "../../provider-auth.ts";
@@ -15,6 +24,7 @@ import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
 import { type IntentContext, missingCapability } from "../intents/types.ts";
+import { conversationInfoQuery, resourcesQuery, toolsQuery } from "./conversation.ts";
 import { editorCompletionsQuery, extensionSettingsQuery, extensionsQuery } from "./extensions.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
@@ -27,6 +37,40 @@ const hostManage = ["host.manage.v1"] as const;
 // Intents
 // ============================================================================
 
+/**
+ * The keys the active extensions bind, the last extension's binding of a key
+ * winning, to intents the client may invoke. A client keeps them off its
+ * reserved keys.
+ */
+function extensionShortcuts(runner: ExtensionRunner, invocable: ReadonlySet<string>): IntentShortcut[] {
+	const byKey = new Map<string, IntentShortcut>();
+	for (const extension of runner.getExtensions()) {
+		for (const [key, shortcut] of extension.shortcuts) {
+			const normalized = key.toLowerCase();
+			byKey.delete(normalized);
+			if (!invocable.has(shortcut.intent)) continue;
+			byKey.set(normalized, {
+				key: normalized,
+				intent: shortcut.intent,
+				...(shortcut.description === undefined ? {} : { description: shortcut.description }),
+			});
+		}
+	}
+	return [...byKey.values()];
+}
+
+/** The triggers of the completion providers the client may ask: a remote one only those that opted in. */
+function completionTriggers(runner: ExtensionRunner, ctx: IntentContext): string[] {
+	const providers = runner.getCompletionProviders();
+	return [
+		...new Set(
+			providers
+				.filter((provider) => ctx.profile.name === "local" || provider.remote)
+				.map((provider) => provider.trigger),
+		),
+	];
+}
+
 export const intentsQuery = defineQuery({
 	name: "intents",
 	scope: "conversation",
@@ -34,7 +78,13 @@ export const intentsQuery = defineQuery({
 	requires: observe,
 	async run(ctx) {
 		const view = { state: intentStateOf(ctx.target?.session), services: ctx.services, profile: ctx.profile };
-		return { intents: intentRegistry.descriptors(view, ctx.target) };
+		const intents = intentRegistry.descriptors(view, ctx.target);
+		const runner = ctx.target?.session.extensionRunner;
+		return {
+			intents,
+			shortcuts: runner ? extensionShortcuts(runner, new Set(intents.map((intent) => intent.name))) : [],
+			completionTriggers: runner ? completionTriggers(runner, ctx) : [],
+		};
 	},
 });
 
@@ -61,22 +111,33 @@ export const modelsQuery = defineQuery({
 		const { session } = targetOf(ctx);
 		// Reload credentials and models from disk so logins, logouts, and API keys
 		// saved by other volt processes become selectable without a host restart.
-		session.modelRegistry.refreshFromDisk();
-		const models = await session.modelRegistry.getAvailable();
-		const scoped = session.scopedModels
-			.map((scopedModel) => scopedModel.model)
-			.filter((model) => session.modelRegistry.hasConfiguredAuth(model));
-		const cycleScope = session.scopedModels.length > 0 ? scoped : models;
+		const registry = session.modelRegistry;
+		registry.refreshFromDisk();
+		const models = await registry.getAvailable();
+		const scoped = session.scopedModels.filter((scopedModel) => registry.hasConfiguredAuth(scopedModel.model));
+		const cycleScope: ReadonlyArray<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> =
+			session.scopedModels.length > 0 ? scoped : models.map((model) => ({ model }));
 		return {
 			models: models.map((model) => ({
 				...toIrohRemoteAgentOptionsCatalogModel(model),
-				auth: session.modelRegistry.isUsingOAuth(model) ? ("oauth" as const) : ("api_key" as const),
+				auth: registry.isUsingOAuth(model) ? ("oauth" as const) : ("api_key" as const),
 			})),
-			cycleScope: cycleScope.map((model) => ({ provider: model.provider, modelId: model.id })),
+			cycleScope: cycleScope.map(({ model, thinkingLevel }) => ({
+				provider: model.provider,
+				modelId: model.id,
+				...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+			})),
 		};
 	},
 });
 
+/** A session list item as a remote client sees it: without the host paths and lineage only local clients read. */
+function remoteSessionItem(item: RpcSessionListItem): RpcSessionListItem {
+	const { cwd: _cwd, parentSessionId: _parentSessionId, ...rest } = item;
+	return rest;
+}
+
+/** `scope` and `search` are local-only: a remote client lists its workspace's sessions alone. */
 export const sessionsQuery = defineQuery({
 	name: "sessions",
 	// A remote host lists its workspace's sessions without a conversation (a workspace stream).
@@ -84,8 +145,21 @@ export const sessionsQuery = defineQuery({
 	remote: "safe",
 	requires: observe,
 	async run(ctx, params) {
+		const remote = ctx.profile.name === "remote";
+		if (remote && (params.scope !== undefined || params.search !== undefined)) {
+			throw new QueryRejectedError("not_allowed", "Session scope and search are not available over remote host");
+		}
 		const listWorkspace = ctx.services.workspace?.listSessions;
-		const sessions = listWorkspace ? await listWorkspace() : await targetOf(ctx).conversation.listSessions();
+		if (listWorkspace && (params.scope !== undefined || params.search !== undefined)) {
+			throw new QueryRejectedError("invalid_input", "This host lists its workspace's sessions alone");
+		}
+		const listed: RpcSessionListItem[] = listWorkspace
+			? await listWorkspace()
+			: await targetOf(ctx).conversation.listSessions({
+					...(params.scope === undefined ? {} : { scope: params.scope }),
+					...(params.search === undefined ? {} : { search: params.search }),
+				});
+		const sessions = remote ? listed.map(remoteSessionItem) : listed;
 		const start = params.cursor === undefined ? 0 : Number(params.cursor);
 		if (
 			!Number.isSafeInteger(start) ||
@@ -614,6 +688,9 @@ export const BUILTIN_QUERIES = {
 	"lsp.status": lspStatusQuery,
 	debug_report: debugReportQuery,
 	"auth.providers": authProvidersQuery,
+	conversation_info: conversationInfoQuery,
+	resources: resourcesQuery,
+	tools: toolsQuery,
 	work_output: workOutputQuery,
 	agent_options: agentOptionsQuery,
 	session_contexts: sessionContextsQuery,

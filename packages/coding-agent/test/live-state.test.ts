@@ -1,4 +1,5 @@
 import type { HostRequest, HostRequestKind, LiveItem, LiveValue, UiPatchOp } from "@hansjm10/volt-protocol";
+import { emptyLiveFold, foldLiveItems, LivePatchError, patchLiveValue } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -8,7 +9,6 @@ import {
 	LiveState,
 	type LiveUpdate,
 } from "../src/core/host/live-state.ts";
-import { emptyLiveFold, foldLiveItems, LivePatchError, patchLiveValue } from "../src/core/protocol/live-fold.ts";
 import { createLiveRecorder } from "./utilities/live-recorder.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];

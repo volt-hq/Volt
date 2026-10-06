@@ -8,7 +8,7 @@
 
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, type Model, modelsAreEqual } from "@hansjm10/volt-ai";
-import type { HostSettingsValues, ModelScopeEntry } from "@hansjm10/volt-protocol";
+import type { HostSettingsValues, ScopedModel } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../agent-session.ts";
 import { configureHttpDispatcher } from "../http-dispatcher.ts";
 import { resolveModelScope } from "../model-resolver.ts";
@@ -45,7 +45,7 @@ export async function setHostSettings(session: AgentSession, values: HostSetting
 }
 
 /** A model scope as settings store it: `provider/modelId`, with `:<thinking level>` when one is set. */
-function scopePattern(entry: ModelScopeEntry): string {
+function scopePattern(entry: ScopedModel): string {
 	return `${entry.provider}/${entry.modelId}${entry.thinkingLevel === undefined ? "" : `:${entry.thinkingLevel}`}`;
 }
 
@@ -56,7 +56,7 @@ function scopePattern(entry: ModelScopeEntry): string {
  */
 export async function setModelScope(
 	session: AgentSession,
-	models: readonly ModelScopeEntry[],
+	models: readonly ScopedModel[],
 	persist: boolean,
 ): Promise<void> {
 	const available = session.modelRegistry.getAvailable();

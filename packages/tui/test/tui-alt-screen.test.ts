@@ -351,7 +351,16 @@ describe("TuiAltScreen", () => {
 		}
 	});
 
-	it("drags a visible scrollbar thumb and keeps it visible until release", async () => {
+	it("drags a visible scrollbar thumb and keeps it visible until release", async (t) => {
+		// Mocked timers keep the 50 ms hide timer from racing the assertions on slow runners (#663).
+		t.mock.timers.enable({ apis: ["setTimeout"] });
+		const advance = async (ms: number): Promise<void> => {
+			for (let elapsed = 0; elapsed < ms; elapsed++) {
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				t.mock.timers.tick(1);
+			}
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		};
 		const terminal = new RecordingTerminal(10, 5);
 		const tui = new TuiAltScreen(terminal);
 		const scrollView = new ScrollView(
@@ -364,21 +373,20 @@ describe("TuiAltScreen", () => {
 		);
 		tui.setLayoutRoot(scrollView);
 		tui.start();
-		await terminal.waitForRender();
+		await advance(20);
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
 		terminal.sendInput("\x1b[<65;10;1M");
-		await terminal.waitForRender();
+		await advance(20);
 		assert.strictEqual(scrollView.scrollTop, 3);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
 
 		terminal.sendInput("\x1b[<0;10;2M");
-		await terminal.waitForRender();
-		await new Promise((resolve) => setTimeout(resolve, 70));
+		await advance(90);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
 
 		terminal.sendInput("\x1b[<32;10;4M");
-		await terminal.waitForRender();
+		await advance(20);
 		assert.strictEqual(scrollView.scrollTop, 15);
 		assert.deepStrictEqual(
 			terminal.getViewport().map((line) => line.trimEnd()),
@@ -386,21 +394,21 @@ describe("TuiAltScreen", () => {
 		);
 
 		terminal.sendInput("\x1b[<0;10;4m");
-		await terminal.waitForRender();
+		await advance(20);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
-		await new Promise((resolve) => setTimeout(resolve, 70));
+		await advance(70);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
 		terminal.sendInput("\x1b[<35;9;4M");
-		await new Promise((resolve) => setTimeout(resolve, 70));
+		await advance(70);
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
 		terminal.sendInput("\x1b[<64;10;4M");
-		await terminal.waitForRender();
+		await advance(20);
 		assert.strictEqual(scrollView.scrollTop, 12);
-		await new Promise((resolve) => setTimeout(resolve, 70));
+		await advance(70);
 		assert.strictEqual(scrollView.isScrollbarVisible, true);
 		terminal.sendInput("\x1b[<35;9;5M");
-		await new Promise((resolve) => setTimeout(resolve, 70));
+		await advance(70);
 		assert.strictEqual(scrollView.isScrollbarVisible, false);
 
 		assert.ok(terminal.events.every((event) => event.type !== "write" || !event.data.includes("\x1b]52;c;")));

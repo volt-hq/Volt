@@ -10,6 +10,9 @@
 import { resolve, sep } from "node:path";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import {
+	emptyLiveFold,
+	foldLiveFrame,
+	HOST_NOTICE_SOURCE,
 	type HostFrame,
 	type LiveItem,
 	PANEL_MAX_SERIALIZED_BYTES,
@@ -19,7 +22,6 @@ import {
 	UI_NODE_LINE_MAX_CHARS,
 } from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
-import { emptyLiveFold, foldLiveFrame } from "../src/core/protocol/live-fold.ts";
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
 import { normalizeUiNode } from "../src/core/ui/normalize.ts";
@@ -209,6 +211,45 @@ describe("remote frame redactor", () => {
 		expect(wire).not.toContain("private-");
 		expect(wire).not.toContain("fullOutputPath");
 		expect(wire).not.toContain("sessionFile");
+	});
+
+	it("sends the host's error notices as their summary and never sends presence", () => {
+		const redactor = redactorFor(workspacePath);
+		const frame = redactor.redact({
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 4,
+			seq: 1,
+			reset: true,
+			items: [
+				{ type: "set", key: "presence", value: { kind: "presence", remote: 2 } },
+				{
+					type: "notice",
+					level: "error",
+					message: "Compaction failed: EACCES: permission denied, open '/home/ada/.volt/agent/sessions/x'",
+					source: HOST_NOTICE_SOURCE,
+				},
+				{ type: "notice", level: "error", message: "Compaction cancelled", source: HOST_NOTICE_SOURCE },
+				{ type: "notice", level: "error", message: `failed: ${hostFile}`, source: "some-extension" },
+			],
+		});
+		expect(frame).toMatchObject({
+			items: [
+				{ type: "notice", message: "Compaction failed", source: HOST_NOTICE_SOURCE },
+				{ type: "notice", message: "Compaction cancelled", source: HOST_NOTICE_SOURCE },
+				{ type: "notice", message: "failed: /workspace/notes.md", source: "some-extension" },
+			],
+		});
+		expect(JSON.stringify(frame)).not.toContain("presence");
+		expect(
+			redactor.redact({
+				type: "live",
+				subscriptionId: "s1",
+				basedOn: 4,
+				seq: 2,
+				items: [{ type: "clear", key: "presence" }],
+			}),
+		).toBeUndefined();
 	});
 
 	it("never rewrites identifiers the client sent, and rewrites host ones only when they name a root", () => {

@@ -40,6 +40,8 @@
  * A kind's remote policy (`requires`, `remote`) is copied into `work_started`,
  * so what a remote client may do with work stays known after its kind is
  * removed; while the kind is registered, its current policy applies too.
+ * Whether the kind opens its work (`opens`) is copied the same way, so a
+ * client shows an open action from the log alone.
  */
 
 import { randomUUID } from "node:crypto";
@@ -621,6 +623,7 @@ export class WorkRegistry {
 					? {}
 					: { requires: [...new Set(definition.requires)] }),
 				...(definition.remote === undefined ? {} : { remote: { ...definition.remote } }),
+				...(definition.open === undefined ? {} : { opens: true }),
 			});
 			const active = this.attach(record, definition);
 			// A kind removed while the work started runs none of it.
