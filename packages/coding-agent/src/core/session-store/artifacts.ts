@@ -20,7 +20,11 @@ export function hardenSessionStoreFiles(databasePath: string): Stats {
 		try {
 			hardenPrivateRegularFileSync(path);
 		} catch (error) {
-			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+			const code = error instanceof Error && "code" in error ? error.code : undefined;
+			// On Windows a sidecar that SQLite deleted while another connection still
+			// holds it is delete-pending, and path operations on it fail with EPERM
+			// rather than ENOENT until that handle closes.
+			if (code !== "ENOENT" && !(code === "EPERM" && process.platform === "win32")) throw error;
 		}
 	}
 	return databaseStat;
