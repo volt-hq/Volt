@@ -9,7 +9,7 @@
 
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../src/core/agent-session.ts";
@@ -430,7 +430,7 @@ describe("the TUI's session commands as intents", () => {
 		const info = await tui.store.client.query("conversation_info");
 		expect(info.cwd).toBe(worktrees.path);
 		// Stored where the session it left is.
-		expect(info.sessionDir).toBe(harness.sessionDir);
+		expect(resolve(info.sessionDir)).toBe(resolve(harness.sessionDir));
 		expect(worktrees.bound).toEqual([{ worktreeId: "feature", sessionId: tui.store.conversation }]);
 	});
 
