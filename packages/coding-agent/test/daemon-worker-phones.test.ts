@@ -390,8 +390,12 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		const harness = await startHarness({ workerLauncher: launcher });
 		const ref = await harness.createSession();
 		await attach(await pair(harness), ref.sessionId);
-		const relayId = harness.audit().find((event) => event.type === "relay_opened")?.details?.relayId;
-		if (typeof relayId !== "string") throw new Error("No relay");
+		// The daemon audits the relay after the phone's handshake may already have reached it.
+		const relayId = await vi.waitFor(() => {
+			const id = harness.audit().find((event) => event.type === "relay_opened")?.details?.relayId;
+			if (typeof id !== "string") throw new Error("No relay");
+			return id;
+		});
 
 		// A second worker, which the test plays, for another conversation.
 		let other: Promise<DaemonClient> | undefined;

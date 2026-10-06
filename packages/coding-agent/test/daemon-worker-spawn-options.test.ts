@@ -6,7 +6,7 @@
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createWorkerSpawnOptions } from "../src/cli/agent-options.ts";
 import { parseArgs } from "../src/cli/args.ts";
@@ -74,8 +74,9 @@ describe("TUI spawn options", () => {
 			"--my-flag",
 			"value",
 		]);
+		const cwd = resolve("/work/project");
 		const options = createWorkerSpawnOptions(args, {
-			cwd: "/work/project",
+			cwd,
 			env: { PATH: "/bin", UNSET: undefined },
 			trust: false,
 		});
@@ -83,12 +84,12 @@ describe("TUI spawn options", () => {
 			env: { PATH: "/bin" },
 			config: {
 				trust: false,
-				extensions: ["/work/project/ext.ts", "npm:@scope/pkg"],
+				extensions: [join(cwd, "ext.ts"), "npm:@scope/pkg"],
 				tools: ["read", "bash"],
 				lsp: true,
 				flags: { "my-flag": "value" },
 			},
-			cwd: "/work/project",
+			cwd,
 			persist: false,
 			session: { model: "sonnet:high", plan: true },
 			modelScopePatterns: ["sonnet*"],
@@ -227,8 +228,8 @@ describe("TUI spawn options", () => {
 		// A project under the home directory is not sensitive.
 		expect(sensitiveDirectoryReason("/home/user/projects/app", context)).toBeUndefined();
 		expect(sensitiveDirectoryReason("/srv/work", context)).toBeUndefined();
-		// Case decides only where the filesystems ignore it.
-		expect(sensitiveDirectoryReason("/Home/User", elsewhere)).toBeUndefined();
+		// Case decides only where the filesystems ignore it (Windows path comparison always ignores it).
+		if (process.platform !== "win32") expect(sensitiveDirectoryReason("/Home/User", elsewhere)).toBeUndefined();
 		expect(sensitiveDirectoryReason("/Home/User", { ...elsewhere, caseInsensitive: true })).toBe("home");
 		expect(sensitiveDirectoryReason("/HOME/USER/.VOLT", { ...context, caseInsensitive: true })).toBe(
 			"contains_agent_dir",
