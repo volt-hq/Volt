@@ -25,7 +25,6 @@ interface ModeControl {
 	conversationView: unknown;
 	planDetails: PlanDetailsComponent | undefined;
 	planInspector: PlanInspectorComponent;
-	pendingUserInputs: string[];
 	isInitialized: boolean;
 	activateView(view: unknown, focus: Component | null, forceRender?: boolean): void;
 	setupKeyHandlers(): void;
@@ -158,7 +157,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 
 	it("leaves a composer draft in control and keeps a persistent approval cue", async () => {
 		const fixture = await createFixture(120, 36);
-		const { control, terminal, session } = fixture;
+		const { control, terminal, session, harness } = fixture;
 		const run = await submitDuringRun(fixture);
 		terminal.sendInput("looks good");
 		await run.finish();
@@ -169,10 +168,18 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		expect(output).toContain("PLAN READY · APPROVAL NEEDED");
 		expect(output).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
 
+		// Enter sends the draft as feedback on the plan: a prompt, never its execution.
+		harness.faux.setResponses([fauxAssistantMessage("Revising the plan")]);
 		terminal.sendInput("\r");
-		expect(control.pendingUserInputs).toEqual(["looks good"]);
+		await vi.waitFor(() =>
+			expect(
+				session.messages.some(
+					(message) => message.role === "user" && JSON.stringify(message.content).includes("looks good"),
+				),
+			).toBe(true),
+		);
+		await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("Revising the plan"));
 		expect(fixture.executePlan).not.toHaveBeenCalled();
-		expect(session.planningState.plan?.phase).toBe("ready");
 	});
 
 	it("focuses the split inspector only after settlement and returns typing to the composer", async () => {

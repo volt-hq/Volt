@@ -16,22 +16,10 @@ export interface BuiltinSlashCommand {
 }
 
 /**
- * Slash aliases that invoke one intent, described as their intents are
- * (`intentRegistry.slashCommands()`; a test keeps the two equal).
+ * The TUI's own slash commands. The slash aliases of the conversation's
+ * intents (`/clear`, `/compact`, `/fast`, `/name`, extension commands, prompt
+ * templates, and skills) come from its `intents` catalog.
  */
-export const INTENT_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
-	{ name: "fast", description: "Request premium low-latency inference capacity for the current session." },
-	{ name: "name", description: "Set the current session display name" },
-	{ name: "clear", description: "Start a new session" },
-	{ name: "compact", description: "Summarize the current session context" },
-];
-
-function intentSlashCommand(name: string): BuiltinSlashCommand {
-	const command = INTENT_SLASH_COMMANDS.find((candidate) => candidate.name === name);
-	if (!command) throw new Error(`No intent has the slash alias /${name}`);
-	return command;
-}
-
 export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "plan", description: "Switch the agent to read-only Plan mode" },
@@ -40,13 +28,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "plan-close", description: "Close a completed or handed-off plan" },
 	{ name: "profile", description: "Show, switch, or create the active settings profile" },
 	{ name: "model", description: "Select model (opens selector UI)" },
-	intentSlashCommand("fast"),
 	{ name: "scoped-models", description: "Enable/disable models for Ctrl+P cycling" },
 	{ name: "export", description: "Export session (HTML default, or specify path: .html/.jsonl)" },
 	{ name: "import", description: "Import a JSONL snapshot as a new session" },
 	{ name: "share", description: "Share session as a secret GitHub gist" },
 	{ name: "copy", description: "Copy last agent message to clipboard" },
-	intentSlashCommand("name"),
 	{ name: "session", description: "Show session info and stats" },
 	{ name: "usage", description: "Show remaining subscription quota and reset times" },
 	{ name: "lsp", description: "Show LSP server status (/lsp restart, /lsp trace [path|off])" },
@@ -68,8 +54,6 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	},
 	{ name: "login", description: "Configure provider authentication" },
 	{ name: "logout", description: "Remove provider authentication" },
-	intentSlashCommand("clear"),
-	intentSlashCommand("compact"),
 	{
 		name: "review",
 		description: "Review code (tools, uncommitted, branch, PR, commit); findings start a fresh session",

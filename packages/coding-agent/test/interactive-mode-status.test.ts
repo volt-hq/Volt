@@ -1,12 +1,6 @@
 import { homedir } from "node:os";
 import * as path from "node:path";
-import {
-	type AutocompleteProvider,
-	CombinedAutocompleteProvider,
-	createRenderFrame,
-	type RenderFrame,
-	setKeybindings,
-} from "@hansjm10/volt-tui";
+import { createRenderFrame, type RenderFrame, setKeybindings } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import {
 	type Component,
@@ -478,28 +472,6 @@ describe("InteractiveMode.terminalSurface themes", () => {
 		expect(result.success).toBe(false);
 		expect(settingsManager.setTheme).not.toHaveBeenCalled();
 		expect(fakeThis.ui.requestRender).not.toHaveBeenCalled();
-	});
-});
-
-describe("InteractiveMode.setupAutocompleteProvider", () => {
-	test("triggers the extensions' completion providers on the first character of their triggers", () => {
-		const defaultEditor = { setAutocompleteProvider: vi.fn() };
-		const fakeThis = {
-			createBaseAutocompleteProvider: () => new CombinedAutocompleteProvider([], "/tmp/project", undefined),
-			defaultEditor,
-			session: { extensionRunner: { getCompletionProviders: () => [{ trigger: "#issue" }] } },
-			intentContext: () => ({}),
-		};
-
-		(
-			InteractiveMode as unknown as {
-				prototype: { setupAutocompleteProvider: (this: typeof fakeThis) => void };
-			}
-		).prototype.setupAutocompleteProvider.call(fakeThis);
-
-		expect(defaultEditor.setAutocompleteProvider).toHaveBeenCalledTimes(1);
-		const provider = defaultEditor.setAutocompleteProvider.mock.calls[0]?.[0] as AutocompleteProvider;
-		expect(provider.triggerCharacters).toEqual(["#"]);
 	});
 });
 
@@ -1292,7 +1264,7 @@ describe("InteractiveMode.showLoadedResources", () => {
 			getShortPath: (p: string, sourceInfo?: SourceInfo) =>
 				(InteractiveMode as any).prototype.getShortPath.call(fakeThis, p, sourceInfo),
 			formatDiagnostics: () => "diagnostics",
-			getBuiltInCommandConflictDiagnostics: () => [],
+			inputDiagnostics: [],
 		};
 
 		if (options.useRealScopeGroups) {

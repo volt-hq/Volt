@@ -97,7 +97,7 @@ function createView(transcript: ProjectedEntry[], live: LiveFoldState) {
 		showImages: () => false,
 		imageWidthCells: () => 60,
 		toolCallWork: () => [],
-		takeLocalBashRow: () => undefined,
+		pendingShellRows: new Container(),
 		workNoticeShown: () => {},
 	});
 	const text = () => stripAnsi(container.render(120).lines.join("\n"));

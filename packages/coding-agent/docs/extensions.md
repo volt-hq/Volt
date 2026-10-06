@@ -1711,7 +1711,7 @@ volt.registerCommand("stats", {
 });
 ```
 
-Optional: add argument auto-completion for `/command ...`. `getArgumentCompletions` returns items `{ value, label, description? }`, or `null` for none, and may be async:
+Optional: add argument auto-completion for `/command ...`. `getArgumentCompletions` returns items `{ value, label?, description? }` (`ExtensionCompletionItem`), or `null` for none, and may be async:
 
 ```typescript
 volt.registerCommand("deploy", {

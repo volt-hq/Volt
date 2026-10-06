@@ -5,37 +5,37 @@
  * query for the tokens their triggers start.
  */
 
+import type { IntentShortcut } from "@hansjm10/volt-protocol";
 import type { AutocompleteItem, AutocompleteProvider, KeyId } from "@hansjm10/volt-tui";
 import { describe, expect, it } from "vitest";
-import type { ExtensionRunner, ExtensionShortcut } from "../src/core/extensions/index.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { withEditorCompletions } from "../src/modes/interactive/editor-completions.ts";
 import { ExtensionShortcutBindings } from "../src/modes/interactive/extension-shortcuts.ts";
 
-function runnerWith(shortcuts: ExtensionShortcut[]): ExtensionRunner {
-	return {
-		getShortcuts: () => new Map(shortcuts.map((shortcut) => [shortcut.shortcut, shortcut])),
-	} as unknown as ExtensionRunner;
-}
-
-const shortcut = (key: KeyId, intent: string, description?: string): ExtensionShortcut => ({
-	shortcut: key,
+const shortcut = (key: string, intent: string, description?: string): IntentShortcut => ({
+	key,
 	intent,
-	extensionId: "presets",
 	...(description === undefined ? {} : { description }),
 });
+
+const NOOP = "extension.intent.presets.noop";
+
+/** Bind `key` to an extension intent over the TUI's keybindings with `userBindings`; what the bindings say and bind. */
+function bindOne(key: string, userBindings: Record<string, KeyId | KeyId[]> = {}) {
+	const bindings = new ExtensionShortcutBindings(new KeybindingsManager(userBindings));
+	const diagnostics = bindings.bind([shortcut(key, NOOP)]);
+	return { diagnostics, bound: bindings.entries().some((entry) => entry.keys.includes(key as KeyId)) };
+}
 
 describe("extension shortcuts in the TUI", () => {
 	it("binds each intent's keys as a keybinding-table entry that users rebind", () => {
 		const cycle = "extension.intent.presets.cycle";
 		const keybindings = new KeybindingsManager({ [cycle]: "ctrl+alt+p" });
 		const bindings = new ExtensionShortcutBindings(keybindings);
-		bindings.bind(
-			runnerWith([
-				shortcut("ctrl+shift+u", cycle, "Cycle presets"),
-				shortcut("ctrl+shift+y", "extension.command.presets.preset"),
-			]),
-		);
+		bindings.bind([
+			shortcut("ctrl+shift+u", cycle, "Cycle presets"),
+			shortcut("ctrl+shift+y", "extension.command.presets.preset"),
+		]);
 		// The user's keys replace the extension's default for the cycle intent.
 		expect(bindings.intentFor("\x1b[112;7u")).toBe(cycle);
 		expect(bindings.intentFor("\x1b[117;6u")).toBeUndefined();
@@ -50,12 +50,55 @@ describe("extension shortcuts in the TUI", () => {
 		]);
 
 		// Rebinding drops the previous entries; the user's override stays stored for when the intent returns.
-		bindings.bind(runnerWith([shortcut("ctrl+shift+u", "extension.intent.presets.other")]));
+		bindings.bind([shortcut("ctrl+shift+u", "extension.intent.presets.other")]);
 		expect(keybindings.hasDefinition(cycle)).toBe(false);
 		expect(bindings.intentFor("\x1b[117;6u")).toBe("extension.intent.presets.other");
 		bindings.clear();
 		expect(bindings.entries()).toEqual([]);
 		expect(bindings.intentFor("\x1b[117;6u")).toBeUndefined();
+	});
+
+	it("skips a key a reserved action binds, as the user bound it", () => {
+		expect(bindOne("ctrl+c")).toEqual({
+			bound: false,
+			diagnostics: [
+				{
+					type: "warning",
+					message: `Extension shortcut 'ctrl+c' for ${NOOP} conflicts with built-in shortcut. Skipping.`,
+				},
+			],
+		});
+		// The plan-pane key, by default and remapped.
+		expect(bindOne("alt+p").bound).toBe(false);
+		expect(bindOne("ctrl+shift+x", { "app.plan.togglePane": "ctrl+shift+x" }).bound).toBe(false);
+		// A reserved action rebound to another key, or to several, reserves those.
+		expect(bindOne("ctrl+x", { "app.interrupt": "ctrl+x" }).bound).toBe(false);
+		expect(bindOne("ctrl+y", { "app.clear": ["ctrl+x", "ctrl+y"] }).bound).toBe(false);
+		// A key a reserved action shares with another action stays reserved.
+		expect(bindOne("ctrl+p").bound).toBe(false);
+	});
+
+	it("takes a key a reserved action no longer binds", () => {
+		const freed = bindOne("ctrl+p", { "app.model.cycleForward": "ctrl+n" });
+		expect(freed.bound).toBe(true);
+		// The model picker's provider toggle, which is not reserved, keeps it there.
+		expect(freed.diagnostics.map((diagnostic) => diagnostic.message)).toEqual([
+			`Extension shortcut conflict: 'ctrl+p' is built-in shortcut for app.models.toggleProvider and ${NOOP}. Using ${NOOP}.`,
+		]);
+	});
+
+	it("takes the key of an action that is not reserved, with a warning", () => {
+		const paste = new KeybindingsManager().getKeys("app.clipboard.pasteImage")[0];
+		if (paste === undefined) throw new Error("Pasting an image has no default key");
+		const taken = bindOne(paste);
+		expect(taken.bound).toBe(true);
+		expect(taken.diagnostics).toEqual([
+			{
+				type: "warning",
+				message: `Extension shortcut conflict: '${paste}' is built-in shortcut for app.clipboard.pasteImage and ${NOOP}. Using ${NOOP}.`,
+			},
+		]);
+		expect(bindOne("ctrl+y", { "app.clipboard.pasteImage": ["ctrl+x", "ctrl+y"] }).bound).toBe(true);
 	});
 });
 

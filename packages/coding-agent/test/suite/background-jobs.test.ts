@@ -830,34 +830,6 @@ describe("AgentSession background jobs", () => {
 		expect(harness.session.work.list()).toEqual([]);
 	});
 
-	it.each(["", "unsubmitted draft", "!keep this command draft"])(
-		"cancels an idle background job through onEscape and preserves queues and draft %j",
-		async (draft) => {
-			const backend = controlledBash();
-			const harness = await setup();
-			const control = setupInteractive(harness);
-			const job = await startJob(harness);
-			// Input queued behind a held turn claim stays queued (an idle steer would start its own turn).
-			harness.control.conversation.reserve();
-			await harness.session.steer("queued steering");
-			await harness.session.followUp("queued follow-up");
-			control.defaultEditor.setText(draft);
-			const abort = vi.spyOn(harness.session, "abort");
-
-			control.defaultEditor.onEscape!();
-
-			await vi.waitFor(() => expect(abort).toHaveBeenCalledExactlyOnceWith("keyboard_interrupt"));
-			expect((await settled(harness, job.id)).status).toBe("cancelled");
-			expect(backend.signal?.aborted).toBe(true);
-			expect(harness.session.work.busy()).toBe(false);
-			expect(harness.session.pendingMessageCount).toBe(0);
-			expect(control.defaultEditor.getText()).toBe(
-				["queued steering", "queued follow-up", draft].filter(Boolean).join("\n\n"),
-			);
-			expect(harness.faux.state.callCount).toBe(2);
-		},
-	);
-
 	it("keeps Ctrl+C as editor clearing while an idle background job runs", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
@@ -1021,39 +993,5 @@ describe("AgentSession background jobs", () => {
 		expect(backend.signal?.aborted).toBe(false);
 		terminal.sendInput("\x04");
 		expect(control.shutdown).toHaveBeenCalledTimes(1);
-	});
-
-	it("interrupts foreground Bash before idle background jobs", async () => {
-		const backend = controlledBash();
-		const harness = await setup();
-		const control = setupInteractive(harness);
-		const job = await startJob(harness);
-		const shellStarted = deferred();
-		const shellFinished = deferred();
-		const shell = harness.session.executeBash("foreground command", undefined, {
-			operations: {
-				exec: async (_command, _cwd, { signal }) => {
-					signal?.addEventListener("abort", shellFinished.resolve, { once: true });
-					shellStarted.resolve();
-					await shellFinished.promise;
-					return { exitCode: 0 };
-				},
-			},
-		});
-		try {
-			await shellStarted.promise;
-			control.defaultEditor.onEscape!();
-			await shell;
-			expect(harness.session.isBashRunning).toBe(false);
-			expect(backend.signal?.aborted).toBe(false);
-			expect(harness.session.work.busy()).toBe(true);
-
-			control.defaultEditor.onEscape!();
-			await vi.waitFor(() => expect(backend.signal?.aborted).toBe(true));
-			expect((await settled(harness, job.id)).status).toBe("cancelled");
-		} finally {
-			shellFinished.resolve();
-			await shell;
-		}
 	});
 });

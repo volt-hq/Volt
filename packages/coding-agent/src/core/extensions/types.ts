@@ -47,7 +47,7 @@ import type {
 	WorkProgress,
 	WorkResult,
 } from "@hansjm10/volt-protocol";
-import type { AutocompleteItem, KeyId } from "@hansjm10/volt-tui";
+import type { KeyId } from "@hansjm10/volt-tui";
 import type { Static, TObject, TSchema } from "typebox";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionPreparation, CompactionResult } from "../compaction/index.ts";
@@ -1259,7 +1259,10 @@ export interface RegisteredCommand {
 	description?: string;
 	/** Explicit host opt-in for invocation by an authorized remote RPC client. Defaults to false. */
 	remoteSafe?: boolean;
-	getArgumentCompletions?: (argumentPrefix: string) => AutocompleteItem[] | null | Promise<AutocompleteItem[] | null>;
+	/** Completions for the command's argument text: each `value` replaces it, listed as `label` with `description`. */
+	getArgumentCompletions?: (
+		argumentPrefix: string,
+	) => ExtensionCompletionItem[] | null | Promise<ExtensionCompletionItem[] | null>;
 	handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 }
 

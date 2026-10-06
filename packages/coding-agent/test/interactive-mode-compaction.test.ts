@@ -25,7 +25,6 @@ function createCompactionContext() {
 		getMarkdownThemeWithSettings: () => undefined,
 		showError: vi.fn(),
 		showStatus: vi.fn(),
-		flushCompactionQueue: vi.fn().mockResolvedValue(undefined),
 		settingsManager: { getShowTerminalProgress: () => false },
 		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 	};
@@ -81,7 +80,7 @@ describe("InteractiveMode extension shutdown", () => {
 });
 
 describe("InteractiveMode compaction", () => {
-	test("leaves the chat to the compaction's entry at compaction_end, and flushes the queued input", async () => {
+	test("leaves the chat to the compaction's entry at compaction_end", async () => {
 		const fakeThis = createCompactionContext();
 
 		await handleStatusEvent.call(fakeThis, {
@@ -95,7 +94,6 @@ describe("InteractiveMode compaction", () => {
 		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
 		expect(fakeThis.chatContainer.render(120).lines).toEqual([]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
-		expect(fakeThis.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 	});
 
 	test("appends the compaction's summary, then every request it made", () => {
@@ -168,42 +166,6 @@ describe("InteractiveMode compaction", () => {
 			"Native compaction request 4 (stop): cache usage unavailable",
 		]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
-	});
-
-	test("waits for the compaction transaction to settle before flushing a new prompt", async () => {
-		let releaseIdle: () => void = () => undefined;
-		const idle = new Promise<void>((resolve) => {
-			releaseIdle = resolve;
-		});
-		const session = {
-			waitForIdle: vi.fn(() => idle),
-			prompt: vi.fn(async () => undefined),
-			followUp: vi.fn(async () => undefined),
-			steer: vi.fn(async () => undefined),
-			clearQueue: vi.fn(),
-		};
-		const fakeThis = {
-			compactionQueuedMessages: [{ text: "queued after compaction", mode: "steer" as const }],
-			updatePendingMessagesDisplay: vi.fn(),
-			showError: vi.fn(),
-			session,
-			isExtensionCommand: vi.fn(() => false),
-			collectPromptImages: vi.fn(async () => undefined),
-		};
-		const flushCompactionQueue = Reflect.get(InteractiveMode.prototype, "flushCompactionQueue") as (
-			this: typeof fakeThis,
-			options?: { willRetry?: boolean },
-		) => Promise<void>;
-
-		const flushing = flushCompactionQueue.call(fakeThis, { willRetry: false });
-		await Promise.resolve();
-		expect(session.waitForIdle).toHaveBeenCalledOnce();
-		expect(session.prompt).not.toHaveBeenCalled();
-
-		releaseIdle();
-		await flushing;
-		expect(session.prompt).toHaveBeenCalledWith("queued after compaction", undefined);
-		expect(fakeThis.compactionQueuedMessages).toEqual([]);
 	});
 
 	test("defers requested shutdown from agent_end until the session settles", async () => {

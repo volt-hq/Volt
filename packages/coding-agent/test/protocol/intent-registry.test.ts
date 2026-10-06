@@ -12,7 +12,6 @@ import {
 import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
-import { INTENT_SLASH_COMMANDS } from "../../src/core/slash-commands.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
 import { adoptTestSession, connectTestClient, type TestClient } from "../utilities/host-client.ts";
 
@@ -370,15 +369,12 @@ describe("intent descriptors", () => {
 		expect(remoteNames.every((name) => intentRegistry.get(name as "prompt").remote === "safe")).toBe(true);
 	});
 
-	it("resolves the slash aliases that invoke one intent, and the slash commands the TUI lists for them", () => {
+	it("resolves the slash aliases that invoke one intent", () => {
 		expect(intentRegistry.resolveSlash("clear")).toBe("new_session");
 		expect(intentRegistry.resolveSlash("/name")).toBe("set_session_name");
 		expect(intentRegistry.resolveSlash("fast")).toBe("set_fast_mode");
 		expect(intentRegistry.resolveSlash("compact")).toBe("compact");
 		expect(intentRegistry.resolveSlash("review")).toBeUndefined();
-		expect([...INTENT_SLASH_COMMANDS].sort((a, b) => a.name.localeCompare(b.name))).toEqual(
-			intentRegistry.slashCommands().sort((a, b) => a.name.localeCompare(b.name)),
-		);
 	});
 
 	it("requires the selection and host management to persist a default", () => {
