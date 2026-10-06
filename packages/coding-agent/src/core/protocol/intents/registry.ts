@@ -541,7 +541,7 @@ function admitDynamicIntent(
 			void session
 				.prompt(promptText, {
 					...(queuedAs === undefined ? {} : { streamingBehavior: queuedAs }),
-					source: "rpc",
+					source: ctx.inputSource ?? "rpc",
 					...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 					preflightResult: (result) => {
 						if (!result.success || admitted) return;

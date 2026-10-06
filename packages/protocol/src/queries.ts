@@ -28,10 +28,11 @@ import {
 	RpcMcpToolsResponseSchema,
 } from "./mcp.ts";
 import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
-import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
+import { RpcConversationIdentifierSchema, RpcQueueModeSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
 import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
 import { IrohRemoteSessionIdSchema, IrohRemoteWorkingDirectorySchema } from "./remote-handshake.ts";
+import { ConversationInfoSchema, ResourcesSchema, ToolSummarySchema } from "./resources.ts";
 import {
 	RpcListReviewDiscussionsSchema,
 	RpcReviewDiscussionSchema,
@@ -79,6 +80,27 @@ export const EditorCompletionItemSchema = Type.Object(
 );
 export type EditorCompletionItem = Static<typeof EditorCompletionItemSchema>;
 
+/**
+ * A key an extension's shortcut binds and the intent it invokes with no
+ * input; a client binds it in its own keybinding table, which may override
+ * it.
+ */
+export const IntentShortcutSchema = Type.Object(
+	{ key: Type.String({ minLength: 1 }), intent: IntentNameSchema, description: Type.Optional(Type.String()) },
+	closed,
+);
+export type IntentShortcut = Static<typeof IntentShortcutSchema>;
+
+/** A model of a cycle scope, with the thinking level the scope gives it. */
+export const ScopedModelSchema = Type.Object(
+	{ ...ClientModelRefSchema.properties, thinkingLevel: Type.Optional(RpcThinkingLevelSchema) },
+	closed,
+);
+export type ScopedModel = Static<typeof ScopedModelSchema>;
+
+/** Longest `sessions` search text, in characters. */
+export const SESSIONS_SEARCH_MAX_CHARS = 1_024;
+
 const server = Type.String();
 const runId = RpcConversationIdentifierSchema;
 
@@ -91,9 +113,21 @@ export interface QuerySchemas {
 /** Every query, keyed by name. */
 export const QUERY_SCHEMAS = {
 	// Intents
+	/**
+	 * The intents a client may invoke, the keys extensions bind to them, and
+	 * the characters that start an editor token the `editor_completions` query
+	 * completes.
+	 */
 	intents: {
 		params: EmptyInputSchema,
-		result: Type.Object({ intents: Type.Array(IntentDescriptorSchema) }, closed),
+		result: Type.Object(
+			{
+				intents: Type.Array(IntentDescriptorSchema),
+				shortcuts: Type.Array(IntentShortcutSchema),
+				completionTriggers: Type.Array(Type.String({ minLength: 1 })),
+			},
+			closed,
+		),
 	},
 	intent_completions: {
 		params: Type.Object(
@@ -196,16 +230,23 @@ export const QUERY_SCHEMAS = {
 		result: Type.Object(
 			{
 				models: Type.Array(RpcCatalogModelSchema),
-				cycleScope: Type.Array(ClientModelRefSchema),
+				cycleScope: Type.Array(ScopedModelSchema),
 			},
 			closed,
 		),
 	},
+	/**
+	 * Stored sessions, newest first: the conversation's workspace, or with
+	 * `scope: "all"` every session directory of the host. `search` keeps the
+	 * sessions whose text matches it.
+	 */
 	sessions: {
 		params: Type.Object(
 			{
 				limit: Type.Optional(Type.Integer({ minimum: 1 })),
 				cursor: Type.Optional(Type.String({ minLength: 1 })),
+				scope: Type.Optional(stringEnum(["workspace", "all"])),
+				search: Type.Optional(Type.String({ minLength: 1, maxLength: SESSIONS_SEARCH_MAX_CHARS })),
 			},
 			closed,
 		),
@@ -270,6 +311,12 @@ export const QUERY_SCHEMAS = {
 		result: Type.Object({ webSearch: RpcWebSearchStatusSchema }, closed),
 	},
 	subagent_definitions: { params: EmptyInputSchema, result: RpcListSubagentsResponseSchema },
+	/** Where the conversation's log lives. */
+	conversation_info: { params: EmptyInputSchema, result: ConversationInfoSchema },
+	/** The resources the conversation loaded and what loading them reported; refetched on `changed{resources}`. */
+	resources: { params: EmptyInputSchema, result: ResourcesSchema },
+	/** The conversation's tools and which are active; refetched on `changed{resources}`. */
+	tools: { params: EmptyInputSchema, result: Type.Object({ tools: Type.Array(ToolSummarySchema) }, closed) },
 	/**
 	 * A work item's output as plain text without terminal control sequences:
 	 * what running work produced so far, or what its result kept. Only the

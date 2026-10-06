@@ -172,6 +172,11 @@ export class Subscription {
 		return this.ended;
 	}
 
+	/** Whether the subscription carries the live lane. */
+	get receivesLive(): boolean {
+		return this.options.live;
+	}
+
 	/**
 	 * Start after the subscriber's position, or from a snapshot. A position
 	 * past the log, or further back than the profile replays, is answered with

@@ -17,16 +17,11 @@
  */
 
 import { type AssistantMessage, type JsonObject, parseStreamingJson, type ToolCall } from "@hansjm10/volt-ai";
-import {
-	applyUiPatch,
-	type LiveItem,
-	type LiveValue,
-	type ProjectedEntry,
-	type ToolPresentation,
-	type ToolPresentationPatch,
-	type UiNode,
-	type UiPatchOp,
-} from "@hansjm10/volt-protocol";
+import type { LiveItem, LiveValue } from "./live.ts";
+import type { ToolPresentation, ToolPresentationPatch } from "./presentation.ts";
+import type { ProjectedEntry } from "./projected.ts";
+import type { UiNode } from "./ui-node.ts";
+import { applyUiPatch, type UiPatchOp } from "./ui-patch.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 type LiveToolItem = Extract<LiveItem, { type: "tool" }>;

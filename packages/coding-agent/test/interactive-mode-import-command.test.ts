@@ -69,7 +69,7 @@ describe("InteractiveMode /import parsing", () => {
 	});
 
 	it("passes the unquoted path to the import intent for the TUI's client", async () => {
-		vi.mocked(openImport).mockResolvedValueOnce({ cancelled: false });
+		vi.mocked(openImport).mockResolvedValueOnce({ cancelled: false, sessionId: "imported-session", seeded: false });
 		const showExtensionConfirm = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();
@@ -102,7 +102,7 @@ describe("InteractiveMode /import parsing", () => {
 	});
 
 	it("passes an unquoted apostrophe path to the import intent unchanged", async () => {
-		vi.mocked(openImport).mockResolvedValueOnce({ cancelled: false });
+		vi.mocked(openImport).mockResolvedValueOnce({ cancelled: false, sessionId: "imported-session", seeded: false });
 		const showExtensionConfirm = vi.fn(async () => true);
 		const showStatus = vi.fn();
 		const showError = vi.fn();

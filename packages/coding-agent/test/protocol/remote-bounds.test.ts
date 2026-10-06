@@ -13,7 +13,10 @@
 import { Buffer } from "node:buffer";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import {
+	emptyLiveFold,
+	foldLiveFrame,
 	type HostFrame,
+	type LiveFoldState,
 	type LiveItem,
 	type QueryResult,
 	REMOTE_CAPABILITIES,
@@ -21,7 +24,6 @@ import {
 } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
-import { emptyLiveFold, foldLiveFrame, type LiveFoldState } from "../../src/core/protocol/live-fold.ts";
 import { type ProfileLimits, remoteProfile } from "../../src/core/protocol/profiles.ts";
 import type { ProtocolConnection } from "../../src/core/protocol/server/connection.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";

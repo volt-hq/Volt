@@ -5,13 +5,13 @@
 
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@hansjm10/volt-ai";
 import type { LiveItem } from "@hansjm10/volt-protocol";
+import { emptyLiveFold, foldLiveItems, HOST_NOTICE_SOURCE } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { feedLiveState } from "../../src/core/host/live-feed.ts";
 import type { LiveUpdate } from "../../src/core/host/live-state.ts";
 import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../src/core/protocol/intents/index.ts";
 import { liveIntentAvailability } from "../../src/core/protocol/intents/state.ts";
-import { emptyLiveFold, foldLiveItems } from "../../src/core/protocol/live-fold.ts";
 import { localProfile } from "../../src/core/protocol/profiles.ts";
 import { conversationProjectionSource, projectEntry } from "../../src/core/protocol/projection/entries.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
@@ -159,5 +159,41 @@ describe("live feed", () => {
 				)
 			: undefined;
 		expect(committed && "view" in committed ? committed.view?.presentation : undefined).toEqual(live);
+	});
+
+	it("carries a scheduled retry's start time and error in the phase, and raises a host notice when retries give up", async () => {
+		const { harness, items } = await feedHarness({
+			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
+		});
+		const overloaded = () =>
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+			});
+		harness.setResponses([overloaded(), overloaded()]);
+		const before = Date.now();
+		await harness.session.prompt("retry me");
+		await harness.session.waitForIdle();
+
+		const retries = items().flatMap((item) =>
+			item.type === "set" && item.value.kind === "phase" && item.value.retry ? [item.value.retry] : [],
+		);
+		expect(retries[0]).toEqual({
+			attempt: 1,
+			maxAttempts: 1,
+			retryAt: expect.any(Number),
+			error: "overloaded_error",
+		});
+		expect(retries[0]?.retryAt).toBeGreaterThanOrEqual(before);
+		expect(harness.session.liveState.get("phase")).toEqual({ kind: "phase", busy: false, operation: null });
+		const notices = items().filter((item) => item.type === "notice");
+		expect(notices).toEqual([
+			{
+				type: "notice",
+				level: "error",
+				message: "Retry failed after 1 attempts: overloaded_error",
+				source: HOST_NOTICE_SOURCE,
+			},
+		]);
 	});
 });

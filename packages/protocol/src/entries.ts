@@ -470,6 +470,8 @@ export const WorkStartedEntryPayloadSchema = Type.Object(
 		requires: Type.Optional(Type.Array(RemoteCapabilitySchema, { uniqueItems: true })),
 		/** Whether a paired remote device may cancel or resume the work at all; it may when absent. */
 		remote: Type.Optional(Type.Object({ cancel: Type.Boolean(), resume: Type.Boolean() }, closed)),
+		/** The kind opens its work's conversation (`open_work`), as it declared when the work started. */
+		opens: Type.Optional(Type.Boolean()),
 	},
 	closed,
 );
