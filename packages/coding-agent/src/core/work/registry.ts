@@ -13,7 +13,8 @@
  * finishes it.
  *
  * Durable checkpoints are coarse: a state transition (cancelling, resumed)
- * is written at once, a kind phase at most once every
+ * and the conversation work moves to (a review's next pass, `child`) are
+ * written at once, a kind phase at most once every
  * {@link WORK_CHECKPOINT_INTERVAL_MS} (a later phase replaces one still
  * waiting, and a finish drops it), and an item records at most
  * {@link WORK_CHECKPOINTS_MAX} checkpoints over its lifetime, its resumes
@@ -138,6 +139,14 @@ export interface WorkContext {
 	progress(progress: WorkProgress, detail?: UiNode): void;
 	/** A kind phase: live at once, and durable as a coarse checkpoint at most every {@link WORK_CHECKPOINT_INTERVAL_MS}. */
 	checkpoint(progress: WorkProgress, detail?: UiNode): void;
+	/**
+	 * The conversation the work runs in from now on, such as a review's next
+	 * pass: a checkpoint written at once, in order with the item's other
+	 * writes, which a client follows to observe the work. Resolves once it is
+	 * written, or dropped: past the item's {@link WORK_CHECKPOINTS_MAX}, once
+	 * the work stopped counting, or when the log refuses it.
+	 */
+	child(child: WorkChild): Promise<void>;
 	/** Output: its newest {@link WORK_OUTPUT_MAX_UTF8_BYTES} become the result's output unless the execution names its own. */
 	output(text: string): void;
 	/**
@@ -1158,6 +1167,14 @@ export class WorkRegistry {
 				if (active.detached) return;
 				this.liveFeed.progress(active.workId, progress, detail);
 				this.schedulePhase(active, { progress, ...(detail === undefined ? {} : { detail }) });
+			},
+			child: async (child) => {
+				if (active.detached) return;
+				if ((this.get(active.workId)?.checkpoints ?? WORK_CHECKPOINTS_MAX) >= WORK_CHECKPOINTS_MAX) return;
+				// A child the log refuses is dropped: the work runs on, unobserved there.
+				await this.write(active, () => this.host.work().checkpoint(active.workId, { child })).catch(
+					() => undefined,
+				);
 			},
 			output: (text) => {
 				if (active.detached || typeof text !== "string") return;

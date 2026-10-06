@@ -125,6 +125,8 @@ export interface HostedConversationOptions {
 	readonly openedAs: ConversationOpenReason;
 	readonly lifetime: ConversationLifetime;
 	readonly subagentContext?: SubagentRuntimeContext;
+	/** Only local clients may observe it; see {@link HostedConversation.localOnly}. */
+	readonly localOnly?: boolean;
 }
 
 export class HostedConversation {
@@ -136,7 +138,14 @@ export class HostedConversation {
 	readonly lifetime: ConversationLifetime;
 	/** Why the conversation opened. */
 	readonly openedAs: ConversationOpenReason;
+	/**
+	 * Only local clients may observe the conversation: a paired remote device
+	 * never reads it, even where the work of a conversation it reads links it
+	 * (a review pass that reads the pull request text the code host provided).
+	 */
+	readonly localOnly: boolean;
 	private readonly lostSignal = Promise.withResolvers<Error>();
+	private readonly closedSignal = Promise.withResolvers<void>();
 	/**
 	 * Resolves once, when the conversation's session loses its log while the
 	 * conversation is open: a commit it could not confirm means it may no
@@ -159,6 +168,7 @@ export class HostedConversation {
 		this.subagentContext = options.subagentContext;
 		this.lifetime = options.lifetime;
 		this.openedAs = options.openedAs;
+		this.localOnly = options.localOnly === true;
 		this.liveFeed = feedLiveState(this.session);
 		void this.session.lost.then((error) => {
 			if (this.closePromise) return;
@@ -198,6 +208,15 @@ export class HostedConversation {
 	/** Whether the conversation is closing or closed. */
 	get closed(): boolean {
 		return this.closePromise !== undefined;
+	}
+
+	/**
+	 * Resolves once the conversation closed, whoever closed it: its session is
+	 * disposed. Never rejects. A subscriber outside the conversation's host
+	 * (a client reading a child) ends its subscription then.
+	 */
+	whenClosed(): Promise<void> {
+		return this.closedSignal.promise;
 	}
 
 	/**
@@ -363,7 +382,7 @@ export class HostedConversation {
 		/** Runs after `session_shutdown`, before the session is disposed. */
 		beforeDispose?: () => void;
 	}): Promise<void> {
-		this.closePromise ??= this.performClose(event);
+		this.closePromise ??= this.performClose(event).finally(() => this.closedSignal.resolve());
 		return this.closePromise;
 	}
 
@@ -415,7 +434,7 @@ export class HostedConversation {
 				},
 				"Conversation cleanup did not complete",
 			);
-		})();
+		})().finally(() => this.closedSignal.resolve());
 		return this.closePromise;
 	}
 

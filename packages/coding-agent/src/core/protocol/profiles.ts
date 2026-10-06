@@ -15,8 +15,8 @@
  * stay on the host. Every frame is redacted at the connection's send (see
  * remote-redaction.ts). Intents and queries are the remote-safe ones within
  * the device's grant, intents act only on the conversation the stream is
- * bound to, and the subagent children its log links by subagent work are
- * observe-only. Snapshots carry a
+ * bound to, and the children its work links (subagent children, review
+ * passes that read no code-host context) are observe-only. Snapshots carry a
  * bounded tail of the active branch (older entries are paged with
  * `history`), and a resume further back than the replay bound is answered
  * with a snapshot instead.
@@ -103,9 +103,9 @@ export interface Profile {
 	/**
 	 * Whether a connection on this profile may target the conversation `id`
 	 * with intents and subscriptions. `linkedFrom` names the conversation
-	 * whose log links `id` as a subagent child by subagent work (directly or
-	 * through linked children): a remote connection reads the children its
-	 * bound conversation links, observe-only, and no other conversation.
+	 * whose work links `id` as a child (directly or through linked children):
+	 * a remote connection reads the children its bound conversation links,
+	 * observe-only, and no other conversation.
 	 */
 	conversations(id: string, linkedFrom?: string): boolean;
 	/** The conversation a remote connection is bound to; none for local connections and workspace streams. */

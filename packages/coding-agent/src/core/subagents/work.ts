@@ -36,9 +36,6 @@ export const SUBAGENT_MAX_ACTIVE = 48;
 /** Longest task a subagent's work input keeps, in characters. */
 const SUBAGENT_WORK_TASK_MAX_CHARS = 2_000;
 
-/** Most links followed from a conversation to a subagent descendant. */
-const SUBAGENT_LINK_MAX_DEPTH = 8;
-
 /** What a subagent's work input holds: the agent and its task, bounded. */
 export interface SubagentWorkInput {
 	readonly agent: string;
@@ -100,61 +97,4 @@ export function subagentWorkKind(options: SubagentWorkKindOptions): WorkKindDefi
 		},
 		resume: (item, signal) => options.resume(item, signal),
 	};
-}
-
-/**
- * The subagent work that links conversation `id` from `conversation`'s log,
- * directly or through the logs of its open linked children, with the
- * conversation whose log holds it: what locates a linked child that closed,
- * which a client of `conversation` may still read from its log.
- */
-export function linkingSubagentWork(
-	conversation: HostedConversation,
-	id: string,
-	depth = SUBAGENT_LINK_MAX_DEPTH,
-): { readonly record: WorkRecord; readonly parent: HostedConversation } | undefined {
-	const manager = conversation.session.getSubagentToolManager();
-	const linked: HostedConversation[] = [];
-	for (const record of conversation.work.list()) {
-		const childId = record.kind === SUBAGENT_WORK_KIND ? record.child?.conversation : undefined;
-		if (childId === undefined) continue;
-		if (childId === id) return { record, parent: conversation };
-		const child = manager?.childConversation?.(childId);
-		if (child && !child.closed && child.id === childId) linked.push(child);
-	}
-	if (depth <= 1) return undefined;
-	for (const child of linked) {
-		const found = linkingSubagentWork(child, id, depth - 1);
-		if (found) return found;
-	}
-	return undefined;
-}
-
-/**
- * The open subagent conversation `id` that `conversation` links by subagent
- * work in its log, directly or through the linked children of its linked
- * children: the only children a client of `conversation` may observe.
- */
-export function linkedSubagentConversation(
-	conversation: HostedConversation,
-	id: string,
-	depth = SUBAGENT_LINK_MAX_DEPTH,
-): HostedConversation | undefined {
-	const manager = conversation.session.getSubagentToolManager();
-	if (!manager?.childConversation) return undefined;
-	const linked: HostedConversation[] = [];
-	for (const record of conversation.work.list()) {
-		const childId = record.kind === SUBAGENT_WORK_KIND ? record.child?.conversation : undefined;
-		if (childId === undefined) continue;
-		const child = manager.childConversation(childId);
-		if (!child || child.closed || child.id !== childId) continue;
-		if (childId === id) return child;
-		linked.push(child);
-	}
-	if (depth <= 1) return undefined;
-	for (const child of linked) {
-		const found = linkedSubagentConversation(child, id, depth - 1);
-		if (found) return found;
-	}
-	return undefined;
 }

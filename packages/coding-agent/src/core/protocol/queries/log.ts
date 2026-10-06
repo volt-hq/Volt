@@ -2,15 +2,21 @@
  * Reads of the projected log (RFC §6.1 as amended): `history` pages older
  * projected entries, and `content` returns one content part of an entry in
  * full. Both read only entries the subscriber's profile projects, and project
- * them exactly as the subscription does.
+ * them exactly as the subscription does: an open conversation's log through
+ * its runtime, a closed child's log read without one, as its snapshot is.
  */
 
 import { CONTENT_TEXT_MAX_SCALARS, type ProjectedEntry, type QueryResult } from "@hansjm10/volt-protocol";
-import type { CommittedSessionEntry } from "../../session-manager.ts";
+import type { CommittedSessionEntry, SessionManager } from "../../session-manager.ts";
 import { targetOf } from "../intents/conversation.ts";
 import type { IntentContext } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
-import { conversationProjectionSource, projectEntry } from "../projection/entries.ts";
+import {
+	conversationProjectionSource,
+	type ProjectionSource,
+	projectEntry,
+	sessionProjectionSource,
+} from "../projection/entries.ts";
 import { transcriptWorkNoticeText } from "../projection/transcript.ts";
 import { defineQuery, QueryRejectedError } from "./types.ts";
 
@@ -23,6 +29,13 @@ type ContentPart =
 function subscriberOf(ctx: IntentContext, query: string): Profile {
 	if (!ctx.subscriber) throw new QueryRejectedError("unavailable", `${query} is read through a protocol subscription`);
 	return ctx.subscriber;
+}
+
+/** The log a read reads and what its entries present with: a closed child's, or the target conversation's. */
+function logOf(ctx: IntentContext): { readonly sessionManager: SessionManager; readonly source: ProjectionSource } {
+	if (ctx.closedLog) return { sessionManager: ctx.closedLog, source: sessionProjectionSource(ctx.closedLog) };
+	const session = targetOf(ctx).conversation.session;
+	return { sessionManager: session.sessionManager, source: conversationProjectionSource(session) };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,11 +87,10 @@ export const historyQuery = defineQuery({
 	scope: "conversation",
 	remote: "safe",
 	requires: observe,
+	closedLogs: true,
 	async run(ctx, params) {
 		const profile = subscriberOf(ctx, "history");
-		const session = targetOf(ctx).conversation.session;
-		const sessionManager = session.sessionManager;
-		const source = conversationProjectionSource(session);
+		const { sessionManager, source } = logOf(ctx);
 		const before = Math.min(params.before, sessionManager.getOrdinal() + 1);
 		const newestFirst: ProjectedEntry[] = [];
 		let earlier = false;
@@ -117,9 +129,10 @@ export const contentQuery = defineQuery({
 	scope: "conversation",
 	remote: "safe",
 	requires: observe,
+	closedLogs: true,
 	async run(ctx, params) {
 		const profile = subscriberOf(ctx, "content");
-		const sessionManager = targetOf(ctx).conversation.session.sessionManager;
+		const { sessionManager } = logOf(ctx);
 		const entry = sessionManager.getCommittedEntry(params.entryId);
 		if (!entry || !profile.includes(entry)) {
 			throw new QueryRejectedError("invalid_input", `Unknown entry: ${params.entryId}`);

@@ -47,6 +47,13 @@ export class QueryRegistry {
 		return Object.hasOwn(this.definitions, name);
 	}
 
+	/** Whether query `name` reads a closed child's log. */
+	readsClosedLogs(name: string): boolean {
+		if (!this.has(name)) return false;
+		const definition: QueryDefinition<QueryName> = this.definitions[name];
+		return definition.closedLogs === true;
+	}
+
 	/** Admit and run a query with typed parameters. */
 	run<N extends QueryName>(ctx: IntentContext, name: N, params: QueryParams<N>): Promise<QueryResult<N>> {
 		return this.runUnchecked(ctx, name, params) as Promise<QueryResult<N>>;
@@ -61,6 +68,20 @@ export class QueryRegistry {
 	}
 
 	private async runUnchecked(ctx: IntentContext, name: QueryName, params: unknown): Promise<unknown> {
+		const definition: QueryDefinition<QueryName> = this.definitions[name];
+		const admitted = this.admit(ctx, name, params);
+		if (definition.scope === "conversation" && !ctx.target && !(definition.closedLogs && ctx.closedLog)) {
+			throw new QueryRejectedError("unavailable", `${name} needs a conversation`);
+		}
+		return definition.run(ctx, admitted as never);
+	}
+
+	/**
+	 * The profile's admission of query `name` and its parameters, before
+	 * anything is read: throws {@link QueryRejectedError} when refused, and
+	 * returns the admitted parameters.
+	 */
+	admit(ctx: Pick<IntentContext, "profile">, name: QueryName, params: unknown): unknown {
 		const definition: QueryDefinition<QueryName> = this.definitions[name];
 		if (ctx.profile.name === "remote") {
 			if (definition.remote !== "safe") {
@@ -81,10 +102,7 @@ export class QueryRegistry {
 			: formatSchemaError(schema, validator.Errors(admitted));
 		if (invalid !== undefined)
 			throw new QueryRejectedError("invalid_input", `Invalid ${name} parameters: ${invalid}`);
-		if (definition.scope === "conversation" && !ctx.target) {
-			throw new QueryRejectedError("unavailable", `${name} needs a conversation`);
-		}
-		return definition.run(ctx, admitted as never);
+		return admitted;
 	}
 
 	private validator(name: QueryName): Validator {

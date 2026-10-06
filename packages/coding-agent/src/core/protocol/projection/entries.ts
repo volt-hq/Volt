@@ -70,8 +70,9 @@ function transcriptWorkPayload(entry: CommittedSessionEntry, payload: unknown, p
 		} satisfies WorkStartedEntryPayload;
 	}
 	if (entry.type === "work_checkpoint") {
+		const { child, ...phase } = payload as WorkCheckpointEntryPayload;
 		return redactedWorkPhase(
-			payload as WorkCheckpointEntryPayload,
+			{ ...phase, ...(child === undefined ? {} : { child: { conversation: child.conversation } }) },
 			profile.source,
 			profile.sourceCut,
 			WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,

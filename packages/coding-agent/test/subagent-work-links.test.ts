@@ -1,7 +1,8 @@
 /**
  * The children a client of a conversation may observe: open conversations
- * the conversation links by `subagent` work in its log, directly or through
- * its linked children's logs, within a bounded depth. Nothing else links.
+ * the conversation links by its work (a subagent's child, a review's current
+ * pass), directly or through its linked children's logs, within a bounded
+ * depth. Nothing else links.
  */
 
 import { tmpdir } from "node:os";
@@ -10,17 +11,18 @@ import { describe, expect, it } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteRpcGrant } from "../src/core/remote/iroh/access-grant.ts";
-import { linkedSubagentConversation } from "../src/core/subagents/work.ts";
+import { linkedChildConversation } from "../src/core/work/children.ts";
 
 interface FakeConversation {
 	readonly id: string;
 	closed: boolean;
 	readonly records: WorkRecord[];
 	readonly children: Map<string, FakeConversation>;
+	readonly passes: Map<string, FakeConversation>;
 }
 
 function conversation(id: string): FakeConversation {
-	return { id, closed: false, records: [], children: new Map() };
+	return { id, closed: false, records: [], children: new Map(), passes: new Map() };
 }
 
 function asHosted(fake: FakeConversation): HostedConversation {
@@ -37,6 +39,12 @@ function asHosted(fake: FakeConversation): HostedConversation {
 					return child ? asHosted(child) : undefined;
 				},
 			}),
+			reviewPasses: {
+				get: (id: string) => {
+					const pass = fake.passes.get(id);
+					return pass ? asHosted(pass) : undefined;
+				},
+			},
 		},
 	} as unknown as HostedConversation;
 }
@@ -47,6 +55,15 @@ function link(parent: FakeConversation, child: FakeConversation, kind: WorkRecor
 	parent.children.set(child.id, child);
 }
 
+/** `parent`'s review `workId` runs in `pass` now; the pass is open among `parent`'s review passes. */
+function reviewIn(parent: FakeConversation, workId: string, pass: FakeConversation): void {
+	const index = parent.records.findIndex((record) => record.workId === workId);
+	const record = { workId, kind: "review", child: { conversation: pass.id } } as WorkRecord;
+	if (index === -1) parent.records.push(record);
+	else parent.records[index] = record;
+	parent.passes.set(pass.id, pass);
+}
+
 describe("subagent work links", () => {
 	it("finds open children linked by subagent work, directly or through linked children", () => {
 		const root = conversation("root");
@@ -54,10 +71,10 @@ describe("subagent work links", () => {
 		const grandchild = conversation("grandchild");
 		link(root, child);
 		link(child, grandchild);
-		expect(linkedSubagentConversation(asHosted(root), "child")?.id).toBe("child");
-		expect(linkedSubagentConversation(asHosted(root), "grandchild")?.id).toBe("grandchild");
+		expect(linkedChildConversation(asHosted(root), "child")?.id).toBe("child");
+		expect(linkedChildConversation(asHosted(root), "grandchild")?.id).toBe("grandchild");
 		// Links point down: a child does not reach its parent.
-		expect(linkedSubagentConversation(asHosted(child), "root")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(child), "root")).toBeUndefined();
 	});
 
 	it("links nothing a manager has open but no subagent work names, nothing closed, and nothing too deep", () => {
@@ -69,9 +86,9 @@ describe("subagent work links", () => {
 		link(root, job, "job");
 		link(root, closed);
 		closed.closed = true;
-		expect(linkedSubagentConversation(asHosted(root), "unlinked")).toBeUndefined();
-		expect(linkedSubagentConversation(asHosted(root), "job-child")).toBeUndefined();
-		expect(linkedSubagentConversation(asHosted(root), "closed")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(root), "unlinked")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(root), "job-child")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(root), "closed")).toBeUndefined();
 
 		let tip = root;
 		for (let depth = 1; depth <= 9; depth += 1) {
@@ -79,8 +96,30 @@ describe("subagent work links", () => {
 			link(tip, next);
 			tip = next;
 		}
-		expect(linkedSubagentConversation(asHosted(root), "depth-8")?.id).toBe("depth-8");
-		expect(linkedSubagentConversation(asHosted(root), "depth-9")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(root), "depth-8")?.id).toBe("depth-8");
+		expect(linkedChildConversation(asHosted(root), "depth-9")).toBeUndefined();
+	});
+
+	it("finds the pass a review runs in now, and no earlier pass or pass no review names", () => {
+		const root = conversation("root");
+		const child = conversation("child");
+		link(root, child);
+		const first = conversation("pass-1");
+		const second = conversation("pass-2");
+		reviewIn(root, "review-1", first);
+		expect(linkedChildConversation(asHosted(root), "pass-1")?.id).toBe("pass-1");
+		// The review moved on: its earlier pass, though still open, is not linked.
+		reviewIn(root, "review-1", second);
+		expect(linkedChildConversation(asHosted(root), "pass-1")).toBeUndefined();
+		expect(linkedChildConversation(asHosted(root), "pass-2")?.id).toBe("pass-2");
+		// A child's reviews link their passes too; a pass open but named by no review does not link.
+		const nested = conversation("nested-pass");
+		reviewIn(child, "review-2", nested);
+		expect(linkedChildConversation(asHosted(root), "nested-pass")?.id).toBe("nested-pass");
+		root.passes.set("stray", conversation("stray"));
+		expect(linkedChildConversation(asHosted(root), "stray")).toBeUndefined();
+		second.closed = true;
+		expect(linkedChildConversation(asHosted(root), "pass-2")).toBeUndefined();
 	});
 
 	it("lets a remote profile read only the children its bound conversation links", () => {

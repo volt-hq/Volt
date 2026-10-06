@@ -51,7 +51,7 @@ export type ProjectedLogOp =
 			awaiting: boolean;
 			parent: number | null;
 	  }
-	| { kind: "work_checkpoint"; pick: number; cancelling: boolean; progress: boolean }
+	| { kind: "work_checkpoint"; pick: number; cancelling: boolean; progress: boolean; child: boolean }
 	| { kind: "work_finish"; pick: number; outcome: number; result: boolean };
 
 const text = fc.string({ maxLength: 8 });
@@ -116,6 +116,7 @@ const opArbitrary: fc.Arbitrary<ProjectedLogOp> = fc.oneof(
 			pick,
 			cancelling: fc.boolean(),
 			progress: fc.boolean(),
+			child: fc.boolean(),
 		}),
 	},
 	{
@@ -529,6 +530,8 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 				if (!item) break;
 				const state = op.cancelling ? ("cancelling" as const) : item.state === "cancelling" ? undefined : "running";
 				const progress = op.progress ? { text: `step ${ordinal}`, value: 1, max: 2 } : undefined;
+				// A review's next pass: the conversation the work runs in from now on.
+				const child = op.child ? { conversation: `pass-${ordinal}` } : undefined;
 				append({
 					parentId: leafId,
 					type: "work_checkpoint",
@@ -536,12 +539,14 @@ export function buildProjectedLog(ops: readonly ProjectedLogOp[], forked: boolea
 						workId: item.workId,
 						...(state === undefined ? {} : { state }),
 						...(progress === undefined ? {} : { progress }),
+						...(child === undefined ? {} : { child }),
 					},
 				});
 				work.set(item.workId, {
 					...item,
 					...(state === undefined ? {} : { state }),
 					...(progress === undefined ? {} : { progress }),
+					...(child === undefined ? {} : { child }),
 					updatedOrdinal: ordinal,
 				});
 				break;

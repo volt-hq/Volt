@@ -61,6 +61,7 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { ReviewPasses } from "./review-passes.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
 import { SessionClientInputs, type WithdrawnInput } from "./session/client-inputs.ts";
@@ -462,6 +463,12 @@ export class AgentSession {
 	});
 	/** Host actions (an LSP server install) wait in the live state for a client's approval, then run as `host_action` work. */
 	private readonly _hostActions = new SessionHostActions({ liveState: this.liveState, work: () => this._work });
+	/**
+	 * The conversations this session's review passes run in while they run:
+	 * the `child` its `review` work links. Closing the session's work closes
+	 * any left.
+	 */
+	readonly reviewPasses = new ReviewPasses();
 	/** The work kinds the extensions declare, registered while their runner generation is current. */
 	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
 	/**
@@ -1357,7 +1364,14 @@ export class AgentSession {
 				// Pending dialogs and approvals end; nothing more reaches the clients.
 				this.liveState.close();
 			},
-			closeWork: () => this._work.cancelAll("closed"),
+			closeWork: async () => {
+				try {
+					await this._work.cancelAll("closed");
+				} finally {
+					// A review's executor closes its pass as it stops; one it left behind closes here.
+					await this.reviewPasses.closeAll();
+				}
+			},
 			settleLiveClientInputs: () => this._clientInputs.settleOnDisposal(),
 			stopToolServers: () => this._tools.stopServers(),
 			drainAdmittedWork: (includePromptWork) => this._drainAdmittedWork(includePromptWork),

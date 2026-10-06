@@ -8,6 +8,7 @@ import {
 	LOG_ENTRY_ENVELOPE_KEYS,
 	LOG_ENTRY_ID_MAX_CHARS,
 	type LogEntryType,
+	type WorkCheckpointEntryPayload,
 	type WorkStartedEntryPayload,
 } from "@hansjm10/volt-protocol/entries";
 import { RpcGitContextSchema } from "@hansjm10/volt-protocol/git-context";
@@ -365,7 +366,10 @@ function validateWorkEntry(entry: Record<string, unknown>, type: WorkEntryPayloa
 	const bounds = workPayloadBoundsError({ type, payload } as WorkEntryPayload);
 	if (bounds !== undefined) fail("$", bounds);
 	// A child's locator names the conversation the work runs in.
-	const child = type === "work_started" ? (payload as WorkStartedEntryPayload).child : undefined;
+	const child =
+		type === "work_started" || type === "work_checkpoint"
+			? (payload as WorkStartedEntryPayload | WorkCheckpointEntryPayload).child
+			: undefined;
 	if (child?.ref !== undefined && child.ref.sessionId !== child.conversation) {
 		fail("$.child.ref.sessionId", "must match child.conversation");
 	}

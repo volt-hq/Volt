@@ -14,6 +14,7 @@ import { createFauxProvider, type FauxResponseFactory, fauxAssistantMessage } fr
 import { type HostFrame, type IntentDescriptor, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, test, vi } from "vitest";
 import { createLoopbackClient, ProtocolClient } from "../src/client/protocol-client.ts";
+import { githubCliCodeHostProvider } from "../src/core/code-host/index.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { localProfile } from "../src/core/protocol/profiles.ts";
 import { serveConnection } from "../src/core/protocol/server/connection.ts";
@@ -226,6 +227,7 @@ describe("protocol client of an in-process host", () => {
 			"effort",
 			"includeOptional",
 			"scopeMode",
+			"tools",
 		]);
 
 		await client.prompt("long running");
@@ -427,6 +429,57 @@ describe("protocol client of an in-process host", () => {
 		await expect(
 			visitor.query("intent_completions", { intent: "review_branch", field: "base", prefix: "" }),
 		).resolves.toEqual({ completions: [] });
+	});
+
+	it("completes the review_commit ref from recent commits and the review_pr number from the branch's pull request", async () => {
+		const harness = await createHostHarness();
+		cleanups.push(() => harness.cleanup());
+		const repo = tempDir("volt-intent-commits-");
+		git(repo, "init", "--initial-branch=main");
+		git(repo, "config", "user.email", "test@example.com");
+		git(repo, "config", "user.name", "Test");
+		git(repo, "config", "commit.gpgsign", "false");
+		writeFileSync(join(repo, "file.txt"), "one\n");
+		git(repo, "add", "file.txt");
+		git(repo, "commit", "-m", "first change");
+		writeFileSync(join(repo, "file.txt"), "two\n");
+		git(repo, "commit", "-am", "second change");
+		const [second, first] = execFileSync("git", ["log", "--pretty=format:%h"], { cwd: repo, encoding: "utf8" }).split(
+			"\n",
+		);
+		const probe = vi.spyOn(githubCliCodeHostProvider, "probeCurrentPullRequest").mockResolvedValue({
+			number: 243,
+			title: "Compact\nwidth UI",
+			url: "https://example.test/pull/243",
+		});
+		const opened = await harness.host.open({
+			kind: "adopt",
+			sessionManager: await SessionManager.create(repo, join(harness.tempDir, "sessions")),
+		});
+		if (opened.cancelled) throw new Error("A startup open cannot be cancelled");
+		const client = await connect(harness, opened.conversation);
+		const complete = (intent: string, field: string, prefix: string) =>
+			client.query("intent_completions", { intent, field, prefix });
+
+		await expect(complete("review_commit", "ref", "")).resolves.toEqual({
+			completions: [
+				{ value: second, label: "second change", description: expect.any(String) },
+				{ value: first, label: "first change", description: expect.any(String) },
+			],
+		});
+		await expect(complete("review_commit", "ref", first!.toUpperCase())).resolves.toMatchObject({
+			completions: [{ value: first }],
+		});
+		await expect(complete("review_pr", "number", "")).resolves.toEqual({
+			completions: [{ value: "243", label: "#243 Compact width UI", description: "Current branch" }],
+		});
+		await expect(complete("review_pr", "number", "24")).resolves.toMatchObject({ completions: [{ value: "243" }] });
+		await expect(complete("review_pr", "number", "9")).resolves.toEqual({ completions: [] });
+		// Completing as the user types probes the code host once, not per keystroke.
+		expect(probe).toHaveBeenCalledTimes(1);
+		const { intents } = await client.query("intents");
+		expect(intents.find((intent) => intent.name === "review_commit")?.completions).toEqual(["ref"]);
+		expect(intents.find((intent) => intent.name === "review_pr")?.completions).toEqual(["number"]);
 	});
 
 	it("asks the attaching client a dialog an extension opens from session_start before the client is ready", async () => {
