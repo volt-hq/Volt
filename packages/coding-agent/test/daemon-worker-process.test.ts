@@ -144,12 +144,17 @@ describe("conversation workers as processes", () => {
 			if (!killed) throw new Error("No worker");
 			process.kill(killed.pid, "SIGKILL");
 			await vi.waitFor(async () => expect((await harness.status()).workers).toEqual([]), { timeout: 30_000 });
-			expect(harness.audit()).toContainEqual(
-				expect.objectContaining({
-					type: "worker_exited",
-					success: false,
-					details: expect.objectContaining({ workerId: killed.workerId, reason: "crashed" }),
-				}),
+			// The exit's audit entry is appended asynchronously after the registry drops the worker.
+			await vi.waitFor(
+				() =>
+					expect(harness.audit()).toContainEqual(
+						expect.objectContaining({
+							type: "worker_exited",
+							success: false,
+							details: expect.objectContaining({ workerId: killed.workerId, reason: "crashed" }),
+						}),
+					),
+				{ timeout: 10_000 },
 			);
 			expect(await lockIsFree(ref)).toBe(true);
 
