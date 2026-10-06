@@ -1,8 +1,8 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
-import { type Component, setKeybindings, TuiMainScreen } from "@hansjm10/volt-tui";
+import { type Component, setKeybindings, type TuiMainScreen } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
+import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type * as PlanHandoff from "../../../src/core/host/plan-handoff.ts";
 import { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import type { PlanState } from "../../../src/core/planning.ts";
@@ -10,10 +10,8 @@ import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../../../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsComponent } from "../../../src/modes/interactive/components/plan-status.ts";
-import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { adoptTestSession } from "../../utilities/host-client.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import type { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { createTuiHarness, type TuiHarness } from "../tui-harness.ts";
 
 const executePlan = vi.hoisted(() => vi.fn());
 vi.mock("../../../src/core/host/plan-handoff.ts", async (importOriginal) => ({
@@ -33,12 +31,12 @@ interface ModeControl {
 	setupKeyHandlers(): void;
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
-	subscribeToAgent(session: Harness["session"]): void;
 	refreshPlanningUi(): void;
 }
 
 interface Fixture {
-	harness: Harness;
+	harness: TuiHarness;
+	session: AgentSession;
 	mode: InteractiveMode;
 	control: ModeControl;
 	terminal: VirtualTerminal;
@@ -61,10 +59,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 	const fixtures: Fixture[] = [];
 
 	afterEach(async () => {
-		for (const fixture of fixtures.splice(0)) {
-			fixture.mode.stop("resume-hint");
-			await fixture.harness.cleanupAsync();
-		}
+		for (const fixture of fixtures.splice(0)) await fixture.harness.cleanup();
 		stopThemeWatcher();
 		vi.restoreAllMocks();
 		vi.unstubAllEnvs();
@@ -72,66 +67,48 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 	});
 
 	async function createFixture(columns: number, rows: number): Promise<Fixture> {
-		const harness = await createHarness({ settings: { theme: "dark", retry: { enabled: false } } });
-		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		await harness.session.setAgentMode("plan");
-		const draft = await harness.session.updatePlan({
+		const harness = await createTuiHarness({ globalSettings: { theme: "dark", retry: { enabled: false } } });
+		const session = harness.startup.session;
+		await session.setAgentMode("plan");
+		const draft = await session.updatePlan({
 			title: PLAN_TITLE,
 			summary: PLAN_SUMMARY,
 			steps: [{ text: "Apply the approved change" }],
 		});
 		executePlan.mockReset();
-		const { host, conversation } = adoptTestSession(
-			harness.session,
-			{ cwd: harness.tempDir, agentDir: harness.tempDir } as unknown as AgentSessionServices,
-			async () => {
-				throw new Error("not used");
-			},
-			{ extensionMode: "tui" },
-		);
-		const mode = new InteractiveMode(TuiHost.start({ host, conversation }));
-		const control = mode as unknown as ModeControl;
-		const terminal = new VirtualTerminal(columns, rows);
-		control.renderer = new TuiMainScreen(terminal, false, harness.tempDir);
-		control.activateView(control.conversationView, control.defaultEditor, false);
-		control.setupKeyHandlers();
-		control.setupPlanPaneInputRouting();
-		control.setupEditorSubmitHandler();
-		control.refreshPlanningUi();
-		control.renderer.start();
-		control.isInitialized = true;
-		control.subscribeToAgent(harness.session);
-		const fixture = { harness, mode, control, terminal, executePlan, draft };
+		const tui = await harness.startMode({ columns, rows });
+		const control = tui.mode as unknown as ModeControl;
+		const fixture = { harness, session, mode: tui.mode, control, terminal: tui.terminal, executePlan, draft };
 		fixtures.push(fixture);
 		return fixture;
 	}
 
 	/** Submit the draft while a run is still streaming, as submit_plan does, and hold the run open. */
-	async function submitDuringRun({ harness, draft }: Fixture): Promise<{ finish(): Promise<void> }> {
+	async function submitDuringRun({ harness, session, draft }: Fixture): Promise<{ finish(): Promise<void> }> {
 		const entered = deferred();
 		const release = deferred();
-		harness.setResponses([
+		harness.faux.setResponses([
 			async () => {
 				entered.resolve();
 				await release.promise;
 				return fauxAssistantMessage("Plan submitted for approval");
 			},
 		]);
-		const run = harness.session.prompt("Plan the change");
+		const run = session.prompt("Plan the change");
 		await entered.promise;
-		await harness.session.submitPlan({
+		await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: PLAN_TITLE,
 			summary: PLAN_SUMMARY,
 		});
-		expect(harness.session.isStreaming).toBe(true);
-		expect(harness.session.planningState.plan?.phase).toBe("ready");
+		expect(session.isStreaming).toBe(true);
+		expect(session.planningState.plan?.phase).toBe("ready");
 		return {
 			async finish() {
 				release.resolve();
 				await run;
-				await harness.session.waitForIdle();
+				await session.waitForIdle();
 			},
 		};
 	}
@@ -145,7 +122,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 
 	it("offers the chooser only after settlement and returns typing to the composer", async () => {
 		const fixture = await createFixture(120, 36);
-		const { control, terminal, harness } = fixture;
+		const { control, terminal, session } = fixture;
 		const run = await submitDuringRun(fixture);
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
@@ -171,7 +148,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		terminal.sendInput("\x1b[C");
 		terminal.sendInput("\x1b[C");
 		terminal.sendInput("\r");
-		await vi.waitFor(() => expect(harness.session.planningState.plan?.phase).toBe("draft"));
+		await vi.waitFor(() => expect(session.planningState.plan?.phase).toBe("draft"));
 		expect(control.planDetails).toBeUndefined();
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("keep this draft");
@@ -180,7 +157,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 
 	it("leaves a composer draft in control and keeps a persistent approval cue", async () => {
 		const fixture = await createFixture(120, 36);
-		const { control, terminal, harness } = fixture;
+		const { control, terminal, session } = fixture;
 		const run = await submitDuringRun(fixture);
 		terminal.sendInput("looks good");
 		await run.finish();
@@ -194,7 +171,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		terminal.sendInput("\r");
 		expect(control.pendingUserInputs).toEqual(["looks good"]);
 		expect(fixture.executePlan).not.toHaveBeenCalled();
-		expect(harness.session.planningState.plan?.phase).toBe("ready");
+		expect(session.planningState.plan?.phase).toBe("ready");
 	});
 
 	it("focuses the split inspector only after settlement and returns typing to the composer", async () => {

@@ -75,10 +75,12 @@ interface FakeStorePackageManager {
 }
 
 interface InteractiveStoreMode {
-	conversation: {
-		session: {
-			settingsManager: InteractiveSettingsManager;
-			sessionManager: { getCwd(): string };
+	tuiHost: {
+		conversation: {
+			session: {
+				settingsManager: InteractiveSettingsManager;
+				sessionManager: { getCwd(): string };
+			};
 		};
 	};
 	loadStoreCatalog(required: boolean): Promise<StoreCatalog | undefined>;
@@ -128,10 +130,12 @@ function createInteractiveMode(packageManager: FakeStorePackageManager): Interac
 		getCwd: () => "/repo/project",
 	};
 	return Object.assign(Object.create(InteractiveMode.prototype) as InteractiveStoreMode, {
-		conversation: {
-			session: {
-				settingsManager,
-				sessionManager,
+		tuiHost: {
+			conversation: {
+				session: {
+					settingsManager,
+					sessionManager,
+				},
 			},
 		},
 		loadStoreCatalog: vi.fn(async () => storeCatalog),

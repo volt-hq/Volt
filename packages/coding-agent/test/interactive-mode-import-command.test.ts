@@ -27,12 +27,12 @@ type ImportCommandContext = {
 	loadingAnimation?: { stop: () => void };
 	statusContainer: { clear: () => void };
 	host: object;
-	client: object;
+	hostClient: object;
 	showError: (message: string) => void;
 	showStatus: (message: string) => void;
 	showExtensionConfirm: (title: string, message: string) => Promise<boolean>;
 	handleRuntimeSessionChange: () => Promise<void>;
-	renderCurrentSessionState: () => void;
+	showMovedConversation: () => Promise<void>;
 	handleFatalRuntimeError: (prefix: string, error: unknown) => Promise<never>;
 	promptForMissingSessionCwd: (error: unknown) => Promise<string | undefined>;
 	getPathCommandArgument: (text: string, command: PathCommand) => string | undefined;
@@ -77,12 +77,12 @@ describe("InteractiveMode /import parsing", () => {
 		const context: ImportCommandContext = {
 			statusContainer: { clear: vi.fn() },
 			host,
-			client,
+			hostClient: client,
 			showError,
 			showStatus,
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
-			renderCurrentSessionState: vi.fn(),
+			showMovedConversation: vi.fn(async () => {}),
 			handleFatalRuntimeError: vi.fn(async () => {
 				throw new Error("unexpected fatal error");
 			}),
@@ -110,12 +110,12 @@ describe("InteractiveMode /import parsing", () => {
 		const context: ImportCommandContext = {
 			statusContainer: { clear: vi.fn() },
 			host,
-			client,
+			hostClient: client,
 			showError,
 			showStatus,
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
-			renderCurrentSessionState: vi.fn(),
+			showMovedConversation: vi.fn(async () => {}),
 			handleFatalRuntimeError: vi.fn(async () => {
 				throw new Error("unexpected fatal error");
 			}),
@@ -142,12 +142,12 @@ describe("InteractiveMode /import parsing", () => {
 		const context: ImportCommandContext = {
 			statusContainer: { clear: vi.fn() },
 			host,
-			client,
+			hostClient: client,
 			showError,
 			showStatus,
 			showExtensionConfirm,
 			handleRuntimeSessionChange: vi.fn(async () => {}),
-			renderCurrentSessionState: vi.fn(),
+			showMovedConversation: vi.fn(async () => {}),
 			handleFatalRuntimeError,
 			promptForMissingSessionCwd: vi.fn(async () => undefined),
 			getPathCommandArgument: interactiveModePrototype.getPathCommandArgument,

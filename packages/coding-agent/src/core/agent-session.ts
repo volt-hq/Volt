@@ -104,18 +104,6 @@ import type { PlanStepInput } from "./tools/planning.ts";
 import { ExtensionKinds } from "./work/extension-kinds.ts";
 import { WorkRegistry } from "./work/registry.ts";
 
-// ============================================================================
-// Skill Block Parsing
-// ============================================================================
-
-/** Parsed skill block from a user message */
-export interface ParsedSkillBlock {
-	name: string;
-	location: string;
-	content: string;
-	userMessage: string | undefined;
-}
-
 export type CompactionReason = "manual" | "threshold" | "overflow";
 
 export interface ActiveAgentRun {
@@ -141,21 +129,6 @@ export interface AgentSessionQueuedMessage {
 /** A runtime message as providers see it: a client user message without its client input identity. */
 function withoutClientIdentity(message: AgentMessage): AgentMessage {
 	return message.role === "user" && "clientMessageId" in message ? withoutClientMessageId(message) : message;
-}
-
-/**
- * Parse a skill block from message text.
- * Returns null if the text doesn't contain a skill block.
- */
-export function parseSkillBlock(text: string): ParsedSkillBlock | null {
-	const match = text.match(/^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/);
-	if (!match) return null;
-	return {
-		name: match[1],
-		location: match[2],
-		content: match[3],
-		userMessage: match[4]?.trim() || undefined,
-	};
 }
 
 /** Session-specific events that extend the core AgentEvent */

@@ -1,16 +1,19 @@
 // Upstream Pi regression: https://github.com/earendil-works/pi/issues/4167
 
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage, ToolResultMessage, Usage } from "@hansjm10/volt-ai";
-import { Container, Text, type TUI } from "@hansjm10/volt-tui";
+import type { AssistantMessage, Usage } from "@hansjm10/volt-ai";
+import {
+	emptyLiveFold,
+	foldLiveItems,
+	type LiveFoldState,
+	type ProjectedEntry,
+	type ToolPresentation,
+} from "@hansjm10/volt-protocol";
+import { Container, type TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
-import type { SessionPresenters } from "../../../../src/core/session/presenters.ts";
-import { initTheme } from "../../../../src/core/theme/runtime.ts";
-import type { PresentedToolComponent } from "../../../../src/modes/interactive/components/presented-tool.ts";
-import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
+import { getMarkdownTheme, initTheme } from "../../../../src/core/theme/runtime.ts";
+import { TranscriptView } from "../../../../src/modes/interactive/client/transcript-view.ts";
+import type { TuiStore } from "../../../../src/modes/interactive/client/tui-store.ts";
 import { stripAnsi } from "../../../../src/utils/ansi.ts";
-import { builtinSessionPresenters } from "../../../utilities/test-presenters.ts";
 
 const TOOL_CALL_ID = "tool-4167";
 const TOOL_NAME = "slow_tool";
@@ -21,93 +24,13 @@ const EMPTY_USAGE: Usage = {
 	cacheRead: 0,
 	cacheWrite: 0,
 	totalTokens: 0,
-	cost: {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		total: 0,
-	},
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-type RenderSessionContextThis = {
-	pendingTools: Map<string, PresentedToolComponent>;
-	liveBackgroundJobTools: Map<string, { component: PresentedToolComponent; jobId?: string }>;
-	disposePendingTools(): void;
-	chatContainer: Container;
-	footer: { invalidate(): void };
-	ui: TUI;
-	settingsManager: {
-		getShowImages(): boolean;
-		getImageWidthCells(): number;
-	};
-	sessionManager: { getCwd(): string };
-	session: { retryAttempt: number; presenters: SessionPresenters };
-	toolOutputExpanded: boolean;
-	isInitialized: boolean;
-	updateEditorBorderColor(): void;
-	toolCallWork(toolCallId: string): [];
-	createToolRow(toolName: string, toolCallId: string, args: unknown, live: boolean): PresentedToolComponent;
-	addMessageToChat(message: AgentMessage, options?: { populateHistory?: boolean }): void;
-};
-
-type CreateToolRow = RenderSessionContextThis["createToolRow"];
-
-type RenderSessionContext = (
-	this: RenderSessionContextThis,
-	messages: readonly AgentMessage[],
-	options?: { updateFooter?: boolean; populateHistory?: boolean },
-) => void;
-
-type HandleEvent = (this: RenderSessionContextThis, event: AgentSessionEvent) => Promise<void>;
-
-function createFakeInteractiveModeThis(): RenderSessionContextThis {
-	const chatContainer = new Container();
-	return {
-		pendingTools: new Map<string, PresentedToolComponent>(),
-		liveBackgroundJobTools: new Map(),
-		disposePendingTools() {
-			for (const component of this.pendingTools.values()) {
-				component.dispose();
-			}
-			this.pendingTools.clear();
-		},
-		chatContainer,
-		footer: { invalidate: vi.fn() },
-		ui: { requestRender: vi.fn() } as unknown as TUI,
-		settingsManager: {
-			getShowImages: () => false,
-			getImageWidthCells: () => 60,
-		},
-		sessionManager: { getCwd: () => process.cwd() },
-		session: { retryAttempt: 0, presenters: builtinSessionPresenters() },
-		toolOutputExpanded: false,
-		isInitialized: true,
-		updateEditorBorderColor: vi.fn(),
-		toolCallWork: () => [],
-		createToolRow(...args) {
-			return (InteractiveMode.prototype as unknown as { createToolRow: CreateToolRow }).createToolRow.apply(
-				this,
-				args,
-			);
-		},
-		addMessageToChat(message: AgentMessage) {
-			chatContainer.addChild(new Text(message.role, 0, 0));
-		},
-	};
-}
-
-function createAssistantToolCallMessage(): AssistantMessage {
-	return {
+function assistantEntry(): ProjectedEntry {
+	const message: AssistantMessage = {
 		role: "assistant",
-		content: [
-			{
-				type: "toolCall",
-				id: TOOL_CALL_ID,
-				name: TOOL_NAME,
-				arguments: { delayMs: 10_000 },
-			},
-		],
+		content: [{ type: "toolCall", id: TOOL_CALL_ID, name: TOOL_NAME, arguments: { delayMs: 10_000 } }],
 		api: "test-api",
 		provider: "test-provider",
 		model: "test-model",
@@ -115,63 +38,109 @@ function createAssistantToolCallMessage(): AssistantMessage {
 		stopReason: "toolUse",
 		timestamp: Date.now(),
 	};
-}
-
-function createToolResultMessage(text: string): ToolResultMessage {
 	return {
-		role: "toolResult",
-		toolCallId: TOOL_CALL_ID,
-		toolName: TOOL_NAME,
-		content: [{ type: "text", text }],
-		isError: false,
-		timestamp: Date.now(),
+		ordinal: 1,
+		id: "assistant",
+		parentId: null,
+		type: "message",
+		timestamp: "1970-01-01T00:00:00.000Z",
+		payload: { message },
 	};
 }
 
-function renderChat(container: Container): string {
-	return stripAnsi(container.render(120).lines.join("\n"));
+function toolResultEntry(text: string): ProjectedEntry {
+	const presentation: ToolPresentation = { title: TOOL_NAME, summary: [{ type: "text", key: "out", text }] };
+	return {
+		ordinal: 2,
+		id: "result",
+		parentId: "assistant",
+		type: "message",
+		timestamp: "1970-01-01T00:00:00.000Z",
+		payload: {
+			message: {
+				role: "toolResult",
+				toolCallId: TOOL_CALL_ID,
+				toolName: TOOL_NAME,
+				content: [{ type: "text", text }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		},
+		view: {
+			role: "tool",
+			text: `${TOOL_NAME} (completed)`,
+			truncated: false,
+			toolCallId: TOOL_CALL_ID,
+			toolName: TOOL_NAME,
+			status: "completed",
+			presentation,
+		},
+	};
 }
 
-describe("InteractiveMode.renderSessionContext", () => {
+/** A transcript view over a store the test sets: its transcript and live state. */
+function createView(transcript: ProjectedEntry[], live: LiveFoldState) {
+	const state = { transcript, live };
+	const store = {
+		transcript: () => state.transcript,
+		get live() {
+			return state.live;
+		},
+		phase: undefined,
+	} as unknown as TuiStore;
+	const container = new Container();
+	const view = new TranscriptView(store, container, {
+		ui: { requestRender: vi.fn() } as unknown as TUI,
+		markdownTheme: () => getMarkdownTheme(),
+		hideThinkingBlock: () => false,
+		toolsExpanded: () => false,
+		showImages: () => false,
+		imageWidthCells: () => 60,
+		toolCallWork: () => [],
+		takeLocalBashRow: () => undefined,
+		workNoticeShown: () => {},
+	});
+	const text = () => stripAnsi(container.render(120).lines.join("\n"));
+	return { state, view, text };
+}
+
+describe("the transcript drawn afresh while a call runs", () => {
 	beforeAll(() => {
 		initTheme("dark");
 	});
 
-	test("keeps unresolved rendered tool calls registered for live completion events", async () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const renderSessionContext = (
-			InteractiveMode.prototype as unknown as { renderSessionContext: RenderSessionContext }
-		).renderSessionContext;
-		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
+	test("keeps an unresolved call's row following it, and shows its result once it commits", () => {
+		const running = foldLiveItems(emptyLiveFold(1), [
+			{
+				type: "tool",
+				op: "start",
+				toolCallId: TOOL_CALL_ID,
+				toolName: TOOL_NAME,
+				presentation: { title: TOOL_NAME, activity: "waiting" },
+			},
+		]);
+		const { state, view, text } = createView([assistantEntry()], running);
+		view.show();
+		// Toggling the thinking blocks draws the transcript afresh while the call runs.
+		view.rebuild();
+		expect(text()).toContain("[running]");
 
-		renderSessionContext.call(fakeThis, [createAssistantToolCallMessage()]);
+		state.transcript = [assistantEntry(), toolResultEntry("FINAL_RESULT")];
+		state.live = emptyLiveFold(2);
+		view.sync();
 
-		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(true);
-
-		await handleEvent.call(fakeThis, {
-			type: "tool_execution_end",
-			toolCallId: TOOL_CALL_ID,
-			toolName: TOOL_NAME,
-			result: { content: [{ type: "text", text: "FINAL_RESULT" }] },
-			isError: false,
-		});
-
-		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(false);
-		expect(renderChat(fakeThis.chatContainer)).toContain("FINAL_RESULT");
+		const shown = text();
+		expect(shown).toContain("FINAL_RESULT");
+		expect(shown).toContain("[success]");
+		expect(shown).not.toContain("[running]");
+		expect(shown.split(TOOL_NAME).length - 1).toBe(1);
 	});
 
-	test("does not keep completed historical tool calls registered as pending", () => {
-		const fakeThis = createFakeInteractiveModeThis();
-		const renderSessionContext = (
-			InteractiveMode.prototype as unknown as { renderSessionContext: RenderSessionContext }
-		).renderSessionContext;
+	test("draws a completed historical call as done", () => {
+		const { view, text } = createView([assistantEntry(), toolResultEntry("HISTORICAL_RESULT")], emptyLiveFold(2));
+		view.show();
 
-		renderSessionContext.call(fakeThis, [
-			createAssistantToolCallMessage(),
-			createToolResultMessage("HISTORICAL_RESULT"),
-		]);
-
-		expect(fakeThis.pendingTools.size).toBe(0);
-		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");
+		expect(text()).toContain("HISTORICAL_RESULT");
+		expect(text()).toContain("[success]");
 	});
 });

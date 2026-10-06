@@ -27,9 +27,8 @@ const handleFastCommand = Reflect.get(InteractiveMode.prototype, "handleFastComm
 	text: string,
 ) => Promise<void>;
 
-const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
+const handleStatusEvent = Reflect.get(InteractiveMode.prototype, "handleStatusEvent") as (
 	this: {
-		isInitialized: boolean;
 		footer: { invalidate(): void };
 		ui: { requestRender(): void };
 	},
@@ -160,8 +159,8 @@ describe("InteractiveMode /fast command", () => {
 		const invalidate = vi.fn();
 		const requestRender = vi.fn();
 
-		await handleEvent.call(
-			{ isInitialized: true, footer: { invalidate }, ui: { requestRender } },
+		await handleStatusEvent.call(
+			{ footer: { invalidate }, ui: { requestRender } },
 			{ type: "fast_mode_changed", enabled: true },
 		);
 

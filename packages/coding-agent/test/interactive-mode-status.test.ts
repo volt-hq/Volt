@@ -433,7 +433,7 @@ describe("InteractiveMode.setToolsExpanded", () => {
 	});
 });
 
-describe("InteractiveMode.createExtensionSurface themes", () => {
+describe("InteractiveMode.terminalSurface themes", () => {
 	test("persists theme changes to settings manager", () => {
 		initTheme("dark");
 
@@ -450,7 +450,7 @@ describe("InteractiveMode.createExtensionSurface themes", () => {
 			ui: { requestRender: vi.fn() },
 		};
 
-		const surface = (InteractiveMode as any).prototype.createExtensionSurface.call(fakeThis);
+		const surface = (InteractiveMode as any).prototype.terminalSurface.call(fakeThis);
 		const result = surface.themes.setTheme("light");
 
 		expect(result.success).toBe(true);
@@ -472,7 +472,7 @@ describe("InteractiveMode.createExtensionSurface themes", () => {
 			ui: { requestRender: vi.fn() },
 		};
 
-		const surface = (InteractiveMode as any).prototype.createExtensionSurface.call(fakeThis);
+		const surface = (InteractiveMode as any).prototype.terminalSurface.call(fakeThis);
 		const result = surface.themes.setTheme("__missing_theme__");
 
 		expect(result.success).toBe(false);

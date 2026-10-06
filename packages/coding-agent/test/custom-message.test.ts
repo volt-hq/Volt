@@ -1,19 +1,17 @@
 import type { JsonValue } from "@hansjm10/volt-ai";
 import type { WorkNoticeDetails } from "@hansjm10/volt-protocol";
-import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, visibleWidth } from "@hansjm10/volt-tui";
+import { type Container, getKeybindings, setKeybindings, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
 import { SessionPresenters } from "../src/core/session/presenters.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { workNoticeOwnText } from "../src/core/ui/message-presenters.ts";
 import { HOST_UI_POLICY } from "../src/core/ui/presentation.ts";
 import type { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
-import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
-import { builtinSessionPresenters, presentedMessage } from "./utilities/test-presenters.ts";
+import { createTuiHarness } from "./suite/tui-harness.ts";
+import { presentedMessage } from "./utilities/test-presenters.ts";
 
 const reviewSummary = [
 	"**Review · PR #346 · eec0db3c22ef**",
@@ -256,66 +254,44 @@ describe("custom messages in the transcript", () => {
 		"retains review metadata and global expansion through %s transcript reconstruction",
 		async (tuiMode) => {
 			const message = createReviewMessage();
-			const sessionManager = SessionManager.inMemory();
-			await sessionManager.logWriter.appendCustomMessageEntry(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-			);
-			const transcript = new Container();
-			const terminal = new VirtualTerminal(80, 24);
-			const ui = createInteractiveTui({ tuiMode, terminal, showHardwareCursor: false, logDirectory: "/tmp" });
-			ui.addChild(transcript);
-			if (isViewportTUI(ui)) ui.setLayoutRoot(new ScrollView(transcript, { follow: "end", primary: true }));
-			const mode = Object.assign(Object.create(InteractiveMode.prototype) as object, {
-				conversation: {
-					session: {
-						sessionManager,
-						get messages() {
-							return [...sessionManager.getConversationState().context.messages];
-						},
-						presenters: builtinSessionPresenters(),
-						settingsManager: { getCodeBlockIndent: () => "  ", isProjectTrusted: () => true },
-					},
-				},
-				chatContainer: transcript,
-				pendingTools: new Map(),
-				liveBackgroundJobTools: new Map(),
-				toolOutputExpanded: false,
-				footer: { invalidate: () => undefined },
-				updateEditorBorderColor: () => undefined,
-				ui,
-			}) as unknown as InteractiveMode;
-			const setToolsExpanded = Reflect.get(InteractiveMode.prototype, "setToolsExpanded") as (
-				this: InteractiveMode,
-				expanded: boolean,
-			) => void;
-			mode.renderInitialMessages();
-			ui.start();
+			const harness = await createTuiHarness({
+				globalSettings: { theme: "dark", quietStartup: true, lsp: { enabled: false } },
+			});
 			try {
-				await terminal.waitForRender();
-				expect(terminal.getViewport().join("\n")).toContain("Review · PR #346");
-				expect(terminal.getViewport().join("\n")).not.toContain("Coverage evidence");
-				const collapsed = ui.render(80).lines.map(stripAnsi);
+				await harness.startup.session.sessionWriter.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+				);
+				const tui = await harness.startMode({ tuiMode, columns: 80, rows: 24 });
+				const access = tui.mode as unknown as {
+					chatContainer: Container;
+					transcript: { rebuild(): void };
+					setToolsExpanded(expanded: boolean): void;
+				};
+				const chat = () => access.chatContainer.render(80).lines.map(stripAnsi);
+				await tui.terminal.waitForRender();
+				expect(tui.screen()).toContain("Review · PR #346");
+				expect(tui.screen()).not.toContain("Coverage evidence");
+				const collapsed = chat();
 				expect(collapsed.length).toBeLessThanOrEqual(10);
 
-				setToolsExpanded.call(mode, true);
-				const expanded = ui.render(80).lines.map(stripAnsi);
+				access.setToolsExpanded(true);
+				const expanded = chat();
 				expect(expanded.join("\n")).toContain(retainedHunks.at(-1));
-				transcript.clear();
-				mode.renderInitialMessages();
-				expect(ui.render(80).lines.map(stripAnsi)).toEqual(expanded);
+				access.transcript.rebuild();
+				expect(chat()).toEqual(expanded);
 
-				setToolsExpanded.call(mode, false);
-				transcript.clear();
-				mode.renderInitialMessages();
-				expect(ui.render(80).lines.map(stripAnsi)).toEqual(collapsed);
-				await terminal.waitForRender();
-				expect(terminal.getViewport().join("\n")).toContain("ctrl+o to expand");
-				expect(terminal.getViewport().join("\n")).not.toContain("Coverage evidence");
+				access.setToolsExpanded(false);
+				access.transcript.rebuild();
+				expect(chat()).toEqual(collapsed);
+				tui.ui.requestRender();
+				await tui.terminal.waitForRender();
+				expect(tui.screen()).toContain("ctrl+o to expand");
+				expect(tui.screen()).not.toContain("Coverage evidence");
 			} finally {
-				ui.stop({ preserveScreen: true });
+				await harness.cleanup();
 			}
 		},
 	);

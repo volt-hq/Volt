@@ -1,47 +1,21 @@
-import { existsSync, mkdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
-import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import type { Component, TUI } from "@hansjm10/volt-tui";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import type { TUI } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
+import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
-import {
-	createAgentSessionFromServices,
-	createAgentSessionServices,
-} from "../../../src/core/agent-session-services.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../../../src/core/host/targets.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
-import type { ExtensionAPI, ExtensionFactory } from "../../../src/index.ts";
+import type { ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
-import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
-import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
-import { openTestHost, type TestHost } from "../../utilities/host-client.ts";
-import { testExtension } from "../../utilities.ts";
 import { getMessageText } from "../harness.ts";
+import { createTuiHarness } from "../tui-harness.ts";
 
-type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type InteractiveAccess = {
-	renderer: ReturnType<typeof createInteractiveTui>;
 	ui: TUI;
 	editor: CustomEditor;
-	conversationView: View;
-	activeView: View;
-	isInitialized: boolean;
-	setupKeyHandlers(): void;
-	setupPlanPaneInputRouting(): void;
-	setupEditorSubmitHandler(): void;
-	renderWidgets(): void;
-	client: HostClient;
-	showSessionExtensions(session: AgentSession): void;
-	subscribeToAgent(session: AgentSession): void;
-	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
 };
 
@@ -57,82 +31,6 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 			await cleanups.pop()?.();
 		}
 	});
-
-	/** Open a conversation over the faux provider in a host of its own, with no client attached yet. */
-	async function openConversationForTest(responses: string[], options: { extensionFactory?: ExtensionFactory } = {}) {
-		const tempDir = join(tmpdir(), `volt-536-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-		mkdirSync(tempDir, { recursive: true });
-
-		const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
-		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
-		const authStorage = AuthStorage.inMemory();
-		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
-
-		const createRuntime: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-			const services = await createAgentSessionServices({
-				cwd,
-				agentDir: tempDir,
-				authStorage,
-				resourceLoaderOptions: {
-					extensionFactories: [
-						testExtension(
-							"test-extension-1",
-							(volt: ExtensionAPI) => {
-								volt.registerProvider(faux.getModel().provider, {
-									baseUrl: faux.getModel().baseUrl,
-									apiKey: "faux-key",
-									api: faux.api,
-									// Interactive extension reset clears dynamic providers; rebind the
-									// same faux implementation as well as its model metadata.
-									streamSimple: faux.streamSimple,
-									models: faux.models.map((registeredModel) => ({
-										id: registeredModel.id,
-										name: registeredModel.name,
-										api: registeredModel.api,
-										reasoning: registeredModel.reasoning,
-										input: registeredModel.input,
-										cost: registeredModel.cost,
-										contextWindow: registeredModel.contextWindow,
-										maxTokens: registeredModel.maxTokens,
-									})),
-								});
-								options.extensionFactory?.(volt);
-							},
-							["providers"],
-						),
-					],
-					noSkills: true,
-					noPromptTemplates: true,
-					noThemes: true,
-				},
-			});
-			return {
-				...(await createAgentSessionFromServices({
-					services,
-					sessionManager,
-					sessionStartEvent,
-					model: faux.getModel(),
-				})),
-				services,
-				diagnostics: services.diagnostics,
-			};
-		};
-
-		const sessionManager = await SessionManager.create(tempDir);
-		const { host, conversation } = await openTestHost(createRuntime, {
-			cwd: sessionManager.getCwd(),
-			agentDir: tempDir,
-			sessionManager,
-		});
-
-		cleanups.push(async () => {
-			await host.dispose().catch(() => {});
-			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true, force: true });
-			}
-		});
-		return { host, conversation, faux, tempDir };
-	}
 
 	function requireSessionRef(session: AgentSession): SessionReference {
 		const sessionRef = session.sessionRef;
@@ -161,34 +59,17 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		return terminal.getViewport().join("\n");
 	}
 
-	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
-	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
-		const { host, conversation, tempDir } = opened;
-		const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode: "regular" });
-		cleanups.push(() => mode.stop());
-		const access = mode as unknown as InteractiveAccess;
+	/** InteractiveMode as the client of a conversation over the faux provider, without the main input loop. */
+	async function startInteractiveMode(extensionFactory: ExtensionFactory) {
+		const harness = await createTuiHarness({ responses: [], extension: extensionFactory });
+		cleanups.push(() => harness.cleanup());
+		const tui = await harness.startMode({ columns: 140, rows: 30 });
+		const access = tui.mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});
 		access.handleFatalRuntimeError = handleFatalRuntimeError;
 		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		cleanups.push(() => exit.mockRestore());
-		const terminal = new VirtualTerminal(140, 30);
-		access.renderer = createInteractiveTui({
-			tuiMode: "regular",
-			showHardwareCursor: false,
-			logDirectory: tempDir,
-			terminal,
-		});
-		access.renderWidgets();
-		access.setupKeyHandlers();
-		access.setupPlanPaneInputRouting();
-		access.setupEditorSubmitHandler();
-		access.activateView(access.conversationView, access.editor, false);
-		access.isInitialized = true;
-		access.ui.start();
-		await host.attach(access.client, conversation);
-		access.showSessionExtensions(conversation.session);
-		access.subscribeToAgent(conversation.session);
-		return { access, terminal, handleFatalRuntimeError, exit };
+		return { harness, access, terminal: tui.terminal, handleFatalRuntimeError, exit };
 	}
 
 	it.each([
@@ -218,12 +99,12 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 					},
 				});
 			};
-			const opened = await openConversationForTest([], { extensionFactory });
+			const { harness, access, terminal, handleFatalRuntimeError, exit } =
+				await startInteractiveMode(extensionFactory);
 			// Also releases the tool on a failed assertion so test teardown cannot hang.
 			cleanups.push(() => result.resolve({ content: [{ type: "text", text: "cleanup" }] }));
-			const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(opened);
-			opened.faux.setResponses([fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" })]);
-			const staleSession = opened.conversation.session;
+			harness.faux.setResponses([fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" })]);
+			const staleSession = harness.startup.session;
 			const sessionRef = requireSessionRef(staleSession);
 			const prompt = Promise.allSettled([staleSession.prompt("start")]);
 			const signal = await started.promise;

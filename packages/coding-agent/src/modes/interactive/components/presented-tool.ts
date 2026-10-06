@@ -1,28 +1,28 @@
 /**
- * A tool call in the TUI transcript drawn from its presentation (RFC §8.3,
- * Q9): the generic tool card around what the call's presenter returns for
- * its arguments, state, and result. The TUI hosts the conversation in
- * process, so it presents calls itself from the session's presenters; until
- * it becomes a client of the host (Phase 6) it does not read the live lane.
+ * A tool call the TUI presents itself from presenters in its own process:
+ * the review workflow's inline view of its pass sessions, which run in the
+ * TUI's process until that view reads the review's hosted pass conversation
+ * (Phase 6). The transcript's rows draw what the host presented instead
+ * (tool-call-row.ts).
  *
  * Streaming arguments and partial results present again at most every
  * {@link STREAMING_RENDER_INTERVAL_MS}; a running call's elapsed time ticks
- * every second. Work the call started (a background job) shows live under it.
+ * every second.
  */
 
 import type { ImageContent, TextContent } from "@hansjm10/volt-ai";
-import { PRESENTATION_MAX_SERIALIZED_BYTES, type ToolPresentation } from "@hansjm10/volt-protocol";
-import { type Component, createRenderFrame, getCapabilities, type RenderFrame, type TUI } from "@hansjm10/volt-tui";
+import { PRESENTATION_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
+import type { Component, RenderFrame, TUI } from "@hansjm10/volt-tui";
 import {
 	type PresenterSet,
 	presentToolCall,
 	type ToolPresentInput,
 	type ToolPresentResult,
 } from "../../../core/ui/presentation.ts";
-import { convertToPng } from "../../../utils/image-convert.ts";
 import type { UiIntentSink } from "../ui-node/intents.ts";
-import { ToolCard, type ToolCardImage, type ToolCardState, type ToolCardWork } from "../ui-node/tool-card.ts";
+import type { ToolCardState, ToolCardWork } from "../ui-node/tool-card.ts";
 import { StreamingRenderCoalescer } from "./streaming-render-coalescer.ts";
+import { ToolCallRow } from "./tool-call-row.ts";
 
 export interface PresentedToolOptions {
 	readonly showImages?: boolean;
@@ -34,8 +34,6 @@ export interface PresentedToolOptions {
 	/** Where the presentation's actions send their intents. */
 	readonly intents?: UiIntentSink;
 }
-
-const IMAGE_MIME_TYPES: ReadonlySet<string> = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -53,37 +51,22 @@ function resultContent(content: ReadonlyArray<{ type: string; text?: string; dat
 }
 
 /**
- * One tool call drawn from its presentation. The call presents with the
- * presenters `presenters()` returns when it presents: after extensions are
- * enabled or disabled, `refreshPresentation()` presents it again, so a
- * disabled extension's presenter no longer draws it.
+ * One tool call presented with the presenters `presenters()` returns when it
+ * presents: after extensions are enabled or disabled,
+ * `refreshPresentation()` presents it again, so a disabled extension's
+ * presenter no longer draws it.
  */
 export class PresentedToolComponent implements Component {
 	private readonly toolName: string;
 	private readonly presenters: () => PresenterSet;
-	private readonly ui: TUI;
 	private readonly cwd: string;
-	private readonly options: PresentedToolOptions;
 	private args: Record<string, unknown>;
 	private argsComplete = false;
 	private executionStarted = false;
 	private result: ToolPresentResult | undefined;
-	private expanded = false;
-	private showImages: boolean;
-	private imageWidthCells: number;
-	private startedAt: number | undefined;
-	private endedAt: number | undefined;
-	private presentation: ToolPresentation | undefined;
-	private card: ToolCard;
-	/** PNG versions of the result's other images, for terminals that place PNG only, by source data. */
-	private readonly converted = new Map<string, ToolCardImage>();
-	private ticker: ReturnType<typeof setInterval> | undefined;
+	private readonly row: ToolCallRow;
 	private disposed = false;
-	private readonly coalescer = new StreamingRenderCoalescer<void>(() => {
-		this.present();
-		this.sync();
-		this.ui.requestRender();
-	});
+	private readonly coalescer: StreamingRenderCoalescer<void>;
 
 	constructor(
 		toolName: string,
@@ -96,22 +79,19 @@ export class PresentedToolComponent implements Component {
 		this.toolName = toolName;
 		this.args = isRecord(args) ? args : {};
 		this.presenters = presenters;
-		this.ui = ui;
 		this.cwd = cwd;
-		this.options = options;
-		this.showImages = options.showImages ?? true;
-		this.imageWidthCells = options.imageWidthCells ?? 60;
+		this.row = new ToolCallRow(toolName, ui, {
+			...(options.showImages === undefined ? {} : { showImages: options.showImages }),
+			...(options.imageWidthCells === undefined ? {} : { imageWidthCells: options.imageWidthCells }),
+			timed: options.liveProgress === true,
+			...(options.work === undefined ? {} : { work: options.work }),
+			...(options.intents === undefined ? {} : { intents: options.intents }),
+		});
+		this.coalescer = new StreamingRenderCoalescer<void>(() => {
+			this.present();
+			ui.requestRender();
+		});
 		this.present();
-		this.card = this.createCard();
-		if (options.liveProgress) {
-			this.ticker = setInterval(() => {
-				if (this.startedAt !== undefined && this.endedAt === undefined) {
-					this.sync();
-					this.ui.requestRender();
-				}
-			}, 1000);
-			this.ticker.unref?.();
-		}
 	}
 
 	updateArgs(args: unknown): void {
@@ -122,7 +102,6 @@ export class PresentedToolComponent implements Component {
 	}
 
 	markExecutionStarted(): void {
-		if (this.options.liveProgress) this.startedAt ??= Date.now();
 		this.executionStarted = true;
 		this.coalescer.commitNow();
 	}
@@ -149,63 +128,44 @@ export class PresentedToolComponent implements Component {
 		};
 		if (!isPartial) {
 			this.argsComplete = true;
-			if (this.startedAt !== undefined) this.endedAt ??= Date.now();
-			this.stopTicker();
 			this.coalescer.commitNow();
-			this.convertImages();
 		} else {
 			this.coalescer.update();
 		}
 	}
 
 	setExpanded(expanded: boolean): void {
-		this.expanded = expanded;
-		this.sync();
+		this.row.setExpanded(expanded);
 	}
 
 	setShowImages(show: boolean): void {
-		if (this.showImages === show) return;
-		this.showImages = show;
-		this.replaceCard();
+		this.row.setShowImages(show);
 	}
 
 	setImageWidthCells(width: number): void {
-		const cells = Math.max(1, Math.floor(width));
-		if (this.imageWidthCells === cells) return;
-		this.imageWidthCells = cells;
-		this.replaceCard();
+		this.row.setImageWidthCells(width);
 	}
 
 	/** Present the call again with the presenters there are now: extensions were enabled or disabled. */
 	refreshPresentation(): void {
 		if (this.disposed) return;
 		this.present();
-		this.sync();
 	}
 
 	/** Re-read the call's work: its job changed. */
 	invalidate(): void {
-		this.card.invalidate();
-		this.sync();
+		this.row.invalidate();
 	}
 
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
 		this.coalescer.dispose();
-		this.stopTicker();
-		this.card.dispose();
-		this.converted.clear();
+		this.row.dispose();
 	}
 
 	render(width: number): RenderFrame {
-		if (this.disposed) return createRenderFrame([]);
-		return this.card.render(width);
-	}
-
-	private stopTicker(): void {
-		if (this.ticker !== undefined) clearInterval(this.ticker);
-		this.ticker = undefined;
+		return this.row.render(width);
 	}
 
 	private state(): ToolCardState {
@@ -214,6 +174,7 @@ export class PresentedToolComponent implements Component {
 	}
 
 	private present(): void {
+		if (this.disposed) return;
 		const state = this.state();
 		const input: ToolPresentInput = {
 			args: this.args,
@@ -222,78 +183,16 @@ export class PresentedToolComponent implements Component {
 			...(this.result === undefined ? {} : { result: this.result }),
 			cwd: this.cwd,
 		};
-		this.presentation = presentToolCall(
-			this.presenters().tool(this.toolName),
-			this.toolName,
-			input,
-			PRESENTATION_MAX_SERIALIZED_BYTES,
-		);
-	}
-
-	private createCard(): ToolCard {
-		return new ToolCard(this.props(), {
-			showImages: this.showImages,
-			imageWidthCells: this.imageWidthCells,
-			...(this.options.intents === undefined ? {} : { intents: this.options.intents }),
-		});
-	}
-
-	private replaceCard(): void {
-		if (this.disposed) return;
-		this.card.dispose();
-		this.card = this.createCard();
-	}
-
-	private sync(): void {
-		if (this.disposed) return;
-		this.card.setProps(this.props());
-	}
-
-	private props() {
-		const state = this.state();
-		const elapsedMs =
-			this.startedAt === undefined ? undefined : Math.max(0, (this.endedAt ?? Date.now()) - this.startedAt);
-		const work = this.options.work?.() ?? [];
-		return {
-			presentation: this.presentation ?? { title: this.toolName },
+		this.row.update({
+			presentation: presentToolCall(
+				this.presenters().tool(this.toolName),
+				this.toolName,
+				input,
+				PRESENTATION_MAX_SERIALIZED_BYTES,
+			),
 			state,
-			isError: state === "done" && this.result?.isError === true,
-			expanded: this.expanded,
-			...(elapsedMs === undefined ? {} : { elapsedMs }),
-			images: this.showImages ? this.images() : [],
-			...(work.length === 0 ? {} : { work }),
-		};
-	}
-
-	/** The result's images the terminal can show: other formats as PNG where it places PNG only. */
-	private images(): ToolCardImage[] {
-		if (this.result === undefined || this.result.partial) return [];
-		const pngOnly = getCapabilities().images === "kitty" || getCapabilities().images === "sixel";
-		return this.result.content.flatMap((block): ToolCardImage[] => {
-			if (block.type !== "image" || !IMAGE_MIME_TYPES.has(block.mimeType)) return [];
-			if (!pngOnly || block.mimeType === "image/png") {
-				return [{ data: block.data, mimeType: block.mimeType as ToolCardImage["mimeType"] }];
-			}
-			const png = this.converted.get(block.data);
-			return png === undefined ? [] : [png];
+			isError: this.result?.isError === true,
+			...(this.result === undefined || this.result.partial ? {} : { content: this.result.content }),
 		});
-	}
-
-	/** Convert the result's non-PNG images for terminals that place PNG only; each image converts once. */
-	private convertImages(): void {
-		const caps = getCapabilities();
-		if (caps.images !== "kitty" && caps.images !== "sixel") return;
-		for (const block of this.result?.content ?? []) {
-			if (block.type !== "image" || block.mimeType === "image/png" || this.converted.has(block.data)) continue;
-			const source = block.data;
-			void convertToPng(source, block.mimeType)
-				.then((converted) => {
-					if (!converted || this.disposed || converted.mimeType !== "image/png") return;
-					this.converted.set(source, { data: converted.data, mimeType: "image/png" });
-					this.sync();
-					this.ui.requestRender();
-				})
-				.catch(() => {});
-		}
 	}
 }

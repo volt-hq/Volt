@@ -3,14 +3,14 @@
  * process runs, its daemon leases, and the TUI's one client of it. Phase 7
  * lifts this seam into a conversation worker.
  *
- * The TUI's client attaches in process (`attach`) until it speaks the
- * protocol over a loopback connection (`connect`). Once the client shows its
- * conversation (`clientReady`), the host takes the conversation's daemon
- * lease, serves the phones relayed into it, follows the client's moves with
- * the lease, and recovers the conversation's durable queued input; a move
- * recovers the input of the conversation the client moved to. `dispose`
- * closes the conversation, disposes the host, then gives the lease back once
- * the relayed phones heard where to reconnect.
+ * The TUI's client speaks the protocol over a loopback connection
+ * (`connect`). Once the client shows its conversation (`clientReady`), the
+ * host takes the conversation's daemon lease, serves the phones relayed into
+ * it, follows the client's moves with the lease, and recovers the
+ * conversation's durable queued input; a move recovers the input of the
+ * conversation the client moved to. `dispose` closes the conversation,
+ * disposes the host, then gives the lease back once the relayed phones heard
+ * where to reconnect.
  */
 
 import type { HostRequestKind } from "@hansjm10/volt-protocol";
@@ -19,7 +19,7 @@ import type { ConversationHost } from "../../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../../core/host/hosted-conversation.ts";
 import type { HostClient } from "../../../core/host/targets.ts";
 import { localProfile } from "../../../core/protocol/profiles.ts";
-import { serveConnection } from "../../../core/protocol/server/connection.ts";
+import { type ServeConnectionOptions, serveConnection } from "../../../core/protocol/server/connection.ts";
 import { createLoopbackRpcTransportPair } from "../../../core/protocol/transport/loopback-transport.ts";
 import type { AcquireOutcome, DaemonLeases } from "./daemon-link.ts";
 
@@ -44,6 +44,10 @@ export interface TuiConnectOptions {
 	readonly onShutdownRequested?: () => void;
 	/** The conversation the client is on lost its log. */
 	readonly onLost?: (error: Error) => void;
+	/** Called with the client before it says hello, so the TUI observes its changes from the first. */
+	readonly onClient?: (client: LoopbackClient) => void;
+	/** What the TUI's terminal offers the conversation's extensions beyond the protocol: themes and the user-input dialog. */
+	readonly terminal?: ServeConnectionOptions["terminal"];
 }
 
 const NO_LEASE: AcquireOutcome = { kind: "noop" };
@@ -55,6 +59,7 @@ export class TuiHost {
 	private readonly modelScopePatterns: readonly string[] | undefined;
 	/** The conversation the TUI's client is attached to, if any. */
 	private clientConversation: (() => HostedConversation | undefined) | undefined;
+	private connectedClient: HostClient | undefined;
 	private shown: HostedConversation;
 	private ready: Promise<void> | undefined;
 	private disposing: Promise<void> | undefined;
@@ -81,11 +86,14 @@ export class TuiHost {
 		return this.shown;
 	}
 
-	/** Attach the TUI's client in process to the startup conversation; its surface binds the conversation's extensions. */
-	async attach(client: HostClient): Promise<void> {
-		if (this.clientConversation) throw new Error("The TUI host already has its client");
-		this.clientConversation = () => this.host.conversationOf(client);
-		await this.host.attach(client, this.startup);
+	/**
+	 * The TUI's client as the host knows it, once it connected. The TUI's
+	 * commands that still act in process (until the end of Phase 6) act as
+	 * this client, so the moves they make reach the client as `ended{moved}`.
+	 */
+	get hostClient(): HostClient {
+		if (!this.connectedClient) throw new Error("The TUI's client is not connected");
+		return this.connectedClient;
 	}
 
 	/**
@@ -112,8 +120,10 @@ export class TuiHost {
 				this.stopServing();
 				options.onLost?.(error);
 			},
+			...(options.terminal === undefined ? {} : { terminal: options.terminal }),
 		});
 		this.clientConversation = () => connection.conversation;
+		this.connectedClient = connection.client;
 		const client = new LoopbackClient(
 			{
 				name: "volt-tui",
@@ -123,6 +133,7 @@ export class TuiHost {
 			},
 			connection.closed,
 		);
+		options.onClient?.(client);
 		try {
 			await client.connect(pair.client);
 			await connection.ready;
@@ -130,7 +141,8 @@ export class TuiHost {
 			await client.stop();
 			throw error;
 		}
-		await this.clientReady();
+		// The daemon lease and recovered input never keep the TUI from starting.
+		await this.clientReady().catch(() => undefined);
 		return client;
 	}
 

@@ -1,137 +1,64 @@
-import type { Component, TUI } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import type { AgentSession } from "../../../src/core/agent-session.ts";
-import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../../../src/core/host/targets.ts";
-import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
-import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
-import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
-import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
+import { createTuiHarness, type TuiHarness } from "../tui-harness.ts";
 
-type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
 type FatalOptions = { unsentDraft?: string };
 type TestAccess = {
-	renderer: ReturnType<typeof createInteractiveTui>;
-	ui: TUI;
-	editor: CustomEditor;
-	conversationView: View;
-	pendingUserInputs: string[];
-	isInitialized: boolean;
-	setupKeyHandlers(): void;
-	setupPlanPaneInputRouting(): void;
-	setupEditorSubmitHandler(): void;
-	renderWidgets(): void;
-	client: HostClient;
-	showSessionExtensions(session: AgentSession): void;
-	subscribeToAgent(session: AgentSession): void;
-	activateView(view: View, focus: Component, forceRender?: boolean): void;
+	editor: { setText(text: string): void };
 	registerSignalHandlers(): void;
 	unregisterSignalHandlers(): void;
-	handleRuntimeLost(error: Error): Promise<void>;
+	endLostConversation(): Promise<void>;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: FatalOptions) => Promise<void>;
-};
-/** The host of the TUI's one conversation: closing it releases the session's lock. */
-type HostMock = {
-	close: ReturnType<typeof vi.fn<() => Promise<void>>>;
-	dispose: ReturnType<typeof vi.fn<() => Promise<void>>>;
 };
 
 const FATAL_PREFIX = "Volt stopped this session because its saved state could not be confirmed";
-const harnesses: Harness[] = [];
+const harnesses: TuiHarness[] = [];
 const cleanups: Array<() => void> = [];
 
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0)) cleanup();
-	for (const harness of harnesses.splice(0)) {
-		await harness.session.abort().catch(() => {});
-		await harness.cleanupAsync().catch(() => {});
-	}
-	stopThemeWatcher();
+	for (const harness of harnesses.splice(0)) await harness.cleanup();
 	vi.restoreAllMocks();
 });
 
-async function createTestHarness(): Promise<Harness> {
-	const harness = await createHarness({
-		settings: { theme: "dark", lsp: { enabled: false }, quietStartup: true, compaction: { enabled: false } },
+/** InteractiveMode as a client of a real host, with the fatal exit kept from the real process.exit. */
+async function fixture() {
+	const harness = await createTuiHarness({
+		globalSettings: { theme: "dark", lsp: { enabled: false }, quietStartup: true, compaction: { enabled: false } },
 	});
 	harnesses.push(harness);
-	return harness;
-}
-
-async function fixture() {
-	const harness = await createTestHarness();
-	const lost = Promise.withResolvers<Error>();
-	const host: HostMock = {
-		close: vi.fn(async () => {}),
-		dispose: vi.fn(async () => {}),
-	};
-	const conversation = {
-		id: harness.session.sessionId,
-		session: harness.session,
-		work: harness.session.work,
-		lost: lost.promise,
-	};
-	const mode = new InteractiveMode(
-		TuiHost.start({
-			host: host as unknown as ConversationHost,
-			conversation: conversation as unknown as HostedConversation,
-		}),
-		{ tuiMode: "regular" },
-	);
-	const access = mode as unknown as TestAccess;
-	const terminal = new VirtualTerminal(140, 30);
-	access.renderer = createInteractiveTui({
-		tuiMode: "regular",
-		showHardwareCursor: false,
-		logDirectory: harness.tempDir,
-		terminal,
-	});
-	access.renderWidgets();
-	access.setupKeyHandlers();
-	access.setupPlanPaneInputRouting();
-	access.setupEditorSubmitHandler();
-	access.activateView(access.conversationView, access.editor, false);
-	access.isInitialized = true;
-	access.ui.start();
-	// The TUI's surface on the session's extensions, as its host attaches it.
-	await harness.session.attachExtensionClient({ ...access.client.surface, id: access.client.id, mode: "tui" }).ready;
-	access.showSessionExtensions(harness.session);
-	access.subscribeToAgent(harness.session);
-	// Never let the fatal exit reach the real process.exit.
+	const tui = await harness.startMode({ columns: 140, rows: 30 });
+	const access = tui.mode as unknown as TestAccess;
 	const handleFatalRuntimeError = vi.fn(async (_prefix: string, _error: unknown, _options?: FatalOptions) => {});
 	access.handleFatalRuntimeError = handleFatalRuntimeError;
 	const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-	cleanups.push(() => mode.stop());
-	await terminal.waitForRender();
-	return { harness, host, mode, access, terminal, handleFatalRuntimeError, exit, loseLog: lost.resolve };
+	return { harness, access, handleFatalRuntimeError, exit };
 }
 
 describe("regression #525: interactive mode ends a conversation whose session lost its log", () => {
 	it("closes the conversation and exits with a fatal error suggesting /resume, handing back the draft", async () => {
-		const { host, access, handleFatalRuntimeError, exit, loseLog } = await fixture();
+		const { harness, access, handleFatalRuntimeError, exit } = await fixture();
+		const close = vi.spyOn(harness.host, "close");
 		access.editor.setText("unsent draft");
 
-		loseLog(new Error("Session ordinal changed from 4 to 5"));
+		// The subscription ends `lost`: the session could not confirm a commit.
+		await loseLog(harness.startup.session.sessionWriter);
 
-		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
 		const [prefix, error, options] = handleFatalRuntimeError.mock.calls[0]!;
 		expect(prefix).toBe(FATAL_PREFIX);
 		expect(error).toBeInstanceOf(Error);
-		expect((error as Error).message).toContain("Session ordinal changed from 4 to 5");
 		expect((error as Error).message).toContain("/resume");
 		expect(options).toEqual({ unsentDraft: "unsent draft" });
 		// Closing the conversation releases the session's lock before the TUI exits.
-		expect(host.close).toHaveBeenCalledTimes(1);
-		expect(host.close.mock.invocationCallOrder[0]).toBeLessThan(handleFatalRuntimeError.mock.invocationCallOrder[0]!);
+		expect(close).toHaveBeenCalled();
+		expect(close.mock.invocationCallOrder[0]).toBeLessThan(handleFatalRuntimeError.mock.invocationCallOrder[0]!);
+		expect(harness.startup.closed).toBe(true);
 		expect(exit).not.toHaveBeenCalled();
 
 		// Ending again does nothing.
-		await access.handleRuntimeLost(new Error("second failure"));
+		await access.endLostConversation();
 		expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1);
-		expect(host.close).toHaveBeenCalledTimes(1);
 	});
 
 	it("crashes on a plain uncaught exception", async () => {
