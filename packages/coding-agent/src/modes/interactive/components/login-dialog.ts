@@ -1,15 +1,42 @@
 import type { OAuthDeviceCodeInfo } from "@hansjm10/volt-ai/oauth";
-import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
+import {
+	Container,
+	type Focusable,
+	getKeybindings,
+	Input,
+	Spacer,
+	sanitizeText,
+	Text,
+	type TUI,
+} from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SecretInput } from "./secret-input.ts";
+
+/**
+ * A sign-in address the dialog may show and open: an http or https URL, as
+ * the URL parser writes it (control characters percent-encoded); undefined
+ * for anything else.
+ */
+export function signInUrl(url: string | undefined): string | undefined {
+	if (url === undefined) return undefined;
+	let parsed: URL;
+	try {
+		parsed = new URL(url);
+	} catch {
+		return undefined;
+	}
+	return parsed.protocol === "https:" || parsed.protocol === "http:" ? parsed.href : undefined;
+}
 
 /**
  * Login dialog component - replaces editor during OAuth login flow
  */
 export class LoginDialogComponent extends Container implements Focusable {
 	private contentContainer: Container;
+	/** The input of the prompt shown now: a new one per prompt, masked for a secret. */
 	private input: Input;
 	private tui: TUI;
 	private abortController = new AbortController();
@@ -39,7 +66,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.onComplete = onComplete;
 
 		const providerName = providerNameOverride || providerId;
-		const title = titleOverride ?? `Login to ${providerName}`;
+		const title = sanitizeText(titleOverride ?? `Login to ${providerName}`);
 
 		// Top border
 		this.addChild(new DynamicBorder());
@@ -51,20 +78,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.contentContainer = new Container();
 		this.addChild(this.contentContainer);
 
-		// Input (always present, used when needed)
-		this.input = new Input();
-		this.input.onSubmit = () => {
-			if (this.inputResolver) {
-				const value = this.input.getValue();
-				this.replaceInputWithSubmittedText(value);
-				this.inputResolver(value);
-				this.inputResolver = undefined;
-				this.inputRejecter = undefined;
-			}
-		};
-		this.input.onEscape = () => {
-			this.cancel();
-		};
+		this.input = this.createInput(false);
 
 		// Bottom border
 		this.addChild(new DynamicBorder());
@@ -74,10 +88,25 @@ export class LoginDialogComponent extends Container implements Focusable {
 		return this.abortController.signal;
 	}
 
-	private replaceInputWithSubmittedText(value: string): void {
-		this.contentContainer.children = this.contentContainer.children.map((child) =>
-			child === this.input ? new Text(`> ${value}`, 0, 0) : child,
-		);
+	/** An input for the next prompt; a secret's submitted value never shows. */
+	private createInput(secret: boolean): Input {
+		const input = secret ? new SecretInput() : new Input();
+		input.focused = this._focused;
+		input.onSubmit = () => {
+			if (this.inputResolver) {
+				const value = input.getValue();
+				this.contentContainer.children = this.contentContainer.children.map((child) =>
+					child === input ? new Text(secret ? "> (hidden)" : `> ${value}`, 0, 0) : child,
+				);
+				this.inputResolver(value);
+				this.inputResolver = undefined;
+				this.inputRejecter = undefined;
+			}
+		};
+		input.onEscape = () => {
+			this.cancel();
+		};
+		return input;
 	}
 
 	private cancel(): void {
@@ -91,41 +120,50 @@ export class LoginDialogComponent extends Container implements Focusable {
 	}
 
 	/**
-	 * Called by onAuth callback - show URL and optional instructions
+	 * Show a sign-in address and optional instructions; the address opens in
+	 * the browser unless `open` is false.
 	 */
-	showAuth(url: string, instructions?: string): void {
+	showAuth(url: string | undefined, instructions?: string, options: { open?: boolean } = {}): void {
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
-		const linkedUrl = `\x1b]8;;${url}\x07${url}\x1b]8;;\x07`;
-		this.contentContainer.addChild(new Text(theme.fg("accent", linkedUrl), 1, 0));
-
-		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
-		const hyperlink = `\x1b]8;;${url}\x07${clickHint}\x1b]8;;\x07`;
-		this.contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
+		const address = signInUrl(url);
+		this.showAddress(address);
 
 		if (instructions) {
 			this.contentContainer.addChild(new Spacer(1));
-			this.contentContainer.addChild(new Text(theme.fg("warning", instructions), 1, 0));
+			this.contentContainer.addChild(new Text(theme.fg("warning", sanitizeText(instructions)), 1, 0));
 		}
 
-		openBrowser(url);
+		// Only an http or https address opens: anything else could run a local program.
+		if (address !== undefined && options.open !== false) openBrowser(address);
 		this.tui.requestRender();
+	}
+
+	/** Show a sign-in address as a link, or that there is none to open. */
+	private showAddress(address: string | undefined): void {
+		if (address === undefined) {
+			this.contentContainer.addChild(
+				new Text(theme.fg("error", "The sign-in address is not an http or https URL."), 1, 0),
+			);
+			return;
+		}
+		const linkedUrl = `\x1b]8;;${address}\x07${address}\x1b]8;;\x07`;
+		this.contentContainer.addChild(new Text(theme.fg("accent", linkedUrl), 1, 0));
+
+		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
+		const hyperlink = `\x1b]8;;${address}\x07${clickHint}\x1b]8;;\x07`;
+		this.contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
 	}
 
 	/**
 	 * Called by onDeviceCode callback - show URL and user code.
 	 */
-	showDeviceCode(info: OAuthDeviceCodeInfo): void {
+	showDeviceCode(info: Pick<OAuthDeviceCodeInfo, "userCode"> & { verificationUri: string | undefined }): void {
 		this.contentContainer.clear();
 		this.contentContainer.addChild(new Spacer(1));
-		const linkedUrl = `\x1b]8;;${info.verificationUri}\x07${info.verificationUri}\x1b]8;;\x07`;
-		this.contentContainer.addChild(new Text(theme.fg("accent", linkedUrl), 1, 0));
-
-		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
-		const hyperlink = `\x1b]8;;${info.verificationUri}\x07${clickHint}\x1b]8;;\x07`;
-		this.contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
+		this.showAddress(signInUrl(info.verificationUri));
 		this.contentContainer.addChild(new Spacer(1));
-		this.contentContainer.addChild(new Text(theme.fg("warning", `Enter code: ${info.userCode}`), 1, 0));
+		this.contentContainer.addChild(new Text(theme.fg("warning", `Enter code: ${sanitizeText(info.userCode)}`), 1, 0));
 
 		this.tui.requestRender();
 	}
@@ -134,7 +172,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
 	showManualInput(prompt: string): Promise<string> {
-		this.input.setValue("");
+		this.input = this.createInput(false);
 		this.contentContainer.addChild(new Spacer(1));
 		this.contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
 		this.contentContainer.addChild(this.input);
@@ -151,11 +189,12 @@ export class LoginDialogComponent extends Container implements Focusable {
 	 * Called by onPrompt callback - show prompt and wait for input
 	 * Note: Does NOT clear content, appends to existing (preserves URL from showAuth)
 	 */
-	showPrompt(message: string, placeholder?: string): Promise<string> {
+	showPrompt(message: string, placeholder?: string, options?: { secret?: boolean }): Promise<string> {
+		this.input = this.createInput(options?.secret === true);
 		this.contentContainer.addChild(new Spacer(1));
-		this.contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
+		this.contentContainer.addChild(new Text(theme.fg("text", sanitizeText(message)), 1, 0));
 		if (placeholder) {
-			this.contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
+			this.contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${sanitizeText(placeholder)}`), 1, 0));
 		}
 		this.contentContainer.addChild(this.input);
 		this.contentContainer.addChild(
@@ -166,7 +205,6 @@ export class LoginDialogComponent extends Container implements Focusable {
 			),
 		);
 
-		this.input.setValue("");
 		this.tui.requestRender();
 
 		return new Promise((resolve, reject) => {

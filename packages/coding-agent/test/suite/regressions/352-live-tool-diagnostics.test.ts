@@ -2,13 +2,30 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@hansjm10/volt-ai";
-import { Container } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { type IntentContext, LOCAL_INTENT_PROFILE } from "../../../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import * as captureSink from "../../../src/core/tool-progress-capture.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+/** What `/debug` runs: the host's `debug_report` query on the harness's conversation, as a local client asks it. */
+function debugReport(harness: Harness): Promise<{ path: string }> {
+	const { conversation } = createFakeConversation(harness.session);
+	const context: IntentContext = {
+		target: {
+			session: harness.session,
+			conversation,
+			host: createFakeHost({ extensionMode: "print" }).host,
+			client: { id: "tui", move: { kind: "in_place", onMoved: () => {} } },
+		},
+		services: {},
+		profile: LOCAL_INTENT_PROFILE,
+	};
+	return queryRegistry.run(context, "debug_report", {});
+}
 
 describe("regression #352: active debug capture", () => {
 	const harnesses: Harness[] = [];
@@ -18,7 +35,7 @@ describe("regression #352: active debug capture", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("captures unfinished faux arguments through the real debug handler without steering or cancelling", async () => {
+	it("captures unfinished faux arguments through the debug report without steering or cancelling", async () => {
 		let executions = 0;
 		const tool: AgentTool = {
 			name: "probe",
@@ -42,29 +59,17 @@ describe("regression #352: active debug capture", () => {
 		]);
 		let captured = false;
 		let snapshot: ReturnType<typeof harness.session.getToolProgressDiagnostics> | undefined;
-		const showError = vi.fn();
-		const context = {
-			isInitialized: true,
-			session: harness.session,
-			chatContainer: new Container(),
-			ui: { requestRender: vi.fn() },
-			showError,
-		};
-		const handleDebug = Reflect.get(InteractiveMode.prototype, "handleDebugCommand") as (
-			this: typeof context,
-		) => Promise<void>;
-		let debugCapture: Promise<void> | undefined;
+		let debugCapture: Promise<{ path: string }> | undefined;
 		harness.session.subscribe((event) => {
 			if (captured || event.type !== "message_update" || event.assistantMessageEvent.type !== "toolcall_delta")
 				return;
 			captured = true;
 			snapshot = harness.session.getToolProgressDiagnostics();
-			debugCapture = handleDebug.call(context);
+			debugCapture = debugReport(harness);
 		});
 		await harness.session.prompt("prepare then execute");
-		await debugCapture;
+		expect(await debugCapture).toEqual({ path: join(harness.tempDir, "debug", "tool-progress-latest.json") });
 		expect(captured).toBe(true);
-		expect(showError).not.toHaveBeenCalled();
 		expect(snapshot?.calls[0]).toMatchObject({
 			callId: "live-call",
 			phase: "preparing",
@@ -129,23 +134,20 @@ describe("regression #352: active debug capture", () => {
 		expect(harness.session.getToolProgressDiagnostics().calls).toEqual([]);
 	});
 
-	it("capture failures are reported locally while faux generation continues", async () => {
+	it("capture failures fail the debug report while faux generation continues", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("complete")]);
-		const showError = vi.fn();
 		const capture = vi.spyOn(harness.session, "captureToolProgressDiagnostics").mockImplementation(() => {
 			throw new Error("disk full");
 		});
-		const context = { session: harness.session, showError, isInitialized: true };
-		const handleDebug = Reflect.get(InteractiveMode.prototype, "handleDebugCommand") as (
-			this: typeof context,
-		) => Promise<void>;
+		const reports: Promise<unknown>[] = [];
 		harness.session.subscribe((event) => {
-			if (event.type === "message_update") void handleDebug.call(context);
+			if (event.type === "message_update") reports.push(debugReport(harness).catch((error: unknown) => error));
 		});
 		await harness.session.prompt("continue despite capture error");
-		expect(showError).toHaveBeenCalledWith("Failed to write debug log: disk full");
+		expect(reports.length).toBeGreaterThan(0);
+		for (const report of reports) expect(await report).toMatchObject({ message: "disk full" });
 		capture.mockRestore();
 		expect(harness.session.isStreaming).toBe(false);
 	});

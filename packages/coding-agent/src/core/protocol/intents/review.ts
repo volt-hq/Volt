@@ -7,6 +7,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { IntentOption } from "@hansjm10/volt-protocol";
+import { parseGitHubPullRequestUrl } from "../../code-host/github-cli-review-target.ts";
 import { openReviewFindings } from "../../host/review-handoff.ts";
 import {
 	listBaseBranches,
@@ -72,12 +73,14 @@ interface ReviewControlsInput {
 	includeOptional?: boolean;
 	scopeMode?: "incremental" | "full";
 	tools?: string[];
+	/** A pull request review's pinned pull request. */
+	url?: string;
 }
 
-/** A review start: refused on remote profiles that name auxiliary tools, else as reviews are available. */
+/** A review start: refused on remote profiles that name auxiliary tools or pin a pull request, else as reviews are available. */
 function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput): IntentAvailability {
-	const tools = localOnlyInput<ReviewControlsInput>(["tools"])(view, input);
-	return tools.enabled ? reviewAvailability(view) : tools;
+	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "url"])(view, input);
+	return localOnly.enabled ? reviewAvailability(view) : localOnly;
 }
 
 /**
@@ -243,6 +246,33 @@ async function completePullRequests(ctx: IntentContext, prefix: string): Promise
 	return [{ value, ...(label === undefined ? {} : { label }), description: "Current branch" }];
 }
 
+/**
+ * The current branch's pull request by its URL, which pins it for a local
+ * client's review (`review_pr{url}`), when the URL starts with `prefix`.
+ */
+async function completePullRequestUrls(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
+	if (ctx.profile.name !== "local") return [];
+	const pullRequest = await currentPullRequest(targetOf(ctx).session.sessionManager.getCwd());
+	if (!pullRequest?.url.startsWith(prefix.trim())) return [];
+	const label = boundedDisplayString(`#${pullRequest.number} — ${pullRequest.title}`, MAX_INTENT_LABEL_LENGTH);
+	return [{ value: pullRequest.url, ...(label === undefined ? {} : { label }), description: "Current branch" }];
+}
+
+/**
+ * The pull request a review targets: by number, or the one `url` pins, which
+ * the code host must resolve the same (its number, when both are given).
+ */
+function pullRequestTarget(input: { number?: string; url?: string }): ReviewTarget {
+	const number = input.number?.trim() || undefined;
+	if (input.url === undefined) return { kind: "pr", number };
+	const pinned = parseGitHubPullRequestUrl(input.url);
+	if (!pinned) throw new IntentRejectedError("invalid_input", "Not a GitHub pull request URL");
+	if (number !== undefined && number !== String(pinned.number)) {
+		throw new IntentRejectedError("invalid_input", "The pull request number does not match its URL");
+	}
+	return { kind: "pr", number: String(pinned.number), expectedUrl: pinned.url };
+}
+
 export const reviewUncommittedIntent = defineIntent({
 	...reviewStart,
 	name: "review_uncommitted",
@@ -280,10 +310,10 @@ export const reviewPrIntent = defineIntent({
 		"Review a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context.",
 	presentation: { kind: "card", group: "Review", priority: 80, icon: "arrow.triangle.pull" },
 	slash: { name: "review", example: "/review pr [number]" },
-	completions: ["number"],
-	complete: (ctx, _field, prefix) => completePullRequests(ctx, prefix),
-	run: (ctx, input) =>
-		runReview(ctx, { kind: "pr", number: input.number?.trim() || undefined }, reviewOptions(ctx, input)),
+	completions: ["number", "url"],
+	complete: (ctx, field, prefix) =>
+		field === "url" ? completePullRequestUrls(ctx, prefix) : completePullRequests(ctx, prefix),
+	run: (ctx, input) => runReview(ctx, pullRequestTarget(input), reviewOptions(ctx, input)),
 });
 
 export const reviewCommitIntent = defineIntent({

@@ -20,7 +20,7 @@ const hostManage = ["host.manage.v1"] as const;
 export const setSettingsIntent = defineIntent({
 	name: "set_settings",
 	label: "Settings",
-	description: "Change settings the host reads: personality, transport, review model, images, and timeouts",
+	description: "Change settings the host reads: personality, transport, review model, images, timeouts, and warnings",
 	category: "host",
 	scope: "host",
 	fence: "none",

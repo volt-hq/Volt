@@ -1,16 +1,26 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+/**
+ * Store updates and removals: a catalog update of a tracking install moves it
+ * to the catalog's reviewed pin, in `volt store update` and the TUI's
+ * `/store`, which installs as the TUI (client install, then reload). The TUI
+ * reviews an installed package's permissions where it was installed from;
+ * declining an update's new permissions reinstalls the reviewed pin and, when
+ * that pin follows a branch, reviews what it reinstalled, removing the
+ * package when that is declined too.
+ */
+
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import type { ConfiguredPackage, PackageInstallOptions, PackageUpdateOptions } from "../src/core/package-manager.ts";
+import type { PackageInstallOptions } from "../src/core/package-manager.ts";
 import { DefaultPackageManager } from "../src/core/package-manager.ts";
 import { main } from "../src/main.ts";
-import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import type { StoreCatalog } from "../src/store/catalog.ts";
 import type { StorePackageInspection } from "../src/store/inspector.ts";
 import type { ResolveStoreSourceOptions, StoreResolvedSource } from "../src/store/resolver.ts";
 import { testCatalog, testCatalogEntry, testStoreSource } from "./store-catalog-fixtures.ts";
+import { choose, createTuiHarness, type TuiHarness, type TuiModeFixture, waitForScreen } from "./suite/tui-harness.ts";
 
 const trackedGitSource = "git:https://github.com/volt-hq/Volt";
 const pinnedGitSource = testStoreSource();
@@ -60,120 +70,45 @@ vi.mock("../src/store/inspector.ts", () => ({
 	inspectStorePackage: inspectorMock.inspectStorePackage,
 }));
 
-interface InteractiveSettingsManager {
-	isProjectTrusted(): boolean;
-	flush(): Promise<void>;
-	getNpmCommand(): string[] | undefined;
-}
-
-interface FakeStorePackageManager {
-	getPackageIdentity(source: string, scope?: "user" | "project"): string;
-	listConfiguredPackages(): ConfiguredPackage[];
-	update(source?: string, options?: PackageUpdateOptions): Promise<void>;
-	installAndPersist(source: string, options?: PackageInstallOptions): Promise<void>;
-	removeAndPersist(source: string, options?: { local?: boolean }): Promise<boolean>;
-}
-
-interface InteractiveStoreMode {
-	tuiHost: {
-		conversation: {
-			session: {
-				settingsManager: InteractiveSettingsManager;
-				sessionManager: { getCwd(): string };
-			};
-		};
-	};
-	loadStoreCatalog(required: boolean): Promise<StoreCatalog | undefined>;
-	getStorePackageManager(): FakeStorePackageManager;
-	showStatus(message: string): void;
-	showWarning(message: string): void;
-	showError(message: string): void;
-	showStoreText(text: string): void;
-	showExtensionConfirm(title: string, message: string): Promise<boolean>;
-	reportStoreSettingsErrors(
-		packageManager: FakeStorePackageManager,
-		source: string,
-		scope: "user" | "project",
-	): boolean;
-	offerStoreReload(message: string): Promise<void>;
-}
-
 const storeCatalog: StoreCatalog = testCatalog(testCatalogEntry("rtk"));
 
 function createCatalogResponse(): Response {
 	return Response.json(storeCatalog);
 }
 
-function getFakePackageIdentity(source: string, scope?: "user" | "project"): string {
-	if (source === trackedGitSource || source === pinnedGitSource) {
-		return "git:github.com/volt-hq/Volt";
-	}
-	if (source === "/repo/project/pkg") {
-		return "local:/repo/project/pkg";
-	}
-	if (source === "../pkg" && scope === "project") {
-		return "local:/repo/project/pkg";
-	}
-	if (source === "../pkg") {
-		return "local:/repo/pkg";
-	}
-	return source;
-}
-
-function createInteractiveMode(packageManager: FakeStorePackageManager): InteractiveStoreMode {
-	const settingsManager: InteractiveSettingsManager = {
-		isProjectTrusted: () => true,
-		flush: vi.fn(async () => {}),
-		getNpmCommand: () => undefined,
-	};
-	const sessionManager = {
-		getCwd: () => "/repo/project",
-	};
-	return Object.assign(Object.create(InteractiveMode.prototype) as InteractiveStoreMode, {
-		tuiHost: {
-			conversation: {
-				session: {
-					settingsManager,
-					sessionManager,
-				},
-			},
-		},
-		loadStoreCatalog: vi.fn(async () => storeCatalog),
-		getStorePackageManager: vi.fn(() => packageManager),
-		showStatus: vi.fn(),
-		showWarning: vi.fn(),
-		showError: vi.fn(),
-		showStoreText: vi.fn(),
-		showExtensionConfirm: vi.fn(async () => true),
-		reportStoreSettingsErrors: vi.fn(() => false),
-		offerStoreReload: vi.fn(async () => {}),
+/**
+ * The TUI over a host whose global settings are `settings`, in `cwd` when
+ * given; the store catalog is served by a stubbed fetch. The host starts
+ * offline, so it never installs the packages the settings configure.
+ */
+async function startTui(
+	harnesses: TuiHarness[],
+	settings: Record<string, unknown>,
+	cwd?: string,
+): Promise<{ harness: TuiHarness; tui: TuiModeFixture }> {
+	vi.stubEnv("VOLT_OFFLINE", "1");
+	const harness = await createTuiHarness({
+		globalSettings: { theme: "dark", quietStartup: true, lsp: { enabled: false }, ...settings },
+		...(cwd === undefined ? {} : { startup: { cwd } }),
 	});
+	harnesses.push(harness);
+	const tui = await harness.startMode({ columns: 110, rows: 40 });
+	vi.stubEnv("VOLT_OFFLINE", "");
+	return { harness, tui };
 }
 
-function getInteractiveStoreUpdateFlow(): (
-	this: InteractiveStoreMode,
-	input?: string,
-	catalog?: StoreCatalog,
-) => Promise<void> {
-	return Reflect.get(InteractiveMode.prototype, "showStoreUpdateFlow") as (
-		this: InteractiveStoreMode,
-		input?: string,
-		catalog?: StoreCatalog,
-	) => Promise<void>;
-}
-
-function getInteractiveStoreRemoveFlow(): (
-	this: InteractiveStoreMode,
-	input: string,
-	local?: boolean,
-	catalog?: StoreCatalog,
-) => Promise<void> {
-	return Reflect.get(InteractiveMode.prototype, "showStoreRemoveFlow") as (
-		this: InteractiveStoreMode,
-		input: string,
-		local?: boolean,
-		catalog?: StoreCatalog,
-	) => Promise<void>;
+/** Write an extension package that declares `permissions` at `directory`. */
+function writeExtensionPackage(directory: string, permissions: string[]): void {
+	mkdirSync(directory, { recursive: true });
+	writeFileSync(
+		join(directory, "package.json"),
+		JSON.stringify({
+			name: "rtk",
+			version: "0.2.0",
+			volt: { id: "rtk", displayName: "RTK Output Compression", entry: "index.js", permissions },
+		}),
+	);
+	writeFileSync(join(directory, "index.js"), "module.exports = function () {};");
 }
 
 describe("catalog updates of a tracking install", () => {
@@ -222,7 +157,11 @@ describe("catalog updates of a tracking install", () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
-		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+		const installSpy = vi
+			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
+			.mockImplementation(async () =>
+				writeExtensionPackage(join(agentDir, "git", "github.com", "volt-hq", "Volt"), []),
+			);
 
 		await main(["store", "update", "rtk", "--yes"]);
 
@@ -236,26 +175,46 @@ describe("catalog updates of a tracking install", () => {
 		logSpy.mockRestore();
 		errorSpy.mockRestore();
 	});
+});
+
+describe("the TUI's /store", () => {
+	const harnesses: TuiHarness[] = [];
+
+	beforeEach(() => {
+		resolverMock.resolveStoreSource.mockImplementation(async (options) => resolveCatalogStoreSource(options));
+		inspectorMock.inspectStorePackage.mockClear();
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => createCatalogResponse()),
+		);
+	});
+
+	afterEach(async () => {
+		for (const harness of harnesses.splice(0)) await harness.cleanup();
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
+		resolverMock.resolveStoreSource.mockReset();
+	});
+
+	it("lists catalog packages at once, without asking for a search", async () => {
+		const { tui } = await startTui(harnesses, {});
+		void tui.submit("/store");
+		await waitForScreen(tui, "Store packages", "1. rtk - RTK Output Compression", "Search", "Cancel");
+	});
 
 	it("moves a tracking install to the reviewed pin during interactive catalog updates", async () => {
-		const update = vi
-			.fn<(source?: string, options?: PackageUpdateOptions) => Promise<void>>()
-			.mockResolvedValue(undefined);
+		const { harness, tui } = await startTui(harnesses, { packages: [trackedGitSource] });
+		const update = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
 		const installAndPersist = vi
-			.fn<(source: string, options?: PackageInstallOptions) => Promise<void>>()
-			.mockResolvedValue(undefined);
-		const packageManager: FakeStorePackageManager = {
-			getPackageIdentity: getFakePackageIdentity,
-			listConfiguredPackages: () => [
-				{ source: trackedGitSource, actionSource: trackedGitSource, scope: "user", filtered: false },
-			],
-			update,
-			installAndPersist,
-			removeAndPersist: vi.fn(async () => true),
-		};
-		const mode = createInteractiveMode(packageManager);
+			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
+			.mockImplementation(async () =>
+				writeExtensionPackage(join(harness.tempDir, "git", "github.com", "volt-hq", "Volt"), []),
+			);
 
-		await getInteractiveStoreUpdateFlow().call(mode, "rtk", storeCatalog);
+		void tui.submit("/store update rtk");
+		await choose(tui, "Yes");
+		await choose(tui, "Later");
+		await waitForScreen(tui, "Run /reload to load the change.");
 
 		expect(update).not.toHaveBeenCalled();
 		expect(installAndPersist).toHaveBeenCalledWith(pinnedGitSource, { local: false, scripts: "never" });
@@ -263,9 +222,61 @@ describe("catalog updates of a tracking install", () => {
 			expect.objectContaining({ source: pinnedGitSource }),
 		);
 	});
+
+	it("goes back to the tracked branch when an update's permissions are declined, removing it when its own are declined", async () => {
+		const { harness, tui } = await startTui(harnesses, { packages: [trackedGitSource] });
+		const installed = join(harness.tempDir, "git", "github.com", "volt-hq", "Volt");
+		const installAndPersist = vi
+			.spyOn(DefaultPackageManager.prototype, "installAndPersist")
+			.mockImplementation(async (source: string, _options?: PackageInstallOptions) => {
+				// Both revisions ask for more than was acknowledged: nothing ever was.
+				writeExtensionPackage(installed, source === pinnedGitSource ? ["exec", "network"] : ["exec"]);
+			});
+
+		void tui.submit("/store update rtk");
+		await choose(tui, "Yes");
+		await waitForScreen(tui, "Extension permissions", "network: use the network");
+		await choose(tui, "No");
+		// The branch it tracks reinstalls at its newest revision: its permissions are reviewed in turn.
+		await waitForScreen(tui, "Extension permissions", "exec: run commands", "Declining removes the package.");
+		await choose(tui, "No");
+		await choose(tui, "Later");
+		await waitForScreen(
+			tui,
+			"Removed git github.com/volt-hq/Volt: the reinstalled revision's permissions were not acknowledged",
+		);
+		expect(installAndPersist.mock.calls.map(([source]) => source)).toEqual([pinnedGitSource, trackedGitSource]);
+		expect(existsSync(join(harness.tempDir, "extension-permissions.json"))).toBe(false);
+		const settings = JSON.parse(readFileSync(join(harness.tempDir, "settings.json"), "utf8"));
+		expect(settings.packages).toEqual([]);
+	});
+
+	it("reviews the permissions of a package installed by a path relative to the cwd", async () => {
+		const { harness, tui } = await startTui(harnesses, {});
+		writeExtensionPackage(join(harness.tempDir, "packages", "rtk"), ["exec"]);
+		resolverMock.resolveStoreSource.mockImplementation(async (options) => ({
+			input: options.input,
+			source: "./packages/rtk",
+			kind: "local",
+			pinned: false,
+			tracking: false,
+			warnings: [],
+		}));
+
+		void tui.submit("/store install ./packages/rtk");
+		await choose(tui, "Yes");
+		await waitForScreen(tui, "Extension permissions", "exec: run commands");
+		await choose(tui, "Yes");
+		await choose(tui, "Later");
+		await waitForScreen(tui, "Installed");
+		const acknowledged = JSON.parse(readFileSync(join(harness.tempDir, "extension-permissions.json"), "utf8"));
+		expect(acknowledged.rtk).toMatchObject({ permissions: ["exec"] });
+	});
 });
 
 describe("interactive store local removals", () => {
+	const harnesses: TuiHarness[] = [];
+
 	beforeEach(() => {
 		resolverMock.resolveStoreSource.mockResolvedValue({
 			input: "../pkg",
@@ -275,29 +286,34 @@ describe("interactive store local removals", () => {
 			tracking: false,
 			warnings: [],
 		});
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => createCatalogResponse()),
+		);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		for (const harness of harnesses.splice(0)) await harness.cleanup();
+		vi.unstubAllGlobals();
+		vi.restoreAllMocks();
 		resolverMock.resolveStoreSource.mockReset();
 	});
 
 	it("uses the selected action source when removing settings-relative project packages", async () => {
-		const removeAndPersist = vi
-			.fn<(source: string, options?: { local?: boolean }) => Promise<boolean>>()
-			.mockResolvedValue(true);
-		const packageManager: FakeStorePackageManager = {
-			getPackageIdentity: getFakePackageIdentity,
-			listConfiguredPackages: () => [
-				{ source: "../pkg", actionSource: "/repo/project/pkg", scope: "project", filtered: false },
-			],
-			update: vi.fn(async () => {}),
-			installAndPersist: vi.fn(async () => {}),
-			removeAndPersist,
-		};
-		const mode = createInteractiveMode(packageManager);
+		const project = join(tmpdir(), `volt-store-project-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(join(project, ".volt"), { recursive: true });
+		writeFileSync(join(project, ".volt", "settings.json"), JSON.stringify({ packages: ["../pkg"] }));
+		try {
+			const { tui } = await startTui(harnesses, {}, project);
+			const removeAndPersist = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
 
-		await getInteractiveStoreRemoveFlow().call(mode, "../pkg", undefined, storeCatalog);
+			void tui.submit("/store remove ../pkg");
+			await choose(tui, "Yes");
+			await choose(tui, "Later");
 
-		expect(removeAndPersist).toHaveBeenCalledWith("/repo/project/pkg", { local: true });
+			await vi.waitFor(() => expect(removeAndPersist).toHaveBeenCalledWith(join(project, "pkg"), { local: true }));
+		} finally {
+			rmSync(project, { recursive: true, force: true });
+		}
 	});
 });

@@ -411,7 +411,19 @@ export const INTENT_SCHEMAS = {
 		output: ReviewStartedSchema,
 	},
 	review_pr: {
-		input: Type.Object({ number: Type.Optional(Type.String()), ...reviewOptions }, closed),
+		input: Type.Object(
+			{
+				number: Type.Optional(Type.String()),
+				/**
+				 * The pull request a local client picked, by its URL, such as its
+				 * current branch's (the `url` completions): the review fails unless
+				 * the code host resolves the same one.
+				 */
+				url: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, pattern: "^https://\\S+$" })),
+				...reviewOptions,
+			},
+			closed,
+		),
 		output: ReviewStartedSchema,
 	},
 	review_commit: {

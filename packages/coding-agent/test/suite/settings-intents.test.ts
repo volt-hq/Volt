@@ -88,6 +88,12 @@ describe("settings the host reads", () => {
 		expect(session.systemPrompt).toContain("pragmatic");
 		await client.intent("set_settings", { promptCacheKeepAlive: 15, reviewModel: null });
 		expect(await client.query("settings")).toMatchObject({ promptCacheKeepAlive: 15, reviewModel: null });
+
+		// The warnings settings, which the host reads (extra usage) and clients show (context tokens).
+		expect(before.warnings).toEqual({});
+		await client.intent("set_settings", { warnings: { anthropicExtraUsage: false, contextTokens: 100_000 } });
+		expect(session.settingsManager.getWarnings()).toEqual({ anthropicExtraUsage: false, contextTokens: 100_000 });
+		expect((await client.query("settings")).warnings).toEqual({ anthropicExtraUsage: false, contextTokens: 100_000 });
 	});
 
 	it("accepts only the closed set of keys, and only models the host knows", async () => {
@@ -97,6 +103,12 @@ describe("settings the host reads", () => {
 			code: "invalid_input",
 		});
 		expect(await rejection(client.intent("set_settings", { httpIdleTimeoutMs: -1 }))).toMatchObject({
+			code: "invalid_input",
+		});
+		expect(await rejection(client.intent("set_settings", { warnings: { contextTokens: -1 } }))).toMatchObject({
+			code: "invalid_input",
+		});
+		expect(await rejection(client.intent("set_settings", { warnings: { other: true } }))).toMatchObject({
 			code: "invalid_input",
 		});
 		expect(await rejection(client.intent("set_settings", { reviewModel: "nowhere/none" }))).toMatchObject({

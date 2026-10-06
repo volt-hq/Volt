@@ -7,6 +7,8 @@ import {
 	emptyLiveFold,
 	foldLiveFrame,
 	foldLiveItems,
+	type HostRequest,
+	type HostResponse,
 	type LiveFoldState,
 	type PlanningState,
 	PRESENTATION_MAX_SERIALIZED_BYTES,
@@ -69,10 +71,7 @@ type InteractiveTestAccess = {
 	setupKeyHandlers(): void;
 	setupEditorSubmitHandler(): void;
 	showExtensionConfirm(title: string, message: string): Promise<boolean>;
-	showOAuthLoginSelect(
-		dialog: Component,
-		prompt: { message: string; options: { id: string; label: string }[] },
-	): Promise<string | undefined>;
+	showLiveRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined>;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFollowUp(): Promise<void>;
 	leaveConversation(): void;
@@ -625,15 +624,16 @@ describe("interactive background jobs", () => {
 			terminal.sendInput("\x1bj");
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBeInstanceOf(WorkInspector);
-			const selected = access.showOAuthLoginSelect(dialog, {
-				message: "Choose an account",
-				options: [{ id: "first", label: "First account" }],
-			});
+			// A provider login asks which account as a host request of its client.
+			const selected = access.showLiveRequest(
+				{ kind: "select", title: "Choose an account", options: ["First account"] },
+				new AbortController().signal,
+			);
 			await terminal.waitForRender();
 			expect(access.workInspector).toBeUndefined();
 			expect(terminal.getViewport().join("\n")).toContain("Choose an account");
 			terminal.sendInput(cancel ? "\x1b" : "\r");
-			expect(await selected).toBe(cancel ? undefined : "first");
+			expect(await selected).toEqual(cancel ? { cancelled: true } : { value: "First account" });
 			await terminal.waitForRender();
 			expect(access.ui.getFocusedComponent()).toBe(dialog);
 			terminal.sendInput("login input");

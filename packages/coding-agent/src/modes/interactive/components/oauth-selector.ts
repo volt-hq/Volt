@@ -1,3 +1,4 @@
+import type { AuthProvider } from "@hansjm10/volt-protocol";
 import {
 	Container,
 	type Focusable,
@@ -7,13 +8,15 @@ import {
 	Spacer,
 	TruncatedText,
 } from "@hansjm10/volt-tui";
-import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
-export type AuthSelectorProvider = {
-	id: string;
-	name: string;
+/**
+ * A provider to sign in to with `authType`, or out of, as the host's
+ * `auth.providers` query lists it: how its requests authenticate now, never
+ * its credentials.
+ */
+export type AuthSelectorProvider = Pick<AuthProvider, "id" | "name" | "source" | "label" | "stored"> & {
 	authType: "oauth" | "api_key";
 };
 
@@ -38,24 +41,18 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	private filteredProviders: AuthSelectorProvider[];
 	private selectedIndex: number = 0;
 	private mode: "login" | "logout";
-	private authStorage: AuthStorage;
-	private getAuthStatus: (providerId: string) => AuthStatus;
 	private onSelectCallback: (providerId: string) => void;
 	private onCancelCallback: () => void;
 
 	constructor(
 		mode: "login" | "logout",
-		authStorage: AuthStorage,
 		providers: AuthSelectorProvider[],
 		onSelect: (providerId: string) => void,
 		onCancel: () => void,
-		getAuthStatus?: (providerId: string) => AuthStatus,
 	) {
 		super();
 
 		this.mode = mode;
-		this.authStorage = authStorage;
-		this.getAuthStatus = getAuthStatus ?? ((providerId) => this.authStorage.getAuthStatus(providerId));
 		this.allProviders = providers;
 		this.filteredProviders = providers;
 		this.onSelectCallback = onSelect;
@@ -149,18 +146,16 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 	}
 
 	private formatStatusIndicator(provider: AuthSelectorProvider): string {
-		const credential = this.authStorage.get(provider.id);
-		if (credential?.type === provider.authType) return theme.fg("success", " ✓ configured");
-		if (credential) {
-			const label = credential.type === "oauth" ? "subscription configured" : "API key configured";
+		if (provider.stored === provider.authType) return theme.fg("success", " ✓ configured");
+		if (provider.stored !== undefined) {
+			const label = provider.stored === "oauth" ? "subscription configured" : "API key configured";
 			return theme.fg("muted", " • ") + theme.fg("warning", label);
 		}
 		if (provider.authType !== "api_key") return theme.fg("muted", " • unconfigured");
 
-		const status = this.getAuthStatus(provider.id);
-		switch (status.source) {
+		switch (provider.source) {
 			case "environment":
-				return theme.fg("success", ` ✓ env: ${status.label ?? "API key"}`);
+				return theme.fg("success", ` ✓ env: ${provider.label ?? "API key"}`);
 			case "runtime":
 				return theme.fg("success", " ✓ runtime API key");
 			case "fallback":

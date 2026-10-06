@@ -1,18 +1,27 @@
+/**
+ * #411: the TUI's current-PR choice names the fork's pull request its branch
+ * tracks, never the parent's same-numbered one gh infers, and pins it by URL:
+ * the `review_pr` intent's `url` completion offers it, and a review started
+ * with that URL fails unless the code host resolves the same pull request.
+ */
+
 import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
+import type { IntentOption } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
 import { type GitHubCliResult, runGitHubCli } from "../../../src/core/code-host/github-cli.ts";
 import { capturePullRequestContextWithGitHubCli } from "../../../src/core/code-host/github-cli-context.ts";
-import { MAX_PULL_REQUEST_NUMBER, type ReviewTarget, resolveReviewTarget } from "../../../src/core/review.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { MAX_PULL_REQUEST_NUMBER, resolveReviewTarget } from "../../../src/core/review.ts";
+import { createHostHarness, type HostHarness } from "../host-harness.ts";
 
 vi.mock("../../../src/core/code-host/github-cli.ts", () => ({ runGitHubCli: vi.fn() }));
 
 const FORK_URL = "https://github.com/contributor/project/pull/42";
 const PARENT_URL = "https://github.com/parent/project/pull/42";
 const HEAD = "b".repeat(40);
-let harness: Harness;
+let harness: HostHarness;
+let client: LoopbackClient;
 let candidates: Array<Record<string, unknown>>;
 let metadataUrl: string;
 
@@ -24,22 +33,14 @@ function response(value: unknown): GitHubCliResult {
 	return { ok: true, stdout: Buffer.from(JSON.stringify(value)), stderr: "", outputLimited: false, timedOut: false };
 }
 
-function createPicker(onSelect?: () => void) {
-	return {
-		sessionManager: { getCwd: () => harness.tempDir },
-		showExtensionSelector: vi.fn(async (_title: string, options: string[]) => {
-			onSelect?.();
-			return options.find((option) => option.startsWith("Current PR"));
-		}),
-	};
+/** The current branch's pull request as the TUI's picker offers it: the `review_pr` intent's `url` completion. */
+async function currentPullRequest(): Promise<IntentOption | undefined> {
+	const { completions } = await client.query("intent_completions", { intent: "review_pr", field: "url" });
+	return completions[0];
 }
 
-const promptForReviewTarget = Reflect.get(InteractiveMode.prototype, "promptForReviewTarget") as (
-	this: ReturnType<typeof createPicker>,
-) => Promise<ReviewTarget | undefined>;
-
 beforeEach(async () => {
-	harness = await createHarness({ settings: { lsp: { enabled: false } } });
+	harness = await createHostHarness({ globalSettings: { lsp: { enabled: false } } });
 	git("init", "--initial-branch=local-topic");
 	git(
 		"-c",
@@ -120,26 +121,23 @@ beforeEach(async () => {
 		}
 		throw new Error(`Unexpected fixture command: ${args.join(" ")}`);
 	});
+	client = await createLoopbackClient(harness.host, await harness.openStartup());
 });
 
 afterEach(async () => {
-	await harness.cleanupAsync();
+	await client.stop();
+	await harness.cleanup();
 	vi.restoreAllMocks();
 });
 
 describe("#411 current-PR picker identity", () => {
 	it("advertises and captures the fork's PR even when gh defaults to the parent's same-numbered PR", async () => {
-		const picker = createPicker();
-		const target = await promptForReviewTarget.call(picker);
-		expect(picker.showExtensionSelector).toHaveBeenCalledWith(
-			"Review what?",
-			expect.arrayContaining(["Current PR #42 — Fork change"]),
-		);
-		expect(target).toEqual({ kind: "pr", number: "42", expectedUrl: FORK_URL });
-		if (target?.kind !== "pr") throw new Error("Expected a selected PR");
+		const offered = await currentPullRequest();
+		expect(offered).toEqual({ value: FORK_URL, label: "#42 — Fork change", description: "Current branch" });
 		const captured = await capturePullRequestContextWithGitHubCli({
-			...target,
 			cwd: harness.tempDir,
+			number: "42",
+			expectedUrl: offered?.value,
 			maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 		});
 		expect(captured).toMatchObject({
@@ -161,14 +159,7 @@ describe("#411 current-PR picker identity", () => {
 				candidates.push({ ...candidates[0], id: "PR_43", number: 43, url: FORK_URL.replace("42", "43") });
 			if (scenario === "parent candidate") candidates[0]!.url = PARENT_URL;
 			if (scenario === "missing tracking") git("branch", "--unset-upstream");
-			const picker = createPicker();
-			expect(await promptForReviewTarget.call(picker)).toBeUndefined();
-			expect(picker.showExtensionSelector).toHaveBeenCalledWith("Review what?", [
-				"Against base branch",
-				"Uncommitted changes",
-				"Pull request",
-				"Specific commit",
-			]);
+			expect(await currentPullRequest()).toBeUndefined();
 			expect(vi.mocked(runGitHubCli).mock.calls.some(([args]) => args[1] === "view")).toBe(false);
 		},
 	);
@@ -176,19 +167,33 @@ describe("#411 current-PR picker identity", () => {
 	it.each(["remote URL", "tracking remote"])(
 		"rejects a %s change while the picker is open through snapshot resolution",
 		async (change) => {
-			const picker = createPicker(() => {
-				if (change === "remote URL") git("remote", "set-url", "origin", "https://github.com/other/project.git");
-				else git("config", "branch.local-topic.remote", "upstream");
-			});
-			const target = await promptForReviewTarget.call(picker);
-			if (!target) throw new Error("Expected a selected PR");
+			const offered = await currentPullRequest();
+			if (!offered) throw new Error("Expected the current PR");
+			if (change === "remote URL") git("remote", "set-url", "origin", "https://github.com/other/project.git");
+			else git("config", "branch.local-topic.remote", "upstream");
 			vi.mocked(runGitHubCli).mockClear();
-			expect(await resolveReviewTarget(target, harness.tempDir)).toMatchObject({
+			expect(
+				await resolveReviewTarget({ kind: "pr", number: "42", expectedUrl: offered.value }, harness.tempDir),
+			).toMatchObject({
 				error: expect.stringContaining("selected pull request does not match"),
 			});
+			// The review the picker starts pins the same pull request, and fails the same way.
+			await expect(client.intent("review_pr", { url: offered.value })).rejects.toThrow(
+				"selected pull request does not match",
+			);
 			expect(vi.mocked(runGitHubCli)).not.toHaveBeenCalled();
 		},
 	);
+
+	it("refuses a pinned URL that is not a pull request, or whose number differs", async () => {
+		await expect(client.intent("review_pr", { url: "https://github.com/contributor/project" })).rejects.toThrow(
+			"Not a GitHub pull request URL",
+		);
+		await expect(client.intent("review_pr", { number: "41", url: FORK_URL })).rejects.toThrow(
+			"does not match its URL",
+		);
+		expect(vi.mocked(runGitHubCli).mock.calls.some(([args]) => args[1] === "view")).toBe(false);
+	});
 
 	it.each([
 		PARENT_URL,
@@ -224,13 +229,14 @@ describe("#411 current-PR picker identity", () => {
 	});
 
 	it("still rejects metadata from the parent's same-numbered PR before discussion capture", async () => {
-		const target = await promptForReviewTarget.call(createPicker());
-		if (target?.kind !== "pr") throw new Error("Expected a selected PR");
+		const offered = await currentPullRequest();
+		if (!offered) throw new Error("Expected the current PR");
 		metadataUrl = PARENT_URL;
 		expect(
 			await capturePullRequestContextWithGitHubCli({
-				...target,
 				cwd: harness.tempDir,
+				number: "42",
+				expectedUrl: offered.value,
 				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 			}),
 		).toMatchObject({ ok: false, error: expect.stringContaining("identity could not be verified") });

@@ -34,6 +34,7 @@ import {
 	refreshInstalledDaemonService,
 	startInstalledDaemon,
 } from "./daemon/spawn.ts";
+import { storeReviewSource, storeUpdateTouches } from "./store/targets.ts";
 import { spawnProcess } from "./utils/child-process.ts";
 import {
 	cleanupSelfUpdateQuarantine,
@@ -625,7 +626,8 @@ export async function createCommandSettingsManager(options: {
  * in a terminal, show the ones not acknowledged yet and ask; otherwise show
  * them, unacknowledged, with `reviewCommand` (default `volt install
  * <source>`) as the way to review them. A manifest that cannot be read is
- * reported and left to fail when the extension loads.
+ * reported and left to fail when the extension loads; `missing` when no
+ * package is installed from `source` in `scope`.
  */
 export async function reviewInstalledPermissions(
 	packageManager: DefaultPackageManager,
@@ -634,9 +636,9 @@ export async function reviewInstalledPermissions(
 	scope: "user" | "project",
 	consequence: string,
 	reviewCommand = `${APP_NAME} install ${source}`,
-): Promise<PackagePermissionOutcome["status"] | "failed"> {
+): Promise<PackagePermissionOutcome["status"] | "failed" | "missing"> {
 	const root = packageManager.getInstalledPath(source, scope);
-	if (root === undefined) return "none";
+	if (root === undefined) return "missing";
 	try {
 		const outcome = await reviewPackagePermissions({
 			store: new ExtensionPermissionStore(agentDir),
@@ -786,11 +788,16 @@ export async function handlePackageCommand(
 				const permissions = await reviewInstalledPermissions(
 					packageManager,
 					agentDir,
-					source!,
+					storeReviewSource(source!, cwd),
 					scope,
 					"Declining removes the package.",
+					`${APP_NAME} install ${source}`,
 				);
-				if (permissions === "declined" || permissions === "failed") {
+				// A package just installed that cannot be found cannot be reviewed: it must not stay to run unreviewed.
+				if (permissions === "missing") {
+					console.error(chalk.red(`Could not find the installed package to review its permissions`));
+				}
+				if (permissions === "declined" || permissions === "failed" || permissions === "missing") {
 					await packageManager.removeAndPersist(source!, { local: options.local });
 					console.error(chalk.red(`Removed ${source}: its permissions were not acknowledged`));
 					process.exitCode = 1;
@@ -853,9 +860,7 @@ export async function handlePackageCommand(
 					const updateSource = target.type === "extensions" ? target.source : undefined;
 					await packageManager.update(updateSource);
 					for (const pkg of packageManager.listConfiguredPackages()) {
-						if (updateSource !== undefined && pkg.source !== updateSource && pkg.actionSource !== updateSource) {
-							continue;
-						}
+						if (updateSource !== undefined && !storeUpdateTouches(packageManager, pkg, updateSource)) continue;
 						const permissions = await reviewInstalledPermissions(
 							packageManager,
 							agentDir,

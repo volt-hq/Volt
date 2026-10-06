@@ -431,7 +431,7 @@ describe("protocol client of an in-process host", () => {
 		).resolves.toEqual({ completions: [] });
 	});
 
-	it("completes the review_commit ref from recent commits and the review_pr number from the branch's pull request", async () => {
+	it("completes the review_commit ref from recent commits and the review_pr number and url from the branch's pull request", async () => {
 		const harness = await createHostHarness();
 		cleanups.push(() => harness.cleanup());
 		const repo = tempDir("volt-intent-commits-");
@@ -475,11 +475,17 @@ describe("protocol client of an in-process host", () => {
 		});
 		await expect(complete("review_pr", "number", "24")).resolves.toMatchObject({ completions: [{ value: "243" }] });
 		await expect(complete("review_pr", "number", "9")).resolves.toEqual({ completions: [] });
+		// The url pins the pull request a local client picked.
+		await expect(complete("review_pr", "url", "")).resolves.toEqual({
+			completions: [
+				{ value: "https://example.test/pull/243", label: "#243 — Compact width UI", description: "Current branch" },
+			],
+		});
 		// Completing as the user types probes the code host once, not per keystroke.
 		expect(probe).toHaveBeenCalledTimes(1);
 		const { intents } = await client.query("intents");
 		expect(intents.find((intent) => intent.name === "review_commit")?.completions).toEqual(["ref"]);
-		expect(intents.find((intent) => intent.name === "review_pr")?.completions).toEqual(["number"]);
+		expect(intents.find((intent) => intent.name === "review_pr")?.completions).toEqual(["number", "url"]);
 	});
 
 	it("asks the attaching client a dialog an extension opens from session_start before the client is ready", async () => {

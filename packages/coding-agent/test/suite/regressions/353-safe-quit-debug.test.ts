@@ -1,5 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { setKeybindings, Text, type TUI, type TuiAltScreen, TuiMainScreen } from "@hansjm10/volt-tui";
@@ -26,6 +24,7 @@ interface ModeControl {
 	setupKeyHandlers(): void;
 	setupEditorSubmitHandler(): void;
 	setupAutocompleteProvider(): void;
+	handleDebugCommand(): Promise<void>;
 	switchTuiMode(mode: "regular" | "fullscreen"): boolean;
 	shutdown(): Promise<void>;
 	showWarning(message: string): void;
@@ -98,6 +97,8 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		vi.spyOn(control, "shutdown").mockResolvedValue();
 		vi.spyOn(control, "showWarning");
 		vi.spyOn(control, "showError");
+		// The capture is the host's debug report (tui-commands.test.ts): here, what runs it.
+		vi.spyOn(control, "handleDebugCommand").mockResolvedValue();
 	});
 
 	afterEach(async () => {
@@ -127,10 +128,6 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		pending = harness.session.prompt("Continue working");
 		await entered.promise;
 		expect(harness.session.isBusy).toBe(true);
-	}
-
-	function getCapturePath(): string {
-		return join(harness.tempDir, "debug", "tool-progress-latest.json");
 	}
 
 	it.each([0, 1])("exits idle on raw Ctrl+D with %i attached phones", (phoneCount) => {
@@ -354,20 +351,19 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		terminal.sendInput("\x1b[100;6u");
 		terminal.sendInput("\x1b[27;6;100~");
 		expect(control.shutdown).not.toHaveBeenCalled();
-		expect(existsSync(getCapturePath())).toBe(false);
+		expect(control.handleDebugCommand).not.toHaveBeenCalled();
 		expect(control.defaultEditor.getText()).toBe("");
 	});
 
-	it("captures real diagnostics with F12 and /debug without stopping or queueing a turn", async () => {
+	it("captures diagnostics with F12 and /debug without stopping or queueing a turn", async () => {
 		await startGeneration();
 		terminal.sendInput("\x04");
 		control.defaultEditor.setText("draft");
 		terminal.sendInput("\x1b[24~");
-		await harness.session.waitForToolProgressDiagnostics();
-		expect(JSON.parse(readFileSync(getCapturePath(), "utf8"))).toMatchObject({ reason: "manual", calls: [] });
+		expect(control.handleDebugCommand).toHaveBeenCalledTimes(1);
 		expect(control.defaultEditor.getText()).toBe("draft");
 		await control.defaultEditor.onSubmit?.("/debug");
-		await harness.session.waitForToolProgressDiagnostics();
+		expect(control.handleDebugCommand).toHaveBeenCalledTimes(2);
 		expect(harness.session.pendingMessageCount).toBe(0);
 		expect(harness.session.isBusy).toBe(true);
 		expect(control.shutdown).not.toHaveBeenCalled();
@@ -384,17 +380,15 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		control.ui.showOverlay(overlay);
 		control.keybindings.setUserBindings({ "app.debug": "ctrl+shift+d" });
 		terminal.sendInput("\x1b[24~");
-		expect(existsSync(getCapturePath())).toBe(false);
+		expect(control.handleDebugCommand).not.toHaveBeenCalled();
 		terminal.sendInput("\x1b[100;6u");
-		await harness.session.waitForToolProgressDiagnostics();
-		expect(existsSync(getCapturePath())).toBe(true);
+		expect(control.handleDebugCommand).toHaveBeenCalledTimes(1);
 		expect(control.ui.getFocusedComponent()).toBe(overlay);
 		expect(control.shutdown).not.toHaveBeenCalled();
 		control.keybindings.setUserBindings({ "app.debug": [] });
-		const capture = vi.spyOn(harness.session, "captureToolProgressDiagnostics");
 		terminal.sendInput("\x1b[24~");
 		terminal.sendInput("\x1b[100;6u");
-		expect(capture).not.toHaveBeenCalled();
+		expect(control.handleDebugCommand).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps debug global after renderer changes and ignores repeat/release events", async () => {
@@ -402,10 +396,9 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		control.switchTuiMode("regular");
 		terminal.sendInput("\x1b[24;1:2~");
 		terminal.sendInput("\x1b[24;1:3~");
-		expect(existsSync(getCapturePath())).toBe(false);
+		expect(control.handleDebugCommand).not.toHaveBeenCalled();
 		terminal.sendInput("\x1b[24~");
-		await harness.session.waitForToolProgressDiagnostics();
-		expect(existsSync(getCapturePath())).toBe(true);
+		expect(control.handleDebugCommand).toHaveBeenCalledTimes(1);
 		expect(control.shutdown).not.toHaveBeenCalled();
 	});
 
@@ -496,22 +489,4 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		expect(output).toContain("F10 / /debug");
 		expect(output).toContain("Capture diagnostics");
 	});
-
-	it.each(["shortcut", "command"])(
-		"contains asynchronous diagnostic capture failures via the %s",
-		async (entryPoint) => {
-			await startGeneration();
-			const capture = vi
-				.spyOn(harness.session, "captureToolProgressDiagnostics")
-				.mockRejectedValueOnce(new Error("fixture capture failure"));
-			if (entryPoint === "shortcut") terminal.sendInput("\x1b[24~");
-			else await control.defaultEditor.onSubmit?.("/debug");
-			await vi.waitFor(() =>
-				expect(control.showError).toHaveBeenCalledWith("Failed to write debug log: fixture capture failure"),
-			);
-			expect(harness.session.isBusy).toBe(true);
-			expect(control.shutdown).not.toHaveBeenCalled();
-			capture.mockRestore();
-		},
-	);
 });

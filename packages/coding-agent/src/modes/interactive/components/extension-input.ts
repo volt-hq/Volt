@@ -2,15 +2,27 @@
  * Simple text input component for extensions.
  */
 
-import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
+import {
+	Container,
+	type Focusable,
+	getKeybindings,
+	Input,
+	Spacer,
+	sanitizeText,
+	Text,
+	type TUI,
+} from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
+import { SecretInput } from "./secret-input.ts";
 
 export interface ExtensionInputOptions {
 	tui?: TUI;
 	timeout?: number;
+	/** The input is a secret, such as an API key: it shows as bullets. */
+	secret?: boolean;
 }
 
 export class ExtensionInputComponent extends Container implements Focusable {
@@ -42,12 +54,12 @@ export class ExtensionInputComponent extends Container implements Focusable {
 
 		this.onSubmitCallback = onSubmit;
 		this.onCancelCallback = onCancel;
-		this.baseTitle = title;
+		this.baseTitle = sanitizeText(title);
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
-		this.titleText = new Text(theme.fg("accent", title), 1, 0);
+		this.titleText = new Text(theme.fg("accent", this.baseTitle), 1, 0);
 		this.addChild(this.titleText);
 		this.addChild(new Spacer(1));
 
@@ -60,7 +72,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
 			);
 		}
 
-		this.input = new Input();
+		this.input = opts?.secret ? new SecretInput() : new Input();
 		this.addChild(this.input);
 		this.addChild(new Spacer(1));
 		this.addChild(

@@ -3,6 +3,7 @@
 import { setKeybindings, type TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { KeybindingsManager } from "../../../../src/core/keybindings.ts";
+import { toIrohRemoteAgentOptionsCatalogModel } from "../../../../src/core/remote/iroh/agent-options.ts";
 import { initTheme } from "../../../../src/core/theme/runtime.ts";
 import { ModelSelectorComponent } from "../../../../src/modes/interactive/components/model-selector.ts";
 import { ScopedModelsSelectorComponent } from "../../../../src/modes/interactive/components/scoped-models-selector.ts";
@@ -13,10 +14,6 @@ function createFakeTui(): TUI {
 	return {
 		requestRender: () => {},
 	} as unknown as TUI;
-}
-
-async function waitForAsyncRender(): Promise<void> {
-	await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("issue #3217 scoped model ordering", () => {
@@ -81,17 +78,17 @@ describe("issue #3217 scoped model ordering", () => {
 		const modelOne = harness.getModel("faux-1")!;
 		const modelTwo = harness.getModel("faux-2")!;
 		const modelThree = harness.getModel("faux-3")!;
+		const scoped = (model: typeof modelOne) => ({ provider: model.provider, modelId: model.id });
 		const selector = new ModelSelectorComponent(
 			createFakeTui(),
-			modelOne,
-			harness.settingsManager,
-			harness.session.modelRegistry,
-			[{ model: modelTwo }, { model: modelOne }, { model: modelThree }],
+			{
+				models: harness.models.map(toIrohRemoteAgentOptionsCatalogModel),
+				scoped: [scoped(modelTwo), scoped(modelOne), scoped(modelThree)],
+				current: scoped(modelOne),
+			},
 			() => {},
 			() => {},
 		);
-
-		await waitForAsyncRender();
 
 		const renderedLines = stripAnsi(selector.render(120).lines.join("\n"))
 			.split("\n")

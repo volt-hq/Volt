@@ -39,6 +39,7 @@ export async function setHostSettings(session: AgentSession, values: HostSetting
 	if (values.blockImages !== undefined) settings.setBlockImages(values.blockImages);
 	if (values.httpIdleTimeoutMs !== undefined) settings.setHttpIdleTimeoutMs(values.httpIdleTimeoutMs);
 	if (values.enableInstallTelemetry !== undefined) settings.setEnableInstallTelemetry(values.enableInstallTelemetry);
+	if (values.warnings !== undefined) settings.setWarnings(values.warnings);
 	await settings.flush();
 	if (values.httpIdleTimeoutMs !== undefined) configureHttpDispatcher(settings.getHttpIdleTimeoutMs());
 	session.applySettings();

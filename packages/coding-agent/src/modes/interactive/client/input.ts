@@ -391,6 +391,37 @@ export class TuiInput {
 		return next;
 	}
 
+	/**
+	 * Switch the conversation to `model`, and keep it, with the thinking level
+	 * it runs with, as the default for new conversations; resolves that level.
+	 */
+	async selectModel(model: RpcCatalogModel): Promise<ThinkingLevel> {
+		const client = this.store.client;
+		const selection = { provider: model.provider, modelId: model.id };
+		await this.applied((await client.intent("set_model", selection)).ordinals);
+		const thinkingLevel = this.store.state.thinkingLevel;
+		await client.intent("set_default_model", selection);
+		if (model.reasoning || thinkingLevel !== "off") {
+			await client.intent("set_default_thinking_level", { level: thinkingLevel });
+		}
+		return thinkingLevel;
+	}
+
+	/**
+	 * Set the thinking level, and keep the level the model runs with, as the
+	 * host clamped it, as the default; resolves that level.
+	 */
+	async selectThinkingLevel(level: ThinkingLevel): Promise<ThinkingLevel> {
+		const client = this.store.client;
+		const model = await this.model();
+		await this.applied((await client.intent("set_thinking_level", { level })).ordinals);
+		const effective = this.store.state.thinkingLevel;
+		if (model?.reasoning || effective !== "off") {
+			await client.intent("set_default_thinking_level", { level: effective });
+		}
+		return effective;
+	}
+
 	/** Switch between Build and Plan mode; resolves the mode switched to. */
 	async toggleAgentMode(): Promise<"build" | "plan"> {
 		const mode = this.store.state.planning?.mode === "plan" ? "build" : "plan";

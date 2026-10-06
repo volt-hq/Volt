@@ -1,4 +1,4 @@
-import { type Model, modelsAreEqual } from "@hansjm10/volt-ai";
+import type { RpcCatalogModel, ScopedModel } from "@hansjm10/volt-protocol";
 import {
 	Container,
 	type Focusable,
@@ -9,8 +9,6 @@ import {
 	Text,
 	type TUI,
 } from "@hansjm10/volt-tui";
-import type { ModelRegistry } from "../../../core/model-registry.ts";
-import type { SettingsManager } from "../../../core/settings-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -18,15 +16,26 @@ import { keyHint } from "./keybinding-hints.ts";
 interface ModelItem {
 	provider: string;
 	id: string;
-	model: Model<any>;
-}
-
-interface ScopedModelItem {
-	model: Model<any>;
-	thinkingLevel?: string;
+	model: RpcCatalogModel;
 }
 
 type ModelScope = "all" | "scoped";
+
+/** The models the selector offers, as the conversation's `models` catalog lists them. */
+export interface ModelSelectorCatalog {
+	/** The selectable models: those whose providers are configured. */
+	readonly models: readonly RpcCatalogModel[];
+	/** The models the model cycle steps through, when a scope limits it. */
+	readonly scoped: readonly ScopedModel[];
+	/** The conversation's model. */
+	readonly current: { readonly provider: string; readonly modelId: string } | null;
+	/** Why some models could not be loaded, such as a `models.json` error. */
+	readonly error?: string;
+}
+
+function isCurrent(current: ModelSelectorCatalog["current"], model: RpcCatalogModel): boolean {
+	return current !== null && current.provider === model.provider && current.modelId === model.id;
+}
 
 /**
  * Component that renders a model selector with search
@@ -49,45 +58,44 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private activeModels: ModelItem[] = [];
 	private filteredModels: ModelItem[] = [];
 	private selectedIndex: number = 0;
-	private currentModel?: Model<any>;
-	private settingsManager: SettingsManager;
-	private modelRegistry: ModelRegistry;
-	private onSelectCallback: (model: Model<any>) => void;
+	private current: ModelSelectorCatalog["current"];
+	private onSelectCallback: (model: RpcCatalogModel) => void;
 	private onCancelCallback: () => void;
 	private errorMessage?: string;
-	private tui: TUI;
-	private scopedModels: ReadonlyArray<ScopedModelItem>;
 	private scope: ModelScope = "all";
 	private scopeText?: Text;
 	private scopeHintText?: Text;
 
 	constructor(
 		tui: TUI,
-		currentModel: Model<any> | undefined,
-		settingsManager: SettingsManager,
-		modelRegistry: ModelRegistry,
-		scopedModels: ReadonlyArray<ScopedModelItem>,
-		onSelect: (model: Model<any>) => void,
+		catalog: ModelSelectorCatalog,
+		onSelect: (model: RpcCatalogModel) => void,
 		onCancel: () => void,
 		initialSearchInput?: string,
 	) {
 		super();
 
-		this.tui = tui;
-		this.currentModel = currentModel;
-		this.settingsManager = settingsManager;
-		this.modelRegistry = modelRegistry;
-		this.scopedModels = scopedModels;
-		this.scope = scopedModels.length > 0 ? "scoped" : "all";
+		this.current = catalog.current;
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
+		this.errorMessage = catalog.error;
+		this.allModels = this.sortModels(
+			catalog.models.map((model) => ({ provider: model.provider, id: model.id, model })),
+		);
+		this.scopedModelItems = catalog.scoped.flatMap((scoped) => {
+			const model = catalog.models.find(
+				(candidate) => candidate.provider === scoped.provider && candidate.id === scoped.modelId,
+			);
+			return model ? [{ provider: model.provider, id: model.id, model }] : [];
+		});
+		this.scope = this.scopedModelItems.length > 0 ? "scoped" : "all";
 
 		// Add top border
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 
 		// Add hint about model filtering
-		if (scopedModels.length > 0) {
+		if (this.scopedModelItems.length > 0) {
 			this.scopeText = new Text(this.getScopeText(), 0, 0);
 			this.addChild(this.scopeText);
 			this.scopeHintText = new Text(this.getScopeHintText(), 0, 0);
@@ -105,9 +113,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		}
 		this.searchInput.onSubmit = () => {
 			// Enter on search input selects the first filtered item
-			if (this.filteredModels[this.selectedIndex]) {
-				this.handleSelect(this.filteredModels[this.selectedIndex].model);
-			}
+			const selected = this.filteredModels[this.selectedIndex];
+			if (selected) this.onSelectCallback(selected.model);
 		};
 		this.addChild(this.searchInput);
 
@@ -122,70 +129,24 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		// Add bottom border
 		this.addChild(new DynamicBorder());
 
-		// Load models and do initial render
-		this.loadModels().then(() => {
-			if (initialSearchInput) {
-				this.filterModels(initialSearchInput);
-			} else {
-				this.updateList();
-			}
-			// Request re-render after models are loaded
-			this.tui.requestRender();
-		});
-	}
-
-	private async loadModels(): Promise<void> {
-		let models: ModelItem[];
-
-		// Refresh to pick up any changes to models.json
-		this.modelRegistry.refresh();
-
-		// Check for models.json errors
-		const loadError = this.modelRegistry.getError();
-		if (loadError) {
-			this.errorMessage = loadError;
-		}
-
-		// Load available models (built-in models still work even if models.json failed)
-		try {
-			const availableModels = await this.modelRegistry.getAvailable();
-			models = availableModels.map((model: Model<any>) => ({
-				provider: model.provider,
-				id: model.id,
-				model,
-			}));
-		} catch (error) {
-			this.allModels = [];
-			this.scopedModelItems = [];
-			this.activeModels = [];
-			this.filteredModels = [];
-			this.errorMessage = error instanceof Error ? error.message : String(error);
-			return;
-		}
-
-		this.allModels = this.sortModels(models);
-		this.scopedModels = this.scopedModels.map((scoped) => {
-			const refreshed = this.modelRegistry.find(scoped.model.provider, scoped.model.id);
-			return refreshed ? { ...scoped, model: refreshed } : scoped;
-		});
-		this.scopedModelItems = this.scopedModels.map((scoped) => ({
-			provider: scoped.model.provider,
-			id: scoped.model.id,
-			model: scoped.model,
-		}));
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
 		this.filteredModels = this.activeModels;
-		const currentIndex = this.filteredModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
-		this.selectedIndex =
-			currentIndex >= 0 ? currentIndex : Math.min(this.selectedIndex, Math.max(0, this.filteredModels.length - 1));
+		const currentIndex = this.filteredModels.findIndex((item) => isCurrent(this.current, item.model));
+		this.selectedIndex = Math.max(0, currentIndex);
+		if (initialSearchInput) {
+			this.filterModels(initialSearchInput);
+		} else {
+			this.updateList();
+		}
+		tui.requestRender();
 	}
 
 	private sortModels(models: ModelItem[]): ModelItem[] {
 		const sorted = [...models];
 		// Sort: current model first, then by provider
 		sorted.sort((a, b) => {
-			const aIsCurrent = modelsAreEqual(this.currentModel, a.model);
-			const bIsCurrent = modelsAreEqual(this.currentModel, b.model);
+			const aIsCurrent = isCurrent(this.current, a.model);
+			const bIsCurrent = isCurrent(this.current, b.model);
 			if (aIsCurrent && !bIsCurrent) return -1;
 			if (!aIsCurrent && bIsCurrent) return 1;
 			return a.provider.localeCompare(b.provider);
@@ -207,7 +168,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		if (this.scope === scope) return;
 		this.scope = scope;
 		this.activeModels = this.scope === "scoped" ? this.scopedModelItems : this.allModels;
-		const currentIndex = this.activeModels.findIndex((item) => modelsAreEqual(this.currentModel, item.model));
+		const currentIndex = this.activeModels.findIndex((item) => isCurrent(this.current, item.model));
 		this.selectedIndex = currentIndex >= 0 ? currentIndex : 0;
 		this.filterModels(this.searchInput.getValue());
 		if (this.scopeText) {
@@ -243,19 +204,19 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			if (!item) continue;
 
 			const isSelected = i === this.selectedIndex;
-			const isCurrent = modelsAreEqual(this.currentModel, item.model);
+			const current = isCurrent(this.current, item.model);
 
 			let line = "";
 			if (isSelected) {
 				const prefix = theme.fg("accent", "→ ");
 				const modelText = `${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+				const checkmark = current ? theme.fg("success", " ✓") : "";
 				line = `${prefix + theme.fg("accent", modelText)} ${providerBadge}${checkmark}`;
 			} else {
 				const modelText = `  ${item.id}`;
 				const providerBadge = theme.fg("muted", `[${item.provider}]`);
-				const checkmark = isCurrent ? theme.fg("success", " ✓") : "";
+				const checkmark = current ? theme.fg("success", " ✓") : "";
 				line = `${modelText} ${providerBadge}${checkmark}`;
 			}
 
@@ -312,7 +273,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		else if (kb.matches(keyData, "tui.select.confirm")) {
 			const selectedModel = this.filteredModels[this.selectedIndex];
 			if (selectedModel) {
-				this.handleSelect(selectedModel.model);
+				this.onSelectCallback(selectedModel.model);
 			}
 		}
 		// Escape or Ctrl+C
@@ -324,12 +285,6 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			this.searchInput.handleInput(keyData);
 			this.filterModels(this.searchInput.getValue());
 		}
-	}
-
-	private handleSelect(model: Model<any>): void {
-		// Save as new default
-		this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
-		this.onSelectCallback(model);
 	}
 
 	getSearchInput(): Input {

@@ -246,23 +246,18 @@ describe("FooterComponent width handling", () => {
 			},
 		});
 		let transient: Parameters<typeof withTransientUsage>[1] = {
-			model: {
-				id: "review-model",
-				name: "review-model",
-				provider: "test",
-				api: "openai-completions",
-				baseUrl: "",
-				reasoning: true,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 100_000,
-				maxTokens: 1_000,
-			},
+			model: { id: "review-model", provider: "test", reasoning: true, contextWindow: 100_000 },
 			thinkingLevel: "high",
-			fastModeEnabled: true,
-			contextUsage: { tokens: 75_000, contextWindow: 100_000, percent: 75 },
-			totals: { input: 300, output: 30, cacheRead: 150, cacheWrite: 0, cost: 0.3 },
-			latestCacheHitRate: 50,
+			fastMode: true,
+			usage: {
+				input: 300,
+				output: 30,
+				cacheRead: 150,
+				cacheWrite: 0,
+				cost: 0.3,
+				latestCacheHitRate: 50,
+				contextUsage: { tokens: 75_000, contextWindow: 100_000, percent: 75 },
+			},
 		};
 		const footer = new FooterComponent(() => withTransientUsage(session, transient));
 
@@ -363,21 +358,20 @@ describe("FooterComponent width handling", () => {
 				withTransientUsage(session, {
 					model: {
 						id: workflow.id,
-						name: workflow.id,
 						provider: workflow.provider,
-						api: "openai-completions",
-						baseUrl: "",
 						reasoning: false,
-						input: ["text"],
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 						contextWindow: workflow.contextWindow,
-						maxTokens: 1_000,
 					},
 					thinkingLevel: "off",
-					fastModeEnabled: false,
-					contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
-					totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
-					latestCacheHitRate: undefined,
+					fastMode: false,
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						cost: 0,
+						contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
+					},
 				}),
 			);
 			expect(renderStats(transient)).not.toContain("cache");

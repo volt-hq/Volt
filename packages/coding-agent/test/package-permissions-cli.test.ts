@@ -2,7 +2,9 @@
  * `volt install` and `volt update` review an extension package's permissions
  * (RFC §8.2): in a terminal they ask for the unacknowledged ones and record
  * the answer (declining an install removes the package); without one they
- * list them, unacknowledged.
+ * list them, unacknowledged. A package installed by a path relative to the
+ * cwd is reviewed where it was installed from, and an update reviews the
+ * packages it touched by their identity, however the source is spelled.
  */
 
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -34,16 +36,16 @@ describe("package permission review", () => {
 		Object.defineProperty(process.stdout, "isTTY", { value: interactive, configurable: true });
 	}
 
-	function writePackage(permissions: string[]): void {
+	function writePackage(permissions: string[], directory = packageDir): void {
 		writeFileSync(
-			join(packageDir, "package.json"),
+			join(directory, "package.json"),
 			JSON.stringify({
 				name: "perm-demo",
 				version: "1.0.0",
 				volt: { id: "perm-demo", displayName: "Permission Demo", entry: "index.js", permissions },
 			}),
 		);
-		writeFileSync(join(packageDir, "index.js"), "module.exports = function () {};");
+		writeFileSync(join(directory, "index.js"), "module.exports = function () {};");
 	}
 
 	function packages(): unknown[] {
@@ -169,5 +171,31 @@ describe("package permission review", () => {
 		expect(logs.join("\n")).toContain("asks for permissions you did not acknowledge");
 		expect(acknowledged()["perm-demo"]?.permissions).toEqual(["exec"]);
 		expect(packages()).toHaveLength(1);
+	});
+
+	it("reviews a package installed by a path relative to the cwd", async () => {
+		setTerminal(false);
+		const nested = join(projectDir, "packages", "perm-demo");
+		mkdirSync(nested, { recursive: true });
+		writePackage(["exec"], nested);
+		await handlePackageCommand(["install", "./packages/perm-demo", "--approve"]);
+		expect(packages()).toHaveLength(1);
+		const output = logs.join("\n");
+		expect(output).toContain("Permission Demo (perm-demo 1.0.0) asks to:");
+		expect(output).toContain('Run "volt install ./packages/perm-demo" in a terminal to review them.');
+	});
+
+	it("reviews the package an update names by its identity, however the source is spelled", async () => {
+		setTerminal(true);
+		writePackage(["exec"]);
+		vi.mocked(promptConfirm).mockResolvedValueOnce(true);
+		await handlePackageCommand(["install", packageDir, "--approve"]);
+
+		writePackage(["exec", "network"]);
+		vi.mocked(promptConfirm).mockResolvedValueOnce(true);
+		await handlePackageCommand(["update", `${packageDir}/.`, "--approve"]);
+		expect(promptConfirm).toHaveBeenCalledTimes(2);
+		expect(logs.join("\n")).toContain("network: use the network (not enforced) (new)");
+		expect(acknowledged()["perm-demo"]?.permissions).toEqual(["exec", "network"]);
 	});
 });

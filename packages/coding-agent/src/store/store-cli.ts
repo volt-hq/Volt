@@ -16,8 +16,6 @@ import {
 	reportSettingsErrors,
 	reviewInstalledPermissions,
 } from "../package-manager-cli.ts";
-import { parseGitUrl } from "../utils/git.ts";
-import { resolvePath } from "../utils/paths.ts";
 import {
 	findCatalogPackage,
 	loadDefaultStoreCatalog,
@@ -45,7 +43,10 @@ import {
 	chooseStoreRemoveTarget,
 	chooseStoreUpdateTarget,
 	type StoreScopeTarget,
+	storeReviewSource,
+	storeSourcePinsCommit,
 	storeTargetMatchesUpdateSource,
+	storeUpdateTouches,
 } from "./targets.ts";
 
 type StoreCommand = "search" | "show" | "install" | "remove" | "update";
@@ -425,14 +426,7 @@ async function reviewUpdatedPermissions(
 ): Promise<void> {
 	for (const pkg of packageManager.listConfiguredPackages()) {
 		if (options.local && pkg.scope !== "project") continue;
-		const source = options.source;
-		if (
-			source !== undefined &&
-			packageManager.getPackageIdentity(pkg.source, pkg.scope) !==
-				packageManager.getPackageIdentity(source, pkg.scope)
-		) {
-			continue;
-		}
+		if (options.source !== undefined && !storeUpdateTouches(packageManager, pkg, options.source)) continue;
 		const status = await reviewInstalledPermissions(
 			packageManager,
 			agentDir,
@@ -556,13 +550,15 @@ async function runInstall(
 	const permissions = await reviewInstalledPermissions(
 		packageManager,
 		agentDir,
-		// A local package is found where it was installed from: the source's path from here.
-		plan.resolved.kind === "local" ? resolvePath(plan.source, cwd, { trim: true }) : plan.source,
+		storeReviewSource(plan.source, cwd),
 		scope,
 		"Declining removes the package.",
 		`${APP_NAME} store install ${input}`,
 	);
-	if (permissions === "declined" || permissions === "failed") {
+	// A package just installed that cannot be found cannot be reviewed: it must not stay to run unreviewed.
+	if (permissions === "missing")
+		console.error(chalk.red("Could not find the installed package to review its permissions"));
+	if (permissions === "declined" || permissions === "failed" || permissions === "missing") {
 		await packageManager.removeAndPersist(plan.source, { local: options.local });
 		await settingsManager.flush();
 		console.error(chalk.red(`Removed ${formatStoreInstallPlanTarget(plan)}: its permissions were not acknowledged`));
@@ -753,26 +749,46 @@ async function runUpdate(
 		`Declining keeps ${currentLabel}.`,
 		`${APP_NAME} store update ${input}`,
 	);
-	if (permissions === "declined" || permissions === "failed") {
+	if (permissions === "missing")
+		console.error(chalk.red("Could not find the installed package to review its permissions"));
+	if (permissions === "declined" || permissions === "failed" || permissions === "missing") {
 		process.exitCode = 1;
+		// The declined revision must not stay installed: without the previous one, the package goes.
+		const removeDeclined = async (reason: string): Promise<void> => {
+			await packageManager.removeAndPersist(plan.source, { local });
+			await settingsManager.flush();
+			console.error(chalk.red(`Removed ${currentLabel}: ${reason}`));
+		};
 		// Back to the installed pin: the update's permissions were not acknowledged.
 		try {
 			await packageManager.installAndPersist(target.source, { local, scripts: "never" });
 			await settingsManager.flush();
 		} catch (error: unknown) {
-			// The declined pin must not stay installed: without the previous one, the package goes.
 			const message = sanitizeText(error instanceof Error ? error.message : String(error));
 			console.error(chalk.red(`Could not reinstall ${currentLabel}: ${message}`));
-			await packageManager.removeAndPersist(plan.source, { local });
-			await settingsManager.flush();
-			console.error(chalk.red(`Removed ${currentLabel}: the update's permissions were not acknowledged`));
+			await removeDeclined("the update's permissions were not acknowledged");
 			return true;
 		}
-		console.error(chalk.red(`Kept ${currentLabel}: the update's permissions were not acknowledged`));
-		// A source without a commit pin reinstalls at its newest revision, which has its own permissions.
-		if (!/^[0-9a-f]{40}$/i.test(parseGitUrl(target.source)?.ref ?? "")) {
-			await reviewUpdatedPermissions(packageManager, agentDir, { source: target.source, local });
+		// A source without a commit pin reinstalls at its newest revision, which has its own permissions:
+		// declining them too removes the package.
+		if (!storeSourcePinsCommit(target.source)) {
+			const rollback = await reviewInstalledPermissions(
+				packageManager,
+				agentDir,
+				target.source,
+				target.scope,
+				"Declining removes the package.",
+				`${APP_NAME} store update ${input}`,
+			);
+			if (rollback === "missing") {
+				console.error(chalk.red("Could not find the installed package to review its permissions"));
+			}
+			if (rollback === "declined" || rollback === "failed" || rollback === "missing" || rollback === "unreviewed") {
+				await removeDeclined("the reinstalled revision's permissions were not acknowledged");
+				return true;
+			}
 		}
+		console.error(chalk.red(`Kept ${currentLabel}: the update's permissions were not acknowledged`));
 		return true;
 	}
 	console.log(chalk.green(`Updated ${currentLabel} to ${formatStoreInstallPlanTarget(plan)}`));

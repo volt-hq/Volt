@@ -15,6 +15,7 @@ import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema 
 import { stringEnum } from "./helpers.ts";
 import {
 	AuthProviderSchema,
+	HostWarningSettingsSchema,
 	LspStatusSchema,
 	RpcPersonalitySchema,
 	RpcTransportSchema,
@@ -286,6 +287,7 @@ export const QUERY_SCHEMAS = {
 				blockImages: Type.Optional(Type.Boolean()),
 				httpIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
 				enableInstallTelemetry: Type.Optional(Type.Boolean()),
+				warnings: Type.Optional(HostWarningSettingsSchema),
 			},
 			closed,
 		),
