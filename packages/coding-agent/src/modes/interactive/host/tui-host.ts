@@ -96,6 +96,8 @@ export class TuiHost {
 			host: this.host,
 			conversation: this.startup,
 			anchor: true,
+			// The TUI's prompts reach extensions as interactive input.
+			inputSource: "interactive",
 			// The TUI's abort stops the run without delivering its queued input.
 			services: () => ({ abortRun: (session) => session.abort("host_action") }),
 			...(options.onShutdownRequested === undefined ? {} : { onShutdownRequested: options.onShutdownRequested }),
