@@ -565,7 +565,7 @@ export function serveConnection(
 	const onExtensionError = (error: ExtensionError): void => {
 		for (const subscription of subscriptions.values()) {
 			if (subscription.conversation !== home) continue;
-			subscription.notice("error", `${error.event}: ${error.error}`, error.extensionId);
+			subscription.notice("error", `${error.event}: ${error.error}`, error.extensionId, error.stack);
 		}
 	};
 

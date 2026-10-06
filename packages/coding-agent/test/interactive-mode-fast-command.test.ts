@@ -1,6 +1,5 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
@@ -25,14 +24,6 @@ type FastCommandHarness = {
 const handleFastCommand = Reflect.get(InteractiveMode.prototype, "handleFastCommand") as (
 	this: FastCommandHarness,
 	text: string,
-) => Promise<void>;
-
-const handleStatusEvent = Reflect.get(InteractiveMode.prototype, "handleStatusEvent") as (
-	this: {
-		footer: { invalidate(): void };
-		ui: { requestRender(): void };
-	},
-	event: AgentSessionEvent,
 ) => Promise<void>;
 
 function createModel(): Model<Api> {
@@ -153,18 +144,5 @@ describe("InteractiveMode /fast command", () => {
 		expect(session.fastModeEnabled).toBe(false);
 		expect(showStatus).toHaveBeenCalledWith("Fast mode disabled");
 		expect(setFastModeEnabled).toHaveBeenCalledWith(false);
-	});
-
-	it("invalidates and repaints the footer for Fast mode state events", async () => {
-		const invalidate = vi.fn();
-		const requestRender = vi.fn();
-
-		await handleStatusEvent.call(
-			{ footer: { invalidate }, ui: { requestRender } },
-			{ type: "fast_mode_changed", enabled: true },
-		);
-
-		expect(invalidate).toHaveBeenCalledOnce();
-		expect(requestRender).toHaveBeenCalledOnce();
 	});
 });

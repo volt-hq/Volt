@@ -1,10 +1,14 @@
-import type { AgentToolResult } from "@hansjm10/volt-agent-core";
+import type { AgentToolResult, WorkRecord } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, JsonObject } from "@hansjm10/volt-ai";
 import {
+	type ClientState,
+	type ClientWorkItem,
+	emptyClientState,
 	emptyLiveFold,
 	foldLiveFrame,
 	foldLiveItems,
 	type LiveFoldState,
+	type PlanningState,
 	PRESENTATION_MAX_SERIALIZED_BYTES,
 	WORK_NOTICE_CUSTOM_TYPE,
 } from "@hansjm10/volt-protocol";
@@ -12,8 +16,11 @@ import type { Component, OverlayHandle, TUI, TuiMode } from "@hansjm10/volt-tui"
 import { type Container, Text } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { liveKey } from "../src/core/host/live-state.ts";
 import type { CustomMessage } from "../src/core/messages.ts";
+import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../src/core/protocol/queries/index.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import { withBackgroundJobs } from "../src/core/tools/background.ts";
@@ -27,7 +34,7 @@ import {
 } from "../src/core/tools/jobs.ts";
 import { presentToolCall } from "../src/core/ui/presentation.ts";
 import type { TranscriptView } from "../src/modes/interactive/client/transcript-view.ts";
-import type { TuiStore } from "../src/modes/interactive/client/tui-store.ts";
+import { TuiStore, type TuiStoreChange } from "../src/modes/interactive/client/tui-store.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import { PresentedMessageComponent } from "../src/modes/interactive/components/presented-message.ts";
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
@@ -36,7 +43,6 @@ import { WorkInspector } from "../src/modes/interactive/components/work-inspecto
 import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
 import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
-import type { TuiLiveView } from "../src/modes/interactive/live-view.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
@@ -56,7 +62,6 @@ type InteractiveTestAccess = {
 	workInspector?: WorkInspector;
 	workOverlay?: OverlayHandle;
 	store: TuiStore;
-	liveView: TuiLiveView;
 	transcript: TranscriptView;
 	workRowsCoalescer: StreamingRenderCoalescer<void>;
 	followWork(): void;
@@ -93,10 +98,53 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
+/** A work record as a client folds it: metadata only, without input, output text, or result data. */
+function clientWorkItem(record: WorkRecord): ClientWorkItem {
+	const { summary, child, output } = record.result ?? {};
+	const result = {
+		...(summary === undefined ? {} : { summary }),
+		...(child === undefined ? {} : { child }),
+		...(output === undefined ? {} : { output: { truncated: output.truncated } }),
+	};
+	return {
+		workId: record.workId,
+		kind: record.kind,
+		title: record.title,
+		...(record.parentWorkId === undefined ? {} : { parentWorkId: record.parentWorkId }),
+		cancellable: record.cancellable,
+		delivery: record.delivery,
+		resume: record.resume,
+		...(record.toolCallId === undefined ? {} : { toolCallId: record.toolCallId }),
+		state: record.state,
+		...(record.outcome === undefined ? {} : { outcome: record.outcome }),
+		...(record.progress === undefined ? {} : { progress: record.progress }),
+		...(record.detail === undefined ? {} : { detail: record.detail }),
+		...(Object.keys(result).length === 0 ? {} : { result }),
+		...(record.error === undefined ? {} : { error: record.error }),
+		startedOrdinal: record.startedOrdinal,
+		updatedOrdinal: record.updatedOrdinal,
+		...(record.finishedOrdinal === undefined ? {} : { finishedOrdinal: record.finishedOrdinal }),
+	};
+}
+
+const READY_PLAN: PlanningState = {
+	mode: "build",
+	plan: {
+		id: "plan-jobs",
+		revision: 1,
+		phase: "ready",
+		title: "Keep the plan visible",
+		summary: "Inspect background work without losing the plan pane.",
+		steps: [{ id: "step-1", text: "Observe the job dock", status: "pending" }],
+	},
+};
+
 /**
  * InteractiveMode over a session whose work is a job runtime of the fixture's.
- * The TUI's store holds what its client would: the session's log projected
- * and the runtime's live work values, plus any running calls a test starts.
+ * The TUI's store holds what its client would: the session's log projected,
+ * the runtime's work as the client fold holds it, and the runtime's live work
+ * values, plus any running calls a test starts; its client reads and acts on
+ * the runtime's work through the work queries and intents.
  */
 async function createFixture(
 	tuiMode: TuiMode,
@@ -125,27 +173,38 @@ async function createFixture(
 	vi.spyOn(harness.session, "getToolDefinition").mockImplementation((name) =>
 		name === "bash" ? bash : name === "jobs" ? jobsTool : getToolDefinition(name),
 	);
-	if (withPlan) {
-		vi.spyOn(harness.session, "planningState", "get").mockReturnValue({
-			mode: "build",
-			plan: {
-				id: "plan-jobs",
-				revision: 1,
-				phase: "ready",
-				title: "Keep the plan visible",
-				summary: "Inspect background work without losing the plan pane.",
-				steps: [{ id: "step-1", text: "Observe the job dock", status: "pending" }],
-			},
-		});
-	}
+	// The client fold: the runtime's work, and the plan, as the store holds them.
+	const foldState = (): ClientState => ({
+		...emptyClientState(),
+		planning: withPlan ? READY_PLAN : null,
+		work: new Map(runtime.work.list().map((record) => [record.workId, clientWorkItem(record)])),
+	});
+	let state = foldState();
+	vi.spyOn(TuiStore.prototype, "state", "get").mockImplementation(() => state);
 	const host = createFakeHost({ extensionMode: "tui" });
 	const { conversation } = createFakeConversation(harness.session);
 	const tuiHost = TuiHost.start({ host: host.host, conversation });
 	// Nothing here connects the TUI: its in-process intents (cancel_work) act as a client of its own.
 	vi.spyOn(tuiHost, "hostClient", "get").mockReturnValue({ id: "tui", move: { kind: "in_place", onMoved: () => {} } });
+	// The TUI's client runs the work queries and intents on the conversation, as its host does.
+	const context = (): IntentContext => ({
+		target: { session: harness.session, conversation, host: host.host, client: tuiHost.hostClient },
+		services: {},
+		profile: LOCAL_INTENT_PROFILE,
+	});
+	const client = {
+		query: (name: "work_output", params: { workId: string; offset?: number }) =>
+			queryRegistry.run(context(), name, params),
+		intent: async (name: string, input: Record<string, unknown>) => {
+			await intentRegistry.invokeFrame(context(), name, input);
+			return { type: "accepted", intentId: name, ordinals: [] };
+		},
+	};
+	vi.spyOn(TuiStore.prototype, "client", "get").mockReturnValue(client as unknown as ProtocolClient);
 	const mode = new InteractiveMode(tuiHost, { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;
 	let shownSession = harness.session;
+	let moved = false;
 	let live: LiveFoldState = emptyLiveFold();
 	vi.spyOn(access.store, "transcript").mockImplementation(() => storeTranscript(shownSession));
 	vi.spyOn(access.store, "live", "get").mockImplementation(() => live);
@@ -161,12 +220,25 @@ async function createFixture(
 	access.setupEditorSubmitHandler();
 	access.activateView(access.conversationView, access.editor, false);
 	access.followWork();
-	// The runtime's work values reach the TUI as its client's live frames do.
+	// What the store hears: the work entries and the runtime's live frames, as its client receives them.
+	const emit = (change: TuiStoreChange): void =>
+		(access.store as unknown as { emit(change: TuiStoreChange): void }).emit(change);
+	const committed = (): void => {
+		if (moved) return;
+		state = foldState();
+		emit({ type: "entries", entries: [] });
+	};
+	// A work entry committed (the jobs hear every commit), or an executor attached or detached.
+	runtime.jobs.subscribe(committed);
+	runtime.work.subscribe(committed);
 	runtime.live.attach("tui", {
 		acceptsHostRequest: () => true,
 		apply: (update) => {
+			if (moved) return;
+			// The entries a work's executor wrote reach the client before its live value changes.
+			state = foldState();
 			live = foldLiveFrame(live, update);
-			access.liveView.apply(update);
+			emit({ type: "live", reset: update.reset, items: update.items });
 		},
 	});
 	access.isInitialized = true;
@@ -205,6 +277,10 @@ async function createFixture(
 		/** Show `session` as the conversation the client moved to. */
 		showSession(session: Harness["session"]) {
 			shownSession = session;
+			// The client left the runtime's conversation: its frames no longer reach the store, which holds the target's.
+			moved = true;
+			state = emptyClientState();
+			live = emptyLiveFold();
 		},
 		/** A call the live lane says runs, as its tool presents it. */
 		run(toolCallId: string, toolName: string, args: Record<string, unknown>) {
@@ -835,6 +911,11 @@ describe("interactive background jobs", () => {
 			const modelMessages = harness.session.messages;
 			finish();
 			await jobs.wait([job.id]);
+			// The final output arrives through `work_output`; reconstructions keep it from then on.
+			await vi.waitFor(async () => {
+				await terminal.waitForRender();
+				expect(terminal.getViewport().join("\n")).toContain("final output");
+			});
 			// The first reconstruction must also flush any queued terminal-status repaint.
 			for (let index = 0; index < 3; index++) {
 				terminal.sendInput("\x14"); // Ctrl+T reconstructs the transcript.
@@ -887,6 +968,10 @@ describe("interactive background jobs", () => {
 		}
 		expect(jobs.list()).toHaveLength(JOB_LIST_MAX);
 		expect(jobs.list().some((listed) => listed.id === job.id)).toBe(false);
+		// The finished job's output arrives through `work_output`.
+		await vi.waitFor(() =>
+			expect(stripAnsi(access.chatContainer.render(100).lines.join("\n"))).toContain("final output"),
+		);
 		for (let index = 0; index < 2; index++) {
 			access.transcript.rebuild();
 			// A finished job's card shows its recorded outcome, not the running state it captured.

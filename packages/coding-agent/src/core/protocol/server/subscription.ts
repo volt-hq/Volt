@@ -222,16 +222,22 @@ export class Subscription {
 
 	/**
 	 * A transient notice on the live lane; it changes no streaming scope. Its
-	 * text, such as an extension's error, reaches the client without terminal
-	 * controls and bounded.
+	 * text and detail, such as an extension's error and its stack, reach the
+	 * client without terminal controls and bounded.
 	 */
-	notice(level: "info" | "warning" | "error", message: string, source?: string): void {
+	notice(level: "info" | "warning" | "error", message: string, source?: string, detail?: string): void {
 		if (!this.options.live || this.ended) return;
 		this.receive({
 			reset: false,
 			basedOn: this.basedOn,
 			items: [
-				{ type: "notice", level, message: plainNoticeText(message), ...(source === undefined ? {} : { source }) },
+				{
+					type: "notice",
+					level,
+					message: plainNoticeText(message),
+					...(source === undefined ? {} : { source }),
+					...(detail === undefined ? {} : { detail: plainNoticeText(detail) }),
+				},
 			],
 		});
 	}

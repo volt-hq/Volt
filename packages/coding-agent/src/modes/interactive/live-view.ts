@@ -1,26 +1,24 @@
 /**
  * The TUI's view of the live state of the conversation it shows, as its
- * client's live frames change it: extension status, panels, and title;
- * notices and editor directives; the progress of the work the host runs; and
- * the dialogs, forms, and approvals the TUI answers, shown one at a time in
- * the order they were asked. A request another client answered, or that
- * ended, closes without an answer. An `editor_text` request is answered at
- * once with the editor's text. A patched panel or work item shows as the
- * client's live fold holds it.
+ * client's live frames change it: extension panels and title; notices (the
+ * host's own and its extensions') and editor directives; the end of the work
+ * the host runs; and the dialogs, forms, and approvals the TUI answers, shown
+ * one at a time in the order they were asked. A request another client
+ * answered, or that ended, closes without an answer. An `editor_text` request
+ * is answered at once with the editor's text. A patched panel shows as the
+ * client's live fold holds it. Status items, phase, and work progress are
+ * read from the store where they show.
  */
 
-import {
-	HOST_NOTICE_SOURCE,
-	type HostRequest,
-	type HostRequestKind,
-	type HostResponse,
-	type LiveItem,
-	type LiveValue,
-	type UiNodeStyledText,
+import type {
+	HostRequest,
+	HostRequestKind,
+	HostResponse,
+	LiveItem,
+	LiveValue,
+	UiNodeStyledText,
 } from "@hansjm10/volt-protocol";
 import type { UiPanel } from "./ui-node/panels.ts";
-
-type WorkValue = Extract<LiveValue, { kind: "work" }>;
 
 /** What the live view renders into. */
 export interface LiveViewHost {
@@ -28,20 +26,19 @@ export interface LiveViewHost {
 	showRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined>;
 	/** Answer `requestId` in the conversation the TUI shows. */
 	answer(requestId: string, response: HostResponse): void;
-	/** Show or clear an extension's status item, keyed `<extension id>/<name>`. */
-	setStatus(key: string, text: UiNodeStyledText | undefined): void;
 	/** Show, update, or remove the panel under its live key. */
 	setPanel(key: string, panel: UiPanel | undefined): void;
 	/** Show an extension's title, or the TUI's own without one. */
 	setTitle(title: string | undefined): void;
-	notify(level: "info" | "warning" | "error", message: UiNodeStyledText): void;
+	/** Show a notice: from an extension (`source`, its id), or the host's own; `detail` such as an error's stack. */
+	notify(level: "info" | "warning" | "error", message: UiNodeStyledText, source?: string, detail?: string): void;
 	setEditorText(text: string): void;
 	/** Paste text into the editor at the cursor. */
 	insertEditorText(text: string): void;
 	/** The editor's text, or undefined when the TUI shows no editor. */
 	editorText(): string | undefined;
-	/** Work `workId` reported progress, or, without a value, its executor detached. */
-	showWork(workId: string, value: WorkValue | undefined): void;
+	/** The executor of work `workId` detached: the work ended, or suspended. */
+	workDetached(workId: string): void;
 	/** The live value under `key` as the client's live fold holds it, patches applied. */
 	liveValue(key: string): LiveValue | undefined;
 }
@@ -68,11 +65,10 @@ function panelOf(value: Extract<LiveValue, { kind: "ext_panel" }>): UiPanel {
 
 export class TuiLiveView {
 	private readonly host: LiveViewHost;
-	private readonly statuses = new Set<string>();
 	/** Panels shown, by live key. */
 	private readonly panels = new Map<string, Extract<LiveValue, { kind: "ext_panel" }>>();
-	/** Work whose progress shows, by work id. */
-	private readonly works = new Map<string, WorkValue>();
+	/** Work an executor runs, by work id. */
+	private readonly works = new Set<string>();
 	private titled = false;
 	/** Pending requests in the order they were asked; the first shows. */
 	private readonly requests = new Map<string, HostRequest>();
@@ -84,8 +80,11 @@ export class TuiLiveView {
 
 	/** Apply a live frame: a reset replaces what the view shows. */
 	apply(update: { readonly reset: boolean; readonly items: readonly LiveItem[] }): void {
+		const running = update.reset ? [...this.works] : [];
 		if (update.reset) this.clearAll();
 		for (const item of update.items) this.applyItem(item);
+		// Work the reset no longer runs detached meanwhile.
+		for (const workId of running) if (!this.works.has(workId)) this.host.workDetached(workId);
 		this.showNext();
 	}
 
@@ -103,8 +102,7 @@ export class TuiLiveView {
 				return;
 			}
 			case "notice":
-				// The host's own notices: the TUI shows them from its session's status events until its status reads the store.
-				if (item.source !== HOST_NOTICE_SOURCE) this.host.notify(item.level, item.message);
+				this.host.notify(item.level, item.message, item.source, item.detail);
 				return;
 			case "directive":
 				if (item.directive === "insert_editor_text") this.host.insertEditorText(item.text);
@@ -117,12 +115,7 @@ export class TuiLiveView {
 	}
 
 	private set(key: string, value: LiveValue): void {
-		const id = key.slice(key.indexOf("/") + 1);
 		switch (value.kind) {
-			case "ext_status":
-				this.statuses.add(id);
-				this.host.setStatus(id, value.text);
-				return;
 			case "ext_panel":
 				this.panels.set(key, value);
 				this.host.setPanel(key, panelOf(value));
@@ -141,8 +134,7 @@ export class TuiLiveView {
 				this.requests.set(value.requestId, value.request);
 				return;
 			case "work":
-				this.works.set(value.workId, value);
-				this.host.showWork(value.workId, value);
+				this.works.add(value.workId);
 				return;
 			default:
 				return;
@@ -154,10 +146,6 @@ export class TuiLiveView {
 		const family = slash === -1 ? key : key.slice(0, slash);
 		const id = key.slice(slash + 1);
 		switch (family) {
-			case "ext_status":
-				this.statuses.delete(id);
-				this.host.setStatus(id, undefined);
-				return;
 			case "ext_panel":
 				if (this.panels.delete(key)) this.host.setPanel(key, undefined);
 				return;
@@ -170,8 +158,7 @@ export class TuiLiveView {
 				if (this.showing?.requestId === id) this.closeShowing();
 				return;
 			case "work":
-				this.works.delete(id);
-				this.host.showWork(id, undefined);
+				if (this.works.delete(id)) this.host.workDetached(id);
 				return;
 			default:
 				return;
@@ -179,11 +166,8 @@ export class TuiLiveView {
 	}
 
 	private clearAll(): void {
-		for (const key of this.statuses) this.host.setStatus(key, undefined);
-		this.statuses.clear();
 		for (const key of this.panels.keys()) this.host.setPanel(key, undefined);
 		this.panels.clear();
-		for (const workId of this.works.keys()) this.host.showWork(workId, undefined);
 		this.works.clear();
 		if (this.titled) {
 			this.titled = false;

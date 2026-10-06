@@ -21,7 +21,7 @@ import { type SubagentDefinition, SubagentManager } from "../../../src/core/suba
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { conversationLines } from "../../../src/modes/interactive/components/work-inspector.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createSessionWorkSource } from "../../utilities/work-source.ts";
+import { createSessionWorkView } from "../../utilities/work-view.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
@@ -187,11 +187,13 @@ describe("#585 subagent suspended after a restart, then resumed explicitly", () 
 		expect(second.children).toHaveLength(0);
 		expect(second.parent.faux.state.callCount).toBe(0);
 		// The work inspector shows it suspended, and opens its closed conversation read-only from its log.
-		const source = createSessionWorkSource(second.parent.session);
-		expect(source.items()).toEqual([
+		const view = await createSessionWorkView(second.parent.session, tmpdir());
+		cleanups.push(() => view.dispose());
+		expect(view.work.items()).toEqual([
 			expect.objectContaining({ suspended: true, actions: { cancel: true, resume: true, open: true } }),
 		]);
-		const opened = await source.open(workId);
+		const opened = await view.work.open(workId);
+		cleanups.push(() => (opened.kind === "view" ? opened.conversation.dispose() : undefined));
 		if (opened.kind !== "view") throw new Error("Expected a read-only view of the child");
 		initTheme("dark");
 		expect(opened.conversation.live).toBe(false);

@@ -7,7 +7,9 @@
  * When an intent moves it to another conversation, it follows: the old
  * subscription ends `moved` and it subscribes to the target from a snapshot.
  * On a gap in the live lane it resubscribes after its position. `connect`
- * again on a new transport resumes after its position.
+ * again on a new transport resumes after its position. Beside it, `observe`
+ * subscribes to a conversation the client may read but not act on, such as a
+ * child its conversation's work links, open or closed.
  *
  * `createLoopbackClient` serves a conversation of an in-process host on the
  * local profile; `spawnRpcClient` runs `volt --mode rpc` as a child process.
@@ -122,6 +124,134 @@ export interface ProtocolPromptOptions {
 	readonly clientMessageId?: string;
 }
 
+/** Why an observation ended: its conversation closed (a closed one ends after its snapshot), lost its log, or the observation or client stopped. */
+export type ObservationEnd = "closed" | "lost" | "stopped";
+
+/**
+ * A read-only subscription to a conversation the client is not on: its client
+ * fold and live fold, from a snapshot. A conversation that is closed ends
+ * right after its snapshot.
+ */
+export interface ConversationObservation {
+	readonly conversation: string;
+	/** Whether the snapshot arrived. */
+	readonly received: boolean;
+	/** Whether the live state arrived after the snapshot: what the observation holds is current. */
+	readonly caughtUp: boolean;
+	readonly state: ClientState;
+	readonly live: LiveFoldState;
+	/** Why the observation ended, once it did. */
+	readonly ended: ObservationEnd | undefined;
+	/** Called after the state, the live state, or `ended` changed. */
+	onChange(listener: () => void): () => void;
+	/** Stop observing. */
+	stop(): void;
+}
+
+class Observation implements ConversationObservation {
+	readonly conversation: string;
+	received = false;
+	caughtUp = false;
+	state: ClientState = emptyClientState();
+	live: LiveFoldState = emptyLiveFold();
+	ended: ObservationEnd | undefined;
+	subscriptionId = "";
+	private liveSeq = 0;
+	private readonly listeners = new Set<() => void>();
+	private readonly owner: {
+		readonly subscribe: (observation: Observation, after: number | "snapshot") => void;
+		readonly unsubscribe: (observation: Observation) => void;
+	};
+
+	constructor(conversation: string, owner: Observation["owner"]) {
+		this.conversation = conversation;
+		this.owner = owner;
+	}
+
+	onChange(listener: () => void): () => void {
+		this.listeners.add(listener);
+		return () => this.listeners.delete(listener);
+	}
+
+	stop(): void {
+		if (this.ended !== undefined) return;
+		this.owner.unsubscribe(this);
+		this.end("stopped");
+	}
+
+	/** Subscribe afresh: after the position held, or from a snapshot when nothing is. */
+	start(after: number | "snapshot"): void {
+		this.liveSeq = 0;
+		this.owner.subscribe(this, after);
+	}
+
+	end(reason: ObservationEnd): void {
+		if (this.ended !== undefined) return;
+		this.ended = reason;
+		this.changed();
+	}
+
+	apply(frame: HostFrame): void {
+		if (this.ended !== undefined) return;
+		switch (frame.type) {
+			case "snapshot":
+				this.state = clientRestore(frame.ordinal, frame.state);
+				this.live = emptyLiveFold();
+				this.received = true;
+				break;
+			case "entry":
+				try {
+					this.state = clientFold([frame.entry], this.state);
+				} catch (error) {
+					if (!(error instanceof ClientFoldError)) throw error;
+					this.owner.unsubscribe(this);
+					this.state = emptyClientState();
+					this.live = emptyLiveFold();
+					this.start("snapshot");
+					return;
+				}
+				this.live = foldLiveCommit(this.live, liveCommitOf(frame.entry));
+				break;
+			case "head":
+				this.state = clientAdvance(this.state, frame.ordinal);
+				break;
+			case "live":
+				if (frame.reset !== true && frame.seq !== this.liveSeq + 1) {
+					this.owner.unsubscribe(this);
+					this.start(this.state.ordinal);
+					return;
+				}
+				this.liveSeq = frame.seq;
+				try {
+					this.live = foldLiveFrame(this.live, frame);
+				} catch (error) {
+					if (!(error instanceof LivePatchError)) throw error;
+					this.owner.unsubscribe(this);
+					this.start(this.state.ordinal);
+					return;
+				}
+				if (frame.reset === true) this.caughtUp = true;
+				break;
+			case "ended":
+				this.end(frame.reason === "lost" ? "lost" : frame.reason === "unsubscribed" ? "stopped" : "closed");
+				return;
+			default:
+				return;
+		}
+		this.changed();
+	}
+
+	private changed(): void {
+		for (const listener of [...this.listeners]) {
+			try {
+				listener();
+			} catch {
+				// Listeners are observers.
+			}
+		}
+	}
+}
+
 interface Pending<T> {
 	readonly name: string;
 	readonly resolve: (value: T) => void;
@@ -148,6 +278,8 @@ export class ProtocolClient {
 	private welcomeFrame: WelcomeFrame | undefined;
 	private welcomeWaiter: { resolve: (frame: WelcomeFrame) => void; reject: (error: Error) => void } | undefined;
 	private subscription: { readonly id: string; readonly conversation: string; caughtUp: boolean } | undefined;
+	/** Observations of other conversations, by subscription id. */
+	private readonly observations = new Map<string, Observation>();
 	private readonly caughtUpWaiters = new Set<{ resolve: () => void; reject: (error: Error) => void }>();
 	private clientState: ClientState = emptyClientState();
 	private liveState: LiveFoldState = emptyLiveFold();
@@ -384,6 +516,29 @@ export class ProtocolClient {
 		this.resubscribeFromSnapshot();
 	}
 
+	/**
+	 * Observe `conversation` read-only beside the conversation the client is
+	 * on: a conversation the host lets it read, such as a child its
+	 * conversation's work links at any depth, open or closed.
+	 */
+	observe(conversation: string): ConversationObservation {
+		const observation = new Observation(conversation, {
+			subscribe: (subscribed, after) => {
+				const id = randomUUID();
+				subscribed.subscriptionId = id;
+				this.observations.set(id, subscribed);
+				this.send({ type: "subscribe", subscriptionId: id, conversation, after });
+			},
+			unsubscribe: (subscribed) => {
+				if (!this.observations.delete(subscribed.subscriptionId)) return;
+				if (this.transport) this.send({ type: "unsubscribe", subscriptionId: subscribed.subscriptionId });
+			},
+		});
+		if (this.failure || !this.transport) observation.end("stopped");
+		else observation.start("snapshot");
+		return observation;
+	}
+
 	/** Close the transport; pending intents and queries fail. */
 	async stop(): Promise<void> {
 		const transport = this.transport ?? this.failedTransport;
@@ -451,6 +606,12 @@ export class ProtocolClient {
 	}
 
 	private apply(frame: HostFrame): void {
+		const observation = "subscriptionId" in frame ? this.observations.get(frame.subscriptionId) : undefined;
+		if (observation) {
+			if (frame.type === "ended") this.observations.delete(frame.subscriptionId);
+			observation.apply(frame);
+			return;
+		}
 		const subscription = this.subscription;
 		const ours = "subscriptionId" in frame && subscription?.id === frame.subscriptionId;
 		switch (frame.type) {
@@ -602,6 +763,9 @@ export class ProtocolClient {
 		}
 		this.intents.clear();
 		this.queries.clear();
+		const observations = [...this.observations.values()];
+		this.observations.clear();
+		for (const observation of observations) observation.end("stopped");
 		this.changed();
 	}
 

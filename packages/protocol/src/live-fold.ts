@@ -13,6 +13,7 @@
  * another `basedOn`, or when it applies the entry that commits them. A host
  * that changes `basedOn` while something streams sends the streaming state
  * again first ({@link liveStreamingItems}), so the client's state matches.
+ * The presentations of the streaming message's tool calls leave with it.
  * Notices and directives leave no state.
  */
 
@@ -34,6 +35,8 @@ export interface LiveStreamingAssistant {
 	readonly ended: boolean;
 	/** The raw argument text of tool calls still streaming, by content index. */
 	readonly argsText: ReadonlyMap<number, string>;
+	/** How the message's tool calls look while their arguments stream, by tool call id. */
+	readonly presentations: ReadonlyMap<string, ToolPresentation>;
 }
 
 /** A running tool: started, with its latest partial result and presentation, possibly ended before its result entry. */
@@ -178,13 +181,20 @@ export function foldLiveItems(state: LiveFoldState, items: readonly LiveItem[]):
 				break;
 			}
 			case "assistant_start":
-				assistant = { message: item.message, ended: false, argsText: new Map() };
+				assistant = { message: item.message, ended: false, argsText: new Map(), presentations: new Map() };
 				break;
 			case "assistant_delta":
 				if (assistant) assistant = applyAssistantDelta(assistant, item.event);
 				break;
 			case "assistant_end":
 				if (assistant) assistant = { ...assistant, ended: true };
+				break;
+			case "toolcall_presentation":
+				if (assistant) {
+					const presentations = new Map(assistant.presentations);
+					presentations.set(item.toolCallId, item.presentation);
+					assistant = { ...assistant, presentations };
+				}
 				break;
 			case "tool":
 				writableTools().set(item.toolCallId, applyToolItem(tools.get(item.toolCallId), item));
@@ -260,6 +270,9 @@ export function liveStreamingItems(state: LiveFoldState): LiveItem[] {
 					event: { type: "toolcall_delta", contentIndex, argsTextDelta: argsText },
 				});
 			}
+		}
+		for (const [toolCallId, presentation] of assistant.presentations) {
+			items.push({ type: "toolcall_presentation", toolCallId, presentation });
 		}
 		if (assistant.ended) items.push({ type: "assistant_end" });
 	}
@@ -402,5 +415,5 @@ function applyAssistantDelta(assistant: LiveStreamingAssistant, event: SlimAssis
 			setArgsText(undefined);
 			break;
 	}
-	return { message: { ...assistant.message, content }, ended: assistant.ended, argsText };
+	return { ...assistant, message: { ...assistant.message, content }, argsText };
 }

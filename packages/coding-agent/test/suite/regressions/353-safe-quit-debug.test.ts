@@ -26,7 +26,6 @@ interface ModeControl {
 	setupKeyHandlers(): void;
 	setupEditorSubmitHandler(): void;
 	setupAutocompleteProvider(): void;
-	observeSessionStatus(session: Harness["session"]): void;
 	switchTuiMode(mode: "regular" | "fullscreen"): boolean;
 	shutdown(): Promise<void>;
 	showWarning(message: string): void;
@@ -96,7 +95,6 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		control.renderer.setFocus(control.defaultEditor);
 		control.renderer.start();
 		control.isInitialized = true;
-		control.observeSessionStatus(harness.session);
 		vi.spyOn(control, "shutdown").mockResolvedValue();
 		vi.spyOn(control, "showWarning");
 		vi.spyOn(control, "showError");

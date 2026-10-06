@@ -178,13 +178,9 @@ export class TuiHost {
 		this.stopped = true;
 	}
 
-	/** Phones relayed into the conversation the TUI shows. */
+	/** Phones relayed into the conversations the TUI hosts and served now; its client sees them as `presence`. */
 	relayCount(): number {
 		return this.daemon?.relayCount() ?? 0;
-	}
-
-	onRelayCountChange(listener: (count: number) => void): () => void {
-		return this.daemon?.onRelayCountChange(listener) ?? (() => {});
 	}
 
 	/** The daemon workspace of the conversation the TUI shows, once resolved. */

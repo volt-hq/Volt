@@ -45,7 +45,8 @@ interface ReviewContext {
 	renderCurrentConversation: ReturnType<typeof vi.fn>;
 	refreshPlanningUi: ReturnType<typeof vi.fn>;
 	editor: Text;
-	footer: { setTransientUsage: ReturnType<typeof vi.fn> };
+	/** The review's usage the footer shows in place of the conversation's own. */
+	transientUsage: unknown;
 	activeInteractiveReview: boolean;
 	createInlineSessionRenderer: ReturnType<typeof vi.fn>;
 	showWarning: ReturnType<typeof vi.fn>;
@@ -95,7 +96,7 @@ function createContext(): ReviewContext {
 		},
 		host: {},
 		// The review's progress is its work's: none reported here.
-		workSource: { subscribe: () => () => undefined, items: () => [] },
+		work: { subscribe: () => () => undefined, items: () => [] },
 		newSession: openNewSession,
 		ui,
 		editorContainer,
@@ -108,7 +109,7 @@ function createContext(): ReviewContext {
 		}),
 		refreshPlanningUi: vi.fn(),
 		editor,
-		footer: { setTransientUsage: vi.fn() },
+		transientUsage: undefined,
 		activeInteractiveReview: false,
 		activeView: view,
 		conversationView: view,
@@ -218,7 +219,7 @@ describe("InteractiveMode review workflow", () => {
 			}
 			expect(JSON.stringify(result)).not.toContain(DIAGNOSTIC_RETENTION_WARNING);
 			expect(context.editorContainer.children).toEqual([context.editor]);
-			expect(context.footer.setTransientUsage).toHaveBeenLastCalledWith(undefined);
+			expect(context.transientUsage).toBeUndefined();
 			expect(context.activeInteractiveReview).toBe(false);
 		},
 	);
@@ -291,7 +292,7 @@ describe("InteractiveMode review workflow", () => {
 		const listeners = new Set<() => void>();
 		let live: object | undefined;
 		Object.assign(context, {
-			workSource: {
+			work: {
 				subscribe: (listener: () => void) => {
 					listeners.add(listener);
 					return () => listeners.delete(listener);
@@ -425,7 +426,7 @@ describe("InteractiveMode review workflow", () => {
 		expect(hooks?.signal?.aborted).toBe(true);
 		expect(context.createInlineSessionRenderer).not.toHaveBeenCalled();
 		expect(inferenceCalls).toBe(0);
-		expect(context.footer.setTransientUsage).toHaveBeenLastCalledWith(undefined);
+		expect(context.transientUsage).toBeUndefined();
 		expect(context.editorContainer.children).toEqual([context.editor]);
 		expect(context.ui.setFocus).toHaveBeenLastCalledWith(context.editor);
 	});

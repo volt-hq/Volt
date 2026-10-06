@@ -677,6 +677,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				return sent(redactDelta(view, item.event));
 			case "assistant_end":
 				return sent([item]);
+			case "toolcall_presentation":
+				// How a call looks while its arguments stream is the local clients' to show.
+				return [];
 			case "tool":
 				return redactToolItem(view, item);
 			case "set": {
@@ -702,11 +705,18 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			}
 			case "patch":
 				return redactPatch(view, item.key);
-			case "notice":
-				if (item.source === HOST_NOTICE_SOURCE && item.level === "error" && typeof item.message === "string") {
-					return sent([{ ...item, message: sanitizeText(item.message.split(": ")[0] ?? item.message) }]);
+			case "notice": {
+				// A notice's detail, such as an extension error's stack, stays with local clients.
+				const { detail: _detail, ...notice } = item;
+				if (
+					notice.source === HOST_NOTICE_SOURCE &&
+					notice.level === "error" &&
+					typeof notice.message === "string"
+				) {
+					return sent([{ ...notice, message: sanitizeText(notice.message.split(": ")[0] ?? notice.message) }]);
 				}
-				return sent([sanitizeUi(item)]);
+				return sent([sanitizeUi(notice)]);
+			}
 			case "directive":
 				return sent([sanitize(item)]);
 		}

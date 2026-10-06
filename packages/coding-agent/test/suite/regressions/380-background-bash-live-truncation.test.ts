@@ -10,7 +10,7 @@ import { JOB_OUTPUT_MAX_BYTES } from "../../../src/core/tools/jobs.ts";
 import { DEFAULT_MAX_LINES } from "../../../src/core/tools/truncate.ts";
 import { WorkInspector } from "../../../src/modes/interactive/components/work-inspector.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createSessionWorkSource } from "../../utilities/work-source.ts";
+import { createSessionWorkView, type SessionWorkView } from "../../utilities/work-view.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const previousBindings = getKeybindings();
@@ -43,6 +43,7 @@ describe("background Bash live truncation", () => {
 		);
 		let harness: Harness | undefined;
 		let inspector: WorkInspector | undefined;
+		let view: SessionWorkView | undefined;
 		try {
 			harness = await createHarness({
 				initialActiveToolNames: ["bash", "jobs"],
@@ -107,7 +108,8 @@ describe("background Bash live truncation", () => {
 
 			initTheme("dark");
 			setKeybindings(new KeybindingsManager());
-			inspector = new WorkInspector(createSessionWorkSource(harness.session), {
+			view = await createSessionWorkView(harness.session, harness.tempDir);
+			inspector = new WorkInspector(view.work, {
 				getHeight: () => 24,
 				requestRender: () => {},
 				onClose: () => {},
@@ -119,6 +121,7 @@ describe("background Bash live truncation", () => {
 			expect(shown.render(80).lines.map(stripAnsi).join("\n").includes("older output dropped")).toBe(truncated);
 		} finally {
 			inspector?.dispose();
+			await view?.dispose();
 			harness?.appendResponses([fauxAssistantMessage("Noticed the result.")]);
 			finish.resolve();
 			if (harness) {

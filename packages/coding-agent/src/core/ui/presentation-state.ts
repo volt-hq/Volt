@@ -7,6 +7,8 @@
  * output appends lines, or the whole `presentation` when anything else
  * changed. The diff starts from the presentation the live state holds for the
  * call, so a client that applies the items in order holds what the host does.
+ * Before a call runs, while its arguments stream, it is presented as they
+ * stand (`ArgumentPresentations`).
  */
 
 import {
@@ -150,5 +152,88 @@ export class ToolPresentationState {
 			input,
 			this.options.maxBytes ?? PRESENTATION_MAX_SERIALIZED_BYTES,
 		);
+	}
+}
+
+export interface ArgumentPresentationsOptions {
+	readonly presenters: () => PresenterSet;
+	readonly cwd: () => string;
+	/** Publish how a call looks now. */
+	readonly publish: (toolCallId: string, presentation: ToolPresentation) => void;
+	readonly maxBytes?: number;
+	readonly coalesceMs?: number;
+}
+
+interface StreamingCall {
+	toolName: string;
+	args: Record<string, unknown>;
+	complete: boolean;
+	/** The presentation published last, as JSON. */
+	published?: string;
+	timer?: ReturnType<typeof setTimeout>;
+}
+
+/**
+ * How the tool calls of a streaming assistant message look while their
+ * arguments stream (`pending`): a call is presented when it starts, again at
+ * most once per {@link PRESENTATION_COALESCE_MS} while its arguments grow, and
+ * at once when they are complete. A presentation equal to the one published
+ * last is not published again.
+ */
+export class ArgumentPresentations {
+	private readonly options: ArgumentPresentationsOptions;
+	private readonly calls = new Map<string, StreamingCall>();
+	private closed = false;
+
+	constructor(options: ArgumentPresentationsOptions) {
+		this.options = options;
+	}
+
+	/** The arguments of call `toolCallId` changed: as far as they streamed, or `complete`. */
+	update(toolCallId: string, toolName: string, args: Record<string, unknown>, complete: boolean): void {
+		if (this.closed) return;
+		const existing = this.calls.get(toolCallId);
+		const call: StreamingCall = existing ?? { toolName, args, complete };
+		call.toolName = toolName;
+		call.args = args;
+		call.complete = complete;
+		this.calls.set(toolCallId, call);
+		if (existing === undefined || complete) {
+			this.publish(toolCallId, call);
+			return;
+		}
+		if (call.timer !== undefined) return;
+		call.timer = setTimeout(() => {
+			call.timer = undefined;
+			if (this.calls.get(toolCallId) === call) this.publish(toolCallId, call);
+		}, this.options.coalesceMs ?? PRESENTATION_COALESCE_MS);
+		call.timer.unref?.();
+	}
+
+	/** The streaming message ended or committed: its calls are forgotten, and pending updates dropped. */
+	clear(): void {
+		for (const call of this.calls.values()) if (call.timer !== undefined) clearTimeout(call.timer);
+		this.calls.clear();
+	}
+
+	/** Stop presenting. */
+	close(): void {
+		this.closed = true;
+		this.clear();
+	}
+
+	private publish(toolCallId: string, call: StreamingCall): void {
+		if (call.timer !== undefined) clearTimeout(call.timer);
+		call.timer = undefined;
+		const presentation = presentToolCall(
+			this.options.presenters().tool(call.toolName),
+			call.toolName,
+			{ args: call.args, argsComplete: call.complete, state: "pending", cwd: this.options.cwd() },
+			this.options.maxBytes ?? PRESENTATION_MAX_SERIALIZED_BYTES,
+		);
+		const json = JSON.stringify(presentation);
+		if (json === call.published) return;
+		call.published = json;
+		this.options.publish(toolCallId, presentation);
 	}
 }

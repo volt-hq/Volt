@@ -143,39 +143,52 @@ describe("InteractiveMode.showStatus", () => {
 });
 
 describe("InteractiveMode.scheduleTurnDoneAlert", () => {
+	const prototype = (
+		InteractiveMode as unknown as {
+			prototype: {
+				scheduleTurnDoneAlert: (this: unknown, aborted: boolean) => void;
+				clearTurnDoneAlertTimer: (this: unknown) => void;
+				scheduleTurnDoneAlertTimer: (this: unknown, delayMs: number) => void;
+			};
+		}
+	).prototype;
+
+	/** What a run phase holds while compaction, a retry, or a run keeps the conversation busy. */
+	const busy = {
+		compaction: { busy: true, operation: "compaction", compaction: { reason: "threshold", startedAt: 0 } },
+		retry: { busy: true, operation: "turn", run: { startedAt: 0 }, retry: { attempt: 1, maxAttempts: 3 } },
+	} as const;
+
 	function createFakeThis(options?: {
-		alertMode?: "off" | "bell";
-		streaming?: boolean;
-		compacting?: boolean;
-		retrying?: boolean;
+		alertMode?: "off" | "bell" | "notify";
+		phase?: Record<string, unknown>;
 		focusState?: "focused" | "unfocused" | "unknown";
+		planPhase?: string;
 	}) {
 		return {
 			settingsManager: { getTurnDoneAlert: vi.fn(() => options?.alertMode ?? "bell") },
-			session: {
-				isStreaming: options?.streaming ?? false,
-				isCompacting: options?.compacting ?? false,
-				isRetrying: options?.retrying ?? false,
-			},
-			ui: { terminal: { alert: vi.fn(), focusState: options?.focusState ?? "unknown" } },
+			// The store's run phase: what keeps the conversation busy.
+			store: { phase: options?.phase as Record<string, unknown> | undefined },
+			planning: () => ({
+				mode: "plan",
+				plan: options?.planPhase === undefined ? null : { phase: options.planPhase },
+			}),
+			catalogs: { conversationInfo: { cwd: "/work/project" } },
+			ui: { terminal: { alert: vi.fn(), notify: vi.fn(), focusState: options?.focusState ?? "unknown" } },
 			shutdownRequested: false,
 			isShuttingDown: false,
 			turnDoneAlertTimer: undefined,
-			clearTurnDoneAlertTimer: (InteractiveMode as any).prototype.clearTurnDoneAlertTimer,
-			scheduleTurnDoneAlertTimer: (InteractiveMode as any).prototype.scheduleTurnDoneAlertTimer,
+			clearTurnDoneAlertTimer: prototype.clearTurnDoneAlertTimer,
+			scheduleTurnDoneAlertTimer: prototype.scheduleTurnDoneAlertTimer,
 		};
 	}
 
-	test("rings the terminal bell after agent_end when enabled and idle", () => {
+	test("rings the terminal bell after a run ends when enabled and idle", () => {
 		vi.useFakeTimers();
 		try {
 			const fakeThis = createFakeThis();
 
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "stop" }],
-			});
+			prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
 			vi.runOnlyPendingTimers();
@@ -185,20 +198,16 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 		}
 	});
 
-	test("waits until post-run compaction is idle", () => {
+	test.each(["compaction", "retry"] as const)("waits until the conversation is idle after a %s", (kind) => {
 		vi.useFakeTimers();
 		try {
-			const fakeThis = createFakeThis({ compacting: true });
+			const fakeThis = createFakeThis({ phase: busy[kind] });
 
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "stop" }],
-			});
+			prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 
 			vi.advanceTimersByTime(0);
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
-			fakeThis.session.isCompacting = false;
+			fakeThis.store.phase = { busy: false, operation: null };
 			vi.advanceTimersByTime(250);
 			expect(fakeThis.ui.terminal.alert).toHaveBeenCalledTimes(1);
 		} finally {
@@ -206,41 +215,17 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 		}
 	});
 
-	test("clears queued alerts when a later agent_end suppresses the alert", () => {
+	test("clears a queued alert when an aborted run ends later", () => {
 		vi.useFakeTimers();
 		try {
-			const fakeThis = createFakeThis({ compacting: true });
+			const fakeThis = createFakeThis({ phase: busy.compaction });
 
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "stop" }],
-			});
+			prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 			vi.advanceTimersByTime(0);
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
 
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "aborted" }],
-			});
-			fakeThis.session.isCompacting = false;
-			vi.advanceTimersByTime(250);
-			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
-
-			fakeThis.session.isCompacting = true;
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "stop" }],
-			});
-			vi.advanceTimersByTime(0);
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: true,
-				messages: [{ role: "assistant", stopReason: "error" }],
-			});
-			fakeThis.session.isCompacting = false;
+			prototype.scheduleTurnDoneAlert.call(fakeThis, true);
+			fakeThis.store.phase = undefined;
 			vi.advanceTimersByTime(250);
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
 		} finally {
@@ -253,11 +238,7 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 		try {
 			const fakeThis = createFakeThis({ focusState: "focused" });
 
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "stop" }],
-			});
+			prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 
 			vi.runOnlyPendingTimers();
 			expect(fakeThis.ui.terminal.alert).not.toHaveBeenCalled();
@@ -272,11 +253,7 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 			for (const focusState of ["unfocused", "unknown"] as const) {
 				const fakeThis = createFakeThis({ focusState });
 
-				(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-					type: "agent_end",
-					willRetry: false,
-					messages: [{ role: "assistant", stopReason: "stop" }],
-				});
+				prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 
 				vi.runOnlyPendingTimers();
 				expect(fakeThis.ui.terminal.alert).toHaveBeenCalledTimes(1);
@@ -293,48 +270,24 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 				["ready", "Plan ready for approval · project"],
 				["draft", "Finished responding · project"],
 			] as const) {
-				const notify = vi.fn();
-				const base = createFakeThis();
-				const fakeThis = {
-					...base,
-					settingsManager: { getTurnDoneAlert: vi.fn(() => "notify") },
-					sessionManager: { getCwd: () => "/work/project" },
-					session: { ...base.session, planningState: { mode: "plan", plan: { phase } } },
-					ui: { terminal: { ...base.ui.terminal, notify } },
-				};
+				const fakeThis = createFakeThis({ alertMode: "notify", planPhase: phase });
 
-				(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
-					type: "agent_end",
-					willRetry: false,
-					messages: [{ role: "assistant", stopReason: "toolUse" }],
-				});
+				prototype.scheduleTurnDoneAlert.call(fakeThis, false);
 				vi.runOnlyPendingTimers();
-				expect(notify).toHaveBeenCalledExactlyOnceWith("Volt", expected);
+				expect(fakeThis.ui.terminal.notify).toHaveBeenCalledExactlyOnceWith("Volt", expected);
 			}
 		} finally {
 			vi.useRealTimers();
 		}
 	});
 
-	test("skips retrying and aborted turns", () => {
+	test("skips aborted runs", () => {
 		vi.useFakeTimers();
 		try {
-			const retryingThis = createFakeThis();
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(retryingThis, {
-				type: "agent_end",
-				willRetry: true,
-				messages: [{ role: "assistant", stopReason: "error" }],
-			});
-
 			const abortedThis = createFakeThis();
-			(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(abortedThis, {
-				type: "agent_end",
-				willRetry: false,
-				messages: [{ role: "assistant", stopReason: "aborted" }],
-			});
+			prototype.scheduleTurnDoneAlert.call(abortedThis, true);
 
 			vi.runOnlyPendingTimers();
-			expect(retryingThis.ui.terminal.alert).not.toHaveBeenCalled();
 			expect(abortedThis.ui.terminal.alert).not.toHaveBeenCalled();
 		} finally {
 			vi.useRealTimers();
@@ -355,10 +308,12 @@ describe("InteractiveMode.scheduleWorkSummary", () => {
 			workSummaryTimer: undefined,
 			shutdownRequested: false,
 			isShuttingDown: false,
-			session: { isStreaming: false, isCompacting: false },
+			// The store's run phase: a run or compaction keeps the summary from showing.
+			store: { phase: undefined as Record<string, unknown> | undefined },
 			chatContainer: new Container(),
 			ui: { requestRender: vi.fn() },
 			clearWorkSummaryTimer: (InteractiveMode as any).prototype.clearWorkSummaryTimer,
+			runActive: (InteractiveMode as any).prototype.runActive,
 		};
 	}
 
@@ -398,7 +353,7 @@ describe("InteractiveMode.scheduleWorkSummary", () => {
 
 			const busy = createFakeThis({ startedAt: now - 5_000, aborted: false });
 			schedule(busy);
-			busy.session.isCompacting = true;
+			busy.store.phase = { busy: true, operation: "compaction", compaction: { reason: "manual", startedAt: 0 } };
 
 			const empty = createFakeThis(undefined);
 			schedule(empty);
@@ -660,7 +615,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planDetails: undefined,
 			planInspector: inspector,
 			planPaneReturnFocus: undefined,
-			session: { planningState: { plan: { phase: "active" } } },
+			planning: () => ({ plan: { phase: "active" } }),
 			ui,
 		};
 		ui.start();
@@ -694,7 +649,7 @@ describe("InteractiveMode plan pane integration", () => {
 			focusPlanInspector: vi.fn(() => ui.setFocus(inspector)),
 			focusConversation: vi.fn(),
 			showPlanDetails: vi.fn(),
-			session: { planningState: { mode: "build", plan: { phase: "active" } } },
+			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 		};
 		ui.start();
 		try {
@@ -755,7 +710,7 @@ describe("InteractiveMode plan pane integration", () => {
 			fullscreenTranscript: { setPrimary: vi.fn() },
 			planInspector: { focused: true, setFullscreenActive: vi.fn() },
 			planDetails: undefined,
-			session: { planningState: { mode: "build", plan: null } },
+			planning: () => ({ mode: "build", plan: null }),
 			focusConversation,
 			showPlanDetails: vi.fn(),
 		};
@@ -798,7 +753,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planInspector: inspector,
 			planPaneReturnFocus: undefined,
 			renderer: ui,
-			session: { planningState: { mode: "build", plan: { phase: "active" } } },
+			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 			ui,
 		};
 		fakeThis.getConversationFocusTarget = () =>
@@ -872,7 +827,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planStatus: { setPlanning: vi.fn() },
 			readyPlanFocusKey: undefined,
 			renderer: ui,
-			session: { planningState: planning },
+			planning: () => planning,
 			ui,
 			updateEditorBorderColor: vi.fn(),
 		};
@@ -933,7 +888,7 @@ describe("InteractiveMode plan pane integration", () => {
 			planInspector: inspector,
 			planPaneReturnFocus: editor,
 			renderer: ui,
-			session: { planningState: { mode: "build", plan: { phase: "active" } } },
+			planning: () => ({ mode: "build", plan: { phase: "active" } }),
 			showPlanDetails,
 			ui,
 		};
@@ -999,19 +954,17 @@ describe("InteractiveMode plan pane integration", () => {
 			planInspector: inspector,
 			planPaneReturnFocus: editor,
 			renderer: ui,
-			session: {
-				planningState: {
-					mode: "plan",
-					plan: {
-						id: "plan-1",
-						revision: 1,
-						phase: "ready",
-						title: "Ready plan",
-						summary: "Ready for execution",
-						steps: [],
-					},
+			planning: () => ({
+				mode: "plan",
+				plan: {
+					id: "plan-1",
+					revision: 1,
+					phase: "ready",
+					title: "Ready plan",
+					summary: "Ready for execution",
+					steps: [],
 				},
-			},
+			}),
 			settingsManager: { getFullscreenScrollbar: () => "auto" },
 			ui,
 		};
@@ -1128,8 +1081,12 @@ describe("InteractiveMode finished plan closing", () => {
 	}
 
 	function closeFixture(plan: ReturnType<typeof planState> | null, isStreaming = false) {
+		const intent = vi.fn(async (_name: string, _input: unknown): Promise<unknown> => ({ type: "accepted" }));
 		return {
-			session: { planningState: { mode: "build", plan }, isStreaming, discardPlan: vi.fn(async () => {}) },
+			planning: () => ({ mode: "build", plan }),
+			runActive: () => isStreaming,
+			// The TUI's client: plan actions go out as intents.
+			store: { client: { intent } },
 			closePlanDetails: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
@@ -1142,7 +1099,10 @@ describe("InteractiveMode finished plan closing", () => {
 			const fakeThis = closeFixture(planState(phase));
 			await prototype.closeFinishedPlan.call(fakeThis);
 			expect(fakeThis.closePlanDetails).toHaveBeenCalledTimes(1);
-			expect(fakeThis.session.discardPlan).toHaveBeenCalledExactlyOnceWith("plan-1", 7);
+			expect(fakeThis.store.client.intent).toHaveBeenCalledExactlyOnceWith("plan_discard", {
+				planId: "plan-1",
+				expectedRevision: 7,
+			});
 			expect(fakeThis.showStatus).toHaveBeenCalledWith("Plan closed");
 			expect(fakeThis.showWarning).not.toHaveBeenCalled();
 		}
@@ -1158,14 +1118,14 @@ describe("InteractiveMode finished plan closing", () => {
 		for (const { plan, streaming, warning } of cases) {
 			const fakeThis = closeFixture(plan, streaming);
 			await prototype.closeFinishedPlan.call(fakeThis);
-			expect(fakeThis.session.discardPlan).not.toHaveBeenCalled();
+			expect(fakeThis.store.client.intent).not.toHaveBeenCalled();
 			expect(fakeThis.closePlanDetails).not.toHaveBeenCalled();
 			expect(fakeThis.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(warning));
 		}
 
 		const empty = closeFixture(null);
 		await prototype.closeFinishedPlan.call(empty);
-		expect(empty.session.discardPlan).not.toHaveBeenCalled();
+		expect(empty.store.client.intent).not.toHaveBeenCalled();
 		expect(empty.showStatus).toHaveBeenCalledWith("No plan to close");
 	});
 
@@ -1185,7 +1145,7 @@ describe("InteractiveMode finished plan closing", () => {
 
 	test("reports discard failures as errors", async () => {
 		const fakeThis = closeFixture(planState("completed"));
-		fakeThis.session.discardPlan.mockRejectedValue(new Error("Plan revision is stale"));
+		fakeThis.store.client.intent.mockRejectedValue(new Error("Plan revision is stale"));
 		await prototype.closeFinishedPlan.call(fakeThis);
 		expect(fakeThis.showError).toHaveBeenCalledWith("Plan revision is stale");
 		expect(fakeThis.showStatus).not.toHaveBeenCalledWith("Plan closed");

@@ -69,14 +69,23 @@ describe("#409 interactive terminal review accounting", () => {
 					chatContainer: Container;
 					editorContainer: Container;
 					editor: unknown;
-					footer: { setTransientUsage(usage: unknown): void };
 					runInteractiveReviewWorkflow(
 						target: { kind: "uncommitted" },
 						options: { tools: string[]; requireConfirmation: boolean; requireProjectTrust: boolean },
 					): Promise<ReviewWorkflowResult>;
 				};
 				const { chatContainer, editorContainer, editor } = access;
-				const setTransientUsage = vi.spyOn(access.footer, "setTransientUsage");
+				// The review's usage the footer shows in place of the conversation's own, as it changes.
+				const transientUsages: unknown[] = [];
+				let transientUsage: unknown;
+				Object.defineProperty(access, "transientUsage", {
+					configurable: true,
+					get: () => transientUsage,
+					set: (value: unknown) => {
+						transientUsage = value;
+						transientUsages.push(value);
+					},
+				});
 				// A review that opens no session opens nothing on the TUI's host.
 				const open = vi.spyOn(h.host, "open");
 				h.faux.setResponses([
@@ -123,8 +132,8 @@ describe("#409 interactive terminal review accounting", () => {
 				).toBe(false);
 				expect(h.faux.state.callCount).toBe(2);
 				expect(open).not.toHaveBeenCalled();
-				expect(setTransientUsage.mock.calls.some(([value]) => value !== undefined)).toBe(true);
-				expect(setTransientUsage).toHaveBeenLastCalledWith(undefined);
+				expect(transientUsages.some((value) => value !== undefined)).toBe(true);
+				expect(transientUsages.at(-1)).toBeUndefined();
 				expect(editorContainer.children).toEqual([editor]);
 				expect(rendered).toContain("Original conversation");
 				// The review's transient inline transcript left with it.
