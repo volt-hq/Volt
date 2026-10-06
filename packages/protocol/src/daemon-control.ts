@@ -391,6 +391,15 @@ export type ControlRelayOutcome = Static<typeof ControlRelayOutcomeSchema>;
 // Hello, ack, fatal, relay preamble
 // ============================================================================
 
+/**
+ * A hello's proof that its sender holds the role's secret (the pidfile token
+ * for a control hello, the spawn's worker token, the offer's relay token),
+ * which never crosses the socket: a fresh random `nonce` and `mac` =
+ * HMAC-SHA256(secret, "volt-hello\0" + role + "\0client\0" + nonce), base64url.
+ */
+export const HelloProofSchema = Type.Object({ nonce: codePoints(32, 128), mac: codePoints(32, 128) }, closed);
+export type HelloProof = Static<typeof HelloProofSchema>;
+
 export const ControlHelloSchema = Type.Union([
 	Type.Object(
 		{
@@ -400,8 +409,8 @@ export const ControlHelloSchema = Type.Union([
 			pid: Type.Number(),
 			version: Type.String(),
 			client: ControlClientKindSchema,
-			/** Per-daemon instance token read from the local pidfile. */
-			controlToken: Type.Optional(Type.String()),
+			/** Proof of the per-daemon instance token read from the local pidfile. */
+			controlProof: Type.Optional(HelloProofSchema),
 			/** Client capabilities, e.g. "worktrees". */
 			capabilities: Type.Optional(Type.Array(Type.String())),
 		},
@@ -413,8 +422,8 @@ export const ControlHelloSchema = Type.Union([
 			role: Type.Literal("relay"),
 			protocolVersion: Type.Number(),
 			relayId: Type.String(),
-			/** Single-use token from the relay_offer. */
-			relayToken: Type.String(),
+			/** Proof of the single-use token from the relay_offer. */
+			relayProof: HelloProofSchema,
 		},
 		open,
 	),
@@ -425,8 +434,8 @@ export const ControlHelloSchema = Type.Union([
 			protocolVersion: Type.Number(),
 			/** The worker the daemon spawned. */
 			workerId: Type.String(),
-			/** Single-use token the spawn issued; a second hello with it is refused. */
-			workerToken: Type.String(),
+			/** Proof of the single-use token the spawn issued; a second hello with it is refused. */
+			workerProof: HelloProofSchema,
 			pid: Type.Number(),
 			version: Type.String(),
 		},
@@ -446,6 +455,13 @@ export const ControlHelloAckSchema = Type.Object(
 		/** Daemon package version. */
 		version: Type.Optional(Type.String()),
 		protocolVersion: Type.Optional(Type.Number()),
+		/**
+		 * The daemon's proof of the same secret, on every answer to a hello whose
+		 * proof it verified: HMAC-SHA256(secret, "volt-hello\0" + role +
+		 * "\0daemon\0" + the hello's nonce), base64url. A client that sent a
+		 * proof trusts no answer without it.
+		 */
+		daemonProof: Type.Optional(Type.String()),
 	},
 	open,
 );

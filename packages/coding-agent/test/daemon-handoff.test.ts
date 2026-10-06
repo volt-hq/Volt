@@ -571,7 +571,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(daemon.broker.lookup(workspaceName as string, "s-1")?.state).toBe("daemon-active");
 	}, 20_000);
 
-	it("keeps reconnecting when auto-start probes stale discovery credentials", async () => {
+	it("keeps reconnecting while its discovery credentials are stale", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-ar-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-ar-ws-"));
 		cleanups.push(() => {
@@ -586,7 +586,9 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		cleanups.push(() => daemon.close());
 		publishDaemonEndpoint(paths, socketPath, "stale-token");
 
-		const attach = createDaemonLink({ cwd, agentDir, autoStart: true });
+		// A daemon that cannot prove the stale token is indistinguishable from whatever else could
+		// hold its socket's name, so auto-start would start another; without it, the link waits.
+		const attach = createDaemonLink({ cwd, agentDir, autoStart: false });
 		cleanups.push(() => attach.dispose());
 		await attach.start();
 		expect(attach.connectionState()).toBe("reconnecting");

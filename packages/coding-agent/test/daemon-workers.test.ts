@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ConversationLockedError } from "../src/core/conversation-log/conversation-lock.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
-import { PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
+import { createHelloProof, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import type { LaunchedWorker, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { WorkerOpenError } from "../src/daemon/worker-registry.ts";
@@ -151,7 +151,7 @@ describe("daemon conversation workers", () => {
 				role: "worker",
 				protocolVersion: PROTOCOL_VERSION,
 				workerId: "w-x",
-				workerToken: "x",
+				workerProof: createHelloProof("worker", "x"),
 				pid: 1,
 				version: "test",
 			}) +
@@ -162,7 +162,7 @@ describe("daemon conversation workers", () => {
 					pid: 1,
 					version: "test",
 					client: "cli",
-					...(probe.authToken === undefined ? {} : { controlToken: probe.authToken }),
+					...(probe.authToken === undefined ? {} : { controlProof: createHelloProof("control", probe.authToken) }),
 				}) +
 				line({ type: "status", id: "after-refusal" }),
 		);

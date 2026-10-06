@@ -35,6 +35,7 @@ import {
 	type ControlResponse,
 	ControlValidators,
 	createControlClientStatus,
+	createHelloProof,
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
@@ -744,7 +745,7 @@ describe("control version negotiation", () => {
 		pid: 4242,
 		version: "0.9.0",
 		client: "tui",
-		controlToken: "token",
+		controlProof: createHelloProof("control", "token"),
 		capabilities: ["worktrees"],
 	};
 	const relayHello: HelloMessage = {
@@ -752,14 +753,14 @@ describe("control version negotiation", () => {
 		role: "relay",
 		protocolVersion: PROTOCOL_VERSION,
 		relayId: "rl-7",
-		relayToken: "tK",
+		relayProof: createHelloProof("relay", "tK"),
 	};
 	const workerHello: HelloMessage = {
 		type: "hello",
 		role: "worker",
 		protocolVersion: PROTOCOL_VERSION,
 		workerId: "w-1",
-		workerToken: "tW",
+		workerProof: createHelloProof("worker", "tW"),
 		pid: 4243,
 		version: "0.9.0",
 	};
@@ -781,11 +782,13 @@ describe("control version negotiation", () => {
 			{ ...controlHello, pid: undefined },
 			{ ...controlHello, client: "web" },
 			{ ...controlHello, capabilities: [1] },
-			{ ...controlHello, controlToken: 1 },
+			{ ...controlHello, controlProof: "token" },
+			{ ...controlHello, controlProof: { nonce: "n" } },
 			{ ...controlHello, protocolVersion: "2" },
-			{ ...relayHello, relayToken: undefined },
+			{ ...relayHello, relayProof: undefined },
+			{ ...relayHello, relayProof: "tK" },
 			{ ...relayHello, relayId: 7 },
-			{ ...workerHello, workerToken: undefined },
+			{ ...workerHello, workerProof: undefined },
 			{ ...workerHello, workerId: 7 },
 		]) {
 			expect(ControlValidators.hello.Check(JSON.parse(JSON.stringify(hello))), JSON.stringify(hello)).toBe(false);

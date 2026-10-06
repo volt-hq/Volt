@@ -17,7 +17,7 @@ import { resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { ControlRelayFrame, ControlRelayOutcome, HostRequest } from "@hansjm10/volt-protocol";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
-import { getAgentDir, isStandaloneBinary, VERSION } from "../../../config.ts";
+import { getAgentDir, VERSION } from "../../../config.ts";
 import { GitContextObservationBinding } from "../../../core/git-context-provider.ts";
 import type { ConversationHost, OpenGate, OpenGateHold } from "../../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../../core/host/hosted-conversation.ts";
@@ -123,11 +123,6 @@ export interface DaemonLink {
 }
 
 const NOOP_OUTCOME: AcquireOutcome = { kind: "noop" };
-
-/** The TUI integrates with the daemon only where the daemon runs: not on Windows or in standalone builds. */
-export function isDaemonLinkSupported(): boolean {
-	return process.platform !== "win32" && !isStandaloneBinary;
-}
 
 export function createDisabledDaemonLink(): DaemonLink {
 	return {

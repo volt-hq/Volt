@@ -9,8 +9,13 @@ import {
 	type ControlRequest,
 	type ControlResponse,
 	ControlValidators,
+	createHelloProof,
+	daemonProofMatches,
 	encodeControlLine,
 	type HelloAck,
+	type HelloMessage,
+	type HelloProof,
+	type HelloRole,
 	PROTOCOL_VERSION,
 	type RelayPreamble,
 } from "./control-protocol.ts";
@@ -26,7 +31,11 @@ export interface DaemonClientEndpoint {
 interface DaemonClientCommonOptions {
 	socketPath: string;
 	version: string;
-	/** Per-daemon instance token read from the local pidfile. */
+	/**
+	 * Per-daemon instance token read from the local pidfile. The hello proves
+	 * it without sending it, and a connection is adopted only once the
+	 * endpoint proved it back.
+	 */
 	authToken?: string;
 	/** Re-read daemon discovery metadata before every dial after the first. */
 	refreshEndpoint?(): DaemonClientEndpoint | undefined;
@@ -214,6 +223,38 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		const dialEndpoint = endpoint;
 		connectPromise = new Promise<void>((resolve, reject) => {
 			const dialed = createConnection(dialEndpoint.socketPath);
+			// The hello proves its secret without sending it: the spawn's worker token, or the pidfile token.
+			let proven: { readonly role: HelloRole; readonly secret: string; readonly proof: HelloProof } | undefined;
+			let hello: HelloMessage;
+			if ("worker" in options) {
+				const proof = createHelloProof("worker", options.worker.workerToken);
+				proven = { role: "worker", secret: options.worker.workerToken, proof };
+				hello = {
+					type: "hello",
+					role: "worker",
+					protocolVersion: PROTOCOL_VERSION,
+					workerId: options.worker.workerId,
+					workerProof: proof,
+					pid: process.pid,
+					version: options.version,
+				};
+			} else {
+				const token = dialEndpoint.authToken;
+				proven =
+					token === undefined
+						? undefined
+						: { role: "control", secret: token, proof: createHelloProof("control", token) };
+				hello = {
+					type: "hello",
+					role: "control",
+					protocolVersion: PROTOCOL_VERSION,
+					pid: process.pid,
+					version: options.version,
+					client: options.client,
+					...(proven === undefined ? {} : { controlProof: proven.proof }),
+					...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+				};
+			}
 			dialing = dialed;
 			const decoder = new ControlLineDecoder();
 			let acked = false;
@@ -246,30 +287,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			};
 
 			dialed.on("connect", () => {
-				dialed.write(
-					encodeControlLine(
-						"worker" in options
-							? {
-									type: "hello",
-									role: "worker",
-									protocolVersion: PROTOCOL_VERSION,
-									workerId: options.worker.workerId,
-									workerToken: options.worker.workerToken,
-									pid: process.pid,
-									version: options.version,
-								}
-							: {
-									type: "hello",
-									role: "control",
-									protocolVersion: PROTOCOL_VERSION,
-									pid: process.pid,
-									version: options.version,
-									client: options.client,
-									...(dialEndpoint.authToken === undefined ? {} : { controlToken: dialEndpoint.authToken }),
-									...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
-								},
-					),
-				);
+				dialed.write(encodeControlLine(hello));
 			});
 			dialed.on("data", (chunk) => {
 				let messages: unknown[];
@@ -286,11 +304,20 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							return;
 						}
 						const ack: HelloAck = message;
+						// An endpoint that cannot prove the secret is not the daemon (on Windows, a stale
+						// pipe name someone else took): nothing it sends is trusted, and its refusals end nothing.
+						const ackProven =
+							proven === undefined ||
+							daemonProofMatches(proven.role, proven.secret, proven.proof, ack.daemonProof);
 						if (!ack.ok) {
 							failDial(
-								new Error(`daemon rejected hello: ${ack.error ?? "unknown"}`),
-								ack.error === "protocol_mismatch" ? "protocol_mismatch" : undefined,
+								new Error(`daemon rejected hello: ${ack.error ?? "unknown"}${ackProven ? "" : " (unproven)"}`),
+								ackProven && ack.error === "protocol_mismatch" ? "protocol_mismatch" : undefined,
 							);
+							return;
+						}
+						if (!ackProven) {
+							failDial(new Error("the daemon endpoint did not prove it holds the daemon's token"));
 							return;
 						}
 						if (closed) {
@@ -457,6 +484,8 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			return new Promise((resolve, reject) => {
 				const relaySocket = createConnection(relayEndpoint.socketPath);
 				const decoder = new ControlLineDecoder();
+				// The hello proves the offer's token without sending it; only the daemon that minted it can prove it back.
+				const proof = createHelloProof("relay", offer.relayToken);
 				let acked = false;
 				let settled = false;
 
@@ -477,6 +506,10 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							if (!acked) {
 								if (!ControlValidators.helloAck.Check(message) || !message.ok) {
 									fail(new Error("relay hello rejected"));
+									return "stop";
+								}
+								if (!daemonProofMatches("relay", offer.relayToken, proof, message.daemonProof)) {
+									fail(new Error("the relay endpoint did not prove it holds the offer's token"));
 									return "stop";
 								}
 								acked = true;
@@ -508,7 +541,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							role: "relay",
 							protocolVersion: PROTOCOL_VERSION,
 							relayId: offer.relayId,
-							relayToken: offer.relayToken,
+							relayProof: proof,
 						}),
 					);
 				});

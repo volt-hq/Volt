@@ -3,7 +3,14 @@ import { randomBytes, randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
 import { DuplexWriteGate, StreamClosedError } from "../core/protocol/transport/duplex-write-gate.ts";
 import type { IrohBiStreamLike } from "../core/protocol/transport/iroh-transport.ts";
-import { encodeControlLine, type RelayCloseReason, type RelayPreamble } from "./control-protocol.ts";
+import {
+	createDaemonProof,
+	encodeControlLine,
+	type HelloProof,
+	helloProofMatches,
+	type RelayCloseReason,
+	type RelayPreamble,
+} from "./control-protocol.ts";
 import {
 	createLifecycleFencedIrohStream,
 	type IrohPhysicalTaskObserver,
@@ -155,10 +162,12 @@ export class RelayLifecycleOwner {
 
 	/**
 	 * Promote this exact owner from offered to active and install its raw pump.
-	 * Invalid, expired, already-used, and closed offers fail without replacement.
+	 * The hello proves the offer's token without sending it, and the ack
+	 * proves it back. Invalid, expired, already-used, and closed offers fail
+	 * without replacement.
 	 */
-	redeem(relayToken: string, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
-		if (this.lifecyclePhase !== "offered" || this.relayToken !== relayToken) {
+	redeem(proof: HelloProof, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
+		if (this.lifecyclePhase !== "offered" || !helloProofMatches("relay", this.relayToken, proof)) {
 			return false;
 		}
 		if (now > this.expiresAt) {
@@ -176,7 +185,13 @@ export class RelayLifecycleOwner {
 		this.writeGate = new DuplexWriteGate(socket);
 		this.observePhysicalTask(this.writeGate.closed);
 
-		socket.write(encodeControlLine({ type: "hello_ack", ok: true }));
+		socket.write(
+			encodeControlLine({
+				type: "hello_ack",
+				ok: true,
+				daemonProof: createDaemonProof("relay", this.relayToken, proof),
+			}),
+		);
 		socket.write(encodeControlLine(this.preamble));
 
 		if (bufferedRemainder.length > 0) {
@@ -534,8 +549,8 @@ export class RelayRegistry {
 		return { ok: true, relay };
 	}
 
-	/** Token lookup only; the stable owner performs the actual promotion. */
-	admit(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
-		return this.owners.get(relayId)?.redeem(relayToken, socket, bufferedRemainder, now) ?? false;
+	/** Offer lookup only; the stable owner checks the hello's proof and performs the actual promotion. */
+	admit(relayId: string, proof: HelloProof, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
+		return this.owners.get(relayId)?.redeem(proof, socket, bufferedRemainder, now) ?? false;
 	}
 }

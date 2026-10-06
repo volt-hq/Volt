@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import type { RelayPreamble } from "../src/daemon/control-protocol.ts";
+import { createDaemonProof, createHelloProof, type RelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import {
 	RELAY_TOKEN_TTL_MS,
@@ -34,7 +34,7 @@ async function startRelayHarness(): Promise<RelayHarness> {
 				onRequest: () => {},
 				relayAdmission: {
 					admitRelay: (hello, socket, bufferedRemainder) =>
-						registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
+						registry.admit(hello.relayId, hello.relayProof, socket, bufferedRemainder),
 				},
 			},
 		});
@@ -151,7 +151,12 @@ describe("relay framing (§12.2.3)", () => {
 		const client = connectRawRelayClient(socketPath, relay);
 		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
 
-		expect(client.messages[0]).toEqual({ type: "hello_ack", ok: true });
+		// The ack proves the offer's token over the hello's nonce.
+		expect(client.messages[0]).toEqual({
+			type: "hello_ack",
+			ok: true,
+			daemonProof: createDaemonProof("relay", relay.relayToken, client.proof),
+		});
 		expect(client.messages[1]).toEqual({
 			type: "relay_preamble",
 			kind: "phone",
@@ -386,7 +391,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(wrongToken.messages).toEqual([{ type: "hello_ack", ok: false, error: "bad_relay_token" }]);
 		const retryB = connectRawRelayClient(socketPath, relayB);
 		await vi.waitFor(() => expect(retryB.messages).toHaveLength(2));
-		expect(retryB.messages[0]).toEqual({ type: "hello_ack", ok: true });
+		expect(retryB.messages[0]).toMatchObject({ type: "hello_ack", ok: true });
 
 		// Expired token.
 		const phoneC = new FakePhoneIrohStream();
@@ -417,7 +422,9 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.get(relay.relayId)).toBeUndefined();
 		// Expiry synchronously removed the owner from the token index, so a
 		// same-tick redemption cannot promote it while rejection I/O settles.
-		expect(registry.admit(relay.relayId, relay.relayToken, {} as never, Buffer.alloc(0))).toBe(false);
+		expect(
+			registry.admit(relay.relayId, createHelloProof("relay", relay.relayToken), {} as never, Buffer.alloc(0)),
+		).toBe(false);
 		expect(await relay.settled).toEqual({ reason: "error", bytesUp: 0, bytesDown: 0, durationMs: 0 });
 		expect(rejectPending).toHaveBeenCalledTimes(1);
 		expect(rejectPending).toHaveBeenCalledWith({ message: "relay offer expired; retry", retryAfterMs: 1000 });

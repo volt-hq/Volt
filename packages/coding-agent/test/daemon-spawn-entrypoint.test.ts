@@ -10,7 +10,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
@@ -56,7 +56,11 @@ describe("daemon CLI entrypoint resolution", () => {
 		createFile(bundledEntry);
 		createFile(join(root, "dist", "cli.js"));
 
-		expect(resolveDaemonCliInvocation()).toEqual({ nodeArgs: ["--optimize-for-size"], entry: bundledEntry });
+		expect(resolveDaemonCliInvocation()).toEqual({
+			command: process.execPath,
+			nodeArgs: ["--optimize-for-size"],
+			entryArgs: [bundledEntry],
+		});
 	});
 
 	it("falls back to the modular CLI for older package layouts", () => {
@@ -64,7 +68,11 @@ describe("daemon CLI entrypoint resolution", () => {
 		const modularEntry = join(root, "dist", "cli.js");
 		createFile(modularEntry);
 
-		expect(resolveDaemonCliInvocation()).toEqual({ nodeArgs: ["--optimize-for-size"], entry: modularEntry });
+		expect(resolveDaemonCliInvocation()).toEqual({
+			command: process.execPath,
+			nodeArgs: ["--optimize-for-size"],
+			entryArgs: [modularEntry],
+		});
 	});
 
 	it("starts the daemon from the given installation instead of the running one", async () => {
@@ -129,8 +137,9 @@ process.exit(process.argv.includes("install-service") ? 3 : 0);
 		createFile(join(root, "dist", "core", "npm", "cli.js"));
 
 		expect(resolveDaemonCliInvocation()).toEqual({
+			command: process.execPath,
 			nodeArgs: ["--optimize-for-size"],
-			entry: sourceRunner,
+			entryArgs: [sourceRunner],
 		});
 	});
 
@@ -140,7 +149,24 @@ process.exit(process.argv.includes("install-service") ? 3 : 0);
 		createFile(join(root, "src", "cli.ts"));
 		createFile(bundledEntry);
 
-		expect(resolveDaemonCliInvocation()).toEqual({ nodeArgs: ["--optimize-for-size"], entry: bundledEntry });
+		expect(resolveDaemonCliInvocation()).toEqual({
+			command: process.execPath,
+			nodeArgs: ["--optimize-for-size"],
+			entryArgs: [bundledEntry],
+		});
+	});
+
+	it("re-executes a standalone binary by its own absolute path, whatever the package directory holds", () => {
+		const root = createPackageDir();
+		// An installation's entry points, which a standalone binary never runs.
+		createFile(join(root, "src", "cli.ts"));
+		createFile(join(root, "..", "..", "scripts", "run-coding-agent-source.mjs"));
+		createFile(join(root, "dist", "core", "npm", "cli.js"));
+		const standalone = { command: process.execPath, nodeArgs: [], entryArgs: [] };
+
+		expect(resolveDaemonCliInvocation({ standalone: true })).toEqual(standalone);
+		expect(resolveDaemonCliInvocation({ standalone: true, packageDir: root })).toEqual(standalone);
+		expect(isAbsolute(resolveDaemonCliInvocation({ standalone: true }).command)).toBe(true);
 	});
 
 	it("launches with source-only dependency exports from outside the checkout", () => {
@@ -178,8 +204,8 @@ process.exit(process.argv.includes("install-service") ? 3 : 0);
 		);
 		const agentDir = join(repo, "agent state");
 		mkdirSync(agentDir);
-		const { nodeArgs, entry } = resolveDaemonCliInvocation();
-		const result = spawnSync(process.execPath, [...nodeArgs, entry, "daemon", "run", "--foreground"], {
+		const { command, nodeArgs, entryArgs } = resolveDaemonCliInvocation();
+		const result = spawnSync(command, [...nodeArgs, ...entryArgs, "daemon", "run", "--foreground"], {
 			cwd: agentDir,
 			encoding: "utf8",
 			timeout: 15_000,

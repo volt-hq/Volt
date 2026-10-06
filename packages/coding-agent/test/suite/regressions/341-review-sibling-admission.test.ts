@@ -16,6 +16,7 @@ import { SessionManager, type SessionReference } from "../../../src/core/session
 import {
 	type ControlEvent,
 	type ControlResponse,
+	createHelloProof,
 	PROTOCOL_VERSION,
 	type WorkerHostKind,
 } from "../../../src/daemon/control-protocol.ts";
@@ -160,7 +161,7 @@ async function fixture() {
 				role: "worker",
 				protocolVersion: PROTOCOL_VERSION,
 				workerId: launch.request.workerId,
-				workerToken: launch.request.workerToken,
+				workerProof: createHelloProof("worker", launch.request.workerToken),
 				pid: 4242,
 				version: "test",
 			},

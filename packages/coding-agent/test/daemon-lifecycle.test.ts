@@ -647,8 +647,8 @@ describe("voltd lifecycle", () => {
 					},
 				});
 				return {
-					admitRelay: (relayId, relayToken, socket, bufferedRemainder) =>
-						registry.admit(relayId, relayToken, socket, bufferedRemainder),
+					admitRelay: (relayId, proof, socket, bufferedRemainder) =>
+						registry.admit(relayId, proof, socket, bufferedRemainder),
 					async quiesce() {
 						await relay?.close("host_shutdown", { pendingMessage: "daemon shutting down" });
 						quiesced = true;

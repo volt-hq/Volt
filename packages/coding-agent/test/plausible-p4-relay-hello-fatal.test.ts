@@ -16,6 +16,7 @@ import { createConnection, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	ControlLineDecoder,
+	createHelloProof,
 	encodeControlLine,
 	type HelloMessage,
 	PROTOCOL_VERSION,
@@ -90,7 +91,7 @@ describe("P4 relay hello: admitRelay throwing must not emit a misleading fatal(f
 			role: "relay",
 			protocolVersion: PROTOCOL_VERSION,
 			relayId: "r-1",
-			relayToken: "tok-1",
+			relayProof: createHelloProof("relay", "tok-1"),
 		};
 		client.write(encodeControlLine(relayHello));
 

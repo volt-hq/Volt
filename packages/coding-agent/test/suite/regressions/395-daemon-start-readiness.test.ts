@@ -267,10 +267,7 @@ describe("#395 detached daemon startup readiness", () => {
 
 	it.each(["start", "restart"])("prints an honest live-child timeout and log path for daemon %s", async (command) => {
 		const output = vi.spyOn(console, "error").mockImplementation(() => {});
-		const pending = handleDaemonCommand(["daemon", command], {
-			agentDir: harness.tempDir,
-			isStandaloneBinary: false,
-		});
+		const pending = handleDaemonCommand(["daemon", command], { agentDir: harness.tempDir });
 		await vi.advanceTimersByTimeAsync(60_000);
 		await expect(pending).resolves.toBe(true);
 		expect(process.exitCode).toBe(1);
@@ -282,7 +279,7 @@ describe("#395 detached daemon startup readiness", () => {
 	it("preserves startup diagnostics for remote commands that auto-start the daemon", async () => {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 		const output = vi.spyOn(console, "error").mockImplementation(() => {});
-		const pending = handleRemoteControlCommand(["remote", "pair"], { isStandaloneBinary: false });
+		const pending = handleRemoteControlCommand(["remote", "pair"]);
 		await vi.advanceTimersByTimeAsync(60_000);
 		await expect(pending).resolves.toBe(true);
 		expect(process.exitCode).toBe(1);

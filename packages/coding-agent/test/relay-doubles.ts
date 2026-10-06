@@ -12,7 +12,12 @@ import type {
 	IrohRecvStreamLike,
 	IrohSendStreamLike,
 } from "../src/core/protocol/transport/iroh-transport.ts";
-import { encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
+import {
+	createHelloProof,
+	encodeControlLine,
+	type HelloProof,
+	PROTOCOL_VERSION,
+} from "../src/daemon/control-protocol.ts";
 
 type QueuedPhoneRead = { type: "data"; bytes: Buffer } | { type: "end" };
 
@@ -92,6 +97,8 @@ export class FakePhoneIrohStream implements IrohBiStreamLike {
 
 export interface RawRelayClient {
 	socket: Socket;
+	/** The hello's proof of the offer's token: the daemon's ack proves the token over its nonce. */
+	proof: HelloProof;
 	/** Decoded control lines (hello_ack, then relay_preamble on success). */
 	messages: Array<Record<string, unknown>>;
 	/** Raw post-preamble bytes received from the daemon. */
@@ -112,6 +119,7 @@ export function connectRawRelayClient(
 	hello: { relayId: string; relayToken: string; protocolVersion?: number },
 ): RawRelayClient {
 	const socket = createConnection(socketPath);
+	const proof = createHelloProof("relay", hello.relayToken);
 	const messages: Array<Record<string, unknown>> = [];
 	const rawChunks: Buffer[] = [];
 	let buffered = Buffer.alloc(0);
@@ -129,7 +137,7 @@ export function connectRawRelayClient(
 				role: "relay",
 				protocolVersion: hello.protocolVersion ?? PROTOCOL_VERSION,
 				relayId: hello.relayId,
-				relayToken: hello.relayToken,
+				relayProof: proof,
 			}),
 		);
 	});
@@ -170,6 +178,7 @@ export function connectRawRelayClient(
 
 	return {
 		socket,
+		proof,
 		messages,
 		rawReceived: () => Buffer.concat(rawChunks),
 		ended: () => sawEnd,

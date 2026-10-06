@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
+import { type ControlEvent, type ControlResponse, createHelloProof } from "../src/daemon/control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import {
 	type LiveWorker,
@@ -95,12 +95,12 @@ function setup(options: { ttlMs?: number } = {}) {
 				role: "worker",
 				protocolVersion: 4,
 				workerId: worker.request.workerId,
-				workerToken: token,
+				workerProof: createHelloProof("worker", token),
 				pid: 4242,
 				version: "test",
 			},
 			worker.connectionId,
-		);
+		) !== undefined;
 
 	let requestId = 0;
 	const send = (worker: FakeWorker, request: Record<string, unknown>): Promise<ControlResponse> =>

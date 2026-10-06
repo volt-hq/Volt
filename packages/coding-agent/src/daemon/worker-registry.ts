@@ -28,17 +28,19 @@
  * removes its record and fails the opens that waited for its readiness.
  */
 
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import type {
-	ControlEvent,
-	ControlRequest,
-	ControlResponse,
-	ControlWorkerOrigin,
-	ControlWorkerStatus,
-	HelloMessage,
-	WorkerHostKind,
-	WorkerSpawnSpec,
-	WorkerStopReason,
+import { randomBytes, randomUUID } from "node:crypto";
+import {
+	type ControlEvent,
+	type ControlRequest,
+	type ControlResponse,
+	type ControlWorkerOrigin,
+	type ControlWorkerStatus,
+	createDaemonProof,
+	type HelloMessage,
+	helloProofMatches,
+	type WorkerHostKind,
+	type WorkerSpawnSpec,
+	type WorkerStopReason,
 } from "./control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLauncher } from "./worker-launcher.ts";
 
@@ -425,24 +427,28 @@ export class WorkerRegistry {
 	// ==========================================================================
 
 	/**
-	 * Admit a worker hello: the worker must be starting, with the unused token
-	 * its spawn issued, on a connection of its own. The token is spent here;
-	 * the conversation the worker opens follows the ack.
+	 * Admit a worker hello: the worker must be starting, proving the unused
+	 * token its spawn issued (which never crosses the socket), on a connection
+	 * of its own. The token is spent here; the conversation the worker opens
+	 * follows the ack. Returns the daemon's proof of the token for the ack, or
+	 * undefined when the hello is refused.
 	 */
-	admitWorker(hello: Extract<HelloMessage, { role: "worker" }>, connectionId: string): boolean {
+	admitWorker(hello: Extract<HelloMessage, { role: "worker" }>, connectionId: string): string | undefined {
 		const record = this.workers.get(hello.workerId);
-		if (!record || record.state !== "starting" || record.tokenUsed || record.connectionId !== undefined) return false;
-		const presented = Buffer.from(hello.workerToken, "base64url");
-		if (presented.length !== record.token.length || !timingSafeEqual(presented, record.token)) return false;
+		if (!record || record.state !== "starting" || record.tokenUsed || record.connectionId !== undefined) {
+			return undefined;
+		}
+		const token = record.token.toString("base64url");
+		if (!helloProofMatches("worker", token, hello.workerProof)) return undefined;
 		const spec = record.spec;
-		if (!spec) return false;
+		if (!spec) return undefined;
 		record.tokenUsed = true;
 		record.connectionId = connectionId;
 		// After the ack the control server writes once this returns.
 		queueMicrotask(() => {
 			if (record.connectionId === connectionId) this.options.sendTo(connectionId, { type: "worker_spawn", spec });
 		});
-		return true;
+		return createDaemonProof("worker", token, hello.workerProof);
 	}
 
 	/** The worker a control connection speaks for, while it is registered. */
