@@ -1,9 +1,10 @@
 /**
- * TUI host harness for suite tests: the TUI's host (`TuiHost`) over a
- * conversation host on the faux provider (host-harness.ts), with daemon leases
- * over a link the test scripts or a real one, the TUI's client over a loopback
- * connection, and InteractiveMode rendering into a virtual terminal as that
- * client, its store following it.
+ * TUI harness for suite tests: the TUI's connector (`InProcessConnector`, or
+ * with a daemon link the CLI's `LeasedConnector`) over a conversation host on
+ * the faux provider (host-harness.ts), with daemon leases over a link the test
+ * scripts or a real one, the TUI's client connected through it (following its
+ * moves by reconnecting), and InteractiveMode rendering into a virtual
+ * terminal as that client, its store following it.
  */
 
 import { duplexPair } from "node:stream";
@@ -11,7 +12,9 @@ import type { HostRequestKind } from "@hansjm10/volt-protocol";
 import { setKeybindings, type TUI, type TuiMode } from "@hansjm10/volt-tui";
 import { expect, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
-import type { LoopbackClient } from "../../src/client/protocol-client.ts";
+import { type ConnectThroughOptions, connectThrough } from "../../src/client/conversation-connector.ts";
+import { InProcessConnector, LeasedConnector } from "../../src/client/in-process-connector.ts";
+import type { ProtocolClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
 import { readIrohJsonlLine } from "../../src/core/protocol/transport/iroh-transport.ts";
@@ -19,9 +22,9 @@ import { createIrohRemotePresetAccess } from "../../src/core/remote/iroh/access-
 import { createIrohRemoteHandshakeSuccess } from "../../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
+import type { LogWriter } from "../../src/core/session-writer.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { RelayPreamble } from "../../src/daemon/control-protocol.ts";
-import type { TuiConnectOptions } from "../../src/modes/interactive/client/tui-connection.ts";
 import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
 import {
 	type AcquireOutcome,
@@ -32,7 +35,6 @@ import {
 	type OpenedRelay,
 } from "../../src/modes/interactive/host/daemon-link.ts";
 import { adaptRelaySocketToIrohStream } from "../../src/modes/interactive/host/relay-serving.ts";
-import { TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { TUI_HOST_REQUESTS } from "../../src/modes/interactive/live-view.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
@@ -41,13 +43,16 @@ import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./
 export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "openGate" | "extensionMode"> {
 	/** The link the TUI host's daemon leases serve through; without one, the TUI runs without the daemon. */
 	link?: DaemonLink;
-	/** The startup conversation's id and cwd: a new id in the harness's temp dir by default. */
-	startup?: { id?: string; cwd?: string };
+	/**
+	 * The startup conversation's id and cwd (a new id in the harness's temp dir
+	 * by default), and what its log holds before it opens.
+	 */
+	startup?: { id?: string; cwd?: string; seed?: (writer: LogWriter) => Promise<void> };
 	/** The model scope patterns the TUI started with (`--models`). */
 	modelScopePatterns?: readonly string[];
 }
 
-/** InteractiveMode over the TUI host, rendering into a virtual terminal. */
+/** InteractiveMode over the TUI's connector, rendering into a virtual terminal. */
 export interface TuiModeFixture {
 	readonly mode: InteractiveMode;
 	readonly terminal: VirtualTerminal;
@@ -65,15 +70,23 @@ export interface TuiModeFixture {
 }
 
 export interface TuiHarness extends HostHarness {
-	readonly tuiHost: TuiHost;
+	/** The TUI's connector: the CLI's leased one with a daemon link. */
+	readonly connector: InProcessConnector;
 	/** The conversation the TUI opens on. */
 	readonly startup: HostedConversation;
 	/** The session directory the startup conversation is stored in. */
 	readonly sessionDir: string;
-	/** Connect the TUI's client over loopback, answering every host request kind the TUI answers by default. */
-	connect(options?: TuiConnectOptions): Promise<LoopbackClient>;
+	/** Phones relayed into the conversation the TUI shows and served now; none without a daemon link. */
+	relayCount(): number;
 	/**
-	 * InteractiveMode over the TUI host, its client connected and its
+	 * Connect a client through the TUI's connector, as the TUI does, answering
+	 * every host request kind the TUI answers by default. Resolves once the
+	 * host serves the client: after the conversation's daemon lease and its
+	 * recovered input, which come before the client's first query.
+	 */
+	connect(options?: ConnectThroughOptions): Promise<ProtocolClient>;
+	/**
+	 * InteractiveMode over the TUI's connector, its client connected and its
 	 * conversation shown; with `connect: false`, its UI runs and the fixture's
 	 * `connect` connects it.
 	 */
@@ -118,23 +131,27 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 		const sessionManager = await SessionManager.create(startupOptions?.cwd ?? harness.tempDir, sessionDir, {
 			...(startupOptions?.id === undefined ? {} : { id: startupOptions.id }),
 		});
+		await startupOptions?.seed?.(sessionManager.logWriter);
 		const opened = await harness.host.open({ kind: "adopt", sessionManager });
 		if (opened.cancelled) throw new Error("A startup open cannot be cancelled");
 		const startup = opened.conversation;
-		const tuiHost = TuiHost.start({
+		const connectorOptions = {
 			host: harness.host,
 			conversation: startup,
-			...(leases === undefined ? {} : { daemon: leases }),
 			...(modelScopePatterns === undefined ? {} : { modelScopePatterns }),
-		});
+		};
+		const leased = leases === undefined ? undefined : new LeasedConnector({ ...connectorOptions, daemon: leases });
+		const connector = leased ?? InProcessConnector.start(connectorOptions);
 		return {
 			...harness,
-			tuiHost,
+			connector,
 			startup,
 			sessionDir,
+			relayCount: () => leased?.relayCount() ?? 0,
 			async connect(connectOptions = {}) {
-				const client = await tuiHost.connect({ hostRequests: TUI_HOST_REQUESTS, ...connectOptions });
+				const client = await connectThrough(connector, { hostRequests: TUI_HOST_REQUESTS, ...connectOptions });
 				cleanups.push(() => client.stop());
+				await client.query("conversation_info");
 				return client;
 			},
 			async startMode(modeOptions = {}) {
@@ -142,7 +159,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 				vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 				const settings = startup.session.settingsManager;
 				const profile = settings.getActiveProfile();
-				const mode = new InteractiveMode(tuiHost, {
+				const mode = new InteractiveMode(connector, {
 					tuiMode,
 					// Where the startup conversation runs, as the volt CLI tells the TUI before its client connects.
 					settingsScope: {
@@ -203,7 +220,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 			},
 			async cleanup() {
 				for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
-				await tuiHost.dispose().catch(() => undefined);
+				await connector.dispose().catch(() => undefined);
 				await harness.cleanup();
 			},
 		};

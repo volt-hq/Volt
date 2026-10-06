@@ -159,6 +159,19 @@ describe("regression #585: extension session control returns the id of the sessi
 		}
 	});
 
+	it("answers the intent of an extension command that moved its client once the command ran", async () => {
+		const { harness, source, results } = await setup();
+		const client = await createLoopbackClient(harness.host, source);
+		cleanups.push(() => client.stop());
+
+		// The command closes the session it ran in as its client moves; its intent still answers.
+		const accepted = await client.intent("extension.command.test-extension.intent-new", {});
+
+		expect(accepted).toMatchObject({ type: "accepted" });
+		expect(results).toEqual([{ cancelled: false, sessionId: expect.any(String), seeded: true }]);
+		expect(source.closed).toBe(true);
+	});
+
 	it("reports cancelled when no attached client handles session changes", async () => {
 		const { harness, source } = await setup();
 		const session = source.session;

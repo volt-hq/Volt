@@ -224,6 +224,90 @@ describe("ConversationHost", () => {
 		expect(result.conversation.closed).toBe(false);
 	});
 
+	it("closes the source a redirected anchor left once the target started, keeping it fenced until then", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const redirects: string[] = [];
+		const tui: HostClient = {
+			id: "tui",
+			anchor: true,
+			surface: {},
+			move: { kind: "redirect", redirect: (sessionId) => void redirects.push(sessionId) },
+		};
+		await harness.host.attach(tui, source);
+		await harness.host.attach(harness.client("phone"), source);
+		harness.events.splice(0);
+
+		const result = moved(await harness.host.openFor(tui, { kind: "new" }));
+
+		expect(redirects).toEqual([result.sessionId]);
+		// The source waits for the client to start the target, fenced: nothing runs there meanwhile.
+		expect(source.closed).toBe(false);
+		await expect(source.session.prompt("meanwhile")).rejects.toThrow();
+		await harness.host.attach(harness.client("tui-reconnected", { anchor: true }), result.conversation);
+		await vi.waitFor(() => expect(source.closed).toBe(true));
+		expect(harness.events.map((event) => [event.type, event.sessionId])).toEqual([
+			["session_before_switch", source.id],
+			["session_start", result.sessionId],
+			["session_shutdown", source.id],
+		]);
+	});
+
+	it("runs a redirected client's withSession once a client started the target and the source it anchored closed", async () => {
+		const harness = await setup({ responses: ["seeded reply"] });
+		const source = await harness.openStartup();
+		const tui: HostClient = { id: "tui", anchor: true, surface: {}, move: { kind: "redirect", redirect: () => {} } };
+		await harness.host.attach(tui, source);
+		harness.events.splice(0);
+		const seeds: string[] = [];
+
+		const opening = harness.host.openFor(
+			tui,
+			{ kind: "new" },
+			{
+				withSession: async (ctx) => {
+					seeds.push(ctx.sessionManager.getSessionId());
+					expect(source.closed).toBe(true);
+					await ctx.sendUserMessage("seed");
+				},
+			},
+		);
+		await vi.waitFor(() => expect(harness.host.list()).toHaveLength(2));
+		const target = harness.host.list().find((conversation) => conversation !== source)!;
+		expect(seeds).toEqual([]);
+		await harness.host.attach(harness.client("tui-reconnected", { anchor: true }), target);
+
+		const result = moved(await opening);
+		expect(result.seeded).toBe(true);
+		expect(seeds).toEqual([target.id]);
+		expect(harness.events.map((event) => [event.type, event.sessionId])).toEqual([
+			["session_before_switch", source.id],
+			["session_start", target.id],
+			["session_shutdown", source.id],
+		]);
+		await vi.waitFor(() =>
+			expect(target.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]),
+		);
+	});
+
+	it("skips a redirected client's withSession when the target closes before a client joins it", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const phone: HostClient = { id: "phone", move: { kind: "redirect", redirect: () => {} } };
+		await harness.host.attach(phone, source);
+		await harness.host.attach(harness.client("tui", { anchor: true }), source);
+		const withSession = vi.fn(async () => {});
+
+		const opening = harness.host.openFor(phone, { kind: "new" }, { withSession });
+		await vi.waitFor(() => expect(harness.host.list()).toHaveLength(2));
+		const target = harness.host.list().find((conversation) => conversation !== source)!;
+		await harness.host.close(target);
+
+		expect(moved(await opening).seeded).toBe(false);
+		expect(withSession).not.toHaveBeenCalled();
+		expect(source.closed).toBe(false);
+	});
+
 	it("lets a redirect client leave a busy source its other clients keep open, without fencing it", async () => {
 		const harness = await setup();
 		const source = await harness.openStartup();

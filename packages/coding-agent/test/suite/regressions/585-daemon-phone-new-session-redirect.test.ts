@@ -55,6 +55,9 @@ function createDaemon() {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 	const events: LifecycleEvent[] = [];
+	/** What a phone's `/handoff` command saw: the sessions its `withSession` seeded, and what `ctx.newSession()` returned. */
+	const seeds: string[] = [];
+	const handoffs: unknown[] = [];
 	const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
 		const services = await createAgentSessionServices({
 			cwd,
@@ -101,6 +104,18 @@ function createDaemon() {
 									sessionId: ctx.sessionManager.getSessionId(),
 									reason: event.reason,
 								});
+							});
+							volt.registerCommand("handoff", {
+								remoteSafe: true,
+								handler: async (_args, ctx) => {
+									handoffs.push(
+										await ctx.newSession({
+											withSession: async (next) => {
+												seeds.push(next.sessionManager.getSessionId());
+											},
+										}),
+									);
+								},
 							});
 						},
 						["providers"],
@@ -226,6 +241,8 @@ function createDaemon() {
 		workspacePath,
 		registry,
 		events,
+		seeds,
+		handoffs,
 		lastSessionIds,
 		authorize,
 		connectPhone,
@@ -327,6 +344,44 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 
 		await Promise.all([moved.phone.close(), phoneB.phone.close()]);
 		await Promise.all([moved.closed, phoneB.closed]);
+	});
+
+	it("runs the withSession of the phone's extension command once the phone reconnected to the conversation the daemon opened", async () => {
+		const daemon = createDaemon();
+		cleanups.push(() => daemon.cleanup());
+		const source = await daemon.connectPhone("n-phone-a", conversationHello({ target: "new", sessionId: "s-seed" }));
+		// A second phone keeps the source open.
+		const stays = await daemon.connectPhone(
+			"n-phone-b",
+			conversationHello({ target: "session", sessionId: "s-seed" }),
+		);
+
+		source.phone.send({
+			type: "extension.command.test-extension-1.handoff",
+			intentId: "i-handoff",
+			expectedOrdinal: source.phone.position(),
+			input: {},
+		});
+		await source.phone.ended;
+		await source.closed;
+		const moved = source.phone.frames.at(-1);
+		if (moved?.type !== "ended" || moved.reason !== "moved") throw new Error("The phone was not redirected");
+		// The new conversation's extensions start when the phone comes back; the seed waits for them.
+		expect(daemon.seeds).toEqual([]);
+
+		const back = await daemon.connectPhone(
+			"n-phone-a",
+			conversationHello({ target: "session", sessionId: moved.target }),
+		);
+
+		await vi.waitFor(() =>
+			expect(daemon.handoffs).toEqual([{ cancelled: false, sessionId: moved.target, seeded: true }]),
+		);
+		expect(daemon.seeds).toEqual([moved.target]);
+		expect(daemon.events).toContainEqual({ type: "session_start", sessionId: moved.target, reason: "new" });
+
+		await Promise.all([back.phone.close(), stays.phone.close()]);
+		await Promise.all([back.closed, stays.closed]);
 	});
 
 	it("closes the source once idle when the phone that moved away was its last client", async () => {

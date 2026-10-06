@@ -419,14 +419,14 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 	it("serves two co-attached phones from one TUI conversation: prompts land, the turn fans out, abort keeps both relays open", async () => {
 		const harness = await startOwnedRelayDaemonHarness();
 		const { registry, tui } = harness;
-		const conversation = tui.tuiHost.conversation;
+		const conversation = tui.connector.conversation;
 
 		// Two phones with distinct clientNodeIds attach concurrently; the daemon
 		// offers one relay each, and the TUI host redeems and serves both.
 		const attachA = mintOwnedPhoneRelay(harness, "n-phone-a", "st-1");
 		const attachB = mintOwnedPhoneRelay(harness, "n-phone-b", "st-2");
 		await vi.waitFor(() => {
-			expect(tui.tuiHost.relayCount()).toBe(2);
+			expect(tui.relayCount()).toBe(2);
 			expect(registry.activeCount()).toBe(2);
 		});
 
@@ -489,7 +489,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		await vi.waitFor(() => {
 			expect(attachA.settle).toHaveBeenCalledTimes(1);
 			expect(registry.activeCount()).toBe(1);
-			expect(tui.tuiHost.relayCount()).toBe(1);
+			expect(tui.relayCount()).toBe(1);
 		});
 		expect(attachA.settle.mock.calls[0]?.[0]?.reason).toBe("phone_disconnected");
 
@@ -504,7 +504,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		await phoneB.close();
 		await vi.waitFor(() => {
 			expect(registry.activeCount()).toBe(0);
-			expect(tui.tuiHost.relayCount()).toBe(0);
+			expect(tui.relayCount()).toBe(0);
 		});
 		// The phones leaving never closes the TUI's conversation.
 		expect(conversation.closed).toBe(false);
@@ -523,7 +523,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		const attachA = mintOwnedPhoneRelay(harness, "n-phone-a", "st-unregister-1");
 		const attachB = mintOwnedPhoneRelay(harness, "n-phone-b", "st-unregister-2");
 		await vi.waitFor(() => {
-			expect(tui.tuiHost.relayCount()).toBe(2);
+			expect(tui.relayCount()).toBe(2);
 			expect(harness.registry.activeCount()).toBe(2);
 		});
 		const [phoneA, phoneB] = await Promise.all([
@@ -542,7 +542,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 			expect(attachA.settle).toHaveBeenCalledTimes(1);
 			expect(attachB.settle).toHaveBeenCalledTimes(1);
 			expect(harness.registry.activeCount()).toBe(0);
-			expect(tui.tuiHost.relayCount()).toBe(0);
+			expect(tui.relayCount()).toBe(0);
 		});
 		await Promise.all([phoneA.ended, phoneB.ended]);
 		return { harness, tui, attachA, attachB, phoneA, phoneB };
@@ -574,7 +574,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		expect(attachB.settle.mock.calls[0]?.[0]?.reason).toBe("workspace_unregistered");
 		expect(harness.broker.lookup(WORKSPACE.name, SESSION_ID)).toBeUndefined();
 		// The TUI keeps its conversation.
-		expect(tui.tuiHost.conversation.closed).toBe(false);
+		expect(tui.connector.conversation.closed).toBe(false);
 	}, 20_000);
 
 	it("serves nothing a phone pipelined after its accepted unregister", async () => {

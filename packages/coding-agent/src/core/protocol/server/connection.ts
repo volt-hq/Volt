@@ -19,13 +19,14 @@
  * withdrawal, and the intents sent while it runs do not wait for it. A
  * stopping intent is checked against the connection's
  * authority like any other. Non-input intents are deduplicated per
- * conversation by `intentId`; input intents carry their durable
- * `clientMessageId` as theirs. A structural intent that moves the client
- * answers `accepted{conversation}`, then ends the subscriptions on the
- * conversation it left with `ended{moved, target}`. A client that follows its
- * structural intents by redirect (a phone) stays where it is: after
- * `ended{moved, target}` the connection closes, and the client connects to
- * the target.
+ * conversation by `intentId`, or, for a client the host knows across its
+ * connections (`clientKey`), across the host's conversations; input intents
+ * carry their durable `clientMessageId` as theirs. A structural intent that
+ * moves the client answers `accepted{conversation}`, then ends the
+ * subscriptions on the conversation it left with `ended{moved, target}`. A
+ * client that follows its structural intents by redirect (a phone, the TUI)
+ * stays where it is: after `ended{moved, target}` the connection closes, and
+ * the client connects to the target.
  *
  * Every frame the host writes passes through the profile's redactor at one
  * send; the remote profile also bounds frames to its frame limit. The
@@ -182,9 +183,12 @@ export interface ServeConnectionOptions {
 	 */
 	readonly conversation?: HostedConversation;
 	/**
-	 * Defaults to true. The client anchors its conversation: the conversation
-	 * closes when the connection ends. A host that shares the conversation
-	 * keeps it open after the connection ends. A redirect client never anchors.
+	 * Whether the client anchors its conversation: the conversation closes when
+	 * the client leaves it, by a move or as the connection ends. By default a
+	 * client that follows moves in place does and a redirect client does not;
+	 * a host that shares the conversation keeps it open after the connection
+	 * ends. A redirect client that anchors (the TUI in its in-process host)
+	 * closes each conversation it leaves.
 	 */
 	readonly anchor?: boolean;
 	/** What the host calls itself in `welcome`. */
@@ -194,16 +198,25 @@ export interface ServeConnectionOptions {
 	/** The conversation the client is on lost its log: a commit it could not confirm. */
 	readonly onLost?: (conversation: HostedConversation, error: Error) => void;
 	/**
-	 * The client follows its structural intents by redirect (a phone): it
-	 * stays on its conversation, its subscriptions there end `moved`, and the
-	 * connection closes. `hostTarget` hosts the conversations its intents
-	 * lead it to (see `HostClientMove`).
+	 * The client follows its structural intents by redirect (a phone, the
+	 * TUI): it stays on its conversation, its subscriptions there end `moved`,
+	 * and the connection closes. `hostTarget` hosts the conversations its
+	 * intents lead it to, and with `hostsStoredSessions` the stored ones a
+	 * switch resumes too (see `HostClientMove`).
 	 */
 	readonly redirect?: {
 		readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
+		readonly hostsStoredSessions?: boolean;
 		/** The client's intent redirected it to `sessionId`. */
 		readonly onRedirected?: (sessionId: string) => void;
 	};
+	/**
+	 * Runs once the client attached to its conversation, before the client's
+	 * intents and queries run: a host that recovers the conversation's durable
+	 * queued input starts it here, so the client's own input never overtakes
+	 * it. A failure is the host's to report; the client is served regardless.
+	 */
+	readonly beforeServing?: (conversation: HostedConversation) => Promise<void> | void;
 	/** What intents get beyond the local services: the host's workspace, push, and settings services. */
 	readonly services?: (conversation: HostedConversation | undefined) => IntentServices;
 	/** The connection's authority, checked before every frame in either direction. */
@@ -217,9 +230,13 @@ export interface ServeConnectionOptions {
 	/** Run relay intents and queries where their state lives (a TUI serving a relayed phone forwards them to the daemon). */
 	readonly relay?: (frame: ControlRelayFrame) => Promise<ControlRelayOutcome>;
 	/**
-	 * Who the client is across its connections (a paired device's node id):
-	 * its retried intents answer from its own outcome window. Clients without
-	 * one share a window.
+	 * Who the client is across its connections (a paired device's node id,
+	 * the TUI process): its retried intents answer from its own outcome window,
+	 * which spans the host's conversations, so an intent retried after the
+	 * client reconnected to another conversation of the host answers as it did.
+	 * The editor text a move leaves for it waits for whichever of its
+	 * connections shows the target. Clients without one share a window per
+	 * conversation.
 	 */
 	readonly clientKey?: string;
 	/** An intent of this client that starts a run (a prompt, a dynamic intent) was accepted on `conversation`. */
@@ -311,6 +328,38 @@ function outcomeWindow(scope: object, clientKey: string): IntentOutcomeWindow {
 		windows.set(clientKey, window);
 	}
 	return window;
+}
+
+/** Where the editor text a client's move leaves reaches the client: one of its connections, once it shows the target. */
+interface ClientEditorTexts {
+	/** The client's connections: each with its host client id, and whether a subscription of it shows a conversation's live lane. */
+	readonly connections: Set<{ readonly clientId: string; showsLive(conversation: HostedConversation): boolean }>;
+	/** Editor text a move left for the conversation the client moved to, until a connection of the client shows it. */
+	pending: { readonly conversation: string; readonly text: string } | undefined;
+}
+
+const editorTexts = new WeakMap<object, Map<string, ClientEditorTexts>>();
+
+/** The editor texts of the client `key` of a host (or of a host-less connection). */
+function clientEditorTexts(scope: object, key: string): ClientEditorTexts {
+	let clients = editorTexts.get(scope);
+	if (!clients) {
+		clients = new Map();
+		editorTexts.set(scope, clients);
+	}
+	let texts = clients.get(key);
+	if (!texts) {
+		texts = { connections: new Set(), pending: undefined };
+		clients.set(key, texts);
+	}
+	return texts;
+}
+
+/** Forget the editor texts of the client `key` once it has no connection and no text waits for it. */
+function releaseEditorTexts(scope: object, key: string): void {
+	const clients = editorTexts.get(scope);
+	const texts = clients?.get(key);
+	if (texts && texts.connections.size === 0 && texts.pending === undefined) clients?.delete(key);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -501,11 +550,14 @@ export function serveConnection(
 	if (options.conversation && !host) throw new Error("A connection to a conversation needs its host");
 	const connectionId = randomUUID();
 	const redirectClient = options.redirect !== undefined;
-	const anchor = !redirectClient && (options.anchor ?? true);
+	const anchor = options.anchor ?? !redirectClient;
 	const server = options.server ?? { name: "volt", version: VERSION };
 	const redactor = profile.redactor();
 	/** The outcome window scope of a connection without a host. */
 	const outcomeScope = {};
+	/** Where the editor text a move leaves for the client waits: for whichever connection of a client the host knows shows the target. */
+	const editorTextScope = host ?? outcomeScope;
+	const editorTextKey = options.clientKey ?? connectionId;
 	const reads = new ReadBudget(profile.limits.readBurst, profile.limits.readRefillMs);
 	const subscriptions = new Map<string, Subscription>();
 	const subscriptionUsage = new SubscriptionUsageService();
@@ -532,6 +584,8 @@ export function serveConnection(
 	void ready.promise.catch(() => undefined);
 	void closed.promise.catch(() => undefined);
 	let attached: Promise<void> | undefined;
+	/** The client left its conversation by a redirect: the conversation closes, or stays, by the move's rules. */
+	let redirected = false;
 	let detachInput: () => void = () => {};
 	let detachClose: () => void = () => {};
 	let unsubscribeHome: () => void = () => {};
@@ -661,11 +715,15 @@ export function serveConnection(
 				kind: "redirect",
 				redirect: (sessionId) => {
 					if (!home) return;
+					redirected = true;
 					options.redirect?.onRedirected?.(sessionId);
 					moves.push({ from: home, to: sessionId });
 					if (!laneBusy) flushMoves();
 				},
 				...(options.redirect?.hostTarget === undefined ? {} : { hostTarget: options.redirect.hostTarget }),
+				...(options.redirect?.hostsStoredSessions === undefined
+					? {}
+					: { hostsStoredSessions: options.redirect.hostsStoredSessions }),
 			}
 		: {
 				kind: "in_place",
@@ -700,21 +758,27 @@ export function serveConnection(
 				subscription.conversation === conversation && subscription.receivesLive && !subscription.isEnded,
 		);
 
-	/** Editor text for the conversation the client moved to, set once a subscription of the client shows it. */
-	let pendingEditorText: { readonly conversation: string; readonly text: string } | undefined;
-
 	/**
 	 * Replace the client's editor text with `text` once it shows the
 	 * conversation `conversationId`: at once when a subscription shows it,
-	 * else when the client subscribes there after its move.
+	 * else when the client subscribes there after its move, on this
+	 * connection or, for a redirect client the host knows, the one it
+	 * reconnects on.
 	 */
 	const setEditorTextOn = (conversationId: string, text: string): void => {
-		pendingEditorText = undefined;
+		const texts = clientEditorTexts(editorTextScope, editorTextKey);
+		texts.pending = undefined;
 		if (!hasEditor()) return;
 		const conversation = host?.get(conversationId);
-		if (conversation && showsLive(conversation)) conversation.liveState.setEditorText(text, { client: client.id });
-		else pendingEditorText = { conversation: conversationId, text };
+		const showing =
+			conversation === undefined
+				? undefined
+				: [...texts.connections].find((connection) => connection.showsLive(conversation));
+		if (conversation && showing) conversation.liveState.setEditorText(text, { client: showing.clientId });
+		else texts.pending = { conversation: conversationId, text };
 	};
+	const editorTextReceiver = { clientId: connectionId, showsLive };
+	clientEditorTexts(editorTextScope, editorTextKey).connections.add(editorTextReceiver);
 
 	/** Put `text` in the client's editor when the draft it reports is empty. */
 	const fillEmptyEditor = async (conversation: HostedConversation, text: string): Promise<void> => {
@@ -1046,7 +1110,9 @@ export function serveConnection(
 			}
 		}
 		const input = INPUT_INTENTS.has(frame.type);
-		const window = input ? undefined : outcomeWindow(conversation ?? host ?? outcomeScope, options.clientKey ?? "");
+		const windowScope =
+			options.clientKey === undefined ? (conversation ?? host ?? outcomeScope) : (host ?? outcomeScope);
+		const window = input ? undefined : outcomeWindow(windowScope, options.clientKey ?? "");
 		const fingerprint = JSON.stringify([frame.type, frame.input ?? null, frame.expectedOrdinal ?? null]);
 		const remembered = window?.get(frame.intentId);
 		if (remembered) {
@@ -1054,7 +1120,9 @@ export function serveConnection(
 				reject({ code: "conflict", message: `Intent id ${frame.intentId} was used for another intent` });
 				return;
 			}
-			write(await remembered.outcome);
+			// A dynamic intent answers once admitted, without holding later frames, retried or not.
+			if (!isBuiltinIntentName(frame.type)) void remembered.outcome.then(write);
+			else write(await remembered.outcome);
 			return;
 		}
 		const outcome = Promise.withResolvers<IntentOutcomeFrame>();
@@ -1390,9 +1458,10 @@ export function serveConnection(
 			return;
 		}
 		// The editor text the client's move left for the conversation it moved to.
-		const editorText = pendingEditorText;
+		const texts = clientEditorTexts(editorTextScope, editorTextKey);
+		const editorText = texts.pending;
 		if (editorText?.conversation === conversation.id && target !== undefined && subscription.receivesLive) {
-			pendingEditorText = undefined;
+			texts.pending = undefined;
 			conversation.liveState.setEditorText(editorText.text, { client: client.id });
 		}
 	};
@@ -1409,20 +1478,33 @@ export function serveConnection(
 		const frame = value as Static<typeof HelloFrameSchema>;
 		helloReceived = true;
 		accepts = profile.hostRequests(frame.accepts.hostRequests);
+		let joined: Promise<void>;
 		if (home && host) {
 			observeHome(home);
 			// The live view attaches synchronously, so a dialog an extension asks from session_start waits for the client.
-			attached = host.attach(client, home);
+			joined = host.attach(client, home);
 		} else {
-			attached = Promise.resolve();
+			joined = Promise.resolve();
 		}
-		attached.then(
+		joined.then(
 			() => ready.resolve(),
 			(error: unknown) => {
 				ready.reject(error);
 				void fail(error);
 			},
 		);
+		const beforeServing = options.beforeServing;
+		const served = home;
+		attached =
+			beforeServing === undefined || served === undefined
+				? joined
+				: joined.then(async () => {
+						try {
+							await beforeServing(served);
+						} catch {
+							// The host reports what it could not do; the client is served regardless.
+						}
+					});
 		write({
 			type: "welcome",
 			protocol: PROTOCOL_VERSION,
@@ -1489,15 +1571,23 @@ export function serveConnection(
 		void close({ code: "invalid_frame", message: `Invalid ${type} frame` });
 	};
 
-	/** Leave the host once: a client that never attached still closes an anchored conversation. */
+	/**
+	 * Leave the host once: a client that never attached still closes an
+	 * anchored conversation, and one its redirect moved away closed or kept it
+	 * by the move's rules.
+	 */
 	let left: Promise<void> | undefined;
 	const leaveHost = (): Promise<void> => {
 		left ??= (async () => {
 			stopObservingClose();
 			unsubscribeHome();
+			const texts = clientEditorTexts(editorTextScope, editorTextKey);
+			texts.connections.delete(editorTextReceiver);
+			if (options.clientKey === undefined) texts.pending = undefined;
+			releaseEditorTexts(editorTextScope, editorTextKey);
 			if (!host) return;
 			if (host.conversationOf(client) !== undefined) await host.detach(client);
-			else if (anchor && home && !home.closed) await host.close(home);
+			else if (anchor && !redirected && home && !home.closed) await host.close(home);
 		})();
 		return left;
 	};

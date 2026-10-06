@@ -19,6 +19,7 @@ import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
+import { InProcessConnector, LeasedConnector } from "./client/in-process-connector.ts";
 import {
 	ENV_SESSION_DIR,
 	expandTildePath,
@@ -86,7 +87,6 @@ import {
 	type LeaseWait,
 	openSessionWithDaemonLease,
 } from "./modes/interactive/host/daemon-link.ts";
-import { TuiHost } from "./modes/interactive/host/tui-host.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
 import { canonicalizePath, isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
@@ -1037,6 +1037,8 @@ export async function main(args: string[], options?: MainOptions) {
 		);
 	}
 	const projectTrustByCwd = new Map<string, boolean>();
+	/** The project trust decided for the startup conversation: the TUI reads its own settings with it. */
+	let startupProjectTrusted: boolean | undefined;
 	// Every session this factory creates (root, subagents, replacements) shares language servers
 	// and, per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
@@ -1118,6 +1120,12 @@ export async function main(args: string[], options?: MainOptions) {
 				extensionFactories: options?.extensionFactories,
 			},
 		});
+		if (isInitialRuntime) {
+			startupProjectTrusted =
+				shouldResolveProjectTrust && trustPath !== undefined
+					? (projectTrustByCwd.get(trustPath) ?? false)
+					: projectTrusted;
+		}
 		let subagentManager: SubagentManager | undefined;
 		try {
 			const { settingsManager, modelRegistry, resourceLoader } = services;
@@ -1300,20 +1308,22 @@ export async function main(args: string[], options?: MainOptions) {
 				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
 			});
 		} else if (appMode === "interactive") {
-			const tuiHost = TuiHost.start({
+			const connectorOptions = {
 				host,
 				conversation,
-				...(daemonLeases === undefined ? {} : { daemon: daemonLeases }),
 				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
-			});
-			const activeProfile = settingsManager.getActiveProfile();
-			const interactiveMode = new InteractiveMode(tuiHost, {
+			};
+			const connector =
+				daemonLeases === undefined
+					? InProcessConnector.start(connectorOptions)
+					: new LeasedConnector({ ...connectorOptions, daemon: daemonLeases });
+			const interactiveMode = new InteractiveMode(connector, {
 				migratedProviders,
-				// The TUI reads its own settings where the startup conversation runs until its client tells.
+				// The TUI reads its own settings where it decided to start, with the trust it decided, until its client tells.
 				settingsScope: {
-					cwd: conversation.cwd,
-					projectTrusted: settingsManager.isProjectTrusted(),
-					...(activeProfile === undefined ? {} : { profile: activeProfile }),
+					cwd: sessionCwd,
+					projectTrusted: startupProjectTrusted ?? false,
+					...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
 				},
 				autoTrustOnReloadCwd,
 				initialMessage,

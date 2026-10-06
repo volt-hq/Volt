@@ -73,7 +73,7 @@ describe("#409 review accounting replay", () => {
 			expect(rendered).toContain("Initial review accounting: complete.");
 			expect(rendered).not.toContain("(unfinished)");
 			// The accounting is display-only: no model-facing message carries it.
-			const messages = harness.tuiHost.conversation.session.sessionManager.getConversationState().context.messages;
+			const messages = harness.connector.conversation.session.sessionManager.getConversationState().context.messages;
 			expect(JSON.stringify(convertToLlm([...messages]))).not.toContain("estimatedCost");
 		},
 	);

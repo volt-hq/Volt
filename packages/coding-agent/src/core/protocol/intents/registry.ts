@@ -503,18 +503,22 @@ function admitDynamicIntent(
 	return () =>
 		new Promise((resolve, reject) => {
 			let admitted = false;
+			const admit = (): void => {
+				if (admitted) return;
+				admitted = true;
+				resolve({ source: intent.source, ...(queuedAs === undefined ? {} : { queuedAs }) });
+			};
 			void session
 				.prompt(promptText, {
 					...(queuedAs === undefined ? {} : { streamingBehavior: queuedAs }),
 					source: ctx.inputSource ?? "rpc",
 					...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 					preflightResult: (result) => {
-						if (!result.success || admitted) return;
-						admitted = true;
-						resolve({ source: intent.source, ...(queuedAs === undefined ? {} : { queuedAs }) });
+						if (result.success) admit();
 					},
 				})
-				.catch((error: unknown) => {
+				// A command that moved its client closed this session before its admission was reported: it ran.
+				.then(admit, (error: unknown) => {
 					if (!admitted) reject(error);
 				});
 		});

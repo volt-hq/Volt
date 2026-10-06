@@ -15,6 +15,7 @@ import { setKeybindings, TuiMainScreen } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
+import { InProcessConnector } from "../../src/client/in-process-connector.ts";
 import type { ExtensionAPI, ToolResultEvent } from "../../src/core/extensions/index.ts";
 import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
@@ -24,7 +25,6 @@ import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
 import { type JobSnapshot, type JobSummary, jobOfDetails } from "../../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
-import { TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createFakeConversation } from "../utilities/fake-conversation-host.ts";
 import { lastAssistantText, userMessagesForForking } from "../utilities/session-reads.ts";
@@ -132,11 +132,11 @@ describe("AgentSession background jobs", () => {
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 		// The TUI shows the harness session; nothing here connects its client to the host.
-		const tuiHost = TuiHost.start({
+		const connector = InProcessConnector.start({
 			host: {} as ConversationHost,
 			conversation: createFakeConversation(harness.session).conversation,
 		});
-		const mode = new InteractiveMode(tuiHost, {
+		const mode = new InteractiveMode(connector, {
 			settingsScope: {
 				cwd: harness.session.sessionManager.getCwd(),
 				projectTrusted: harness.settingsManager.isProjectTrusted(),

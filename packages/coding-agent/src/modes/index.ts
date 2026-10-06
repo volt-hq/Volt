@@ -2,8 +2,6 @@
  * Run modes for the coding agent.
  */
 
-export type { TuiConnection, TuiConnectOptions } from "./interactive/client/tui-connection.ts";
-export { TuiHost, type TuiHostOptions } from "./interactive/host/tui-host.ts";
 export {
 	InteractiveMode,
 	type InteractiveModeOptions,
