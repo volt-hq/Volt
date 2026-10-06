@@ -17,6 +17,8 @@ const WATCH_DEBOUNCE_MS = 100;
 /** Upper bound on how long repeated scheduleRefresh() calls may postpone one scan. */
 const MAX_REFRESH_DEFER_MS = 1000;
 const MAX_OPERATION_MARKER_BYTES = 4096;
+/** How long a disposed provider's close waits for the Git commands it stopped to exit. */
+export const GIT_CLOSE_GRACE_MS = 2_000;
 
 const STATUS_ARGS = [
 	"--no-pager",
@@ -587,12 +589,20 @@ export class GitContextProvider {
 			else child.kill("SIGKILL");
 		}
 		this.children.clear();
-		this.closed = Promise.all(exits).then(() => undefined);
+		if (exits.length === 0) return;
+		let timer: NodeJS.Timeout | undefined;
+		const grace = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, GIT_CLOSE_GRACE_MS);
+			timer.unref?.();
+		});
+		// A command that outlives its kill is left behind: closing never waits on it for longer.
+		this.closed = Promise.race([Promise.all(exits), grace]).then(() => clearTimeout(timer));
 	}
 
 	/**
-	 * Resolves once the Git commands that disposal stopped have exited: until
-	 * then a command keeps the worktree as its cwd, and Windows cannot remove it.
+	 * Resolves once the Git commands that disposal stopped have exited, or
+	 * after {@link GIT_CLOSE_GRACE_MS}: until then a command keeps the worktree
+	 * as its cwd, and Windows cannot remove it.
 	 */
 	waitForClosed(): Promise<void> {
 		return this.closed ?? Promise.resolve();
