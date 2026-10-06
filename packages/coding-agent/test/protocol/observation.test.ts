@@ -63,18 +63,25 @@ async function connect(
 	const pair = createLoopbackRpcTransportPair();
 	const connection = serveConnection(pair.server, profile, { host: harness.host, conversation, anchor: false });
 	const frames: HostFrame[] = [];
+	const waiters = new Set<() => void>();
 	pair.client.onValue?.((value) => {
 		frames.push(value as HostFrame);
+		for (const waiter of [...waiters]) waiter();
 	});
 	const send = (frame: object): void => void pair.client.write(frame);
-	const waitFor = async <T extends HostFrame>(predicate: (frame: HostFrame) => frame is T): Promise<T> => {
-		let found: T | undefined;
-		await vi.waitFor(() => {
-			found = frames.find(predicate);
-			expect(found).toBeDefined();
+	// A reply can take the host's Git reads, which a loaded runner can slow past any polling deadline:
+	// wait for the frame itself, within the test's timeout.
+	const waitFor = <T extends HostFrame>(predicate: (frame: HostFrame) => frame is T): Promise<T> =>
+		new Promise((resolve) => {
+			const check = (): void => {
+				const found = frames.find(predicate);
+				if (found === undefined) return;
+				waiters.delete(check);
+				resolve(found);
+			};
+			waiters.add(check);
+			check();
 		});
-		return found!;
-	};
 	send({ type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests } });
 	await connection.ready;
 	return {
@@ -292,7 +299,7 @@ describe("review passes as observed children", () => {
 		);
 
 		verification.release();
-		await vi.waitFor(() => expect(conversation.work.get(workId)?.outcome).toBe("completed"));
+		await vi.waitFor(() => expect(conversation.work.get(workId)?.outcome).toBe("completed"), { timeout: 10_000 });
 		await vi.waitFor(() =>
 			expect(phone.framesOf("verification").at(-1)).toMatchObject({ type: "ended", reason: "closed" }),
 		);
@@ -399,8 +406,9 @@ describe("review passes as observed children", () => {
 		const firstPass = conversation.work.get((started.result as { workId: string }).workId)?.child?.conversation;
 		expect(conversation.session.reviewPasses.get(firstPass!)?.session.getActiveToolNames()).toContain("bash");
 		discovery.release();
-		await vi.waitFor(() =>
-			expect(conversation.work.get((started.result as { workId: string }).workId)?.outcome).toBe("completed"),
+		await vi.waitFor(
+			() => expect(conversation.work.get((started.result as { workId: string }).workId)?.outcome).toBe("completed"),
+			{ timeout: 10_000 },
 		);
 	});
 });

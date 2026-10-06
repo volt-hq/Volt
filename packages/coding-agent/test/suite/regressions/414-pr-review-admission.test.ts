@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
@@ -288,9 +289,9 @@ async function fixture(nested = false, workspaceName = "project") {
 		for (const registry of registries) await registry.stopAll("test_cleanup");
 		await harness.cleanupAsync();
 		await audit.flush();
-		// Stopped runtimes may still be exiting; on Windows that holds the cwd and
-		// fails rmdir with EBUSY.
-		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+		// Windows can release a stopped Git command's hold on a worktree after it exited. Unlike
+		// rmSync, which retries only a directory it found non-empty, rm retries that EBUSY.
+		await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
 	return {
 		source,

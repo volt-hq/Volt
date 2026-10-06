@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { RPC_GIT_CONTEXT_REF_MAX_CHARS, RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "@hansjm10/volt-protocol";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { spawnProcess } from "../utils/child-process.ts";
+import { terminateProcessTree } from "../utils/shell.ts";
 import { discoverGitWorktree, type GitWorktreeLocation, getGitRepositoryDisplayName } from "./git-repository.ts";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 2500;
@@ -463,6 +464,7 @@ export class GitContextProvider {
 	private observationCount = 0;
 	private rerunRequested = false;
 	private disposed = false;
+	private closed: Promise<void> | undefined;
 
 	constructor(cwd: string, options: GitContextProviderOptions = {}) {
 		this.cwd = cwd;
@@ -577,8 +579,23 @@ export class GitContextProvider {
 		if (this.scheduledRefresh) clearTimeout(this.scheduledRefresh);
 		this.scheduledRefresh = null;
 		this.scheduledRefreshDeadline = null;
-		for (const child of this.children) child.kill("SIGKILL");
+		const exits: Promise<void>[] = [];
+		for (const child of this.children) {
+			exits.push(new Promise((resolve) => child.once("close", () => resolve())));
+			// Git for Windows' git.exe launches the real Git, which a kill of the launcher alone leaves running.
+			if (process.platform === "win32" && child.pid !== undefined) void terminateProcessTree(child.pid);
+			else child.kill("SIGKILL");
+		}
 		this.children.clear();
+		this.closed = Promise.all(exits).then(() => undefined);
+	}
+
+	/**
+	 * Resolves once the Git commands that disposal stopped have exited: until
+	 * then a command keeps the worktree as its cwd, and Windows cannot remove it.
+	 */
+	waitForClosed(): Promise<void> {
+		return this.closed ?? Promise.resolve();
 	}
 
 	private async performRefresh(signal?: AbortSignal): Promise<GitContextObservation> {
