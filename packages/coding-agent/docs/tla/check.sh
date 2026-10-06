@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Model-check a TLA+ module in this directory with TLC.
 #
-#   ./check.sh                       # check LeaseBroker (baseline .cfg)
-#   ./check.sh LeaseBroker leak.cfg  # check LeaseBroker with a specific .cfg
+#   ./check.sh                                           # check WorkerRegistry (baseline .cfg)
+#   ./check.sh WorkerRegistry WorkerRegistryOrphans.cfg  # check a module with a specific .cfg
 #
 # Requires a Java 17+ runtime (set JAVA_HOME, or have `java` on PATH). Downloads
 # tla2tools.jar into this directory on first run (it is git-ignored).
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MODULE="${1:-LeaseBroker}"
+MODULE="${1:-WorkerRegistry}"
 CONFIG="${2:-$MODULE.cfg}"
 JAR="tla2tools.jar"
 
