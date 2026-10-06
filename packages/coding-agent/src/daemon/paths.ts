@@ -208,6 +208,11 @@ export function getDaemonPaths(agentDir: string = getAgentDir()): DaemonPaths {
 	};
 }
 
+/** Where conversation workers' logs are written: one `<workerId>.log` (0600) each, in a 0700 directory. */
+export function getWorkerLogDirectory(agentDir: string = getAgentDir()): string {
+	return join(getDaemonDir(agentDir), "workers");
+}
+
 /** Create the daemon dir (0700) and, for fallback sockets, the socket's parent dir. */
 export function ensureDaemonDirs(paths: DaemonPaths): void {
 	mkdirSync(paths.daemonDir, { recursive: true, mode: 0o700 });

@@ -1,10 +1,12 @@
 /**
  * A daemon on a temporary agent directory, run in this process with its real
  * control socket (Phase 7 plan §7, "New harness"). Its conversation workers
- * run in this process too (`InProcessWorkerLauncher`) and connect over that
- * socket with role `worker`; they load the faux provider extension fixture,
- * which registers this harness's faux provider, so no real provider is
- * involved. One workspace is registered.
+ * run in this process too by default (`InProcessWorkerLauncher`), or as
+ * processes (`ProcessWorkerLauncher`), and connect over that socket with role
+ * `worker`; they load the faux provider extension fixture, which registers
+ * this harness's faux provider (offered in this process, and served over a
+ * local socket to worker processes), so no real provider is involved. One
+ * workspace is registered.
  */
 
 import { randomUUID } from "node:crypto";
@@ -21,9 +23,10 @@ import type { ControlResponse, WorkerSpawnSpec } from "../../src/daemon/control-
 import { runVoltDaemon, type VoltdRuntimeServices, type VoltdServiceExtension } from "../../src/daemon/main.ts";
 import { getDaemonPaths } from "../../src/daemon/paths.ts";
 import { probeDaemon } from "../../src/daemon/spawn.ts";
-import { InProcessWorkerLauncher, type WorkerLauncher } from "../../src/daemon/worker-launcher.ts";
+import type { WorkerLauncher } from "../../src/daemon/worker-launcher.ts";
 import type { LiveWorker, WorkerClientKind, WorkerRegistry } from "../../src/daemon/worker-registry.ts";
-import { manifest as fauxManifest, offerFauxProvider } from "../fixtures/faux-provider-extension.ts";
+import { manifest as fauxManifest, offerFauxProvider, serveFauxProvider } from "../fixtures/faux-provider-extension.ts";
+import { InProcessWorkerLauncher } from "./in-process-worker-launcher.ts";
 
 const FAUX_EXTENSION_PATH = realpathSync.native(
 	fileURLToPath(new URL("../fixtures/faux-provider-extension.ts", import.meta.url)),
@@ -102,6 +105,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 		permissions: [...fauxManifest.permissions],
 		version: "local",
 	});
+	const stopServingFaux = await serveFauxProvider(faux, agentDir);
 
 	let services: VoltdRuntimeServices | undefined;
 	const capture: VoltdServiceExtension = (runtime) => {
@@ -226,6 +230,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 					await shutdown();
 				} finally {
 					withdrawFaux();
+					await stopServingFaux();
 					rmSync(root, { recursive: true, force: true });
 				}
 			})();

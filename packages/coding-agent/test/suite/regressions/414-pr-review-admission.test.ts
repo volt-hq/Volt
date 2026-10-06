@@ -49,15 +49,8 @@ afterAll(() => gitSeed?.dispose());
 
 const cleanups: Array<() => Promise<void>> = [];
 beforeEach(() => {
-	// The fixture's workers run in this process with its daemon, as `InProcessWorkerLauncher`
-	// runs them: a worktree session's restoration takes the daemon's own preparation.
-	vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockResolvedValue({
-		healthy: true,
-		state: "healthy",
-		spawned: false,
-		socketPath: "unused",
-		pid: process.pid,
-	});
+	// A worker restores managed checkouts through its own daemon connection, never a daemon of its own.
+	vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockRejectedValue(new Error("A worker never starts a daemon"));
 });
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -247,6 +240,13 @@ async function fixture(nested = false, workspaceName = "project") {
 				agentDir,
 				extensionMode: "rpc",
 				whenUnattached: "keep",
+				// The daemon's worker route, as `worker_worktree_restore` runs it.
+				worktreeDaemon: {
+					restore: async (sessionRef, cwd) => {
+						const release = await worktrees.acquireLocalSessionWorktree(spec.workspace.name, sessionRef, cwd);
+						return async () => release();
+					},
+				},
 			});
 			const hosted = new WorkerConversations({
 				client: grantingDaemonClient(),

@@ -23,7 +23,7 @@
 (* refuse the stop if it turned active.  A crashed worker's relays close   *)
 (* and its clients reconnect.  If the daemon dies, its workers stop taking *)
 (* input, finish their turn, and exit; a restarted daemon starts from an   *)
-(* empty registry while those orphans may still hold locks.                *)
+(* empty registry and admits nothing until those orphans have exited.      *)
 (*                                                                         *)
 (* The properties: one registered host and one writer per log; clients     *)
 (* attach only to live workers that have the log open; relay offers are    *)
@@ -39,6 +39,7 @@
 (*   docs/workspace-authority-lifecycle-design.md W3-W6                    *)
 (*   src/daemon/worker-registry.ts, src/daemon/worker-launcher.ts,         *)
 (*     src/daemon/worker/  (Phase 7 slices 4 and 5)                        *)
+(*   src/daemon/worker-gate.ts  (the restart wait, RestartWaitsForOrphans) *)
 (*   src/daemon/relay-stream.ts  (single-use relay offers, 10 s TTL)       *)
 (*   src/core/conversation-log/conversation-lock.ts  (per-log lock)        *)
 (*   src/core/host/hosted-conversation.ts  isActive() (the idle check)     *)
@@ -517,8 +518,11 @@ DaemonCrash ==
     /\ wire'   = [c \in Clients |-> "none"]
     /\ UNCHANGED << alive, opened, busy, closing, lockOf, want, inSess, acked, logCnt >>
 
-\* The daemon starts again with an empty registry.  In the plan's design it
-\* does not wait for orphans; spawns then retry on locks the orphans hold.
+\* The daemon starts again with an empty registry.  With the restart wait
+\* (the implementation: every worker holds a shared lock on the daemon's
+\* worker gate, which a starting daemon takes exclusively before it serves) it
+\* admits nothing until the orphans have exited.  Without it, spawns retry on
+\* locks the orphans hold (WorkerRegistryOrphans.cfg).
 DaemonRestart ==
     /\ ~daemonUp
     /\ RestartWaitsForOrphans => \A w \in Workers : ~alive[w]
@@ -715,12 +719,11 @@ FencedWorkersInert ==
          /\ (att[c] = NoWorker /\ att'[c] # NoWorker) => wGen'[att'[c]] = gen'
          /\ (logCnt'[c] > logCnt[c]) => (att[c] # NoWorker /\ wGen[att[c]] = gen)]_vars
 
-\* --- Off in the baseline .cfg: the plan's design does not satisfy these. ---
-\* A restarted daemon does not know the dead daemon's orphans, so a workspace
-\* mutation can report success, and admit the new generation, while an orphan
-\* of the fenced generation still finishes its turn (up to 60 s).  See
-\* WorkerRegistryOrphans.cfg (trace) and WorkerRegistryRestartWaits.cfg
-\* (RestartWaitsForOrphans = TRUE: green).
+\* --- Hold only with RestartWaitsForOrphans = TRUE (the baseline .cfg). ---
+\* Without the restart wait a restarted daemon does not know the dead
+\* daemon's orphans, so a workspace mutation can report success, and admit the
+\* new generation, while an orphan of the fenced generation still finishes its
+\* turn (up to 60 s).  WorkerRegistryOrphans.cfg shows the trace.
 
 \* W4: a mutation reports success only when no process of the fenced
 \* generation is alive.

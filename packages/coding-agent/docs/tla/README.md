@@ -33,7 +33,7 @@ go with it.
 
 | Module | What it covers (plain) | State |
 |--------|------------------------|-------|
-| **`WorkerRegistry`** | Which worker process hosts each conversation: spawning, attaching, relay offers, the per-log lock, retirement, crashes, workspace fences, and daemon loss. | **Model of record. Verified green** (1,112,484 distinct states). `WorkerRegistry.tla` / `.cfg`, variants `WorkerRegistryOrphans.cfg` (finding below) and `WorkerRegistryRestartWaits.cfg` |
+| **`WorkerRegistry`** | Which worker process hosts each conversation: spawning, attaching, relay offers, the per-log lock, retirement, crashes, workspace fences, and daemon loss. | **Model of record. Verified green** with the restart wait (495,727 distinct states). `WorkerRegistry.tla` / `.cfg`, variant `WorkerRegistryOrphans.cfg` (the finding below, without the restart wait) |
 | **`LeaseBroker`** | Who held a conversation (daemon vs terminal) and how it handed off. | **Superseded by `WorkerRegistry`**; deleted with the lease code in Phase 7 slice 9. Last verified green (40,804 states). `LeaseBroker.tla` / `.cfg` |
 | **`RelayViewer`** | The relay token + the "watch the turn finish" viewer feed during a hand-off. | **Superseded by `WorkerRegistry`** (relay offers) and the deletion of the viewer feed; deleted in Phase 7 slice 9. Last verified green (207,025 states). `RelayViewer.tla` / `.cfg` |
 | **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states) before its rekey overlay was removed; not re-run since (24 states by construction). `SessionTarget.tla` / `.cfg` |
@@ -49,7 +49,7 @@ change to registry semantics. See [How to run](#how-to-run).
 
 ## What the models found
 
-**`WorkerRegistry` — an orphan can outlive a workspace mutation (open).**
+**`WorkerRegistry` — an orphan can outlive a workspace mutation (fixed: the restart wait).**
 When the daemon dies, its workers stop taking input, finish their turn (60 s
 cap), and exit. A restarted daemon starts from an empty registry, so it does not
 know those orphans. If a workspace is then replaced, unregistered, or has its
@@ -61,14 +61,14 @@ terminal (`docs/workspace-authority-lifecycle-design.md` W4/W5). TLC trace
 (`WorkerRegistryOrphans.cfg`): `RequestOpen → Spawn → DaemonCrash → DaemonRestart
 → FenceWorkspace → WorkspaceRetired`, with the spawned worker still alive; with
 `WorkerOpen → WorkerReady → TurnStart` before the crash, the same steps leave an
-orphan running a turn in the fenced workspace. The predicates that catch it,
-`RetireReportsAfterExit` and `NoGenerationOverlap`, are off in the baseline so it
-models the plan's design. A fix is to have a restarted daemon admit nothing until
-the previous daemon's workers have exited (for example, each worker holds a
-shared lock that the daemon takes exclusively before it serves);
-`WorkerRegistryRestartWaits.cfg` checks that variant green with both predicates
-on. The decision belongs to the slice that implements daemon loss (Phase 7 slice
-5).
+orphan running a turn in the fenced workspace. The predicates that catch it are
+`RetireReportsAfterExit` and `NoGenerationOverlap`. **Fixed** (maintainer decision
+2026-10-06, Phase 7 slice 5): a restarted daemon admits nothing until the previous
+daemon's workers have exited. Every worker holds a shared lock on the daemon's
+worker gate for its whole run (`src/daemon/worker-gate.ts`), and a starting daemon
+takes the gate exclusively, and releases it, before it serves anything. The
+baseline `.cfg` sets `RestartWaitsForOrphans = TRUE` with both predicates on;
+`WorkerRegistryOrphans.cfg` keeps the trace of the design without the wait.
 
 **`LeaseBroker` (superseded), two issues in `lease-broker.ts`**, each reproduced
 by TLC as a concrete trace (both invariants ship in `LeaseBroker.tla`, off by
@@ -132,7 +132,7 @@ admission, `RetireStale` closes the fenced workers' relays with `fatal` and
 retires them without the option to refuse (`ForceAbort` is the 60 s cap), and
 `WorkspaceRetired` reports success once they exited. `DaemonCrash` loses the
 registry, its relays, and offers; live workers become orphans that exit by
-`OrphanExit`.
+`OrphanExit`, and `DaemonRestart` waits for them (the worker gate).
 
 ### Invariants checked (safety)
 
@@ -147,7 +147,7 @@ registry, its relays, and offers; live workers become orphans that exit by
 | `NoLostInput` | An acknowledged input is in the durable log. |
 | `ExactlyOnce` | No input id is committed twice, across lost acks, worker crashes, retirement, and daemon loss. |
 | `RetireOnlyDetachedIdle` | Retention retires only a detached worker, and a worker that accepted a stop is detached and idle and starts nothing. |
-| `NoGenerationOverlap` | *(off in the baseline)* Two workspace generations never run at once (W5). |
+| `NoGenerationOverlap` | Two workspace generations never run at once (W5), across a daemon restart too. |
 
 Action properties, checked as `PROPERTY`:
 
@@ -156,7 +156,7 @@ Action properties, checked as `PROPERTY`:
 | `OfferAdmittedOnce` | Every new attachment redeems the client's pending offer for exactly that worker and consumes it: an offer is admitted at most once. |
 | `ClaimRespectsHost` | A worker gains a session only through a spawn or claim under the current key, never one another registered worker hosts. |
 | `FencedWorkersInert` | After a fence, no client newly attaches to a fenced worker and no fenced worker commits input. |
-| `RetireReportsAfterExit` | *(off in the baseline)* A workspace mutation reports success only when no process of the fenced generation is alive (W4). |
+| `RetireReportsAfterExit` | A workspace mutation reports success only when no process of the fenced generation is alive (W4), an orphan of a dead daemon included. |
 
 ### Properties checked (liveness)
 
@@ -217,18 +217,18 @@ plan's properties.
 ### Bounds and result
 
 `WorkerRegistry.cfg`: `Sessions = {s1, s2}`, `Workers = {w1, w2, w3}`,
-`Clients = {c1, c2}`, `Senders = {c1}`, `MaxFaults = 1`, `MaxGen = 1`, symmetry
-off (liveness). TLC 2.19 on JDK 17, 8 workers: **1,112,484 distinct states**
-(6,423,426 generated), depth 42, all ten invariants, the three action
-properties, and the six liveness properties hold; about 11 minutes on a shared
-16-core machine. Safety alone takes seconds, so larger bounds are cheap for a run
-without the liveness properties (`MaxFaults = 2`: 2,459,059 distinct states,
-15 s).
+`Clients = {c1, c2}`, `Senders = {c1}`, `MaxFaults = 1`, `MaxGen = 1`,
+`RestartWaitsForOrphans = TRUE`, symmetry off (liveness). TLC 2.19 on JDK 17, 16
+workers: **495,727 distinct states** (2,778,873 generated), depth 42, all eleven
+invariants, the four action properties, and the six liveness properties hold;
+about 3 minutes on a shared 16-core machine. The restart wait removes the states
+where a restarted daemon runs beside the previous daemon's orphans, so the space
+is smaller than without it (1,112,484 distinct states). Safety alone takes
+seconds, so larger bounds are cheap for a run without the liveness properties
+(`MaxFaults = 2`: 811,309 distinct states, 5 s).
 
-`WorkerRegistryOrphans.cfg` reaches the orphan trace above in seven states.
-`WorkerRegistryRestartWaits.cfg` (the fix) checks everything in the baseline plus
-`RetireReportsAfterExit` and `NoGenerationOverlap`, green: 495,727 distinct
-states, depth 42, about 4 minutes.
+`WorkerRegistryOrphans.cfg` (`RestartWaitsForOrphans = FALSE`) reaches the
+orphan trace above in seven states.
 
 ---
 
@@ -305,8 +305,7 @@ abstractions; the ownership logic itself is kept exact.
 
 ```bash
 ./check.sh                                                # WorkerRegistry, baseline config (auto-fetches tla2tools.jar)
-./check.sh WorkerRegistry WorkerRegistryOrphans.cfg       # the orphan finding (a trace)
-./check.sh WorkerRegistry WorkerRegistryRestartWaits.cfg  # the proposed fix (green)
+./check.sh WorkerRegistry WorkerRegistryOrphans.cfg       # the orphan finding without the restart wait (a trace)
 ./check.sh LeaseBroker                                    # a superseded module
 ```
 

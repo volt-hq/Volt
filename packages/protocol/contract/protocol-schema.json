@@ -1758,6 +1758,12 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_stop_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_worktree_restore"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_worktree_release"
 				}
 			]
 		},
@@ -2620,6 +2626,55 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Request.worker_worktree_release": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"pinId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_release"
+				},
+				"id": {
+					"type": "string"
+				},
+				"pinId": {
+					"type": "string",
+					"maxLength": 64
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_worktree_restore": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"path",
+				"sessionRef"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_restore"
+				},
+				"id": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[\\s\\S]{1,4096}$"
+				},
+				"sessionRef": {
+					"$ref": "#/$defs/SessionReference"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Request.workspace_register": {
 			"type": "object",
 			"required": [
@@ -2928,6 +2983,9 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Response.worker_authority_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worker_worktree_pinned"
 				},
 				{
 					"$ref": "#/$defs/Control.Response.relay_push_delivery_result"
@@ -3325,6 +3383,27 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Response.worker_worktree_pinned": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"pinId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_pinned"
+				},
+				"id": {
+					"type": "string"
+				},
+				"pinId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Response.worktree_prune_result": {
 			"type": "object",
 			"required": [
@@ -3667,6 +3746,9 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				"logPath": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false

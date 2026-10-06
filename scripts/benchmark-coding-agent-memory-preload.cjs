@@ -13,6 +13,9 @@ function isTargetProcess() {
 	if (ROLE === "daemon") {
 		return process.argv.includes("daemon") && process.argv.includes("run") && process.argv.includes("--foreground");
 	}
+	if (ROLE === "conversation-worker") {
+		return process.argv.includes("daemon") && process.argv.includes("worker");
+	}
 	if (ROLE === "rpc") {
 		const modeIndex = process.argv.indexOf("--mode");
 		return modeIndex !== -1 && process.argv[modeIndex + 1] === "rpc";

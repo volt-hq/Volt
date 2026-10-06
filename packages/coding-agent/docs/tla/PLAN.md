@@ -211,16 +211,17 @@ and results are in [`README.md`](README.md#the-workerregistry-module-model-of-re
 It models the daemon's worker registry keyed by `(workspace, generation,
 session)`, coalesced spawns, claims, single-use relay offers, the per-log lock
 and exit-ordered replacement, retention with a refusable stop handshake, worker
-crashes, workspace fences, and daemon loss with orphaned workers.
+crashes, workspace fences, and daemon loss with orphaned workers, which a
+restarted daemon waits for (the worker gate, `RestartWaitsForOrphans = TRUE`).
 
 **Safety:** `OneHost`, `OneWriter`, `LockCoherent`, `ReadyHoldsLocks`,
 `AttachOnlyToLive`, `NoOfferToRetiring`, `NoLostInput`, `ExactlyOnce`,
-`RetireOnlyDetachedIdle`, and the action properties `OfferAdmittedOnce`,
-`ClaimRespectsHost`, `FencedWorkersInert`. Off in the baseline because the plan's
-design does not satisfy them (an orphan of a dead daemon can outlive a workspace
-mutation; see the README finding): `RetireReportsAfterExit` (W4) and
-`NoGenerationOverlap` (W5), checked by `WorkerRegistryOrphans.cfg` (trace) and
-`WorkerRegistryRestartWaits.cfg` (the proposed fix, green).
+`RetireOnlyDetachedIdle`, `NoGenerationOverlap` (W5), and the action properties
+`OfferAdmittedOnce`, `ClaimRespectsHost`, `FencedWorkersInert`,
+`RetireReportsAfterExit` (W4). The last two of these hold only with the restart
+wait (Phase 7 slice 5); `WorkerRegistryOrphans.cfg` keeps the trace of the design
+without it (an orphan of a dead daemon outlives a workspace mutation; see the
+README finding).
 
 **Liveness:** `OpenServed`, `RetiringExits`, `StartingSettles`,
 `DetachedIdleRetires`, `OrphansExit`, `WorkspaceRetireCompletes`, under weak

@@ -361,12 +361,18 @@ export class WorkerRegistry {
 				workerToken: record.token.toString("base64url"),
 				socketPath: this.options.socketPath(),
 				agentDir: this.options.agentDir,
+				cwd: input.cwd,
 			});
 		} catch (error) {
 			this.finish(record, { reason: "failed", error: errorMessage(error) }, error);
 			throw error;
 		}
 		record.launched = launched;
+		this.options.log?.("info", "worker started", {
+			workerId: record.workerId,
+			pid: launched.pid,
+			...(launched.logPath === undefined ? {} : { logPath: launched.logPath }),
+		});
 		// A worker that never reports ready (a lock it cannot take) is retired.
 		record.readyTimer = setTimeout(() => {
 			if (record.state === "starting") void this.retire(record, "authority");
@@ -710,7 +716,9 @@ export class WorkerRegistry {
 	/**
 	 * Retire `record` without the option to refuse: its relays close first
 	 * (the retire listeners), then it stops, aborting a turn still running
-	 * after 60 s. Resolves once it exited.
+	 * after 60 s. A worker that has not exited by the forced-stop timeout (its
+	 * event loop is blocked) is killed, so no fence waits for it forever.
+	 * Resolves once it exited.
 	 */
 	private retire(record: WorkerRecord, reason: WorkerStopReason): Promise<WorkerExit> {
 		if (!record.forced) {
@@ -718,6 +726,15 @@ export class WorkerRegistry {
 			this.beginRetiring(record);
 			for (const listener of [...this.retireListeners]) listener(record.workerId, reason);
 			this.sendStop(record, reason, true);
+			const timer = setTimeout(() => {
+				if (this.workers.get(record.workerId) !== record) return;
+				this.options.log?.("warn", "worker did not exit after a forced stop; killing it", {
+					workerId: record.workerId,
+				});
+				record.launched?.kill();
+			}, WORKER_FORCED_STOP_TIMEOUT_MS);
+			timer.unref?.();
+			void record.exited.promise.then(() => clearTimeout(timer));
 		}
 		return record.exited.promise;
 	}
@@ -826,7 +843,7 @@ export class WorkerRegistry {
 	/**
 	 * The daemon stops: admission closes, and every worker retires without the
 	 * option to refuse. Resolves once each exited, or after the forced-stop
-	 * timeout, when a worker that has not exited is killed.
+	 * timeout, by which `retire` killed a worker that had not exited.
 	 */
 	async stopAll(): Promise<void> {
 		this.closed = true;
@@ -834,21 +851,33 @@ export class WorkerRegistry {
 		await Promise.allSettled(
 			records.map(async (record) => {
 				let timer: ReturnType<typeof setTimeout> | undefined;
-				const timedOut = new Promise<"timed_out">((resolve) => {
-					timer = setTimeout(() => resolve("timed_out"), WORKER_FORCED_STOP_TIMEOUT_MS);
+				const timedOut = new Promise<void>((resolve) => {
+					timer = setTimeout(resolve, WORKER_FORCED_STOP_TIMEOUT_MS);
 					timer.unref?.();
 				});
 				try {
-					if ((await Promise.race([this.retire(record, "shutdown"), timedOut])) === "timed_out") {
-						this.options.log?.("warn", "worker did not exit after a forced stop; killing it", {
-							workerId: record.workerId,
-						});
-						record.launched?.kill();
-					}
+					await Promise.race([this.retire(record, "shutdown"), timedOut]);
 				} finally {
 					clearTimeout(timer);
 				}
 			}),
+		);
+	}
+
+	/**
+	 * Whether `workerId` may still act on its workspace: registered, live,
+	 * not fenced or retiring, connected, and its generation current with no
+	 * fence of its workspace in flight.
+	 */
+	isServing(workerId: string): boolean {
+		const record = this.workers.get(workerId);
+		return (
+			record !== undefined &&
+			record.state === "live" &&
+			!record.forced &&
+			record.connectionId !== undefined &&
+			!this.fences.has(record.workspaceName) &&
+			this.options.currentGeneration(record.workspaceName) === record.workspaceGeneration
 		);
 	}
 
@@ -927,6 +956,7 @@ export class WorkerRegistry {
 					local: kinds.filter((kind) => kind === "local").length,
 					remote: kinds.filter((kind) => kind === "remote").length,
 				},
+				...(record.launched?.logPath === undefined ? {} : { logPath: record.launched.logPath }),
 			};
 		});
 	}

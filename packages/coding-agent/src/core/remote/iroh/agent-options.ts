@@ -29,7 +29,7 @@ export interface IrohRemoteAgentOptionsRpcBackend {
 
 export async function createIrohRemoteAgentOptions(
 	workspaceName: string,
-	services: AgentSessionServices,
+	services: Pick<AgentSessionServices, "modelRegistry" | "settingsManager">,
 	signal?: AbortSignal,
 ): Promise<IrohRemoteAgentOptions> {
 	services.modelRegistry.refreshFromDisk();

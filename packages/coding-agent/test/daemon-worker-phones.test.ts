@@ -6,15 +6,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
 import { createIrohDaemonService } from "../src/daemon/iroh-service.ts";
-import {
-	InProcessWorkerLauncher,
-	type LaunchedWorker,
-	type WorkerExit,
-	type WorkerLauncher,
-	type WorkerLaunchRequest,
-} from "../src/daemon/worker-launcher.ts";
+import type { LaunchedWorker, WorkerExit, WorkerLauncher, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import { handoffRecord } from "./fixtures/handoff-command-extension.ts";
 import { createDaemonHarness, type DaemonHarness } from "./suite/daemon-harness.ts";
+import { InProcessWorkerLauncher } from "./suite/in-process-worker-launcher.ts";
 import { nativeIrohAvailable, type PairedPhone, type PhoneConversation, pairPhone } from "./utilities/daemon-phone.ts";
 import type { RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -382,6 +377,22 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 				type: "ok",
 			},
 		);
+		// It restores and pins only a managed checkout of a session it hosts, and releases only its own pins.
+		expect(
+			await client.request({ type: "worker_worktree_restore", path: harness.workspacePath, sessionRef: ref }),
+		).toMatchObject({ type: "error", code: "not_hosted" });
+		expect(
+			await client.request({ type: "worker_worktree_restore", path: harness.workspacePath, sessionRef: otherRef }),
+		).toMatchObject({ type: "error", code: "worktree_restore_failed" });
+		expect(await client.request({ type: "worker_worktree_release", pinId: "pin-1" })).toMatchObject(refused);
+		// A control client restores through `worktree_restore`, never the worker request.
+		expect(
+			await harness.control.request({
+				type: "worker_worktree_restore",
+				path: harness.workspacePath,
+				sessionRef: otherRef,
+			}),
+		).toMatchObject({ type: "error", code: "forbidden" });
 	}, 60_000);
 
 	it("opens an extension command's new session in the phone's worker and seeds it once the phone reconnects (D1)", async () => {

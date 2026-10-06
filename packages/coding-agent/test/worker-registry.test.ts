@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import {
 	type LiveWorker,
+	WORKER_FORCED_STOP_TIMEOUT_MS,
 	WorkerOpenError,
 	WorkerRegistry,
 	type WorkerRegistryAuditEvent,
@@ -27,6 +28,8 @@ function setup(options: { ttlMs?: number } = {}) {
 	const events = new Map<string, ControlEvent[]>();
 	const audits: WorkerRegistryAuditEvent[] = [];
 	const launched: FakeWorker[] = [];
+	/** The workers the registry killed, by id. */
+	const killed: string[] = [];
 	let connections = 0;
 	const registry = new WorkerRegistry({
 		launcher: {
@@ -37,7 +40,7 @@ function setup(options: { ttlMs?: number } = {}) {
 					connectionId: `c-${++connections}`,
 					exit: (exit = { reason: "stopped" }) => exited.resolve(exit),
 				});
-				return { pid: 4242, exited: exited.promise, kill: () => {} };
+				return { pid: 4242, exited: exited.promise, kill: () => killed.push(request.workerId) };
 			},
 		},
 		agentDir: "/agent",
@@ -127,7 +130,7 @@ function setup(options: { ttlMs?: number } = {}) {
 			(event): event is Extract<ControlEvent, { type: "worker_stop" }> => event.type === "worker_stop",
 		);
 
-	return { registry, generations, events, audits, launched, open, hello, send, start, spawnOf, stops };
+	return { registry, generations, events, audits, launched, killed, open, hello, send, start, spawnOf, stops };
 }
 
 async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -392,6 +395,29 @@ describe("worker registry", () => {
 				},
 			),
 		).rejects.toMatchObject({ outcome: "workspace_authorization_removed" });
+	});
+
+	it("kills a fenced worker that has not exited by the forced-stop timeout, and the fence then settles", async () => {
+		const { registry, open, start, generations, killed } = setup();
+		const opened = open("s1", "remote");
+		const worker = await start(0);
+		await opened;
+		generations.set("ws", 2);
+		vi.useFakeTimers();
+		try {
+			const fence = registry.fenceWorkspace("ws");
+			vi.advanceTimersByTime(WORKER_FORCED_STOP_TIMEOUT_MS - 1);
+			expect(killed).toEqual([]);
+			vi.advanceTimersByTime(1);
+			expect(killed).toEqual([worker.request.workerId]);
+			// The killed process' exit is what settles the fence.
+			worker.exit({ reason: "crashed", error: "signal SIGKILL" });
+			vi.useRealTimers();
+			await fence;
+			expect(registry.size).toBe(0);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("waits for the exit of a worker that lost its control connection", async () => {

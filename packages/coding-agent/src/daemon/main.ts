@@ -69,10 +69,12 @@ import {
 	type DaemonPaths,
 	ensureDaemonDirs,
 	getDaemonPaths,
+	getWorkerLogDirectory,
 	isWindowsNamedPipePath,
 } from "./paths.ts";
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
+import { waitForWorkerGate } from "./worker-gate.ts";
 import type { WorkerLauncher } from "./worker-launcher.ts";
 import { WorkerRegistry } from "./worker-registry.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
@@ -139,7 +141,11 @@ export const VOLTD_EXIT_ALREADY_RUNNING = 3;
 export const VOLTD_EXIT_BIND_FAILED = 4;
 export const VOLTD_EXIT_INCOMPATIBLE_RUNNING = 5;
 export const VOLTD_EXIT_STARTUP_CONTENDED = 6;
+/** Workers of a previous daemon did not exit in time; the daemon did not start. */
+export const VOLTD_EXIT_WORKERS_RUNNING = 7;
 
+/** How long a starting daemon waits for an earlier daemon's workers: their 60 s turn cap, and margin. */
+const ORPHANED_WORKER_WAIT_MS = 75_000;
 const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
 const DAEMON_BIND_WAIT_POLL_MS = 200;
 export const VOLTD_EXTENSION_DISPOSE_TIMEOUT_MS = 5_000;
@@ -290,6 +296,27 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		return VOLTD_EXIT_STARTUP_CONTENDED;
 	}
 	daemonLock = lockResult.lock;
+	// The restart wait: nothing is admitted while a worker of an earlier daemon may still write a log.
+	let waitedForWorkers = false;
+	const gate = await waitForWorkerGate(agentDir, {
+		timeoutMs: ORPHANED_WORKER_WAIT_MS,
+		onWaiting: () => {
+			waitedForWorkers = true;
+			log("info", "waiting for the conversation workers of a previous daemon to exit");
+		},
+	});
+	if (gate.status === "timed_out") {
+		log(
+			"error",
+			`conversation workers of a previous daemon still run after ${Math.round(gate.waitedMs / 1000)}s; not starting (the first line of each log in ${getWorkerLogDirectory(agentDir)} names its worker's pid)`,
+		);
+		return finishBeforeServing(VOLTD_EXIT_WORKERS_RUNNING);
+	}
+	if (gate.status === "unavailable") {
+		log("warn", `worker gate unavailable (no worker can run): ${gate.reason}`);
+	} else if (waitedForWorkers) {
+		log("info", `the previous daemon's conversation workers exited after ${gate.waitedMs}ms`);
+	}
 	if (usingDefaultSocketPath && process.platform === "win32") {
 		selectedSocketPath = createDaemonControlSocketPath(agentDir);
 		paths = resolvePaths();

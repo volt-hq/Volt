@@ -13,6 +13,7 @@ import type {
 	IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationIntent,
 } from "../../core/remote/iroh/push.ts";
+import type { SessionReference } from "../../core/session-manager.ts";
 import {
 	ControlRequestTooLargeError,
 	createDaemonClient,
@@ -224,6 +225,20 @@ export class WorkerDaemonClient {
 		gitContext: { repository: string; branch: string; headOid: string; baseRef?: string } | null,
 	): Promise<ControlResponse> {
 		return this.request({ type: "change_observe", workspaceName, sessionId, gitContext });
+	}
+
+	/**
+	 * Have the daemon restore the archived managed checkout `path` of a session
+	 * of the worker's workspace; it stays pinned until the returned release
+	 * runs, or the connection ends.
+	 */
+	async restoreWorktree(sessionRef: SessionReference, path: string): Promise<() => Promise<void>> {
+		const response = await this.request({ type: "worker_worktree_restore", path, sessionRef });
+		if (response.type !== "worker_worktree_pinned") throw new Error(`Unexpected ${response.type}`);
+		const pinId = response.pinId;
+		return async () => {
+			await this.request({ type: "worker_worktree_release", pinId }).catch(() => undefined);
+		};
 	}
 
 	close(): Promise<void> {

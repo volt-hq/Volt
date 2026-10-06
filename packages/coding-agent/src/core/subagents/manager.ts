@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import type { AgentAbortSource, AgentMessage, ThinkingLevel, WorkRecord } from "@hansjm10/volt-agent-core";
 import { WORK_OUTPUT_MAX_UTF8_BYTES } from "@hansjm10/volt-protocol/work";
+import type { SessionWorktreeDaemon } from "../../daemon/session-worktree.ts";
 import type { AgentSessionEvent, SessionStats } from "../agent-session.ts";
 import { ConversationLockedError } from "../conversation-log/conversation-lock.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
@@ -151,6 +152,8 @@ export interface SubagentManagerOptions {
 	turnLimits?: SubagentTurnLimits;
 	/** Keep child conversations open after the manager's client of each one detaches. Another owner must close them. */
 	retainRuntimeOnDispose?: boolean;
+	/** How the child conversations restore a managed checkout: a conversation worker's route to its daemon. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 	/** Called after a child runtime is ready so hosts can prepare it for live attachment. */
 	onRuntimeCreated?: (
 		event: SubagentRuntimeCreatedEvent,
@@ -828,6 +831,7 @@ export class SubagentManager {
 	private readonly delegationLimits?: SubagentDelegationScopeLimits;
 	private readonly turnLimits?: SubagentTurnLimits;
 	private readonly retainRuntimeOnDispose: boolean;
+	private readonly worktreeDaemon: SessionWorktreeDaemon | undefined;
 	private readonly onRuntimeCreated?: (
 		event: SubagentRuntimeCreatedEvent,
 	) => SubagentRuntimeRegistration | Promise<SubagentRuntimeRegistration> | Promise<void> | void;
@@ -856,6 +860,7 @@ export class SubagentManager {
 		this.delegationLimits = options.delegationLimits;
 		this.turnLimits = options.turnLimits;
 		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
+		this.worktreeDaemon = options.worktreeDaemon;
 		this.onRuntimeCreated = options.onRuntimeCreated;
 	}
 
@@ -2309,6 +2314,7 @@ export class SubagentManager {
 				agentDir,
 				extensionMode: "rpc",
 				whenUnattached: "keep",
+				...(this.worktreeDaemon === undefined ? {} : { worktreeDaemon: this.worktreeDaemon }),
 			});
 			this.childHosts.set(agentDir, host);
 		}
