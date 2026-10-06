@@ -19,6 +19,7 @@ import {
 	IrohRemoteHostStateManager,
 	isIrohRemoteWorkspaceHasWorktreesError,
 } from "../core/remote/iroh/state-manager.ts";
+import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import {
 	getCurrentThemeName,
@@ -467,6 +468,14 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
 		detachedRuntimeTtlMs: () => state.state.settings.detachedRuntimeTtlMs,
+		sessionInWorkspace: async (workspaceName, sessionId) => {
+			const workspace = state.getHostState().workspaces.find((candidate) => candidate.name === workspaceName);
+			if (!workspace) return false;
+			return (
+				(await SessionManager.findForResume(getDefaultSessionDir(workspace.path, agentDir), sessionId)) !==
+				undefined
+			);
+		},
 		audit: (event) => void auditLogger.log(event).catch(() => {}),
 		log: (level, message, details) => logger.log(level, "workers", message, details),
 	});
@@ -630,7 +639,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			case "worker_hosts":
 			case "worker_released":
 			case "worker_stop_result":
-				connection.send(workers.handleWorkerRequest(connection.connectionId, request));
+				connection.send(await workers.handleWorkerRequest(connection.connectionId, request));
 				return;
 		}
 		for (const extension of extensionInstances) {

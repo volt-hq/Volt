@@ -48,6 +48,8 @@ function setup(options: { ttlMs?: number } = {}) {
 		},
 		currentGeneration: (workspaceName) => generations.get(workspaceName),
 		detachedRuntimeTtlMs: () => options.ttlMs ?? 60_000,
+		// Sessions s1-s9 are the workspace's.
+		sessionInWorkspace: async (workspaceName, sessionId) => workspaceName === "ws" && /^s\d$/.test(sessionId),
 		audit: (event) => audits.push(event),
 	});
 
@@ -93,7 +95,7 @@ function setup(options: { ttlMs?: number } = {}) {
 		);
 
 	let requestId = 0;
-	const send = (worker: FakeWorker, request: Record<string, unknown>): ControlResponse =>
+	const send = (worker: FakeWorker, request: Record<string, unknown>): Promise<ControlResponse> =>
 		registry.handleWorkerRequest(worker.connectionId, { ...request, id: `${++requestId}` } as Parameters<
 			WorkerRegistry["handleWorkerRequest"]
 		>[1]);
@@ -104,7 +106,7 @@ function setup(options: { ttlMs?: number } = {}) {
 		const worker = launched[index]!;
 		expect(hello(worker)).toBe(true);
 		const sessionId = (await spawnOf(worker)).session.sessionId;
-		expect(send(worker, { type: "worker_ready", sessionIds: [sessionId] })).toMatchObject({ type: "ok" });
+		expect(await send(worker, { type: "worker_ready", sessionIds: [sessionId] })).toMatchObject({ type: "ok" });
 		return worker;
 	};
 
@@ -174,10 +176,14 @@ describe("worker registry", () => {
 		void open("s1").catch(() => undefined);
 		await waitUntil(() => launched.length === 1);
 		const worker = launched[0]!;
-		expect(send(worker, { type: "worker_ready", sessionIds: ["s1"] })).toMatchObject({ code: "not_registered" });
+		expect(await send(worker, { type: "worker_ready", sessionIds: ["s1"] })).toMatchObject({
+			code: "not_registered",
+		});
 		hello(worker);
-		expect(send(worker, { type: "worker_ready", sessionIds: ["s2"] })).toMatchObject({ code: "invalid_sessions" });
-		expect(send(worker, { type: "worker_ready", sessionIds: ["s1", "s2"] })).toMatchObject({
+		expect(await send(worker, { type: "worker_ready", sessionIds: ["s2"] })).toMatchObject({
+			code: "invalid_sessions",
+		});
+		expect(await send(worker, { type: "worker_ready", sessionIds: ["s1", "s2"] })).toMatchObject({
 			code: "invalid_sessions",
 		});
 	});
@@ -190,20 +196,36 @@ describe("worker registry", () => {
 		const other = open("s9");
 		const b = await start(1);
 		await other;
-		expect(send(a, { type: "worker_hosts", sessionId: "s2", kind: "child", parentSessionId: "s1" })).toMatchObject({
+		expect(
+			await send(a, { type: "worker_hosts", sessionId: "s2", kind: "child", parentSessionId: "s1" }),
+		).toMatchObject({
 			type: "ok",
 		});
-		expect(send(b, { type: "worker_hosts", sessionId: "s2", kind: "moved" })).toMatchObject({ code: "claimed" });
-		expect(send(b, { type: "worker_hosts", sessionId: "s1", kind: "sibling" })).toMatchObject({ code: "claimed" });
-		expect(send(b, { type: "worker_hosts", sessionId: "s3", kind: "child", parentSessionId: "s1" })).toMatchObject({
+		expect(
+			await send(b, { type: "worker_hosts", sessionId: "s2", kind: "moved", parentSessionId: "s9" }),
+		).toMatchObject({ code: "claimed" });
+		expect(
+			await send(b, { type: "worker_hosts", sessionId: "s1", kind: "sibling", parentSessionId: "s9" }),
+		).toMatchObject({ code: "claimed" });
+		expect(
+			await send(b, { type: "worker_hosts", sessionId: "s3", kind: "child", parentSessionId: "s1" }),
+		).toMatchObject({
 			code: "not_hosted",
 		});
-		expect(send(a, { type: "worker_released", sessionId: "s1" })).toMatchObject({ code: "primary" });
-		expect(send(a, { type: "worker_released", sessionId: "s2" })).toMatchObject({ type: "ok" });
-		expect(send(b, { type: "worker_hosts", sessionId: "s2", kind: "moved" })).toMatchObject({ type: "ok" });
+		// Only the worker's own workspace's stored sessions.
+		expect(
+			await send(a, { type: "worker_hosts", sessionId: "other-workspace", kind: "moved", parentSessionId: "s1" }),
+		).toMatchObject({ code: "not_found" });
+		expect(await send(a, { type: "worker_released", sessionId: "s1" })).toMatchObject({ code: "primary" });
+		expect(await send(a, { type: "worker_released", sessionId: "s2" })).toMatchObject({ type: "ok" });
+		expect(
+			await send(b, { type: "worker_hosts", sessionId: "s2", kind: "moved", parentSessionId: "s9" }),
+		).toMatchObject({ type: "ok" });
 		expect(registry.hosts("ws", "s2")).toBe(true);
 		generations.set("ws", 2);
-		expect(send(b, { type: "worker_hosts", sessionId: "s4", kind: "moved" })).toMatchObject({ code: "fenced" });
+		expect(
+			await send(b, { type: "worker_hosts", sessionId: "s4", kind: "moved", parentSessionId: "s9" }),
+		).toMatchObject({ code: "fenced" });
 		expect(launched).toHaveLength(2);
 	});
 
@@ -214,20 +236,20 @@ describe("worker registry", () => {
 		const { release } = await opened;
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(stops(worker)).toEqual([]);
-		send(worker, { type: "worker_activity", active: true });
+		await send(worker, { type: "worker_activity", active: true });
 		release();
 		await new Promise((resolve) => setTimeout(resolve, 20));
 		expect(stops(worker)).toEqual([]);
-		send(worker, { type: "worker_activity", active: false });
+		await send(worker, { type: "worker_activity", active: false });
 		await waitUntil(() => stops(worker).length === 1);
 		expect(stops(worker)[0]).toMatchObject({ reason: "retention", force: false });
 		expect(registry.list()[0]?.state).toBe("retiring");
 		// A job's wake made it active before it answered.
-		send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
+		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
 		expect(registry.list()[0]?.state).toBe("live");
-		send(worker, { type: "worker_activity", active: false });
+		await send(worker, { type: "worker_activity", active: false });
 		await waitUntil(() => stops(worker).length === 2);
-		send(worker, { type: "worker_stop_result", stopId: stops(worker)[1]!.stopId, outcome: "stopped" });
+		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[1]!.stopId, outcome: "stopped" });
 		worker.exit({ reason: "stopped" });
 		await waitUntil(() => registry.size === 0);
 		expect(audits.map((event) => event.type)).toEqual([
@@ -246,7 +268,7 @@ describe("worker registry", () => {
 		const first = await start(0);
 		await opened;
 		await waitUntil(() => stops(first).length === 1);
-		send(first, { type: "worker_stop_result", stopId: stops(first)[0]!.stopId, outcome: "stopped" });
+		await send(first, { type: "worker_stop_result", stopId: stops(first)[0]!.stopId, outcome: "stopped" });
 		const reopened = open("s1", "remote");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		// The previous worker still holds the log: nothing spawns yet.
@@ -265,7 +287,7 @@ describe("worker registry", () => {
 		await waitUntil(() => launched.length === 1);
 		const worker = launched[0]!;
 		hello(worker);
-		send(worker, { type: "worker_open_failed", outcome: "conversation_locked", message: "locked elsewhere" });
+		await send(worker, { type: "worker_open_failed", outcome: "conversation_locked", message: "locked elsewhere" });
 		worker.exit({ reason: "failed", error: "locked elsewhere" });
 		for (const pending of [first, second]) {
 			const error = await pending.catch((caught: unknown) => caught);
@@ -287,7 +309,7 @@ describe("worker registry", () => {
 		expect(retired).toEqual([worker.request.workerId]);
 		expect(stops(worker)).toMatchObject([{ reason: "authority", force: true }]);
 		// A forced stop cannot be refused.
-		send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
+		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
 		expect(registry.list()[0]?.state).toBe("retiring");
 		const reopened = open("s1");
 		let fenceSettled = false;
@@ -341,5 +363,30 @@ describe("worker registry", () => {
 		worker.exit();
 		await stopped;
 		expect(registry.size).toBe(0);
+	});
+
+	it("serves an open that waited on a retiring worker once the worker refuses the stop", async () => {
+		const { registry, open, start, send, stops, launched } = setup({ ttlMs: 1 });
+		const opened = open("s1");
+		const worker = await start(0);
+		await opened;
+		await waitUntil(() => stops(worker).length === 1);
+		const reopened = open("s1", "remote");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
+		const { worker: live } = await reopened;
+		expect(live.workerId).toBe(worker.request.workerId);
+		expect(launched).toHaveLength(1);
+		expect(registry.list()[0]?.state).toBe("live");
+	});
+
+	it("attaches no client to a worker that retires after its lookup", async () => {
+		const { registry, open, start, generations } = setup();
+		const opened = open("s1");
+		await start(0);
+		const { worker } = await opened;
+		generations.set("ws", 2);
+		void registry.fenceWorkspace("ws");
+		expect(() => worker.attach("remote")).toThrow(WorkerOpenError);
 	});
 });

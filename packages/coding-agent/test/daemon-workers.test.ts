@@ -1,7 +1,9 @@
+import { createConnection } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { ConversationLockedError } from "../src/core/conversation-log/conversation-lock.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
+import { PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import {
 	InProcessWorkerLauncher,
@@ -135,6 +137,45 @@ describe("daemon conversation workers", () => {
 			code: "forbidden",
 		});
 		release();
+	}, 30_000);
+
+	it("reads nothing after a refused hello on the same connection", async () => {
+		const harness = await startHarness();
+		const probe = await probeDaemon(harness.agentDir);
+		const socket = createConnection(probe.socketPath);
+		const received: string[] = [];
+		socket.on("data", (chunk: Buffer) => received.push(chunk.toString("utf8")));
+		const closed = new Promise<void>((resolve) => socket.on("close", () => resolve()));
+		await new Promise<void>((resolve) => socket.on("connect", () => resolve()));
+		const line = (message: object) => `${JSON.stringify(message)}\n`;
+		socket.write(
+			line({
+				type: "hello",
+				role: "worker",
+				protocolVersion: PROTOCOL_VERSION,
+				workerId: "w-x",
+				workerToken: "x",
+				pid: 1,
+				version: "test",
+			}) +
+				line({
+					type: "hello",
+					role: "control",
+					protocolVersion: PROTOCOL_VERSION,
+					pid: 1,
+					version: "test",
+					client: "cli",
+					...(probe.authToken === undefined ? {} : { controlToken: probe.authToken }),
+				}) +
+				line({ type: "status", id: "after-refusal" }),
+		);
+		await closed;
+		const messages = received
+			.join("")
+			.trim()
+			.split("\n")
+			.map((text) => JSON.parse(text) as { type: string; error?: string });
+		expect(messages).toEqual([expect.objectContaining({ type: "hello_ack", ok: false, error: "auth_failed" })]);
 	}, 30_000);
 
 	it("fails the open when the worker cannot take the conversation's lock", async () => {

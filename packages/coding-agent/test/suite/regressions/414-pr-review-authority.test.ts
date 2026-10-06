@@ -295,6 +295,7 @@ async function fixture(grant = capabilities) {
 			sendTo: () => false,
 			currentGeneration: () => 1,
 			detachedRuntimeTtlMs: () => 60_000,
+			sessionInWorkspace: async () => false,
 			audit() {},
 		}),
 		// Streams record client activity for PR status polling; nothing else may touch the change association.

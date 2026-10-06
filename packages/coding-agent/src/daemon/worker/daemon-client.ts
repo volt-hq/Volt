@@ -6,6 +6,7 @@
  */
 
 import { VERSION } from "../../config.ts";
+import type { IrohRemoteHostHandshakeFailureOutcome } from "../../core/remote/iroh/protocol.ts";
 import { createDaemonClient, type DaemonClient, type DistributiveOmit } from "../control-client.ts";
 import type {
 	ControlEvent,
@@ -105,7 +106,7 @@ export class WorkerDaemonClient {
 		return this.request({ type: "worker_ready", sessionIds: [...sessionIds] });
 	}
 
-	openFailed(message: string, outcome?: string): Promise<ControlResponse> {
+	openFailed(message: string, outcome?: IrohRemoteHostHandshakeFailureOutcome): Promise<ControlResponse> {
 		return this.request({
 			type: "worker_open_failed",
 			message: Array.from(message).slice(0, 1024).join(""),
@@ -118,13 +119,8 @@ export class WorkerDaemonClient {
 	}
 
 	/** Claim `sessionId` before opening it; rejects with code `claimed` when another worker hosts it. */
-	hosts(sessionId: string, kind: WorkerHostKind, parentSessionId?: string): Promise<ControlResponse> {
-		return this.request({
-			type: "worker_hosts",
-			sessionId,
-			kind,
-			...(parentSessionId === undefined ? {} : { parentSessionId }),
-		});
+	hosts(sessionId: string, kind: WorkerHostKind, parentSessionId: string): Promise<ControlResponse> {
+		return this.request({ type: "worker_hosts", sessionId, kind, parentSessionId });
 	}
 
 	released(sessionId: string): Promise<ControlResponse> {

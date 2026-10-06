@@ -17,7 +17,7 @@
  */
 
 import { type Static, type TSchema, type TString, Type } from "typebox";
-import { SessionReferenceSchema } from "./entries.ts";
+import { LogSessionIdSchema, SessionReferenceSchema } from "./entries.ts";
 import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, ResultFrameSchema } from "./frames.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
@@ -25,6 +25,7 @@ import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificat
 import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
 import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
 import {
+	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
 	IrohRemoteHandshakeSuccessSchema,
 	IrohRemoteHelloSchema,
 	IrohRemoteRelayModeSchema,
@@ -241,7 +242,7 @@ export const ControlWorkerStatusSchema = Type.Object(
 		origin: ControlWorkerOriginSchema,
 		workspaceName: Type.String(),
 		/** Every conversation the worker hosts: its primary, then what it claimed. */
-		sessionIds: Type.Array(Type.String()),
+		sessionIds: Type.Array(LogSessionIdSchema),
 		/** Relayed streams, offered or open, by client kind. */
 		clients: Type.Object({ local: NonNegativeIntegerSchema, remote: NonNegativeIntegerSchema }, closed),
 	},
@@ -622,24 +623,24 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		notification: IrohRemotePushNotificationSchema,
 	}),
 	/** Worker: its primary conversation is open and its log locked; offers may follow. */
-	worker_ready: withId("worker_ready", { sessionIds: Type.Array(Type.String()) }),
+	worker_ready: withId("worker_ready", { sessionIds: Type.Array(LogSessionIdSchema, { maxItems: 1 }) }),
 	/** Worker: its primary could not open; the waiting opens fail with this outcome. */
 	worker_open_failed: withId("worker_open_failed", {
 		/** A phone handshake outcome, such as conversation_locked or session_unavailable. */
-		outcome: Type.Optional(Type.String()),
+		outcome: Type.Optional(stringEnum(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)),
 		message: codePoints(0, 1024),
 	}),
 	/** Worker: whether any conversation it hosts is active (a turn, running work, or a hold). */
 	worker_activity: withId("worker_activity", { active: Type.Boolean() }),
 	/** Worker: claim a conversation before opening it. Refused (`claimed`) when another worker hosts it. */
 	worker_hosts: withId("worker_hosts", {
-		sessionId: Type.String(),
+		sessionId: LogSessionIdSchema,
 		kind: WorkerHostKindSchema,
-		/** The hosted conversation the claimed one belongs to (a child's or a sibling's source). */
-		parentSessionId: Type.Optional(Type.String()),
+		/** The hosted conversation the claimed one belongs to: a child's parent, a sibling's source, a move's source. */
+		parentSessionId: LogSessionIdSchema,
 	}),
 	/** Worker: it closed a conversation it claimed, and released its log. */
-	worker_released: withId("worker_released", { sessionId: Type.String() }),
+	worker_released: withId("worker_released", { sessionId: LogSessionIdSchema }),
 	/** Worker: its answer to `worker_stop`, from its own idle check when the stop arrived. */
 	worker_stop_result: withId("worker_stop_result", {
 		stopId: Type.String(),

@@ -2267,7 +2267,8 @@
 				"type",
 				"id",
 				"sessionId",
-				"kind"
+				"kind",
+				"parentSessionId"
 			],
 			"properties": {
 				"type": {
@@ -2278,13 +2279,17 @@
 					"type": "string"
 				},
 				"sessionId": {
-					"type": "string"
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				},
 				"kind": {
 					"$ref": "#/$defs/Control.WorkerHostKind"
 				},
 				"parentSessionId": {
-					"type": "string"
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -2305,7 +2310,26 @@
 					"type": "string"
 				},
 				"outcome": {
-					"type": "string"
+					"type": "string",
+					"enum": [
+						"host_storage_full",
+						"invalid_workspace",
+						"invalid_conversation_target",
+						"conversation_streams_unsupported",
+						"pairing_secret_expired",
+						"pairing_secret_consumed",
+						"client_unknown",
+						"client_revoked",
+						"workspace_unavailable",
+						"workspace_missing",
+						"workspace_forbidden",
+						"workspace_authorization_removed",
+						"workspace_unregistered",
+						"session_unavailable",
+						"duplicate_conversation_connection",
+						"conversation_in_use",
+						"conversation_locked"
+					]
 				},
 				"message": {
 					"type": "string",
@@ -2333,8 +2357,11 @@
 				"sessionIds": {
 					"type": "array",
 					"items": {
-						"type": "string"
-					}
+						"type": "string",
+						"maxLength": 512,
+						"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+					},
+					"maxItems": 1
 				}
 			},
 			"additionalProperties": false
@@ -2355,7 +2382,9 @@
 					"type": "string"
 				},
 				"sessionId": {
-					"type": "string"
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -3349,7 +3378,9 @@
 				"sessionIds": {
 					"type": "array",
 					"items": {
-						"type": "string"
+						"type": "string",
+						"maxLength": 512,
+						"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 					}
 				},
 				"clients": {

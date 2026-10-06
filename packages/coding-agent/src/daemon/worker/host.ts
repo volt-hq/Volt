@@ -20,6 +20,10 @@
 import { realpath } from "node:fs/promises";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import {
+	type IrohRemoteHostHandshakeFailureOutcome,
+	isIrohRemoteHostHandshakeFailureOutcome,
+} from "../../core/remote/iroh/protocol.ts";
 import { SessionManager } from "../../core/session-manager.ts";
 import type { WorkerSpawnSpec } from "../control-protocol.ts";
 import { resolveIrohRemoteSessionTarget } from "../session-target.ts";
@@ -40,9 +44,9 @@ function errorMessage(error: unknown): string {
 }
 
 /** The phone-facing outcome an open failure carries, if any. */
-function failureOutcome(error: unknown): string | undefined {
+function failureOutcome(error: unknown): IrohRemoteHostHandshakeFailureOutcome | undefined {
 	const outcome = typeof error === "object" && error !== null ? (error as { outcome?: unknown }).outcome : undefined;
-	return typeof outcome === "string" ? outcome : undefined;
+	return isIrohRemoteHostHandshakeFailureOutcome(outcome) ? outcome : undefined;
 }
 
 /** Throw unless `cwd` stays inside `root`, both resolved. */
