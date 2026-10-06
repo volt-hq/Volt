@@ -1,11 +1,14 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
+import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import type { RelayPreamble } from "../src/daemon/control-protocol.ts";
+import type { PhoneRelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import {
+	adaptRelaySocketToIrohStream,
+	RELAY_SOCKET_BUFFER_BYTES,
 	RELAY_TOKEN_TTL_MS,
 	type RelayOutcome,
 	type RelayPendingRejection,
@@ -74,7 +77,7 @@ const RELAY_AUTHORIZATION = {
 	rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 };
 
-const HANDSHAKE_VERBATIM: RelayPreamble["handshake"] = {
+const HANDSHAKE_VERBATIM: PhoneRelayPreamble["handshake"] = {
 	hello: {
 		type: "volt_iroh_hello",
 		protocol: "volt/1",
@@ -469,7 +472,9 @@ describe("relay framing (§12.2.3)", () => {
 		const bufferedPrompt = Buffer.from(
 			`${JSON.stringify({ type: "prompt", intentId: "client-p1", expectedOrdinal: 0, input: { message: "do not run" } })}\n`,
 		);
-		(relay.preamble.handshake as { initialInput: number[] }).initialInput = Array.from(bufferedPrompt);
+		const preamble = relay.preamble;
+		if (preamble.kind !== "phone") throw new Error("A phone's relay has a phone's preamble");
+		(preamble.handshake as { initialInput: number[] }).initialInput = Array.from(bufferedPrompt);
 
 		// Revocation uses this same synchronous owner close before acknowledging
 		// the control request. The stale token must never expose initialInput.
@@ -621,5 +626,24 @@ describe("relay framing (§12.2.3)", () => {
 		for (const gate of writeGates.splice(0)) {
 			gate();
 		}
+	});
+});
+
+describe("relay socket adapter", () => {
+	it("stops reading its socket while a megabyte waits unread, and reads again as it is consumed", async () => {
+		const socket = new PassThrough();
+		const stream = adaptRelaySocketToIrohStream(socket);
+		socket.write(Buffer.alloc(RELAY_SOCKET_BUFFER_BYTES, 1));
+		socket.write(Buffer.alloc(16, 2));
+		await new Promise((resolve) => setImmediate(resolve));
+		expect(socket.isPaused()).toBe(true);
+		let read = 0;
+		while (read < RELAY_SOCKET_BUFFER_BYTES + 16) {
+			const chunk = await stream.recv.read(64 * 1024);
+			if (!chunk) throw new Error("The stream ended early");
+			read += chunk.length;
+		}
+		expect(socket.isPaused()).toBe(false);
+		stream.close();
 	});
 });

@@ -27,6 +27,10 @@ import { openTestHost } from "../../utilities/host-client.ts";
 import { anchorLiveReviewRun, anchorReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 
+// The harness's in-memory model registry streams its faux provider through a client registration a disk
+// refresh drops: these workers do not watch the agent directory's settings and credentials (D12).
+vi.mock("../../../src/daemon/worker/settings-watcher.ts", () => ({ watchConversationSettings: () => () => {} }));
+
 /**
  * Review finding discussions open beside their source, in the source's
  * conversation worker, each claimed from the daemon's worker registry
@@ -209,6 +213,8 @@ async function fixture() {
 		client: client as unknown as WorkerDaemonClient,
 		workspaceName: "ws",
 		log: () => {},
+		onCatalogChanged: () => {},
+		projectTrusted: () => false,
 	});
 	hosted.adoptPrimary(source.host, source.conversation);
 
@@ -300,7 +306,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(status!.sessionIds).toEqual(expect.arrayContaining([f.source.conversation.id, ...ids]));
 		for (const row of result.results) {
 			const id = row.discussion!.sessionId;
-			expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+			expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, origin: "phone", kind: "sibling" });
 			const child = f.hosted.get(id)!;
 			expect(child.kind).toBe("sibling");
 			expect(child.host).toBe(f.source.host);
@@ -328,7 +334,11 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		await vi.waitFor(() => expect(f.registry.host("ws", ref.sessionId)).toBeUndefined());
 		// A phone's open of the discussion spawns a worker of its own for it.
 		const other = await f.spawn(ref);
-		expect(f.registry.host("ws", ref.sessionId)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
+		expect(f.registry.host("ws", ref.sessionId)).toEqual({
+			workerId: other.worker.workerId,
+			origin: "phone",
+			kind: "primary",
+		});
 		const foreign = await openTestHost(f.factory, {
 			sessionManager: await SessionManager.open(ref),
 			cwd: f.root,
@@ -356,7 +366,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		f.harness.setResponses([fauxAssistantMessage("retry")]);
 		const retried = await f.reviews.start("run", ["f1"], "retry");
 		expect(retried.results[0]).toMatchObject({ outcome: "existing", discussion: { sessionId: id } });
-		expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, origin: "phone", kind: "sibling" });
 		await f.hosted.get(id)!.conversation.session.waitForIdle();
 	});
 
@@ -416,7 +426,11 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 			// Had the source's worker seeded the discussion, this writer's revision would be stale.
 			await otherManager.logWriter.appendSessionInfo("The other worker owns initialization");
 			expect(f.hosted.get(id)).toBeUndefined();
-			expect(f.registry.host("ws", id)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
+			expect(f.registry.host("ws", id)).toEqual({
+				workerId: other.worker.workerId,
+				origin: "phone",
+				kind: "primary",
+			});
 		} finally {
 			await otherManager.closePersistence();
 		}
@@ -462,7 +476,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(reset.status).toBe("reset");
 		const resetId = reset.discussion.currentSessionId;
 		expect(resetId).not.toBe(first.sessionId);
-		expect(f.registry.host("ws", resetId)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		expect(f.registry.host("ws", resetId)).toEqual({ workerId: f.worker.workerId, origin: "phone", kind: "sibling" });
 		const child = f.hosted.get(resetId)!;
 		expect(child.kind).toBe("sibling");
 		expect(child.conversation.session.isBusy).toBe(false);
@@ -491,7 +505,11 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		const recorded = f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "fixed" });
 		await writing.promise;
 		// The write holds the source's claim: a phone's open of it reaches this worker, not a worker of its own.
-		expect(f.registry.host("ws", originalId)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		expect(f.registry.host("ws", originalId)).toEqual({
+			workerId: f.worker.workerId,
+			origin: "phone",
+			kind: "sibling",
+		});
 		const routed = await f.registry.open(
 			{ workspaceName: "ws", workspaceGeneration: 1, sessionId: originalId },
 			{
@@ -514,7 +532,11 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		await expect(
 			f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
 		).rejects.toMatchObject({ code: "claimed" });
-		expect(f.registry.host("ws", originalId)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
+		expect(f.registry.host("ws", originalId)).toEqual({
+			workerId: other.worker.workerId,
+			origin: "phone",
+			kind: "primary",
+		});
 		expect(
 			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
 				?.status,

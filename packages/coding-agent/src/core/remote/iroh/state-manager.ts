@@ -28,6 +28,7 @@ import {
 } from "./state.ts";
 import {
 	findIrohRemoteWorkspace,
+	getIrohRemoteWorkspaceNameAlias,
 	getIrohRemoteWorkspaceStatuses,
 	type IrohRemoteWorkspaceAvailabilityClassifier,
 	type IrohRemoteWorkspaceStatus,
@@ -206,6 +207,22 @@ export class IrohRemoteHostStateManager {
 			const savedWorkspace = upsertIrohRemoteWorkspace(state, workspace, allowTools);
 			await this.saveUnlocked(state);
 			return cloneWorkspace(savedWorkspace);
+		});
+	}
+
+	/**
+	 * Register `workspace` only when no workspace has its name (or a name that
+	 * differs only by case or Unicode normalization): never a replace, whose
+	 * old authority would need fencing. Resolves whether it registered.
+	 */
+	async insertWorkspace(workspace: IrohRemoteWorkspace): Promise<boolean> {
+		return this.runExclusive(async () => {
+			const state = await this.loadUnlocked();
+			const alias = getIrohRemoteWorkspaceNameAlias(workspace.name);
+			if (state.workspaces.some((entry) => getIrohRemoteWorkspaceNameAlias(entry.name) === alias)) return false;
+			upsertIrohRemoteWorkspace(state, workspace);
+			await this.saveUnlocked(state);
+			return true;
 		});
 	}
 

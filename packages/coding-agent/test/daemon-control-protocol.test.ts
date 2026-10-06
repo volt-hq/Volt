@@ -38,6 +38,7 @@ import {
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
+	isRequestAllowedFor,
 	PROTOCOL_VERSION,
 	type RelayPreamble,
 } from "../src/daemon/control-protocol.ts";
@@ -66,6 +67,20 @@ const PUSH_TARGET = {
 	pushTargetId: "target-1",
 	pushTargetAuthToken: "token-1",
 	enabled: true,
+};
+
+const SPAWN_OPTIONS = {
+	env: { PATH: "/usr/bin", HOME: "/home/user" },
+	config: {
+		trust: true,
+		extensions: ["/home/user/ext.ts", "npm:@scope/ext"],
+		tools: ["read", "bash"],
+		flags: { "my-flag": "on", verbose: true },
+	},
+	cwd: "/home/user/project",
+	persist: true,
+	session: { provider: "anthropic", model: "sonnet:high", plan: true },
+	modelScopePatterns: ["sonnet*"],
 };
 
 // One valid sample per message type. The mapped types make a missing type a compile error.
@@ -158,6 +173,13 @@ const REQUESTS: ByType<ControlRequest> = {
 			workspaceName: "volt",
 			planId: "plan-1",
 		},
+	},
+	conversation_open: {
+		type: "conversation_open",
+		id: "42",
+		target: { kind: "session", sessionId: "s-1", sessionDir: "/sessions" },
+		spawn: SPAWN_OPTIONS,
+		clientKey: "tui-1",
 	},
 	worker_ready: { type: "worker_ready", id: "29", sessionIds: ["s-1"] },
 	worker_open_failed: {
@@ -295,6 +317,18 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ notification: { ...REVIEW_NOTIFICATION, hostNodeId: "A".repeat(64) } },
 		{ notification: { ...REVIEW_NOTIFICATION, workspaceName: undefined, workspace: "volt" } },
 	],
+	conversation_open: [
+		{ clientKey: "" },
+		{ target: { kind: "fork" } },
+		{ target: { kind: "session", sessionId: "s 1" } },
+		{ spawn: { ...SPAWN_OPTIONS, persist: undefined } },
+		// An environment variable's name has no `=`, and no value carries NUL.
+		{ spawn: { ...SPAWN_OPTIONS, env: { "A=B": "x" } } },
+		{ spawn: { ...SPAWN_OPTIONS, env: { A: "x\u0000y" } } },
+		{ spawn: { ...SPAWN_OPTIONS, config: { ...SPAWN_OPTIONS.config, unexpected: true } } },
+		{ spawn: { ...SPAWN_OPTIONS, session: { model: "sonnet", thinking: "huge" } } },
+		{ spawn: { ...SPAWN_OPTIONS, config: { flags: { "a=b": true } } } },
+	],
 	worker_ready: [{ sessionIds: "s-1" }],
 	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }],
 	worker_activity: [{ active: "yes" }],
@@ -405,6 +439,17 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-1", ordinals: [], result: { registered: true } },
 	},
 	relay_push_delivery_result: { type: "relay_push_delivery_result", id: "16", status: "sent" },
+	conversation_opened: {
+		type: "conversation_opened",
+		id: "20",
+		relayId: "rl-2",
+		relayToken: "tok",
+		sessionId: "s-1",
+		selection: "resumed",
+		workspaceName: "volt",
+		spawned: false,
+		ignoredOptions: ["extensions", "trust"],
+	},
 	worker_forward_result: {
 		type: "worker_forward_result",
 		id: "17",
@@ -415,6 +460,7 @@ const RESPONSES: ByType<ControlResponse> = {
 };
 
 const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string, unknown>> } = {
+	conversation_opened: [{ ignoredOptions: ["env"] }, { selection: "created_after_missing" }, { spawned: undefined }],
 	error: [{ code: undefined }],
 	lease_granted: [{ handoff: "hot" }],
 	lease_pending: [{ viewerFeedId: undefined }],
@@ -572,6 +618,48 @@ describe("daemon control contract", () => {
 
 	it("accepts every event type and rejects mutated events", () => {
 		checkFamily(EVENTS, INVALID_EVENTS, (value) => ControlValidators.event.Check(value), { correlated: false });
+	});
+
+	it("offers a worker a TUI's stream without a phone's identity, and spawns a TUI's worker with its options", () => {
+		const offer = {
+			type: "relay_offer",
+			clientKind: "local",
+			relayId: "rl-2",
+			relayToken: "tok",
+			workspaceName: "volt",
+			sessionId: "s-1",
+		};
+		expect(ControlValidators.event.Check(roundTrip(offer))).toBe(true);
+		expect(ControlValidators.event.Check(roundTrip({ ...offer, clientNodeId: "n-1" }))).toBe(false);
+		const spawn = {
+			type: "worker_spawn",
+			spec: {
+				workerId: "w-1",
+				origin: "tui",
+				workspace: { name: "volt", path: "/tmp/volt", generation: 3 },
+				session: { sessionId: "s-1", inMemory: true },
+				cwd: "/tmp/volt",
+				root: "/tmp/volt",
+				projectCwd: "/tmp/volt",
+				config: SPAWN_OPTIONS.config,
+				sessionOptions: SPAWN_OPTIONS.session,
+			},
+		};
+		expect(ControlValidators.event.Check(roundTrip(spawn))).toBe(true);
+		// A TUI's spawn carries no tool policy, and its environment is the worker process's own.
+		for (const spec of [
+			{ ...spawn.spec, toolPolicy: { tools: [], allowUnlistedExtensionTools: false } },
+			{ ...spawn.spec, env: SPAWN_OPTIONS.env },
+			{ ...spawn.spec, session: { sessionId: "s-1", inMemory: false } },
+		]) {
+			expect(ControlValidators.event.Check(roundTrip({ ...spawn, spec }))).toBe(false);
+		}
+	});
+
+	it("lets only a TUI open a conversation", () => {
+		expect(isRequestAllowedFor("tui", "conversation_open")).toBe(true);
+		expect(isRequestAllowedFor("cli", "conversation_open")).toBe(false);
+		expect(isRequestAllowedFor("worker", "conversation_open")).toBe(false);
 	});
 
 	it("admits the default, preset, and explicit pairing access selections", () => {
@@ -869,6 +957,27 @@ describe("relay preamble", () => {
 			workingDirectory: "packages/app",
 		},
 	};
+
+	it("accepts a TUI's local preamble, which carries no phone's identity or grant", () => {
+		const local: RelayPreamble = {
+			type: "relay_preamble",
+			kind: "local",
+			relayId: "rl-8",
+			sessionId: "s-abc",
+			clientKey: "tui-1",
+			modelScopePatterns: ["sonnet*"],
+			apply: { model: "sonnet", thinking: "high" },
+		};
+		expect(ControlValidators.relayPreamble.Check(roundTrip(local))).toBe(true);
+		for (const invalid of [
+			{ ...local, authorization: preamble.authorization },
+			{ ...local, handshake: preamble.handshake },
+			{ ...local, clientKey: "" },
+			{ ...local, kind: "tui" },
+		]) {
+			expect(ControlValidators.relayPreamble.Check(JSON.parse(JSON.stringify(invalid)))).toBe(false);
+		}
+	});
 
 	it("accepts a preamble and rejects malformed authorization, targets, and handshakes", () => {
 		expect(ControlValidators.relayPreamble.Check(roundTrip(preamble))).toBe(true);

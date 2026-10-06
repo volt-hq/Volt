@@ -41,6 +41,10 @@ import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
+// The harness's in-memory model registry streams its faux provider through a client registration a disk
+// refresh drops: these workers do not watch the agent directory's settings and credentials (D12).
+vi.mock("../../../src/daemon/worker/settings-watcher.ts", () => ({ watchConversationSettings: () => () => {} }));
+
 let gitSeed: ReturnType<typeof createPrReviewGitSeed>;
 beforeAll(() => {
 	gitSeed = createPrReviewGitSeed("parent\n", "PR head");
@@ -234,6 +238,7 @@ async function fixture(nested = false, workspaceName = "project") {
 		const started: TestWorker[] = [];
 		/** A worker opens the stored conversation its spawn names, with the spawn's cwd. */
 		const openWorker = vi.fn(async (spec: WorkerSpawnInput): Promise<TestWorker> => {
+			if (spec.origin !== "phone") throw new Error("A phone's open spawns a phone's worker");
 			const opened = await openTestHost(factory, {
 				sessionManager: await SessionManager.open(spec.session),
 				cwd: spec.cwd,
@@ -252,6 +257,8 @@ async function fixture(nested = false, workspaceName = "project") {
 				client: grantingDaemonClient(),
 				workspaceName: spec.workspace.name,
 				log: () => {},
+				onCatalogChanged: () => {},
+				projectTrusted: () => false,
 			});
 			hosted.adoptPrimary(opened.host, opened.conversation);
 			const worker = { spec, ...opened, hosted };
@@ -604,7 +611,7 @@ describe("#414 PR review admission and worker spawn", () => {
 			const placement = opened.worker.conversation.session.sessionManager.getPrReviewBinding()!;
 			expect(opened.resolved.selection).toMatchObject({ kind: "created", sessionId: prepared.sessionId });
 			expect(opened.spec).toMatchObject({ cwd: placement.cwd, projectCwd: placement.cwd });
-			expect(opened.spec.session.sessionDirectory).toBe(f.sessionDir);
+			expect(opened.spec.session).toMatchObject({ sessionDirectory: f.sessionDir });
 			expect(opened.resolved.worktree).toMatchObject({ id: prepared.worktreeId, path: placement.cwd });
 			expect(opened.resolved.workingDirectory).toBe(prepared.workingDirectory);
 			expect(placement.cwd).not.toBe(f.source);

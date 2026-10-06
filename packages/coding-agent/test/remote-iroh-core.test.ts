@@ -1632,6 +1632,16 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.lastSeenAt).toBe(200);
 	});
 
+	test("registers a workspace insert-only: a taken name, in any case, is never replaced", async () => {
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		expect(await stateManager.insertWorkspace({ name: "alpha", path: "/alpha" })).toBe(true);
+		expect(await stateManager.insertWorkspace({ name: "alpha", path: "/elsewhere" })).toBe(false);
+		expect(await stateManager.insertWorkspace({ name: "ALPHA", path: "/elsewhere" })).toBe(false);
+		const state = await stateManager.getState();
+		expect(state.workspaces).toEqual([{ name: "alpha", path: "/alpha" }]);
+		expect(state.workspaceGenerations?.filter((record) => record.workspaceName === "alpha")).toHaveLength(1);
+	});
+
 	test("host engine authorizes paired clients across registered workspaces without another pairing secret", async () => {
 		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
 		const alphaWorkspace: IrohRemoteWorkspace = { name: "alpha", path: "/alpha" };

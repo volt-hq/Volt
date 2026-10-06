@@ -6,7 +6,8 @@
  * argv, environment, and log, writes a private log, is replaced after it is
  * killed, finishes its turn and exits when it loses its daemon, and stops
  * with the daemon. A phone's conversation streams from the test's faux
- * provider across the processes.
+ * provider across the processes, and so does a TUI's, in a worker that runs
+ * with the TUI's environment less the daemon's credentials.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -14,6 +15,8 @@ import { dirname } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { openDaemonConversation } from "../src/client/daemon-conversation.ts";
+import { ProtocolClient } from "../src/client/protocol-client.ts";
 import { ConversationLockedError } from "../src/core/conversation-log/conversation-lock.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
@@ -187,6 +190,56 @@ describe("conversation workers as processes", () => {
 			);
 			expect(await lockIsFree(ref)).toBe(true);
 			expect(await waitForWorkerGate(harness.agentDir, { timeoutMs: 0 })).toMatchObject({ status: "open" });
+		},
+		PROCESS_TEST_TIMEOUT_MS,
+	);
+});
+
+describe("a TUI's conversation in a worker process", () => {
+	it(
+		"runs with the TUI's environment, less the daemon's credentials, and streams the TUI's turn across the processes",
+		async () => {
+			const harness = await startHarness(new ProcessWorkerLauncher());
+			harness.faux.setResponses([fauxAssistantMessage("hello from the TUI's worker process")]);
+			const tui = await harness.connect("tui");
+			const env: Record<string, string> = {};
+			for (const [name, value] of Object.entries(process.env)) if (value !== undefined) env[name] = value;
+			const { opened, transport } = await openDaemonConversation(tui, {
+				target: { kind: "new" },
+				spawn: {
+					env: {
+						...env,
+						VOLT_TEST_TUI_MARKER: "tui-marker-value",
+						VOLT_IROH_RELAY_AUTH_TOKEN: "daemon-only-secret",
+					},
+					config: {},
+					cwd: harness.workspacePath,
+					persist: true,
+					session: {},
+				},
+				clientKey: "tui-1",
+			});
+			const client = new ProtocolClient({ followMoves: "reconnect" });
+			cleanups.push(() => client.stop());
+			await client.connect(transport);
+			await client.promptAndWait("hi", { timeoutMs: 30_000 });
+			expect(JSON.stringify(client.state.entries)).toContain("hello from the TUI's worker process");
+
+			const [worker] = (await harness.status()).workers;
+			if (!worker?.logPath) throw new Error("No worker");
+			expect(worker).toMatchObject({ origin: "tui", sessionIds: [opened.sessionId] });
+			expect(worker.pid).not.toBe(process.pid);
+			// The worker logs its environment's names, never a value.
+			const log = readFileSync(worker.logPath, "utf8");
+			expect(log).toContain("VOLT_TEST_TUI_MARKER");
+			expect(log).not.toContain("tui-marker-value");
+			expect(log).not.toContain("VOLT_IROH_RELAY_AUTH_TOKEN");
+			expect(log).not.toContain("daemon-only-secret");
+			if (process.platform === "linux") {
+				const environ = readFileSync(`/proc/${worker.pid}/environ`, "utf8").split("\0");
+				expect(environ).toContain("VOLT_TEST_TUI_MARKER=tui-marker-value");
+				expect(environ.some((entry) => entry.startsWith("VOLT_IROH_RELAY_AUTH_TOKEN="))).toBe(false);
+			}
 		},
 		PROCESS_TEST_TIMEOUT_MS,
 	);

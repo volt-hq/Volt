@@ -43,8 +43,10 @@ export interface DaemonHarnessOptions {
 	readonly workerExtensions?: readonly string[];
 }
 
-/** What a harness worker opens beside its stored session. */
-export type HarnessSpawn = Partial<Omit<WorkerSpawnSpec, "workerId" | "session" | "workspace">>;
+/** What a harness phone worker opens beside its stored session. */
+export type HarnessSpawn = Partial<
+	Omit<Extract<WorkerSpawnSpec, { origin: "phone" }>, "workerId" | "session" | "workspace" | "origin">
+>;
 
 export interface DaemonHarness {
 	readonly agentDir: string;

@@ -97,9 +97,9 @@ import {
 	type ControlRequest,
 	createControlClientStatus,
 	isRemoteTransportPairingAvailable,
+	type PhoneRelayPreamble,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
 	type RelayCloseReason,
-	type RelayPreamble,
 	type RemoteTransportHealth,
 } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
@@ -4122,7 +4122,7 @@ class IrohDaemonService {
 			worktree: IrohRemoteWorkspaceWorktree | undefined;
 			workingDirectory: string | undefined;
 		},
-	): Omit<RelayPreamble, "type" | "relayId"> {
+	): Omit<PhoneRelayPreamble, "type" | "relayId"> {
 		const authorization = handshake.authorization;
 		const worktree = target.worktree;
 		return {
@@ -4259,8 +4259,13 @@ class IrohDaemonService {
 		}
 		for (const relay of relaysOf()) void relay.close("error", { pendingMessage: "conversation reopened; retry" });
 		try {
-			// A fresh pairing replaces the worker serving the conversation, as it replaced a daemon runtime.
-			if (authorization.paired && target !== "new" && this.workers.hosts(workspaceName, sessionId)) {
+			// A fresh pairing replaces the phone-opened worker serving the conversation, as it replaced a daemon
+			// runtime; a TUI's worker keeps serving its TUI (the phone uses its tools, D9, or is refused).
+			if (
+				authorization.paired &&
+				target !== "new" &&
+				this.workers.host(workspaceName, sessionId)?.origin === "phone"
+			) {
 				await this.workers.retireHost(workspaceName, sessionId, "authority");
 			}
 			await this.dependencies.beforeAuthorizedStreamPublication?.("conversation", authorization);
@@ -4298,8 +4303,9 @@ class IrohDaemonService {
 								},
 							);
 						}
+						// A TUI-opened worker keeps its own tools for every client (#50).
 						if (
-							worker.origin === "phone" &&
+							worker.spec.origin === "phone" &&
 							!isIrohRemoteRuntimeToolPolicyWithin(worker.spec.toolPolicy, resolved.toolPolicy)
 						) {
 							throw createConversationOpenError(
@@ -5499,6 +5505,8 @@ class IrohDaemonService {
 		frame: ControlRelayFrame,
 		keep: ReadonlySet<string>,
 	): Promise<{ ok: true; frame: ControlRelayOutcome } | { ok: false; code: string; message: string }> {
+		// The daemon's own relays are phones'; a TUI's local relays forward nothing.
+		if (relay.preamble.kind !== "phone") return { ok: false, code: "not_found", message: "not a phone's relay" };
 		const metadata = relay.preamble.authorization;
 		const current = await this.currentRelayAuthorization({
 			clientNodeId: relay.clientNodeId,

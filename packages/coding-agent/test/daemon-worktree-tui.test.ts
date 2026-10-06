@@ -25,7 +25,7 @@ import {
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlRequest,
 	type ControlResponse,
-	type RelayPreamble,
+	type PhoneRelayPreamble,
 } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
@@ -508,7 +508,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		workspaces: [{ name: "repo", status: "available" }],
 		allowedTools: "read",
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-	} satisfies RelayPreamble["authorization"];
+	} satisfies PhoneRelayPreamble["authorization"];
 
 	it("keeps the parent root for non-worktree conversations", () => {
 		expect(getRelaySanitizerOptions(authorizationBase, HOST_AGENT_DIR)).toEqual({

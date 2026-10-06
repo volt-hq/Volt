@@ -6,11 +6,14 @@
  *
  * `ProcessWorkerLauncher` runs each worker as a process of its own (`volt
  * daemon worker`, daemon-hosted conversations RFC §5.1): detached from any
- * terminal, in the conversation's working directory, with the daemon's
- * environment (less the daemon's relay credentials), and its stdout and
- * stderr in `daemon/workers/<workerId>.log` (0600). Its token, worker id, and
- * the socket travel on its stdin, never in its argv or environment, and are
- * never logged; what it opens follows its hello over the socket.
+ * terminal, in the conversation's working directory, with the environment of
+ * the client whose open spawned it (a TUI's, carried by `conversation_open`;
+ * the daemon's own for a phone's), less the daemon's relay credentials
+ * (`DAEMON_ONLY_ENVIRONMENT`), and its stdout and stderr in
+ * `daemon/workers/<workerId>.log` (0600). Its token, worker id, and the socket
+ * travel on its stdin, never in its argv or environment, and are never
+ * logged; what it opens follows its hello over the socket. Its environment's
+ * values are never logged either: the worker logs their names.
  */
 
 import { spawn } from "node:child_process";
@@ -20,6 +23,7 @@ import { ENV_AGENT_DIR } from "../config.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import { getWorkerLogDirectory } from "./paths.ts";
 import { resolveDaemonCliInvocation } from "./spawn.ts";
+import { withoutDaemonCredentials } from "./worker-spawn-options.ts";
 
 /** Why a worker exited. */
 export type WorkerExitReason =
@@ -47,6 +51,8 @@ export interface WorkerLaunchRequest {
 	readonly agentDir: string;
 	/** The working directory of the conversation the worker opens. */
 	readonly cwd: string;
+	/** The environment of the TUI whose open spawned the worker; the daemon's own without one. Never logged. */
+	readonly env?: Readonly<Record<string, string>>;
 }
 
 export interface LaunchedWorker {
@@ -91,14 +97,15 @@ export function workerExitFromCode(code: number | null, signal: NodeJS.Signals |
 /** Worker logs kept beyond those of running workers; older ones are removed as workers start. */
 const MAX_WORKER_LOGS = 50;
 
-/** The daemon's own relay credentials: a worker never uses them, and its tools must not see them. */
-const DAEMON_ONLY_ENVIRONMENT = ["VOLT_IROH_RELAY_AUTH_TOKEN", "VOLT_PUSH_RELAY_AUTH_TOKEN"] as const;
-
-/** The daemon's environment, without its own credentials, for a worker of the agent directory `agentDir`. */
-function workerEnvironment(agentDir: string): NodeJS.ProcessEnv {
-	const env: NodeJS.ProcessEnv = { ...process.env, [ENV_AGENT_DIR]: agentDir };
-	for (const name of DAEMON_ONLY_ENVIRONMENT) delete env[name];
-	return env;
+/**
+ * A worker's environment: `base` (its opener's; the daemon's own by default)
+ * without the daemon's credentials, for the agent directory `agentDir`.
+ */
+export function workerEnvironment(
+	agentDir: string,
+	base: Readonly<Record<string, string | undefined>> = process.env,
+): NodeJS.ProcessEnv {
+	return { ...withoutDaemonCredentials(base), [ENV_AGENT_DIR]: agentDir };
 }
 
 /** Conversation workers as processes of their own. */
@@ -126,7 +133,7 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 				detached: true,
 				windowsHide: true,
 				stdio: ["pipe", logFd, logFd],
-				env: workerEnvironment(request.agentDir),
+				env: workerEnvironment(request.agentDir, request.env),
 			});
 		} finally {
 			// The child has its own copy of the descriptor.

@@ -22,13 +22,19 @@
  * hosts is offered or open, else detached. The retention TTL
  * (`remote.detachedRuntimeTtlMs`) runs only while it is live, detached, and
  * idle (its last `worker_activity`); when it fires, the worker is asked to
- * stop and may refuse because it turned active. A fenced workspace closes
+ * stop and may refuse because it turned active. A worker a TUI spawned for a
+ * conversation without a session file (`--no-session`, D15) is exclusive to
+ * that TUI's client key: no other client's open reaches what it hosts, it
+ * alone claims conversations in its memory, and it retires once its last client left
+ * for `EXCLUSIVE_WORKER_RETENTION_MS` (its client reconnects within it after
+ * a move). A fenced workspace closes
  * admission for that workspace and retires its workers without the option to
  * refuse, until their exit is observed. A worker's exit, however it happens,
  * removes its record and fails the opens that waited for its readiness.
  */
 
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import type { DistributiveOmit } from "./control-client.ts";
 import type {
 	ControlEvent,
 	ControlRequest,
@@ -41,6 +47,7 @@ import type {
 	WorkerStopReason,
 } from "./control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLauncher } from "./worker-launcher.ts";
+import { workerCompatibilityKey } from "./worker-spawn-options.ts";
 
 /** How long a forced stop may take before the daemon stops waiting for the worker: its 60 s turn cap, and margin. */
 export const WORKER_FORCED_STOP_TIMEOUT_MS = 75_000;
@@ -50,6 +57,9 @@ export const WORKER_READY_TIMEOUT_MS = 90_000;
 
 /** The conversations one worker may host at most: its primary and its claims. */
 export const MAX_WORKER_HOSTED_SESSIONS = 256;
+
+/** How long an exclusive (`--no-session`) worker outlives its last client: its client reconnects within it after a move. */
+export const EXCLUSIVE_WORKER_RETENTION_MS = 10_000;
 
 export type WorkerState = "starting" | "live" | "retiring";
 
@@ -71,8 +81,10 @@ export interface LiveWorker {
 	readonly workspaceGeneration: number;
 	/** The worker's control connection, where its events go. */
 	readonly connectionId: string;
-	/** What it was spawned with: its tool policy is fixed for its lifetime (D9). */
+	/** What it was spawned with: its tool policy, or its TUI's spawn-only options, are fixed for its lifetime (D9). */
 	readonly spec: WorkerSpawnSpec;
+	/** Opens it could serve run with the same key (see `worker-spawn-options.ts`). */
+	readonly compatibilityKey: string;
 	/**
 	 * Count a relayed stream (an offer, then the stream it was redeemed for)
 	 * as attached until the returned release runs: the worker is not detached
@@ -82,7 +94,7 @@ export interface LiveWorker {
 }
 
 /** The conversation a spawn opens, as the daemon resolved it; the registry adds the worker id. */
-export type WorkerSpawnInput = Omit<WorkerSpawnSpec, "workerId">;
+export type WorkerSpawnInput = DistributiveOmit<WorkerSpawnSpec, "workerId">;
 
 /** A spawn failed: the worker could not open its primary, or it exited first. */
 export class WorkerOpenError extends Error {
@@ -114,8 +126,13 @@ export interface WorkerRegistryOptions {
 	currentGeneration(workspaceName: string): number | undefined;
 	/** `remote.detachedRuntimeTtlMs`, read whenever a detached idle worker arms its timer. */
 	detachedRuntimeTtlMs(): number;
-	/** Whether `sessionId` is a stored session of `workspaceName`: a worker claims only its own workspace's sessions. */
-	sessionInWorkspace(workspaceName: string, sessionId: string): Promise<boolean>;
+	/**
+	 * Whether `sessionId` is a stored session of `workspaceName`, or of the
+	 * session directory of the claiming worker's primary (a TUI's sessions
+	 * are stored by their working directory): a worker claims only its own
+	 * workspace's sessions.
+	 */
+	sessionInWorkspace(workspaceName: string, sessionId: string, sessionDirectory?: string): Promise<boolean>;
 	audit(event: WorkerRegistryAuditEvent): void;
 	log?(level: "info" | "warn" | "error", message: string, details?: Record<string, unknown>): void;
 }
@@ -143,6 +160,9 @@ interface WorkerRecord {
 	/** Registry assignment: the primary, then every claim, in order. */
 	readonly hosts: Map<string, HostedSession>;
 	spec: WorkerSpawnSpec | undefined;
+	compatibilityKey: string | undefined;
+	/** The only client key whose opens reach this worker (`--no-session`, D15). */
+	readonly exclusiveTo: string | undefined;
 	launched: LaunchedWorker | undefined;
 	connectionId: string | undefined;
 	/** Its key's generation was fenced, or it is being stopped without the option to refuse. */
@@ -196,18 +216,29 @@ export class WorkerRegistry {
 	 * no retention can fire between them. With no host, `prepare` builds the
 	 * spawn's conversation; concurrent opens of the session share that spawn
 	 * and fail with it. A retiring host is waited for until it exited. An open
-	 * of a fenced generation, a session another workspace's worker hosts, or a
-	 * closed registry is refused.
+	 * of a fenced generation, a session another workspace's worker hosts, a
+	 * session an exclusive worker of another client hosts, or a closed
+	 * registry is refused. `attach` hears whether this open spawned the worker.
 	 */
 	async open<T>(
 		key: WorkerOpenKey,
 		options: {
 			readonly origin: ControlWorkerOrigin;
 			readonly prepare: () => Promise<WorkerSpawnInput>;
-			readonly attach: (worker: LiveWorker) => T;
+			readonly attach: (worker: LiveWorker, spawned: boolean) => T;
 			readonly signal?: AbortSignal;
+			/** The opening client's key (a TUI's); phones have none. */
+			readonly client?: string;
+			/** A worker this open spawns admits no other client's open (`--no-session`, D15). */
+			readonly exclusive?: boolean;
+			/** The environment a worker this open spawns runs with (a TUI's); the daemon's own without one. */
+			readonly env?: Readonly<Record<string, string>>;
 		},
 	): Promise<T> {
+		if (options.exclusive === true && options.client === undefined) {
+			throw new WorkerOpenError("An exclusive worker needs its client's key", "invalid_conversation_target");
+		}
+		let spawned: WorkerRecord | undefined;
 		for (;;) {
 			options.signal?.throwIfAborted();
 			if (this.closed) throw new WorkerOpenError("The daemon is shutting down");
@@ -221,10 +252,11 @@ export class WorkerRegistry {
 			}
 			const host = this.hostOf(key.sessionId);
 			if (!host) {
-				const record = this.reserve(key, options.origin);
+				const record = this.reserve(key, options.origin, options.exclusive === true ? options.client : undefined);
+				spawned = record;
 				record.routing++;
 				try {
-					await this.launch(record, options.prepare);
+					await this.launch(record, options.prepare, options.env);
 				} finally {
 					record.routing--;
 					// Armed for a later turn; the attach below, in this turn, cancels it again.
@@ -235,9 +267,15 @@ export class WorkerRegistry {
 			if (host.workspaceName !== key.workspaceName) {
 				throw new WorkerOpenError("The conversation is open in another workspace", "session_unavailable");
 			}
+			if (host.exclusiveTo !== undefined && host.exclusiveTo !== options.client) {
+				throw new WorkerOpenError(
+					"The conversation is open in a terminal without a session file; only that terminal reaches it",
+					"conversation_in_use",
+				);
+			}
 			if (host.state === "live" && !host.forced && host.workspaceGeneration === key.workspaceGeneration) {
 				try {
-					return options.attach(this.liveView(host));
+					return options.attach(this.liveView(host), host === spawned);
 				} finally {
 					this.updateRetention(host);
 				}
@@ -281,7 +319,7 @@ export class WorkerRegistry {
 	}
 
 	/** Register a starting worker for `key` synchronously, so concurrent opens of the session wait for it. */
-	private reserve(key: WorkerOpenKey, origin: ControlWorkerOrigin): WorkerRecord {
+	private reserve(key: WorkerOpenKey, origin: ControlWorkerOrigin, exclusiveTo: string | undefined): WorkerRecord {
 		const record: WorkerRecord = {
 			workerId: `w-${randomUUID()}`,
 			token: randomBytes(32),
@@ -293,6 +331,8 @@ export class WorkerRegistry {
 			primarySessionId: key.sessionId,
 			hosts: new Map([[key.sessionId, { kind: "primary" }]]),
 			spec: undefined,
+			compatibilityKey: undefined,
+			exclusiveTo,
 			launched: undefined,
 			connectionId: undefined,
 			forced: false,
@@ -320,12 +360,24 @@ export class WorkerRegistry {
 	}
 
 	/** Build the spawn and start the worker; resolves once it is live, rejects with its failure. */
-	private async launch(record: WorkerRecord, prepare: () => Promise<WorkerSpawnInput>): Promise<void> {
+	private async launch(
+		record: WorkerRecord,
+		prepare: () => Promise<WorkerSpawnInput>,
+		env: Readonly<Record<string, string>> | undefined,
+	): Promise<void> {
 		let input: WorkerSpawnInput;
 		try {
 			input = await prepare();
 			if (input.session.sessionId !== record.primarySessionId) {
 				throw new Error("The prepared conversation is not the one the spawn was registered for");
+			}
+			// Only a TUI's spawn runs with an environment of its own, and an in-memory primary only for its exclusive TUI.
+			if (
+				input.origin !== record.origin ||
+				(env !== undefined && input.origin !== "tui") ||
+				"inMemory" in input.session !== (record.exclusiveTo !== undefined)
+			) {
+				throw new Error("The prepared conversation does not match the spawn's client");
 			}
 			if (
 				input.workspace.name !== record.workspaceName ||
@@ -343,6 +395,7 @@ export class WorkerRegistry {
 			throw error;
 		}
 		record.spec = { ...input, workerId: record.workerId };
+		record.compatibilityKey = workerCompatibilityKey(input, env);
 		this.options.audit({
 			type: "worker_spawned",
 			workspace: record.workspaceName,
@@ -362,6 +415,7 @@ export class WorkerRegistry {
 				socketPath: this.options.socketPath(),
 				agentDir: this.options.agentDir,
 				cwd: input.cwd,
+				...(env === undefined ? {} : { env }),
 			});
 		} catch (error) {
 			this.finish(record, { reason: "failed", error: errorMessage(error) }, error);
@@ -396,7 +450,10 @@ export class WorkerRegistry {
 	private liveView(record: WorkerRecord): LiveWorker {
 		const spec = record.spec;
 		const connectionId = record.connectionId;
-		if (!spec || connectionId === undefined) throw new Error("A live worker has no spawn or connection");
+		const compatibilityKey = record.compatibilityKey;
+		if (!spec || connectionId === undefined || compatibilityKey === undefined) {
+			throw new Error("A live worker has no spawn or connection");
+		}
 		return {
 			workerId: record.workerId,
 			origin: record.origin,
@@ -404,6 +461,7 @@ export class WorkerRegistry {
 			workspaceGeneration: record.workspaceGeneration,
 			connectionId,
 			spec,
+			compatibilityKey,
 			attach: (kind) => {
 				// Offers go only to a live worker (the model's NoOfferToRetiring).
 				if (this.workers.get(record.workerId) !== record || record.state !== "live" || record.forced) {
@@ -515,10 +573,19 @@ export class WorkerRegistry {
 			}
 			case "worker_hosts": {
 				if (record.hosts.has(request.sessionId)) return ok;
-				// A worker claims only its own workspace's stored sessions.
-				const owned = await this.options
-					.sessionInWorkspace(record.workspaceName, request.sessionId)
-					.catch(() => false);
+				// A worker claims only its own workspace's stored sessions, and a `--no-session` one also the
+				// conversations in its memory, which only its client reaches.
+				const primary = record.spec?.session;
+				const owned =
+					request.inMemory === true
+						? record.exclusiveTo !== undefined
+						: await this.options
+								.sessionInWorkspace(
+									record.workspaceName,
+									request.sessionId,
+									primary === undefined || "inMemory" in primary ? undefined : primary.sessionDirectory,
+								)
+								.catch(() => false);
 				const refused = owned
 					? this.claim(record, request.sessionId, request.kind, request.parentSessionId)
 					: { code: "not_found", message: "no such session in the worker's workspace" };
@@ -653,7 +720,8 @@ export class WorkerRegistry {
 			return;
 		}
 		if (record.retention !== undefined) return;
-		const ttlMs = this.options.detachedRuntimeTtlMs();
+		const ttlMs =
+			record.exclusiveTo !== undefined ? EXCLUSIVE_WORKER_RETENTION_MS : this.options.detachedRuntimeTtlMs();
 		record.retention = setTimeout(() => {
 			record.retention = undefined;
 			this.expire(record, ttlMs);
@@ -792,20 +860,31 @@ export class WorkerRegistry {
 		});
 	}
 
+	/** The workspace of the registered worker hosting `sessionId`, whichever it is. */
+	workspaceHosting(sessionId: string): string | undefined {
+		return this.hostOf(sessionId)?.workspaceName;
+	}
+
 	/** Whether a registered worker hosts `sessionId` of `workspaceName`. */
 	hosts(workspaceName: string, sessionId: string): boolean {
 		return this.hostOf(sessionId)?.workspaceName === workspaceName;
 	}
 
-	/** The registered worker hosting `sessionId` of `workspaceName`, and why it hosts it. */
+	/** The registered worker hosting `sessionId` of `workspaceName`, who opened it, and why it hosts the session. */
 	host(
 		workspaceName: string,
 		sessionId: string,
-	): { readonly workerId: string; readonly kind: "primary" | WorkerHostKind } | undefined {
+	):
+		| {
+				readonly workerId: string;
+				readonly origin: ControlWorkerOrigin;
+				readonly kind: "primary" | WorkerHostKind;
+		  }
+		| undefined {
 		const record = this.hostOf(sessionId);
 		const hosted = record?.hosts.get(sessionId);
 		return record && hosted && record.workspaceName === workspaceName
-			? { workerId: record.workerId, kind: hosted.kind }
+			? { workerId: record.workerId, origin: record.origin, kind: hosted.kind }
 			: undefined;
 	}
 

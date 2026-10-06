@@ -735,6 +735,105 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.ConversationOpenTarget": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"kind"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "new"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"sessionDir": {
+							"type": "string",
+							"maxLength": 4096,
+							"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"sessionId"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "session"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"sessionDir": {
+							"type": "string",
+							"maxLength": 4096,
+							"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+						},
+						"cwdOverride": {
+							"type": "string",
+							"maxLength": 4096,
+							"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"source"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "fork"
+						},
+						"source": {
+							"type": "object",
+							"required": [
+								"sessionId"
+							],
+							"properties": {
+								"sessionId": {
+									"type": "string",
+									"maxLength": 512,
+									"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+								},
+								"sessionDir": {
+									"type": "string",
+									"maxLength": 4096,
+									"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+								}
+							},
+							"additionalProperties": false
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"sessionDir": {
+							"type": "string",
+							"maxLength": 4096,
+							"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
 		"Control.EnvironmentStatus": {
 			"type": "object",
 			"required": [
@@ -921,50 +1020,90 @@
 			"additionalProperties": false
 		},
 		"Control.Event.relay_offer": {
-			"type": "object",
-			"required": [
-				"type",
-				"clientKind",
-				"relayId",
-				"relayToken",
-				"workspaceName",
-				"sessionId",
-				"clientNodeId",
-				"connectionId",
-				"streamId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "relay_offer"
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"clientKind",
+						"relayId",
+						"relayToken",
+						"workspaceName",
+						"sessionId",
+						"clientNodeId",
+						"connectionId",
+						"streamId"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "relay_offer"
+						},
+						"clientKind": {
+							"type": "string",
+							"const": "phone"
+						},
+						"relayId": {
+							"type": "string"
+						},
+						"relayToken": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string"
+						},
+						"clientNodeId": {
+							"type": "string"
+						},
+						"connectionId": {
+							"type": "string"
+						},
+						"streamId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
 				},
-				"clientKind": {
-					"type": "string",
-					"const": "phone"
-				},
-				"relayId": {
-					"type": "string"
-				},
-				"relayToken": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"clientNodeId": {
-					"type": "string"
-				},
-				"connectionId": {
-					"type": "string"
-				},
-				"streamId": {
-					"type": "string"
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"clientKind",
+						"relayId",
+						"relayToken",
+						"workspaceName",
+						"sessionId"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "relay_offer"
+						},
+						"clientKind": {
+							"type": "string",
+							"const": "local"
+						},
+						"relayId": {
+							"type": "string"
+						},
+						"relayToken": {
+							"type": "string"
+						},
+						"workspaceName": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						}
+					},
+					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"Control.Event.theme_snapshot": {
 			"type": "object",
@@ -1423,163 +1562,210 @@
 			]
 		},
 		"Control.RelayPreamble": {
-			"type": "object",
-			"required": [
-				"type",
-				"kind",
-				"relayId",
-				"handshake",
-				"authorization",
-				"connectionId",
-				"streamId",
-				"resolvedTarget"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "relay_preamble"
-				},
-				"kind": {
-					"type": "string",
-					"const": "phone"
-				},
-				"relayId": {
-					"type": "string"
-				},
-				"handshake": {
+			"anyOf": [
+				{
 					"type": "object",
 					"required": [
-						"hello",
-						"response",
-						"initialInput"
+						"type",
+						"kind",
+						"relayId",
+						"handshake",
+						"authorization",
+						"connectionId",
+						"streamId",
+						"resolvedTarget"
 					],
 					"properties": {
-						"hello": {
-							"$ref": "#/$defs/RemoteHandshake.ParsedHello"
-						},
-						"response": {
-							"$ref": "#/$defs/RemoteHandshake.Success"
-						},
-						"initialInput": {
-							"type": "array",
-							"items": {
-								"type": "integer",
-								"minimum": 0,
-								"maximum": 255
-							}
-						}
-					},
-					"additionalProperties": false
-				},
-				"authorization": {
-					"type": "object",
-					"required": [
-						"workspaceNames",
-						"workspaces",
-						"clientNodeId",
-						"workspaceName",
-						"workspacePath",
-						"allowedTools",
-						"rpcGrant"
-					],
-					"properties": {
-						"workspaceNames": {
-							"type": "array",
-							"items": {
-								"$ref": "#/$defs/IrohRemoteWorkspaceName"
-							}
-						},
-						"workspaces": {
-							"type": "array",
-							"items": {
-								"$ref": "#/$defs/IrohRemoteWorkspaceStatus"
-							}
-						},
-						"clientNodeId": {
-							"type": "string"
-						},
-						"workspaceName": {
-							"type": "string"
-						},
-						"workspacePath": {
-							"type": "string"
-						},
-						"allowedTools": {
-							"type": "string"
-						},
-						"rpcGrant": {
-							"$ref": "#/$defs/RemoteGrant"
-						},
-						"worktreeId": {
-							"type": "string"
-						},
-						"worktreePath": {
-							"type": "string"
-						},
-						"worktreeSourceRootRelativePath": {
-							"type": "string"
-						}
-					},
-					"additionalProperties": false
-				},
-				"hostNodeId": {
-					"type": "string"
-				},
-				"relayMode": {
-					"$ref": "#/$defs/RemoteHandshake.RelayMode"
-				},
-				"relayUrls": {
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
-				"connectionId": {
-					"type": "string"
-				},
-				"streamId": {
-					"type": "string"
-				},
-				"resolvedTarget": {
-					"type": "object",
-					"required": [
-						"sessionId",
-						"selection",
-						"workspaceName",
-						"workspacePath"
-					],
-					"properties": {
-						"sessionId": {
-							"type": "string"
-						},
-						"selection": {
+						"type": {
 							"type": "string",
-							"enum": [
-								"created",
-								"created_after_missing",
-								"resumed"
-							]
+							"const": "relay_preamble"
 						},
-						"requestedSessionId": {
+						"kind": {
+							"type": "string",
+							"const": "phone"
+						},
+						"relayId": {
 							"type": "string"
 						},
-						"workspaceName": {
+						"handshake": {
+							"type": "object",
+							"required": [
+								"hello",
+								"response",
+								"initialInput"
+							],
+							"properties": {
+								"hello": {
+									"$ref": "#/$defs/RemoteHandshake.ParsedHello"
+								},
+								"response": {
+									"$ref": "#/$defs/RemoteHandshake.Success"
+								},
+								"initialInput": {
+									"type": "array",
+									"items": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 255
+									}
+								}
+							},
+							"additionalProperties": false
+						},
+						"authorization": {
+							"type": "object",
+							"required": [
+								"workspaceNames",
+								"workspaces",
+								"clientNodeId",
+								"workspaceName",
+								"workspacePath",
+								"allowedTools",
+								"rpcGrant"
+							],
+							"properties": {
+								"workspaceNames": {
+									"type": "array",
+									"items": {
+										"$ref": "#/$defs/IrohRemoteWorkspaceName"
+									}
+								},
+								"workspaces": {
+									"type": "array",
+									"items": {
+										"$ref": "#/$defs/IrohRemoteWorkspaceStatus"
+									}
+								},
+								"clientNodeId": {
+									"type": "string"
+								},
+								"workspaceName": {
+									"type": "string"
+								},
+								"workspacePath": {
+									"type": "string"
+								},
+								"allowedTools": {
+									"type": "string"
+								},
+								"rpcGrant": {
+									"$ref": "#/$defs/RemoteGrant"
+								},
+								"worktreeId": {
+									"type": "string"
+								},
+								"worktreePath": {
+									"type": "string"
+								},
+								"worktreeSourceRootRelativePath": {
+									"type": "string"
+								}
+							},
+							"additionalProperties": false
+						},
+						"hostNodeId": {
 							"type": "string"
 						},
-						"workspacePath": {
+						"relayMode": {
+							"$ref": "#/$defs/RemoteHandshake.RelayMode"
+						},
+						"relayUrls": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"connectionId": {
 							"type": "string"
 						},
-						"worktreeId": {
+						"streamId": {
 							"type": "string"
 						},
-						"workingDirectory": {
+						"resolvedTarget": {
+							"type": "object",
+							"required": [
+								"sessionId",
+								"selection",
+								"workspaceName",
+								"workspacePath"
+							],
+							"properties": {
+								"sessionId": {
+									"type": "string"
+								},
+								"selection": {
+									"type": "string",
+									"enum": [
+										"created",
+										"created_after_missing",
+										"resumed"
+									]
+								},
+								"requestedSessionId": {
+									"type": "string"
+								},
+								"workspaceName": {
+									"type": "string"
+								},
+								"workspacePath": {
+									"type": "string"
+								},
+								"worktreeId": {
+									"type": "string"
+								},
+								"workingDirectory": {
+									"type": "string"
+								}
+							},
+							"additionalProperties": false
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"kind",
+						"relayId",
+						"sessionId",
+						"clientKey"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "relay_preamble"
+						},
+						"kind": {
+							"type": "string",
+							"const": "local"
+						},
+						"relayId": {
 							"type": "string"
+						},
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"clientKey": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\u0000\\r\\n]{1,128}$"
+						},
+						"modelScopePatterns": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"apply": {
+							"$ref": "#/$defs/Control.WorkerSessionOptions"
 						}
 					},
 					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"Control.RemotePolicyStatus": {
 			"type": "object",
@@ -1725,6 +1911,9 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.relay_notification_delivery"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.conversation_open"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_ready"
@@ -1971,6 +2160,37 @@
 				},
 				"id": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.conversation_open": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"target",
+				"spawn",
+				"clientKey"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "conversation_open"
+				},
+				"id": {
+					"type": "string"
+				},
+				"target": {
+					"$ref": "#/$defs/Control.ConversationOpenTarget"
+				},
+				"spawn": {
+					"$ref": "#/$defs/Control.WorkerSpawnOptions"
+				},
+				"clientKey": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[^\\u0000\\r\\n]{1,128}$"
 				}
 			},
 			"additionalProperties": false
@@ -2417,6 +2637,10 @@
 					"type": "string",
 					"maxLength": 512,
 					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"inMemory": {
+					"type": "boolean",
+					"const": true
 				}
 			},
 			"additionalProperties": false
@@ -2979,6 +3203,9 @@
 					"$ref": "#/$defs/Control.Response.relay_rpc_result"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.conversation_opened"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.worker_forward_result"
 				},
 				{
@@ -3032,6 +3259,60 @@
 					"type": "array",
 					"items": {
 						"$ref": "#/$defs/Control.ClientStatus"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.conversation_opened": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"relayToken",
+				"sessionId",
+				"selection",
+				"workspaceName",
+				"spawned",
+				"ignoredOptions"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "conversation_opened"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"relayToken": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"selection": {
+					"type": "string",
+					"enum": [
+						"created",
+						"resumed"
+					]
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"spawned": {
+					"type": "boolean"
+				},
+				"ignoredOptions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.WorkerSpawnOnlyOption"
 					}
 				}
 			},
@@ -3567,6 +3848,132 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.WorkerAgentConfig": {
+			"type": "object",
+			"properties": {
+				"trust": {
+					"type": "boolean"
+				},
+				"profile": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+				},
+				"extensions": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 4096,
+						"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+					},
+					"maxItems": 256
+				},
+				"noExtensions": {
+					"type": "boolean"
+				},
+				"skills": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 4096,
+						"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+					},
+					"maxItems": 256
+				},
+				"noSkills": {
+					"type": "boolean"
+				},
+				"promptTemplates": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 4096,
+						"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+					},
+					"maxItems": 256
+				},
+				"noPromptTemplates": {
+					"type": "boolean"
+				},
+				"themes": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 4096,
+						"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+					},
+					"maxItems": 256
+				},
+				"noThemes": {
+					"type": "boolean"
+				},
+				"noContextFiles": {
+					"type": "boolean"
+				},
+				"systemPrompt": {
+					"type": "string"
+				},
+				"appendSystemPrompt": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"maxItems": 64
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 256,
+						"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+					},
+					"maxItems": 256
+				},
+				"noTools": {
+					"type": "boolean"
+				},
+				"noBuiltinTools": {
+					"type": "boolean"
+				},
+				"excludeTools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 256,
+						"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+					},
+					"maxItems": 256
+				},
+				"allowUnlistedExtensionTools": {
+					"type": "boolean"
+				},
+				"lsp": {
+					"type": "boolean"
+				},
+				"apiKey": {
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+				},
+				"flags": {
+					"type": "object",
+					"patternProperties": {
+						"^[^\\u0000\\r\\n=]{1,128}$": {
+							"anyOf": [
+								{
+									"type": "boolean"
+								},
+								{
+									"type": "string"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.WorkerAuthorityLoss": {
 			"type": "string",
 			"enum": [
@@ -3597,90 +4004,285 @@
 				"workspace_unregistered"
 			]
 		},
-		"Control.WorkerSpawnSpec": {
+		"Control.WorkerSessionOptions": {
+			"type": "object",
+			"properties": {
+				"provider": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+				},
+				"model": {
+					"type": "string",
+					"maxLength": 1024,
+					"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
+				},
+				"thinking": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				},
+				"plan": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorkerSpawnOnlyOption": {
+			"type": "string",
+			"enum": [
+				"trust",
+				"profile",
+				"extensions",
+				"noExtensions",
+				"skills",
+				"noSkills",
+				"promptTemplates",
+				"noPromptTemplates",
+				"themes",
+				"noThemes",
+				"noContextFiles",
+				"systemPrompt",
+				"appendSystemPrompt",
+				"tools",
+				"noTools",
+				"noBuiltinTools",
+				"excludeTools",
+				"allowUnlistedExtensionTools",
+				"lsp",
+				"apiKey",
+				"flags"
+			]
+		},
+		"Control.WorkerSpawnOptions": {
 			"type": "object",
 			"required": [
-				"workerId",
-				"origin",
-				"workspace",
-				"session",
+				"env",
+				"config",
 				"cwd",
-				"root",
-				"projectCwd",
-				"toolPolicy",
-				"projectTrusted"
+				"persist",
+				"session"
 			],
 			"properties": {
-				"workerId": {
-					"type": "string"
-				},
-				"origin": {
-					"$ref": "#/$defs/Control.WorkerOrigin"
-				},
-				"workspace": {
+				"env": {
 					"type": "object",
-					"required": [
-						"name",
-						"path",
-						"generation"
-					],
-					"properties": {
-						"name": {
-							"type": "string"
-						},
-						"path": {
-							"type": "string"
-						},
-						"generation": {
-							"type": "integer",
-							"minimum": 0,
-							"maximum": 9007199254740991
+					"patternProperties": {
+						"^[^=\\u0000-\\u001f\\u007f]+$": {
+							"type": "string",
+							"pattern": "^[^\\u0000]*$"
 						}
 					},
 					"additionalProperties": false
 				},
-				"session": {
-					"$ref": "#/$defs/SessionReference"
+				"config": {
+					"$ref": "#/$defs/Control.WorkerAgentConfig"
 				},
 				"cwd": {
-					"type": "string"
+					"type": "string",
+					"maxLength": 4096,
+					"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
 				},
-				"root": {
-					"type": "string"
+				"persist": {
+					"type": "boolean"
 				},
-				"projectCwd": {
-					"type": "string"
+				"session": {
+					"$ref": "#/$defs/Control.WorkerSessionOptions"
 				},
-				"baseRef": {
-					"type": "string"
-				},
-				"toolPolicy": {
+				"modelScopePatterns": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 1024,
+						"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
+					},
+					"maxItems": 256
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorkerSpawnSpec": {
+			"anyOf": [
+				{
 					"type": "object",
 					"required": [
-						"tools",
-						"allowUnlistedExtensionTools"
+						"workerId",
+						"workspace",
+						"cwd",
+						"root",
+						"projectCwd",
+						"origin",
+						"session",
+						"toolPolicy",
+						"projectTrusted"
 					],
 					"properties": {
-						"tools": {
+						"workerId": {
+							"type": "string"
+						},
+						"workspace": {
+							"type": "object",
+							"required": [
+								"name",
+								"path",
+								"generation"
+							],
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"path": {
+									"type": "string"
+								},
+								"generation": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								}
+							},
+							"additionalProperties": false
+						},
+						"cwd": {
+							"type": "string"
+						},
+						"root": {
+							"type": "string"
+						},
+						"projectCwd": {
+							"type": "string"
+						},
+						"baseRef": {
+							"type": "string"
+						},
+						"origin": {
+							"type": "string",
+							"const": "phone"
+						},
+						"session": {
+							"$ref": "#/$defs/SessionReference"
+						},
+						"toolPolicy": {
+							"type": "object",
+							"required": [
+								"tools",
+								"allowUnlistedExtensionTools"
+							],
+							"properties": {
+								"tools": {
+									"type": "array",
+									"items": {
+										"type": "string"
+									}
+								},
+								"allowUnlistedExtensionTools": {
+									"type": "boolean"
+								}
+							},
+							"additionalProperties": false
+						},
+						"projectTrusted": {
+							"type": "boolean"
+						},
+						"profile": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"workerId",
+						"workspace",
+						"cwd",
+						"root",
+						"projectCwd",
+						"origin",
+						"session",
+						"config",
+						"sessionOptions"
+					],
+					"properties": {
+						"workerId": {
+							"type": "string"
+						},
+						"workspace": {
+							"type": "object",
+							"required": [
+								"name",
+								"path",
+								"generation"
+							],
+							"properties": {
+								"name": {
+									"type": "string"
+								},
+								"path": {
+									"type": "string"
+								},
+								"generation": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								}
+							},
+							"additionalProperties": false
+						},
+						"cwd": {
+							"type": "string"
+						},
+						"root": {
+							"type": "string"
+						},
+						"projectCwd": {
+							"type": "string"
+						},
+						"baseRef": {
+							"type": "string"
+						},
+						"origin": {
+							"type": "string",
+							"const": "tui"
+						},
+						"session": {
+							"anyOf": [
+								{
+									"$ref": "#/$defs/SessionReference"
+								},
+								{
+									"type": "object",
+									"required": [
+										"sessionId",
+										"inMemory"
+									],
+									"properties": {
+										"sessionId": {
+											"type": "string",
+											"maxLength": 512,
+											"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+										},
+										"inMemory": {
+											"type": "boolean",
+											"const": true
+										}
+									},
+									"additionalProperties": false
+								}
+							]
+						},
+						"config": {
+							"$ref": "#/$defs/Control.WorkerAgentConfig"
+						},
+						"sessionOptions": {
+							"$ref": "#/$defs/Control.WorkerSessionOptions"
+						},
+						"modelScopePatterns": {
 							"type": "array",
 							"items": {
 								"type": "string"
 							}
-						},
-						"allowUnlistedExtensionTools": {
-							"type": "boolean"
 						}
 					},
 					"additionalProperties": false
-				},
-				"projectTrusted": {
-					"type": "boolean"
-				},
-				"profile": {
-					"type": "string"
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"Control.WorkerState": {
 			"type": "string",

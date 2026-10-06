@@ -472,4 +472,62 @@ describe("worker registry", () => {
 		void registry.fenceWorkspace("ws");
 		expect(() => worker.attach("remote")).toThrow(WorkerOpenError);
 	});
+
+	it("keeps a --no-session worker for its opener: other clients are refused, and it alone claims conversations in its memory", async () => {
+		const { registry, open, launched, start, send } = setup();
+		const env = { PATH: "/bin" };
+		const tuiOpen = (client: string | undefined, exclusive: boolean) =>
+			registry.open(
+				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "m1" },
+				{
+					origin: "tui",
+					...(client === undefined ? {} : { client }),
+					exclusive,
+					env,
+					prepare: async () => ({
+						origin: "tui",
+						workspace: { name: "ws", path: "/ws", generation: 1 },
+						session: { sessionId: "m1", inMemory: true },
+						cwd: "/ws",
+						root: "/ws",
+						projectCwd: "/ws",
+						config: {},
+						sessionOptions: {},
+					}),
+					attach: (worker: LiveWorker, spawned: boolean) => ({ worker, spawned }),
+				},
+			);
+		const opening = tuiOpen("tui-1", true);
+		const exclusive = await start(0);
+		const opened = await opening;
+		expect(opened.spawned).toBe(true);
+		expect(opened.worker.compatibilityKey).toMatch(/^[0-9a-f]{64}$/);
+		// The TUI's environment reaches the launch, and nothing else.
+		expect(launched[0]?.request.env).toEqual(env);
+		expect(await tuiOpen("tui-1", false)).toMatchObject({ spawned: false });
+		await expect(tuiOpen("tui-2", false)).rejects.toMatchObject({ outcome: "conversation_in_use" });
+		await expect(tuiOpen(undefined, false)).rejects.toMatchObject({ outcome: "conversation_in_use" });
+
+		const phone = open("s9");
+		const other = await start(1);
+		await phone;
+		const claim = (worker: typeof exclusive, sessionId: string, inMemory: boolean, parentSessionId: string) =>
+			send(worker, {
+				type: "worker_hosts",
+				sessionId,
+				kind: "moved",
+				parentSessionId,
+				...(inMemory ? { inMemory: true } : {}),
+			});
+		expect(await claim(exclusive, "m2", true, "m1")).toMatchObject({ type: "ok" });
+		// Only a --no-session worker holds conversations in memory; its stored claims are its workspace's.
+		expect(await claim(other, "m3", true, "s9")).toMatchObject({ code: "not_found" });
+		expect(await claim(exclusive, "other-workspace", false, "m1")).toMatchObject({ code: "not_found" });
+		await expect(
+			registry.open(
+				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "m2" },
+				{ origin: "phone", prepare: async () => Promise.reject(new Error("unused")), attach: () => undefined },
+			),
+		).rejects.toMatchObject({ outcome: "conversation_in_use" });
+	});
 });

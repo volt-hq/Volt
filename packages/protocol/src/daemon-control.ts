@@ -7,9 +7,10 @@
  * same `id`) and unsolicited events. A worker hello is admitted with the
  * single-use token its spawn issued, and then carries the worker requests
  * and the events the daemon sends its worker: one worker per connection. A
- * relay hello hands the socket to one phone stream: after the ack the daemon
- * writes one `relay_preamble` line and the rest of the socket is raw relay
- * bytes.
+ * relay hello hands the socket to one end of a relayed client stream. A
+ * worker redeeming a `relay_offer` reads the ack, then one `relay_preamble`
+ * line, then raw relay bytes; a TUI redeeming its `conversation_opened` reads
+ * the ack, then raw relay bytes.
  *
  * Every message is closed except the version-negotiation envelopes (hellos,
  * `hello_ack`, `fatal`), whose unknown fields are ignored so peers of
@@ -21,6 +22,7 @@ import { LogSessionIdSchema, SessionReferenceSchema } from "./entries.ts";
 import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, ResultFrameSchema } from "./frames.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
+import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
 import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
@@ -270,43 +272,224 @@ export type WorkerRelayAuthority = Static<typeof WorkerRelayAuthoritySchema>;
 export const WorkerStopReasonSchema = stringEnum(["retention", "authority", "shutdown", "lease_transferred"]);
 export type WorkerStopReason = Static<typeof WorkerStopReasonSchema>;
 
+/** An absolute path, or a package source: one line, no NUL. */
+const PathSchema = codePoints(1, 4096, SINGLE_LINE);
+const PathListSchema = Type.Array(PathSchema, { maxItems: 256 });
+const NameListSchema = Type.Array(codePoints(1, 256, SINGLE_LINE), { maxItems: 256 });
+
 /**
- * What a worker opens when it starts, sent over its control connection after
- * the hello: the daemon resolved the conversation, its placement, and its
- * policy; the worker only opens the stored log and holds its lock.
+ * Spawn-only options: what a worker builds every conversation it hosts with,
+ * from the CLI arguments of the TUI that opened it. Each field is the `Args`
+ * field of the same name; local paths are absolute (the opener resolved
+ * them), others are package sources. A worker keeps them for its lifetime:
+ * an open that attaches to a live worker applies none of them, and hears
+ * which of its own differ (`conversation_opened.ignoredOptions`).
  */
-export const WorkerSpawnSpecSchema = Type.Object(
+export const WorkerAgentConfigSchema = Type.Object(
 	{
-		workerId: Type.String(),
-		origin: ControlWorkerOriginSchema,
-		workspace: Type.Object(
-			{
-				name: Type.String(),
-				path: Type.String(),
-				generation: NonNegativeIntegerSchema,
-			},
-			closed,
+		/**
+		 * The project trust the opener decided (`--approve`/`--no-approve`, or
+		 * its saved or prompted decision) for the project of the conversation
+		 * it opens; the worker's conversations elsewhere use their saved decision.
+		 */
+		trust: Type.Optional(Type.Boolean()),
+		/** The settings profile. */
+		profile: Type.Optional(codePoints(1, 256, SINGLE_LINE)),
+		/** `-e`. */
+		extensions: Type.Optional(PathListSchema),
+		noExtensions: Type.Optional(Type.Boolean()),
+		skills: Type.Optional(PathListSchema),
+		noSkills: Type.Optional(Type.Boolean()),
+		promptTemplates: Type.Optional(PathListSchema),
+		noPromptTemplates: Type.Optional(Type.Boolean()),
+		themes: Type.Optional(PathListSchema),
+		noThemes: Type.Optional(Type.Boolean()),
+		noContextFiles: Type.Optional(Type.Boolean()),
+		systemPrompt: Type.Optional(Type.String()),
+		appendSystemPrompt: Type.Optional(Type.Array(Type.String(), { maxItems: 64 })),
+		tools: Type.Optional(NameListSchema),
+		noTools: Type.Optional(Type.Boolean()),
+		noBuiltinTools: Type.Optional(Type.Boolean()),
+		excludeTools: Type.Optional(NameListSchema),
+		allowUnlistedExtensionTools: Type.Optional(Type.Boolean()),
+		lsp: Type.Optional(Type.Boolean()),
+		/** `--api-key`: a runtime key for the session model's provider. Never logged. */
+		apiKey: Type.Optional(codePoints(1, 4096, SINGLE_LINE)),
+		/** Extension flag values (`registerFlag`), by flag name. */
+		flags: Type.Optional(
+			Type.Record(
+				Type.String({ pattern: String.raw`^[^\u0000\r\n=]{1,128}$` }),
+				Type.Union([Type.Boolean(), Type.String()]),
+				closed,
+			),
 		),
-		/** The stored log the worker opens first, its primary. */
-		session: SessionReferenceSchema,
-		/** The conversation's working directory. */
-		cwd: Type.String(),
-		/** The root the working directory stays inside: the workspace, or its worktree checkout. */
-		root: Type.String(),
-		/** Where project resources are read from; the root by default. */
-		projectCwd: Type.String(),
-		/** The managed worktree's base ref, for the Git context. */
-		baseRef: Type.Optional(Type.String()),
-		/** Fixed for the worker's lifetime (D9). */
-		toolPolicy: Type.Object(
-			{ tools: Type.Array(Type.String()), allowUnlistedExtensionTools: Type.Boolean() },
-			closed,
-		),
-		projectTrusted: Type.Boolean(),
-		profile: Type.Optional(Type.String()),
 	},
 	closed,
 );
+export type WorkerAgentConfig = Static<typeof WorkerAgentConfigSchema>;
+
+/** The spawn-only options, by name: what `conversation_opened.ignoredOptions` names. */
+export const WORKER_SPAWN_ONLY_OPTIONS = [
+	"trust",
+	"profile",
+	"extensions",
+	"noExtensions",
+	"skills",
+	"noSkills",
+	"promptTemplates",
+	"noPromptTemplates",
+	"themes",
+	"noThemes",
+	"noContextFiles",
+	"systemPrompt",
+	"appendSystemPrompt",
+	"tools",
+	"noTools",
+	"noBuiltinTools",
+	"excludeTools",
+	"allowUnlistedExtensionTools",
+	"lsp",
+	"apiKey",
+	"flags",
+] as const satisfies readonly (keyof WorkerAgentConfig)[];
+export const WorkerSpawnOnlyOptionSchema = stringEnum(WORKER_SPAWN_ONLY_OPTIONS);
+export type WorkerSpawnOnlyOption = Static<typeof WorkerSpawnOnlyOptionSchema>;
+
+/**
+ * Session-level options: what an open asks of its conversation (`--provider`,
+ * `--model`, `--thinking`, `--plan`). A spawn opens its first conversation
+ * with them; an open that attaches to a live worker has them applied once its
+ * client attached, as session commands are.
+ */
+export const WorkerSessionOptionsSchema = Type.Object(
+	{
+		provider: Type.Optional(codePoints(1, 256, SINGLE_LINE)),
+		/** A model pattern, resolved where the conversation runs; `<pattern>:<thinking>` names a thinking level too. */
+		model: Type.Optional(codePoints(1, 1024, SINGLE_LINE)),
+		thinking: Type.Optional(RpcThinkingLevelSchema),
+		plan: Type.Optional(Type.Boolean()),
+	},
+	closed,
+);
+export type WorkerSessionOptions = Static<typeof WorkerSessionOptionsSchema>;
+
+/**
+ * What a TUI's open spawns a worker with (`conversation_open`), from its CLI
+ * arguments. The worker-level part is the opener's environment and its
+ * spawn-only `config`: with the opener's kind, the worker's compatibility
+ * key. The rest is the conversation's or the client's own: the working
+ * directory, `persist`, the session-level options, and the model scope.
+ */
+export const WorkerSpawnOptionsSchema = Type.Object(
+	{
+		/** The opener's environment, which a worker it spawns runs with. Never logged, and never leaves the local socket. */
+		env: Type.Record(
+			// A name is one printable line (the worker logs names); a value carries no NUL.
+			Type.String({ pattern: String.raw`^[^=\u0000-\u001f\u007f]+$` }),
+			Type.String({ pattern: String.raw`^[^\u0000]*$` }),
+			closed,
+		),
+		config: WorkerAgentConfigSchema,
+		/** The opener's working directory: a new or forked conversation's, and where a session directory defaults from. */
+		cwd: PathSchema,
+		/** False for `--no-session`: the conversation lives in the worker's memory only (D15). */
+		persist: Type.Boolean(),
+		session: WorkerSessionOptionsSchema,
+		/** `--models`: the opener's model scope patterns, which its client's profile switches scope by. */
+		modelScopePatterns: Type.Optional(Type.Array(codePoints(1, 1024, SINGLE_LINE), { maxItems: 256 })),
+	},
+	closed,
+);
+export type WorkerSpawnOptions = Static<typeof WorkerSpawnOptionsSchema>;
+
+/** A stored session: its id, and the session directory it is stored in (the opener's default for its cwd otherwise). */
+const storedSession = { sessionId: LogSessionIdSchema, sessionDir: Type.Optional(PathSchema) };
+
+/** What a TUI opens: a new conversation, one a worker hosts or the store keeps, or a copy of a stored one's branch. */
+export const ConversationOpenTargetSchema = Type.Union([
+	Type.Object({ kind: Type.Literal("new"), ...storedSession, sessionId: Type.Optional(LogSessionIdSchema) }, closed),
+	Type.Object(
+		{
+			kind: Type.Literal("session"),
+			...storedSession,
+			/** Run the stored conversation in this directory instead of its own, which the store keeps. */
+			cwdOverride: Type.Optional(PathSchema),
+		},
+		closed,
+	),
+	Type.Object(
+		{
+			kind: Type.Literal("fork"),
+			source: Type.Object(storedSession, closed),
+			sessionId: Type.Optional(LogSessionIdSchema),
+			sessionDir: Type.Optional(PathSchema),
+		},
+		closed,
+	),
+]);
+export type ConversationOpenTarget = Static<typeof ConversationOpenTargetSchema>;
+
+const workerSpawnSpecCommon = {
+	workerId: Type.String(),
+	workspace: Type.Object(
+		{
+			name: Type.String(),
+			path: Type.String(),
+			generation: NonNegativeIntegerSchema,
+		},
+		closed,
+	),
+	/** The conversation's working directory. */
+	cwd: Type.String(),
+	/** The root the working directory stays inside: the workspace, or its worktree checkout. */
+	root: Type.String(),
+	/** Where project resources are read from; the root by default. */
+	projectCwd: Type.String(),
+	/** The managed worktree's base ref, for the Git context. */
+	baseRef: Type.Optional(Type.String()),
+};
+
+/**
+ * What a worker opens when it starts, sent over its control connection after
+ * the hello: the daemon resolved the conversation, its placement, and its
+ * policy; the worker only opens the log (stored, or for a TUI's `--no-session`
+ * in memory) and holds its lock. A phone's open fixes the worker's tool
+ * policy; a TUI's carries its spawn-only and session-level options (its
+ * environment is the worker process's own).
+ */
+export const WorkerSpawnSpecSchema = Type.Union([
+	Type.Object(
+		{
+			...workerSpawnSpecCommon,
+			origin: Type.Literal("phone"),
+			/** The stored log the worker opens first, its primary. */
+			session: SessionReferenceSchema,
+			/** Fixed for the worker's lifetime (D9). */
+			toolPolicy: Type.Object(
+				{ tools: Type.Array(Type.String()), allowUnlistedExtensionTools: Type.Boolean() },
+				closed,
+			),
+			projectTrusted: Type.Boolean(),
+			profile: Type.Optional(Type.String()),
+		},
+		closed,
+	),
+	Type.Object(
+		{
+			...workerSpawnSpecCommon,
+			origin: Type.Literal("tui"),
+			/** The stored log the worker opens first (in `cwd`), or the id of the in-memory one it creates (D15). */
+			session: Type.Union([
+				SessionReferenceSchema,
+				Type.Object({ sessionId: LogSessionIdSchema, inMemory: Type.Literal(true) }, closed),
+			]),
+			config: WorkerAgentConfigSchema,
+			sessionOptions: WorkerSessionOptionsSchema,
+			modelScopePatterns: Type.Optional(Type.Array(Type.String())),
+		},
+		closed,
+	),
+]);
 export type WorkerSpawnSpec = Static<typeof WorkerSpawnSpecSchema>;
 
 /** How voltd resolved the environment its runtimes and tools use. */
@@ -458,7 +641,7 @@ export const ControlFatalSchema = Type.Object(
 );
 export type ControlFatal = Static<typeof ControlFatalSchema>;
 
-export const ControlRelayPreambleSchema = Type.Object(
+const PhoneRelayPreambleSchema = Type.Object(
 	{
 		type: Type.Literal("relay_preamble"),
 		/** The relayed client: a paired phone. */
@@ -473,26 +656,26 @@ export const ControlRelayPreambleSchema = Type.Object(
 			},
 			closed,
 		),
-		/** Everything the TUI needs to serve the stream. */
+		/** Everything the worker needs to serve the stream. */
 		authorization: Type.Object(
 			{
 				...IrohRemoteWorkspaceMetadataSnapshotSchema.properties,
 				clientNodeId: Type.String(),
 				workspaceName: Type.String(),
 				workspacePath: Type.String(),
-				/** Headless agent tool grant, for visibility; TUI-owned sessions keep their full local tools. */
+				/** Headless agent tool grant, for visibility; a TUI-opened worker keeps its own tools (D9). */
 				allowedTools: Type.String(),
 				rpcGrant: RemoteGrantSchema,
 				/** Present when the conversation is bound to a daemon-managed worktree. */
 				worktreeId: Type.Optional(Type.String()),
-				/** Worktree checkout path: the TUI sanitizes with it as the root. */
+				/** Worktree checkout path: the worker sanitizes with it as the root. */
 				worktreePath: Type.Optional(Type.String()),
 				/** Registered-workspace-relative git source root for nested repository worktrees. */
 				worktreeSourceRootRelativePath: Type.Optional(Type.String()),
 			},
 			closed,
 		),
-		/** The daemon's Iroh node id; the TUI writes it into the handshake response for the phone's host check. */
+		/** The daemon's Iroh node id; the worker writes it into the handshake response for the phone's host check. */
 		hostNodeId: Type.Optional(Type.String()),
 		relayMode: Type.Optional(IrohRemoteRelayModeSchema),
 		relayUrls: Type.Optional(Type.Array(Type.String())),
@@ -514,7 +697,35 @@ export const ControlRelayPreambleSchema = Type.Object(
 	},
 	closed,
 );
+
+/**
+ * A local TUI's stream (`conversation_open`): the daemon mints it only for a
+ * TUI control connection's open, and the worker serves it on the local
+ * profile as that TUI's client.
+ */
+const LocalRelayPreambleSchema = Type.Object(
+	{
+		type: Type.Literal("relay_preamble"),
+		/** The relayed client: a TUI on this host. */
+		kind: Type.Literal("local"),
+		relayId: Type.String(),
+		/** The conversation the TUI opened. */
+		sessionId: LogSessionIdSchema,
+		/** The TUI process across its connections: its retried intents answer as they did. */
+		clientKey: codePoints(1, 128, SINGLE_LINE),
+		/** `--models`: the TUI's model scope patterns. */
+		modelScopePatterns: Type.Optional(Type.Array(Type.String())),
+		/** The session-level options of an open that attached to a live worker: applied once the TUI attached. */
+		apply: Type.Optional(WorkerSessionOptionsSchema),
+	},
+	closed,
+);
+
+/** The first line a worker reads on a relay it redeemed: who the client is, and how to serve it. */
+export const ControlRelayPreambleSchema = Type.Union([PhoneRelayPreambleSchema, LocalRelayPreambleSchema]);
 export type RelayPreamble = Static<typeof ControlRelayPreambleSchema>;
+export type PhoneRelayPreamble = Extract<RelayPreamble, { kind: "phone" }>;
+export type LocalRelayPreamble = Extract<RelayPreamble, { kind: "local" }>;
 
 // ============================================================================
 // Requests (client -> daemon)
@@ -639,6 +850,19 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		sessionId: Type.String(),
 		notification: IrohRemotePushNotificationSchema,
 	}),
+	/**
+	 * TUI: open a conversation in a worker (Phase 7 plan §1). The daemon
+	 * resolves its workspace from the conversation's working directory
+	 * (registering that directory when no workspace holds it, D17), then
+	 * attaches the TUI to the live worker hosting it or spawns one with
+	 * `spawn`. Answered by `conversation_opened`.
+	 */
+	conversation_open: withId("conversation_open", {
+		target: ConversationOpenTargetSchema,
+		spawn: WorkerSpawnOptionsSchema,
+		/** The TUI process across its connections; a `--no-session` conversation admits only the client that opened it. */
+		clientKey: codePoints(1, 128, SINGLE_LINE),
+	}),
 	/** Worker: its primary conversation is open and its log locked; offers may follow. */
 	worker_ready: withId("worker_ready", { sessionIds: Type.Array(LogSessionIdSchema, { maxItems: 1 }) }),
 	/** Worker: its primary could not open; the waiting opens fail with this outcome. */
@@ -655,6 +879,8 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		kind: WorkerHostKindSchema,
 		/** The hosted conversation the claimed one belongs to: a child's parent, a sibling's source, a move's source. */
 		parentSessionId: LogSessionIdSchema,
+		/** The conversation lives in the worker's memory, in no store: only a `--no-session` worker hosts one. */
+		inMemory: Type.Optional(Type.Literal(true)),
 	}),
 	/** Worker: it closed a conversation it claimed, and released its log. */
 	worker_released: withId("worker_released", { sessionId: LogSessionIdSchema }),
@@ -739,6 +965,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.viewer_abort,
 	CONTROL_REQUEST_SCHEMAS.relay_rpc,
 	CONTROL_REQUEST_SCHEMAS.relay_notification_delivery,
+	CONTROL_REQUEST_SCHEMAS.conversation_open,
 	CONTROL_REQUEST_SCHEMAS.worker_ready,
 	CONTROL_REQUEST_SCHEMAS.worker_open_failed,
 	CONTROL_REQUEST_SCHEMAS.worker_activity,
@@ -823,6 +1050,23 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	}),
 	pair_started: withId("pair_started", { requestId: Type.String() }),
 	relay_rpc_result: withId("relay_rpc_result", { frame: ControlRelayOutcomeSchema }),
+	/**
+	 * The conversation a TUI opened: dial a relay hello with `relayId` and
+	 * `relayToken` (single-use, expiring after 10 seconds) within that time to
+	 * reach it, and speak protocol 1 on the local profile once it is acked.
+	 */
+	conversation_opened: withId("conversation_opened", {
+		relayId: Type.String(),
+		relayToken: Type.String(),
+		sessionId: LogSessionIdSchema,
+		/** `created` for a new or forked conversation; `resumed` otherwise. */
+		selection: stringEnum(["created", "resumed"]),
+		workspaceName: Type.String(),
+		/** Whether this open spawned the worker; otherwise it attached to a live one, which keeps its spawn-only options. */
+		spawned: Type.Boolean(),
+		/** The open's spawn-only options that differ from the live worker's, which kept its own. */
+		ignoredOptions: Type.Array(WorkerSpawnOnlyOptionSchema),
+	}),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
 	/** The checkout a worker restored is pinned until it releases `pinId`. */
@@ -848,6 +1092,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
 	CONTROL_RESPONSE_SCHEMAS.relay_rpc_result,
+	CONTROL_RESPONSE_SCHEMAS.conversation_opened,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,
@@ -863,18 +1108,30 @@ const event = <T extends string, P extends Record<string, TSchema>>(type: T, pro
 	Type.Object({ type: Type.Literal(type), ...properties }, closed);
 
 export const CONTROL_EVENT_SCHEMAS = {
-	relay_offer: event("relay_offer", {
-		/** The relayed client: a paired phone. */
-		clientKind: Type.Literal("phone"),
-		relayId: Type.String(),
-		/** Single-use; expires after 10 seconds. */
-		relayToken: Type.String(),
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		clientNodeId: Type.String(),
-		connectionId: Type.String(),
-		streamId: Type.String(),
-	}),
+	/** The redeemed relay's preamble is of the offer's client kind. */
+	relay_offer: Type.Union([
+		event("relay_offer", {
+			/** The relayed client: a paired phone. */
+			clientKind: Type.Literal("phone"),
+			relayId: Type.String(),
+			/** Single-use; expires after 10 seconds. */
+			relayToken: Type.String(),
+			workspaceName: Type.String(),
+			sessionId: Type.String(),
+			clientNodeId: Type.String(),
+			connectionId: Type.String(),
+			streamId: Type.String(),
+		}),
+		event("relay_offer", {
+			/** The relayed client: a TUI on this host, to a worker only. */
+			clientKind: Type.Literal("local"),
+			relayId: Type.String(),
+			/** Single-use; expires after 10 seconds. */
+			relayToken: Type.String(),
+			workspaceName: Type.String(),
+			sessionId: LogSessionIdSchema,
+		}),
+	]),
 	relay_closed: event("relay_closed", { relayId: Type.String(), reason: ControlRelayCloseReasonSchema }),
 	viewer_end: event("viewer_end", {
 		viewerFeedId: Type.String(),
