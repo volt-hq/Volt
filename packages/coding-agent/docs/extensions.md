@@ -1357,6 +1357,8 @@ Options:
 - `replaceInstructions`: If true, `customInstructions` replaces the default prompt instead of being appended
 - `label`: Label to attach to the branch summary entry (or target entry if not summarizing)
 
+Navigating to a user message moves to before it; its text goes into the invoking client's editor when the editor is empty.
+
 ### ctx.switchSession(sessionRef, options?)
 
 Switch to a persisted session by `SessionReference`:
@@ -1375,6 +1377,8 @@ if (result.cancelled) {
 
 Options:
 - `withSession`: run post-switch work against a fresh context of the session switched to. Do not use captured old `volt` / command `ctx`; see [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
+
+When the session's working directory no longer exists, the invoking client is asked whether to continue in the current one; declining cancels the switch. A session of a daemon-managed worktree whose checkout is gone is never opened in another directory: the switch fails.
 
 `SessionManager.list()` and `listAll()` read materialized SQLite summaries; `search()` scans extracted searchable text one session at a time. All return `SessionInfo` objects whose `ref` field can be passed directly to `ctx.switchSession()`:
 

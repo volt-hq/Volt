@@ -1,3 +1,4 @@
+import type { LogMessage, ProjectedEntry } from "@hansjm10/volt-protocol";
 import {
 	type Component,
 	Container,
@@ -14,10 +15,24 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
-import type { SessionTreeNode } from "../../../core/session-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { formatKeyText, keyHint } from "./keybinding-hints.ts";
+
+/** A node of a conversation's entry tree: an entry the client holds, the entries after it, and its label. */
+export interface EntryTreeNode {
+	entry: ProjectedEntry;
+	children: EntryTreeNode[];
+	/** The entry's label, if any. */
+	label?: string;
+	/** When the entry's label last changed. */
+	labelTimestamp?: string;
+}
+
+/** The message a message entry holds; undefined for other entries, or when its payload is not projected. */
+function messageOf(entry: ProjectedEntry): LogMessage | undefined {
+	return entry.type === "message" ? entry.payload?.message : undefined;
+}
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
 interface GutterInfo {
@@ -27,7 +42,7 @@ interface GutterInfo {
 
 /** Flattened tree node for navigation */
 interface FlatNode {
-	node: SessionTreeNode;
+	node: EntryTreeNode;
 	/** Indentation level (each level = 3 chars) */
 	indent: number;
 	/** Whether to show connector (├─ or └─) - true if parent has multiple children */
@@ -127,7 +142,7 @@ class TreeList implements Component {
 	public onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
 
 	constructor(
-		tree: SessionTreeNode[],
+		tree: EntryTreeNode[],
 		currentLeafId: string | null,
 		maxVisibleLines: number,
 		initialSelectedId?: string,
@@ -198,7 +213,7 @@ class TreeList implements Component {
 		}
 	}
 
-	private flattenTree(roots: SessionTreeNode[]): FlatNode[] {
+	private flattenTree(roots: EntryTreeNode[]): FlatNode[] {
 		const result: FlatNode[] = [];
 		this.toolCallMap.clear();
 
@@ -208,17 +223,17 @@ class TreeList implements Component {
 		// - At indent 2+: stay flat for single-child chains, +1 only if parent branches
 
 		// Stack items: [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild]
-		type StackItem = [SessionTreeNode, number, boolean, boolean, boolean, GutterInfo[], boolean];
+		type StackItem = [EntryTreeNode, number, boolean, boolean, boolean, GutterInfo[], boolean];
 		const stack: StackItem[] = [];
 
 		// Determine which subtrees contain the active leaf (to sort current branch first)
 		// Use iterative post-order traversal to avoid stack overflow
-		const containsActive = new Map<SessionTreeNode, boolean>();
+		const containsActive = new Map<EntryTreeNode, boolean>();
 		const leafId = this.currentLeafId;
 		{
 			// Build list in pre-order, then process in reverse for post-order effect
-			const allNodes: SessionTreeNode[] = [];
-			const preOrderStack: SessionTreeNode[] = [...roots];
+			const allNodes: EntryTreeNode[] = [];
+			const preOrderStack: EntryTreeNode[] = [...roots];
 			while (preOrderStack.length > 0) {
 				const node = preOrderStack.pop()!;
 				allNodes.push(node);
@@ -253,9 +268,9 @@ class TreeList implements Component {
 			const [node, indent, justBranched, showConnector, isLast, gutters, isVirtualRootChild] = stack.pop()!;
 
 			// Extract tool calls from assistant messages for later lookup
-			const entry = node.entry;
-			if (entry.type === "message" && entry.message.role === "assistant") {
-				const content = (entry.message as { content?: unknown }).content;
+			const message = messageOf(node.entry);
+			if (message?.role === "assistant") {
+				const content = (message as { content?: unknown }).content;
 				if (Array.isArray(content)) {
 					for (const block of content) {
 						if (typeof block === "object" && block !== null && "type" in block && block.type === "toolCall") {
@@ -273,8 +288,8 @@ class TreeList implements Component {
 
 			// Order children so the branch containing the active leaf comes first
 			const orderedChildren = (() => {
-				const prioritized: SessionTreeNode[] = [];
-				const rest: SessionTreeNode[] = [];
+				const prioritized: EntryTreeNode[] = [];
+				const rest: EntryTreeNode[] = [];
 				for (const child of children) {
 					if (containsActive.get(child)) {
 						prioritized.push(child);
@@ -339,12 +354,13 @@ class TreeList implements Component {
 
 		this.filteredNodes = this.flatNodes.filter((flatNode) => {
 			const entry = flatNode.node.entry;
+			const message = messageOf(entry);
 			const isCurrentLeaf = entry.id === this.currentLeafId;
 
 			// Skip assistant messages with only tool calls (no text) unless error/aborted
 			// Always show current leaf so active position is visible
-			if (entry.type === "message" && entry.message.role === "assistant" && !isCurrentLeaf) {
-				const msg = entry.message as { stopReason?: string; content?: unknown };
+			if (message?.role === "assistant" && !isCurrentLeaf) {
+				const msg = message as { stopReason?: string; content?: unknown };
 				const hasText = this.hasTextContent(msg.content);
 				const isErrorOrAborted = msg.stopReason && msg.stopReason !== "stop" && msg.stopReason !== "toolUse";
 				// Only hide if no text AND not an error/aborted message
@@ -367,11 +383,11 @@ class TreeList implements Component {
 			switch (this.filterMode) {
 				case "user-only":
 					// Just user messages
-					passesFilter = entry.type === "message" && entry.message.role === "user";
+					passesFilter = message?.role === "user";
 					break;
 				case "no-tools":
 					// Default minus tool results
-					passesFilter = !isSettingsEntry && !(entry.type === "message" && entry.message.role === "toolResult");
+					passesFilter = !isSettingsEntry && message?.role !== "toolResult";
 					break;
 				case "labeled-only":
 					// Just labeled entries
@@ -559,7 +575,7 @@ class TreeList implements Component {
 	}
 
 	/** Get searchable text content from a node */
-	private getSearchableText(node: SessionTreeNode): string {
+	private getSearchableText(node: EntryTreeNode): string {
 		const entry = node.entry;
 		const parts: string[] = [];
 
@@ -569,7 +585,8 @@ class TreeList implements Component {
 
 		switch (entry.type) {
 			case "message": {
-				const msg = entry.message;
+				const msg = entry.payload?.message;
+				if (!msg) break;
 				parts.push(msg.role);
 				if ("content" in msg && msg.content) {
 					parts.push(this.extractContent(msg.content));
@@ -581,11 +598,13 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
-				parts.push(entry.customType);
-				if (typeof entry.content === "string") {
-					parts.push(entry.content);
+				const payload = entry.payload;
+				if (!payload) break;
+				parts.push(payload.customType);
+				if (typeof payload.content === "string") {
+					parts.push(payload.content);
 				} else {
-					parts.push(this.extractContent(entry.content));
+					parts.push(this.extractContent(payload.content));
 				}
 				break;
 			}
@@ -593,26 +612,26 @@ class TreeList implements Component {
 				parts.push("compaction");
 				break;
 			case "branch_summary":
-				parts.push("branch summary", entry.summary);
+				parts.push("branch summary", entry.payload?.summary ?? "");
 				break;
 			case "session_info":
 				parts.push("title");
-				if (entry.name) parts.push(entry.name);
+				if (entry.payload?.name) parts.push(entry.payload.name);
 				break;
 			case "model_change":
-				parts.push("model", entry.modelId);
+				parts.push("model", entry.payload?.modelId ?? "");
 				break;
 			case "thinking_level_change":
-				parts.push("thinking", entry.thinkingLevel);
+				parts.push("thinking", entry.payload?.thinkingLevel ?? "");
 				break;
 			case "fast_mode_change":
-				parts.push("fast mode", entry.enabled ? "enabled" : "disabled");
+				parts.push("fast mode", entry.payload?.enabled ? "enabled" : "disabled");
 				break;
 			case "custom":
-				parts.push("custom", entry.customType);
+				parts.push("custom", entry.payload?.customType ?? "");
 				break;
 			case "label":
-				parts.push("label", entry.label ?? "");
+				parts.push("label", entry.payload?.label ?? "");
 				break;
 		}
 
@@ -625,7 +644,7 @@ class TreeList implements Component {
 		return this.searchQuery;
 	}
 
-	getSelectedNode(): SessionTreeNode | undefined {
+	getSelectedNode(): EntryTreeNode | undefined {
 		return this.filteredNodes[this.selectedIndex]?.node;
 	}
 
@@ -765,7 +784,7 @@ class TreeList implements Component {
 		return createRenderFrame(lines);
 	}
 
-	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
+	private getEntryDisplayText(node: EntryTreeNode, isSelected: boolean): string {
 		const entry = node.entry;
 		let result: string;
 
@@ -773,7 +792,11 @@ class TreeList implements Component {
 
 		switch (entry.type) {
 			case "message": {
-				const msg = entry.message;
+				const msg = entry.payload?.message;
+				if (!msg) {
+					result = theme.fg("dim", "[message]");
+					break;
+				}
 				const role = msg.role;
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
@@ -809,44 +832,49 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
+				const payload = entry.payload;
 				const content =
-					typeof entry.content === "string"
-						? entry.content
-						: entry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map((c) => c.text)
-								.join("");
-				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
+					payload === undefined
+						? ""
+						: typeof payload.content === "string"
+							? payload.content
+							: payload.content
+									.filter((c): c is { type: "text"; text: string } => c.type === "text")
+									.map((c) => c.text)
+									.join("");
+				result = theme.fg("customMessageLabel", `[${payload?.customType ?? "custom"}]: `) + normalize(content);
 				break;
 			}
 			case "compaction": {
-				const tokens = Math.round(entry.tokensBefore / 1000);
+				const tokens = Math.round((entry.payload?.tokensBefore ?? 0) / 1000);
 				result = theme.fg("borderAccent", `[compaction: ${tokens}k tokens]`);
 				break;
 			}
 			case "branch_summary":
-				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.summary);
+				result = theme.fg("warning", `[branch summary]: `) + normalize(entry.payload?.summary ?? "");
 				break;
 			case "model_change":
-				result = theme.fg("dim", `[model: ${entry.modelId}]`);
+				result = theme.fg("dim", `[model: ${entry.payload?.modelId ?? ""}]`);
 				break;
 			case "thinking_level_change":
-				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel}]`);
+				result = theme.fg("dim", `[thinking: ${entry.payload?.thinkingLevel ?? ""}]`);
 				break;
 			case "fast_mode_change":
-				result = theme.fg("dim", `[fast mode: ${entry.enabled ? "enabled" : "disabled"}]`);
+				result = theme.fg("dim", `[fast mode: ${entry.payload?.enabled ? "enabled" : "disabled"}]`);
 				break;
 			case "custom":
-				result = theme.fg("dim", `[custom: ${entry.customType}]`);
+				result = theme.fg("dim", `[custom: ${entry.payload?.customType ?? ""}]`);
 				break;
 			case "label":
-				result = theme.fg("dim", `[label: ${entry.label ?? "(cleared)"}]`);
+				result = theme.fg("dim", `[label: ${entry.payload?.label ?? "(cleared)"}]`);
 				break;
-			case "session_info":
-				result = entry.name
-					? [theme.fg("dim", "[title: "), theme.fg("dim", entry.name), theme.fg("dim", "]")].join("")
+			case "session_info": {
+				const name = entry.payload?.name;
+				result = name
+					? [theme.fg("dim", "[title: "), theme.fg("dim", name), theme.fg("dim", "]")].join("")
 					: [theme.fg("dim", "[title: "), theme.italic(theme.fg("dim", "empty")), theme.fg("dim", "]")].join("");
 				break;
+			}
 			default:
 				result = "";
 		}
@@ -1318,7 +1346,7 @@ export class TreeSelectorComponent extends Container implements Focusable {
 	}
 
 	constructor(
-		tree: SessionTreeNode[],
+		tree: EntryTreeNode[],
 		currentLeafId: string | null,
 		terminalHeight: number,
 		onSelect: (entryId: string) => void,

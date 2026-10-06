@@ -1,15 +1,10 @@
 import { stripVTControlCharacters } from "node:util";
+import type { ProjectedEntry } from "@hansjm10/volt-protocol";
 import { setKeybindings, visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, beforeEach, describe, expect, test } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import type {
-	ModelChangeEntry,
-	SessionEntry,
-	SessionMessageEntry,
-	SessionTreeNode,
-} from "../src/core/session-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
+import { type EntryTreeNode, TreeSelectorComponent } from "../src/modes/interactive/components/tree-selector.ts";
 
 beforeAll(() => {
 	initTheme("dark");
@@ -20,98 +15,97 @@ beforeEach(() => {
 	setKeybindings(new KeybindingsManager());
 });
 
+type MessageEntry = Extract<ProjectedEntry, { type: "message" }>;
+
+let ordinal = 0;
+
+/** The envelope of a projected entry: its ordinal, id, parent, and time. */
+function envelope(id: string, parentId: string | null) {
+	return { ordinal: ++ordinal, id, parentId, timestamp: new Date().toISOString() };
+}
+
+const usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
 // Helper to create a user message entry
-function userMessage(id: string, parentId: string | null, content: string): SessionMessageEntry {
+function userMessage(id: string, parentId: string | null, content: string): MessageEntry {
 	return {
+		...envelope(id, parentId),
 		type: "message",
-		id,
-		parentId,
-		timestamp: new Date().toISOString(),
-		message: { role: "user", content, timestamp: Date.now() },
+		payload: { message: { role: "user", content, timestamp: Date.now() } },
 	};
 }
 
 // Helper to create an assistant message entry
-function assistantMessage(id: string, parentId: string | null, text: string): SessionMessageEntry {
+function assistantMessage(id: string, parentId: string | null, text: string): MessageEntry {
 	return {
+		...envelope(id, parentId),
 		type: "message",
-		id,
-		parentId,
-		timestamp: new Date().toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "text", text }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-sonnet-4",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		payload: {
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4",
+				usage,
+				stopReason: "stop",
+				timestamp: Date.now(),
 			},
-			stopReason: "stop",
-			timestamp: Date.now(),
 		},
 	};
 }
 
 // Helper to create a tool-call-only assistant message (filtered out in default mode)
-function toolCallOnlyAssistant(id: string, parentId: string | null): SessionMessageEntry {
+function toolCallOnlyAssistant(id: string, parentId: string | null): MessageEntry {
 	return {
+		...envelope(id, parentId),
 		type: "message",
-		id,
-		parentId,
-		timestamp: new Date().toISOString(),
-		message: {
-			role: "assistant",
-			content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: { path: "test.ts" } }],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-sonnet-4",
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		payload: {
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", id: `tc-${id}`, name: "read", arguments: { path: "test.ts" } }],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude-sonnet-4",
+				usage,
+				stopReason: "toolUse",
+				timestamp: Date.now(),
 			},
-			stopReason: "toolUse",
-			timestamp: Date.now(),
 		},
 	};
 }
 
 // Helper to create a model_change entry
-function modelChange(id: string, parentId: string | null): ModelChangeEntry {
+function modelChange(id: string, parentId: string | null): ProjectedEntry {
 	return {
+		...envelope(id, parentId),
 		type: "model_change",
-		id,
-		parentId,
-		timestamp: new Date().toISOString(),
-		provider: "anthropic",
-		modelId: "claude-sonnet-4",
+		payload: { provider: "anthropic", modelId: "claude-sonnet-4" },
 	};
 }
 
 // Helper to build a tree from entries using parentId relationships
-function buildTree(entries: Array<SessionEntry>): SessionTreeNode[] {
+function buildTree(entries: ProjectedEntry[]): EntryTreeNode[] {
 	if (entries.length === 0) return [];
 
-	const nodes: SessionTreeNode[] = entries.map((entry) => ({
+	const nodes: EntryTreeNode[] = entries.map((entry) => ({
 		entry,
 		children: [],
 	}));
 
-	const byId = new Map<string, SessionTreeNode>();
+	const byId = new Map<string, EntryTreeNode>();
 	for (const node of nodes) {
 		byId.set(node.entry.id, node);
 	}
 
-	const roots: SessionTreeNode[] = [];
+	const roots: EntryTreeNode[] = [];
 	for (const node of nodes) {
 		if (node.entry.parentId === null) {
 			roots.push(node);
@@ -163,12 +157,10 @@ describe("TreeSelectorComponent", () => {
 				assistantMessage("asst-1", "user-1", "hi"),
 				userMessage("user-2", "asst-1", "active branch"),
 				{
-					type: "thinking_level_change" as const,
-					id: "thinking-1",
-					parentId: "user-2",
-					timestamp: new Date().toISOString(),
-					thinkingLevel: "high" as const,
-				},
+					...envelope("thinking-1", "user-2"),
+					type: "thinking_level_change",
+					payload: { thinkingLevel: "high" },
+				} satisfies ProjectedEntry,
 				userMessage("user-3", "asst-1", "sibling branch"),
 			];
 			const tree = buildTree(entries);
@@ -395,7 +387,7 @@ describe("TreeSelectorComponent", () => {
 		// Foldable nodes: user-1 (root), user-3a (segment start), user-3b (segment start)
 
 		function buildBranchingTree() {
-			const entries: SessionEntry[] = [
+			const entries: ProjectedEntry[] = [
 				userMessage("user-1", null, "first message"),
 				assistantMessage("asst-1", "user-1", "response 1"),
 				userMessage("user-2", "asst-1", "second message"),
@@ -545,7 +537,7 @@ describe("TreeSelectorComponent", () => {
 		});
 
 		test("fold and navigate with multiple roots", () => {
-			const entries: SessionEntry[] = [
+			const entries: ProjectedEntry[] = [
 				userMessage("user-1", null, "first root"),
 				assistantMessage("asst-1", "user-1", "response 1"),
 				userMessage("user-2", null, "second root"),
@@ -587,7 +579,7 @@ describe("TreeSelectorComponent", () => {
 
 		test("folding root hides descendants even when intermediate nodes are filtered out", () => {
 			// user-1 → toolCallOnly-1 (filtered out) → user-2 → asst-2
-			const entries: SessionEntry[] = [
+			const entries: ProjectedEntry[] = [
 				userMessage("user-1", null, "hello"),
 				toolCallOnlyAssistant("tool-asst-1", "user-1"),
 				userMessage("user-2", "tool-asst-1", "follow up"),

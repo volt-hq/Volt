@@ -53,8 +53,8 @@ export interface TuiModeFixture {
 	/** What the mode's client holds of the conversation it shows. */
 	readonly store: TuiStore;
 	readonly ui: TUI;
-	/** Resume `ref` as `/resume` does. */
-	resume(ref: SessionReference): Promise<{ cancelled: boolean }>;
+	/** Resume `ref` as `/resume` does: where the client went, unless it stayed. */
+	resume(ref: SessionReference): Promise<{ cancelled: true } | { cancelled: false; sessionId: string }>;
 	/** Connect the mode's client and show its conversation, when it started without. */
 	connect(): Promise<void>;
 	/** The terminal's visible rows, joined. */
@@ -97,7 +97,7 @@ interface ModeAccess {
 	setupEditorSubmitHandler(): void;
 	activateView(view: unknown, focus: unknown, forceRender?: boolean): void;
 	connect(): Promise<void>;
-	handleResumeSession(ref: SessionReference): Promise<{ cancelled: boolean }>;
+	handleResumeSession(sessionId: string): Promise<{ moved: false } | { moved: true; conversation: string }>;
 }
 
 export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise<TuiHarness> {
@@ -168,7 +168,10 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 					terminal,
 					store: access.store,
 					ui: access.ui,
-					resume: (ref) => access.handleResumeSession(ref),
+					resume: async (ref) => {
+						const outcome = await access.handleResumeSession(ref.sessionId);
+						return outcome.moved ? { cancelled: false, sessionId: outcome.conversation } : { cancelled: true };
+					},
 					connect,
 					screen: () => terminal.getViewport().join("\n"),
 				};

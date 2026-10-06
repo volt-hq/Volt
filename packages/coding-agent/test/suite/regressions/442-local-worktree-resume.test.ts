@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as startupUi from "../../../src/cli/startup-ui.ts";
+import { createLoopbackClient } from "../../../src/client/protocol-client.ts";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../../src/config.ts";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-services.ts";
-import type { SessionIntentResult } from "../../../src/core/extensions/index.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
@@ -31,7 +31,6 @@ import {
 	WorktreeRetentionSweeper,
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
@@ -672,27 +671,15 @@ describe("#442 local archived-worktree resume", () => {
 		const runtime = await createRuntime(f.factory, {
 			cwd: f.source,
 			agentDir: f.agentDir,
-			sessionManager: SessionManager.inMemory(f.source),
+			sessionManager: await SessionManager.create(f.source, f.sessionDir),
 		});
 		cleanups.push(() => runtime.dispose());
 		const previous = runtime.session;
-		const showError = vi.fn();
-		const context = Object.assign(Object.create(InteractiveMode.prototype), {
-			host: runtime.host,
-			tuiHost: { conversation: runtime.conversation, hostClient: runtime.client },
-			statusContainer: { clear: vi.fn() },
-			showError,
-		}) as InteractiveMode;
-		const resume = Reflect.get(InteractiveMode.prototype, "handleResumeSession") as (
-			this: InteractiveMode,
-			ref: typeof f.ref,
-		) => Promise<SessionIntentResult>;
-		vi.spyOn(process, "exit").mockImplementation(() => {
-			throw new Error("Unexpected TUI exit");
-		});
-		await expect(resume.call(context, f.ref)).resolves.toEqual({ cancelled: true });
-		expect(showError).toHaveBeenCalledWith(expect.stringContaining(message));
-		expect(process.exit).not.toHaveBeenCalled();
+		// The TUI resumes through its client's switch_session intent, which the failed restore rejects.
+		const client = await createLoopbackClient(runtime.host, runtime.conversation, { anchor: false });
+		cleanups.push(() => client.stop());
+		await expect(client.intent("switch_session", { sessionId: f.ref.sessionId })).rejects.toThrow(message);
+		expect(client.conversation).toBe(runtime.conversation.id);
 		expect(runtime.session).toBe(previous);
 		expect(runtime.cwd).toBe(f.source);
 		expect(existsSync(f.record.path)).toBe(false);

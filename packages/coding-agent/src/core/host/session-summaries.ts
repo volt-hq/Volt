@@ -27,6 +27,8 @@ export interface WorkspaceSessionSummary {
 	startingGitContext?: RpcGitContext | null;
 	/** The session this one was started from. */
 	parentSessionId?: string;
+	/** The session directory the session is stored in; absent for a session that is not stored. */
+	sessionDir?: string;
 }
 
 /** Which stored sessions a listing reads: the workspace's or every session directory's, possibly searched. */
@@ -60,6 +62,7 @@ function sessionInfoToSummary(info: SessionInfo, currentSessionId: string): Work
 		origin: info.origin,
 		...(info.startingGitContext === undefined ? {} : { startingGitContext: info.startingGitContext }),
 		...(info.parentSessionRef === undefined ? {} : { parentSessionId: info.parentSessionRef.sessionId }),
+		sessionDir: info.ref.sessionDirectory,
 	};
 }
 
@@ -69,6 +72,7 @@ export function summarizeOpenSession(session: AgentSession, cwd: string): Worksp
 	const startingGitContext = session.sessionManager.getStartingGitContext();
 	const summary = session.sessionManager.getSessionEntrySummary();
 	const discussion = session.sessionManager.getReviewDiscussion();
+	const sessionDir = session.sessionManager.isPersisted() ? session.sessionManager.getSessionDir() : undefined;
 	return {
 		...(discussion ? { reviewDiscussion: projectReviewDiscussionLink(discussion, session.sessionId) } : {}),
 		sessionId: session.sessionId,
@@ -85,6 +89,7 @@ export function summarizeOpenSession(session: AgentSession, cwd: string): Worksp
 		origin: header?.origin,
 		...(startingGitContext === undefined ? {} : { startingGitContext }),
 		...(header?.parentSession === undefined ? {} : { parentSessionId: header.parentSession.sessionId }),
+		...(sessionDir ? { sessionDir } : {}),
 	};
 }
 
