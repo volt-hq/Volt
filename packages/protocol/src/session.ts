@@ -92,6 +92,8 @@ export const RpcSessionListItemSchema = Type.Object(
 		cwd: Type.Optional(Type.String()),
 		/** The session the session was started from; local clients only. */
 		parentSessionId: Type.Optional(Type.String()),
+		/** The session directory the session is stored in; local clients only. */
+		sessionDir: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );

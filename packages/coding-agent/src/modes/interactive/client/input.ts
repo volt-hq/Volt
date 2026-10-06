@@ -321,7 +321,7 @@ export class TuiInput {
 	}
 
 	/** Whether work runs: an executor holds work that does not wait for approval, which its live `work` value shows. */
-	private workRunning(): boolean {
+	workRunning(): boolean {
 		const work = this.store.state.work;
 		for (const value of this.store.live.values.values()) {
 			if (value.kind === "work" && work.get(value.workId)?.state !== "awaiting_approval") return true;

@@ -1,5 +1,14 @@
-import type { SessionInfo } from "../../../core/session-manager.ts";
 import { fuzzyMatchSessionText } from "../../../core/session-search.ts";
+
+/** What a session search reads of a session. */
+export interface SearchableSession {
+	readonly id: string;
+	readonly name?: string;
+	readonly firstMessage: string;
+	/** The session's working directory; empty when unknown. */
+	readonly cwd: string;
+	readonly modified: Date;
+}
 
 export type SortMode = "threaded" | "recent" | "relevance";
 
@@ -23,15 +32,15 @@ function normalizeWhitespaceLower(text: string): string {
 	return text.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function getSessionSearchText(session: SessionInfo): string {
+function getSessionSearchText(session: SearchableSession): string {
 	return `${session.id} ${session.name ?? ""} ${session.firstMessage} ${session.cwd}`;
 }
 
-export function hasSessionName(session: SessionInfo): boolean {
+export function hasSessionName(session: SearchableSession): boolean {
 	return Boolean(session.name?.trim());
 }
 
-function matchesNameFilter(session: SessionInfo, filter: NameFilter): boolean {
+function matchesNameFilter(session: SearchableSession, filter: NameFilter): boolean {
 	if (filter === "all") return true;
 	return hasSessionName(session);
 }
@@ -113,7 +122,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 	return { mode: "tokens", tokens, regex: null };
 }
 
-export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): MatchResult {
+export function matchSession(session: SearchableSession, parsed: ParsedSearchQuery): MatchResult {
 	const text = getSessionSearchText(session);
 
 	if (parsed.mode === "regex") {
@@ -153,14 +162,14 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 	return { matches: true, score: totalScore };
 }
 
-export function filterAndSortSessions(
-	sessions: SessionInfo[],
+export function filterAndSortSessions<T extends SearchableSession>(
+	sessions: readonly T[],
 	query: string,
 	sortMode: SortMode,
 	nameFilter: NameFilter = "all",
-): SessionInfo[] {
+): T[] {
 	const nameFiltered =
-		nameFilter === "all" ? sessions : sessions.filter((session) => matchesNameFilter(session, nameFilter));
+		nameFilter === "all" ? [...sessions] : sessions.filter((session) => matchesNameFilter(session, nameFilter));
 	const trimmed = query.trim();
 	if (!trimmed) return nameFiltered;
 
@@ -169,7 +178,7 @@ export function filterAndSortSessions(
 
 	// Recent mode: filter only, keep incoming order.
 	if (sortMode === "recent") {
-		const filtered: SessionInfo[] = [];
+		const filtered: T[] = [];
 		for (const s of nameFiltered) {
 			const res = matchSession(s, parsed);
 			if (res.matches) filtered.push(s);
@@ -178,7 +187,7 @@ export function filterAndSortSessions(
 	}
 
 	// Relevance mode: sort by score, tie-break by modified desc.
-	const scored: { session: SessionInfo; score: number }[] = [];
+	const scored: { session: T; score: number }[] = [];
 	for (const s of nameFiltered) {
 		const res = matchSession(s, parsed);
 		if (!res.matches) continue;

@@ -1,9 +1,9 @@
 // Upstream Pi regression: https://github.com/earendil-works/pi/issues/5080
 
+import type { ConversationInfo } from "@hansjm10/volt-protocol";
 import chalk from "chalk";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { APP_NAME } from "../../../../src/config.ts";
-import type { SessionManager, SessionReference } from "../../../../src/core/session-manager.ts";
 import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
 
 // On SIGTERM/SIGHUP the graceful shutdown must emit `session_shutdown`
@@ -23,7 +23,9 @@ type ShutdownThis = {
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
-	sessionManager: SessionManager;
+	/** The TUI's client connected; where the conversation's log lives comes through it. */
+	connected: boolean;
+	sessions: { info: () => Promise<ConversationInfo> };
 	closeLspTrace: () => Promise<void>;
 	cleanupAllScratchDirectories: () => void;
 };
@@ -39,21 +41,15 @@ const originalStdoutIsTTY = Object.getOwnPropertyDescriptor(process.stdout, "isT
 
 class ProcessExitError extends Error {}
 
-const TEST_SESSION_REF: SessionReference = {
-	sessionDirectory: "/tmp/volt-sessions",
-	storeId: "test-store",
-	sessionGeneration: "generation-test",
-	sessionId: "test-session",
-};
-
-function createSessionManager(options: { sessionRef?: SessionReference } = {}): SessionManager {
+/** Where the conversation's log lives, as the `conversation_info` query answers: stored, or in memory. */
+function conversationInfo(options: { persisted?: boolean } = {}): ConversationInfo {
 	return {
-		isPersisted: () => options.sessionRef !== undefined,
-		getSessionRef: () => options.sessionRef,
-		getSessionId: () => options.sessionRef?.sessionId ?? "test-session",
-		getSessionDir: () => options.sessionRef?.sessionDirectory ?? "/tmp/volt-sessions",
-		usesDefaultSessionDir: () => true,
-	} as unknown as SessionManager;
+		id: "test-session",
+		cwd: "/tmp/project",
+		sessionDir: "/tmp/volt-sessions",
+		persisted: options.persisted ?? false,
+		defaultSessionDir: true,
+	};
 }
 
 function setStdoutIsTTY(value: boolean): void {
@@ -68,7 +64,7 @@ function restoreStdoutIsTTY(): void {
 	}
 }
 
-function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
+function createContext(order: string[], info = conversationInfo()): ShutdownThis {
 	return {
 		isShuttingDown: false,
 		disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
@@ -94,7 +90,8 @@ function createContext(order: string[], sessionManager = createSessionManager())
 			rememberActiveProfile: vi.fn(),
 			flush: vi.fn(async () => {}),
 		},
-		sessionManager,
+		connected: true,
+		sessions: { info: async () => info },
 		closeLspTrace: vi.fn(async () => {}),
 		cleanupAllScratchDirectories: vi.fn(),
 	};
@@ -225,7 +222,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 			.mockImplementation(completeStdoutWrite as typeof process.stdout.write);
 		setStdoutIsTTY(true);
 		const order: string[] = [];
-		const context = createContext(order, createSessionManager({ sessionRef: TEST_SESSION_REF }));
+		const context = createContext(order, conversationInfo({ persisted: true }));
 
 		await callShutdown(context);
 
@@ -244,7 +241,7 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 			.mockImplementation(completeStdoutWrite as typeof process.stdout.write);
 		setStdoutIsTTY(true);
 		const order: string[] = [];
-		const context = createContext(order, createSessionManager({ sessionRef: TEST_SESSION_REF }));
+		const context = createContext(order, conversationInfo({ persisted: true }));
 
 		await callShutdown(context, { fromSignal: true });
 

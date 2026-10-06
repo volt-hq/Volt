@@ -16,6 +16,7 @@ import {
 	type AuthProvider,
 	type ClientQueuedInput,
 	type ClientState,
+	type ConversationInfo,
 	type ExtensionState,
 	type ExtensionSummary,
 	HOST_NOTICE_SOURCE,
@@ -26,6 +27,9 @@ import {
 	type LiveValue,
 	type ProjectedEntry,
 	type QueryResult,
+	type ResourceDiagnostic,
+	type ResourceSource,
+	type Resources,
 	type RpcCatalogModel,
 	type ScopedModel,
 	type UiNodeStyledText,
@@ -81,35 +85,23 @@ import {
 	VERSION,
 } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
-import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
-import type {
-	ExtensionCommandContext,
-	ExtensionUIDialogOptions,
-	SessionIntentResult,
-} from "../../core/extensions/index.ts";
+import type { ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
 import {
 	ExtensionPermissionStore,
 	type PackagePermissionOutcome,
 	permissionRequestLines,
 	reviewPackagePermissions,
 } from "../../core/extensions/permissions.ts";
-import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
 import type { HostClient } from "../../core/host/targets.ts";
-import {
-	configureHttpDispatcher,
-	DEFAULT_HTTP_IDLE_TIMEOUT_MS,
-	formatHttpIdleTimeoutMs,
-} from "../../core/http-dispatcher.ts";
+import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
-import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
 import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
-import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
 	MUTABLE_WORKSPACE_REVIEW_TOOLS,
 	parseReviewCommandArgs,
@@ -118,16 +110,13 @@ import {
 	type ReviewTarget,
 } from "../../core/review.ts";
 import type { ExtensionClient } from "../../core/session/extension-binding.ts";
-import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
+import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
-import type { SourceInfo } from "../../core/source-info.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
 import type { UserInputResponse } from "../../core/user-input.ts";
-import { LocalSessionWorktreeRestoreError } from "../../daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
 import {
 	findCatalogPackage,
@@ -169,6 +158,16 @@ import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
 import { footerViewModel, type TransientUsage, withTransientUsage } from "./client/footer-model.ts";
 import { type Delivery, type InputDiagnostic, type Interruptible, TuiInput } from "./client/input.ts";
 import { ReviewView } from "./client/review-view.ts";
+import {
+	entryTree,
+	forkableMessages,
+	isMissingCwd,
+	lastAssistantText,
+	type MoveOutcome,
+	messageStats,
+	sessionItem,
+	TuiSessions,
+} from "./client/session-commands.ts";
 import { TranscriptView } from "./client/transcript-view.ts";
 import { TuiCatalogs } from "./client/tui-catalogs.ts";
 import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
@@ -196,7 +195,6 @@ import { StreamingRenderCoalescer } from "./components/streaming-render-coalesce
 import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
 import { withEditorCompletions } from "./editor-completions.ts";
 import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
-import { DaemonLeaseUnavailableError } from "./host/daemon-link.ts";
 import type { TuiHost } from "./host/tui-host.ts";
 import { TUI_HOST_REQUESTS, TuiLiveView } from "./live-view.ts";
 import {
@@ -243,7 +241,7 @@ import { type ModelSelectorCatalog, ModelSelectorComponent } from "./components/
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
 import { type ReviewToolSelectorOption, ReviewToolsSelectorComponent } from "./components/review-tools-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
-import { SessionSelectorComponent } from "./components/session-selector.ts";
+import { SessionSelectorComponent, type SessionSelectorItem } from "./components/session-selector.ts";
 import { SettingsSelectorComponent } from "./components/settings-selector.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
@@ -285,6 +283,9 @@ class ExpandableText extends Text implements Expandable {
 }
 
 type PhaseValue = Extract<LiveValue, { kind: "phase" }>;
+
+/** A problem loading resources, as the resources listing shows it. */
+type LoadDiagnostic = Omit<ResourceDiagnostic, "resource">;
 
 /** How an extension selector closed: an option picked, cancelled by the user, or dismissed by Volt or its signal. */
 type ExtensionSelectorOutcome = { kind: "selected"; option: string } | { kind: "cancelled" } | { kind: "dismissed" };
@@ -362,6 +363,11 @@ function formatClockTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
+/** An error's message, for the TUI's messages. */
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 function quoteIfNeeded(value: string): string {
 	if (value.length > 0 && !/[^a-zA-Z0-9_\-./~:@]/.test(value)) {
 		return value;
@@ -369,17 +375,16 @@ function quoteIfNeeded(value: string): string {
 	return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function formatResumeCommand(sessionManager: SessionManager): string | undefined {
+/** The command that resumes the conversation `info` describes, when its log is stored and stdout is a terminal. */
+export function formatResumeCommand(info: ConversationInfo): string | undefined {
 	if (!process.stdout.isTTY) return undefined;
-	if (!sessionManager.isPersisted()) return undefined;
-
-	if (!sessionManager.getSessionRef()) return undefined;
+	if (!info.persisted) return undefined;
 
 	const args = [APP_NAME];
-	if (!sessionManager.usesDefaultSessionDir()) {
-		args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
+	if (!info.defaultSessionDir) {
+		args.push("--session-dir", quoteIfNeeded(info.sessionDir));
 	}
-	args.push("--session", sessionManager.getSessionId());
+	args.push("--session", info.id);
 	return args.join(" ");
 }
 
@@ -495,6 +500,10 @@ export class InteractiveMode {
 	private readonly input = new TuiInput(this.store);
 	/** What the TUI could not bind or list as the catalog asks: shortcuts and commands its own keys and commands take. */
 	private inputDiagnostics: readonly InputDiagnostic[] = [];
+	/** What the session commands send through the TUI's client, and read of the conversation from the store. */
+	private readonly sessions = new TuiSessions(this.store);
+	/** The resources the conversation loaded, as the `resources` query answered at startup and after a reload. */
+	private resources: Resources | undefined;
 	/** The TUI's client connected: the store's conversation shows from then on. */
 	private connected = false;
 	/** Settles once the TUI's client connected: what the user sends before then waits for it. */
@@ -625,9 +634,7 @@ export class InteractiveMode {
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
-	private quitConfirmation:
-		| { warnedAt: number; activityRevision: number; signal: AbortSignal | undefined }
-		| undefined;
+	private quitConfirmation: { warnedAt: number; activity: string } | undefined;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1155,7 +1162,8 @@ export class InteractiveMode {
 	 * runs first: the conversation's session_start dialogs show through the
 	 * live view before the conversation is ready. What its extensions
 	 * contribute shows before its messages, its slash commands and shortcuts
-	 * as its intents catalog lists them.
+	 * as its intents catalog lists them, its resources as the `resources`
+	 * query lists them.
 	 */
 	private async connect(): Promise<void> {
 		await this.tuiHost.connect({
@@ -1168,11 +1176,15 @@ export class InteractiveMode {
 			},
 			terminal: this.terminalSurface(),
 		});
-		await this.input.load().catch((error: unknown) => {
-			this.showWarning(
-				`Could not load the conversation's commands: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		});
+		const [, resources] = await Promise.all([
+			this.input.load().catch((error: unknown) => {
+				this.showWarning(
+					`Could not load the conversation's commands: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}),
+			this.store.client.query("resources").catch(() => undefined),
+		]);
+		this.resources = resources;
 		this.connected = true;
 		this.clientConnected.resolve();
 		this.showConversation({ afresh: false });
@@ -1256,7 +1268,7 @@ export class InteractiveMode {
 			this.showWarning(`Migrated credentials to auth.json: ${migratedProviders.join(", ")}`);
 		}
 
-		await this.showResourceNotices();
+		this.showResourceNotices();
 
 		await this.sendInitialMessages([
 			...(initialMessage ? [{ text: initialMessage, images: initialImages }] : []),
@@ -1440,7 +1452,7 @@ export class InteractiveMode {
 	/**
 	 * Get a short path relative to the package root for display.
 	 */
-	private getShortPath(fullPath: string, sourceInfo?: SourceInfo): string {
+	private getShortPath(fullPath: string, sourceInfo?: ResourceSource): string {
 		const baseDir = sourceInfo?.baseDir;
 		if (baseDir && this.isPackageSource(sourceInfo)) {
 			const relativePath = path.relative(path.resolve(baseDir), path.resolve(fullPath));
@@ -1469,7 +1481,7 @@ export class InteractiveMode {
 		return this.formatDisplayPath(fullPath);
 	}
 
-	private getDisplaySourceInfo(sourceInfo?: SourceInfo): {
+	private getDisplaySourceInfo(sourceInfo?: ResourceSource): {
 		label: string;
 		scopeLabel?: string;
 		color: "accent" | "muted";
@@ -1498,7 +1510,7 @@ export class InteractiveMode {
 		return { label: source, scopeLabel, color: "accent" };
 	}
 
-	private getScopeGroup(sourceInfo?: SourceInfo): "user" | "project" | "path" {
+	private getScopeGroup(sourceInfo?: ResourceSource): "user" | "project" | "path" {
 		const source = sourceInfo?.source ?? "local";
 		const scope = sourceInfo?.scope ?? "project";
 		if (source === "cli" || scope === "temporary") return "path";
@@ -1507,22 +1519,22 @@ export class InteractiveMode {
 		return "path";
 	}
 
-	private isPackageSource(sourceInfo?: SourceInfo): boolean {
+	private isPackageSource(sourceInfo?: ResourceSource): boolean {
 		const source = sourceInfo?.source ?? "";
 		return source.startsWith("npm:") || source.startsWith("git:");
 	}
 
-	private buildScopeGroups(items: Array<{ path: string; sourceInfo?: SourceInfo }>): Array<{
+	private buildScopeGroups(items: Array<{ path: string; sourceInfo?: ResourceSource }>): Array<{
 		scope: "user" | "project" | "path";
-		paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-		packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
+		paths: Array<{ path: string; sourceInfo?: ResourceSource }>;
+		packages: Map<string, Array<{ path: string; sourceInfo?: ResourceSource }>>;
 	}> {
 		const groups: Record<
 			"user" | "project" | "path",
 			{
 				scope: "user" | "project" | "path";
-				paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-				packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
+				paths: Array<{ path: string; sourceInfo?: ResourceSource }>;
+				packages: Map<string, Array<{ path: string; sourceInfo?: ResourceSource }>>;
 			}
 		> = {
 			user: { scope: "user", paths: [], packages: new Map() },
@@ -1552,12 +1564,12 @@ export class InteractiveMode {
 	private formatScopeGroups(
 		groups: Array<{
 			scope: "user" | "project" | "path";
-			paths: Array<{ path: string; sourceInfo?: SourceInfo }>;
-			packages: Map<string, Array<{ path: string; sourceInfo?: SourceInfo }>>;
+			paths: Array<{ path: string; sourceInfo?: ResourceSource }>;
+			packages: Map<string, Array<{ path: string; sourceInfo?: ResourceSource }>>;
 		}>,
 		options: {
-			formatPath: (item: { path: string; sourceInfo?: SourceInfo }) => string;
-			formatPackagePath: (item: { path: string; sourceInfo?: SourceInfo }, source: string) => string;
+			formatPath: (item: { path: string; sourceInfo?: ResourceSource }) => string;
+			formatPackagePath: (item: { path: string; sourceInfo?: ResourceSource }, source: string) => string;
 		},
 	): string {
 		const lines: string[] = [];
@@ -1583,7 +1595,7 @@ export class InteractiveMode {
 		return lines.join("\n");
 	}
 
-	private findSourceInfoForPath(p: string, sourceInfos: Map<string, SourceInfo>): SourceInfo | undefined {
+	private findSourceInfoForPath(p: string, sourceInfos: Map<string, ResourceSource>): ResourceSource | undefined {
 		const exact = sourceInfos.get(p);
 		if (exact) return exact;
 
@@ -1597,7 +1609,7 @@ export class InteractiveMode {
 		return undefined;
 	}
 
-	private formatPathWithSource(p: string, sourceInfo?: SourceInfo): string {
+	private formatPathWithSource(p: string, sourceInfo?: ResourceSource): string {
 		if (sourceInfo) {
 			const shortPath = this.getShortPath(p, sourceInfo);
 			const { label, scopeLabel } = this.getDisplaySourceInfo(sourceInfo);
@@ -1607,12 +1619,12 @@ export class InteractiveMode {
 		return this.formatDisplayPath(p);
 	}
 
-	private formatDiagnostics(diagnostics: readonly ResourceDiagnostic[], sourceInfos: Map<string, SourceInfo>): string {
+	private formatDiagnostics(diagnostics: readonly LoadDiagnostic[], sourceInfos: Map<string, ResourceSource>): string {
 		const lines: string[] = [];
 
 		// Group collision diagnostics by name
-		const collisions = new Map<string, ResourceDiagnostic[]>();
-		const otherDiagnostics: ResourceDiagnostic[] = [];
+		const collisions = new Map<string, LoadDiagnostic[]>();
+		const otherDiagnostics: LoadDiagnostic[] = [];
 
 		for (const d of diagnostics) {
 			if (d.type === "collision" && d.collision) {
@@ -1660,11 +1672,14 @@ export class InteractiveMode {
 		return lines.join("\n");
 	}
 
-	private showLoadedResources(options?: {
-		extensions?: Array<{ path: string; sourceInfo?: SourceInfo }>;
-		force?: boolean;
-		showDiagnosticsWhenQuiet?: boolean;
-	}): void {
+	/**
+	 * List the resources the conversation loaded, as the `resources` query
+	 * last answered: the listing unless startup is quiet (or `force`), and
+	 * what loading them reported, with `showDiagnosticsWhenQuiet` even then.
+	 */
+	private showLoadedResources(options?: { force?: boolean; showDiagnosticsWhenQuiet?: boolean }): void {
+		const resources = this.resources;
+		if (!resources) return;
 		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
 		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
 		if (!showListing && !showDiagnostics) {
@@ -1673,40 +1688,21 @@ export class InteractiveMode {
 
 		const sectionHeader = (name: string) => theme.bold(theme.fg("accent", name.toUpperCase()));
 
-		const skillsResult = this.session.resourceLoader.getSkills();
-		const promptsResult = this.session.resourceLoader.getPrompts();
-		const themesResult = this.session.resourceLoader.getThemes();
-		const extensions =
-			options?.extensions ??
-			this.session.resourceLoader.getExtensions().extensions.map((extension) => ({
-				path: extension.path,
-				sourceInfo: extension.sourceInfo,
-			}));
-		const sourceInfos = new Map<string, SourceInfo>();
-		for (const extension of extensions) {
-			if (extension.sourceInfo) {
-				sourceInfos.set(extension.path, extension.sourceInfo);
-			}
+		const extensions = resources.extensions.map((extension) => ({
+			path: extension.path,
+			...(extension.source === undefined ? {} : { sourceInfo: extension.source }),
+		}));
+		const sourceInfos = new Map<string, ResourceSource>();
+		for (const resource of [...resources.extensions, ...resources.skills, ...resources.promptTemplates]) {
+			if (resource.source) sourceInfos.set(resource.path, resource.source);
 		}
-		for (const skill of skillsResult.skills) {
-			if (skill.sourceInfo) {
-				sourceInfos.set(skill.filePath, skill.sourceInfo);
-			}
-		}
-		for (const prompt of promptsResult.prompts) {
-			if (prompt.sourceInfo) {
-				sourceInfos.set(prompt.filePath, prompt.sourceInfo);
-			}
-		}
-		for (const loadedTheme of themesResult.themes) {
-			if (loadedTheme.sourcePath && loadedTheme.sourceInfo) {
-				sourceInfos.set(loadedTheme.sourcePath, loadedTheme.sourceInfo);
-			}
+		for (const loadedTheme of resources.themes) {
+			if (loadedTheme.path && loadedTheme.source) sourceInfos.set(loadedTheme.path, loadedTheme.source);
 		}
 
 		if (showListing) {
 			const sections: Array<{ name: string; count: number; noun: string; body: string }> = [];
-			const contextFiles = this.session.resourceLoader.getAgentsFiles().agentsFiles;
+			const contextFiles = resources.contextFiles;
 			if (contextFiles.length > 0) {
 				sections.push({
 					name: "Context",
@@ -1716,10 +1712,13 @@ export class InteractiveMode {
 				});
 			}
 
-			const skills = skillsResult.skills;
+			const skills = resources.skills;
 			if (skills.length > 0) {
 				const groups = this.buildScopeGroups(
-					skills.map((skill) => ({ path: skill.filePath, sourceInfo: skill.sourceInfo })),
+					skills.map((skill) => ({
+						path: skill.path,
+						...(skill.source === undefined ? {} : { sourceInfo: skill.source }),
+					})),
 				);
 				sections.push({
 					name: "Skills",
@@ -1732,12 +1731,15 @@ export class InteractiveMode {
 				});
 			}
 
-			const templates = this.session.promptTemplates;
+			const templates = resources.promptTemplates;
 			if (templates.length > 0) {
 				const groups = this.buildScopeGroups(
-					templates.map((template) => ({ path: template.filePath, sourceInfo: template.sourceInfo })),
+					templates.map((template) => ({
+						path: template.path,
+						...(template.source === undefined ? {} : { sourceInfo: template.source }),
+					})),
 				);
-				const templateByPath = new Map(templates.map((template) => [template.filePath, template]));
+				const templateByPath = new Map(templates.map((template) => [template.path, template]));
 				sections.push({
 					name: "Prompts",
 					count: templates.length,
@@ -1769,14 +1771,18 @@ export class InteractiveMode {
 				});
 			}
 
-			const customThemes = themesResult.themes.filter((loadedTheme) => loadedTheme.sourcePath);
+			const customThemes = resources.themes.flatMap((loadedTheme) =>
+				loadedTheme.path === undefined
+					? []
+					: [
+							{
+								path: loadedTheme.path,
+								...(loadedTheme.source === undefined ? {} : { sourceInfo: loadedTheme.source }),
+							},
+						],
+			);
 			if (customThemes.length > 0) {
-				const groups = this.buildScopeGroups(
-					customThemes.map((loadedTheme) => ({
-						path: loadedTheme.sourcePath!,
-						sourceInfo: loadedTheme.sourceInfo,
-					})),
-				);
+				const groups = this.buildScopeGroups(customThemes);
 				sections.push({
 					name: "Themes",
 					count: customThemes.length,
@@ -1807,48 +1813,19 @@ export class InteractiveMode {
 		}
 
 		if (showDiagnostics) {
-			const skillDiagnostics = skillsResult.diagnostics;
-			if (skillDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(skillDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Skill conflicts]")}\n${warningLines}`, 0, 0));
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const promptDiagnostics = promptsResult.diagnostics;
-			if (promptDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(promptDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Prompt conflicts]")}\n${warningLines}`, 0, 0),
-				);
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const extensionDiagnostics: ResourceDiagnostic[] = [];
-			const extensionErrors = this.session.resourceLoader.getExtensions().errors;
-			if (extensionErrors.length > 0) {
-				for (const error of extensionErrors) {
-					extensionDiagnostics.push({ type: "error", message: error.error, path: error.path });
-				}
-			}
-
-			const commandDiagnostics = this.session.extensionRunner.getCommandDiagnostics();
-			extensionDiagnostics.push(...commandDiagnostics);
-			extensionDiagnostics.push(...this.session.extensionRunner.getShortcutDiagnostics());
-			// The commands and shortcuts the TUI's own commands and keys take.
-			extensionDiagnostics.push(...this.inputDiagnostics);
-
-			if (extensionDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(extensionDiagnostics, sourceInfos);
-				this.chatContainer.addChild(
-					new Text(`${theme.fg("warning", "[Extension issues]")}\n${warningLines}`, 0, 0),
-				);
-				this.chatContainer.addChild(new Spacer(1));
-			}
-
-			const themeDiagnostics = themesResult.diagnostics;
-			if (themeDiagnostics.length > 0) {
-				const warningLines = this.formatDiagnostics(themeDiagnostics, sourceInfos);
-				this.chatContainer.addChild(new Text(`${theme.fg("warning", "[Theme conflicts]")}\n${warningLines}`, 0, 0));
+			const diagnosticsOf = (resource: ResourceDiagnostic["resource"]) =>
+				resources.diagnostics.filter((diagnostic) => diagnostic.resource === resource);
+			const sections: Array<{ title: string; diagnostics: readonly LoadDiagnostic[] }> = [
+				{ title: "[Skill conflicts]", diagnostics: diagnosticsOf("skill") },
+				{ title: "[Prompt conflicts]", diagnostics: diagnosticsOf("prompt") },
+				// The commands and shortcuts the TUI's own commands and keys take join the extensions' own issues.
+				{ title: "[Extension issues]", diagnostics: [...diagnosticsOf("extension"), ...this.inputDiagnostics] },
+				{ title: "[Theme conflicts]", diagnostics: diagnosticsOf("theme") },
+			];
+			for (const { title, diagnostics } of sections) {
+				if (diagnostics.length === 0) continue;
+				const warningLines = this.formatDiagnostics(diagnostics, sourceInfos);
+				this.chatContainer.addChild(new Text(`${theme.fg("warning", title)}\n${warningLines}`, 0, 0));
 				this.chatContainer.addChild(new Spacer(1));
 			}
 		}
@@ -1935,14 +1912,8 @@ export class InteractiveMode {
 	 * startup: a model it fell back from, a `models.json` it could not read,
 	 * and a subscription login that bills extra usage.
 	 */
-	private async showResourceNotices(): Promise<void> {
-		let notices: { level: "info" | "warning" | "error"; message: string }[];
-		try {
-			notices = (await this.store.client.query("resources")).notices;
-		} catch {
-			return;
-		}
-		for (const notice of notices) {
+	private showResourceNotices(): void {
+		for (const notice of this.resources?.notices ?? []) {
 			if (notice.level === "error") this.showError(notice.message);
 			else if (notice.level === "warning") this.showWarning(notice.message);
 			else this.showStatus(notice.message);
@@ -2190,21 +2161,6 @@ export class InteractiveMode {
 		if (!this.connected) return;
 		this.store.resync();
 		this.ui.requestRender();
-	}
-
-	/** Wait until the TUI shows the conversation its client is on: after a move, once its snapshot drew it. */
-	private async showMovedConversation(): Promise<void> {
-		await this.store.showing(this.conversation.id);
-	}
-
-	/**
-	 * Report a session change that failed. When the new session failed to
-	 * open, the runtime is still on `source` and the TUI keeps running; a
-	 * failure after the move committed ended the runtime, and the TUI exits.
-	 */
-	private async reportSessionChangeFailure(prefix: string, error: unknown, source: AgentSession): Promise<void> {
-		if (this.session !== source) await this.handleFatalRuntimeError(prefix, error);
-		this.showError(`${prefix}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
 	private async handleFatalRuntimeError(
@@ -2826,21 +2782,28 @@ export class InteractiveMode {
 		return result === "Yes";
 	}
 
-	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
-		// A missing daemon-managed worktree checkout refuses takeover with a clear
-		// error instead of resurrecting the session in another directory (§5.2.3).
-		if (isPathUnderWorktreesRoot(this.conversation.services.agentDir, error.issue.sessionCwd)) {
+	/**
+	 * A session's working directory is gone (the host said why, `reason`):
+	 * the current one when the user continues there, else undefined. A
+	 * session of a daemon-managed worktree whose checkout is missing
+	 * (`sessionCwd`, when known) never runs in another directory.
+	 */
+	private async continueInCurrentCwd(reason: string, sessionCwd: string | undefined): Promise<string | undefined> {
+		if (sessionCwd !== undefined && isPathUnderWorktreesRoot(getAgentDir(), sessionCwd)) {
 			this.showError(
-				`This session ran in a daemon-managed worktree whose checkout is missing: ${error.issue.sessionCwd}. ` +
+				`This session ran in a daemon-managed worktree whose checkout is missing: ${sessionCwd}. ` +
 					"Recreate the worktree (volt remote worktree add) or remove the session; refusing to open it in another directory.",
 			);
 			return undefined;
 		}
+		const cwd = (await this.sessions.info()).cwd;
 		const confirmed = await this.showExtensionConfirm(
 			"Session cwd not found",
-			formatMissingSessionCwdPrompt(error.issue),
+			sessionCwd === undefined
+				? `${reason}\n\ncontinue in current cwd\n${cwd}`
+				: formatMissingSessionCwdPrompt({ sessionCwd, fallbackCwd: cwd }),
 		);
-		return confirmed ? error.issue.fallbackCwd : undefined;
+		return confirmed ? cwd : undefined;
 	}
 
 	/**
@@ -3199,15 +3162,6 @@ export class InteractiveMode {
 		});
 	}
 
-	/** This client's intent context: its conversation, and how the TUI aborts. */
-	private intentContext(): IntentContext {
-		return {
-			target: { session: this.session, conversation: this.conversation, host: this.host, client: this.hostClient },
-			services: { abortRun: (session) => session.abort("host_action") },
-			profile: LOCAL_INTENT_PROFILE,
-		};
-	}
-
 	private async handleRightClickPaste(): Promise<void> {
 		const target = this.renderer.getFocusedComponent();
 		const handleInput = target?.handleInput;
@@ -3375,8 +3329,8 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/session") {
-				this.handleSessionCommand();
 				this.editor.setText("");
+				await this.handleSessionCommand();
 				return;
 			}
 			if (text === "/usage") {
@@ -3820,9 +3774,26 @@ export class InteractiveMode {
 		return (
 			this.quitConfirmation !== undefined &&
 			now - this.quitConfirmation.warnedAt < 3000 &&
-			this.quitConfirmation.activityRevision === this.session.activityRevision &&
-			this.quitConfirmation.signal === this.session.signal
+			this.quitConfirmation.activity === this.activity()
 		);
+	}
+
+	/**
+	 * What the conversation runs, as the store shows it: its operation, the
+	 * run or compaction it started and when, and whether work runs; undefined
+	 * while nothing runs. A quit confirmation holds while this stays the same.
+	 */
+	private activity(): string | undefined {
+		const phase = this.store.phase;
+		const working = this.input.workRunning();
+		if (phase?.busy !== true && !working && !this.activeReview) return undefined;
+		return JSON.stringify([
+			phase?.operation ?? null,
+			phase?.run?.startedAt ?? null,
+			phase?.compaction?.startedAt ?? null,
+			working,
+			this.activeReview,
+		]);
 	}
 
 	/**
@@ -3831,12 +3802,9 @@ export class InteractiveMode {
 	 */
 	private async requestQuit(): Promise<void> {
 		const now = Date.now();
-		if ((this.conversation.isActive() || this.activeReview) && !this.hasQuitConfirmation(now)) {
-			this.quitConfirmation = {
-				warnedAt: now,
-				activityRevision: this.session.activityRevision,
-				signal: this.session.signal,
-			};
+		const activity = this.activity();
+		if (activity !== undefined && !this.hasQuitConfirmation(now)) {
+			this.quitConfirmation = { warnedAt: now, activity };
 			this.showWarning(
 				"Work is active; quitting will interrupt it. Quit again within 3 seconds to confirm. Use /debug to capture diagnostics.",
 			);
@@ -3921,12 +3889,14 @@ export class InteractiveMode {
 		// Drain any in-flight Kitty key release events before stopping.
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		await this.ui.terminal.drainInput(1000);
+		// Where the conversation's log lives, read while its host still serves it: the resume hint names it.
+		const info = this.connected ? await this.sessions.info().catch(() => undefined) : undefined;
 
 		this.stop();
 		await this.disposeRuntimeHost();
 		await rememberActiveProfile();
 
-		const resumeCommand = formatResumeCommand(this.sessionManager);
+		const resumeCommand = info === undefined ? undefined : formatResumeCommand(info);
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
@@ -6061,20 +6031,21 @@ export class InteractiveMode {
 		this.checkDaxnutsEasterEgg(model);
 	}
 
-	private maybeSaveImplicitProjectTrustAfterReload(): boolean {
-		const cwd = this.sessionManager.getCwd();
+	private async maybeSaveImplicitProjectTrustAfterReload(): Promise<boolean> {
+		if (this.autoTrustOnReloadCwd === undefined) return false;
+		const cwd = (await this.sessions.info()).cwd;
 		if (this.autoTrustOnReloadCwd !== cwd) {
 			return false;
 		}
 		// Trust entries are never persisted for daemon-managed worktree paths.
-		if (isPathUnderWorktreesRoot(this.conversation.services.agentDir, cwd)) {
+		if (isPathUnderWorktreesRoot(getAgentDir(), cwd)) {
 			return false;
 		}
 		if (!this.settingsManager.isProjectTrusted() || !hasTrustRequiringProjectResources(cwd)) {
 			return false;
 		}
 
-		const trustStore = new ProjectTrustStore(this.conversation.services.agentDir);
+		const trustStore = new ProjectTrustStore(getAgentDir());
 		try {
 			if (trustStore.get(cwd) !== null) {
 				this.autoTrustOnReloadCwd = undefined;
@@ -6094,12 +6065,14 @@ export class InteractiveMode {
 	/**
 	 * /worktree — open a new session inside a daemon-managed git worktree
 	 * (§5.2.1): ensures the daemon is running, creates (or picks) a worktree via
-	 * the control socket, then starts a new session with cwd = the worktree
-	 * checkout and sessionDir = the PARENT workspace's default session dir, so
-	 * the session stays listed and lease-keyed under the parent workspace.
+	 * the control socket, then starts a new session in the worktree checkout
+	 * (`new_session{cwd}`), stored where the conversation it leaves is, and
+	 * binds it to the worktree once the client moved there.
 	 */
 	private async handleWorktreeCommand(args: string): Promise<void> {
-		if (this.session.isStreaming || this.session.isCompacting) {
+		await this.clientConnected.promise;
+		const operation = this.store.phase?.operation;
+		if (operation === "turn" || operation === "compaction" || operation === "navigation") {
 			this.showWarning("Wait for the current response to finish before switching to a worktree.");
 			return;
 		}
@@ -6115,9 +6088,9 @@ export class InteractiveMode {
 			requestedName = parts[1];
 		}
 
-		const agentDir = this.conversation.services.agentDir;
 		this.showStatus("Contacting voltd…");
-		const opened = await openDaemonWorktreeControl({ cwd: this.sessionManager.getCwd(), agentDir });
+		const cwd = (await this.sessions.info()).cwd;
+		const opened = await openDaemonWorktreeControl({ cwd, agentDir: getAgentDir() });
 		if (!opened.ok) {
 			this.showError(`Worktrees need the volt daemon: ${opened.error}`);
 			return;
@@ -6160,22 +6133,18 @@ export class InteractiveMode {
 				return;
 			}
 
-			const sessionDir = getDefaultSessionDir(control.workspacePath, agentDir);
-			const result = await openNewSession(this.host, this.hostClient, {
+			const outcome = await this.sessions.newSessionIn({
 				cwd: target.path,
-				sessionDir,
 				workspaceName: control.workspaceName,
-				baseRef: target.baseRef,
-				setup: async (writer) => {
-					const bound = await control.bindSession(target.id, writer.sessionManager.getSessionId());
-					if (!bound) throw new Error(`Worktree ${target.id} is unavailable for session binding`);
-				},
+				...(target.baseRef === undefined ? {} : { baseRef: target.baseRef }),
 			});
-			if (result.cancelled) {
+			if (!outcome.moved) {
 				this.showStatus("Worktree session cancelled");
 				return;
 			}
-			await this.showMovedConversation();
+			if (!(await control.bindSession(target.id, outcome.conversation))) {
+				this.showWarning(`The daemon did not bind this session to worktree ${target.id}.`);
+			}
 			this.showStatus(`New session in worktree ${target.id} (branch ${target.branch}) — ${target.path}`);
 			this.ui.requestRender();
 		} catch (error) {
@@ -6310,8 +6279,9 @@ export class InteractiveMode {
 		});
 	}
 
+	/** `/fork`: the user messages of the conversation; a fork taken before one moves the client there, its text in the editor. */
 	private showUserMessageSelector(): void {
-		const userMessages = this.session.getUserMessagesForForking();
+		const userMessages = forkableMessages(this.store.state);
 
 		if (userMessages.length === 0) {
 			this.showStatus("No messages to fork from");
@@ -6324,22 +6294,19 @@ export class InteractiveMode {
 			const selector = new UserMessageSelectorComponent(
 				userMessages.map((m) => ({ id: m.entryId, text: m.text })),
 				async (entryId) => {
-					const source = this.session;
 					try {
-						const result = await openFork(this.host, this.hostClient, entryId);
-						if (result.cancelled) {
+						const outcome = await this.sessions.fork(entryId);
+						if (!outcome.moved) {
 							done();
 							this.ui.requestRender();
 							return;
 						}
-
-						await this.showMovedConversation();
-						this.editor.setText(result.selectedText ?? "");
+						this.editor.setText(outcome.text);
 						done();
 						this.showStatus("Forked to new session");
 					} catch (error: unknown) {
 						done();
-						await this.reportSessionChangeFailure("Failed to fork session", error, source);
+						this.showError(`Failed to fork session: ${errorText(error)}`);
 					}
 				},
 				() => {
@@ -6353,31 +6320,33 @@ export class InteractiveMode {
 	}
 
 	private async handleCloneCommand(): Promise<void> {
-		const leafId = this.sessionManager.getLeafId();
-		if (!leafId) {
+		await this.clientConnected.promise;
+		if (!this.store.state.leafId) {
 			this.showStatus("Nothing to clone yet");
 			return;
 		}
-
-		const source = this.session;
 		try {
-			const result = await openFork(this.host, this.hostClient, leafId, { position: "at" });
-			if (result.cancelled) {
+			if (!(await this.sessions.clone()).moved) {
 				this.ui.requestRender();
 				return;
 			}
-
-			await this.showMovedConversation();
 			this.editor.setText("");
 			this.showStatus("Cloned to new session");
 		} catch (error: unknown) {
-			await this.reportSessionChangeFailure("Failed to clone session", error, source);
+			this.showError(`Failed to clone session: ${errorText(error)}`);
 		}
 	}
 
+	/**
+	 * `/tree`: the conversation's entry tree as the client fold holds it.
+	 * Picking an entry moves the active branch there (`navigate_tree`),
+	 * summarizing the branch it leaves when asked; the interrupt key stops
+	 * the summary. Labels change through `set_label`.
+	 */
 	private showTreeSelector(initialSelectedId?: string): void {
-		const tree = this.sessionManager.getTree();
-		const realLeafId = this.sessionManager.getLeafId();
+		const state = this.store.state;
+		const tree = entryTree(state);
+		const realLeafId = state.leafId;
 		const initialFilterMode = this.settingsManager.getTreeFilterMode();
 
 		if (tree.length === 0) {
@@ -6435,14 +6404,9 @@ export class InteractiveMode {
 						}
 					}
 
-					// Set up escape handler and loader if summarizing
+					// The interrupt key stops a summary: the conversation's operation is the navigation meanwhile.
 					let summaryLoader: Loader | undefined;
-					const originalOnEscape = this.defaultEditor.onEscape;
-
 					if (wantsSummary) {
-						this.defaultEditor.onEscape = () => {
-							this.session.abortBranchSummary();
-						};
 						this.chatContainer.addChild(new Spacer(1));
 						summaryLoader = new Loader(
 							this.ui,
@@ -6455,9 +6419,9 @@ export class InteractiveMode {
 					}
 
 					try {
-						const result = await this.session.navigateTree(entryId, {
+						const result = await this.sessions.navigate(entryId, {
 							summarize: wantsSummary,
-							customInstructions,
+							...(customInstructions === undefined ? {} : { customInstructions }),
 						});
 
 						if (result.aborted) {
@@ -6483,7 +6447,6 @@ export class InteractiveMode {
 							summaryLoader.stop();
 							this.statusContainer.clear();
 						}
-						this.defaultEditor.onEscape = originalOnEscape;
 					}
 				},
 				() => {
@@ -6491,9 +6454,9 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				(entryId, label) => {
-					void this.session.sessionWriter.appendLabelChange(entryId, label).then(
+					void this.sessions.label(entryId, label).then(
 						() => this.ui.requestRender(),
-						(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+						(error: unknown) => this.showError(errorText(error)),
 					);
 				},
 				initialSelectedId,
@@ -6503,26 +6466,33 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * `/resume`: the stored sessions of the conversation's workspace, or of
+	 * every session directory, as the `sessions` query lists and searches
+	 * them; picking one moves the client there. Renaming and deleting go
+	 * through their intents; the host deletes only sessions of this
+	 * workspace, so the picker refuses the others.
+	 */
 	private showSessionSelector(): void {
+		const current = this.store.conversation;
+		/** The sessions of this workspace, once listed: the ones the host deletes. */
+		let workspace: ReadonlySet<string> | undefined;
+		const loader =
+			(scope: "workspace" | "all") =>
+			async (_onProgress?: unknown, query?: string): Promise<SessionSelectorItem[]> => {
+				const sessions = await this.sessions.list(scope, query);
+				if (scope === "workspace" && !query?.trim()) {
+					workspace = new Set(sessions.map((session) => session.sessionId));
+				}
+				return sessions.map(sessionItem);
+			};
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
-				(onProgress, query) =>
-					query
-						? SessionManager.search(this.sessionManager.getCwd(), query, this.sessionManager.getSessionDir())
-						: SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
-				(onProgress, query) => {
-					if (query) {
-						return this.sessionManager.usesDefaultSessionDir()
-							? SessionManager.searchAll(query)
-							: SessionManager.searchAll(query, this.sessionManager.getSessionDir());
-					}
-					return this.sessionManager.usesDefaultSessionDir()
-						? SessionManager.listAll(onProgress)
-						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress);
-				},
-				async (sessionRef) => {
+				loader("workspace"),
+				loader("all"),
+				async (session) => {
 					done();
-					await this.handleResumeSession(sessionRef);
+					await this.handleResumeSession(session.id, session.cwd || undefined);
 				},
 				() => {
 					done();
@@ -6534,105 +6504,51 @@ export class InteractiveMode {
 				},
 				() => this.ui.requestRender(),
 				{
-					renameSession: async (sessionRef, nextName) => {
-						const next = (nextName ?? "").trim();
-						if (!next) return;
-						const currentRef = this.sessionManager.getSessionRef();
-						if (
-							currentRef &&
-							currentRef.storeId === sessionRef.storeId &&
-							currentRef.sessionId === sessionRef.sessionId &&
-							currentRef.sessionGeneration === sessionRef.sessionGeneration
-						) {
-							await this.session.setSessionName(next);
-							return;
-						}
-						const manager = await SessionManager.open(sessionRef);
-						try {
-							await manager.logWriter.appendSessionInfo(next);
-						} catch (error) {
-							try {
-								await manager.closePersistence();
-							} catch (closeError) {
-								throw new AggregateError(
-									[error, closeError],
-									"Session rename failed and its manager could not be closed",
-								);
-							}
-							throw error;
-						}
-						await manager.closePersistence();
-					},
+					renameSession: (session, name) => this.sessions.rename(name, session.id),
 					showRenameHint: true,
 					keybindings: this.keybindings,
+					deleteSession: (session) => this.sessions.deleteSession(session.id),
+					deleteRefusal: (session) =>
+						workspace === undefined || workspace.has(session.id)
+							? undefined
+							: "Only sessions of this folder can be deleted here",
 				},
-
-				this.sessionManager.getSessionRef(),
+				current,
 			);
 			return { component: selector, focus: selector };
 		});
 	}
 
-	private async handleResumeSession(
-		sessionRef: SessionReference,
-		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
-	): Promise<SessionIntentResult> {
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
-		const source = this.session;
-		// The host's open gate takes the target's daemon lease first: granting it
-		// frees the session's lock when the daemon hosts it. The lease of the
-		// session left behind is released once that session closed.
-		const switchSession = (cwdOverride?: string): Promise<SessionIntentResult> =>
-			openStoredSession(this.host, this.hostClient, sessionRef, {
-				...(cwdOverride === undefined ? {} : { cwdOverride }),
-				withSession: options?.withSession,
-			});
+	/**
+	 * Move the client to the stored session `sessionId`. When its working
+	 * directory (`sessionCwd`, when known) is gone, the user may continue in
+	 * the current one instead. Resolves where the client went, if it moved.
+	 */
+	private async handleResumeSession(sessionId: string, sessionCwd?: string): Promise<MoveOutcome> {
+		await this.clientConnected.promise;
+		const stays: MoveOutcome = { moved: false };
 		try {
-			const result = await switchSession();
-			if (result.cancelled) {
-				return result;
-			}
-			await this.showMovedConversation();
-			this.showStatus("Resumed session");
-			return result;
+			const outcome = await this.sessions.switchTo(sessionId);
+			if (outcome.moved) this.showStatus("Resumed session");
+			return outcome;
 		} catch (error: unknown) {
-			// The daemon would not hand the target over, or another Volt process has
-			// it open: the target stayed closed while this session stayed open.
-			if (
-				error instanceof DaemonLeaseUnavailableError ||
-				error instanceof LocalSessionWorktreeRestoreError ||
-				(error instanceof ConversationLockedError && error.sessionId !== this.session.sessionId)
-			) {
-				this.showError(error.message);
-				return { cancelled: true };
+			if (!isMissingCwd(error)) {
+				this.showError(`Failed to resume session: ${errorText(error)}`);
+				return stays;
 			}
-			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Resume cancelled");
-					return { cancelled: true };
-				}
-				let result: SessionIntentResult;
-				try {
-					result = await switchSession(selectedCwd);
-				} catch (retryError) {
-					if (!(retryError instanceof DaemonLeaseUnavailableError)) throw retryError;
-					this.showError(retryError.message);
-					return { cancelled: true };
-				}
-				if (result.cancelled) {
-					return result;
-				}
-				await this.showMovedConversation();
-				this.showStatus("Resumed session in current cwd");
-				return result;
+			const cwd = await this.continueInCurrentCwd(error.message, sessionCwd);
+			if (cwd === undefined) {
+				this.showStatus("Resume cancelled");
+				return stays;
 			}
-			await this.reportSessionChangeFailure("Failed to resume session", error, source);
-			return { cancelled: true };
+			try {
+				const outcome = await this.sessions.switchTo(sessionId, cwd);
+				if (outcome.moved) this.showStatus("Resumed session in current cwd");
+				return outcome;
+			} catch (retryError: unknown) {
+				this.showError(`Failed to resume session: ${errorText(retryError)}`);
+				return stays;
+			}
 		}
 	}
 
@@ -6890,11 +6806,13 @@ export class InteractiveMode {
 		successMessage?: (savedImplicitProjectTrust: boolean) => string;
 	}): Promise<boolean> {
 		const action = options?.action ?? "reloading";
-		if (this.session.isStreaming) {
+		await this.clientConnected.promise;
+		const operation = this.store.phase?.operation;
+		if (operation === "turn") {
 			this.showWarning(`Wait for the current response to finish before ${action}.`);
 			return false;
 		}
-		if (this.session.isCompacting) {
+		if (operation === "compaction" || operation === "navigation") {
 			this.showWarning(`Wait for compaction to finish before ${action}.`);
 			return false;
 		}
@@ -6934,9 +6852,9 @@ export class InteractiveMode {
 		};
 
 		try {
-			await this.session.reload();
-			configureHttpDispatcher(this.session.settingsManager.getHttpIdleTimeoutMs());
-			this.session.setTransport(this.session.settingsManager.getTransport());
+			// The host reloads the conversation's resources and settings; the TUI reloads its own.
+			await this.sessions.reload();
+			if (!this.followSettings()) await this.settingsManager.reload();
 			this.keybindings.reload();
 			if (isExpandable(this.builtInHeader)) {
 				this.builtInHeader.setExpanded(this.toolOutputExpanded);
@@ -6960,8 +6878,12 @@ export class InteractiveMode {
 			this.ui.setShowHardwareCursor(this.settingsManager.getShowHardwareCursor());
 			this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 			this.applyFullscreenScrollbarSetting();
-			// The reloaded commands and shortcuts, as the conversation's intents catalog lists them now.
-			await this.input.load().catch(() => false);
+			// The reloaded commands and shortcuts, as the conversation's intents catalog lists them now, and its resources.
+			const [, resources] = await Promise.all([
+				this.input.load().catch(() => false),
+				this.store.client.query("resources").catch(() => undefined),
+			]);
+			this.resources = resources;
 			this.setupAutocompleteProvider();
 			this.setupExtensionShortcuts();
 			this.transcript.rebuild();
@@ -6970,10 +6892,10 @@ export class InteractiveMode {
 				force: false,
 				showDiagnosticsWhenQuiet: true,
 			});
-			const savedImplicitProjectTrust = this.maybeSaveImplicitProjectTrustAfterReload();
-			const modelsJsonError = this.session.modelRegistry.getError();
-			if (modelsJsonError) {
-				this.showError(`models.json error: ${modelsJsonError}`);
+			const savedImplicitProjectTrust = await this.maybeSaveImplicitProjectTrustAfterReload();
+			// What the reloaded setup reports as errors, such as a models.json the host could not read.
+			for (const notice of resources?.notices ?? []) {
+				if (notice.level === "error") this.showError(notice.message);
 			}
 			this.showStatus(
 				options?.successMessage?.(savedImplicitProjectTrust) ??
@@ -6993,17 +6915,13 @@ export class InteractiveMode {
 		await this.reloadRuntimeResources();
 	}
 
+	/** `/export [path]`: the host writes the session as HTML, or with a `.jsonl` path its active branch as JSONL. */
 	private async handleExportCommand(text: string): Promise<void> {
 		const outputPath = this.getPathCommandArgument(text, "/export");
-
+		await this.clientConnected.promise;
 		try {
-			if (outputPath?.endsWith(".jsonl")) {
-				const filePath = await this.session.exportToJsonl(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			} else {
-				const filePath = await this.session.exportToHtml(outputPath);
-				this.showStatus(`Session exported to: ${filePath}`);
-			}
+			const filePath = await this.sessions.exportTo(outputPath);
+			this.showStatus(`Session exported to: ${filePath}`);
 		} catch (error: unknown) {
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
 		}
@@ -7038,6 +6956,11 @@ export class InteractiveMode {
 		return argsString.slice(0, firstWhitespaceIndex);
 	}
 
+	/**
+	 * `/import <path>`: the host imports the JSONL session file as a new
+	 * session and moves the client there; one whose working directory is gone
+	 * runs in the current one when the user agrees.
+	 */
 	private async handleImportCommand(text: string): Promise<void> {
 		const inputPath = this.getPathCommandArgument(text, "/import");
 		if (!inputPath) {
@@ -7051,41 +6974,26 @@ export class InteractiveMode {
 			return;
 		}
 
-		const source = this.session;
+		await this.clientConnected.promise;
+		const imported = (moved: boolean): void =>
+			this.showStatus(moved ? `Session imported from: ${inputPath}` : "Import cancelled");
 		try {
-			if (this.loadingAnimation) {
-				this.loadingAnimation.stop();
-				this.loadingAnimation = undefined;
+			imported((await this.sessions.importSession(inputPath)).moved);
+		} catch (error: unknown) {
+			if (!isMissingCwd(error)) {
+				this.showError(`Failed to import session: ${errorText(error)}`);
+				return;
 			}
-			this.statusContainer.clear();
-			const result = await openImport(this.host, this.hostClient, inputPath);
-			if (result.cancelled) {
+			const cwd = await this.continueInCurrentCwd(error.message, undefined);
+			if (cwd === undefined) {
 				this.showStatus("Import cancelled");
 				return;
 			}
-			await this.showMovedConversation();
-			this.showStatus(`Session imported from: ${inputPath}`);
-		} catch (error: unknown) {
-			if (error instanceof MissingSessionCwdError) {
-				const selectedCwd = await this.promptForMissingSessionCwd(error);
-				if (!selectedCwd) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				const result = await openImport(this.host, this.hostClient, inputPath, selectedCwd);
-				if (result.cancelled) {
-					this.showStatus("Import cancelled");
-					return;
-				}
-				await this.showMovedConversation();
-				this.showStatus(`Session imported from: ${inputPath}`);
-				return;
+			try {
+				imported((await this.sessions.importSession(inputPath, cwd)).moved);
+			} catch (retryError: unknown) {
+				this.showError(`Failed to import session: ${errorText(retryError)}`);
 			}
-			if (error instanceof SessionImportFileNotFoundError) {
-				this.showError(`Failed to import session: ${error.message}`);
-				return;
-			}
-			await this.reportSessionChangeFailure("Failed to import session", error, source);
 		}
 	}
 
@@ -7113,7 +7021,8 @@ export class InteractiveMode {
 		}
 		const tmpFile = path.join(scratchDirectory, "session.html");
 		try {
-			await this.session.exportToHtml(tmpFile);
+			await this.clientConnected.promise;
+			await this.sessions.exportTo(tmpFile);
 		} catch (error: unknown) {
 			this.removeScratchDirectory(scratchDirectory);
 			this.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -7195,7 +7104,7 @@ export class InteractiveMode {
 	}
 
 	private async handleCopyCommand(): Promise<void> {
-		const text = this.session.getLastAssistantText();
+		const text = lastAssistantText(this.store.transcript());
 		if (!text) {
 			this.showError("No agent messages to copy yet.");
 			return;
@@ -7212,7 +7121,7 @@ export class InteractiveMode {
 	private async handleNameCommand(text: string): Promise<void> {
 		const name = text.replace(/^\/name\s*/, "").trim();
 		if (!name) {
-			const currentName = this.sessionManager.getSessionName();
+			const currentName = this.store.state.name;
 			if (currentName) {
 				this.chatContainer.addChild(new Spacer(1));
 				this.chatContainer.addChild(new Text(theme.fg("dim", `Session name: ${currentName}`), 1, 0));
@@ -7223,9 +7132,10 @@ export class InteractiveMode {
 			return;
 		}
 
-		const { outcome } = await intentRegistry.invoke(this.intentContext(), "set_session_name", { name });
+		await this.clientConnected.promise;
+		await this.sessions.rename(name);
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${outcome}`), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -7255,36 +7165,43 @@ export class InteractiveMode {
 		}
 	}
 
-	private handleSessionCommand(): void {
-		const stats = this.session.getSessionStats();
-		const sessionName = this.sessionManager.getSessionName();
+	/** `/session`: where the conversation's log lives, its messages from the client fold, and its usage from the live lane. */
+	private async handleSessionCommand(): Promise<void> {
+		await this.clientConnected.promise;
+		const conversation = await this.sessions.info();
+		const stats = messageStats(this.store.state);
+		const usage = this.store.value("usage");
+		const tokens =
+			usage?.kind === "usage" ? usage.tokens : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+		const cost = usage?.kind === "usage" ? usage.cost : 0;
+		const sessionName = this.store.state.name;
 
 		let info = `${theme.bold("Session Info")}\n\n`;
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
-		info += `${theme.fg("dim", "Store:")} ${stats.sessionRef?.sessionDirectory ?? "In-memory"}\n`;
-		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
+		info += `${theme.fg("dim", "Store:")} ${conversation.persisted ? conversation.sessionDir : "In-memory"}\n`;
+		info += `${theme.fg("dim", "ID:")} ${conversation.id}\n\n`;
 		info += `${theme.bold("Messages")}\n`;
-		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
-		info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
+		info += `${theme.fg("dim", "User:")} ${stats.user}\n`;
+		info += `${theme.fg("dim", "Assistant:")} ${stats.assistant}\n`;
 		info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
 		info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
-		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
+		info += `${theme.fg("dim", "Total:")} ${stats.total}\n\n`;
 		info += `${theme.bold("Tokens")}\n`;
-		info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-		info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
-		if (stats.tokens.cacheRead > 0) {
-			info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Input:")} ${tokens.input.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Output:")} ${tokens.output.toLocaleString()}\n`;
+		if (tokens.cacheRead > 0) {
+			info += `${theme.fg("dim", "Cache Read:")} ${tokens.cacheRead.toLocaleString()}\n`;
 		}
-		if (stats.tokens.cacheWrite > 0) {
-			info += `${theme.fg("dim", "Cache Write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
+		if (tokens.cacheWrite > 0) {
+			info += `${theme.fg("dim", "Cache Write:")} ${tokens.cacheWrite.toLocaleString()}\n`;
 		}
-		info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
+		info += `${theme.fg("dim", "Total:")} ${tokens.total.toLocaleString()}\n`;
 
-		if (stats.cost > 0) {
+		if (cost > 0) {
 			info += `\n${theme.bold("Cost")}\n`;
-			info += `${theme.fg("dim", "Total:")} ${stats.cost.toFixed(4)}`;
+			info += `${theme.fg("dim", "Total:")} ${cost.toFixed(4)}`;
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
@@ -7719,29 +7636,20 @@ export class InteractiveMode {
 		});
 	}
 
+	/** `/clear` and the new-session key: a running turn stops, then the client moves to a new session. */
 	private async handleClearCommand(): Promise<void> {
-		if (this.session.isStreaming) {
-			// Abort deliberately before the session switch so the in-flight turn is
-			// stopped and persisted, instead of relying on dispose-time teardown.
-			await this.session.abort("session_replacement");
+		await this.clientConnected.promise;
+		if (this.store.phase?.operation === "turn") {
+			// Stop the turn before the move, so it is persisted as it stopped.
+			await this.store.client.intent("abort");
 		}
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
-		const source = this.session;
 		try {
-			const { outcome } = await intentRegistry.invoke(this.intentContext(), "new_session", {});
-			if (outcome.cancelled) {
-				return;
-			}
-			await this.showMovedConversation();
+			if (!(await this.sessions.newSession()).moved) return;
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(new Text(`${theme.fg("accent", "✓ New session started")}`, 1, 1));
 			this.ui.requestRender();
 		} catch (error: unknown) {
-			await this.reportSessionChangeFailure("Failed to create session", error, source);
+			this.showError(`Failed to create session: ${errorText(error)}`);
 		}
 	}
 
@@ -8127,31 +8035,25 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * `/compact [instructions]`: the host compacts the conversation. The
+	 * compaction runs beside the TUI's other intents, so input sent meanwhile
+	 * queues on the host, and the interrupt key stops it.
+	 */
 	private async handleCompactCommand(customInstructions?: string): Promise<void> {
-		const entries = this.sessionManager.getEntries();
-		const messageCount = entries.filter((e) => e.type === "message").length;
-
+		await this.clientConnected.promise;
+		const messageCount = this.store.state.entries.filter((entry) => entry.type === "message").length;
 		if (messageCount < 2) {
 			this.showWarning("Nothing to compact (no messages yet)");
 			return;
 		}
 
-		if (this.loadingAnimation) {
-			this.loadingAnimation.stop();
-			this.loadingAnimation = undefined;
-		}
-		this.statusContainer.clear();
-
 		// A compaction already running takes this one's place.
-		if (this.session.isCompacting) return;
+		if (this.store.phase?.operation === "compaction") return;
 		try {
-			await intentRegistry.invoke(
-				this.intentContext(),
-				"compact",
-				customInstructions === undefined ? {} : { customInstructions },
-			);
+			await this.sessions.compact(customInstructions);
 		} catch {
-			// Ignore, will be emitted as an event
+			// The compaction's end reports how it failed.
 		}
 	}
 

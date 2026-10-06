@@ -1,29 +1,18 @@
-import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { setKeybindings, Text, type TUI, type TuiAltScreen, TuiMainScreen } from "@hansjm10/volt-tui";
+import { Text, type TUI } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
-import { KeybindingsManager } from "../../../src/core/keybindings.ts";
+import type { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
+import type { KeybindingsManager } from "../../../src/core/keybindings.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../../src/core/slash-commands.ts";
-import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
-import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { createTuiHarness, type TuiHarness, type TuiModeFixture } from "../tui-harness.ts";
 
 interface ModeControl {
-	renderer: TuiMainScreen | TuiAltScreen;
 	ui: TUI;
 	defaultEditor: CustomEditor;
 	keybindings: KeybindingsManager;
-	isInitialized: boolean;
-	activeInteractiveReview: boolean;
-	tuiHost: { relayCount(): number };
-	setupKeyHandlers(): void;
-	setupEditorSubmitHandler(): void;
-	setupAutocompleteProvider(): void;
 	handleDebugCommand(): Promise<void>;
 	switchTuiMode(mode: "regular" | "fullscreen"): boolean;
 	shutdown(): Promise<void>;
@@ -41,9 +30,15 @@ function deferred() {
 	return { promise, resolve };
 }
 
+/**
+ * The TUI asks before it quits while work runs, as its store shows the
+ * conversation's phase and work, and captures diagnostics without stopping
+ * the work.
+ */
 describe("regression #353: active quit protection and safe diagnostics", () => {
-	let harness: Harness;
-	let mode: InteractiveMode;
+	let harness: TuiHarness;
+	let tui: TuiModeFixture;
+	let session: AgentSession;
 	let control: ModeControl;
 	let terminal: VirtualTerminal;
 	let pending: Promise<void> | undefined;
@@ -55,45 +50,31 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 	beforeEach(async () => {
 		toolEntered = deferred();
 		toolCompleted = deferred();
-		const tool: AgentTool = {
-			name: "hold",
-			label: "Hold",
-			description: "Wait for this offline test",
-			parameters: Type.Object({}),
-			execute: async () => {
-				toolEntered.resolve();
-				await toolCompleted.promise;
-				return { content: [{ type: "text", text: "Done" }], details: {} };
-			},
-		};
 		runExtensionCommand = async () => undefined;
-		harness = await createHarness({
-			tools: [tool],
-			settings: { theme: "dark", retry: { enabled: false } },
-			extensionFactories: [
-				(volt) => {
-					volt.registerCommand("offline-hold", {
-						description: "Wait for this offline test",
-						handler: () => runExtensionCommand(),
-					});
-				},
-			],
+		harness = await createTuiHarness({
+			globalSettings: { theme: "dark", quietStartup: true, lsp: { enabled: false }, retry: { enabled: false } },
+			extension: (volt) => {
+				volt.registerTool({
+					name: "hold",
+					label: "Hold",
+					description: "Wait for this offline test",
+					parameters: Type.Object({}),
+					execute: async () => {
+						toolEntered.resolve();
+						await toolCompleted.promise;
+						return { content: [{ type: "text", text: "Done" }], details: {} };
+					},
+				});
+				volt.registerCommand("offline-hold", {
+					description: "Wait for this offline test",
+					handler: () => runExtensionCommand(),
+				});
+			},
 		});
-		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		const { host } = createFakeHost({ extensionMode: "tui" });
-		mode = new InteractiveMode(
-			TuiHost.start({ host, conversation: createFakeConversation(harness.session).conversation }),
-		);
-		control = mode as unknown as ModeControl;
-		terminal = new VirtualTerminal(120, 36);
-		control.renderer = new TuiMainScreen(terminal, false, harness.tempDir);
-		control.setupKeyHandlers();
-		control.setupEditorSubmitHandler();
-		control.setupAutocompleteProvider();
-		control.renderer.addChild(control.defaultEditor);
-		control.renderer.setFocus(control.defaultEditor);
-		control.renderer.start();
-		control.isInitialized = true;
+		tui = await harness.startMode({ columns: 120, rows: 36 });
+		session = harness.startup.session;
+		control = tui.mode as unknown as ModeControl;
+		terminal = tui.terminal;
 		vi.spyOn(control, "shutdown").mockResolvedValue();
 		vi.spyOn(control, "showWarning");
 		vi.spyOn(control, "showError");
@@ -106,57 +87,66 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		await pending;
 		pending = undefined;
 		finish = undefined;
-		mode.stop("resume-hint");
-		stopThemeWatcher();
-		await harness.cleanupAsync();
+		await harness.cleanup();
 		vi.restoreAllMocks();
-		vi.unstubAllEnvs();
-		setKeybindings(new KeybindingsManager());
 	});
+
+	/** The store shows the conversation busy, or idle. */
+	async function storeBusy(busy: boolean): Promise<void> {
+		await vi.waitFor(() => expect(tui.store.phase?.busy === true).toBe(busy));
+	}
 
 	async function startGeneration(): Promise<void> {
 		const entered = deferred();
 		const completed = deferred();
 		finish = completed.resolve;
-		harness.setResponses([
+		harness.faux.setResponses([
 			async () => {
 				entered.resolve();
 				await completed.promise;
 				return fauxAssistantMessage("Completed safely");
 			},
 		]);
-		pending = harness.session.prompt("Continue working");
+		pending = session.prompt("Continue working");
 		await entered.promise;
-		expect(harness.session.isBusy).toBe(true);
+		expect(session.isBusy).toBe(true);
+		await storeBusy(true);
 	}
 
-	it.each([0, 1])("exits idle on raw Ctrl+D with %i attached phones", (phoneCount) => {
-		vi.spyOn(control.tuiHost, "relayCount").mockReturnValue(phoneCount);
+	/** Phones the daemon relays into the conversation, as its live `presence` shows them. */
+	async function attachPhones(count: number): Promise<void> {
+		harness.startup.liveState.set("presence", { kind: "presence", remote: count });
+		await vi.waitFor(() => expect(tui.store.value("presence")).toMatchObject({ remote: count }));
+	}
+
+	it.each([0, 1])("exits idle on raw Ctrl+D with %i attached phones", async (phoneCount) => {
+		await attachPhones(phoneCount);
 		terminal.sendInput("\x04");
 		expect(control.shutdown).toHaveBeenCalledTimes(1);
 		expect(control.showWarning).not.toHaveBeenCalled();
 	});
 
 	it.each([0, 1])("requires a second Ctrl+D during generation with %i attached phones", async (phoneCount) => {
-		vi.spyOn(control.tuiHost, "relayCount").mockReturnValue(phoneCount);
+		await attachPhones(phoneCount);
 		await startGeneration();
 		terminal.sendInput("\x04");
 		expect(control.shutdown).not.toHaveBeenCalled();
 		expect(control.showWarning).toHaveBeenCalledWith(expect.stringContaining("Work is active"));
-		expect(harness.session.isBusy).toBe(true);
+		expect(session.isBusy).toBe(true);
 		terminal.sendInput("\x04");
 		expect(control.shutdown).toHaveBeenCalledTimes(1);
 	});
 
 	it("protects actual tool execution after model generation has completed", async () => {
 		finish = toolCompleted.resolve;
-		harness.setResponses([
+		harness.faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("hold", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("Completed safely"),
 		]);
-		pending = harness.session.prompt("Use the offline tool");
+		pending = session.prompt("Use the offline tool");
 		await toolEntered.promise;
-		expect(harness.eventsOfType("message_end").some((event) => event.message.role === "assistant")).toBe(true);
+		expect(session.messages.some((message) => message.role === "assistant")).toBe(true);
+		await storeBusy(true);
 		terminal.sendInput("\x04");
 		expect(control.shutdown).not.toHaveBeenCalled();
 		terminal.sendInput("\x04");
@@ -214,7 +204,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		const entered = deferred();
 		const completed = deferred();
 		finish = completed.resolve;
-		pending = harness.session
+		pending = session
 			.executeBash("offline operation", undefined, {
 				operations: {
 					exec: async () => {
@@ -226,8 +216,9 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 			})
 			.then(() => undefined);
 		await entered.promise;
-		expect(harness.session.isStreaming).toBe(false);
-		expect(harness.session.isBusy).toBe(true);
+		expect(session.isStreaming).toBe(false);
+		expect(session.isBusy).toBe(true);
+		await storeBusy(true);
 		terminal.sendInput("\x04");
 		expect(control.shutdown).not.toHaveBeenCalled();
 		terminal.sendInput("\x04");
@@ -249,7 +240,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 				};
 				let operation: Promise<unknown>;
 				if (currentKind === "bash") {
-					operation = harness.session.executeBash("offline", undefined, {
+					operation = session.executeBash("offline", undefined, {
 						operations: {
 							exec: async () => {
 								await hold();
@@ -259,27 +250,29 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 					});
 				} else if (currentKind === "extension command") {
 					runExtensionCommand = hold;
-					operation = harness.session.prompt("/offline-hold");
+					operation = session.prompt("/offline-hold");
 				} else {
-					vi.spyOn(harness.session.resourceLoader, "reload").mockImplementationOnce(async () => {
+					vi.spyOn(session.resourceLoader, "reload").mockImplementationOnce(async () => {
 						await hold();
 						if (currentKind === "failed reload") throw new Error("offline reload failure");
 					});
-					operation = harness.session.reload();
+					operation = session.reload();
 				}
 				pending =
 					currentKind === "failed reload"
 						? expect(operation).rejects.toThrow("offline reload failure")
 						: operation.then(() => undefined);
 				await entered.promise;
-				expect(harness.session.isBusy).toBe(true);
+				expect(session.isBusy).toBe(true);
+				await storeBusy(true);
 			}
 			await startOperation();
 			terminal.sendInput("\x04");
 			expect(control.showWarning).toHaveBeenCalledTimes(1);
 			finish?.();
 			await pending;
-			expect(harness.session.isBusy).toBe(false);
+			expect(session.isBusy).toBe(false);
+			await storeBusy(false);
 			await startOperation();
 			terminal.sendInput("\x04");
 			expect(control.shutdown).not.toHaveBeenCalled();
@@ -329,6 +322,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		terminal.sendInput("\x04");
 		finish?.();
 		await pending;
+		await storeBusy(false);
 		await startGeneration();
 		terminal.sendInput("\x04");
 		expect(control.shutdown).not.toHaveBeenCalled();
@@ -364,14 +358,14 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		expect(control.defaultEditor.getText()).toBe("draft");
 		await control.defaultEditor.onSubmit?.("/debug");
 		expect(control.handleDebugCommand).toHaveBeenCalledTimes(2);
-		expect(harness.session.pendingMessageCount).toBe(0);
-		expect(harness.session.isBusy).toBe(true);
+		expect(session.pendingMessageCount).toBe(0);
+		expect(session.isBusy).toBe(true);
 		expect(control.shutdown).not.toHaveBeenCalled();
 		terminal.sendInput("\x04");
 		expect(control.shutdown).not.toHaveBeenCalled();
 		finish?.();
 		await pending;
-		expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		expect(session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
 	});
 
 	it("honors rebinding and disabling debug globally with overlay focus", async () => {
@@ -488,5 +482,143 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 		const output = control.ui.render(120).lines.join("\n");
 		expect(output).toContain("F10 / /debug");
 		expect(output).toContain("Capture diagnostics");
+	});
+});
+
+/**
+ * Work that runs in the background, after the foreground settled, is active
+ * work too: the TUI's store shows it from the live `work` value its executor
+ * holds, until the work's cleanup settles.
+ */
+describe("regression #353: quit protection for background work", () => {
+	let harness: TuiHarness;
+	let tui: TuiModeFixture;
+	let control: ModeControl;
+	let release: (() => void) | undefined;
+	let holdCleanup = false;
+
+	beforeEach(async () => {
+		release = undefined;
+		holdCleanup = false;
+		harness = await createTuiHarness({
+			globalSettings: { theme: "dark", quietStartup: true, lsp: { enabled: false }, retry: { enabled: false } },
+			responses: ["Foreground work completed."],
+			extension: (volt) => {
+				volt.registerWorkKind("job");
+				volt.registerCommand("start-job", {
+					description: "Start a job that runs until it is released or cancelled",
+					handler: async (_args, ctx) => {
+						await ctx.startWork("job", { title: "Background job" }, async ({ signal }) => {
+							const done = Promise.withResolvers<void>();
+							release = () => done.resolve();
+							// A cancelled job whose cleanup is held stays active until it is released.
+							signal.addEventListener("abort", () => (holdCleanup ? undefined : done.resolve()), {
+								once: true,
+							});
+							await done.promise;
+							return { outcome: signal.aborted ? "cancelled" : "completed" };
+						});
+					},
+				});
+			},
+		});
+		tui = await harness.startMode({ columns: 120, rows: 36 });
+		control = tui.mode as unknown as ModeControl;
+		vi.spyOn(control, "shutdown").mockResolvedValue();
+		vi.spyOn(control, "showWarning");
+		vi.spyOn(control, "showError");
+	});
+
+	afterEach(async () => {
+		release?.();
+		await harness.cleanup();
+		vi.restoreAllMocks();
+	});
+
+	/** The id of the job the store shows running, once it shows one. */
+	async function startJob(): Promise<string> {
+		tui.terminal.sendInput("/start-job");
+		tui.terminal.sendInput("\r");
+		let workId = "";
+		await vi.waitFor(() => {
+			const work = [...tui.store.live.values.values()].find((value) => value.kind === "work");
+			expect(work).toBeDefined();
+			workId = work?.kind === "work" ? work.workId : "";
+		});
+		await vi.waitFor(() => expect(tui.store.phase?.busy).toBe(false));
+		return workId;
+	}
+
+	it.each(["/quit", "Ctrl+D"])("requires confirmation for %s while background work runs", async (entryPoint) => {
+		await startJob();
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		const quit = () => {
+			if (entryPoint === "/quit") {
+				tui.terminal.sendInput("/quit");
+				tui.terminal.sendInput("\r");
+			} else {
+				tui.terminal.sendInput("\x04");
+			}
+		};
+
+		quit();
+		expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
+		expect(control.shutdown).not.toHaveBeenCalled();
+
+		now += 2999;
+		quit();
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+		expect(control.showWarning).toHaveBeenCalledTimes(1);
+		expect(control.showError).not.toHaveBeenCalled();
+	});
+
+	it("protects cancelling background work until its cleanup settles", async () => {
+		holdCleanup = true;
+		const workId = await startJob();
+		await tui.store.client.intent("cancel_work", { workId });
+		await vi.waitFor(() => expect(tui.store.state.work.get(workId)?.state).toBe("cancelling"));
+
+		tui.terminal.sendInput("\x04");
+		expect(control.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining("Work is active"));
+		expect(control.shutdown).not.toHaveBeenCalled();
+		tui.terminal.sendInput("\x04");
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+
+		release?.();
+		await vi.waitFor(() => expect(tui.store.state.work.get(workId)?.outcome).toBe("cancelled"));
+	});
+
+	it("expires a background-work quit warning at three seconds", async () => {
+		await startJob();
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await control.defaultEditor.onSubmit?.("/quit");
+		now += 3000;
+		await control.defaultEditor.onSubmit?.("/quit");
+		expect(control.showWarning).toHaveBeenCalledTimes(2);
+		expect(control.shutdown).not.toHaveBeenCalled();
+
+		now += 1;
+		await control.defaultEditor.onSubmit?.("/quit");
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not reuse a background-work quit warning after new foreground work", async () => {
+		await startJob();
+		vi.spyOn(Date, "now").mockReturnValue(Date.now());
+		tui.terminal.sendInput("\x04");
+		expect(control.showWarning).toHaveBeenCalledTimes(1);
+
+		await harness.startup.session.prompt("Continue foreground work");
+		await vi.waitFor(() => expect(tui.store.phase?.busy).toBe(false));
+		await vi.waitFor(() => expect(tui.store.transcript().length).toBeGreaterThan(1));
+
+		tui.terminal.sendInput("\x04");
+		expect(control.showWarning).toHaveBeenCalledTimes(2);
+		expect(control.shutdown).not.toHaveBeenCalled();
+		tui.terminal.sendInput("\x04");
+		expect(control.shutdown).toHaveBeenCalledTimes(1);
 	});
 });

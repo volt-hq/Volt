@@ -77,6 +77,7 @@ type InteractiveTestAccess = {
 	leaveConversation(): void;
 	showConversation(options: { afresh: boolean }): void;
 	reloadRuntimeResources(): Promise<boolean>;
+	clientConnected: PromiseWithResolvers<void>;
 };
 
 /** The tool call that launched the fixture's job. */
@@ -201,6 +202,8 @@ async function createFixture(
 	vi.spyOn(TuiStore.prototype, "client", "get").mockReturnValue(client as unknown as ProtocolClient);
 	const mode = new InteractiveMode(tuiHost, { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;
+	// The commands that wait for the TUI's client to connect go out through the fixture's client at once.
+	access.clientConnected.resolve();
 	let shownSession = harness.session;
 	let moved = false;
 	let live: LiveFoldState = emptyLiveFold();

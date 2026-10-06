@@ -2,11 +2,15 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@hansjm10/volt-tui";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { sessionSelectorItem } from "../src/cli/session-picker.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { type SessionInfo, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
+import type { SessionInfo } from "../src/core/session-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
-import { SessionSelectorComponent } from "../src/modes/interactive/components/session-selector.ts";
+import {
+	SessionSelectorComponent,
+	type SessionSelectorItem,
+} from "../src/modes/interactive/components/session-selector.ts";
 import { createDirectorySymlinkSync } from "./symlink-utils.ts";
 
 type Deferred<T> = {
@@ -42,18 +46,14 @@ function stripAnsi(text: string): string {
 	return text.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, "");
 }
 
-function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionInfo {
+function makeSession(overrides: Partial<SessionSelectorItem> & { id: string }): SessionSelectorItem {
 	return {
-		ref: overrides.ref ?? {
-			sessionDirectory: "/tmp/sessions",
-			storeId: "store",
-			sessionGeneration: "generation-test",
-			sessionId: overrides.id,
-		},
+		key: overrides.key ?? overrides.id,
+		location: overrides.location ?? "/tmp/sessions",
 		id: overrides.id,
 		cwd: overrides.cwd ?? "",
 		name: overrides.name,
-		parentSessionRef: overrides.parentSessionRef,
+		...(overrides.parentKey === undefined ? {} : { parentKey: overrides.parentKey }),
 		created: overrides.created ?? new Date(0),
 		modified: overrides.modified ?? new Date(0),
 		messageCount: overrides.messageCount ?? 1,
@@ -61,8 +61,16 @@ function makeSession(overrides: Partial<SessionInfo> & { id: string }): SessionI
 	};
 }
 
-function refKey(session: SessionInfo): string {
-	return `${session.ref.sessionDirectory}\0${session.ref.storeId}\0${session.ref.sessionId}\0${session.ref.sessionGeneration}`;
+/** A stored session as the startup picker reads it from its session directory. */
+function storedSession(overrides: Partial<SessionInfo> & Pick<SessionInfo, "id" | "ref">): SessionInfo {
+	return {
+		cwd: "",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 1,
+		firstMessage: "hello",
+		...overrides,
+	};
 }
 
 function createSymlinkedSessionDirectories(): {
@@ -120,7 +128,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, deleteSession: async () => ({ trashed: false }) },
 		);
 		await flushPromises();
 
@@ -144,7 +152,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, deleteSession: async () => ({ trashed: false }) },
 		);
 		await flushPromises();
 
@@ -155,7 +163,7 @@ describe("session selector path/delete interactions", () => {
 		list.handleInput("a");
 		list.handleInput(CTRL_D);
 
-		expect(confirmationChanges).toEqual([refKey(sessions[0]!)]);
+		expect(confirmationChanges).toEqual([sessions[0]!.key]);
 	});
 
 	it("enters confirmation mode on Ctrl+Backspace when search query is empty", async () => {
@@ -168,7 +176,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, deleteSession: async () => ({ trashed: false }) },
 		);
 		await flushPromises();
 
@@ -176,62 +184,42 @@ describe("session selector path/delete interactions", () => {
 		const confirmationChanges: Array<string | null> = [];
 		list.onDeleteConfirmationChange = (path) => confirmationChanges.push(path);
 
-		let deletedRef: SessionReference | null = null;
-		list.onDeleteSession = async (sessionRef) => {
-			deletedRef = sessionRef;
+		let deleted: SessionSelectorItem | null = null;
+		list.onDeleteSession = async (session) => {
+			deleted = session;
 		};
 
 		list.handleInput(CTRL_BACKSPACE);
-		expect(confirmationChanges).toEqual([refKey(sessions[0]!)]);
+		expect(confirmationChanges).toEqual([sessions[0]!.key]);
 
 		list.handleInput("\r");
-		expect(confirmationChanges).toEqual([refKey(sessions[0]!), null]);
-		expect(deletedRef).toEqual(sessions[0]!.ref);
+		expect(confirmationChanges).toEqual([sessions[0]!.key, null]);
+		expect(deleted).toBe(sessions[0]);
 	});
 
 	it("preserves and refreshes active deep-search results while deleting", async () => {
-		const sessionDirectory = mkdtempSync(join(tmpdir(), "volt-session-selector-delete-"));
-		tempDirs.push(sessionDirectory);
 		const target = makeSession({
 			id: "target",
 			name: "Delete Me",
-			ref: {
-				sessionDirectory,
-				storeId: "store",
-				sessionGeneration: "generation-target",
-				sessionId: "target",
-			},
 			modified: new Date("2026-01-01T00:00:00.000Z"),
 			firstMessage: "summary without the query",
 		});
 		const remaining = makeSession({
 			id: "remaining",
 			name: "Remaining Deep Match",
-			ref: {
-				sessionDirectory,
-				storeId: "store",
-				sessionGeneration: "generation-remaining",
-				sessionId: "remaining",
-			},
 			modified: new Date("2026-01-02T00:00:00.000Z"),
 			firstMessage: "another summary without the query",
 		});
 		const shallow = makeSession({
 			id: "shallow",
 			name: "Shallow Summary Match",
-			ref: {
-				sessionDirectory,
-				storeId: "store",
-				sessionGeneration: "generation-shallow",
-				sessionId: "shallow",
-			},
 			modified: new Date("2026-01-03T00:00:00.000Z"),
 			firstMessage: "deepterm",
 		});
-		const refreshLoad = createDeferred<SessionInfo[]>();
+		const refreshLoad = createDeferred<SessionSelectorItem[]>();
 		let unqueriedLoadCalls = 0;
 		let searchCalls = 0;
-		let deleted = false;
+		let deleted: SessionSelectorItem | undefined;
 		const selector = new SessionSelectorComponent(
 			async (_onProgress, query) => {
 				if (query) {
@@ -246,7 +234,13 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{
+				keybindings,
+				deleteSession: async (session) => {
+					deleted = session;
+					return { trashed: false };
+				},
+			},
 		);
 		await flushPromises();
 
@@ -254,42 +248,64 @@ describe("session selector path/delete interactions", () => {
 		for (const character of "deepterm") list.handleInput(character);
 		await waitForDebouncedSearch();
 		expect(searchCalls).toBe(1);
-		expect(list.getSelectedSessionRef()?.sessionId).toBe("target");
+		expect(list.getSelectedSession()?.id).toBe("target");
 
-		const exportSnapshot = vi.spyOn(SessionManager, "exportJsonlSnapshot").mockResolvedValue({ lastOrdinal: 1 });
-		const deleteSession = vi.spyOn(SessionManager, "delete").mockImplementation(async () => {
-			deleted = true;
-			return true;
-		});
-		try {
-			const deleteSelected = list.onDeleteSession;
-			expect(deleteSelected).toBeDefined();
-			const deletion = deleteSelected!(target.ref);
-			await flushPromises();
+		const deleteSelected = list.onDeleteSession;
+		expect(deleteSelected).toBeDefined();
+		const deletion = deleteSelected!(target);
+		await flushPromises();
+		expect(deleted).toBe(target);
 
-			let output = selector.render(120).lines.join("\n");
-			expect(output).not.toContain("Delete Me");
-			expect(output).toContain("Remaining Deep Match");
-			expect(output).not.toContain("Shallow Summary Match");
+		let output = selector.render(120).lines.join("\n");
+		expect(output).not.toContain("Delete Me");
+		expect(output).toContain("Remaining Deep Match");
+		expect(output).not.toContain("Shallow Summary Match");
 
-			refreshLoad.resolve([remaining, shallow]);
-			await deletion;
+		refreshLoad.resolve([remaining, shallow]);
+		await deletion;
 
-			expect(searchCalls).toBe(2);
-			expect(list.getSearchQuery()).toBe("deepterm");
-			expect(list.getSelectedSessionRef()?.sessionId).toBe("remaining");
-			output = selector.render(120).lines.join("\n");
-			expect(output).toContain("Remaining Deep Match");
-			expect(output).not.toContain("Shallow Summary Match");
-		} finally {
-			exportSnapshot.mockRestore();
-			deleteSession.mockRestore();
-		}
+		expect(searchCalls).toBe(2);
+		expect(list.getSearchQuery()).toBe("deepterm");
+		expect(list.getSelectedSession()?.id).toBe("remaining");
+		output = selector.render(120).lines.join("\n");
+		expect(output).toContain("Remaining Deep Match");
+		expect(output).not.toContain("Shallow Summary Match");
+	});
+
+	it("refuses to delete what the delete refusal names, before it asks", async () => {
+		const sessions = [makeSession({ id: "elsewhere" })];
+		const selector = new SessionSelectorComponent(
+			async () => sessions,
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{
+				keybindings,
+				deleteSession: async () => ({ trashed: false }),
+				deleteRefusal: (session) => (session.id === "elsewhere" ? "Only sessions of this folder" : undefined),
+			},
+		);
+		await flushPromises();
+
+		const list = selector.getSessionList();
+		const confirmationChanges: Array<string | null> = [];
+		let errorMessage: string | undefined;
+		list.onDeleteConfirmationChange = (path) => confirmationChanges.push(path);
+		list.onError = (message) => {
+			errorMessage = message;
+		};
+
+		list.handleInput(CTRL_D);
+
+		expect(confirmationChanges).toEqual([]);
+		expect(errorMessage).toBe("Only sessions of this folder");
 	});
 
 	it("does not switch scope back to All when All load resolves after toggling back to Current", async () => {
 		const currentSessions = [makeSession({ id: "current" })];
-		const allDeferred = createDeferred<SessionInfo[]>();
+		const allDeferred = createDeferred<SessionSelectorItem[]>();
 		let allLoadCalls = 0;
 
 		const selector = new SessionSelectorComponent(
@@ -321,7 +337,7 @@ describe("session selector path/delete interactions", () => {
 
 	it("does not start redundant All loads when toggling scopes while All is already loading", async () => {
 		const currentSessions = [makeSession({ id: "current" })];
-		const allDeferred = createDeferred<SessionInfo[]>();
+		const allDeferred = createDeferred<SessionSelectorItem[]>();
 		let allLoadCalls = 0;
 
 		const selector = new SessionSelectorComponent(
@@ -360,13 +376,13 @@ describe("session selector path/delete interactions", () => {
 		};
 
 		const sessions = [
-			makeSession({
+			storedSession({
 				id: "parent",
 				ref: parentRef,
 				name: "Parent",
 				modified: new Date("2026-01-01T00:00:00.000Z"),
 			}),
-			makeSession({
+			storedSession({
 				id: "child",
 				ref: {
 					sessionDirectory: paths.aliasB,
@@ -383,7 +399,7 @@ describe("session selector path/delete interactions", () => {
 				name: "Child",
 				modified: new Date("2025-12-31T00:00:00.000Z"),
 			}),
-		];
+		].map(sessionSelectorItem);
 
 		const selector = new SessionSelectorComponent(
 			async () => sessions,
@@ -406,7 +422,7 @@ describe("session selector path/delete interactions", () => {
 		tempDirs.push(paths.baseDir);
 
 		const sessions = [
-			makeSession({
+			storedSession({
 				id: "parent",
 				ref: {
 					sessionDirectory: paths.aliasB,
@@ -416,7 +432,18 @@ describe("session selector path/delete interactions", () => {
 				},
 				name: "Parent",
 			}),
-		];
+		].map(sessionSelectorItem);
+		const current = sessionSelectorItem(
+			storedSession({
+				id: "parent",
+				ref: {
+					sessionDirectory: paths.aliasA,
+					storeId: "store",
+					sessionId: "parent",
+					sessionGeneration: "generation-parent",
+				},
+			}),
+		);
 		const selector = new SessionSelectorComponent(
 			async () => sessions,
 			async () => [],
@@ -424,13 +451,8 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
-			{
-				sessionDirectory: paths.aliasA,
-				storeId: "store",
-				sessionId: "parent",
-				sessionGeneration: "generation-parent",
-			},
+			{ keybindings, deleteSession: async () => ({ trashed: false }) },
+			current.key,
 		);
 		await flushPromises();
 

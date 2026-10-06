@@ -135,7 +135,7 @@ export const modelsQuery = defineQuery({
 
 /** A session list item as a remote client sees it: without the host paths and lineage only local clients read. */
 function remoteSessionItem(item: RpcSessionListItem): RpcSessionListItem {
-	const { cwd: _cwd, parentSessionId: _parentSessionId, ...rest } = item;
+	const { cwd: _cwd, parentSessionId: _parentSessionId, sessionDir: _sessionDir, ...rest } = item;
 	return rest;
 }
 

@@ -21183,6 +21183,9 @@
 				},
 				"parentSessionId": {
 					"type": "string"
+				},
+				"sessionDir": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
