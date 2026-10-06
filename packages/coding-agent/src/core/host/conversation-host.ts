@@ -1008,6 +1008,7 @@ export class ConversationHost {
 		this.cancelRetention(conversation);
 		const attachment: Attachment = { client, conversation };
 		this.attachments.set(client.id, attachment);
+		if (client.remote) this.publishPresence(conversation);
 		try {
 			// The live view first: a dialog an extension asks from session_start reaches the client.
 			if (client.live) attachment.detachLive = conversation.liveState.attach(client.id, client.live);
@@ -1023,6 +1024,7 @@ export class ConversationHost {
 			if (this.attachments.get(client.id) === attachment) this.attachments.delete(client.id);
 			attachment.detachLive?.();
 			attachment.detachLive = undefined;
+			if (client.remote) this.publishPresence(conversation);
 			throw error;
 		}
 	}
@@ -1033,6 +1035,16 @@ export class ConversationHost {
 		attachment.detachSurface = undefined;
 		attachment.detachLive?.();
 		attachment.detachLive = undefined;
+		if (attachment.client.remote) this.publishPresence(attachment.conversation);
+	}
+
+	/** Set `conversation`'s live `presence` to the paired remote devices attached to it, when that changed. */
+	private publishPresence(conversation: HostedConversation): void {
+		if (conversation.closed) return;
+		const remote = this.clientsOf(conversation).filter((client) => client.remote === true).length;
+		const current = conversation.liveState.get("presence");
+		if (current?.kind === "presence" ? current.remote === remote : remote === 0) return;
+		conversation.liveState.set("presence", { kind: "presence", remote });
 	}
 
 	/** Apply the close rules to a conversation a client left; resolves whether it closes. */

@@ -232,6 +232,12 @@ export const ExtensionSummarySchema = Type.Object(
 		hasSettings: Type.Boolean(),
 		/** Why it failed, when `state` is `failed`. */
 		error: Type.Optional(Type.String({ maxLength: EXTENSION_ERROR_MAX_CHARS, pattern: UI_NODE_TEXT_PATTERN })),
+		/**
+		 * Where its code came from and which revision (an npm or git package, or
+		 * a local path), as its permission acknowledgment records it; local
+		 * clients only.
+		 */
+		fingerprint: Type.Optional(Type.String()),
 	},
 	closed,
 );

@@ -24,12 +24,18 @@ import {
 	clientFold,
 	clientRestore,
 	emptyClientState,
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveFrame,
 	type HostFrame,
 	type HostRequestKind,
 	type HostResponse,
 	type IntentInput,
 	type IntentOutput,
+	type LiveFoldState,
+	LivePatchError,
 	type LiveValue,
+	liveCommitOf,
 	PROTOCOL_VERSION,
 	type QueryErrorCode,
 	type QueryName,
@@ -41,14 +47,6 @@ import {
 import { VERSION } from "../config.ts";
 import type { ConversationHost } from "../core/host/conversation-host.ts";
 import type { HostedConversation } from "../core/host/hosted-conversation.ts";
-import {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveFrame,
-	type LiveFoldState,
-	LivePatchError,
-	liveCommitOf,
-} from "../core/protocol/live-fold.ts";
 import { localProfile } from "../core/protocol/profiles.ts";
 import { serveConnection } from "../core/protocol/server/connection.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "../core/protocol/transport/jsonl.ts";

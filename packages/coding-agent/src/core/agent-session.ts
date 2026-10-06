@@ -63,7 +63,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
-import { SessionClientInputs } from "./session/client-inputs.ts";
+import { SessionClientInputs, type WithdrawnInput } from "./session/client-inputs.ts";
 import { SessionCompaction } from "./session/compaction.ts";
 import { SessionEvents } from "./session/events.ts";
 import {
@@ -1880,6 +1880,16 @@ export class AgentSession {
 	 */
 	clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
 		return this._clientInputs.clearQueue();
+	}
+
+	/**
+	 * Take every queued input back, with its images, steering first: what a
+	 * client restores to its editor. Withdrawn durably, as {@link clearQueue}.
+	 * @throws QueueClearPersistenceError when the cleared state could not be persisted
+	 */
+	async withdrawQueue(): Promise<WithdrawnInput[]> {
+		const { steering, followUp } = await this._clientInputs.withdrawQueue();
+		return [...steering, ...followUp];
 	}
 
 	/** Number of pending messages (includes both steering and follow-up) */

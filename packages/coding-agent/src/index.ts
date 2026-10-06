@@ -358,18 +358,6 @@ export type {
 export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { Personality } from "./core/personality.ts";
 export type { PromptCacheStatus } from "./core/prompt-cache-status.ts";
-export {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveFrame,
-	foldLiveItems,
-	type LiveFoldState,
-	LivePatchError,
-	type LiveStreamingAssistant,
-	type LiveStreamingTool,
-	liveCommitOf,
-	patchLiveValue,
-} from "./core/protocol/live-fold.ts";
 export { localProfile, type Profile, type ProfileLimits } from "./core/protocol/profiles.ts";
 export {
 	type ProtocolConnection,

@@ -51,9 +51,9 @@ npm run check
 
 Required checks and affected tests must pass. Fix failures caused by your changes and report unrelated failures without expanding the PR's scope. Include the commands and results in the PR description.
 
-The AI, agent, and coding-agent Vitest configs default to two workers locally to
-reduce contention with the editor, daemon, and other worktrees. Override a
-workspace run with the standard Vitest option:
+The AI, agent, protocol, and coding-agent Vitest configs default to half the
+host's cores locally. When the editor, daemon, or other worktrees share the
+host, lower it for a workspace run with the standard Vitest option:
 
 ```bash
 ./test.sh test --workspace packages/coding-agent -- test/skills.test.ts --maxWorkers=1

@@ -22,7 +22,8 @@ import {
 	assertValidSessionId,
 	findSessionInfoById,
 	getDefaultSessionDir,
-	type SessionManager,
+	type SessionInfo,
+	SessionManager,
 	type SessionReference,
 } from "../session-manager.ts";
 import type { LogWriter } from "../session-writer.ts";
@@ -305,29 +306,59 @@ export async function openStoredSession(
 	);
 }
 
-/** Move `client` to the stored session `sessionId` of its conversation's workspace. */
+/**
+ * The stored session `sessionId` as `conversation` finds it: in its
+ * workspace (its session directory, with its cwd), or, with `scope: "all"`,
+ * also in every session directory the `sessions` query lists with that
+ * scope. Undefined when there is none.
+ */
+export async function findStoredSession(
+	conversation: HostedConversation,
+	sessionId: string,
+	scope: "workspace" | "all" = "workspace",
+): Promise<SessionInfo | undefined> {
+	assertValidSessionId(sessionId);
+	const manager = conversation.session.sessionManager;
+	const sessionDir = manager.getSessionDir() || getDefaultSessionDir(conversation.cwd);
+	const found = await findSessionInfoById(sessionDir, sessionId);
+	if (found && (!found.cwd || sameFilesystemLocation(found.cwd, conversation.cwd))) return found;
+	if (scope === "workspace") return undefined;
+	const all = manager.usesDefaultSessionDir()
+		? await SessionManager.listAll()
+		: await SessionManager.listAll(manager.getSessionDir());
+	return all.find((info) => info.id === sessionId);
+}
+
+/**
+ * Move `client` to the stored session `sessionId` of its conversation's
+ * workspace or, with `scope: "all"`, of any session directory the `sessions`
+ * query lists with that scope.
+ */
 export async function openStoredSessionById(
 	host: ConversationHost,
 	client: HostClient,
 	sessionId: string,
-	options?: SwitchSessionIntentOptions,
+	options?: SwitchSessionIntentOptions & { readonly scope?: "workspace" | "all" },
 ): Promise<SessionIntentResult> {
 	const source = intentSource(host, client, options?.assertConversationGenerationCurrent);
 	assertValidSessionId(sessionId);
 	const conversation = source.conversation;
 	if (sessionId === conversation.id) return { cancelled: false, sessionId, seeded: false };
-	const sessionDir = conversation.session.sessionManager.getSessionDir() || getDefaultSessionDir(conversation.cwd);
-	const target = await findSessionInfoById(sessionDir, sessionId);
+	const target = await findStoredSession(conversation, sessionId, options?.scope);
 	source.assertCurrent();
-	if (!target || (target.cwd && !sameFilesystemLocation(target.cwd, conversation.cwd))) {
-		throw new Error(`Session not found in current workspace: ${sessionId}`);
+	if (!target) {
+		throw new Error(
+			options?.scope === "all"
+				? `Session not found: ${sessionId}`
+				: `Session not found in current workspace: ${sessionId}`,
+		);
 	}
 	return switchFrom(
 		host,
 		client,
 		source,
 		target.ref,
-		target.cwd ? options : { ...options, cwdOverride: conversation.cwd },
+		target.cwd ? options : { ...options, cwdOverride: options?.cwdOverride ?? conversation.cwd },
 	);
 }
 
@@ -433,11 +464,13 @@ export async function openImport(
 	client: HostClient,
 	inputPath: string,
 	cwdOverride?: string,
-): Promise<{ cancelled: boolean }> {
-	const result = await moveClient(host, client, intentSource(host, client), {
-		kind: "import",
-		path: inputPath,
-		...(cwdOverride === undefined ? {} : { cwdOverride }),
-	});
-	return { cancelled: result.cancelled };
+	options?: { readonly assertConversationGenerationCurrent?: () => void },
+): Promise<SessionIntentResult> {
+	return toIntentResult(
+		await moveClient(host, client, intentSource(host, client, options?.assertConversationGenerationCurrent), {
+			kind: "import",
+			path: inputPath,
+			...(cwdOverride === undefined ? {} : { cwdOverride }),
+		}),
+	);
 }

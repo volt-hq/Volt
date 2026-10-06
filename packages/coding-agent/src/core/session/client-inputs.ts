@@ -72,6 +72,18 @@ function messageText(content: AgentMessage): string {
 		.join("");
 }
 
+/** Queued input taken back: its text, and its images when it had any. */
+export interface WithdrawnInput {
+	readonly text: string;
+	readonly images?: ImageContent[];
+}
+
+function withdrawnInput(message: AgentMessage): WithdrawnInput {
+	const content = "content" in message ? message.content : undefined;
+	const images = Array.isArray(content) ? content.filter((part): part is ImageContent => part.type === "image") : [];
+	return { text: messageText(message), ...(images.length === 0 ? {} : { images }) };
+}
+
 /**
  * The recovery of the client inputs a previous runtime left, without quiet
  * host input: a `message` work notice (`wake: false`) stays queued by design
@@ -262,10 +274,22 @@ export class SessionClientInputs {
 	 * {@link QueueClearPersistenceError}.
 	 */
 	async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+		const withdrawn = await this.withdrawQueue();
+		const text = (inputs: readonly WithdrawnInput[]) => inputs.map((input) => input.text);
+		return { steering: text(withdrawn.steering), followUp: text(withdrawn.followUp) };
+	}
+
+	/**
+	 * {@link clearQueue}, with each input's images: what a client takes back
+	 * into its editor. A persistence failure carries the text back on
+	 * {@link QueueClearPersistenceError}.
+	 */
+	async withdrawQueue(): Promise<{ steering: WithdrawnInput[]; followUp: WithdrawnInput[] }> {
+		const textOnly = (texts: readonly string[]) => texts.map((text) => ({ text }));
 		if (this.host.isDisposed() || this.host.isLost()) {
 			const handback = this.disposedQueueHandback ?? this.queueText();
 			this.disposedQueueHandback = { steering: [], followUp: [] };
-			return { steering: [...handback.steering], followUp: [...handback.followUp] };
+			return { steering: textOnly(handback.steering), followUp: textOnly(handback.followUp) };
 		}
 		// Input still being admitted is part of the queue being cleared.
 		await Promise.allSettled([...this.admissions]);
@@ -278,9 +302,9 @@ export class SessionClientInputs {
 			throw new QueueClearPersistenceError(error instanceof Error ? error : new Error(String(error)), queued);
 		}
 		// Client input delivers a user message with its identity; host messages show no text.
-		const text = (messages: readonly AgentMessage[]) =>
-			messages.flatMap((message) => (getClientMessageId(message) === undefined ? [] : [messageText(message)]));
-		return { steering: text(cleared.steer), followUp: text(cleared.followUp) };
+		const inputs = (messages: readonly AgentMessage[]) =>
+			messages.flatMap((message) => (getClientMessageId(message) === undefined ? [] : [withdrawnInput(message)]));
+		return { steering: inputs(cleared.steer), followUp: inputs(cleared.followUp) };
 	}
 
 	/** Track queued input while its admission commits, so `waitForIdle` joins the turn it starts. */

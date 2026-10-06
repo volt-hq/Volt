@@ -285,7 +285,17 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			}
 			assertSessionViewMatchesLog(harness, sessionManagerLogEntries(sessionManager));
 			session.dispose();
-			if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+			try {
+				if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+			} catch (error) {
+				// Windows cannot remove a file that a scheduled diagnostic write still holds
+				// open (#641). The closing session waits for those writes; remove the rest then.
+				if (process.platform !== "win32") throw error;
+				void session
+					.waitForClosed()
+					.finally(() => rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }))
+					.catch(() => {});
+			}
 		},
 		async cleanupAsync() {
 			assertSessionViewMatchesLog(harness, await rereadSessionLog(harness));

@@ -1,7 +1,4 @@
-import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import * as os from "node:os";
-import { join } from "node:path";
 import {
 	type Component,
 	Container,
@@ -16,15 +13,10 @@ import {
 	visibleWidth,
 } from "@hansjm10/volt-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
-import {
-	type SessionInfo,
-	type SessionListProgress,
-	SessionManager,
-	type SessionReference,
-} from "../../../core/session-manager.ts";
+import { deleteStoredSession } from "../../../core/session-delete.ts";
+import type { SessionInfo, SessionListProgress, SessionReference } from "../../../core/session-manager.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
-import { ensurePrivateDirectorySync } from "../../../utils/private-files.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
 import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
@@ -800,17 +792,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.sessionList.onSearchQueryChange = (query) => this.queueSearch(query);
 
 		this.sessionList.onDeleteSession = async (sessionRef) => {
-			const recoveryDirectory = join(sessionRef.sessionDirectory, "deleted-session-snapshots");
-			ensurePrivateDirectorySync(recoveryDirectory);
-			const snapshotPath = join(recoveryDirectory, `volt-session-${sessionRef.sessionId}-${randomUUID()}.jsonl`);
-			let movedToTrash = false;
 			try {
-				const snapshot = await SessionManager.exportJsonlSnapshot(sessionRef, snapshotPath);
-				const trash = spawnSync("trash", snapshotPath.startsWith("-") ? ["--", snapshotPath] : [snapshotPath], {
-					encoding: "utf8",
-				});
-				movedToTrash = trash.status === 0;
-				await SessionManager.delete(sessionRef, snapshot.lastOrdinal);
+				const movedToTrash = (await deleteStoredSession(sessionRef)).trashed;
 				if (this.currentSessions) {
 					this.currentSessions = this.currentSessions.filter(
 						(session) => !sessionRefsEqual(session.ref, sessionRef),

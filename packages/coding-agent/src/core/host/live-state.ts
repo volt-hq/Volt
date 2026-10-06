@@ -7,7 +7,8 @@
  * patch changes a panel's node or a work item's detail in place, and a client
  * that attaches later receives the patched value.
  * Notices and editor directives reach the clients attached when they are
- * raised and are not kept. A client attached with `attach` first receives the
+ * raised and are not kept; a directive given for one host client reaches
+ * only that client's views. A client attached with `attach` first receives the
  * current values as a reset, then every change in order; detaching it, or
  * closing the live state, delivers an empty reset.
  *
@@ -32,35 +33,33 @@
 import { randomUUID } from "node:crypto";
 import {
 	EXTENSION_ID_PATTERN,
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveItems,
 	type HostRequest,
 	type HostRequestKind,
 	type HostResponse,
 	HostResponseSchema,
+	isLiveStreaming,
 	LIVE_EXTENSION_KINDS,
 	LIVE_EXTENSION_NAME_MAX_CHARS,
 	LIVE_KEY_ID_MAX_CHARS,
 	LIVE_KEYED_KINDS,
 	LIVE_PATCHABLE_KINDS,
 	LIVE_SINGLETON_KINDS,
+	type LiveCommit,
+	type LiveFoldState,
 	type LiveItem,
 	LivePatchItemSchema,
 	type LiveValue,
 	LiveValueSchema,
+	liveStreamingItems,
+	patchLiveValue,
 	type UiNodeFormField,
 	type UiNodeStyledText,
 	type UiPatchOp,
 } from "@hansjm10/volt-protocol";
 import { Compile, type Validator } from "typebox/compile";
-import {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveItems,
-	isLiveStreaming,
-	type LiveCommit,
-	type LiveFoldState,
-	liveStreamingItems,
-	patchLiveValue,
-} from "../protocol/live-fold.ts";
 
 /** A change to a client's live state; with `reset`, `items` replace everything the client held. */
 export interface LiveUpdate {
@@ -714,6 +713,8 @@ export class LiveState {
 		 * gate for the clients delivered after the answer.
 		 */
 		readonly gates: ReadonlyMap<string, RequestGate>;
+		/** The host client the batch's directives are for; every client's when absent. */
+		readonly directiveClient: string | undefined;
 	}> = [];
 	private nextSeq = 0;
 	private delivering = false;
@@ -827,16 +828,22 @@ export class LiveState {
 		this.publish([{ type: "notice", level, message, ...(source === undefined ? {} : { source }) }]);
 	}
 
-	/** Ask the attached interactive clients to replace their editor text. */
-	setEditorText(text: string): void {
+	/**
+	 * Ask the attached interactive clients to replace their editor text; with
+	 * `client`, only the views of that host client.
+	 */
+	setEditorText(text: string, options: { readonly client?: string } = {}): void {
 		if (this.closed) return;
-		this.publish([{ type: "directive", directive: "set_editor_text", text }]);
+		this.publish([{ type: "directive", directive: "set_editor_text", text }], options.client);
 	}
 
-	/** Ask the attached interactive clients to paste `text` into their editor at the cursor. */
-	insertEditorText(text: string): void {
+	/**
+	 * Ask the attached interactive clients to paste `text` into their editor at
+	 * the cursor; with `client`, only the views of that host client.
+	 */
+	insertEditorText(text: string, options: { readonly client?: string } = {}): void {
 		if (this.closed) return;
-		this.publish([{ type: "directive", directive: "insert_editor_text", text }]);
+		this.publish([{ type: "directive", directive: "insert_editor_text", text }], options.client);
 	}
 
 	/** Publish streaming items: the streaming assistant message and tool progress. */
@@ -972,7 +979,7 @@ export class LiveState {
 	 * answers or changes the state while a batch is delivered sees its own
 	 * change after that batch, as every other client does.
 	 */
-	private publish(items: readonly LiveItem[]): void {
+	private publish(items: readonly LiveItem[], directiveClient?: string): void {
 		const basedOn = this.readHead();
 		// Clients discard streaming items when `basedOn` changes: repeat what still streams.
 		const resync =
@@ -989,6 +996,7 @@ export class LiveState {
 			basedOn,
 			items: resync.length === 0 ? items : [...resync, ...items],
 			gates,
+			directiveClient,
 		});
 		if (this.delivering) return;
 		this.delivering = true;
@@ -996,7 +1004,7 @@ export class LiveState {
 			for (let batch = this.outbox.shift(); batch !== undefined; batch = this.outbox.shift()) {
 				for (const attached of [...this.clients.values()]) {
 					if (batch.seq < attached.since || this.clients.get(attached.id) !== attached) continue;
-					const visible = this.visible(attached, batch.items, batch.gates);
+					const visible = this.visible(attached, batch.items, batch.gates, batch.directiveClient);
 					if (visible.length > 0) {
 						this.deliver(attached, { reset: false, basedOn: batch.basedOn, items: visible });
 					}
@@ -1024,16 +1032,20 @@ export class LiveState {
 
 	/**
 	 * The part of `items` `attached` may see: host requests only of the kinds it
-	 * accepts, asked of it, by the gates they had when published.
+	 * accepts, asked of it, by the gates they had when published, and
+	 * directives only when given for its host client or for every client.
 	 */
 	private visible(
 		attached: AttachedClient,
 		items: readonly LiveItem[],
 		gates: ReadonlyMap<string, RequestGate>,
+		directiveClient: string | undefined,
 	): LiveItem[] {
 		const visible: LiveItem[] = [];
 		for (const item of items) {
-			if (item.type === "set") {
+			if (item.type === "directive") {
+				if (directiveClient === undefined || belongsTo(attached, directiveClient)) visible.push(item);
+			} else if (item.type === "set") {
 				if (item.value.kind !== "host_request") {
 					visible.push(item);
 					continue;

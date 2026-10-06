@@ -36,6 +36,7 @@ import type {
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import type { AgentSession } from "../../agent-session.ts";
+import type { InputSource } from "../../extensions/types.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import type { HostClient } from "../../host/targets.ts";
@@ -186,6 +187,8 @@ export interface IntentContext {
 	readonly assertCurrent?: () => void;
 	/** A protocol connection's subscriber profile: what `history` and `content` project. */
 	readonly subscriber?: Profile;
+	/** The source of the `input` event the prompts it sends raise; `rpc` by default. */
+	readonly inputSource?: InputSource;
 }
 
 // ============================================================================

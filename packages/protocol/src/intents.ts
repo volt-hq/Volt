@@ -13,7 +13,8 @@
  * position, and are rejected `stale` once the branch switched after it.
  *
  * Structural intents (`new_session`, `switch_session`, `fork`, `clone`,
- * `review_open_session`, and `open_work` when it moves the client) answer
+ * `import_session`, `review_open_session`, and `open_work` when it moves the
+ * client) answer
  * `accepted{conversation}` when they moved the client, followed by
  * `ended{moved, target}` on its subscription; their result is present only
  * when they were cancelled.
@@ -50,7 +51,7 @@ import { RemoteCapabilitiesSchema } from "./remote-access.ts";
 import { IrohRemoteWorkingDirectorySchema, IrohRemoteWorktreeIdSchema } from "./remote-handshake.ts";
 import { RpcResetReviewDiscussionSchema, RpcStartReviewDiscussionsSchema } from "./review-discussions.ts";
 import { RpcKeepAwakeStatusSchema, RpcRegisterPushTargetResponseSchema, RpcWebSearchStatusSchema } from "./session.ts";
-import { RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES } from "./wire-limits.ts";
+import { RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES, RPC_GIT_CONTEXT_REF_MAX_CHARS } from "./wire-limits.ts";
 import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -107,6 +108,30 @@ export const RpcBashResultSchema = Type.Object(
 	},
 	closed,
 );
+
+/** Queued input a client took back: its text and images. */
+export const WithdrawnInputSchema = Type.Object(
+	{ text: Type.String(), images: Type.Optional(RpcConversationInputImagesSchema) },
+	closed,
+);
+export type WithdrawnInput = Static<typeof WithdrawnInputSchema>;
+
+/** The output of `withdraw_queued` and of `abort{withdrawQueued}`: the withdrawn input, steering first, then follow-up. */
+export const WithdrawnQueueSchema = Type.Object({ messages: Type.Array(WithdrawnInputSchema) }, closed);
+
+/** Longest host path an intent takes, in characters. */
+export const HOST_PATH_MAX_CHARS = 4_096;
+
+/** A path on the host: absolute, or relative to the conversation's cwd. */
+const hostPath = Type.String({ minLength: 1, maxLength: HOST_PATH_MAX_CHARS });
+
+/** A Git ref a new conversation's Git context compares with: no option-like leading dash, no whitespace or controls. */
+const GitBaseRefSchema = Type.String({
+	minLength: 1,
+	maxLength: RPC_GIT_CONTEXT_REF_MAX_CHARS,
+	pattern: "^[^-\\s\\u0000-\\u001f\\u007f-\\u009f][^\\s\\u0000-\\u001f\\u007f-\\u009f]*$",
+	"x-volt-expected": "be a Git ref",
+});
 
 /** The output of `compact`. */
 export const RpcCompactionResultSchema = Type.Object(
@@ -174,7 +199,24 @@ export const INTENT_SCHEMAS = {
 	follow_up: { input: Type.Object(conversationInput, closed) },
 
 	// Run control
-	abort: { input: EmptyInputSchema },
+	/**
+	 * Stop the run. With `operation`, only that operation stops: a compaction,
+	 * or a tree navigation's branch summary. With `withdrawQueued`, the queued
+	 * input is taken back first instead of delivered after the stop.
+	 */
+	abort: {
+		input: Type.Object(
+			{
+				withdrawQueued: Type.Optional(Type.Boolean()),
+				operation: Type.Optional(stringEnum(["compaction", "navigation"])),
+			},
+			closed,
+		),
+		/** Present with `withdrawQueued`. */
+		output: WithdrawnQueueSchema,
+	},
+	/** Take the queued steering and follow-up input back, without stopping the run. */
+	withdraw_queued: { input: EmptyInputSchema, output: WithdrawnQueueSchema },
 	abort_retry: { input: EmptyInputSchema },
 	bash: {
 		input: Type.Object({ command: Type.String(), excludeFromContext: Type.Optional(Type.Boolean()) }, closed),
@@ -195,7 +237,10 @@ export const INTENT_SCHEMAS = {
 		),
 	},
 	set_fast_mode: { input: Type.Object({ enabled: Type.Boolean() }, closed) },
-	set_session_name: { input: Type.Object({ name: Type.String() }, closed) },
+	/** `sessionId` names another stored session of the host to rename. */
+	set_session_name: {
+		input: Type.Object({ name: Type.String(), sessionId: Type.Optional(LogSessionIdSchema) }, closed),
+	},
 
 	// Agent mode and plans
 	set_agent_mode: { input: Type.Object({ mode: RpcAgentModeSchema }, closed) },
@@ -207,12 +252,20 @@ export const INTENT_SCHEMAS = {
 	plan_discard: { input: Type.Object(planRevision, closed) },
 
 	// Structural
+	/**
+	 * `cwd` starts the session in another existing directory, such as a
+	 * worktree; `workspaceName` and `baseRef` name its workspace and the ref
+	 * its Git context compares with.
+	 */
 	new_session: {
 		input: Type.Object(
 			{
 				parentSessionId: Type.Optional(LogSessionIdSchema),
 				preserveReviewRunId: Type.Optional(runId),
 				replaceReviewGeneral: Type.Optional(Type.Boolean()),
+				cwd: Type.Optional(hostPath),
+				workspaceName: Type.Optional(IrohRemoteWorkspaceNameSchema),
+				baseRef: Type.Optional(GitBaseRefSchema),
 			},
 			{
 				...closed,
@@ -221,17 +274,87 @@ export const INTENT_SCHEMAS = {
 		),
 		output: IntentCancelledSchema,
 	},
-	switch_session: { input: Type.Object({ sessionId: LogSessionIdSchema }, closed), output: IntentCancelledSchema },
+	/**
+	 * A session whose stored cwd is gone is rejected `unavailable`; `cwdOverride`
+	 * runs it in another directory, which the store does not keep.
+	 */
+	switch_session: {
+		input: Type.Object({ sessionId: LogSessionIdSchema, cwdOverride: Type.Optional(hostPath) }, closed),
+		output: IntentCancelledSchema,
+	},
 	fork: {
 		input: Type.Object({ entryId: LogEntryIdSchema }, closed),
 		/** Not cancelled: the text of the message the fork was taken before, for the editor. */
 		output: Type.Union([IntentCancelledSchema, Type.Object({ text: Type.String() }, closed)]),
 	},
 	clone: { input: EmptyInputSchema, output: IntentCancelledSchema },
+	/**
+	 * Import a JSONL session file as a new conversation. A file whose cwd is
+	 * gone is rejected `unavailable`; `cwdOverride` runs it in another directory.
+	 */
+	import_session: {
+		input: Type.Object({ path: hostPath, cwdOverride: Type.Optional(hostPath) }, closed),
+		output: IntentCancelledSchema,
+	},
 	export_html: {
 		input: Type.Object({ outputPath: Type.Optional(Type.String()) }, closed),
 		output: Type.Object({ path: Type.String({ minLength: 1 }) }, closed),
 	},
+	/** Write the active branch as a JSONL session file. */
+	export_jsonl: {
+		input: Type.Object({ outputPath: Type.Optional(hostPath) }, closed),
+		output: Type.Object({ path: Type.String({ minLength: 1 }) }, closed),
+	},
+	/**
+	 * Delete a stored session of the conversation's workspace that no
+	 * conversation has open. A recovery snapshot is written first; `trashed`
+	 * says whether it went to the system trash.
+	 */
+	delete_session: {
+		input: Type.Object({ sessionId: LogSessionIdSchema }, closed),
+		output: Type.Object({ trashed: Type.Boolean() }, closed),
+	},
+
+	// Branches, labels, and resources
+	/**
+	 * Move the active branch to an entry; with `summarize`, the branch left
+	 * behind is summarized first. Before a user message, the branch moves to
+	 * its parent and `editorText` is its text. `aborted`: the summary was
+	 * stopped (`abort{operation: "navigation"}`); `cancelled`: an extension
+	 * cancelled the move.
+	 */
+	navigate_tree: {
+		input: Type.Object(
+			{
+				entryId: LogEntryIdSchema,
+				summarize: Type.Optional(Type.Boolean()),
+				customInstructions: Type.Optional(Type.String()),
+				replaceInstructions: Type.Optional(Type.Boolean()),
+				label: Type.Optional(Type.String({ maxLength: 1_024 })),
+			},
+			closed,
+		),
+		output: Type.Object(
+			{
+				cancelled: Type.Boolean(),
+				aborted: Type.Optional(Type.Boolean()),
+				editorText: Type.Optional(Type.String()),
+			},
+			closed,
+		),
+	},
+	/** Bookmark an entry; `null` removes its label. */
+	set_label: {
+		input: Type.Object(
+			{
+				entryId: LogEntryIdSchema,
+				label: Type.Union([Type.String({ minLength: 1, maxLength: 1_024 }), Type.Null()]),
+			},
+			closed,
+		),
+	},
+	/** Reload the conversation's extensions, skills, prompts, themes, and settings, while it is idle. */
+	reload: { input: EmptyInputSchema },
 
 	// Work (RFC §7): work items of the conversation, by work id
 	/** Cancel open work; rejected `not_allowed` when its kind is not cancellable. */

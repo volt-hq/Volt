@@ -96,6 +96,7 @@ import {
 import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
 import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
+import { ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, isAnthropicSubscriptionAuthKey } from "../../core/host/host-notices.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { executePlan } from "../../core/host/plan-handoff.ts";
 import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
@@ -321,8 +322,6 @@ function isDeadTerminalError(error: unknown): boolean {
 	return code !== undefined && DEAD_TERMINAL_ERROR_CODES.has(code);
 }
 
-const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
-	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
@@ -354,10 +353,6 @@ function formatElapsedDuration(ms: number): string {
 /** Local wall-clock time, e.g. "3:42 PM". */
 function formatClockTime(ms: number): string {
 	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
-}
-
-function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
-	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 }
 
 function isUnknownModel(model: Model<any> | undefined): boolean {

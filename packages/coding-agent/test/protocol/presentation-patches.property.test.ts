@@ -5,15 +5,15 @@
  */
 
 import type { LiveItem, ToolPresentation } from "@hansjm10/volt-protocol";
-import fc from "fast-check";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	emptyLiveFold,
 	foldLiveItems,
 	LivePatchError,
 	liveStreamingItems,
 	patchToolPresentation,
-} from "../../src/core/protocol/live-fold.ts";
+} from "@hansjm10/volt-protocol";
+import fc from "fast-check";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { presentBash } from "../../src/core/tools/presenters.ts";
 import { type PresenterSet, presentToolCall, type ToolPresentInput } from "../../src/core/ui/presentation.ts";
 import { presentationChange, ToolPresentationState } from "../../src/core/ui/presentation-state.ts";
