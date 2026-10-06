@@ -121,6 +121,8 @@ export class TuiHost implements TuiConnection {
 			await client.connect(pair.client);
 			await connection.ready;
 		} catch (error) {
+			// Without its client, no trace was started through it.
+			process.off("exit", this.closeLspTraces);
 			await client.stop();
 			throw error;
 		}

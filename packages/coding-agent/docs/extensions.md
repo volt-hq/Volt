@@ -1223,7 +1223,7 @@ Command handlers receive `ExtensionCommandContext`, which extends `ExtensionCont
 
 ### ctx.invokedBy
 
-Who invoked the command (`CommandInvoker`): `"local"` for a client in the host's trust domain (the TUI, a stdio RPC client, the SDK), `"remote"` for a paired remote device, or for an invoking client the host no longer knows. Gate what only a user at the host may do on `"local"`, with `ctx.hasUI` for a confirmation. `/swarm-review` gives its verifiers a shell (`--exec`) only this way:
+Who invoked the command (`CommandInvoker`): `"local"` for a client in the host's trust domain (the TUI, a stdio RPC client, the SDK, a print run), `"remote"` for a paired remote device, or for an invoking client the host no longer knows. A command run from text the model wrote, such as a subagent's task, is not one a user typed: it reads `"remote"` when a client's turn started it, and `"local"` when a run of the host's own did (a print run, the SDK, or queued input the host replays). Gate what only a user at the host may do on `"local"` and a confirmation the user answers (`ctx.hasUI` and `ctx.ui.confirm`). `/swarm-review` gives its verifiers a shell (`--exec`) only this way:
 
 ```typescript
 if (ctx.invokedBy !== "local") return ctx.ui.notify("--exec is only available from a local client.", "error");
