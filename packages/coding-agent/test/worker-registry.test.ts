@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ControlEvent, ControlResponse } from "../src/daemon/control-protocol.ts";
+import { type ControlEvent, type ControlResponse, createHelloProof } from "../src/daemon/control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import {
 	type LiveWorker,
@@ -88,6 +88,7 @@ function setup(options: { ttlMs?: number } = {}) {
 	};
 
 	/** The worker launched `index`-th says hello. */
+	const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 	const hello = (worker: FakeWorker, token = worker.request.workerToken): boolean =>
 		registry.admitWorker(
 			{
@@ -95,12 +96,13 @@ function setup(options: { ttlMs?: number } = {}) {
 				role: "worker",
 				protocolVersion: 4,
 				workerId: worker.request.workerId,
-				workerToken: token,
+				workerProof: createHelloProof("worker", token, binding),
 				pid: 4242,
 				version: "test",
 			},
+			binding,
 			worker.connectionId,
-		);
+		) !== undefined;
 
 	let requestId = 0;
 	const send = (worker: FakeWorker, request: Record<string, unknown>): Promise<ControlResponse> =>

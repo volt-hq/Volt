@@ -2,7 +2,7 @@ import { createServer, type Server, type Socket } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 import { probeControlSocket } from "../src/daemon/control-server.ts";
-import { createTestSocketEndpoint, listenTestServer } from "./socket-test-helpers.ts";
+import { createTestSocketEndpoint, greetControlClient, listenTestServer } from "./socket-test-helpers.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -19,7 +19,10 @@ function tempSocketPath(): string {
 }
 
 async function startProbeServer(socketPath: string, handle: (socket: Socket) => void): Promise<Server> {
-	const server = createServer(handle);
+	const server = createServer((socket) => {
+		greetControlClient(socket);
+		handle(socket);
+	});
 	await listenTestServer(server, socketPath);
 	return server;
 }

@@ -542,26 +542,21 @@ async function daemonLogs(agentDir: string, args: string[]): Promise<void> {
 
 export interface DaemonCommandOptions {
 	agentDir?: string;
-	/** Standalone releases omit the native Iroh adapter. */
-	isStandaloneBinary: boolean;
 }
 
-/** Router for `volt daemon <command>`; returns true when the args were handled. */
-export async function handleDaemonCommand(args: string[], options: DaemonCommandOptions): Promise<boolean> {
+/**
+ * Router for `volt daemon <command>`; returns true when the args were handled.
+ * Every install runs the daemon: where the Iroh binding does not load
+ * (standalone binaries, `--omit=optional`, darwin x64) it serves the control
+ * plane and workers, and its status reports phone transport unavailable.
+ */
+export async function handleDaemonCommand(args: string[], options: DaemonCommandOptions = {}): Promise<boolean> {
 	if (args[0] !== "daemon") {
 		return false;
 	}
 	const command = args[1];
 	if (command === undefined || command === "--help" || command === "-h") {
 		printDaemonUsage();
-		return true;
-	}
-	if (options.isStandaloneBinary) {
-		console.error("Error: volt daemon is not available from the standalone binary release.");
-		console.error(
-			"Use a Node.js npm install or source checkout with the required Iroh wrapper and optional platform binding.",
-		);
-		process.exitCode = 1;
 		return true;
 	}
 	const agentDir = options.agentDir ?? getAgentDir();

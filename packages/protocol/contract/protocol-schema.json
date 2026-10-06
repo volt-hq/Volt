@@ -1272,8 +1272,25 @@
 						"client": {
 							"$ref": "#/$defs/Control.ClientKind"
 						},
-						"controlToken": {
-							"type": "string"
+						"controlProof": {
+							"type": "object",
+							"required": [
+								"nonce",
+								"mac"
+							],
+							"properties": {
+								"nonce": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								},
+								"mac": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								}
+							},
+							"additionalProperties": false
 						},
 						"capabilities": {
 							"type": "array",
@@ -1291,7 +1308,7 @@
 						"role",
 						"protocolVersion",
 						"relayId",
-						"relayToken"
+						"relayProof"
 					],
 					"properties": {
 						"type": {
@@ -1308,8 +1325,25 @@
 						"relayId": {
 							"type": "string"
 						},
-						"relayToken": {
-							"type": "string"
+						"relayProof": {
+							"type": "object",
+							"required": [
+								"nonce",
+								"mac"
+							],
+							"properties": {
+								"nonce": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								},
+								"mac": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								}
+							},
+							"additionalProperties": false
 						}
 					},
 					"additionalProperties": true
@@ -1321,7 +1355,7 @@
 						"role",
 						"protocolVersion",
 						"workerId",
-						"workerToken",
+						"workerProof",
 						"pid",
 						"version"
 					],
@@ -1340,8 +1374,25 @@
 						"workerId": {
 							"type": "string"
 						},
-						"workerToken": {
-							"type": "string"
+						"workerProof": {
+							"type": "object",
+							"required": [
+								"nonce",
+								"mac"
+							],
+							"properties": {
+								"nonce": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								},
+								"mac": {
+									"type": "string",
+									"maxLength": 128,
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
+								}
+							},
+							"additionalProperties": false
 						},
 						"pid": {
 							"type": "number"
@@ -1385,6 +1436,28 @@
 				},
 				"protocolVersion": {
 					"type": "number"
+				},
+				"daemonProof": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": true
+		},
+		"Control.HelloChallenge": {
+			"type": "object",
+			"required": [
+				"type",
+				"nonce"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "hello_challenge"
+				},
+				"nonce": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 				}
 			},
 			"additionalProperties": true

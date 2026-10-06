@@ -5,8 +5,9 @@ Node.js 22.23.1 Single Executable Application. It supports local interactive
 and print-mode agent sessions.
 
 It does **not** include the required `@hansjm10/volt-iroh` wrapper or any native
-Iroh binding and cannot run `volt daemon` or provide remote/iOS access. Install
-`@hansjm10/volt-coding-agent` through npm for daemon and remote support. The npm
+Iroh binding and cannot provide remote/iOS access: `volt daemon` runs for local
+clients and conversation workers only. Install `@hansjm10/volt-coding-agent`
+through npm for remote support. The npm
 package requires the exact wrapper while npm selects an optional platform
 binding; `--omit=optional` disables phone transport, and Darwin x64 is unsupported.
 

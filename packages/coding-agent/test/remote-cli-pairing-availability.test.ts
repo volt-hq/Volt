@@ -97,11 +97,7 @@ describe("remote pair CLI transport availability", () => {
 	}
 
 	it("sends a pairing retry while storage-full degradation is recoverable", async () => {
-		await expect(
-			handleRemoteControlCommand(["remote", "pair", "--workspace", "volt"], {
-				isStandaloneBinary: false,
-			}),
-		).resolves.toBe(true);
+		await expect(handleRemoteControlCommand(["remote", "pair", "--workspace", "volt"])).resolves.toBe(true);
 
 		expect(mockDaemon.requestTypes).toEqual(["status", "pair_request"]);
 		expect(loggedErrors()).toContain("pair request observed");
@@ -115,9 +111,7 @@ describe("remote pair CLI transport availability", () => {
 			message: "Computer storage is full. Free space on the computer, then retry.",
 		};
 
-		await handleRemoteControlCommand(["remote", "pair", "--workspace", "volt"], {
-			isStandaloneBinary: false,
-		});
+		await handleRemoteControlCommand(["remote", "pair", "--workspace", "volt"]);
 
 		expect(mockDaemon.requestTypes).toEqual(["status"]);
 		expect(loggedErrors()).toContain("phone transport is unavailable");

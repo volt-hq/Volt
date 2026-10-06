@@ -39,6 +39,8 @@ import type {
 	ControlRequest,
 	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
+	HelloBinding,
+	HelloProof,
 	RemoteTransportHealth,
 } from "./control-protocol.ts";
 import {
@@ -212,8 +214,14 @@ export interface VoltdServiceExtensionInstance {
 		remoteTransport?: RemoteTransportHealth;
 		relayCredential?: ControlRelayCredentialStatus;
 	};
-	/** Redeem a relay hello token; true when the socket was taken over. */
-	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
+	/** Redeem a relay hello by its proof of the offer's token on this connection; true when the socket was taken over. */
+	admitRelay?(
+		relayId: string,
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean;
 	/** Stop admitting work, settle durable ownership, and flush extension state. */
 	quiesce?(context: VoltdExtensionQuiesceContext): Promise<void>;
 	/** Release native/process resources after durable daemon state is closed. */
@@ -254,19 +262,19 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		releaseDaemonLock();
 		return code;
 	};
+	// A healthy answer from the published endpoint proves the owner lives (it proved the pidfile token);
+	// anything else is settled by the owner's process identity, so whatever holds a stale endpoint's name
+	// cannot keep the lock held.
 	const verifyLockOwner = async (owner: DaemonLockOwner) => {
 		const pidfile = readPidfile(paths.pidfilePath);
-		if (pidfile?.pid === owner.pid) {
+		if (pidfile?.pid === owner.pid && pidfile.token !== undefined) {
 			const socketProbe = await probeControlSocket(pidfile.socketPath, {
 				version: VERSION,
 				timeoutMs: 500,
-				...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+				authToken: pidfile.token,
 			});
 			if (socketProbe.kind === "healthy" && socketProbe.status.pid === owner.pid) {
 				return "match" as const;
-			}
-			if (socketProbe.kind === "live-rejected" || socketProbe.kind === "unresponsive") {
-				return "unknown" as const;
 			}
 		}
 		return verifyVoltdProcessIdentity(owner, { toleranceMs: DAEMON_LOCK_START_TIME_TOLERANCE_MS });
@@ -1031,15 +1039,18 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				onRequest: handleRequest,
 				isShuttingDown: () => shutdownPhase !== "running",
 				workerAdmission: {
-					admitWorker: (hello, connection) => workers.admitWorker(hello, connection.connectionId),
+					admitWorker: (hello, binding, connection) =>
+						workers.admitWorker(hello, binding, connection.connectionId),
 				},
 				relayAdmission: {
-					admitRelay(hello, socket, bufferedRemainder) {
-						if (tuiConversations.admitRelay(hello.relayId, hello.relayToken, socket, bufferedRemainder)) {
+					admitRelay(hello, binding, socket, bufferedRemainder) {
+						if (
+							tuiConversations.admitRelay(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder)
+						) {
 							return true;
 						}
 						for (const extension of extensionInstances) {
-							if (extension.admitRelay?.(hello.relayId, hello.relayToken, socket, bufferedRemainder)) {
+							if (extension.admitRelay?.(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder)) {
 								return true;
 							}
 						}

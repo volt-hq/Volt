@@ -16,6 +16,7 @@ import { SessionManager, type SessionReference } from "../../../src/core/session
 import {
 	type ControlEvent,
 	type ControlResponse,
+	createHelloProof,
 	PROTOCOL_VERSION,
 	type WorkerHostKind,
 } from "../../../src/daemon/control-protocol.ts";
@@ -158,16 +159,18 @@ async function fixture() {
 		);
 		await waitUntil(() => launches.length > index);
 		const launch = launches[index]!;
+		const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 		const admitted = registry.admitWorker(
 			{
 				type: "hello",
 				role: "worker",
 				protocolVersion: PROTOCOL_VERSION,
 				workerId: launch.request.workerId,
-				workerToken: launch.request.workerToken,
+				workerProof: createHelloProof("worker", launch.request.workerToken, binding),
 				pid: 4242,
 				version: "test",
 			},
+			binding,
 			launch.connectionId,
 		);
 		if (!admitted) throw new Error("The worker was not admitted");

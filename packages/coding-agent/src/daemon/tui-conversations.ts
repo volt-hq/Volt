@@ -29,7 +29,7 @@
  * spec or preamble, and never leaves the local socket.
  */
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
@@ -49,7 +49,13 @@ import type {
 	WorkerSessionOptions,
 	WorkerSpawnOnlyOption,
 } from "./control-protocol.ts";
-import { encodeControlLine } from "./control-protocol.ts";
+import {
+	createDaemonProof,
+	encodeControlLine,
+	type HelloBinding,
+	type HelloProof,
+	helloProofMatches,
+} from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
 import {
 	adaptRelaySocketToIrohStream,
@@ -121,7 +127,8 @@ interface ResolvedOpen {
 /** The TUI's end of a relay, issued with `conversation_opened` and redeemed once. */
 interface Ticket {
 	readonly relayId: string;
-	readonly token: Buffer;
+	/** Single-use; the TUI proves it in its relay hello. */
+	readonly token: string;
 	readonly worker: LiveWorker;
 	readonly workspaceName: string;
 	readonly sessionId: string;
@@ -213,7 +220,7 @@ export class TuiConversations {
 				type: "conversation_opened",
 				id: request.id,
 				relayId: opened.ticket.relayId,
-				relayToken: opened.ticket.token.toString("base64url"),
+				relayToken: opened.ticket.token,
 				sessionId: resolved.sessionId,
 				selection: resolved.selection,
 				workspaceName,
@@ -246,7 +253,7 @@ export class TuiConversations {
 		const relayId = `rl-${uuidv7()}`;
 		const ticket: Ticket = {
 			relayId,
-			token: randomBytes(32),
+			token: randomBytes(32).toString("base64url"),
 			worker,
 			workspaceName: worker.workspaceName,
 			sessionId: resolved.sessionId,
@@ -280,18 +287,30 @@ export class TuiConversations {
 	 * A relay hello: the TUI's end of a ticket (its stream is offered to the
 	 * worker), or the worker redeeming that offer. False when it is neither.
 	 */
-	admitRelay(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean {
+	admitRelay(
+		relayId: string,
+		proof: HelloProof | undefined,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean {
 		const ticket = this.tickets.get(relayId);
-		if (!ticket) return this.relays.admit(relayId, relayToken, socket, bufferedRemainder);
-		const presented = Buffer.from(relayToken, "base64url");
-		if (presented.length !== ticket.token.length || !timingSafeEqual(presented, ticket.token)) return false;
+		if (!ticket) return proof !== undefined && this.relays.admit(relayId, proof, binding, socket, bufferedRemainder);
+		// The TUI proves the ticket's token on this connection, without sending it; the daemon proves it back.
+		if (proof === undefined || !helloProofMatches("relay", ticket.token, binding, proof)) return false;
 		this.tickets.delete(relayId);
 		clearTimeout(ticket.timer);
 		if (this.closed) {
 			ticket.release();
 			return false;
 		}
-		socket.write(encodeControlLine({ type: "hello_ack", ok: true }));
+		socket.write(
+			encodeControlLine({
+				type: "hello_ack",
+				ok: true,
+				daemonProof: createDaemonProof("relay", ticket.token, binding, proof),
+			}),
+		);
 		if (bufferedRemainder.length > 0) socket.unshift(bufferedRemainder);
 		const stream = adaptRelaySocketToIrohStream(socket);
 		const { worker } = ticket;

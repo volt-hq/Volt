@@ -1,14 +1,17 @@
 import { Buffer } from "node:buffer";
+import { type BinaryLike, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import {
 	type ControlClientStatus,
 	ControlEventSchema,
 	ControlFatalSchema,
 	ControlHelloAckSchema,
+	ControlHelloChallengeSchema,
 	ControlHelloSchema,
 	ControlRelayPreambleSchema,
 	type ControlRequest,
 	ControlRequestSchema,
 	ControlResponseSchema,
+	type HelloProof,
 	type RemoteTransportHealth,
 	type RemoteTransportReasonCode,
 	WORKER_REQUEST_TYPES,
@@ -40,6 +43,7 @@ export type {
 	ControlClientStatus,
 	ControlEvent,
 	ControlFatal,
+	ControlHelloChallenge,
 	ControlKeepAwakeStatus,
 	ControlLeaseStatus,
 	ControlRelayCredentialStatus,
@@ -55,6 +59,7 @@ export type {
 	DaemonRemotePolicyStatus,
 	HelloAck,
 	HelloMessage,
+	HelloProof,
 	LeaseReleaseReason,
 	LeaseState,
 	LocalRelayPreamble,
@@ -74,7 +79,7 @@ export type {
 	WorkerStopReason,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -112,8 +117,100 @@ export const REMOTE_TRANSPORT_REASON_MESSAGES: Readonly<Record<RemoteTransportRe
 	host_storage_full: IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE,
 };
 
+/** The guidance for `native_binding_missing` in a standalone binary, which never bundles the binding. */
+export const STANDALONE_REMOTE_TRANSPORT_MESSAGE =
+	"Phone transport is not included in the standalone binary. Install Volt from npm on a supported platform to pair a phone.";
+
 export function isRemoteTransportPairingAvailable(health: RemoteTransportHealth | undefined): boolean {
 	return health?.state === "ready" || (health?.state === "degraded" && health.reasonCode === "host_storage_full");
+}
+
+// ============================================================================
+// Hello proofs
+// ============================================================================
+
+/** Whose secret a hello proves: the pidfile token, a spawn's worker token, or an offer's relay token. */
+export type HelloRole = "control" | "worker" | "relay";
+
+/**
+ * What every proof on a connection is bound to: the challenge the daemon
+ * greeted it with, and the socket path the client dialed (the daemon's own
+ * listen path). A proof is good for that connection only: it cannot be
+ * replayed on another connection, nor relayed from a socket name someone
+ * else holds to the daemon's. The path is compared as a string: a client
+ * dials exactly the path the daemon published (its pidfile, or the
+ * bootstrap a worker was given), never a resolved or respelled one.
+ */
+export interface HelloBinding {
+	readonly challenge: string;
+	readonly socketPath: string;
+}
+
+/** A fresh challenge for the daemon's greeting. */
+export function createHelloChallenge(): string {
+	return randomBytes(32).toString("base64url");
+}
+
+/** The HMAC of a hello's `nonce` under its role's secret and the connection's binding, for the client or the daemon. */
+function helloMac(
+	role: HelloRole,
+	secret: BinaryLike,
+	party: "client" | "daemon",
+	binding: HelloBinding,
+	nonce: string,
+): string {
+	return createHmac("sha256", secret)
+		.update(JSON.stringify(["volt-hello", role, party, binding.socketPath, binding.challenge, nonce]))
+		.digest("base64url");
+}
+
+function macMatches(expected: string, presented: string | undefined): boolean {
+	if (presented === undefined) return false;
+	const wanted = Buffer.from(expected, "utf8");
+	const actual = Buffer.from(presented, "utf8");
+	return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
+/**
+ * A hello's proof that its client holds `secret`, bound to the connection.
+ * The secret itself never crosses the socket, so an endpoint that is not the
+ * daemon (a stale Windows pipe name someone else took) learns nothing it can
+ * use, there or anywhere else.
+ */
+export function createHelloProof(role: HelloRole, secret: BinaryLike, binding: HelloBinding): HelloProof {
+	const nonce = randomBytes(32).toString("base64url");
+	return { nonce, mac: helloMac(role, secret, "client", binding, nonce) };
+}
+
+/** Whether a hello's proof shows its client holds `secret`, on this connection. */
+export function helloProofMatches(
+	role: HelloRole,
+	secret: BinaryLike,
+	binding: HelloBinding,
+	proof: HelloProof | undefined,
+): boolean {
+	return proof !== undefined && macMatches(helloMac(role, secret, "client", binding, proof.nonce), proof.mac);
+}
+
+/** The daemon's answer to a verified proof: its own proof of `secret`, on the same connection and nonce. */
+export function createDaemonProof(
+	role: HelloRole,
+	secret: BinaryLike,
+	binding: HelloBinding,
+	proof: HelloProof,
+): string {
+	return helloMac(role, secret, "daemon", binding, proof.nonce);
+}
+
+/** Whether an answer to a hello proves its endpoint holds `secret`: the daemon, not whoever holds its socket name. */
+export function daemonProofMatches(
+	role: HelloRole,
+	secret: BinaryLike,
+	binding: HelloBinding,
+	proof: HelloProof,
+	daemonProof: string | undefined,
+): boolean {
+	return macMatches(helloMac(role, secret, "daemon", binding, proof.nonce), daemonProof);
 }
 
 // ============================================================================
@@ -130,6 +227,7 @@ function compileOnFirstUse<T>(compile: () => T): () => T {
 
 const helloValidator = compileOnFirstUse(() => Compile(ControlHelloSchema));
 const helloAckValidator = compileOnFirstUse(() => Compile(ControlHelloAckSchema));
+const helloChallengeValidator = compileOnFirstUse(() => Compile(ControlHelloChallengeSchema));
 const fatalValidator = compileOnFirstUse(() => Compile(ControlFatalSchema));
 const requestValidator = compileOnFirstUse(() => Compile(ControlRequestSchema));
 const responseValidator = compileOnFirstUse(() => Compile(ControlResponseSchema));
@@ -148,6 +246,10 @@ export const ControlValidators = {
 	},
 	get helloAck() {
 		return helloAckValidator();
+	},
+	/** The daemon's greeting: the challenge every proof on the connection covers. */
+	get helloChallenge() {
+		return helloChallengeValidator();
 	},
 	get fatal() {
 		return fatalValidator();

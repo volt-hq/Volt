@@ -58,11 +58,12 @@ volt remote worktree diff <id> [--workspace <name>]
 ```
 
 `volt remote host` is gone; running it prints a pointer to `volt daemon
-start`. The daemon requires a Node.js npm install or source checkout with the
-exact required `@hansjm10/volt-iroh` wrapper and its optional selected native
-binding. Installs made with `--omit=optional` cannot provide phone transport,
-and Darwin x64 has no binding. Standalone Node SEA builds do not bundle Iroh and
-cannot host the daemon.
+start`. Phone transport requires a Node.js npm install or source checkout with
+the exact required `@hansjm10/volt-iroh` wrapper and its optional selected
+native binding. Installs made with `--omit=optional`, Darwin x64 (no binding),
+and standalone Node SEA builds (Iroh is not bundled) still run the daemon for
+local clients and conversation workers; their status reports phone transport
+`unavailable` (`native_binding_missing`) and pairing is refused.
 
 `volt daemon install-service` writes a launchd LaunchAgent (macOS) or a
 systemd user unit (Linux) that starts the daemon at login. The service does
@@ -502,7 +503,8 @@ supported.
   speaks another control protocol, so the TUI and CLI cannot use it. Run
   `volt daemon restart` after upgrading Volt.
 - `native_binding_missing` → reinstall without `--omit=optional` on a supported
-  platform. Darwin x64 is intentionally local CLI/TUI only.
+  platform. Darwin x64 is intentionally local CLI/TUI only, and a standalone
+  binary never bundles the binding: install Volt from npm to pair a phone.
 - `endpoint_start_failed` → inspect `volt daemon logs`, fix the reported host
   issue, then restart the daemon.
 - `host_storage_full` → free computer disk/quota capacity, then retry. Rejected

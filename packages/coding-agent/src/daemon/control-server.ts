@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, rmSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import {
@@ -10,9 +9,16 @@ import {
 	type ControlRequest,
 	type ControlResponse,
 	ControlValidators,
+	createDaemonProof,
+	createHelloChallenge,
+	createHelloProof,
+	daemonProofMatches,
 	encodeControlLine,
 	type HelloAck,
+	type HelloBinding,
 	type HelloMessage,
+	type HelloProof,
+	helloProofMatches,
 	isRequestAllowedFor,
 	PROTOCOL_VERSION,
 } from "./control-protocol.ts";
@@ -32,16 +38,31 @@ export interface ControlConnection {
 }
 
 export interface RelayAdmission {
-	/** Validate a relay hello; on success the server hands over the raw socket. */
-	admitRelay(hello: Extract<HelloMessage, { role: "relay" }>, socket: Socket, bufferedRemainder: Buffer): boolean;
+	/**
+	 * Validate a relay hello by its proof of the offer's token on this
+	 * connection (`binding`); on success the relay takes the raw socket and
+	 * writes the ack, with its own proof.
+	 */
+	admitRelay(
+		hello: Extract<HelloMessage, { role: "relay" }>,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean;
 }
 
 export interface WorkerAdmission {
 	/**
-	 * Admit a worker hello on `connection`: its token must be the unused one
-	 * its spawn issued. One worker per connection; a refused hello closes it.
+	 * Admit a worker hello on `connection`: it must prove the unused token its
+	 * spawn issued, on this connection (`binding`). One worker per connection;
+	 * a refused hello closes it. Returns the daemon's proof of the token for
+	 * the ack, or undefined when the hello is refused.
 	 */
-	admitWorker(hello: Extract<HelloMessage, { role: "worker" }>, connection: ControlConnection): boolean;
+	admitWorker(
+		hello: Extract<HelloMessage, { role: "worker" }>,
+		binding: HelloBinding,
+		connection: ControlConnection,
+	): string | undefined;
 }
 
 export interface ControlServerHandlers {
@@ -61,7 +82,11 @@ export interface ControlServerHandlers {
 export interface ControlServerOptions {
 	socketPath: string;
 	version: string;
-	/** Optional local control-plane token published in the daemon pidfile. */
+	/**
+	 * Optional local control-plane token published in the daemon pidfile. A
+	 * control hello proves it holds the token without sending it, and the
+	 * daemon's ack proves the same back: a client trusts no other endpoint.
+	 */
 	authToken?: string;
 	handlers: ControlServerHandlers;
 }
@@ -108,14 +133,6 @@ export function retainControlConnectionResource(connection: ControlConnection, r
 }
 
 let controlConnectionSequence = 0;
-
-/** Compare a presented token with the expected one in constant time. */
-function tokenMatches(presented: string | undefined, expected: string): boolean {
-	if (presented === undefined) return false;
-	const actual = Buffer.from(presented, "utf8");
-	const wanted = Buffer.from(expected, "utf8");
-	return actual.length === wanted.length && timingSafeEqual(actual, wanted);
-}
 
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
 	const { socketPath, version, authToken, handlers } = options;
@@ -186,6 +203,10 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			return;
 		}
 		pendingSockets.add(socket);
+		// Every proof on this connection covers this challenge and the daemon's socket path: a proof made for
+		// another connection, or for whatever else holds a socket name a client dialed, is refused here.
+		const binding: HelloBinding = { challenge: createHelloChallenge(), socketPath };
+		socket.write(encodeControlLine({ type: "hello_challenge", nonce: binding.challenge }));
 		const decoder = new ControlLineDecoder();
 		let established: ControlConnectionImpl | undefined;
 		let handedOffToRelay = false;
@@ -206,38 +227,31 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				fatal("invalid_hello");
 				return false;
 			}
-			if (!acceptingRequests || handlers.isShuttingDown?.()) {
+			// A control hello that proved the pidfile token gets the daemon's proof on every answer, refusals
+			// included, so its client can tell this daemon from whatever else holds the socket's name.
+			const daemonProof =
+				hello.role === "control" &&
+				authToken !== undefined &&
+				hello.controlProof !== undefined &&
+				helloProofMatches("control", authToken, binding, hello.controlProof)
+					? createDaemonProof("control", authToken, binding, hello.controlProof)
+					: undefined;
+			const refuse = (error: "shutting_down" | "protocol_mismatch" | "auth_failed"): false => {
 				const ack: HelloAck = {
 					type: "hello_ack",
 					ok: false,
-					error: "shutting_down",
+					error,
 					version,
 					protocolVersion: PROTOCOL_VERSION,
+					...(daemonProof === undefined ? {} : { daemonProof }),
 				};
 				socket.end(encodeControlLine(ack));
 				return false;
-			}
-			if (hello.protocolVersion !== PROTOCOL_VERSION) {
-				const ack: HelloAck = {
-					type: "hello_ack",
-					ok: false,
-					error: "protocol_mismatch",
-					version,
-					protocolVersion: PROTOCOL_VERSION,
-				};
-				socket.end(encodeControlLine(ack));
-				return false;
-			}
-			if (hello.role === "control" && authToken !== undefined && !tokenMatches(hello.controlToken, authToken)) {
-				const ack: HelloAck = {
-					type: "hello_ack",
-					ok: false,
-					error: "auth_failed",
-					version,
-					protocolVersion: PROTOCOL_VERSION,
-				};
-				socket.end(encodeControlLine(ack));
-				return false;
+			};
+			if (!acceptingRequests || handlers.isShuttingDown?.()) return refuse("shutting_down");
+			if (hello.protocolVersion !== PROTOCOL_VERSION) return refuse("protocol_mismatch");
+			if (hello.role === "control" && authToken !== undefined && daemonProof === undefined) {
+				return refuse("auth_failed");
 			}
 			if (hello.role === "relay") {
 				const remainder = decoder.drainRemainder();
@@ -245,7 +259,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				handedOffToRelay = true;
 				let admitted = false;
 				try {
-					admitted = handlers.relayAdmission?.admitRelay(hello, socket, remainder) ?? false;
+					admitted = handlers.relayAdmission?.admitRelay(hello, binding, socket, remainder) ?? false;
 				} catch (error) {
 					// admitRelay may have partly taken ownership of the socket before
 					// throwing, and the socket now carries raw relay bytes — so a
@@ -272,26 +286,20 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				return false;
 			}
 			const connection = new ControlConnectionImpl(socket, hello);
-			if (hello.role === "worker" && handlers.workerAdmission?.admitWorker(hello, connection) !== true) {
-				const ack: HelloAck = {
-					type: "hello_ack",
-					ok: false,
-					error: "auth_failed",
-					version,
-					protocolVersion: PROTOCOL_VERSION,
-				};
-				socket.end(encodeControlLine(ack));
-				return false;
-			}
+			const workerProof =
+				hello.role === "worker" ? handlers.workerAdmission?.admitWorker(hello, binding, connection) : undefined;
+			if (hello.role === "worker" && workerProof === undefined) return refuse("auth_failed");
 			established = connection;
 			pendingSockets.delete(socket);
 			connections.set(established.connectionId, established);
+			const ackProof = workerProof ?? daemonProof;
 			const ack: HelloAck = {
 				type: "hello_ack",
 				ok: true,
 				connectionId: established.connectionId,
 				version,
 				protocolVersion: PROTOCOL_VERSION,
+				...(ackProof === undefined ? {} : { daemonProof: ackProof }),
 			};
 			socket.write(encodeControlLine(ack));
 			return true;
@@ -475,7 +483,9 @@ export async function startControlServer(options: ControlServerOptions): Promise
 /**
  * Probe an existing socket with a status request. The result distinguishes a
  * provably dead/stale path from a live daemon that answered but rejected us;
- * callers must only unlink a socket after a no-listener result.
+ * callers must only unlink a socket after a no-listener result. With
+ * `authToken`, only an endpoint that proves it holds the token reads as
+ * healthy or as refusing; any other answer is unresponsive.
  */
 export async function probeControlSocket(
 	socketPath: string,
@@ -511,6 +521,20 @@ export async function probeControlSocket(
 		const timer = setTimeout(() => settle({ kind: "unresponsive" }), timeoutMs);
 		const socket = createConnection(socketPath);
 		const decoder = new ControlLineDecoder();
+		const token = options.authToken;
+		/** The connection's binding and the hello's proof, once the daemon's challenge arrived. */
+		let greeted: { readonly binding: HelloBinding; readonly proof: HelloProof | undefined } | undefined;
+		/** Whether an answer comes from the daemon the token names; without a token there is nothing to prove. */
+		const proven = (daemonProof: string | undefined): boolean =>
+			token === undefined ||
+			(greeted?.proof !== undefined &&
+				daemonProofMatches("control", token, greeted.binding, greeted.proof, daemonProof));
+		/** An endpoint that cannot prove the token (a stale name someone else took) is never healthy, nor its refusals believed. */
+		const unproven: ControlSocketProbe = {
+			kind: "unresponsive",
+			error: "the endpoint did not prove it holds the daemon's token",
+		};
+		let acked = false;
 		socket.on("error", (error) => {
 			lastError = error instanceof Error ? error : new Error(String(error));
 			settle(connected ? { kind: "unresponsive", error: lastError.message } : classifyNoListener(lastError));
@@ -524,17 +548,6 @@ export async function probeControlSocket(
 		});
 		socket.on("connect", () => {
 			connected = true;
-			const hello: HelloMessage = {
-				type: "hello",
-				role: "control",
-				protocolVersion: PROTOCOL_VERSION,
-				pid: process.pid,
-				version: options.version,
-				client: "cli",
-				...(options.authToken === undefined ? {} : { controlToken: options.authToken }),
-			};
-			socket.write(encodeControlLine(hello));
-			socket.write(encodeControlLine({ type: "status", id: "probe" }));
 		});
 		socket.on("data", (chunk) => {
 			let messages: unknown[];
@@ -545,11 +558,39 @@ export async function probeControlSocket(
 				return;
 			}
 			for (const message of messages) {
-				if (isControlStatusProbe(message)) {
-					settle({ kind: "healthy", status: message });
-					return;
+				// The daemon speaks first: its challenge, which the hello's proof covers.
+				if (greeted === undefined) {
+					if (!ControlValidators.helloChallenge.Check(message)) {
+						settle(token === undefined ? { kind: "unresponsive", error: "no daemon greeting" } : unproven);
+						return;
+					}
+					const binding: HelloBinding = { challenge: message.nonce, socketPath };
+					greeted = {
+						binding,
+						proof: token === undefined ? undefined : createHelloProof("control", token, binding),
+					};
+					const hello: HelloMessage = {
+						type: "hello",
+						role: "control",
+						protocolVersion: PROTOCOL_VERSION,
+						pid: process.pid,
+						version: options.version,
+						client: "cli",
+						...(greeted.proof === undefined ? {} : { controlProof: greeted.proof }),
+					};
+					socket.write(encodeControlLine(hello));
+					socket.write(encodeControlLine({ type: "status", id: "probe" }));
+					continue;
 				}
-				if (ControlValidators.helloAck.Check(message) && !message.ok) {
+				if (ControlValidators.helloAck.Check(message)) {
+					if (!proven(message.daemonProof)) {
+						settle(unproven);
+						return;
+					}
+					if (message.ok) {
+						acked = true;
+						continue;
+					}
 					const error = message.error;
 					settle({
 						kind: "live-rejected",
@@ -561,8 +602,14 @@ export async function probeControlSocket(
 					});
 					return;
 				}
+				if (isControlStatusProbe(message)) {
+					settle(acked ? { kind: "healthy", status: message } : unproven);
+					return;
+				}
 				if (ControlValidators.fatal.Check(message)) {
-					settle({ kind: "live-rejected", reason: "fatal", error: message.error });
+					settle(
+						token === undefined ? { kind: "live-rejected", reason: "fatal", error: message.error } : unproven,
+					);
 					return;
 				}
 			}

@@ -12,7 +12,13 @@ import type {
 	IrohRecvStreamLike,
 	IrohSendStreamLike,
 } from "../src/core/protocol/transport/iroh-transport.ts";
-import { encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
+import {
+	createHelloProof,
+	encodeControlLine,
+	type HelloBinding,
+	type HelloProof,
+	PROTOCOL_VERSION,
+} from "../src/daemon/control-protocol.ts";
 
 type QueuedPhoneRead = { type: "data"; bytes: Buffer } | { type: "end" };
 
@@ -92,6 +98,8 @@ export class FakePhoneIrohStream implements IrohBiStreamLike {
 
 export interface RawRelayClient {
 	socket: Socket;
+	/** The connection's binding and the hello's proof of the offer's token, once the daemon greeted. */
+	proven(): { binding: HelloBinding; proof: HelloProof };
 	/** Decoded control lines (hello_ack, then relay_preamble on success). */
 	messages: Array<Record<string, unknown>>;
 	/** Raw post-preamble bytes received from the daemon. */
@@ -109,9 +117,10 @@ export interface RawRelayClient {
  */
 export function connectRawRelayClient(
 	socketPath: string,
-	hello: { relayId: string; relayToken: string; protocolVersion?: number },
+	hello: { relayId: string; relayToken: string; protocolVersion?: number; trailing?: Buffer },
 ): RawRelayClient {
 	const socket = createConnection(socketPath);
+	let proven: { binding: HelloBinding; proof: HelloProof } | undefined;
 	const messages: Array<Record<string, unknown>> = [];
 	const rawChunks: Buffer[] = [];
 	let buffered = Buffer.alloc(0);
@@ -122,17 +131,6 @@ export function connectRawRelayClient(
 		resolveClosed = resolve;
 	});
 
-	socket.on("connect", () => {
-		socket.write(
-			encodeControlLine({
-				type: "hello",
-				role: "relay",
-				protocolVersion: hello.protocolVersion ?? PROTOCOL_VERSION,
-				relayId: hello.relayId,
-				relayToken: hello.relayToken,
-			}),
-		);
-	});
 	socket.on("data", (chunk: Buffer) => {
 		if (rawMode) {
 			rawChunks.push(Buffer.from(chunk));
@@ -150,6 +148,25 @@ export function connectRawRelayClient(
 				continue;
 			}
 			const message = JSON.parse(line) as Record<string, unknown>;
+			// The daemon's greeting: answer it with the relay hello, its proof bound to the challenge.
+			if (proven === undefined && message.type === "hello_challenge" && typeof message.nonce === "string") {
+				const binding: HelloBinding = { challenge: message.nonce, socketPath };
+				proven = { binding, proof: createHelloProof("relay", hello.relayToken, binding) };
+				// Bytes after the hello, written with it: the daemon must treat them as relay payload.
+				socket.write(
+					Buffer.concat([
+						encodeControlLine({
+							type: "hello",
+							role: "relay",
+							protocolVersion: hello.protocolVersion ?? PROTOCOL_VERSION,
+							relayId: hello.relayId,
+							relayProof: proven.proof,
+						}),
+						hello.trailing ?? Buffer.alloc(0),
+					]),
+				);
+				continue;
+			}
 			messages.push(message);
 			if (message.type === "relay_preamble") {
 				rawMode = true;
@@ -170,6 +187,10 @@ export function connectRawRelayClient(
 
 	return {
 		socket,
+		proven: () => {
+			if (proven === undefined) throw new Error("The daemon has not greeted the relay client");
+			return proven;
+		},
 		messages,
 		rawReceived: () => Buffer.concat(rawChunks),
 		ended: () => sawEnd,

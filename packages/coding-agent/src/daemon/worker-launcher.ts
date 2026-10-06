@@ -1,19 +1,22 @@
 /**
  * How the daemon starts conversation workers. A launched worker connects back
- * to the daemon's control socket with role `worker`, presenting the
- * single-use token its launch carried, and receives the conversation it opens
- * over that connection; the daemon observes its exit through `exited`.
+ * to the daemon's control socket with role `worker`, proving the single-use
+ * token its launch carried (without sending it), and receives the
+ * conversation it opens over that connection; the daemon observes its exit
+ * through `exited`.
  *
  * `ProcessWorkerLauncher` runs each worker as a process of its own (`volt
- * daemon worker`, daemon-hosted conversations RFC §5.1): detached from any
- * terminal, in the conversation's working directory, with the environment of
- * the client whose open spawned it (a TUI's, carried by `conversation_open`;
- * the daemon's own for a phone's), less the daemon's relay credentials
- * (`DAEMON_ONLY_ENVIRONMENT`), and its stdout and stderr in
- * `daemon/workers/<workerId>.log` (0600). Its token, worker id, and the socket
- * travel on its stdin, never in its argv or environment, and are never
- * logged; what it opens follows its hello over the socket. Its environment's
- * values are never logged either: the worker logs their names.
+ * daemon worker`, daemon-hosted conversations RFC §5.1), from the daemon's
+ * own installation (a standalone binary re-executes itself, by absolute
+ * path): detached from any terminal, in the conversation's working
+ * directory, with the environment of the client whose open spawned it (a
+ * TUI's, carried by `conversation_open`; the daemon's own for a phone's),
+ * less the daemon's relay credentials (`DAEMON_ONLY_ENVIRONMENT`), and its
+ * stdout and stderr in `daemon/workers/<workerId>.log` (0600). Its token,
+ * worker id, and the socket travel on its stdin, never in its argv or
+ * environment, and are never logged; what it opens follows its hello over
+ * the socket. Its environment's values are never logged either: the worker
+ * logs their names.
  */
 
 import { spawn } from "node:child_process";
@@ -45,7 +48,7 @@ export interface WorkerExit {
 
 export interface WorkerLaunchRequest {
 	readonly workerId: string;
-	/** Single-use; the worker presents it in its hello. Never logged. */
+	/** Single-use; the worker proves it in its hello. Never logged, never sent over the socket. */
 	readonly workerToken: string;
 	readonly socketPath: string;
 	readonly agentDir: string;
@@ -127,7 +130,8 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 		);
 		let child: ReturnType<typeof spawn>;
 		try {
-			child = spawn(process.execPath, [resolveDaemonCliInvocation().entry, "daemon", "worker"], {
+			const invocation = resolveDaemonCliInvocation();
+			child = spawn(invocation.command, [...invocation.entryArgs, "daemon", "worker"], {
 				cwd: request.cwd,
 				// Its own process group and session: no terminal's signals reach it, and it outlives no daemon (it exits on daemon loss).
 				detached: true,

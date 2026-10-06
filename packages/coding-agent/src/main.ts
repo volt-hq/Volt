@@ -21,15 +21,7 @@ import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
 import { InProcessConnector, LeasedConnector } from "./client/in-process-connector.ts";
-import {
-	ENV_SESSION_DIR,
-	expandTildePath,
-	getAgentDir,
-	getPackageDir,
-	getSessionsDir,
-	isStandaloneBinary,
-	VERSION,
-} from "./config.ts";
+import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, getSessionsDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionDiagnostic,
 	createAgentSessionFromServices,
@@ -82,7 +74,6 @@ import {
 	DaemonLeases,
 	DaemonLeaseUnavailableError,
 	type DaemonLink,
-	isDaemonLinkSupported,
 	type LeaseWait,
 	openSessionWithDaemonLease,
 } from "./modes/interactive/host/daemon-link.ts";
@@ -714,11 +705,11 @@ export async function main(args: string[], options?: MainOptions) {
 				: process.env.VOLT_PROFILE?.trim() || undefined,
 	};
 
-	if (await handleDaemonCommand(commandProfileArgs.args, { isStandaloneBinary })) {
+	if (await handleDaemonCommand(commandProfileArgs.args)) {
 		return;
 	}
 
-	if (await handleRemoteControlCommand(commandProfileArgs.args, { isStandaloneBinary })) {
+	if (await handleRemoteControlCommand(commandProfileArgs.args)) {
 		return;
 	}
 
@@ -832,7 +823,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	const startupDaemonLease =
-		appMode === "interactive" && isDaemonLinkSupported()
+		appMode === "interactive"
 			? new StartupDaemonLease(agentDir, startupSettingsManager.getRemoteSettings().background === true)
 			: undefined;
 	let initialSessionManager: SessionManager;

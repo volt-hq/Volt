@@ -151,7 +151,7 @@ Unsafe remote tools are powerful. Granting `bash`, `edit`, or `write` lets the r
 
 Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. A saved trust decision for the workspace is honored; otherwise the daemon runs those resources untrusted. Save trust from a desktop Volt session in that workspace.
 
-The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected native binding. `--omit=optional` installs retain the wrapper but cannot provide phone transport. Darwin x64 has no binding and is local CLI/TUI only. Standalone Node SEA builds reject `volt daemon` because Iroh is intentionally not bundled. If status reports `native_binding_missing`, reinstall with optional dependencies enabled on a supported platform.
+The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected native binding. `--omit=optional` installs retain the wrapper but cannot provide phone transport. Darwin x64 has no binding and is local CLI/TUI only. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon serves local clients and workers only, re-executing its own binary by absolute path for each worker. If status reports `native_binding_missing`, reinstall with optional dependencies enabled on a supported platform.
 
 Daemon exit, crash, or explicit shutdown stops in-memory work; remote access does not provide durable job recovery beyond persisted session state.
 
