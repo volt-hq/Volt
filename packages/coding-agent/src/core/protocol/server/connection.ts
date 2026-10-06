@@ -9,11 +9,11 @@
  * and answers host requests. Intents and queries run one at a time in arrival
  * order; input intents (prompts) and dynamic intents answer once admitted
  * without holding later frames. Stopping intents (`abort`, `abort_bash`,
- * `abort_retry`, `cancel_work`) run on arrival instead of after the frames
- * before them, so a stop never waits behind a long intent such as `compact`;
- * a client that needs an earlier intent admitted first waits for its
- * `accepted`. A stopping intent is checked against the connection's
- * authority like any other. Non-input intents are deduplicated per
+ * `abort_retry`, `cancel_work`) run in a lane of their own, in arrival order
+ * among themselves but not after the other frames before them, so a stop
+ * never waits behind a long intent such as `compact`; a client that needs an
+ * earlier intent admitted first waits for its `accepted`. A stopping intent
+ * is checked against the connection's authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
  * answers `accepted{conversation}`, then ends the subscriptions on the
@@ -468,6 +468,8 @@ export function serveConnection(
 	/** A fatal frame was written: nothing follows it. */
 	let fatalWritten = false;
 	let lane: Promise<void> = Promise.resolve();
+	/** Stopping intents, in order, beside the lane. */
+	let stopLane: Promise<void> = Promise.resolve();
 	/** Subscribe, unsubscribe, and answers, in order, each after the authority check. */
 	let controlLane: Promise<void> = Promise.resolve();
 	let pendingFrames = 0;
@@ -560,7 +562,8 @@ export function serveConnection(
 		const unsubscribeReloads = session.subscribeReloads(() => {
 			write({ type: "changed", catalog: "intents" });
 			write({ type: "changed", catalog: "extensions" });
-			write({ type: "changed", catalog: "resources" });
+			// Only local clients read the conversation's resources and tools.
+			if (profile.name === "local") write({ type: "changed", catalog: "resources" });
 		});
 		// A client in the host's trust domain slows the agent loop to its pace. A
 		// remote client never does: its transport bounds what it queues instead.
@@ -639,15 +642,21 @@ export function serveConnection(
 	/**
 	 * An extension's `ctx.abort()` in a command this client invoked: the
 	 * queued input is taken back, the run stops, and the input's text returns
-	 * to this client's editor, before the draft the client reports. Only a
-	 * local client with an editor (it answers `editor_text`) takes the queue
-	 * back; for any other the run stops and the queue stays.
+	 * to this client's editor, before the draft the client reports (pasted at
+	 * its cursor when it reports none). Only a local client with an editor (it
+	 * answers `editor_text`) that shows the conversation's live lane takes the
+	 * queue back, and only for a call in its own scope; otherwise the run stops
+	 * and the queue stays.
 	 */
 	const abortForCommand = async (): Promise<void> => {
 		const conversation = home;
 		if (!conversation || conversation.closed) return;
 		const session = conversation.session;
-		if (profile.name !== "local" || !accepts.has("editor_text")) {
+		const shows = [...subscriptions.values()].some(
+			(subscription) =>
+				subscription.conversation === conversation && subscription.receivesLive && !subscription.isEnded,
+		);
+		if (profile.name !== "local" || !accepts.has("editor_text") || !shows || ClientScope.current() !== client.id) {
 			await session.abort();
 			return;
 		}
@@ -663,10 +672,13 @@ export function serveConnection(
 			{ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS },
 			{ client: client.id },
 		);
-		const draftText = draft.status === "answered" && "value" in draft.response ? draft.response.value : "";
-		conversation.liveState.setEditorText([queued, draftText].filter((text) => text.trim()).join("\n\n"), {
-			client: client.id,
-		});
+		if (draft.status !== "answered" || !("value" in draft.response)) {
+			// No draft reported: paste the queue where the editor's cursor is rather than replace what it holds.
+			conversation.liveState.insertEditorText(queued, { client: client.id });
+			return;
+		}
+		const text = [queued, draft.response.value].filter((part) => part.trim()).join("\n\n");
+		conversation.liveState.setEditorText(text, { client: client.id });
 	};
 
 	const client: HostClient = {
@@ -986,16 +998,19 @@ export function serveConnection(
 	};
 
 	/**
-	 * Run a stopping intent at once, beside the lane, once the client is
-	 * attached; it counts toward the pending frames as a lane frame does.
+	 * Run a stopping intent in the stop lane, once the client is attached:
+	 * beside the intent and query lane, so it never waits behind a long
+	 * intent, and one at a time in arrival order, so stops re-read the
+	 * connection's authority one at a time. It counts toward the pending
+	 * frames as a lane frame does.
 	 */
-	const runNow = (task: () => Promise<void>): void => {
+	const enqueueStop = (task: () => Promise<void>): void => {
 		if (pendingFrames >= MAX_PENDING_FRAMES) {
 			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
 			return;
 		}
 		pendingFrames++;
-		void (async () => {
+		stopLane = stopLane.then(async () => {
 			try {
 				await attached;
 				if (closing) return;
@@ -1005,7 +1020,7 @@ export function serveConnection(
 			} finally {
 				pendingFrames--;
 			}
-		})();
+		});
 	};
 
 	/** Run a subscription change or an answer in order, once the connection's authority is re-read. */
@@ -1224,7 +1239,7 @@ export function serveConnection(
 				return;
 			default:
 				if (RESERVED.has(type) || !intentEnvelopeValidator(type).Check(value)) break;
-				if (STOPPING_INTENTS.has(type)) runNow(() => runIntent(value as unknown as IntentEnvelope));
+				if (STOPPING_INTENTS.has(type)) enqueueStop(() => runIntent(value as unknown as IntentEnvelope));
 				else enqueue(() => runIntent(value as unknown as IntentEnvelope));
 				return;
 		}

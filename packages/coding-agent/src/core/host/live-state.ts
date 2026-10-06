@@ -837,10 +837,13 @@ export class LiveState {
 		this.publish([{ type: "directive", directive: "set_editor_text", text }], options.client);
 	}
 
-	/** Ask the attached interactive clients to paste `text` into their editor at the cursor. */
-	insertEditorText(text: string): void {
+	/**
+	 * Ask the attached interactive clients to paste `text` into their editor at
+	 * the cursor; with `client`, only the views of that host client.
+	 */
+	insertEditorText(text: string, options: { readonly client?: string } = {}): void {
 		if (this.closed) return;
-		this.publish([{ type: "directive", directive: "insert_editor_text", text }]);
+		this.publish([{ type: "directive", directive: "insert_editor_text", text }], options.client);
 	}
 
 	/** Publish streaming items: the streaming assistant message and tool progress. */

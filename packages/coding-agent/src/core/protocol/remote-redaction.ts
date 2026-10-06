@@ -21,6 +21,11 @@
  * (a presentation that does not fit becomes its tool's name only), and sent
  * as a patch from the redacted presentation the client holds when that is
  * smaller.
+ *
+ * The host's own error notices (source `host`) may quote an error that names
+ * host paths outside the workspace, such as the agent directory: a client
+ * receives the summary before the quoted error. The live `presence` value is
+ * for local clients only and never sent.
  */
 
 import { Buffer } from "node:buffer";
@@ -42,6 +47,7 @@ import {
 	foldLiveCommit,
 	foldLiveFrame,
 	foldLiveItems,
+	HOST_NOTICE_SOURCE,
 	LIVE_PATCHABLE_KINDS,
 	type LiveFoldState,
 	liveCommitOf,
@@ -671,6 +677,9 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			case "patch":
 				return redactPatch(view, item.key);
 			case "notice":
+				if (item.source === HOST_NOTICE_SOURCE && item.level === "error" && typeof item.message === "string") {
+					return sent([{ ...item, message: sanitizeText(item.message.split(": ")[0] ?? item.message) }]);
+				}
 				return sent([sanitizeUi(item)]);
 			case "directive":
 				return sent([sanitize(item)]);

@@ -129,7 +129,7 @@ const hostPath = Type.String({ minLength: 1, maxLength: HOST_PATH_MAX_CHARS });
 const GitBaseRefSchema = Type.String({
 	minLength: 1,
 	maxLength: RPC_GIT_CONTEXT_REF_MAX_CHARS,
-	pattern: "^[^-\\s\\u0000-\\u001f\\u007f][^\\s\\u0000-\\u001f\\u007f]*$",
+	pattern: "^[^-\\s\\u0000-\\u001f\\u007f-\\u009f][^\\s\\u0000-\\u001f\\u007f-\\u009f]*$",
 	"x-volt-expected": "be a Git ref",
 });
 

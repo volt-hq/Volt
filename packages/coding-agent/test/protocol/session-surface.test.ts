@@ -506,6 +506,52 @@ describe("the session surface on the local profile", () => {
 		expect(client.state.queue).toEqual([]);
 	});
 
+	it("pastes the queue at the cursor when the client reports no draft", async () => {
+		const { harness, conversation } = await setup({
+			extension: (volt: ExtensionAPI) => {
+				volt.registerCommand("stop", {
+					description: "Stop the run",
+					handler: async (_args, ctx) => {
+						ctx.abort();
+					},
+				});
+			},
+		});
+		const started = Promise.withResolvers<void>();
+		harness.faux.setResponses([heldResponse(() => started.resolve())]);
+		const declineDraft: ProtocolClientOptions["onFrame"] = (frame, self) => {
+			if (frame.type !== "live") return;
+			for (const item of frame.items) {
+				if (
+					item.type === "set" &&
+					item.value.kind === "host_request" &&
+					item.value.request.kind === "editor_text"
+				) {
+					self.answer(item.value.requestId, { cancelled: true });
+				}
+			}
+		};
+		const { client, frames } = await connect(harness, conversation, {
+			hostRequests: ["editor_text"],
+			onFrame: declineDraft,
+		});
+		await client.prompt("long run");
+		await started.promise;
+		await client.intent("follow_up", { message: "queued input" });
+		await vi.waitFor(() => expect(client.state.queue).toHaveLength(1));
+		await client.intent(`extension.command.${EXTENSION}.stop`, {});
+		await vi.waitFor(() =>
+			expect(liveItems(frames)).toContainEqual({
+				type: "directive",
+				directive: "insert_editor_text",
+				text: "queued input",
+			}),
+		);
+		expect(liveItems(frames).some((item) => item.type === "directive" && item.directive === "set_editor_text")).toBe(
+			false,
+		);
+	});
+
 	it("leaves the queue in place when a client without an editor runs a command that calls ctx.abort()", async () => {
 		const { harness, conversation } = await setup({
 			extension: (volt: ExtensionAPI) => {
@@ -628,6 +674,12 @@ describe("the session surface on the remote profile", () => {
 		cleanups.push(() => harness.cleanup());
 		const conversation = await harness.openStartup();
 		const device = await phoneOn(harness, conversation);
+		// A reload changes catalogs a phone reads, but not the resources only local clients read.
+		await conversation.session.reload();
+		await vi.waitFor(() =>
+			expect(device.frames.some((frame) => frame.type === "changed" && frame.catalog === "extensions")).toBe(true),
+		);
+		expect(device.frames.some((frame) => frame.type === "changed" && frame.catalog === "resources")).toBe(false);
 
 		const refused: Array<[string, object, boolean]> = [
 			["withdraw_queued", {}, false],
