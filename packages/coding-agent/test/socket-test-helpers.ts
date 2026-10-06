@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
-import type { Server } from "node:net";
+import type { Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,4 +48,9 @@ export async function listenTestServer(server: Server, socketPath: string): Prom
 			reject(error);
 		}
 	});
+}
+
+/** Greet a control client as the daemon does, before its hello: a fake daemon's first line, its challenge. */
+export function greetControlClient(socket: Socket, challenge = "C".repeat(43)): void {
+	socket.write(`${JSON.stringify({ type: "hello_challenge", nonce: challenge })}\n`);
 }

@@ -141,9 +141,16 @@ describe("daemon conversation workers", () => {
 		const probe = await probeDaemon(harness.agentDir);
 		const socket = createConnection(probe.socketPath);
 		const received: string[] = [];
-		socket.on("data", (chunk: Buffer) => received.push(chunk.toString("utf8")));
+		const greeted = Promise.withResolvers<string>();
+		socket.on("data", (chunk: Buffer) => {
+			received.push(chunk.toString("utf8"));
+			greeted.resolve(received.join(""));
+		});
 		const closed = new Promise<void>((resolve) => socket.on("close", () => resolve()));
-		await new Promise<void>((resolve) => socket.on("connect", () => resolve()));
+		// The daemon greets first; a control hello that proves the token on this connection would be admitted.
+		const greeting = JSON.parse((await greeted.promise).split("\n")[0] ?? "") as { type: string; nonce: string };
+		expect(greeting.type).toBe("hello_challenge");
+		const binding = { challenge: greeting.nonce, socketPath: probe.socketPath };
 		const line = (message: object) => `${JSON.stringify(message)}\n`;
 		socket.write(
 			line({
@@ -151,7 +158,7 @@ describe("daemon conversation workers", () => {
 				role: "worker",
 				protocolVersion: PROTOCOL_VERSION,
 				workerId: "w-x",
-				workerProof: createHelloProof("worker", "x"),
+				workerProof: createHelloProof("worker", "x", binding),
 				pid: 1,
 				version: "test",
 			}) +
@@ -162,7 +169,9 @@ describe("daemon conversation workers", () => {
 					pid: 1,
 					version: "test",
 					client: "cli",
-					...(probe.authToken === undefined ? {} : { controlProof: createHelloProof("control", probe.authToken) }),
+					...(probe.authToken === undefined
+						? {}
+						: { controlProof: createHelloProof("control", probe.authToken, binding) }),
 				}) +
 				line({ type: "status", id: "after-refusal" }),
 		);
@@ -172,7 +181,10 @@ describe("daemon conversation workers", () => {
 			.trim()
 			.split("\n")
 			.map((text) => JSON.parse(text) as { type: string; error?: string });
-		expect(messages).toEqual([expect.objectContaining({ type: "hello_ack", ok: false, error: "auth_failed" })]);
+		expect(messages).toEqual([
+			expect.objectContaining({ type: "hello_challenge" }),
+			expect.objectContaining({ type: "hello_ack", ok: false, error: "auth_failed" }),
+		]);
 	}, 30_000);
 
 	it("fails the open when the worker cannot take the conversation's lock within its retry window", async () => {

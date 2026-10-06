@@ -62,6 +62,7 @@ async function liveWorker() {
 	);
 	await vi.waitFor(() => expect(launched).toBeDefined());
 	const worker = launched!;
+	const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 	expect(
 		registry.admitWorker(
 			{
@@ -69,10 +70,11 @@ async function liveWorker() {
 				role: "worker",
 				protocolVersion: 4,
 				workerId: worker.request.workerId,
-				workerProof: createHelloProof("worker", worker.request.workerToken),
+				workerProof: createHelloProof("worker", worker.request.workerToken, binding),
 				pid: 4242,
 				version: "test",
 			},
+			binding,
 			"c-1",
 		),
 	).toBeDefined();

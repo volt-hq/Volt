@@ -36,6 +36,7 @@ import {
 	type ControlWorkerOrigin,
 	type ControlWorkerStatus,
 	createDaemonProof,
+	type HelloBinding,
 	type HelloMessage,
 	helloProofMatches,
 	type WorkerHostKind,
@@ -428,18 +429,22 @@ export class WorkerRegistry {
 
 	/**
 	 * Admit a worker hello: the worker must be starting, proving the unused
-	 * token its spawn issued (which never crosses the socket), on a connection
-	 * of its own. The token is spent here; the conversation the worker opens
+	 * token its spawn issued (which never crosses the socket) on this
+	 * connection (`binding`), a connection of its own. The token is spent here; the conversation the worker opens
 	 * follows the ack. Returns the daemon's proof of the token for the ack, or
 	 * undefined when the hello is refused.
 	 */
-	admitWorker(hello: Extract<HelloMessage, { role: "worker" }>, connectionId: string): string | undefined {
+	admitWorker(
+		hello: Extract<HelloMessage, { role: "worker" }>,
+		binding: HelloBinding,
+		connectionId: string,
+	): string | undefined {
 		const record = this.workers.get(hello.workerId);
 		if (!record || record.state !== "starting" || record.tokenUsed || record.connectionId !== undefined) {
 			return undefined;
 		}
 		const token = record.token.toString("base64url");
-		if (!helloProofMatches("worker", token, hello.workerProof)) return undefined;
+		if (!helloProofMatches("worker", token, binding, hello.workerProof)) return undefined;
 		const spec = record.spec;
 		if (!spec) return undefined;
 		record.tokenUsed = true;
@@ -448,7 +453,7 @@ export class WorkerRegistry {
 		queueMicrotask(() => {
 			if (record.connectionId === connectionId) this.options.sendTo(connectionId, { type: "worker_spawn", spec });
 		});
-		return createDaemonProof("worker", token, hello.workerProof);
+		return createDaemonProof("worker", token, binding, hello.workerProof);
 	}
 
 	/** The worker a control connection speaks for, while it is registered. */

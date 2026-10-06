@@ -97,6 +97,7 @@ import {
 	type ControlRelayCredentialStatus,
 	type ControlRequest,
 	createControlClientStatus,
+	type HelloBinding,
 	type HelloProof,
 	isRemoteTransportPairingAvailable,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
@@ -892,8 +893,8 @@ export function createIrohDaemonService(
 			onThemeChanged: () => service.onThemeChanged(),
 			onKeepAwakeChanged: () => service.onKeepAwakeChanged(),
 			statusExtras: () => service.statusExtras(),
-			admitRelay: (relayId, proof, socket, bufferedRemainder) =>
-				service.admitRelay(relayId, proof, socket, bufferedRemainder),
+			admitRelay: (relayId, proof, binding, socket, bufferedRemainder) =>
+				service.admitRelay(relayId, proof, binding, socket, bufferedRemainder),
 			quiesce: () => service.quiesce(),
 			dispose: () => service.dispose(),
 		};
@@ -5882,8 +5883,14 @@ class IrohDaemonService {
 		void Promise.all(cancellations).finally(() => admission.release());
 	}
 
-	admitRelay(relayId: string, proof: HelloProof, socket: Socket, bufferedRemainder: Buffer): boolean {
-		return this.relays.admit(relayId, proof, socket, bufferedRemainder);
+	admitRelay(
+		relayId: string,
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean {
+		return this.relays.admit(relayId, proof, binding, socket, bufferedRemainder);
 	}
 
 	statusExtras(): {

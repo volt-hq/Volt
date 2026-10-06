@@ -738,6 +738,7 @@ describe("daemon control contract", () => {
 });
 
 describe("control version negotiation", () => {
+	const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 	const controlHello: HelloMessage = {
 		type: "hello",
 		role: "control",
@@ -745,7 +746,7 @@ describe("control version negotiation", () => {
 		pid: 4242,
 		version: "0.9.0",
 		client: "tui",
-		controlProof: createHelloProof("control", "token"),
+		controlProof: createHelloProof("control", "token", binding),
 		capabilities: ["worktrees"],
 	};
 	const relayHello: HelloMessage = {
@@ -753,14 +754,14 @@ describe("control version negotiation", () => {
 		role: "relay",
 		protocolVersion: PROTOCOL_VERSION,
 		relayId: "rl-7",
-		relayProof: createHelloProof("relay", "tK"),
+		relayProof: createHelloProof("relay", "tK", binding),
 	};
 	const workerHello: HelloMessage = {
 		type: "hello",
 		role: "worker",
 		protocolVersion: PROTOCOL_VERSION,
 		workerId: "w-1",
-		workerProof: createHelloProof("worker", "tW"),
+		workerProof: createHelloProof("worker", "tW", binding),
 		pid: 4243,
 		version: "0.9.0",
 	};

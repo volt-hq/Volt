@@ -275,8 +275,8 @@ async function startOwnedRelayDaemonHarness(): Promise<OwnedRelayDaemonHarness> 
 			onRequest: handleRequest,
 			onConnectionClosed: (connection) => broker.releaseAllForConnection(connection.connectionId),
 			relayAdmission: {
-				admitRelay: (hello, socket, bufferedRemainder) =>
-					registry.admit(hello.relayId, hello.relayProof, socket, bufferedRemainder),
+				admitRelay: (hello, binding, socket, bufferedRemainder) =>
+					registry.admit(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder),
 			},
 		},
 	});

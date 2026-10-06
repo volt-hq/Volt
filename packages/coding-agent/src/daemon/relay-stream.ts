@@ -6,6 +6,7 @@ import type { IrohBiStreamLike } from "../core/protocol/transport/iroh-transport
 import {
 	createDaemonProof,
 	encodeControlLine,
+	type HelloBinding,
 	type HelloProof,
 	helloProofMatches,
 	type RelayCloseReason,
@@ -162,12 +163,18 @@ export class RelayLifecycleOwner {
 
 	/**
 	 * Promote this exact owner from offered to active and install its raw pump.
-	 * The hello proves the offer's token without sending it, and the ack
-	 * proves it back. Invalid, expired, already-used, and closed offers fail
-	 * without replacement.
+	 * The hello proves the offer's token on this connection (`binding`)
+	 * without sending it, and the ack proves it back. Invalid, expired,
+	 * already-used, and closed offers fail without replacement.
 	 */
-	redeem(proof: HelloProof, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
-		if (this.lifecyclePhase !== "offered" || !helloProofMatches("relay", this.relayToken, proof)) {
+	redeem(
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+		now = Date.now(),
+	): boolean {
+		if (this.lifecyclePhase !== "offered" || !helloProofMatches("relay", this.relayToken, binding, proof)) {
 			return false;
 		}
 		if (now > this.expiresAt) {
@@ -189,7 +196,7 @@ export class RelayLifecycleOwner {
 			encodeControlLine({
 				type: "hello_ack",
 				ok: true,
-				daemonProof: createDaemonProof("relay", this.relayToken, proof),
+				daemonProof: createDaemonProof("relay", this.relayToken, binding, proof),
 			}),
 		);
 		socket.write(encodeControlLine(this.preamble));
@@ -550,7 +557,14 @@ export class RelayRegistry {
 	}
 
 	/** Offer lookup only; the stable owner checks the hello's proof and performs the actual promotion. */
-	admit(relayId: string, proof: HelloProof, socket: Socket, bufferedRemainder: Buffer, now = Date.now()): boolean {
-		return this.owners.get(relayId)?.redeem(proof, socket, bufferedRemainder, now) ?? false;
+	admit(
+		relayId: string,
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+		now = Date.now(),
+	): boolean {
+		return this.owners.get(relayId)?.redeem(proof, binding, socket, bufferedRemainder, now) ?? false;
 	}
 }

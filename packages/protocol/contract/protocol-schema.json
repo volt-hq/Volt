@@ -1143,12 +1143,12 @@
 								"nonce": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								},
 								"mac": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								}
 							},
 							"additionalProperties": false
@@ -1196,12 +1196,12 @@
 								"nonce": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								},
 								"mac": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								}
 							},
 							"additionalProperties": false
@@ -1245,12 +1245,12 @@
 								"nonce": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								},
 								"mac": {
 									"type": "string",
 									"maxLength": 128,
-									"pattern": "^[\\s\\S]{32,128}$"
+									"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 								}
 							},
 							"additionalProperties": false
@@ -1300,6 +1300,25 @@
 				},
 				"daemonProof": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": true
+		},
+		"Control.HelloChallenge": {
+			"type": "object",
+			"required": [
+				"type",
+				"nonce"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "hello_challenge"
+				},
+				"nonce": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[A-Za-z0-9_\\-]{32,128}$"
 				}
 			},
 			"additionalProperties": true

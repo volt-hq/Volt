@@ -1,26 +1,36 @@
 /**
  * Every hello proves its secret (the pidfile token, a spawn's worker token,
- * an offer's relay token) without sending it, and the daemon proves it back
- * on every answer. On Windows the daemon's socket is a named pipe whose name
- * another local account can list and, once the daemon is gone, take; an
- * endpoint that cannot prove the secret is never trusted: not as a daemon,
- * not as a relay, not for its refusals, and not as the owner of a stale
- * startup lock.
+ * an offer's relay token) without sending it, bound to the daemon's challenge
+ * on that connection and the socket path the client dialed, and the daemon
+ * proves it back on every answer. On Windows the daemon's socket is a named
+ * pipe whose name another local account can list and, once the daemon is
+ * gone, take. An endpoint that cannot prove the secret is never trusted: not
+ * as a daemon, not as a relay, not for its refusals, and not as the owner of
+ * a stale startup lock. And a hello it captures is good nowhere else: not
+ * replayed on another connection, nor relayed live to the daemon.
  */
 
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { createServer, type Socket } from "node:net";
+import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
-import { ControlLineDecoder, encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
-import { probeControlSocket, startControlServer } from "../src/daemon/control-server.ts";
+import {
+	ControlLineDecoder,
+	createHelloProof,
+	daemonProofMatches,
+	encodeControlLine,
+	type HelloBinding,
+	type HelloMessage,
+	PROTOCOL_VERSION,
+} from "../src/daemon/control-protocol.ts";
+import { type ControlServer, probeControlSocket, startControlServer } from "../src/daemon/control-server.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
-import { createTestSocketEndpoint, listenTestServer } from "./socket-test-helpers.ts";
+import { createTestSocketEndpoint, greetControlClient, listenTestServer } from "./socket-test-helpers.ts";
 
 const TOKEN = "pidfile-token-0123456789";
 
@@ -38,20 +48,27 @@ function socketPath(): string {
 
 /**
  * An endpoint that is not the daemon, as at a stale pipe name someone else
- * took: it answers every hello with `ack`, without knowing any secret, then
- * a relay preamble or a status. It records every byte it receives.
+ * took: it greets like the daemon, answers every hello with `ack` without
+ * knowing any secret, then a relay preamble or a status. It records every
+ * byte it receives, and the hellos.
  */
-async function startImpostor(path: string, ack: Record<string, unknown>): Promise<{ received: string[] }> {
+async function startImpostor(
+	path: string,
+	ack: Record<string, unknown>,
+): Promise<{ received: string[]; hellos: HelloMessage[] }> {
 	const received: string[] = [];
+	const hellos: HelloMessage[] = [];
 	const server = createServer((socket: Socket) => {
 		const decoder = new ControlLineDecoder();
 		// Its clients hang up on it mid-answer (EPIPE on Windows pipes).
 		socket.on("error", () => {});
+		greetControlClient(socket);
 		socket.on("data", (chunk) => {
 			received.push(chunk.toString("utf8"));
 			for (const message of decoder.push(chunk)) {
 				const request = message as Record<string, unknown>;
 				if (request.type === "hello") {
+					hellos.push(message as HelloMessage);
 					socket.write(
 						encodeControlLine({
 							type: "hello_ack",
@@ -69,7 +86,64 @@ async function startImpostor(path: string, ack: Record<string, unknown>): Promis
 	});
 	await listenTestServer(server, path);
 	cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
-	return { received };
+	return { received, hellos };
+}
+
+/** A daemon's control server on `path` with the pidfile token, answering every request with ok. */
+async function startDaemonServer(path: string): Promise<ControlServer> {
+	const server = await startControlServer({
+		socketPath: path,
+		version: "test",
+		authToken: TOKEN,
+		handlers: {
+			onRequest(connection, request) {
+				connection.send({ type: "ok", id: request.id });
+			},
+		},
+	});
+	cleanups.push(() => server.close());
+	return server;
+}
+
+/** A raw connection to `path`: the daemon's challenge, then whatever lines the test sends and reads. */
+async function connectRaw(path: string): Promise<{
+	readonly challenge: string;
+	send(message: object): void;
+	next(): Promise<Record<string, unknown>>;
+}> {
+	const socket = createConnection(path);
+	socket.on("error", () => {});
+	cleanups.push(() => socket.destroy());
+	const decoder = new ControlLineDecoder();
+	const lines: Record<string, unknown>[] = [];
+	const waiting: Array<(line: Record<string, unknown>) => void> = [];
+	socket.on("data", (chunk: Buffer) => {
+		for (const message of decoder.push(chunk)) {
+			const line = message as Record<string, unknown>;
+			const waiter = waiting.shift();
+			if (waiter) waiter(line);
+			else lines.push(line);
+		}
+	});
+	const next = (): Promise<Record<string, unknown>> => {
+		const line = lines.shift();
+		return line === undefined ? new Promise((resolve) => waiting.push(resolve)) : Promise.resolve(line);
+	};
+	const greeting = await next();
+	expect(greeting.type).toBe("hello_challenge");
+	return { challenge: String(greeting.nonce), send: (message) => socket.write(encodeControlLine(message)), next };
+}
+
+function controlHello(proof: ReturnType<typeof createHelloProof>): HelloMessage {
+	return {
+		type: "hello",
+		role: "control",
+		protocolVersion: PROTOCOL_VERSION,
+		pid: 1,
+		version: "test",
+		client: "tui",
+		controlProof: proof,
+	};
 }
 
 describe("an endpoint that cannot prove the secret", () => {
@@ -129,6 +203,27 @@ describe("an endpoint that cannot prove the secret", () => {
 		await expect(client.openRelay({ relayId: "rl-1", relayToken })).rejects.toThrow(/did not prove/);
 		expect(impostor.received.join("")).toContain("relayProof");
 		expect(impostor.received.join("")).not.toContain(relayToken);
+	});
+
+	it("is no relay when it never greets: the open fails instead of waiting", async () => {
+		const path = socketPath();
+		const silent = createServer((socket: Socket) => {
+			socket.on("error", () => {});
+		});
+		await listenTestServer(silent, path);
+		cleanups.push(() => new Promise<void>((resolve) => silent.close(() => resolve())));
+		const client = createDaemonClient({
+			socketPath: path,
+			client: "tui",
+			version: "test",
+			reconnect: false,
+			helloTimeoutMs: 200,
+		});
+		cleanups.push(() => client.close());
+
+		await expect(client.openRelay({ relayId: "rl-1", relayToken: "relay-token-0123456789" })).rejects.toThrow(
+			/timed out/,
+		);
 	});
 
 	it("does not keep a stale startup lock held: a new daemon starts", async () => {
@@ -243,5 +338,107 @@ describe("the daemon", () => {
 			cleanups.push(() => refused.close());
 			await expect(refused.connect()).rejects.toThrow(/auth_failed/);
 		}
+	});
+});
+
+describe("a hello's proof", () => {
+	it("is good for its own connection to the daemon, and the daemon proves itself on it", async () => {
+		const path = socketPath();
+		await startDaemonServer(path);
+		const raw = await connectRaw(path);
+		const binding: HelloBinding = { challenge: raw.challenge, socketPath: path };
+		const proof = createHelloProof("control", TOKEN, binding);
+		raw.send(controlHello(proof));
+		const ack = await raw.next();
+		expect(ack).toMatchObject({ type: "hello_ack", ok: true });
+		expect(daemonProofMatches("control", TOKEN, binding, proof, ack.daemonProof as string)).toBe(true);
+	});
+
+	it("is refused when it was made for another challenge, or for another socket", async () => {
+		const path = socketPath();
+		await startDaemonServer(path);
+		for (const bindingOf of [
+			(challenge: string): HelloBinding => ({ challenge: `${challenge.slice(1)}A`, socketPath: path }),
+			(challenge: string): HelloBinding => ({ challenge, socketPath: `${path}-squatted` }),
+		]) {
+			const raw = await connectRaw(path);
+			raw.send(controlHello(createHelloProof("control", TOKEN, bindingOf(raw.challenge))));
+			const ack = await raw.next();
+			expect(ack).toMatchObject({ type: "hello_ack", ok: false, error: "auth_failed" });
+			expect(ack.daemonProof).toBeUndefined();
+		}
+	});
+
+	it("captured on one connection is refused when replayed on another", async () => {
+		const path = socketPath();
+		await startDaemonServer(path);
+		const first = await connectRaw(path);
+		const captured = controlHello(
+			createHelloProof("control", TOKEN, { challenge: first.challenge, socketPath: path }),
+		);
+		first.send(captured);
+		expect(await first.next()).toMatchObject({ type: "hello_ack", ok: true });
+
+		const replay = await connectRaw(path);
+		replay.send(captured);
+		expect(await replay.next()).toMatchObject({ type: "hello_ack", ok: false, error: "auth_failed" });
+	});
+
+	it("captured by a squatter is refused when replayed to the daemon", async () => {
+		const daemonPath = socketPath();
+		await startDaemonServer(daemonPath);
+		const stale = socketPath();
+		const impostor = await startImpostor(stale, { ok: true, connectionId: "c-1" });
+		const client = createDaemonClient({
+			socketPath: stale,
+			client: "tui",
+			version: "test",
+			authToken: TOKEN,
+			reconnect: false,
+		});
+		cleanups.push(() => client.close());
+		await expect(client.connect()).rejects.toThrow(/did not prove/);
+		const [captured] = impostor.hellos;
+		if (captured === undefined) throw new Error("The squatter captured no hello");
+
+		const replay = await connectRaw(daemonPath);
+		replay.send(captured);
+		expect(await replay.next()).toMatchObject({ type: "hello_ack", ok: false, error: "auth_failed" });
+	});
+
+	it("relayed live from a squatted name to the daemon is refused", async () => {
+		const daemonPath = socketPath();
+		await startDaemonServer(daemonPath);
+		const stale = socketPath();
+		// The squatter greets the client with the daemon's own challenge and forwards the client's hello.
+		const forwarded = Promise.withResolvers<Record<string, unknown>>();
+		const squatter = createServer((socket: Socket) => {
+			socket.on("error", () => {});
+			void (async () => {
+				const upstream = await connectRaw(daemonPath);
+				greetControlClient(socket, upstream.challenge);
+				const decoder = new ControlLineDecoder();
+				socket.on("data", (chunk: Buffer) => {
+					for (const message of decoder.push(chunk)) {
+						if ((message as Record<string, unknown>).type !== "hello") continue;
+						upstream.send(message as object);
+						void upstream.next().then(forwarded.resolve);
+					}
+				});
+			})();
+		});
+		await listenTestServer(squatter, stale);
+		cleanups.push(() => new Promise<void>((resolve) => squatter.close(() => resolve())));
+		const client = createDaemonClient({
+			socketPath: stale,
+			client: "tui",
+			version: "test",
+			authToken: TOKEN,
+			reconnect: false,
+		});
+		cleanups.push(() => client.close());
+		void client.connect().catch(() => undefined);
+
+		expect(await forwarded.promise).toMatchObject({ type: "hello_ack", ok: false, error: "auth_failed" });
 	});
 });

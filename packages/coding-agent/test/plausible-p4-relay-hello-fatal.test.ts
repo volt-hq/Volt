@@ -91,7 +91,8 @@ describe("P4 relay hello: admitRelay throwing must not emit a misleading fatal(f
 			role: "relay",
 			protocolVersion: PROTOCOL_VERSION,
 			relayId: "r-1",
-			relayProof: createHelloProof("relay", "tok-1"),
+			// Admission throws before any proof is checked.
+			relayProof: createHelloProof("relay", "tok-1", { challenge: "C".repeat(43), socketPath }),
 		};
 		client.write(encodeControlLine(relayHello));
 

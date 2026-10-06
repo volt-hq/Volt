@@ -39,6 +39,7 @@ import type {
 	ControlRequest,
 	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
+	HelloBinding,
 	HelloProof,
 	RemoteTransportHealth,
 } from "./control-protocol.ts";
@@ -212,8 +213,14 @@ export interface VoltdServiceExtensionInstance {
 		remoteTransport?: RemoteTransportHealth;
 		relayCredential?: ControlRelayCredentialStatus;
 	};
-	/** Redeem a relay hello by its proof of the offer's token; true when the socket was taken over. */
-	admitRelay?(relayId: string, proof: HelloProof, socket: Socket, bufferedRemainder: Buffer): boolean;
+	/** Redeem a relay hello by its proof of the offer's token on this connection; true when the socket was taken over. */
+	admitRelay?(
+		relayId: string,
+		proof: HelloProof,
+		binding: HelloBinding,
+		socket: Socket,
+		bufferedRemainder: Buffer,
+	): boolean;
 	/** Stop admitting work, settle durable ownership, and flush extension state. */
 	quiesce?(context: VoltdExtensionQuiesceContext): Promise<void>;
 	/** Release native/process resources after durable daemon state is closed. */
@@ -996,12 +1003,13 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				onRequest: handleRequest,
 				isShuttingDown: () => shutdownPhase !== "running",
 				workerAdmission: {
-					admitWorker: (hello, connection) => workers.admitWorker(hello, connection.connectionId),
+					admitWorker: (hello, binding, connection) =>
+						workers.admitWorker(hello, binding, connection.connectionId),
 				},
 				relayAdmission: {
-					admitRelay(hello, socket, bufferedRemainder) {
+					admitRelay(hello, binding, socket, bufferedRemainder) {
 						for (const extension of extensionInstances) {
-							if (extension.admitRelay?.(hello.relayId, hello.relayProof, socket, bufferedRemainder)) {
+							if (extension.admitRelay?.(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder)) {
 								return true;
 							}
 						}

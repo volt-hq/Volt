@@ -88,6 +88,7 @@ function setup(options: { ttlMs?: number } = {}) {
 	};
 
 	/** The worker launched `index`-th says hello. */
+	const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 	const hello = (worker: FakeWorker, token = worker.request.workerToken): boolean =>
 		registry.admitWorker(
 			{
@@ -95,10 +96,11 @@ function setup(options: { ttlMs?: number } = {}) {
 				role: "worker",
 				protocolVersion: 4,
 				workerId: worker.request.workerId,
-				workerProof: createHelloProof("worker", token),
+				workerProof: createHelloProof("worker", token, binding),
 				pid: 4242,
 				version: "test",
 			},
+			binding,
 			worker.connectionId,
 		) !== undefined;
 

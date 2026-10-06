@@ -92,6 +92,8 @@ describe("voltd lifecycle", () => {
 		const daemon = runVoltDaemon({ agentDir, foreground: false });
 		const status = await waitForDaemon();
 		const rawSocket = createConnection(status.socketPath);
+		// The daemon greets every connection with its challenge; reading it lets the socket's close be seen.
+		rawSocket.resume();
 		await new Promise<void>((resolve, reject) => {
 			rawSocket.once("connect", resolve);
 			rawSocket.once("error", reject);
@@ -647,8 +649,8 @@ describe("voltd lifecycle", () => {
 					},
 				});
 				return {
-					admitRelay: (relayId, proof, socket, bufferedRemainder) =>
-						registry.admit(relayId, proof, socket, bufferedRemainder),
+					admitRelay: (relayId, proof, binding, socket, bufferedRemainder) =>
+						registry.admit(relayId, proof, binding, socket, bufferedRemainder),
 					async quiesce() {
 						await relay?.close("host_shutdown", { pendingMessage: "daemon shutting down" });
 						quiesced = true;

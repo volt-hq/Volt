@@ -391,13 +391,28 @@ export type ControlRelayOutcome = Static<typeof ControlRelayOutcomeSchema>;
 // Hello, ack, fatal, relay preamble
 // ============================================================================
 
+/** A base64url nonce or MAC. */
+const Base64UrlTokenSchema = codePoints(32, 128, "A-Za-z0-9_\\-");
+
+/**
+ * The daemon's first line on every connection, before the client's hello: a
+ * fresh random challenge that every proof on the connection covers, so a
+ * proof is good for this connection of this daemon only.
+ */
+export const ControlHelloChallengeSchema = Type.Object(
+	{ type: Type.Literal("hello_challenge"), nonce: Base64UrlTokenSchema },
+	open,
+);
+export type ControlHelloChallenge = Static<typeof ControlHelloChallengeSchema>;
+
 /**
  * A hello's proof that its sender holds the role's secret (the pidfile token
  * for a control hello, the spawn's worker token, the offer's relay token),
  * which never crosses the socket: a fresh random `nonce` and `mac` =
- * HMAC-SHA256(secret, "volt-hello\0" + role + "\0client\0" + nonce), base64url.
+ * HMAC-SHA256(secret, JSON ["volt-hello", role, "client", socket path dialed,
+ * the connection's challenge, nonce]), base64url.
  */
-export const HelloProofSchema = Type.Object({ nonce: codePoints(32, 128), mac: codePoints(32, 128) }, closed);
+export const HelloProofSchema = Type.Object({ nonce: Base64UrlTokenSchema, mac: Base64UrlTokenSchema }, closed);
 export type HelloProof = Static<typeof HelloProofSchema>;
 
 export const ControlHelloSchema = Type.Union([
@@ -457,9 +472,9 @@ export const ControlHelloAckSchema = Type.Object(
 		protocolVersion: Type.Optional(Type.Number()),
 		/**
 		 * The daemon's proof of the same secret, on every answer to a hello whose
-		 * proof it verified: HMAC-SHA256(secret, "volt-hello\0" + role +
-		 * "\0daemon\0" + the hello's nonce), base64url. A client that sent a
-		 * proof trusts no answer without it.
+		 * proof it verified: the hello's MAC with party "daemon", over the same
+		 * socket path, challenge, and nonce. A client that sent a proof trusts
+		 * no answer without it.
 		 */
 		daemonProof: Type.Optional(Type.String()),
 	},

@@ -33,8 +33,8 @@ async function startRelayHarness(): Promise<RelayHarness> {
 			handlers: {
 				onRequest: () => {},
 				relayAdmission: {
-					admitRelay: (hello, socket, bufferedRemainder) =>
-						registry.admit(hello.relayId, hello.relayProof, socket, bufferedRemainder),
+					admitRelay: (hello, binding, socket, bufferedRemainder) =>
+						registry.admit(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder),
 				},
 			},
 		});
@@ -151,11 +151,12 @@ describe("relay framing (§12.2.3)", () => {
 		const client = connectRawRelayClient(socketPath, relay);
 		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
 
-		// The ack proves the offer's token over the hello's nonce.
+		// The ack proves the offer's token on the connection, over the hello's nonce.
+		const { binding, proof } = client.proven();
 		expect(client.messages[0]).toEqual({
 			type: "hello_ack",
 			ok: true,
-			daemonProof: createDaemonProof("relay", relay.relayToken, client.proof),
+			daemonProof: createDaemonProof("relay", relay.relayToken, binding, proof),
 		});
 		expect(client.messages[1]).toEqual({
 			type: "relay_preamble",
@@ -230,11 +231,12 @@ describe("relay framing (§12.2.3)", () => {
 		// Random binary (contains 0x0a newlines with near-certainty at this size);
 		// the relay must never re-frame or reinterpret it.
 		const trailing = randomBytes(1024);
-		const client = connectRawRelayClient(socketPath, relay);
-		client.socket.on("connect", () => {
-			// Lands in the same stream as (usually the same chunk as) the hello: the
-			// server must hand it to the pump as bufferedRemainder, not decode it.
-			client.socket.write(trailing);
+		// Written with the hello, in the same chunk: the server must hand it to the
+		// pump as bufferedRemainder, not decode it.
+		const client = connectRawRelayClient(socketPath, {
+			relayId: relay.relayId,
+			relayToken: relay.relayToken,
+			trailing,
 		});
 		await vi.waitFor(() => expect(phone.receivedBytes().equals(trailing)).toBe(true));
 
@@ -422,8 +424,15 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.get(relay.relayId)).toBeUndefined();
 		// Expiry synchronously removed the owner from the token index, so a
 		// same-tick redemption cannot promote it while rejection I/O settles.
+		const binding = { challenge: "C".repeat(43), socketPath: "/tmp/voltd-test.sock" };
 		expect(
-			registry.admit(relay.relayId, createHelloProof("relay", relay.relayToken), {} as never, Buffer.alloc(0)),
+			registry.admit(
+				relay.relayId,
+				createHelloProof("relay", relay.relayToken, binding),
+				binding,
+				{} as never,
+				Buffer.alloc(0),
+			),
 		).toBe(false);
 		expect(await relay.settled).toEqual({ reason: "error", bytesUp: 0, bytesDown: 0, durationMs: 0 });
 		expect(rejectPending).toHaveBeenCalledTimes(1);
