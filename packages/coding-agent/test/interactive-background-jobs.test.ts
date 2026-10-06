@@ -843,7 +843,12 @@ describe("interactive background jobs", () => {
 		expect(invalidate.mock.calls.length).toBeLessThanOrEqual(3);
 		expect(invalidateHistory).not.toHaveBeenCalled();
 		expect(access.chatContainer.children).toContain(history);
-		expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("output 99");
+		// The card's output arrives through `work_output` once the item changed.
+		await vi.waitFor(() => {
+			access.workRowsCoalescer.flush();
+			expect(stripAnsi(card.render(100).lines.join("\n"))).toContain("output 99");
+		});
+		expect(invalidateHistory).not.toHaveBeenCalled();
 		finish();
 		await jobs.wait([job.id]);
 		await vi.waitFor(() => {
