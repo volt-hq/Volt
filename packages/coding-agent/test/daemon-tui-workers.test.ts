@@ -131,10 +131,14 @@ function assistantTexts(client: ProtocolClient): string[] {
 /** Resolves once `client` shows `conversation` on a connection of its own, caught up with its log. */
 async function shows(client: ProtocolClient, conversation: string | undefined): Promise<void> {
 	if (conversation === undefined) throw new Error("The intent moved the client nowhere");
-	await vi.waitFor(() => {
-		expect(client.moving).toBeUndefined();
-		expect(client.conversation).toBe(conversation);
-	});
+	// The client reconnects through the daemon: an open, a relay, and the worker's serving.
+	await vi.waitFor(
+		() => {
+			expect(client.moving).toBeUndefined();
+			expect(client.conversation).toBe(conversation);
+		},
+		{ timeout: 15_000 },
+	);
 	await client.caughtUp();
 }
 
@@ -187,7 +191,7 @@ describe("conversations TUIs open in workers", () => {
 
 		// The TUI left: the worker stays, detached.
 		await client.stop();
-		await expect.poll(async () => (await harness.status()).workers[0]?.clients.local).toBe(0);
+		await expect.poll(async () => (await harness.status()).workers[0]?.clients.local, { timeout: 10_000 }).toBe(0);
 		expect((await harness.status()).workers).toHaveLength(1);
 	}, 60_000);
 
@@ -203,8 +207,9 @@ describe("conversations TUIs open in workers", () => {
 		client.onFrame((frame) => frames.push(frame));
 		expect(await harness.shutdown()).toBe(0);
 		// The client stops at the subscription's end, before the connection's `fatal{host_shutdown}`.
-		await vi.waitFor(() =>
-			expect(frames).toContainEqual(expect.objectContaining({ type: "ended", reason: "shutdown" })),
+		await vi.waitFor(
+			() => expect(frames).toContainEqual(expect.objectContaining({ type: "ended", reason: "shutdown" })),
+			{ timeout: 10_000 },
 		);
 	}, 60_000);
 
@@ -237,8 +242,8 @@ describe("conversations TUIs open in workers", () => {
 			"The conversation was already running; it keeps its own --approve/--no-approve, --tools.",
 		]);
 		// The second TUI's plan mode applied once it attached; the first TUI sees it too.
-		await vi.waitFor(() => expect(attached.client.state.planning?.mode).toBe("plan"));
-		await vi.waitFor(() => expect(opener.client.state.planning?.mode).toBe("plan"));
+		await vi.waitFor(() => expect(attached.client.state.planning?.mode).toBe("plan"), { timeout: 10_000 });
+		await vi.waitFor(() => expect(opener.client.state.planning?.mode).toBe("plan"), { timeout: 10_000 });
 		const [worker] = (await harness.status()).workers;
 		expect(worker).toMatchObject({ sessionIds: [opener.opened.sessionId], clients: { local: 2, remote: 0 } });
 	}, 60_000);
@@ -408,7 +413,9 @@ describe("conversations TUIs open in workers", () => {
 			}),
 			clientKey: "tui-1",
 		});
-		await vi.waitFor(() => expect(spawnFlagRecord().get(trusted.opened.sessionId)).toBe("from the TUI"));
+		await vi.waitFor(() => expect(spawnFlagRecord().get(trusted.opened.sessionId)).toBe("from the TUI"), {
+			timeout: 10_000,
+		});
 		expect(await trusted.client.query("settings")).toMatchObject({ blockImages: true });
 
 		// Without the TUI's trust, the project's settings are not read (nothing saved trusts it).

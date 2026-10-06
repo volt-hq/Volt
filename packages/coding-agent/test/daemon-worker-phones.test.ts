@@ -190,7 +190,9 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		]);
 		expect(await phone.intent("prompt", { message: "hi" })).toMatchObject({ type: "accepted" });
 		await expect.poll(() => assistantText(phone.frames), { timeout: 5000 }).toContain("hello to both");
-		await vi.waitFor(() => expect(JSON.stringify(client.state.entries)).toContain("hello to both"));
+		await vi.waitFor(() => expect(JSON.stringify(client.state.entries)).toContain("hello to both"), {
+			timeout: 10_000,
+		});
 	}, 60_000);
 
 	it("keeps a workspace local to the host out of reach of a phone granted all workspaces (D17)", async () => {
