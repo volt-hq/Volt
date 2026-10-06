@@ -32,6 +32,7 @@ import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
 import { releaseLocalSessionWorktree } from "../src/daemon/session-worktree.ts";
 import type { EnsureDaemonResult } from "../src/daemon/spawn.ts";
 import * as daemonSpawn from "../src/daemon/spawn.ts";
+import { getRelaySanitizerOptions } from "../src/daemon/worker/serve-phone.ts";
 import {
 	evaluateWorktreeRelayGate,
 	getWorktreeCheckoutPath,
@@ -42,7 +43,6 @@ import {
 	WorktreeManager,
 } from "../src/daemon/worktree-manager.ts";
 import { createDaemonLink } from "../src/modes/interactive/host/daemon-link.ts";
-import { getRelayServingSanitizerOptions } from "../src/modes/interactive/host/relay-serving.ts";
 import { openDaemonWorktreeControl, resolveDaemonWorkspaceForCwd } from "../src/modes/interactive/worktree-control.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHostHarness } from "./suite/host-harness.ts";
@@ -511,13 +511,13 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 	} satisfies RelayPreamble["authorization"];
 
 	it("keeps the parent root for non-worktree conversations", () => {
-		expect(getRelayServingSanitizerOptions(authorizationBase, HOST_AGENT_DIR)).toEqual({
+		expect(getRelaySanitizerOptions(authorizationBase, HOST_AGENT_DIR)).toEqual({
 			workspacePath: HOST_PARENT_PATH,
 		});
 	});
 
 	it("switches the root to the worktree and redacts the parent + worktrees root", () => {
-		const options = getRelayServingSanitizerOptions(
+		const options = getRelaySanitizerOptions(
 			{
 				...authorizationBase,
 				worktreeId: "fix-login",
@@ -532,7 +532,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 	});
 
 	it("maps nested worktree relay roots back under the registered workspace", () => {
-		const options = getRelayServingSanitizerOptions(
+		const options = getRelaySanitizerOptions(
 			{
 				...authorizationBase,
 				worktreeId: "fix-login",
@@ -562,10 +562,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 			conversation,
 			stream: pair.host,
 			grant: authorizationBase.rpcGrant,
-			redaction: getRelayServingSanitizerOptions(
-				{ ...authorizationBase, worktreeId: "fix-login", worktreePath },
-				agentDir,
-			),
+			redaction: getRelaySanitizerOptions({ ...authorizationBase, worktreeId: "fix-login", worktreePath }, agentDir),
 			// A relayed phone stays on the TUI's conversation.
 			redirect: {},
 		});

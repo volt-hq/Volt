@@ -3,8 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { observeCompactionFailures } from "../../../src/daemon/compaction-failure-log.ts";
 import { createDaemonLogger } from "../../../src/daemon/log.ts";
+import { observeCompactionFailures } from "../../../src/daemon/worker/compaction-failure-log.ts";
 import type { ExtensionFactory } from "../../../src/index.ts";
 import { createHarness, type Harness } from "../harness.ts";
 

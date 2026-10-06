@@ -179,6 +179,7 @@ export class WorkerRegistry {
 	private readonly fences = new Map<string, Promise<void>>();
 	private readonly exitListeners = new Set<(workerId: string, exit: WorkerExit) => void>();
 	private readonly retireListeners = new Set<(workerId: string, reason: WorkerStopReason) => void>();
+	private readonly hostsListeners = new Set<(workspaceName: string, sessionId: string, hosted: boolean) => void>();
 	private closed = false;
 
 	constructor(options: WorkerRegistryOptions) {
@@ -310,7 +311,12 @@ export class WorkerRegistry {
 		};
 		void record.ready.promise.catch(() => undefined);
 		this.workers.set(record.workerId, record);
+		this.hostsChanged(record.workspaceName, key.sessionId, true);
 		return record;
+	}
+
+	private hostsChanged(workspaceName: string, sessionId: string, hosted: boolean): void {
+		for (const listener of [...this.hostsListeners]) listener(workspaceName, sessionId, hosted);
 	}
 
 	/** Build the spawn and start the worker; resolves once it is live, rejects with its failure. */
@@ -535,6 +541,7 @@ export class WorkerRegistry {
 				if (!hosted) return refuse("not_hosted", "the worker does not host that conversation");
 				if (hosted.kind === "primary") return refuse("primary", "a worker's primary closes with the worker");
 				record.hosts.delete(request.sessionId);
+				this.hostsChanged(record.workspaceName, request.sessionId, false);
 				return ok;
 			}
 			case "worker_stop_result": {
@@ -564,7 +571,9 @@ export class WorkerRegistry {
 	 * `worker_hosts`: the worker claims `sessionId` before opening it. Refused
 	 * unless the worker is live with a control connection, its generation is
 	 * current and its workspace admits, the parent it names is one it hosts,
-	 * and no registered worker hosts the session.
+	 * and no registered worker hosts the session. A sibling claim of a
+	 * session a detached, idle worker hosts retires that worker early, as its
+	 * TTL would (`retiring`: the claimant retries).
 	 */
 	private claim(
 		record: WorkerRecord,
@@ -585,11 +594,24 @@ export class WorkerRegistry {
 			return { code: "not_hosted", message: "the worker does not host the parent conversation" };
 		}
 		if (record.hosts.has(sessionId)) return undefined;
-		if (this.hostOf(sessionId)) return { code: "claimed", message: "another worker hosts that conversation" };
+		const owner = this.hostOf(sessionId);
+		if (owner) {
+			// A review source or discussion a detached, idle worker keeps only until its TTL runs: retention
+			// retires that worker now, and the claimant retries once it exited.
+			if (
+				kind === "sibling" &&
+				owner.workspaceName === record.workspaceName &&
+				(owner.state === "retiring" || this.expire(owner, "sibling_claim"))
+			) {
+				return { code: "retiring", message: "the worker hosting that conversation is retiring; retry" };
+			}
+			return { code: "claimed", message: "another worker hosts that conversation" };
+		}
 		if (record.hosts.size >= MAX_WORKER_HOSTED_SESSIONS) {
 			return { code: "too_many", message: "the worker hosts too many conversations" };
 		}
 		record.hosts.set(sessionId, { kind, parentSessionId });
+		this.hostsChanged(record.workspaceName, sessionId, true);
 		return undefined;
 	}
 
@@ -633,8 +655,12 @@ export class WorkerRegistry {
 		record.retention.unref?.();
 	}
 
-	/** The TTL fired on a detached, idle worker: ask it to stop. It may refuse if it turned active. */
-	private expire(record: WorkerRecord, ttlMs: number): void {
+	/**
+	 * The TTL fired on a detached, idle worker, or a sibling claim needs a
+	 * conversation it hosts: ask it to stop. It may refuse if it turned active.
+	 * Whether it began retiring.
+	 */
+	private expire(record: WorkerRecord, why: number | "sibling_claim"): boolean {
 		if (
 			record.state !== "live" ||
 			record.forced ||
@@ -643,11 +669,17 @@ export class WorkerRegistry {
 			record.active ||
 			record.connectionId === undefined
 		) {
-			return;
+			return false;
 		}
+		if (record.retention !== undefined) clearTimeout(record.retention);
+		record.retention = undefined;
 		record.state = "retiring";
 		this.sendStop(record, "retention", false);
-		this.options.log?.("info", "retiring detached idle worker", { workerId: record.workerId, ttlMs });
+		this.options.log?.("info", "retiring detached idle worker", {
+			workerId: record.workerId,
+			...(why === "sibling_claim" ? { why } : { ttlMs: why }),
+		});
+		return true;
 	}
 
 	private sendStop(record: WorkerRecord, reason: WorkerStopReason, force: boolean): void {
@@ -748,6 +780,49 @@ export class WorkerRegistry {
 		return this.hostOf(sessionId)?.workspaceName === workspaceName;
 	}
 
+	/** The registered worker hosting `sessionId` of `workspaceName`, and why it hosts it. */
+	host(
+		workspaceName: string,
+		sessionId: string,
+	): { readonly workerId: string; readonly kind: "primary" | WorkerHostKind } | undefined {
+		const record = this.hostOf(sessionId);
+		const hosted = record?.hosts.get(sessionId);
+		return record && hosted && record.workspaceName === workspaceName
+			? { workerId: record.workerId, kind: hosted.kind }
+			: undefined;
+	}
+
+	/** Whether the worker `workerId` hosts `sessionId`. */
+	workerHosts(workerId: string, sessionId: string): boolean {
+		return this.workers.get(workerId)?.hosts.has(sessionId) ?? false;
+	}
+
+	/** The control connection of a registered worker, once it said hello. */
+	connectionOf(workerId: string): string | undefined {
+		return this.workers.get(workerId)?.connectionId;
+	}
+
+	/** The workspace and generation of a registered worker. */
+	keyOf(workerId: string): { readonly workspaceName: string; readonly workspaceGeneration: number } | undefined {
+		const record = this.workers.get(workerId);
+		return record
+			? { workspaceName: record.workspaceName, workspaceGeneration: record.workspaceGeneration }
+			: undefined;
+	}
+
+	/** The registered workers of `workspaceName`. */
+	workersOf(workspaceName: string): string[] {
+		return [...this.workers.values()]
+			.filter((record) => record.workspaceName === workspaceName)
+			.map((record) => record.workerId);
+	}
+
+	/** Retire the worker `workerId` without the option to refuse; resolves once it exited. */
+	async retireWorker(workerId: string, reason: WorkerStopReason): Promise<void> {
+		const record = this.workers.get(workerId);
+		if (record) await this.retire(record, reason);
+	}
+
 	/**
 	 * The daemon stops: admission closes, and every worker retires without the
 	 * option to refuse. Resolves once each exited, or after the forced-stop
@@ -802,7 +877,9 @@ export class WorkerRegistry {
 				details: { workerId: record.workerId, reason: exit.reason, sessionIds: [...record.hosts.keys()] },
 			});
 		}
+		const hosted = [...record.hosts.keys()];
 		record.hosts.clear();
+		for (const sessionId of hosted) this.hostsChanged(record.workspaceName, sessionId, false);
 		record.exited.resolve(exit);
 		this.notifyChanged(record);
 		for (const listener of [...this.exitListeners]) listener(record.workerId, exit);
@@ -813,6 +890,14 @@ export class WorkerRegistry {
 		this.exitListeners.add(listener);
 		return () => {
 			this.exitListeners.delete(listener);
+		};
+	}
+
+	/** A registered worker started or stopped hosting a session (spawn, claim, release, exit). */
+	onHostsChanged(listener: (workspaceName: string, sessionId: string, hosted: boolean) => void): () => void {
+		this.hostsListeners.add(listener);
+		return () => {
+			this.hostsListeners.delete(listener);
 		};
 	}
 

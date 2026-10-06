@@ -6,15 +6,15 @@ import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
-import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
+import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
+import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { openNewSession } from "../../../src/core/host/session-intents.ts";
 import type { HostClient } from "../../../src/core/host/targets.ts";
 import { readPrReviewBinding } from "../../../src/core/pr-review-binding.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
-import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
-import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
+import type { IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { prepareReviewWorkflow } from "../../../src/core/review.ts";
@@ -28,12 +28,13 @@ import {
 } from "../../../src/core/review-state.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { getDefaultSessionDir, SessionManager } from "../../../src/core/session-manager.ts";
-import { ConversationSessionWriter } from "../../../src/core/session-writer.ts";
-import type { IntegratedRuntimeEntry } from "../../../src/daemon/integrated-runtimes.ts";
-import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
+import { LogWriter } from "../../../src/core/session-writer.ts";
+import { type ConversationOpenServices, resolveConversationOpen } from "../../../src/daemon/conversation-open.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
-import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
+import type { WorkerDaemonClient } from "../../../src/daemon/worker/daemon-client.ts";
+import { WorkerConversations } from "../../../src/daemon/worker/hosted.ts";
+import type { WorkerSpawnInput } from "../../../src/daemon/worker-registry.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
@@ -48,8 +49,8 @@ afterAll(() => gitSeed?.dispose());
 
 const cleanups: Array<() => Promise<void>> = [];
 beforeEach(() => {
-	// This fixture owns daemon runtimes in-process, not in a separately spawned
-	// daemon whose state file would not contain the fixture's worktrees.
+	// The fixture's workers run in this process with its daemon, as `InProcessWorkerLauncher`
+	// runs them: a worktree session's restoration takes the daemon's own preparation.
 	vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockResolvedValue({
 		healthy: true,
 		state: "healthy",
@@ -70,6 +71,22 @@ function git(cwd: string, ...args: string[]): string {
 		stdio: ["ignore", "pipe", "pipe"],
 	}).trim();
 }
+
+/** A conversation worker, as the daemon spawns one: its primary conversation, and those it claims beside it. */
+interface TestWorker {
+	readonly spec: WorkerSpawnInput;
+	readonly host: ConversationHost;
+	readonly conversation: HostedConversation;
+	readonly hosted: WorkerConversations;
+}
+
+/** A worker's daemon client whose claims the daemon grants. */
+function grantingDaemonClient(): WorkerDaemonClient {
+	const ok = async () => ({ type: "ok" as const, id: "granted" });
+	return { hosts: ok, released: ok, changeObserve: ok } as unknown as WorkerDaemonClient;
+}
+
+type ConversationTarget = Extract<IrohRemoteHello, { mode: "conversation" }>["conversation"];
 
 async function fixture(nested = false, workspaceName = "project") {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-admission-")));
@@ -178,7 +195,14 @@ async function fixture(nested = false, workspaceName = "project") {
 			diagnostics: [],
 		};
 	};
-	const registries: IntegratedRuntimeRegistry[] = [];
+	/** Every running worker of the fixture's daemons. */
+	const workers = new Set<TestWorker>();
+	const stop = async (worker: TestWorker) => {
+		if (!workers.delete(worker)) return;
+		worker.hosted.beginStopping();
+		await worker.host.dispose();
+	};
+	/** A daemon on the fixture's state: it opens a phone's conversation as `relayToWorker` does. */
 	function host() {
 		const state = new IrohRemoteHostStateManager({ statePath });
 		const worktrees = new WorktreeManager({ agentDir, stateManager: state, auditLogger: audit });
@@ -187,53 +211,13 @@ async function fixture(nested = false, workspaceName = "project") {
 			stateManager: state,
 			worktrees,
 			provider,
-			hasActiveSession: (name, id) => registries.some((registry) => registry.findOwner(name, id) !== undefined),
+			hasActiveSession: (name, id) =>
+				[...workers].some((worker) => worker.spec.workspace.name === name && worker.hosted.get(id) !== undefined),
 		});
-		const createRuntime = vi.fn<
-			NonNullable<ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["createRuntime"]>
-		>(async (options) => {
-			const selected = options.conversationTarget;
-			if (!selected) throw new Error("Expected conversation target");
-			const resolved = await resolveIrohRemoteSessionTarget(
-				selected.target === "last"
-					? { kind: "last", resumeSessionId: selected.resumeSessionId }
-					: { kind: selected.target, sessionId: selected.sessionId! },
-				workspace,
-				createSessionManagerTargetStore(options.cwd, options.sessionDir!, {
-					listAll: true,
-					preserveSessionCwd: true,
-				}),
-			);
-			await options.validateCwd?.(resolved.sessionManager.getCwd());
-			// As the daemon does: phones attach as clients, and the registry closes the conversation.
-			const runtime = await openTestHost(factory, {
-				sessionManager: resolved.sessionManager,
-				cwd: resolved.sessionManager.getCwd(),
-				agentDir,
-				extensionMode: "rpc",
-				whenUnattached: "keep",
-			});
-			return {
-				runtime,
-				sessionSelection:
-					resolved.selection === "created"
-						? { kind: "created", sessionId: resolved.sessionId }
-						: {
-								kind: resolved.selection,
-								sessionId: resolved.sessionId,
-								requestedSessionId: resolved.requestedSessionId ?? resolved.sessionId,
-							},
-			};
-		});
-		const registry = new IntegratedRuntimeRegistry({
+		const services: ConversationOpenServices = {
 			agentDir,
-			auditLogger: audit,
-			stateManager: state,
-			activeStreams: new IrohRemoteActiveStreamRegistry(),
-			detachedRuntimeTtlMs: () => 60_000,
-			getProjectTrustedForWorkspace: () => true,
-			setClientLastSessionId: (node, name, id) => state.setClientLastSessionId(node, name, id),
-			createRuntime,
+			toolPolicy: () => ({ tools: ["read", "write"], allowUnlistedExtensionTools: false }),
+			projectTrusted: () => true,
 			resolveWorktree: async (name, hello, id) => {
 				if (hello.mode === "conversation" && hello.conversation.target === "new") {
 					return hello.conversation.worktreeId
@@ -253,18 +237,30 @@ async function fixture(nested = false, workspaceName = "project") {
 			preparePrReviewSession: (auth, hello, signal) =>
 				checkouts.prepareSession(auth, hello, { ...authority, signal }),
 			bindWorktreeSession: (name, id, sessionId) => worktrees.bindSession(name, id, sessionId),
-			withReviewSourceWrite: async (_parent, _ref, write) => write(),
+		};
+		const started: TestWorker[] = [];
+		/** A worker opens the stored conversation its spawn names, with the spawn's cwd. */
+		const openWorker = vi.fn(async (spec: WorkerSpawnInput): Promise<TestWorker> => {
+			const opened = await openTestHost(factory, {
+				sessionManager: await SessionManager.open(spec.session),
+				cwd: spec.cwd,
+				agentDir,
+				extensionMode: "rpc",
+				whenUnattached: "keep",
+			});
+			const hosted = new WorkerConversations({
+				client: grantingDaemonClient(),
+				workspaceName: spec.workspace.name,
+				log: () => {},
+			});
+			hosted.adoptPrimary(opened.host, opened.conversation);
+			const worker = { spec, ...opened, hosted };
+			workers.add(worker);
+			started.push(worker);
+			return worker;
 		});
-		registries.push(registry);
-		const response = createIrohRemoteHandshakeSuccess({
-			workspace: workspace.name,
-			hostNodeId: "host",
-			clientNodeId: "phone",
-		});
-		function open(
-			conversation: Extract<IrohRemoteHello, { mode: "conversation" }>["conversation"],
-			signal?: AbortSignal,
-		) {
+		/** The daemon's half of the open: the target resolved read-only, then the spawn prepared. */
+		async function open(conversation: ConversationTarget, signal?: AbortSignal) {
 			const hello: IrohRemoteHello = {
 				type: "volt_iroh_hello",
 				protocol: "volt/1",
@@ -272,21 +268,22 @@ async function fixture(nested = false, workspaceName = "project") {
 				mode: "conversation",
 				conversation,
 			};
-			return registry.getOrCreateEntry({ hello, response }, authorization, { signal });
+			const resolved = await resolveConversationOpen(hello, authorization, services, signal);
+			const spec = await resolved.prepare(authorization.workspaceGeneration!, signal);
+			return { resolved, spec };
 		}
-		async function attach(conversation: Parameters<typeof open>[0]) {
+		/** Open, and spawn the worker that hosts the conversation. */
+		async function attach(conversation: ConversationTarget) {
 			const opened = await open(conversation);
-			try {
-				await registry.commitEntry(opened.entry, opened.sessionSelection, authorization, opened.attachClaim);
-			} finally {
-				opened.attachClaim.release();
-			}
-			return opened;
+			return { ...opened, worker: await openWorker(opened.spec) };
 		}
-		return { state, worktrees, checkouts, registry, createRuntime, open, attach };
+		async function stopAll() {
+			for (const worker of started.splice(0)) await stop(worker);
+		}
+		return { state, worktrees, checkouts, openWorker, open, attach, stop, stopAll };
 	}
 	cleanups.push(async () => {
-		for (const registry of registries) await registry.stopAll("test_cleanup");
+		for (const worker of [...workers]) await stop(worker);
 		await harness.cleanupAsync();
 		await audit.flush();
 		// Windows can release a stopped Git command's hold on a worktree after it exited. Unlike
@@ -326,7 +323,7 @@ async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persist
 			workingDirectory: prepared.workingDirectory,
 		}),
 	).rejects.toThrow("interrupted launch");
-	expect(host.registry.size).toBe(0);
+	expect(host.openWorker).not.toHaveBeenCalled();
 	expect(host.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
 	const ref = await SessionManager.findForResume(f.sessionDir, prepared.sessionId);
 	if (!ref) throw new Error("missing interrupted session");
@@ -406,7 +403,7 @@ function reviewRecord(source: string, base: string, target: ResolvedPullRequestC
 	};
 }
 
-describe("#414 PR review admission and runtime lifecycle", () => {
+describe("#414 PR review admission and worker spawn", () => {
 	for (const nested of [false, true]) {
 		it.each([
 			{ target: "session", persistBinding: false },
@@ -414,46 +411,31 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			{ target: "session", persistBinding: true },
 			{ target: "last", persistBinding: true },
 		] as const)(
-			`recovers an interrupted launch before publication (nested: ${nested}): %j`,
+			`recovers an interrupted launch before a worker opens it (nested: ${nested}): %j`,
 			async ({ target, persistBinding }) => {
 				const f = await fixture(nested);
 				const { prepared, ref, placement } = await interruptedLaunch(f, persistBinding);
 				f.authorization.client.lastSessionIdByWorkspace = { [f.workspace.name]: prepared.sessionId };
 				const restarted = f.host();
-				const opened = await restarted.open(
+				const { resolved, spec } = await restarted.open(
 					target === "last" ? { target } : { target, sessionId: prepared.sessionId },
 				);
-				let published = false;
+				expect(resolved.selection.kind).toBe("resumed");
+				expect(resolved.worktree?.id).toBe(prepared.worktreeId);
+				expect(spec.session).toEqual(ref);
+				expect(spec.cwd).toBe(placement.cwd);
+				// A separate store reader sees the binding before any worker opens the conversation.
+				const reader = await SessionManager.openReadOnly(ref);
 				try {
-					expect(opened.sessionSelection.kind).toBe("resumed");
-					expect(opened.entry.runtime.conversation.session.sessionRef).toEqual(ref);
-					expect(opened.entry.runtime.conversation.cwd).toBe(placement.cwd);
-					expect(opened.entry.worktreeId).toBe(prepared.worktreeId);
-					// A separate store reader must see the binding before ownership publication.
-					const reader = await SessionManager.openReadOnly(ref);
-					try {
-						expect(await readPrReviewBinding(reader)).toEqual(placement);
-					} finally {
-						await reader.closePersistence();
-					}
-					const launch = (await restarted.state.listWorktrees())[0]!.prReviewLaunches![0];
-					expect(launch).toMatchObject({ sessionGeneration: ref.sessionGeneration, storeId: ref.storeId });
-					await restarted.registry.commitEntry(
-						opened.entry,
-						opened.sessionSelection,
-						f.authorization,
-						opened.attachClaim,
-					);
-					published = true;
+					expect(await readPrReviewBinding(reader)).toEqual(placement);
 				} finally {
-					if (!published)
-						await restarted.registry.abortPreparedEntry(
-							opened.entry,
-							opened.sessionSelection,
-							opened.attachClaim,
-						);
-					opened.attachClaim.release();
+					await reader.closePersistence();
 				}
+				const launch = (await restarted.state.listWorktrees())[0]!.prReviewLaunches![0];
+				expect(launch).toMatchObject({ sessionGeneration: ref.sessionGeneration, storeId: ref.storeId });
+				const { conversation } = await restarted.openWorker(spec);
+				expect(conversation.session.sessionRef).toEqual(ref);
+				expect(conversation.cwd).toBe(placement.cwd);
 				const capture = vi
 					.spyOn(githubCliCodeHostProvider, "capturePullRequestContext")
 					.mockRejectedValue(new Error("unexpected ordinary PR resolution"));
@@ -461,7 +443,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 					prepareReviewWorkflow({
 						target: { kind: "pr", number: "415" },
 						cwd: placement.cwd,
-						sessionManager: opened.entry.runtime.conversation.session.sessionManager,
+						sessionManager: conversation.session.sessionManager,
 						settingsManager: f.harness.settingsManager,
 						modelRegistry: f.harness.session.modelRegistry,
 						currentModel: f.harness.getModel(),
@@ -474,7 +456,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 	}
 
 	it.each(["dirty", "head", "remote"] as const)(
-		"rejects %s drift on interrupted-session resume without publication",
+		"rejects %s drift on interrupted-session resume before any worker opens it",
 		async (drift) => {
 			const f = await fixture();
 			const { prepared, ref, placement } = await interruptedLaunch(f);
@@ -485,8 +467,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toMatchObject({
 				code: "review_preparation_stale",
 			});
-			expect(restarted.createRuntime).not.toHaveBeenCalled();
-			expect(restarted.registry.size).toBe(0);
+			expect(restarted.openWorker).not.toHaveBeenCalled();
 			const reader = await SessionManager.open(ref);
 			try {
 				expect(reader.getPrReviewBinding()).toBeUndefined();
@@ -506,35 +487,32 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toThrow(
 			"review_preparation_failed",
 		);
-		expect(restarted.createRuntime).not.toHaveBeenCalled();
-		expect(restarted.registry.size).toBe(0);
+		expect(restarted.openWorker).not.toHaveBeenCalled();
 		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("full").rpcGrant;
 		await restarted.attach({ target: "session", sessionId: prepared.sessionId });
-		await restarted.registry.stopAll("restart");
+		await restarted.stopAll();
 		writeFileSync(join(placement.cwd, "value.txt"), "requested edit\n");
 		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
-		const resumed = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
-		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
+		const { worker } = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
+		expect(await readPrReviewBinding(worker.conversation.session.sessionManager)).toEqual(placement);
 		expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("requested edit\n");
 	});
 
-	it("does not publish a resumed runtime when binding persistence fails and permits retry", async () => {
+	it("spawns no worker when binding persistence fails, and permits retry", async () => {
 		const f = await fixture();
 		const { prepared, placement } = await interruptedLaunch(f);
 		const restarted = f.host();
-		const record = vi
-			.spyOn(ConversationSessionWriter.prototype, "recordPrReviewBinding")
-			.mockImplementationOnce(() => {
-				throw new Error("binding persistence failed");
-			});
+		const record = vi.spyOn(LogWriter.prototype, "recordPrReviewBinding").mockImplementationOnce(() => {
+			throw new Error("binding persistence failed");
+		});
 		await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toThrow(
 			"binding persistence failed",
 		);
-		expect(restarted.registry.size).toBe(0);
+		expect(restarted.openWorker).not.toHaveBeenCalled();
 		expect(restarted.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
 		record.mockRestore();
-		const resumed = await restarted.attach({ target: "session", sessionId: prepared.sessionId });
-		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
+		const { worker } = await restarted.attach({ target: "session", sessionId: prepared.sessionId });
+		expect(await readPrReviewBinding(worker.conversation.session.sessionManager)).toEqual(placement);
 	});
 
 	it("leaves ordinary resumed sessions unbound", async () => {
@@ -542,8 +520,8 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		const manager = await SessionManager.create(f.source, f.sessionDir, { id: "ordinary" });
 		await manager.closePersistence();
 		f.authorization.client.rpcGrant = createIrohRemotePresetAccess("review").rpcGrant;
-		const resumed = await f.host().attach({ target: "session", sessionId: "ordinary" });
-		expect(await readPrReviewBinding(resumed.entry.runtime.conversation.session.sessionManager)).toBeUndefined();
+		const { worker } = await f.host().attach({ target: "session", sessionId: "ordinary" });
+		expect(await readPrReviewBinding(worker.conversation.session.sessionManager)).toBeUndefined();
 		expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
 	});
 
@@ -557,10 +535,10 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		await host.state.upsertWorkspace(foreign.workspace);
 		await host.state.upsertWorktree((await foreignHost.state.listWorktrees(foreign.workspace.name))[0]!);
 		const { ref, placement } = await interruptedLaunch(f);
-		const opened = await host.attach({ target: "session", sessionId: f.request.sessionId });
-		expect(opened.entry.runtime.conversation.session.sessionRef).toEqual(ref);
-		expect(opened.entry.runtime.conversation.cwd).toBe(placement.cwd);
-		expect(await readPrReviewBinding(opened.entry.runtime.conversation.session.sessionManager)).toEqual(placement);
+		const { worker } = await host.attach({ target: "session", sessionId: f.request.sessionId });
+		expect(worker.conversation.session.sessionRef).toEqual(ref);
+		expect(worker.conversation.cwd).toBe(placement.cwd);
+		expect(await readPrReviewBinding(worker.conversation.session.sessionManager)).toEqual(placement);
 	});
 
 	it.each(["new", "session", "last"] as const)(
@@ -578,17 +556,19 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 				await manager.closePersistence();
 			}
 			f.authorization.client.lastSessionIdByWorkspace = { [f.workspace.name]: f.request.sessionId };
-			const opened = await host.attach(target === "last" ? { target } : { target, sessionId: f.request.sessionId });
-			expect(opened.sessionSelection.kind).toBe(target === "new" ? "created" : "resumed");
-			expect(opened.entry.runtime.conversation.session.sessionId).toBe(f.request.sessionId);
-			expect(opened.entry.runtime.conversation.cwd).toBe(f.source);
-			expect(await readPrReviewBinding(opened.entry.runtime.conversation.session.sessionManager)).toBeUndefined();
+			const { resolved, worker } = await host.attach(
+				target === "last" ? { target } : { target, sessionId: f.request.sessionId },
+			);
+			expect(resolved.selection.kind).toBe(target === "new" ? "created" : "resumed");
+			expect(worker.conversation.session.sessionId).toBe(f.request.sessionId);
+			expect(worker.conversation.cwd).toBe(f.source);
+			expect(await readPrReviewBinding(worker.conversation.session.sessionManager)).toBeUndefined();
 			expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
 		},
 	);
 
 	it.each(["dirty", "head", "remote"] as const)(
-		"rejects %s drift before the first runtime factory or session creation",
+		"rejects %s drift before the session is created or a worker spawns",
 		async (drift) => {
 			const f = await fixture();
 			const host = f.host();
@@ -600,8 +580,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			await expect(
 				host.open({ target: "new", sessionId: prepared.sessionId, worktreeId: prepared.worktreeId }),
 			).rejects.toMatchObject({ code: "review_preparation_stale" });
-			expect(host.createRuntime).not.toHaveBeenCalled();
-			expect(host.registry.size).toBe(0);
+			expect(host.openWorker).not.toHaveBeenCalled();
 			expect(await SessionManager.findForResume(f.sessionDir, prepared.sessionId)).toBeUndefined();
 			expect(await SessionManager.listAll(f.sessionDir)).toEqual([]);
 			expect(host.worktrees.isRuntimePreparing(f.workspace.name, checkout.id)).toBe(false);
@@ -622,35 +601,34 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 				workingDirectory: prepared.workingDirectory,
 			};
 			const opened = await first.attach(conversation);
-			const placement = opened.entry.runtime.conversation.session.sessionManager.getPrReviewBinding()!;
-			expect(opened.sessionSelection).toMatchObject({ kind: "created", sessionId: prepared.sessionId });
-			expect(first.createRuntime).toHaveBeenCalledWith(
-				expect.objectContaining({ cwd: placement.cwd, projectCwd: placement.cwd, sessionDir: f.sessionDir }),
-			);
-			expect(opened.entry).toMatchObject({ worktreeId: prepared.worktreeId, worktreePath: placement.cwd });
-			expect(opened.entry.workingDirectory).toBe(prepared.workingDirectory);
+			const placement = opened.worker.conversation.session.sessionManager.getPrReviewBinding()!;
+			expect(opened.resolved.selection).toMatchObject({ kind: "created", sessionId: prepared.sessionId });
+			expect(opened.spec).toMatchObject({ cwd: placement.cwd, projectCwd: placement.cwd });
+			expect(opened.spec.session.sessionDirectory).toBe(f.sessionDir);
+			expect(opened.resolved.worktree).toMatchObject({ id: prepared.worktreeId, path: placement.cwd });
+			expect(opened.resolved.workingDirectory).toBe(prepared.workingDirectory);
 			expect(placement.cwd).not.toBe(f.source);
 			expect(git(placement.cwd, "rev-parse", "HEAD")).toBe(f.head);
-			const ref = opened.entry.runtime.conversation.session.sessionRef;
-			await first.registry.stopAll("restart");
+			const ref = opened.worker.conversation.session.sessionRef;
+			await first.stopAll();
 			// Requested edits must survive retries/resumes; only first admission requires a pristine checkout.
 			writeFileSync(join(placement.cwd, "value.txt"), "requested edit\n");
 			const restarted = f.host();
 			const retry = await restarted.attach(conversation);
-			expect(retry.sessionSelection.kind).toBe("resumed");
-			expect(retry.entry.runtime.conversation.session.sessionRef).toEqual(ref);
-			expect(retry.entry.runtime.conversation.session.sessionManager.getPrReviewBinding()).toEqual(placement);
-			await restarted.registry.stopAll("restart_again");
-			const resumed = await f.host().attach({ target: "session", sessionId: prepared.sessionId });
-			expect(resumed.entry.runtime.conversation.cwd).toBe(placement.cwd);
-			expect(resumed.entry.runtime.conversation.session.sessionManager.getCwd()).toBe(placement.cwd);
-			expect(resumed.entry.runtime.conversation.session.sessionRef).toEqual(ref);
+			expect(retry.resolved.selection.kind).toBe("resumed");
+			expect(retry.worker.conversation.session.sessionRef).toEqual(ref);
+			expect(retry.worker.conversation.session.sessionManager.getPrReviewBinding()).toEqual(placement);
+			await restarted.stopAll();
+			const resumed = (await f.host().attach({ target: "session", sessionId: prepared.sessionId })).worker;
+			expect(resumed.conversation.cwd).toBe(placement.cwd);
+			expect(resumed.conversation.session.sessionManager.getCwd()).toBe(placement.cwd);
+			expect(resumed.conversation.session.sessionRef).toEqual(ref);
 			expect(readFileSync(join(placement.cwd, "value.txt"), "utf8")).toBe("requested edit\n");
 			expect(readFileSync(join(f.source, "value.txt"), "utf8")).toBe("parent\n");
 		},
 	);
 
-	it("cancels an attach while asynchronous PR admission is pending without creating a session", async () => {
+	it("cancels an open while asynchronous PR admission is pending without creating a session", async () => {
 		const f = await fixture();
 		const host = f.host();
 		const prepared = await host.checkouts.prepare(f.workspace, f.request, f.authority);
@@ -675,97 +653,127 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			gate.resolve();
 		}
 		expect(await result).toBeInstanceOf(Error);
-		expect(host.createRuntime).not.toHaveBeenCalled();
+		expect(host.openWorker).not.toHaveBeenCalled();
 		expect(await SessionManager.findForResume(f.sessionDir, prepared.sessionId)).toBeUndefined();
-		expect(host.registry.size).toBe(0);
+		expect(host.worktrees.isRuntimePreparing(f.workspace.name, prepared.worktreeId)).toBe(false);
 	});
 
 	it("keeps General, findings handoff, discussion creation/reset and requested faux writes in the PR checkout", async () => {
 		const f = await fixture(true);
 		const host = f.host();
 		const prepared = await host.checkouts.prepare(f.workspace, f.request, f.authority);
-		const { entry } = await host.attach({
+		const { worker } = await host.attach({
 			target: "new",
 			sessionId: prepared.sessionId,
 			worktreeId: prepared.worktreeId,
 			workingDirectory: prepared.workingDirectory,
 		});
-		const source = entry.runtime.conversation;
+		const source = worker.conversation;
 		const placement = source.session.sessionManager.getPrReviewBinding()!;
 		const sourceId = source.session.sessionId;
 		const record = reviewRecord(f.source, f.base, f.target);
 		await anchorLiveReviewRun(source.session, record.runId);
 		await appendReviewRunDurably(source.session.sessionWriter, record);
-		// A phone's structural intents redirect it; the daemon hosts each conversation they open.
-		const phoneOn = async (from: IntegratedRuntimeEntry): Promise<HostClient> => {
+		/**
+		 * A phone's own structural intent on `from` redirects it, as a worker serves the phone: the
+		 * target's log is written there, and the daemon spawns a worker for it when the phone reconnects.
+		 */
+		const reconnectAfter = async (
+			from: TestWorker,
+			move: (phone: HostClient) => ReturnType<typeof openNewSession>,
+		): Promise<TestWorker> => {
+			const redirects: string[] = [];
 			const phone: HostClient = {
-				id: `phone-${from.sessionId}`,
+				id: `phone-${from.conversation.id}`,
 				move: {
 					kind: "redirect",
-					redirect: () => {},
-					...host.registry.streamRedirect(from, f.authorization),
+					redirect: (sessionId) => {
+						redirects.push(sessionId);
+					},
+					hostTarget: (target) => from.hosted.hostMoved(from.conversation, target),
+					hostsStoredSessions: true,
 				},
 			};
-			await from.runtime.host.attach(phone, from.runtime.conversation);
-			return phone;
+			await from.host.attach(phone, from.conversation);
+			const moved = await move(phone);
+			if (moved.cancelled) throw new Error("The move was cancelled");
+			expect(redirects).toEqual([moved.sessionId]);
+			// Client-started moves open nothing in the worker the phone left.
+			expect(from.hosted.get(moved.sessionId)).toBeUndefined();
+			return (await host.attach({ target: "session", sessionId: moved.sessionId })).worker;
 		};
-		const opened = await openNewSession(entry.runtime.host, await phoneOn(entry), {
-			preserveReviewRunId: record.runId,
-			replaceReviewGeneral: true,
-			setup: async (manager) => {
-				await appendReviewRun(manager, record);
-			},
-		});
-		if (opened.cancelled) throw new Error("The General session was not opened");
-		const generalEntry = host.registry.findOwner(f.workspace.name, opened.sessionId)!;
-		const general = generalEntry.runtime.conversation;
+		const generalWorker = await reconnectAfter(worker, (phone) =>
+			openNewSession(worker.host, phone, {
+				preserveReviewRunId: record.runId,
+				replaceReviewGeneral: true,
+				setup: async (manager) => {
+					await appendReviewRun(manager, record);
+				},
+			}),
+		);
+		const general = generalWorker.conversation;
 		expect(await getReviewGeneral(general.session.sessionManager, record.runId)).toMatchObject({
 			sourceSessionId: sourceId,
 			generalSessionId: general.session.sessionId,
 		});
+		expect(general.cwd).toBe(placement.cwd);
 		expect(await readPrReviewBinding(general.session.sessionManager)).toEqual(placement);
 		const generalId = general.session.sessionId;
-		const findings = await openNewSession(generalEntry.runtime.host, await phoneOn(generalEntry), {
-			setup: async (manager) => {
-				await appendReviewRun(manager, record);
-				const message = createReviewSeedMessage(record, ["f1"]);
-				await manager.appendCustomMessageEntry(
-					message.customType,
-					message.content,
-					message.display,
-					message.details,
-				);
-			},
-		});
-		if (findings.cancelled) throw new Error("The findings session was not opened");
-		const findingsEntry = host.registry.findOwner(f.workspace.name, findings.sessionId)!;
-		const handoff = findingsEntry.runtime.conversation;
+		const findingsWorker = await reconnectAfter(generalWorker, (phone) =>
+			openNewSession(generalWorker.host, phone, {
+				setup: async (manager) => {
+					await appendReviewRun(manager, record);
+					const message = createReviewSeedMessage(record, ["f1"]);
+					await manager.appendCustomMessageEntry(
+						message.customType,
+						message.content,
+						message.display,
+						message.details,
+					);
+				},
+			}),
+		);
+		const handoff = findingsWorker.conversation;
 		expect(handoff.session.sessionId).not.toBe(generalId);
 		expect(handoff.cwd).toBe(placement.cwd);
 		expect(await readPrReviewBinding(handoff.session.sessionManager)).toEqual(placement);
-		const api = findingsEntry.reviewDiscussions!;
+		// The workers the phone left retire: the daemon retires a detached, idle worker for a sibling claim of the
+		// review source (341 covers it); this test's claims are granted without a registry, so it stops them. The
+		// review source is then written unloaded.
+		await host.stop(worker);
+		await host.stop(generalWorker);
+		const api = findingsWorker.hosted.reviewDiscussions(handoff);
 		f.harness.setResponses([fauxAssistantMessage("Finding discussion")]);
 		const started = await api.start(record.runId, ["f1"], "start-414");
 		expect(started.results).toMatchObject([{ outcome: "created" }]);
 		const discussion = started.results[0]!.discussion!;
-		const child = host.registry.findOwner(f.workspace.name, discussion.sessionId)!;
-		await child.runtime.conversation.session.waitForIdle();
-		expect(child.runtime.conversation.cwd).toBe(placement.cwd);
-		expect(child.worktreeId).toBe(prepared.worktreeId);
+		// A finding discussion opens beside its source, in the source's worker.
+		const child = findingsWorker.hosted.get(discussion.sessionId)!;
+		expect(child.kind).toBe("sibling");
+		await child.conversation.session.waitForIdle();
+		expect(child.conversation.cwd).toBe(placement.cwd);
+		// The daemon places the discussion in the PR checkout when a phone opens it.
+		expect((await host.worktrees.resolveSessionWorktree(f.workspace.name, discussion.sessionId))?.id).toBe(
+			prepared.worktreeId,
+		);
 		const reset = await api.reset(discussion.discussionId, discussion.sessionId, "reset-414");
 		expect(reset.status).toBe("reset");
-		const resetEntry = host.registry.findOwner(f.workspace.name, reset.discussion.currentSessionId)!;
-		expect(resetEntry.runtime.conversation.cwd).toBe(placement.cwd);
-		expect(resetEntry.runtime.conversation.session.sessionManager.getCwd()).toBe(placement.cwd);
-		expect(resetEntry.worktreeId).toBe(prepared.worktreeId);
-		expect(resetEntry.runtime.conversation.session.messages.some((message) => message.role === "user")).toBe(false);
+		const resetChild = findingsWorker.hosted.get(reset.discussion.currentSessionId)!;
+		expect(resetChild.kind).toBe("sibling");
+		const resetConversation = resetChild.conversation;
+		expect(resetConversation.cwd).toBe(placement.cwd);
+		expect(resetConversation.session.sessionManager.getCwd()).toBe(placement.cwd);
+		expect(
+			(await host.worktrees.resolveSessionWorktree(f.workspace.name, reset.discussion.currentSessionId))?.id,
+		).toBe(prepared.worktreeId);
+		expect(resetConversation.session.messages.some((message) => message.role === "user")).toBe(false);
 		f.harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("write", { path: "value.txt", content: "requested faux fix\n" }), {
 				stopReason: "toolUse",
 			}),
 			fauxAssistantMessage("Fixed the finding"),
 		]);
-		await resetEntry.runtime.conversation.session.prompt("Fix finding f1 by writing value.txt", {
+		await resetConversation.session.prompt("Fix finding f1 by writing value.txt", {
 			source: "rpc",
 			clientMessageId: "fix-414",
 		});
@@ -775,14 +783,12 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		expect(git(f.source, "rev-parse", "HEAD")).toBe(f.base);
 		expect(git(f.source, "status", "--porcelain")).toBe("");
 		expect(getReviewRun(handoff.session.sessionManager, record.runId)?.result?.findings[0]?.status).toBe("open");
-		const resetId = resetEntry.sessionId;
-		await host.registry.stopAll("restart_discussion");
+		const resetId = resetConversation.id;
+		await host.stopAll();
 		const resumed = await f.host().attach({ target: "session", sessionId: resetId });
-		expect(resumed.entry.runtime.conversation.cwd).toBe(placement.cwd);
-		expect(resumed.entry.worktreeId).toBe(prepared.worktreeId);
-		expect(resumed.entry.runtime.conversation.session.isReviewDiscussion).toBe(true);
-		expect(
-			resumed.entry.runtime.conversation.session.messages.filter((message) => message.role === "user"),
-		).toHaveLength(1);
+		expect(resumed.worker.conversation.cwd).toBe(placement.cwd);
+		expect(resumed.resolved.worktree?.id).toBe(prepared.worktreeId);
+		expect(resumed.worker.conversation.session.isReviewDiscussion).toBe(true);
+		expect(resumed.worker.conversation.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
 	});
 });

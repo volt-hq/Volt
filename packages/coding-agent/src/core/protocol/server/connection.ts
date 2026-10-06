@@ -200,15 +200,17 @@ export interface ServeConnectionOptions {
 	/**
 	 * The client follows its structural intents by redirect (a phone, the
 	 * TUI): it stays on its conversation, its subscriptions there end `moved`,
-	 * and the connection closes. `hostTarget` hosts the conversations its
-	 * intents lead it to, and with `hostsStoredSessions` the stored ones a
-	 * switch resumes too (see `HostClientMove`).
+	 * and the connection closes. `hostTarget` hosts the conversations the
+	 * extension commands it invokes lead it to, with `hostsClientMoves` those
+	 * its own intents lead it to too, and with `hostsStoredSessions` the stored
+	 * ones a switch resumes that it takes (see `HostClientMove`).
 	 */
 	readonly redirect?: {
-		readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
+		readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect | undefined>;
+		readonly hostsClientMoves?: boolean;
 		readonly hostsStoredSessions?: boolean;
-		/** The client's intent redirected it to `sessionId`. */
-		readonly onRedirected?: (sessionId: string) => void;
+		/** The client's intent redirected it to `sessionId`; `created` when the move wrote that conversation's log. */
+		readonly onRedirected?: (sessionId: string, created: boolean) => void;
 	};
 	/**
 	 * Runs once the client attached to its conversation, before the client's
@@ -706,14 +708,17 @@ export function serveConnection(
 	const move: HostClientMove = redirectClient
 		? {
 				kind: "redirect",
-				redirect: (sessionId) => {
+				redirect: (sessionId, created) => {
 					if (!home) return;
 					redirected = true;
-					options.redirect?.onRedirected?.(sessionId);
+					options.redirect?.onRedirected?.(sessionId, created);
 					moves.push({ from: home, to: sessionId });
 					if (!laneBusy) flushMoves();
 				},
 				...(options.redirect?.hostTarget === undefined ? {} : { hostTarget: options.redirect.hostTarget }),
+				...(options.redirect?.hostsClientMoves === undefined
+					? {}
+					: { hostsClientMoves: options.redirect.hostsClientMoves }),
 				...(options.redirect?.hostsStoredSessions === undefined
 					? {}
 					: { hostsStoredSessions: options.redirect.hostsStoredSessions }),
@@ -873,9 +878,11 @@ export function serveConnection(
 		surface: {
 			commandContextActions: {
 				waitForIdle: () => currentHome().session.waitForIdle(),
-				newSession: (newSessionOptions) => openNewSession(currentHost(), client, newSessionOptions),
+				// The moves an extension command starts for its client.
+				newSession: (newSessionOptions) =>
+					openNewSession(currentHost(), client, { ...newSessionOptions, origin: "extension" }),
 				fork: async (entryId, forkOptions) => {
-					const result = await openFork(currentHost(), client, entryId, forkOptions);
+					const result = await openFork(currentHost(), client, entryId, { ...forkOptions, origin: "extension" });
 					if (result.cancelled) return result;
 					// The client's editor takes the text of the message the fork was taken before.
 					setEditorTextOn(result.sessionId, result.selectedText ?? "");
@@ -895,12 +902,19 @@ export function serveConnection(
 				},
 				switchSession: async (sessionRef, switchOptions) => {
 					try {
-						return await openStoredSession(currentHost(), client, sessionRef, switchOptions);
+						return await openStoredSession(currentHost(), client, sessionRef, {
+							...switchOptions,
+							origin: "extension",
+						});
 					} catch (error) {
 						if (!(error instanceof MissingSessionCwdError)) throw error;
 						const cwdOverride = await continueInCurrentCwd(error);
 						if (cwdOverride === undefined) return { cancelled: true };
-						return openStoredSession(currentHost(), client, sessionRef, { ...switchOptions, cwdOverride });
+						return openStoredSession(currentHost(), client, sessionRef, {
+							...switchOptions,
+							cwdOverride,
+							origin: "extension",
+						});
 					}
 				},
 				reload: () => currentHome().session.reload(),
@@ -1085,6 +1099,12 @@ export function serveConnection(
 			const relayFrame: unknown = frame;
 			if (!validator(`relay:${type}`, () => schema).Check(relayFrame)) {
 				reject({ code: "invalid_input", message: `Invalid ${type} input` });
+				return;
+			}
+			// The host's admission covers relayed intents too: a subagent conversation's client only stops it.
+			const refused = home === undefined ? undefined : options.admit?.(type, home);
+			if (refused) {
+				reject(refused);
 				return;
 			}
 			await relayed(frame as unknown as ControlRelayFrame);

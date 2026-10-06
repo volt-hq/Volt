@@ -60,7 +60,9 @@ export type {
 	RelayPreamble,
 	RemoteTransportHealth,
 	RemoteTransportReasonCode,
+	WorkerAuthorityLoss,
 	WorkerHostKind,
+	WorkerRelayAuthority,
 	WorkerSpawnSpec,
 	WorkerStopReason,
 } from "@hansjm10/volt-protocol/daemon-control";
@@ -184,11 +186,22 @@ export function isWorkerRequestType(type: string): type is WorkerRequestType {
 	return WORKER_REQUESTS.has(type);
 }
 
+/**
+ * Whether a connection of `client` may send a request of `type`: a worker
+ * sends worker requests and its conversations' Git observations
+ * (`change_observe`, which the daemon authorizes per session), and nothing
+ * else; a control client sends no worker request.
+ */
+export function isRequestAllowedFor(client: "tui" | "cli" | "worker", type: string): boolean {
+	return type === "change_observe" || (client === "worker") === isWorkerRequestType(type);
+}
+
 /** A request the contract schema accepts, with a relayed notification inside its UTF-8 budgets. */
 export function admitControlRequest(value: unknown): value is ControlRequest {
 	return (
 		requestValidator().Check(value) &&
-		(value.type !== "relay_notification_delivery" || isWithinNotificationBudgets(value.notification))
+		((value.type !== "relay_notification_delivery" && value.type !== "worker_notification_delivery") ||
+			isWithinNotificationBudgets(value.notification))
 	);
 }
 

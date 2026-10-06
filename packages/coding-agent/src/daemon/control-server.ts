@@ -13,7 +13,7 @@ import {
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
-	isWorkerRequestType,
+	isRequestAllowedFor,
 	PROTOCOL_VERSION,
 } from "./control-protocol.ts";
 
@@ -158,9 +158,19 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		}
 
 		send(message: ControlResponse | ControlEvent): void {
-			if (!this.socket.destroyed) {
-				this.socket.write(encodeControlLine(message));
+			if (this.socket.destroyed) return;
+			let line = encodeControlLine(message);
+			// A line the peer cannot read would end its connection: a response says it is too large instead.
+			if (line.byteLength - 1 > CONTROL_MAX_LINE_BYTES) {
+				if (!("id" in message)) return;
+				line = encodeControlLine({
+					type: "error",
+					id: message.id,
+					code: "too_large",
+					message: "The response exceeds the control line limit",
+				});
 			}
+			this.socket.write(line);
 		}
 
 		close(): void {
@@ -303,7 +313,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				return;
 			}
 			// A worker sends worker requests only, and nothing else may.
-			if ((connection.client === "worker") !== isWorkerRequestType(message.type)) {
+			if (!isRequestAllowedFor(connection.client, message.type)) {
 				connection.send({
 					type: "error",
 					id: message.id,

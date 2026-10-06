@@ -84,6 +84,8 @@ export const ControlRelayCloseReasonSchema = stringEnum([
 	"lease_transferred",
 	"workspace_unregistered",
 	"host_shutdown",
+	/** The worker serving the relay exited; the client reconnects with resume. */
+	"worker_exited",
 	"error",
 ]);
 export type RelayCloseReason = Static<typeof ControlRelayCloseReasonSchema>;
@@ -254,6 +256,14 @@ export type ControlWorkerStatus = Static<typeof ControlWorkerStatusSchema>;
 export const WorkerHostKindSchema = stringEnum(["child", "sibling", "moved"]);
 export type WorkerHostKind = Static<typeof WorkerHostKindSchema>;
 
+/** Why a relayed client lost its authority: the fatal code its stream ends with. */
+export const WorkerAuthorityLossSchema = stringEnum(["revoked", "workspace_unregistered"]);
+export type WorkerAuthorityLoss = Static<typeof WorkerAuthorityLossSchema>;
+
+/** A relay's authority as the daemon reads it now. */
+export const WorkerRelayAuthoritySchema = stringEnum(["current", "revoked", "workspace_unregistered"]);
+export type WorkerRelayAuthority = Static<typeof WorkerRelayAuthoritySchema>;
+
 /** Why the daemon asks a worker to stop. */
 export const WorkerStopReasonSchema = stringEnum(["retention", "authority", "shutdown", "lease_transferred"]);
 export type WorkerStopReason = Static<typeof WorkerStopReasonSchema>;
@@ -329,9 +339,11 @@ const explicitAccess = {
 };
 
 /**
- * The intents a TUI serving a relayed phone forwards to the daemon, which
- * executes them against its own state: push targets, workspace registration
- * and worktrees, keep-awake, and the web search key.
+ * The intents a host serving a relayed phone (a worker, or a TUI holding
+ * the conversation's lease) forwards to the daemon, which executes them
+ * against its own state: push targets, workspace registration and
+ * worktrees, keep-awake, the web search key, and device log uploads (written
+ * under the workspace and audited there).
  */
 export const RELAY_INTENT_NAMES = [
 	"register_push_target",
@@ -339,9 +351,10 @@ export const RELAY_INTENT_NAMES = [
 	"create_worktree",
 	"set_keep_awake",
 	"set_web_search_key",
+	"upload_device_logs",
 ] as const satisfies readonly BuiltinIntentName[];
 
-/** The queries a TUI serving a relayed phone forwards to the daemon. */
+/** The queries a host serving a relayed phone forwards to the daemon. */
 export const RELAY_QUERY_NAMES = [
 	"sessions",
 	"worktrees",
@@ -363,7 +376,7 @@ export const ControlRelayFrameSchema = Type.Unsafe<ControlRelayFrame>(
 	]),
 );
 
-/** The daemon's outcome for a relayed frame: what the TUI writes to the phone. */
+/** The daemon's outcome for a relayed frame: what the serving host writes to the phone. */
 export const ControlRelayOutcomeSchema = Type.Union([
 	AcceptedFrameSchema,
 	RejectedFrameSchema,
@@ -446,6 +459,8 @@ export type ControlFatal = Static<typeof ControlFatalSchema>;
 export const ControlRelayPreambleSchema = Type.Object(
 	{
 		type: Type.Literal("relay_preamble"),
+		/** The relayed client: a paired phone. */
+		kind: Type.Literal("phone"),
 		relayId: Type.String(),
 		/** The phone's parsed hello, the success response to write for it, and the bytes it sent after the hello. */
 		handshake: Type.Object(
@@ -520,7 +535,7 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		sessionId: Type.String(),
 		reason: ControlLeaseReleaseReasonSchema,
 	}),
-	/** Path-free authoritative Git state from the exact TUI lease holder. */
+	/** Path-free authoritative Git state from the exact TUI lease holder, or the worker hosting the session. */
 	change_observe: withId("change_observe", {
 		workspaceName: codePoints(1, 256),
 		sessionId: codePoints(1, 128),
@@ -641,6 +656,22 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	}),
 	/** Worker: it closed a conversation it claimed, and released its log. */
 	worker_released: withId("worker_released", { sessionId: LogSessionIdSchema }),
+	/**
+	 * Worker: a relayed phone's daemon-backed intent or query, run with that
+	 * relay's grant. Only for the worker's own relays.
+	 */
+	worker_forward: withId("worker_forward", { relayId: Type.String(), frame: ControlRelayFrameSchema }),
+	/** Worker: a relayed phone's completion push, for the worker's own relay. */
+	worker_notification_delivery: withId("worker_notification_delivery", {
+		relayId: Type.String(),
+		notification: IrohRemotePushNotificationSchema,
+	}),
+	/** Worker: a relayed client moved from a conversation it hosts to `to`; the change association follows. */
+	worker_moved: withId("worker_moved", { from: LogSessionIdSchema, to: LogSessionIdSchema }),
+	/** Worker: a relayed phone was redirected to `sessionId`, its last session in the workspace now. */
+	worker_last_session: withId("worker_last_session", { relayId: Type.String(), sessionId: LogSessionIdSchema }),
+	/** Worker: whether a relay's client still holds the authority it was relayed with (before each frame acts). */
+	worker_authority: withId("worker_authority", { relayId: Type.String() }),
 	/** Worker: its answer to `worker_stop`, from its own idle check when the stop arrived. */
 	worker_stop_result: withId("worker_stop_result", {
 		stopId: Type.String(),
@@ -655,6 +686,11 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_activity",
 	"worker_hosts",
 	"worker_released",
+	"worker_forward",
+	"worker_notification_delivery",
+	"worker_moved",
+	"worker_last_session",
+	"worker_authority",
 	"worker_stop_result",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
 export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
@@ -693,6 +729,11 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_activity,
 	CONTROL_REQUEST_SCHEMAS.worker_hosts,
 	CONTROL_REQUEST_SCHEMAS.worker_released,
+	CONTROL_REQUEST_SCHEMAS.worker_forward,
+	CONTROL_REQUEST_SCHEMAS.worker_notification_delivery,
+	CONTROL_REQUEST_SCHEMAS.worker_moved,
+	CONTROL_REQUEST_SCHEMAS.worker_last_session,
+	CONTROL_REQUEST_SCHEMAS.worker_authority,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
@@ -765,6 +806,8 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	}),
 	pair_started: withId("pair_started", { requestId: Type.String() }),
 	relay_rpc_result: withId("relay_rpc_result", { frame: ControlRelayOutcomeSchema }),
+	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
+	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
 	relay_push_delivery_result: withId("relay_push_delivery_result", {
 		status: IrohRemotePushNotificationDeliveryStatusSchema,
 	}),
@@ -786,6 +829,8 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
 	CONTROL_RESPONSE_SCHEMAS.relay_rpc_result,
+	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
+	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
 	CONTROL_RESPONSE_SCHEMAS.relay_push_delivery_result,
 ]);
 export type ControlResponse = Static<typeof ControlResponseSchema>;
@@ -799,6 +844,8 @@ const event = <T extends string, P extends Record<string, TSchema>>(type: T, pro
 
 export const CONTROL_EVENT_SCHEMAS = {
 	relay_offer: event("relay_offer", {
+		/** The relayed client: a paired phone. */
+		clientKind: Type.Literal("phone"),
 		relayId: Type.String(),
 		/** Single-use; expires after 10 seconds. */
 		relayToken: Type.String(),
@@ -835,6 +882,14 @@ export const CONTROL_EVENT_SCHEMAS = {
 	 * refused and aborts a turn still running after 60 s.
 	 */
 	worker_stop: event("worker_stop", { stopId: Type.String(), reason: WorkerStopReasonSchema, force: Type.Boolean() }),
+	/**
+	 * To a worker: the relayed client lost its authority. The worker ends the
+	 * stream with `fatal{loss}` as its last frame; the daemon closes the relay
+	 * itself if the worker has not within 2 s.
+	 */
+	relay_authority: event("relay_authority", { relayId: Type.String(), loss: WorkerAuthorityLossSchema }),
+	/** To a worker: stop the running turn of a conversation it hosts (a TUI acquiring its lease stops the turn it waits for). */
+	worker_abort: event("worker_abort", { sessionId: LogSessionIdSchema }),
 } as const;
 
 export const ControlEventSchema = Type.Union([
@@ -847,5 +902,7 @@ export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.daemon_shutdown,
 	CONTROL_EVENT_SCHEMAS.worker_spawn,
 	CONTROL_EVENT_SCHEMAS.worker_stop,
+	CONTROL_EVENT_SCHEMAS.relay_authority,
+	CONTROL_EVENT_SCHEMAS.worker_abort,
 ]);
 export type ControlEvent = Static<typeof ControlEventSchema>;

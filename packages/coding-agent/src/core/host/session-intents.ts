@@ -30,17 +30,21 @@ import type { LogWriter } from "../session-writer.ts";
 import { type ConversationHost, PinnedConversationError } from "./conversation-host.ts";
 import type { HostedConversation } from "./hosted-conversation.ts";
 import { sameFilesystemLocation } from "./session-summaries.ts";
-import type { ConversationTarget, HostClient, HostedRedirect } from "./targets.ts";
+import type { ConversationTarget, HostClient, HostedRedirect, MoveOrigin } from "./targets.ts";
 
 export interface SwitchSessionIntentOptions {
 	/** Run in this cwd instead of the stored one ("continue in current cwd"); the store keeps the original. */
 	cwdOverride?: string;
+	/** Who started the move; the client's own intent by default. */
+	origin?: MoveOrigin;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	/** A caller's own lease on the conversation, revalidated wherever the intent checks it is current. */
 	assertConversationGenerationCurrent?: () => void;
 }
 
 export interface NewSessionIntentOptions {
+	/** Who started the move; the client's own intent by default. */
+	origin?: MoveOrigin;
 	parentSessionRef?: SessionReference;
 	preserveReviewRunId?: string;
 	replaceReviewGeneral?: boolean;
@@ -112,6 +116,8 @@ function intentSource(
 }
 
 interface MoveOptions {
+	/** Who started the move; the client's own intent by default. */
+	origin?: MoveOrigin;
 	beforeMove?: (source: HostedConversation) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	/** The last durable step, with the target's log, after the move and `withSession`. */
@@ -121,10 +127,12 @@ interface MoveOptions {
 /**
  * Open `target` from `source` and move the client there: in place, or, for a
  * client that follows moves by redirect, by opening the target where the
- * client's `hostTarget` takes it over (a switch only when its move hosts
- * stored sessions), or by writing its log for the host the client reconnects
- * through. A redirected client's `withSession` runs only against a target
- * opened here, once a client joined it (see `ConversationHost.openFor`).
+ * client's `hostTarget` takes it over (for a move an extension started, or any
+ * move when the client's own moves are hosted too; a stored session only when
+ * its move hosts stored sessions and the callee takes it), or by writing its
+ * log for the host the client reconnects through. A redirected client's
+ * `withSession` runs only against a target opened here, once a client joined
+ * it (see `ConversationHost.openFor`).
  */
 async function moveClient(
 	host: ConversationHost,
@@ -174,40 +182,59 @@ async function moveClient(
 			...(moved.selectedText === undefined ? {} : { selectedText: moved.selectedText }),
 		};
 	}
-	const hostTarget = move.hostTarget;
-	if (hostTarget && (target.kind !== "session" || move.hostsStoredSessions === true)) {
-		const opened = await host.openFor(client, target, {
-			assertCurrent: source.assertCurrent,
-			beforeMove: async (from, to) => {
-				// The target closes without its extensions having started.
-				const discard = () => host.discard(to).catch(() => undefined);
-				let hosted: HostedRedirect;
-				try {
-					hosted = await hostTarget({ sessionId: to.id, conversation: to });
-				} catch (error) {
-					await discard();
-					throw error;
-				}
-				// What can fail is prepared before anything is written through the source.
-				try {
-					source.assertCurrent();
-					if (from) await beforeMove?.(from);
-					await publish?.(to.session.sessionManager);
-				} catch (error) {
-					await hosted.abort().catch(() => undefined);
-					await discard();
-					throw error;
-				}
-				try {
-					await hosted.commit();
-				} catch (error) {
-					await discard();
-					throw error;
-				}
-			},
-			...(options.withSession === undefined ? {} : { withSession: options.withSession }),
-		});
-		if (opened.cancelled) return opened;
+	const hostTarget =
+		move.hostTarget !== undefined && ((options.origin ?? "client") === "extension" || move.hostsClientMoves === true)
+			? move.hostTarget
+			: undefined;
+	// A stored session opens here only when the callee takes it, asked before it opens.
+	const stored =
+		hostTarget && target.kind === "session" && move.hostsStoredSessions === true
+			? await hostTarget({ sessionId: target.ref.sessionId })
+			: undefined;
+	if (hostTarget && (target.kind !== "session" || stored !== undefined)) {
+		const opened = await host
+			.openFor(client, target, {
+				assertCurrent: source.assertCurrent,
+				beforeMove: async (from, to) => {
+					// The target closes without its extensions having started.
+					const discard = () => host.discard(to).catch(() => undefined);
+					let hosted: HostedRedirect;
+					try {
+						const taken = stored ?? (await hostTarget({ sessionId: to.id, conversation: to }));
+						if (taken === undefined) throw new Error("The host did not take the conversation");
+						hosted = taken;
+					} catch (error) {
+						await discard();
+						throw error;
+					}
+					// What can fail is prepared before anything is written through the source.
+					try {
+						source.assertCurrent();
+						if (from) await beforeMove?.(from);
+						await publish?.(to.session.sessionManager);
+					} catch (error) {
+						await hosted.abort().catch(() => undefined);
+						await discard();
+						throw error;
+					}
+					try {
+						await hosted.commit();
+					} catch (error) {
+						await discard();
+						throw error;
+					}
+				},
+				...(options.withSession === undefined ? {} : { withSession: options.withSession }),
+			})
+			.catch(async (error: unknown) => {
+				// A stored session taken before it opened is given back when the open failed.
+				await stored?.abort().catch(() => undefined);
+				throw error;
+			});
+		if (opened.cancelled) {
+			await stored?.abort().catch(() => undefined);
+			return opened;
+		}
 		return {
 			cancelled: false,
 			sessionId: opened.sessionId,
@@ -218,15 +245,7 @@ async function moveClient(
 	const redirected = await host.redirectFor(client, target, {
 		beforeMove: async (from) => {
 			source.assertCurrent();
-			const hosted =
-				hostTarget && target.kind === "session" ? await hostTarget({ sessionId: target.ref.sessionId }) : undefined;
-			try {
-				await beforeMove?.(from);
-			} catch (error) {
-				await hosted?.abort().catch(() => undefined);
-				throw error;
-			}
-			await hosted?.commit();
+			await beforeMove?.(from);
 		},
 		...(publish === undefined ? {} : { publish }),
 	});
@@ -280,7 +299,10 @@ async function switchFrom(
 				ref: sessionRef,
 				...(options?.cwdOverride === undefined ? {} : { cwdOverride: options.cwdOverride }),
 			},
-			options?.withSession === undefined ? {} : { withSession: options.withSession },
+			{
+				...(options?.origin === undefined ? {} : { origin: options.origin }),
+				...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
+			},
 		),
 	);
 }
@@ -412,6 +434,7 @@ export async function openNewSession(
 				},
 			},
 			{
+				...(options?.origin === undefined ? {} : { origin: options.origin }),
 				...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
 				...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
 				...(options?.replaceReviewGeneral
@@ -436,7 +459,12 @@ export async function openFork(
 	host: ConversationHost,
 	client: HostClient,
 	entryId: string,
-	options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+	options?: {
+		position?: "before" | "at";
+		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+		/** Who started the move; the client's own intent by default. */
+		origin?: MoveOrigin;
+	},
 ): Promise<ForkIntentResult> {
 	const source = intentSource(host, client);
 	return moveClient(
@@ -444,7 +472,10 @@ export async function openFork(
 		client,
 		source,
 		{ kind: "fork", source: source.conversation, entryId, position: options?.position ?? "before" },
-		options?.withSession === undefined ? {} : { withSession: options.withSession },
+		{
+			...(options?.origin === undefined ? {} : { origin: options.origin }),
+			...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
+		},
 	);
 }
 

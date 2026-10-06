@@ -36,7 +36,8 @@ export interface ConversationSubscriber {
 	readonly attachedAt: number;
 }
 
-export type ConversationTransportKind = "direct" | "relay";
+/** A relay of a phone to the TUI holding the conversation's lease; phones reach workers through the worker registry. */
+export type ConversationTransportKind = "relay";
 
 export interface ConversationTransportOwner {
 	readonly id: string;
@@ -48,7 +49,6 @@ export interface ConversationTransportOwner {
 
 interface OwnedConversationTransport {
 	readonly owner: ConversationTransportOwner;
-	leaseActive: boolean;
 	closePromise?: Promise<void>;
 }
 
@@ -134,14 +134,6 @@ export class ConversationCoordinator {
 
 	get transportCount(): number {
 		return this.transports.size;
-	}
-
-	get activeDirectTransportCount(): number {
-		let count = 0;
-		for (const transport of this.transports.values()) {
-			if (transport.owner.kind === "direct" && transport.leaseActive) count++;
-		}
-		return count;
 	}
 
 	get hasRuntime(): boolean {
@@ -321,19 +313,6 @@ export class ConversationCoordinator {
 		return outcome;
 	}
 
-	syncDaemonRuntimeStreamCount(): boolean {
-		const owner = this.leaseOwnerValue;
-		return (
-			owner !== undefined &&
-			this.requireLeaseBroker().onDaemonRuntimeStreamCountChanged(
-				owner,
-				this.workspaceName,
-				this.sessionId,
-				this.activeDirectTransportCount,
-			)
-		);
-	}
-
 	releaseDaemonRuntimeLease(reason: string): boolean {
 		const owner = this.leaseOwnerValue;
 		if (!owner) return false;
@@ -412,16 +391,13 @@ export class ConversationCoordinator {
 		if (this.runtimeLifecycleValue === "retiring") {
 			throw new Error("conversation is retiring");
 		}
-		if (owner.kind === "direct" && this.runtimeLifecycleValue !== "active") {
-			throw new Error("direct conversation transport requires an active daemon runtime");
-		}
-		if (owner.kind === "relay" && (this.hasRuntime || this.tuiLeaseConnectionIdValue === undefined)) {
+		if (this.hasRuntime || this.tuiLeaseConnectionIdValue === undefined) {
 			throw new Error("relay transport requires TUI lease authority without a daemon runtime");
 		}
 		if (this.transports.has(owner.id)) {
 			throw new Error(`conversation transport already registered: ${owner.id}`);
 		}
-		const owned: OwnedConversationTransport = { owner, leaseActive: false };
+		const owned: OwnedConversationTransport = { owner };
 		this.transports.set(owner.id, owned);
 		let removed = false;
 		return () => {
@@ -440,13 +416,6 @@ export class ConversationCoordinator {
 
 	transportOwnersForClient(clientNodeId: string): ConversationTransportOwner[] {
 		return this.transportOwners().filter((owner) => owner.clientNodeId === clientNodeId);
-	}
-
-	markTransportLeaseActive(transportId: string, active: boolean): boolean {
-		const transport = this.transports.get(transportId);
-		if (!transport || transport.owner.kind !== "direct") return false;
-		transport.leaseActive = active;
-		return true;
 	}
 
 	closeTransport(transportId: string, reason: string): Promise<boolean> {

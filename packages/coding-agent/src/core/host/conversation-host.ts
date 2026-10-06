@@ -739,7 +739,7 @@ export class ConversationHost {
 		const errors: unknown[] = [];
 		try {
 			if (move.kind === "in_place") await move.onMoved(to, from);
-			else await move.redirect(to.id);
+			else await move.redirect(to.id, to.openedAs === "new" || to.openedAs === "fork");
 		} catch (error) {
 			errors.push(error);
 		}
@@ -973,7 +973,7 @@ export class ConversationHost {
 			if (attachment) this.leave(attachment);
 			const errors: unknown[] = [];
 			try {
-				await move.redirect(sessionId);
+				await move.redirect(sessionId, written !== undefined);
 			} catch (error) {
 				errors.push(error);
 			}

@@ -33,7 +33,7 @@ go with it.
 
 | Module | What it covers (plain) | State |
 |--------|------------------------|-------|
-| **`WorkerRegistry`** | Which worker process hosts each conversation: spawning, attaching, relay offers, the per-log lock, retirement, crashes, workspace fences, and daemon loss. | **Model of record. Verified green** (1,064,340 distinct states). `WorkerRegistry.tla` / `.cfg`, variants `WorkerRegistryOrphans.cfg` (finding below) and `WorkerRegistryRestartWaits.cfg` |
+| **`WorkerRegistry`** | Which worker process hosts each conversation: spawning, attaching, relay offers, the per-log lock, retirement, crashes, workspace fences, and daemon loss. | **Model of record. Verified green** (1,112,484 distinct states). `WorkerRegistry.tla` / `.cfg`, variants `WorkerRegistryOrphans.cfg` (finding below) and `WorkerRegistryRestartWaits.cfg` |
 | **`LeaseBroker`** | Who held a conversation (daemon vs terminal) and how it handed off. | **Superseded by `WorkerRegistry`**; deleted with the lease code in Phase 7 slice 9. Last verified green (40,804 states). `LeaseBroker.tla` / `.cfg` |
 | **`RelayViewer`** | The relay token + the "watch the turn finish" viewer feed during a hand-off. | **Superseded by `WorkerRegistry`** (relay offers) and the deletion of the viewer feed; deleted in Phase 7 slice 9. Last verified green (207,025 states). `RelayViewer.tla` / `.cfg` |
 | **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states) before its rekey overlay was removed; not re-run since (24 states by construction). `SessionTarget.tla` / `.cfg` |
@@ -203,28 +203,32 @@ plan's properties.
 - **Worker ids are never reused.** When every id is spent, an open that needs a
   spawn is refused (`SpawnUnavailable`), a bound artifact.
 - **A starting worker that gives up on a held lock** (75 s) is a `Crash`.
+- **`Release` drops a claim** (`worker_released`) once the worker closed the
+  conversation and its lock, with no relay of it offered or attached there and
+  no open of it waiting (the daemon routes an open in the turn it arrives). The
+  primary is not tracked: a release never closes a worker's last open log, which
+  stands for the registry refusing the primary's release.
 - **Not modeled:** tool policy and `conversation_in_use` (D9), in-process hosts
-  holding a log's lock (D20), `--no-session` (D15), releasing a claimed
-  conversation before the worker exits, graceful daemon stop (the forced
-  retirement `RetireStale` applies to one workspace), and the handoff write a
-  redirect makes to its target log (a lock-guarded write that fails the move when
-  the target is held).
+  holding a log's lock (D20), `--no-session` (D15), graceful daemon stop (the
+  forced retirement `RetireStale` applies to one workspace), and the handoff
+  write a redirect makes to its target log (a lock-guarded write that fails the
+  move when the target is held).
 
 ### Bounds and result
 
 `WorkerRegistry.cfg`: `Sessions = {s1, s2}`, `Workers = {w1, w2, w3}`,
 `Clients = {c1, c2}`, `Senders = {c1}`, `MaxFaults = 1`, `MaxGen = 1`, symmetry
-off (liveness). TLC 2.19 on JDK 17, 16 workers: **1,064,340 distinct states**
-(6,109,020 generated), depth 42, all ten invariants, the three action
-properties, and the six liveness properties hold; 7.5 to 10 minutes on a shared
+off (liveness). TLC 2.19 on JDK 17, 8 workers: **1,112,484 distinct states**
+(6,423,426 generated), depth 42, all ten invariants, the three action
+properties, and the six liveness properties hold; about 11 minutes on a shared
 16-core machine. Safety alone takes seconds, so larger bounds are cheap for a run
-without the liveness properties (`MaxFaults = 2`: 2,337,505 distinct states,
-18 s).
+without the liveness properties (`MaxFaults = 2`: 2,459,059 distinct states,
+15 s).
 
 `WorkerRegistryOrphans.cfg` reaches the orphan trace above in seven states.
 `WorkerRegistryRestartWaits.cfg` (the fix) checks everything in the baseline plus
-`RetireReportsAfterExit` and `NoGenerationOverlap`, green: 483,499 distinct
-states, depth 42, about 2.5 minutes.
+`RetireReportsAfterExit` and `NoGenerationOverlap`, green: 495,727 distinct
+states, depth 42, about 4 minutes.
 
 ---
 

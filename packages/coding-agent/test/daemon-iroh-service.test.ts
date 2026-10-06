@@ -50,6 +50,7 @@ import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
+import { InProcessWorkerLauncher } from "../src/daemon/worker-launcher.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
@@ -1306,7 +1307,7 @@ describe.skipIf(!nativeAvailable)("TUI release/reacquire relay admission (#585)"
 		const relaySockets: Array<{ destroy(): void }> = [];
 		const controlEvents: ControlEvent[] = [];
 		const tuiEvents: ControlEvent[] = [];
-		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+		const daemon = runVoltDaemon({ agentDir, foreground: false, workerLauncher: new InProcessWorkerLauncher() }, [
 			createIrohDaemonService({ relayMode: "disabled" }),
 		]);
 
@@ -1797,7 +1798,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 		const unregisterResponseWriteGate = createDeferred();
 		let unregisterResponseWriteStarted = false;
 		const controlEvents: ControlEvent[] = [];
-		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+		const daemon = runVoltDaemon({ agentDir, foreground: false, workerLauncher: new InProcessWorkerLauncher() }, [
 			createIrohDaemonService(
 				{ relayMode: "disabled" },
 				{
@@ -1989,9 +1990,13 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 			await expect(control.request({ type: "workspace_unregister", name: "ws" })).resolves.toMatchObject({
 				type: "ok",
 			});
+			// The worker that served the requesting conversation retired for the lost authority once its relay ended.
 			await expect
 				.poll(() => readFileSync(getDaemonPaths(agentDir).auditPath, "utf8"))
-				.toContain('"reason":"workspace_unregistered"');
+				.toMatch(/"type":"worker_stop".*"reason":"authority"/);
+			await expect
+				.poll(() => readFileSync(getDaemonPaths(agentDir).auditPath, "utf8"))
+				.toContain('"type":"worker_exited"');
 			// The control-plane unregister retires the fresh discovery stream: its last frame says why.
 			await freshDiscovery.ended;
 			const freshLast = freshDiscovery.frames.at(-1);

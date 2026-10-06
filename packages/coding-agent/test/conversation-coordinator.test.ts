@@ -18,7 +18,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 function createTransport(
 	id: string,
 	close: ConversationTransportOwner["close"] = () => {},
-	kind: ConversationTransportOwner["kind"] = "direct",
+	kind: ConversationTransportOwner["kind"] = "relay",
 ): ConversationTransportOwner {
 	return {
 		id,
@@ -52,9 +52,8 @@ function createCoordinatorWiredLeaseBroker(registry: ConversationCoordinatorRegi
 		disposeRuntime: async (workspaceName, sessionId, reason) => {
 			await registry.get(workspaceName, sessionId)?.beginRuntimeRetirement(reason, () => {}).settled;
 		},
-		closePhoneStreams: async (workspaceName, sessionId, reason) => {
-			await registry.get(workspaceName, sessionId)?.closeTransports(reason, (owner) => owner.kind === "direct");
-		},
+		// Phones' streams are relays, which `closeRelays` closes.
+		closePhoneStreams: async () => {},
 		closeRelays: (record, reason) => {
 			for (const relayId of Array.from(record.relayIds)) {
 				void registry.get(record.workspaceName, record.sessionId)?.closeTransport(relayId, reason);
@@ -131,45 +130,16 @@ describe("ConversationCoordinator", () => {
 		expect(coordinator.attachClaims).toEqual(new Set([claim]));
 	});
 
-	it("owns one terminal barrier across transport close and runtime finalization", async () => {
-		const registry = new ConversationCoordinatorRegistry();
-		const coordinator = registry.reserveRuntime("workspace", "session");
-		coordinator.activateRuntime();
-		const closeGate = deferred();
-		const events: string[] = [];
-		const close = vi.fn(async () => {
-			events.push("transport_close_started");
-			await closeGate.promise;
-			events.push("transport_close_settled");
-		});
-		coordinator.registerTransport(createTransport("stream", close));
-
-		const first = coordinator.beginRuntimeRetirement("shutdown", () => {
-			events.push("runtime_finalized");
-		});
-		const second = coordinator.beginRuntimeRetirement("duplicate", () => {
-			throw new Error("must not run");
-		});
-
-		expect(second).toBe(first);
-		await vi.waitFor(() => expect(close).toHaveBeenCalledTimes(1));
-		expect(events).toEqual(["transport_close_started"]);
-		closeGate.resolve();
-		await first.settled;
-		expect(events).toEqual(["transport_close_started", "transport_close_settled", "runtime_finalized"]);
-		expect(coordinator.transportCount).toBe(0);
-		expect(registry.size).toBe(0);
-	});
-
 	it("fences a transport synchronously while retaining it through physical close settlement", async () => {
 		const registry = new ConversationCoordinatorRegistry();
-		const coordinator = registry.reserveRuntime("workspace", "session");
-		coordinator.activateRuntime();
+		const coordinator = registry.getOrCreate("workspace", "session");
+		coordinator.beginTuiLeaseHandoff("tui-connection");
+		coordinator.commitTuiLeaseHandoff("tui-connection");
 		const closeGate = deferred();
 		const close = vi.fn(() => closeGate.promise);
-		coordinator.registerTransport(createTransport("stream", close));
+		coordinator.registerTransport(createTransport("relay", close));
 
-		const closing = coordinator.closeTransport("stream", "host_shutdown");
+		const closing = coordinator.closeTransport("relay", "host_shutdown");
 
 		expect(close).toHaveBeenCalledOnce();
 		expect(close).toHaveBeenCalledWith("host_shutdown");
@@ -177,6 +147,16 @@ describe("ConversationCoordinator", () => {
 		closeGate.resolve();
 		await expect(closing).resolves.toBe(true);
 		expect(coordinator.transportCount).toBe(0);
+	});
+
+	it("refuses a transport on a daemon runtime: phones reach a daemon-hosted conversation through its worker", () => {
+		const registry = new ConversationCoordinatorRegistry();
+		const coordinator = registry.reserveRuntime("workspace", "session");
+		coordinator.activateRuntime();
+
+		expect(() => coordinator.registerTransport(createTransport("relay"))).toThrow(
+			"relay transport requires TUI lease authority without a daemon runtime",
+		);
 	});
 
 	it("is the exactly-once closer for relay-only conversations", async () => {
@@ -213,7 +193,7 @@ describe("ConversationCoordinator", () => {
 		);
 	});
 
-	it("owns daemon lease publication, stream count, and exact release", async () => {
+	it("owns daemon lease publication and exact release", async () => {
 		const registry = new ConversationCoordinatorRegistry();
 		const broker = createLeaseBroker();
 		registry.bindLeaseBroker(broker);
@@ -226,11 +206,8 @@ describe("ConversationCoordinator", () => {
 		expect(publication.outcome.ok).toBe(true);
 		if (!publication.outcome.ok) return;
 		coordinator.activateRuntime();
-		coordinator.registerTransport(createTransport("stream"));
-		coordinator.markTransportLeaseActive("stream", true);
 		expect(coordinator.finalizeDaemonRuntimeCommit(publication.outcome.token).kind).toBe("finalized");
-		expect(coordinator.syncDaemonRuntimeStreamCount()).toBe(true);
-		expect(broker.lookup("workspace", "session")).toMatchObject({ state: "daemon-active", streamCount: 1 });
+		expect(broker.lookup("workspace", "session")).toMatchObject({ state: "daemon-active" });
 
 		await coordinator.beginRuntimeRetirement("test", () => {}).settled;
 
@@ -327,11 +304,6 @@ describe("ConversationCoordinator", () => {
 		const releaseTransport = coordinator.registerTransport(createTransport("relay-1", () => {}, "relay"));
 		expect(coordinator.registerRelayLease("relay-1")).toBe(true);
 
-		// Direct transports still require an active daemon runtime.
-		expect(() => coordinator.registerTransport(createTransport("direct-1"))).toThrow(
-			"direct conversation transport requires an active daemon runtime",
-		);
-
 		coordinator.unregisterRelayLease("relay-1");
 		releaseTransport();
 		expect(broker.releaseFromTui("tui-connection", "workspace", "session")).toEqual({ ok: true });
@@ -342,16 +314,15 @@ describe("ConversationCoordinator", () => {
 		const registry = new ConversationCoordinatorRegistry();
 		const coordinator = registry.reserveRuntime("workspace", "session");
 		coordinator.activateRuntime();
-		const closeGate = deferred();
-		coordinator.registerTransport(createTransport("stream", () => closeGate.promise));
+		const finalized = deferred();
 
-		const retirement = coordinator.beginRuntimeRetirement("lease_transferred_to_tui", () => {});
+		const retirement = coordinator.beginRuntimeRetirement("lease_transferred_to_tui", () => finalized.promise);
 
 		expect(coordinator.runtimeLifecycle).toBe("retiring");
 		expect(() => coordinator.registerTransport(createTransport("relay-1", () => {}, "relay"))).toThrow(
 			"conversation is retiring",
 		);
-		closeGate.resolve();
+		finalized.resolve();
 		await retirement.settled;
 	});
 

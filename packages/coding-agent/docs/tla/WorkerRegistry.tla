@@ -70,11 +70,13 @@
 (*    MaxFaults, so liveness is checked after the faults stop.  A starting *)
 (*    worker that gives up on a held lock after 75 s is a Crash.           *)
 (*  - Not modeled: tool policy and conversation_in_use (D9), in-process    *)
-(*    hosts holding a lock (D20), --no-session (D15), releasing a claimed  *)
-(*    conversation before exit, graceful daemon stop (forced retirement of *)
-(*    every worker, as RetireStale does for a workspace), and the handoff  *)
-(*    write a redirect makes to its target log (a lock-guarded write that  *)
-(*    fails the move when the target is held).                             *)
+(*    hosts holding a lock (D20), --no-session (D15), graceful daemon stop *)
+(*    (forced retirement of every worker, as RetireStale does for a        *)
+(*    workspace), and the handoff write a redirect makes to its target log *)
+(*    (a lock-guarded write that fails the move when the target is held).  *)
+(*  - The primary is not tracked: Release never closes a worker's last     *)
+(*    open log, which stands for the registry refusing the primary's       *)
+(*    release (it closes with the worker).                                 *)
 (***************************************************************************)
 
 EXTENDS Naturals, FiniteSets, TLC
@@ -551,6 +553,27 @@ Claim(w, s) ==
     /\ hosts' = [hosts EXCEPT ![w] = @ \cup {s}]
     /\ UNCHANGED << daemonVars, wState, wGen, alive, opened, busy, closing, lockOf, clientVars >>
 
+\* worker_released: a live worker closed a conversation it claimed (a finished
+\* subagent child, a closed review sibling, a move target its clients left),
+\* which released the log's lock, and the registry drops the claim.  It
+\* closes a conversation only once no relay of it is offered or attached
+\* there.  A later open of that session spawns a worker or a claim takes it.
+\* No open of the session waits: the daemon routes an open in the turn it
+\* arrives, so the model's separate routing step must not invent a window
+\* for a release (as for retention, ~Routing).  An offer minted in the real
+\* window between the close and worker_released is one the worker does not
+\* take: it expires and the client retries (an ExpireOffer).
+Release(w, s) ==
+    /\ Ctl(w)
+    /\ wState[w] = "live"
+    /\ s \in opened[w]
+    /\ opened[w] # {s}
+    /\ \A c \in Clients : want[c] = s => (att[c] # w /\ offer[c] # w /\ ~Waiting(c))
+    /\ hosts'  = [hosts  EXCEPT ![w] = @ \ {s}]
+    /\ opened' = [opened EXCEPT ![w] = @ \ {s}]
+    /\ lockOf' = [lockOf EXCEPT ![s] = NoWorker]
+    /\ UNCHANGED << daemonVars, wState, wGen, alive, busy, closing, clientVars >>
+
 -----------------------------------------------------------------------------
 Next ==
     \/ FenceWorkspace
@@ -581,13 +604,13 @@ Next ==
          \/ Crash(w)
          \/ ObserveExit(w)
          \/ OrphanExit(w)
-         \/ \E s \in Sessions : WorkerOpen(w, s) \/ Claim(w, s)
+         \/ \E s \in Sessions : WorkerOpen(w, s) \/ Claim(w, s) \/ Release(w, s)
 
 \* Fairness: weak fairness on every daemon and worker step the design promises
 \* will happen (routing, spawning, opening, readiness, redemption, the TTL, the
 \* answer to worker_stop, disposal, exit observation, forced aborts, orphan
-\* exit, restart).  Client choices, turns, claims, fences, and faults get none:
-\* they may or may not happen, and the fault budget ends them.
+\* exit, restart).  Client choices, turns, claims, releases, fences, and
+\* faults get none: they may or may not happen, and the fault budget ends them.
 Fairness ==
     /\ WF_vars(DaemonRestart)
     /\ WF_vars(WorkspaceRetired)

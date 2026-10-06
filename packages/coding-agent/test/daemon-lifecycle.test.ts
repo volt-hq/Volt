@@ -600,6 +600,7 @@ describe("voltd lifecycle", () => {
 					streamId: "stream-test",
 					stream: phone,
 					preamble: {
+						kind: "phone",
 						handshake: {
 							hello: {
 								type: IROH_REMOTE_HELLO_TYPE,

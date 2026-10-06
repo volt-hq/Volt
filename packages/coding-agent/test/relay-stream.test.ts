@@ -111,6 +111,7 @@ function mintTestRelay(
 		streamId: "st-1",
 		stream: phone,
 		preamble: {
+			kind: "phone",
 			handshake: HANDSHAKE_VERBATIM,
 			authorization: RELAY_AUTHORIZATION,
 			hostNodeId: "n-host-1",
@@ -153,6 +154,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(client.messages[0]).toEqual({ type: "hello_ack", ok: true });
 		expect(client.messages[1]).toEqual({
 			type: "relay_preamble",
+			kind: "phone",
 			relayId: relay.relayId,
 			handshake: HANDSHAKE_VERBATIM,
 			authorization: RELAY_AUTHORIZATION,

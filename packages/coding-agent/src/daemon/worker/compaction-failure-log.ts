@@ -1,6 +1,6 @@
-import type { AgentSessionEvent } from "../core/agent-session.ts";
-import type { HostedConversation } from "../core/host/hosted-conversation.ts";
-import type { DaemonLogger } from "./log.ts";
+import type { AgentSessionEvent } from "../../core/agent-session.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import type { DaemonLogger } from "../log.ts";
 
 const MAX_LOGGED_ERROR_LENGTH = 500;
 

@@ -80,19 +80,21 @@ export type ConversationTarget =
 	| AdoptConversationTarget;
 
 /**
- * The conversation a redirect client's structural intent leads it to, opened
- * in the client's host: see `HostClientMove` `hostTarget`.
+ * The conversation a redirect client's move leads it to: see `HostClientMove`
+ * `hostTarget`.
  */
 export interface RedirectTarget {
 	readonly sessionId: string;
 	/**
-	 * The conversation the intent opened in the client's host, which the callee
-	 * takes over; absent for a switch to a stored conversation, which opens
-	 * wherever the client reconnects, unless the client's move hosts stored
-	 * sessions too.
+	 * The conversation the move opened in the client's host, which the callee
+	 * takes over; absent for a stored conversation a switch resumes, which the
+	 * callee is asked about before it opens.
 	 */
 	readonly conversation?: HostedConversation;
 }
+
+/** Who started a move: the client's own structural intent, or an extension command it invoked. */
+export type MoveOrigin = "client" | "extension";
 
 /**
  * A redirect target a host took: prepared before the move writes anything
@@ -123,24 +125,29 @@ export type HostClientMove =
 	| {
 			/** The client is told to reconnect to the new conversation and leaves this host's registry. */
 			readonly kind: "redirect";
-			redirect(sessionId: string): Promise<void> | void;
+			/** `created`: the move wrote the target's log (a new, forked, or imported conversation), not a switch to a stored one. */
+			redirect(sessionId: string, created: boolean): Promise<void> | void;
 			/**
-			 * Host the conversations the client's structural intents lead it to,
-			 * before the client is redirected there. A new, forked, or imported
-			 * conversation opens in this host, which need not fence the source
-			 * while other clients keep it open; a switch opens nothing. The
-			 * callee prepares the target before the move writes through the
-			 * source (a handoff) and commits it after; a failure keeps the client
-			 * where it was and discards what opened. Without it, the target's log
-			 * is written and closed for the host the client reconnects through.
+			 * Host the conversations the moves an extension starts for the
+			 * client lead it to (`ctx.newSession`, `ctx.fork`,
+			 * `ctx.switchSession`), and with `hostsClientMoves` those its own
+			 * structural intents lead it to, before the client is redirected
+			 * there. A new, forked, or imported conversation opens in this host,
+			 * which need not fence the source while other clients keep it open;
+			 * the callee takes it once it opened. A stored one a switch resumes
+			 * opens here only with `hostsStoredSessions`, and only when the
+			 * callee takes it, asked before it opens: it resolves undefined for
+			 * a conversation it does not take, which then opens wherever the
+			 * client reconnects. The callee prepares the target before the move
+			 * writes through the source (a handoff) and commits it after; a
+			 * failure keeps the client where it was and discards what opened.
+			 * Without it, the target's log is written and closed for the host
+			 * the client reconnects through.
 			 */
-			readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
-			/**
-			 * With `hostTarget`, a switch to a stored conversation opens it in
-			 * this host too, as a new, forked, or imported one does, so the client
-			 * reconnects to a conversation open here (the TUI in its in-process
-			 * host).
-			 */
+			readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect | undefined>;
+			/** With `hostTarget`, the client's own structural intents open their targets here too (the TUI in its in-process host). */
+			readonly hostsClientMoves?: boolean;
+			/** With `hostTarget`, a switch to a stored conversation may open it here too, when the callee takes it. */
 			readonly hostsStoredSessions?: boolean;
 	  };
 

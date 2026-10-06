@@ -738,7 +738,15 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					});
 					return;
 				}
+				const generationOf = () =>
+					state.getHostState().workspaceGenerations?.find((record) => record.workspaceName === request.name)
+						?.generation;
+				const previousGeneration = generationOf();
 				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath });
+				// A replace fences the old authority: its workers retire before the replace is reported (W4).
+				if (previousGeneration !== undefined && generationOf() !== previousGeneration) {
+					await workers.fenceWorkspace(request.name);
+				}
 				await auditLogger
 					.log({
 						type: "workspace_registered",

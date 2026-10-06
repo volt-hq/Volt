@@ -1130,6 +1130,38 @@ export class LeaseBroker {
 		return true;
 	}
 
+	/**
+	 * A conversation worker hosts the session, or stopped hosting it (Phase 7
+	 * slice 4, until slice 9 deletes the broker): a hosted session is
+	 * daemon-owned, `daemon-active` while `streams` relayed phones are open and
+	 * `daemon-detached` otherwise, and unowned once no worker hosts it. A
+	 * session a TUI holds or drains keeps its state; a TUI's drain retires the
+	 * worker through `disposeRuntime`.
+	 */
+	syncWorkerHosting(workspaceName: string, sessionId: string, hosted: boolean, streams: number): void {
+		const record = hosted ? this.getOrCreateRecord(workspaceName, sessionId) : this.lookup(workspaceName, sessionId);
+		if (!record || record.state === "tui-owned" || record.state === "daemon-draining") return;
+		const previous = record.state;
+		record.streamCount = hosted ? streams : 0;
+		record.state = hosted ? (streams > 0 ? "daemon-active" : "daemon-detached") : "unowned";
+		if (previous === "unowned" && record.state !== "unowned") {
+			this.effects.audit({
+				type: "lease_acquired",
+				workspaceName,
+				sessionId,
+				details: { owner: "worker", handoff: "none" },
+			});
+		} else if (previous !== "unowned" && record.state === "unowned") {
+			this.effects.audit({
+				type: "lease_released",
+				workspaceName,
+				sessionId,
+				details: { owner: "worker", reason: "worker_released" },
+			});
+		}
+		this.dropIfUnowned(record);
+	}
+
 	isDraining(workspaceName: string, sessionId: string): boolean {
 		return this.lookup(workspaceName, sessionId)?.state === "daemon-draining";
 	}

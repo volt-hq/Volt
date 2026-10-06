@@ -68,7 +68,9 @@ import {
 	DaemonEnvironmentStatusSchema,
 	DaemonRemotePolicyStatusSchema,
 	RemoteTransportHealthSchema,
+	WorkerAuthorityLossSchema,
 	WorkerHostKindSchema,
+	WorkerRelayAuthoritySchema,
 	WorkerSpawnSpecSchema,
 	WorkerStopReasonSchema,
 } from "./daemon-control.ts";
@@ -677,6 +679,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	"Control.WorkerHostKind": WorkerHostKindSchema,
 	"Control.WorkerStopReason": WorkerStopReasonSchema,
 	"Control.WorkerSpawnSpec": WorkerSpawnSpecSchema,
+	"Control.WorkerAuthorityLoss": WorkerAuthorityLossSchema,
+	"Control.WorkerRelayAuthority": WorkerRelayAuthoritySchema,
 };
 
 /** Protocol schemas registered under their own names, before the per-intent, per-query, and per-frame entries. */

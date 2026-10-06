@@ -1,32 +1,42 @@
 /**
- * Phones relayed through the TUI's host (live-shared session daemon design
- * §5.6 steps 7-9): the daemon authenticates a phone, resolves its session
- * target, and hands the TUI its stream through a byte relay. The TUI host
- * writes the handshake response itself and serves the stream on the remote
- * profile with the daemon's authorization subset, its sanitizer roots, and
- * its notification routing; intents and queries the daemon's state backs are
- * forwarded to the daemon, and a phone that unregisters the workspace retires
- * the session's lease.
+ * A phone relayed to the host of its conversation (daemon-hosted
+ * conversations design §4.3): the daemon authenticates the phone, resolves
+ * its session target, and hands the conversation's host the stream through a
+ * byte relay. The host writes the handshake response itself and serves the
+ * stream on the remote profile with the daemon's authorization subset, its
+ * sanitizer roots, and its notification routing; intents and queries the
+ * daemon's state backs, completion pushes, and the relay's authority go to
+ * the daemon. A worker serves its relays this way, and until the TUI attaches
+ * to workers, so does a TUI holding a conversation's lease.
  */
 
 import { Buffer } from "node:buffer";
 import type { Duplex } from "node:stream";
-import type { ConversationHost } from "../../../core/host/conversation-host.ts";
-import type { HostedConversation } from "../../../core/host/hosted-conversation.ts";
-import { DuplexWriteGate } from "../../../core/protocol/transport/duplex-write-gate.ts";
-import type { IrohBiStreamLike, IrohBytes } from "../../../core/protocol/transport/iroh-transport.ts";
-import { parseIrohRemoteRpcGrant } from "../../../core/remote/iroh/access-grant.ts";
-import type { IrohRemoteClientAuthorizationSuccess } from "../../../core/remote/iroh/authorization.ts";
-import { serveIrohRemoteConnection } from "../../../core/remote/iroh/connection.ts";
-import { uploadIrohRemoteDeviceLog } from "../../../core/remote/iroh/device-log-rpc.ts";
-import { writeIrohRemoteHandshakeResponse } from "../../../core/remote/iroh/handshake-reader.ts";
-import type { RelayPreamble } from "../../../daemon/control-protocol.ts";
+import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
+import type { ConversationHost } from "../../core/host/conversation-host.ts";
+import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import type {
+	AuthorityLoss,
+	ProtocolConnection,
+	ServeConnectionOptions,
+} from "../../core/protocol/server/connection.ts";
+import { DuplexWriteGate } from "../../core/protocol/transport/duplex-write-gate.ts";
+import type { IrohBiStreamLike, IrohBytes } from "../../core/protocol/transport/iroh-transport.ts";
+import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../../core/remote/iroh/connection.ts";
+import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
+import type {
+	IrohRemotePushNotificationDeliveryStatus,
+	IrohRemotePushNotificationIntent,
+} from "../../core/remote/iroh/push.ts";
+import type { ReviewDiscussionService } from "../../core/review-discussions.ts";
+import type { RelayPreamble } from "../control-protocol.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
 	type IntegratedConversationSessionSelection,
-} from "../../../daemon/handshake-responses.ts";
-import { getWorktreesRoot } from "../../../daemon/worktree-manager.ts";
-import type { DaemonLink, OpenedRelay } from "./daemon-link.ts";
+} from "../handshake-responses.ts";
+import { getWorktreesRoot } from "../worktree-manager.ts";
 
 export interface RelayedIrohStreamLike extends IrohBiStreamLike {
 	/** Close both directions; maps to socket.destroy(). */
@@ -35,10 +45,10 @@ export interface RelayedIrohStreamLike extends IrohBiStreamLike {
 }
 
 /**
- * Wrap a relay unix-socket Duplex in the Iroh stream shape consumed by
- * runIrohRemoteRpcMode. The adapter writes no close-reason trailer: a
- * TUI-initiated destroy surfaces as a generic closure. A stream that ends on
- * purpose writes its `remote_terminal` frame first and finishes gracefully.
+ * Wrap a relay unix-socket Duplex in the Iroh stream shape the remote
+ * connection consumes. The adapter writes no close-reason trailer: a
+ * host-initiated destroy surfaces as a generic closure. A stream that ends on
+ * purpose writes its last frame first and finishes gracefully.
  */
 export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamLike {
 	const chunks: Buffer[] = [];
@@ -141,36 +151,8 @@ export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamL
 	};
 }
 
-/**
- * A relayed phone unregistered the workspace of the session the TUI serves:
- * once the phone is answered, the TUI releases the session's lease.
- */
-export interface RelayWorkspaceUnregisterRetirement {
-	/** The daemon accepted the phone's unregister_workspace. */
-	unregistered(): void;
-	finalize(): Promise<void>;
-}
-
-export function createRelayWorkspaceUnregisterRetirement(
-	link: Pick<DaemonLink, "release">,
-	getSessionId: () => string,
-): RelayWorkspaceUnregisterRetirement {
-	let workspaceUnregistered = false;
-	let releasePromise: Promise<void> | undefined;
-	return {
-		unregistered() {
-			workspaceUnregistered = true;
-		},
-		async finalize() {
-			if (!workspaceUnregistered) return;
-			releasePromise ??= link.release(getSessionId(), "workspace_unregistered");
-			await releasePromise;
-		},
-	};
-}
-
-/** Rehydrate the daemon-authorized relay snapshot without recomputing its workspace scope in the TUI. */
-export function createTuiRelayAuthorization(
+/** Rehydrate the daemon-authorized relay snapshot without recomputing its workspace scope. */
+export function createRelayAuthorization(
 	authorization: RelayPreamble["authorization"],
 ): IrohRemoteClientAuthorizationSuccess {
 	const rpcGrant = parseIrohRemoteRpcGrant(authorization.rpcGrant, "relay rpcGrant");
@@ -195,12 +177,12 @@ export function createTuiRelayAuthorization(
 }
 
 /**
- * Sanitizer roots for serving a relayed conversation from the TUI: a
- * worktree-bound conversation sanitizes with the worktree checkout as the
- * root, and the parent checkout plus the worktrees root must ALSO redact
- * (bash output like `git worktree list` prints both). §5.2.3.
+ * Sanitizer roots for serving a relayed conversation: a worktree-bound
+ * conversation sanitizes with the worktree checkout as the root, and the
+ * parent checkout plus the worktrees root must ALSO redact (bash output like
+ * `git worktree list` prints both). §5.2.3.
  */
-export function getRelayServingSanitizerOptions(
+export function getRelaySanitizerOptions(
 	authorization: RelayPreamble["authorization"],
 	agentDir: string,
 ): { remoteWorkspacePath?: string; workspacePath: string; additionalRedactedPaths?: string[] } {
@@ -216,59 +198,68 @@ export function getRelayServingSanitizerOptions(
 	};
 }
 
-export interface ServeRelayedPhoneOptions {
+/** What a relayed phone gets from the daemon through the host serving it. */
+export interface RelayedPhoneDaemon {
+	/** Run a daemon-backed intent or query with the relay's grant; undefined when the daemon is unavailable. */
+	forward(frame: ControlRelayFrame): Promise<ControlRelayOutcome | undefined>;
+	deliverNotification(
+		notification: IrohRemotePushNotificationIntent,
+	): Promise<IrohRemotePushNotificationDeliveryStatus>;
+	/** Re-read the relay's authority before a frame of the phone acts; false is a revocation. */
+	revalidate?(): Promise<boolean>;
+	/** The phone's accepted `unregister_workspace` was answered and its stream ended. */
+	unregistered?(): Promise<void>;
+}
+
+/** A relay redeemed for a phone: its preamble and stream. */
+export interface OpenedPhoneRelay {
+	readonly preamble: RelayPreamble;
+	readonly stream: Duplex;
+	/** The relay ended here. */
+	finished(): void;
+}
+
+export interface ServePhoneRelayOptions {
 	readonly host: ConversationHost;
-	/** The conversation the TUI shows, which the relay was offered for. */
+	/** The conversation the relay was offered for. */
 	readonly conversation: HostedConversation;
-	/** Redeem the relay offer: its preamble and the phone's stream. */
-	readonly openRelay: () => Promise<OpenedRelay>;
-	/** Where relay intents and queries, completion pushes, and an unregister's lease release go. */
-	readonly link: Pick<DaemonLink, "forwardRelayRpc" | "relayNotificationDelivery" | "release">;
+	readonly relay: OpenedPhoneRelay;
+	readonly daemon: RelayedPhoneDaemon;
 	/** The agent directory, whose worktrees root the sanitizer redacts. */
 	readonly agentDir: string;
+	/** How the phone follows its structural intents: it is redirected; by default every target opens where it reconnects. */
+	readonly redirect?: ServeConnectionOptions["redirect"];
+	/** The host's own admission of the phone's intents. */
+	readonly admit?: ServeConnectionOptions["admit"];
+	/** The relay's authority as the daemon last pushed it, checked before every frame. */
+	readonly authority?: () => AuthorityLoss | undefined;
+	readonly reviewDiscussions?: ReviewDiscussionService;
+	/** The connection serving the phone, once it exists: the host ends it on shutdown or authority loss. */
+	readonly onConnection?: (connection: ProtocolConnection) => void;
 }
 
 /**
- * Serve a relayed phone conversation from the TUI host's in-process
- * conversation on the remote profile, until the stream ends. The daemon has
- * already authenticated the phone and resolved the session target; a
- * preamble for another session, or without the daemon's node id, is refused.
- * The phone follows its structural intents by redirect: a session change the
- * phone asks for ends its stream with `ended{moved}` for the phone alone, and
- * when the TUI leaves the conversation the phone hears `ended{closed}` and
- * reconnects to the daemon. Once the phone is attached, the conversation's
- * queued input is recovered.
+ * Serve a relayed phone from `conversation` on the remote profile until the
+ * stream ends. A preamble for another session, or without the daemon's node
+ * id, is refused. The phone follows its structural intents by redirect. Once
+ * the phone is attached, the conversation's queued input is recovered.
  */
-export async function serveRelayedPhone(options: ServeRelayedPhoneOptions): Promise<void> {
-	const { host, conversation, link } = options;
-	// The conversation is closing: the TUI is leaving it.
-	if (conversation.closed) return;
-	let opened: OpenedRelay;
-	try {
-		opened = await options.openRelay();
-	} catch {
-		return;
-	}
-	const conversationSessionId = conversation.id;
-	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
-	const preamble = opened.preamble;
+export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<void> {
+	const { host, conversation, relay, daemon } = options;
+	const relayedStream = adaptRelaySocketToIrohStream(relay.stream);
+	const preamble = relay.preamble;
 	const hostNodeId = preamble.hostNodeId;
 	// Serve only the session the daemon authorized the phone for, with the
 	// daemon's identity: the phone verifies the saved host node id in the
 	// handshake response and every notification destination.
-	if (preamble.resolvedTarget.sessionId !== conversationSessionId || hostNodeId === undefined) {
+	if (conversation.closed || preamble.resolvedTarget.sessionId !== conversation.id || hostNodeId === undefined) {
 		relayedStream.close();
-		opened.finished();
+		relay.finished();
 		return;
 	}
 	const handshake = preamble.handshake;
 	const authorizationSubset = preamble.authorization;
-	const authorization = createTuiRelayAuthorization(authorizationSubset);
-	const responseContext = {
-		hostNodeId,
-		relayMode: preamble.relayMode,
-		relayUrls: preamble.relayUrls,
-	};
+	const authorization = createRelayAuthorization(authorizationSubset);
 	const sessionSelection: IntegratedConversationSessionSelection =
 		preamble.resolvedTarget.selection === "created"
 			? { kind: "created", sessionId: preamble.resolvedTarget.sessionId }
@@ -277,16 +268,16 @@ export async function serveRelayedPhone(options: ServeRelayedPhoneOptions): Prom
 					requestedSessionId: preamble.resolvedTarget.requestedSessionId ?? preamble.resolvedTarget.sessionId,
 					sessionId: preamble.resolvedTarget.sessionId,
 				};
-	const workspaceUnregisterRetirement = createRelayWorkspaceUnregisterRetirement(link, () => conversationSessionId);
+	let unregistered = false;
+	const revalidate = daemon.revalidate;
 	try {
-		// The TUI writes the handshake success response itself, keeping
-		// construction identical to the daemon-owned path.
+		// The serving host writes the handshake success response itself.
 		const handshakeResponse = createIntegratedConversationHandshakeResponse(
 			{ hello: handshake.hello, response: handshake.response },
 			authorization,
-			conversationSessionId,
+			conversation.id,
 			sessionSelection,
-			responseContext,
+			{ hostNodeId, relayMode: preamble.relayMode, relayUrls: preamble.relayUrls },
 			preamble.resolvedTarget.worktreeId,
 			preamble.resolvedTarget.workingDirectory,
 		);
@@ -298,40 +289,31 @@ export async function serveRelayedPhone(options: ServeRelayedPhoneOptions): Prom
 			initialInput: handshake.initialInput,
 			grant: authorization.client.rpcGrant,
 			clientKey: authorizationSubset.clientNodeId,
-			redaction: getRelayServingSanitizerOptions(authorizationSubset, options.agentDir),
-			// The phone stays on this conversation; a session change redirects it alone, to the daemon.
-			redirect: {},
-			// The phone's device logs are written under the workspace here; the rest of the host is the daemon's.
+			redaction: getRelaySanitizerOptions(authorizationSubset, options.agentDir),
+			redirect: options.redirect ?? {},
+			// The host's services are the daemon's, reached through `relay`.
 			services: () => ({
-				workspace: {
-					name: authorization.workspace.name,
-					uploadDeviceLogs: (upload) =>
-						uploadIrohRemoteDeviceLog(upload, { workspacePath: authorization.workspace.path }),
-				},
+				workspace: { name: authorization.workspace.name },
+				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
 			}),
 			relay: async (frame) => {
-				const outcome = await link.forwardRelayRpc(authorizationSubset.clientNodeId, conversationSessionId, frame);
+				const outcome = await daemon.forward(frame);
 				if (!outcome) throw new Error("daemon_unavailable");
 				// An accepted unregister ends the connection after its answer.
-				if (frame.type === "unregister_workspace" && outcome.type === "accepted") {
-					workspaceUnregisterRetirement.unregistered();
-				}
+				if (frame.type === "unregister_workspace" && outcome.type === "accepted") unregistered = true;
 				return outcome;
 			},
+			...(options.authority === undefined ? {} : { authority: options.authority }),
+			...(revalidate === undefined ? {} : { revalidate: () => revalidate.call(daemon) }),
+			...(options.admit === undefined ? {} : { admit: options.admit }),
 			notifications: {
 				hostNodeId,
 				clientNodeId: authorizationSubset.clientNodeId,
 				workspaceName: authorization.workspace.name,
-				delivery: {
-					deliverNotification: (notification) =>
-						link.relayNotificationDelivery.deliverNotification(
-							authorizationSubset.clientNodeId,
-							conversationSessionId,
-							notification,
-						),
-				},
+				delivery: { deliverNotification: (notification) => daemon.deliverNotification(notification) },
 			},
 		});
+		options.onConnection?.(connection);
 		void connection.ready.then(
 			() => void conversation.startRecoveredClientInputs().catch(() => undefined),
 			() => undefined,
@@ -340,8 +322,8 @@ export async function serveRelayedPhone(options: ServeRelayedPhoneOptions): Prom
 	} catch {
 		// Relay teardown surfaces to the phone via the daemon's close reason.
 	} finally {
-		await workspaceUnregisterRetirement.finalize();
+		if (unregistered) await daemon.unregistered?.().catch(() => undefined);
 		relayedStream.close();
-		opened.finished();
+		relay.finished();
 	}
 }

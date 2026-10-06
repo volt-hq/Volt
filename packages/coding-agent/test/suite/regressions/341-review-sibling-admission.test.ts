@@ -4,12 +4,6 @@ import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
-import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
-import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
-import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
-import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
-import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { registerReviewHandoffAliases } from "../../../src/core/review-links.ts";
 import {
 	appendReviewRun,
@@ -18,29 +12,29 @@ import {
 	type ReviewRunRecord,
 } from "../../../src/core/review-state.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import {
-	ConversationCoordinator,
-	ConversationCoordinatorRegistry,
-} from "../../../src/daemon/conversation-coordinator.ts";
-import { type IntegratedRuntimeEntry, IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
-import { IrohDaemonAdmissionGate } from "../../../src/daemon/iroh-service.ts";
-import { LeaseBroker } from "../../../src/daemon/lease-broker.ts";
-import {
-	beginReviewSiblingAdmission,
-	withReviewSourceWriteLease,
-} from "../../../src/daemon/review-sibling-admission.ts";
-import type { IrohRemoteAgentRuntime } from "../../../src/daemon/worker/conversation-factory.ts";
+	type ControlEvent,
+	type ControlResponse,
+	PROTOCOL_VERSION,
+	type WorkerHostKind,
+} from "../../../src/daemon/control-protocol.ts";
+import { type WorkerDaemonClient, WorkerRequestError } from "../../../src/daemon/worker/daemon-client.ts";
+import { WorkerConversations } from "../../../src/daemon/worker/hosted.ts";
+import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../../../src/daemon/worker-launcher.ts";
+import { type LiveWorker, WorkerRegistry, type WorkerRegistryOptions } from "../../../src/daemon/worker-registry.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { anchorLiveReviewRun, anchorReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";
 
-/** Open a review discussion beside `source`, in its host, without moving any client. */
-async function openSibling(source: IrohRemoteAgentRuntime, manager: SessionManager): Promise<IrohRemoteAgentRuntime> {
-	const opened = await source.host.open({ kind: "adopt", sessionManager: manager, cwd: source.conversation.cwd });
-	if (opened.cancelled) throw new Error("Review sibling open was cancelled");
-	return { host: source.host, conversation: opened.conversation };
-}
+/**
+ * Review finding discussions open beside their source, in the source's
+ * conversation worker, each claimed from the daemon's worker registry
+ * (`worker_hosts`, kind `sibling`) before it opens; an unloaded review source
+ * is claimed for the length of a write. The registry here is the daemon's;
+ * the worker is driven in this test, its conversations hosted by
+ * `WorkerConversations` as `runWorker` hosts them.
+ */
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -48,31 +42,24 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
+async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition()) {
+		if (Date.now() > deadline) throw new Error("timed out");
+		await new Promise((resolve) => setTimeout(resolve, 1));
+	}
+}
+
+/** A worker process the registry launched: the test speaks its control connection. */
+interface FakeLaunch {
+	readonly request: WorkerLaunchRequest;
+	readonly connectionId: string;
+}
+
 async function fixture() {
 	const root = mkdtempSync(join(tmpdir(), "volt-341-admission-"));
+	const sessionDir = join(root, "sessions");
 	const harness = await createHarness({ settings: { lsp: { enabled: false }, compaction: { enabled: false } } });
-	const gate = new IrohDaemonAdmissionGate();
-	const coordinators = new ConversationCoordinatorRegistry();
-	const stateManager = new IrohRemoteHostStateManager();
-	let registry: IntegratedRuntimeRegistry;
-	const broker = new LeaseBroker({
-		isRuntimeStreaming: (ws, id) => registry.findOwner(ws, id)?.runtime.conversation.session.isBusy === true,
-		waitForRuntimeIdle: async (ws, id) => {
-			await registry.findOwner(ws, id)?.runtime.conversation.session.waitForIdle();
-		},
-		disposeRuntime: async (ws, id, reason) => {
-			const entry = registry.findOwner(ws, id);
-			if (entry) await registry.stopEntry(entry, reason);
-		},
-		closePhoneStreams: () => {},
-		closeRelays: () => {},
-		audit: () => {},
-		beginTuiLeaseHandoff: (ws, id, connection) => coordinators.getOrCreate(ws, id).beginTuiLeaseHandoff(connection),
-		commitTuiLeaseHandoff: (ws, id, connection) => coordinators.getOrCreate(ws, id).commitTuiLeaseHandoff(connection),
-		cancelTuiLeaseHandoff: (ws, id, connection) => coordinators.get(ws, id)?.cancelTuiLeaseHandoff(connection),
-		releaseTuiLease: (ws, id, connection) => coordinators.get(ws, id)?.releaseTuiLease(connection),
-	});
-	coordinators.bindLeaseBroker(broker);
 	const factory: ConversationFactory = async ({ sessionManager, cwd, agentDir }) => {
 		const created = await createAgentSession({
 			sessionManager,
@@ -103,14 +90,128 @@ async function fixture() {
 			diagnostics: [],
 		};
 	};
-	// The daemon's host for the source: phones attach as clients, and the daemon closes its conversations.
-	const source: IrohRemoteAgentRuntime = await openTestHost(factory, {
-		sessionManager: await SessionManager.create(root, join(root, "sessions")),
+
+	// The daemon's registry, its workers launched by the test.
+	const generations = new Map<string, number>([["ws", 1]]);
+	const launches: FakeLaunch[] = [];
+	const exits: Array<(exit: WorkerExit) => void> = [];
+	const registryOptions: WorkerRegistryOptions & {
+		sessionInWorkspace(workspaceName: string, sessionId: string): Promise<boolean>;
+	} = {
+		launcher: {
+			launch(request: WorkerLaunchRequest): LaunchedWorker {
+				const exited = Promise.withResolvers<WorkerExit>();
+				launches.push({ request, connectionId: `worker-connection-${launches.length + 1}` });
+				exits.push(exited.resolve);
+				return { pid: 4242, exited: exited.promise, kill: () => exited.resolve({ reason: "crashed" }) };
+			},
+		},
+		agentDir: root,
+		socketPath: () => join(root, "voltd.sock"),
+		sendTo: (_connectionId: string, _event: ControlEvent) => true,
+		currentGeneration: (workspaceName: string) => generations.get(workspaceName),
+		detachedRuntimeTtlMs: () => 60_000,
+		// Every claim here names a session of the workspace's store.
+		sessionInWorkspace: async () => true,
+		audit: () => {},
+	};
+	const registry = new WorkerRegistry(registryOptions);
+	let requestId = 0;
+	const send = async (connectionId: string, request: Record<string, unknown>): Promise<ControlResponse> =>
+		registry.handleWorkerRequest(connectionId, { ...request, id: `${++requestId}` } as Parameters<
+			WorkerRegistry["handleWorkerRequest"]
+		>[1]);
+
+	/**
+	 * Spawn a worker for `ref`, as a phone's open does: launched, admitted, and
+	 * ready; with `attached`, the phone stays attached to it.
+	 */
+	const spawn = async (
+		ref: SessionReference,
+		options: { attached?: boolean } = {},
+	): Promise<{ launch: FakeLaunch; worker: LiveWorker; exit: (exit: WorkerExit) => void }> => {
+		const index = launches.length;
+		const generation = generations.get("ws") ?? 0;
+		const opening = registry.open(
+			{ workspaceName: "ws", workspaceGeneration: generation, sessionId: ref.sessionId },
+			{
+				origin: "phone",
+				prepare: async () => ({
+					origin: "phone",
+					workspace: { name: "ws", path: root, generation },
+					session: ref,
+					cwd: root,
+					root,
+					projectCwd: root,
+					toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+					projectTrusted: false,
+				}),
+				attach: (worker) => {
+					if (options.attached) worker.attach("remote");
+					return worker;
+				},
+			},
+		);
+		await waitUntil(() => launches.length > index);
+		const launch = launches[index]!;
+		const admitted = registry.admitWorker(
+			{
+				type: "hello",
+				role: "worker",
+				protocolVersion: PROTOCOL_VERSION,
+				workerId: launch.request.workerId,
+				workerToken: launch.request.workerToken,
+				pid: 4242,
+				version: "test",
+			},
+			launch.connectionId,
+		);
+		if (!admitted) throw new Error("The worker was not admitted");
+		expect(await send(launch.connectionId, { type: "worker_ready", sessionIds: [ref.sessionId] })).toMatchObject({
+			type: "ok",
+		});
+		return { launch, worker: await opening, exit: exits[index]! };
+	};
+
+	// The source conversation, in the worker a phone's open spawned for it.
+	const sourceManager = await SessionManager.create(root, sessionDir);
+	const sourceRef = sourceManager.getSessionRef()!;
+	const { launch, worker } = await spawn(sourceRef);
+	const source = await openTestHost(factory, {
+		sessionManager: sourceManager,
 		cwd: root,
 		agentDir: root,
 		extensionMode: "rpc",
 		whenUnattached: "keep",
 	});
+	// The worker's daemon client: its claims and releases are the registry's requests.
+	const claim = async (sessionId: string, kind: WorkerHostKind, parentSessionId?: string) => {
+		const response = await send(launch.connectionId, {
+			type: "worker_hosts",
+			sessionId,
+			kind,
+			...(parentSessionId === undefined ? {} : { parentSessionId }),
+		});
+		if (response.type === "error") throw new WorkerRequestError(response.code, response.message);
+		return response;
+	};
+	const release = async (sessionId: string) => {
+		const response = await send(launch.connectionId, { type: "worker_released", sessionId });
+		if (response.type === "error") throw new WorkerRequestError(response.code, response.message);
+		return response;
+	};
+	const client = {
+		hosts: vi.fn(claim),
+		released: vi.fn(release),
+		changeObserve: vi.fn(async (): Promise<ControlResponse> => ({ type: "ok", id: "observed" })),
+	};
+	const hosted = new WorkerConversations({
+		client: client as unknown as WorkerDaemonClient,
+		workspaceName: "ws",
+		log: () => {},
+	});
+	hosted.adoptPrimary(source.host, source.conversation);
+
 	const record: ReviewRunRecord = {
 		schemaVersion: 1,
 		runId: "run",
@@ -160,312 +261,188 @@ async function fixture() {
 	};
 	await anchorLiveReviewRun(source.conversation.session, record.runId);
 	await appendReviewRunDurably(source.conversation.session.sessionWriter, record);
-	const validate = vi.fn(async () => {});
-	const published = vi.fn((_entry: IntegratedRuntimeEntry) => {});
-	const createRuntime = vi.fn(async () => ({
-		runtime: source,
-		sessionSelection: {
-			kind: "resumed" as const,
-			requestedSessionId: source.conversation.session.sessionId,
-			sessionId: source.conversation.session.sessionId,
-		},
-	}));
-	registry = new IntegratedRuntimeRegistry({
-		agentDir: root,
-		coordinators,
-		auditLogger: new IrohRemoteAuditLogger({ sink: { write: () => {} } }),
-		stateManager,
-		activeStreams: new IrohRemoteActiveStreamRegistry(),
-		detachedRuntimeTtlMs: () => 60_000,
-		getProjectTrustedForWorkspace: () => false,
-		setClientLastSessionId: async () => undefined,
-		createRuntime,
-		withReviewSourceWrite: (parent, ref, write) => {
-			const lease = gate.tryAcquire();
-			if (!lease) return Promise.reject(new Error("admission closed"));
-			return withReviewSourceWriteLease({
-				workspaceName: parent.workspaceName,
-				sessionId: ref.sessionId,
-				broker,
-				lease,
-				write,
-				validateWorkspace: validate,
-			});
-		},
-		onRuntimePublished: published,
-		beginReviewSiblingAdmission: (parent, id) => {
-			const lease = gate.tryAcquire();
-			if (!lease) throw new Error("admission closed");
-			return beginReviewSiblingAdmission({
-				workspaceName: parent.workspaceName,
-				sessionId: id,
-				broker,
-				lease,
-				validateWorkspace: validate,
-			});
-		},
-	});
 	cleanups.push(async () => {
-		gate.close();
-		await registry.stopAll("test_cleanup");
+		hosted.beginStopping();
 		await source.host.dispose();
+		for (const exit of exits) exit({ reason: "stopped" });
 		await harness.cleanupAsync();
 		rmSync(root, { recursive: true, force: true });
 	});
-	const authorization: IrohRemoteClientAuthorizationSuccess = {
-		ok: true,
-		allowTools: "read",
-		paired: false,
-		pairingSecretConsumed: false,
-		client: {
-			nodeId: "phone",
-			label: "phone",
-			allowedWorkspaces: ["ws"],
-			allowedTools: "read",
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			pairedAt: 1,
-			lastSeenAt: 2,
-		},
-		workspace: { name: "ws", path: root },
-		workspaceGeneration: 1,
-		workspaceNames: ["ws"],
-		workspaces: [{ name: "ws", status: "available" }],
-	};
-	await stateManager.save({
-		...(await stateManager.getState()),
-		clients: [authorization.client],
-		workspaces: [authorization.workspace],
-	});
-	const handshake = (id: string) => ({
-		hello: {
-			type: "volt_iroh_hello",
-			protocol: "volt/1",
-			workspace: "ws",
-			mode: "conversation",
-			conversation: { target: "session", sessionId: id },
-		} as IrohRemoteHello,
-		response: {} as IrohRemoteHandshakeSuccess,
-	});
-	const prepared = await registry.getOrCreateEntry(handshake(source.conversation.session.sessionId), authorization);
-	const sourceLease = gate.tryAcquire()!;
-	const admission = beginReviewSiblingAdmission({
-		workspaceName: "ws",
-		sessionId: source.conversation.session.sessionId,
-		broker,
-		lease: sourceLease,
-		validateWorkspace: async () => {},
-	});
-	admission.commit(prepared.entry.coordinator);
-	await registry.commitEntry(prepared.entry, prepared.sessionSelection, authorization, prepared.attachClaim);
-	admission.finalize();
-	admission.release();
-	prepared.attachClaim.release();
-	published.mockClear();
 	return {
 		root,
+		sessionDir,
+		factory,
 		registry,
+		generations,
+		launches,
+		spawn,
+		worker,
 		source,
-		/** The source's registry entry, whose review discussion service the tests drive. */
-		sourceEntry: prepared.entry,
-		gate,
-		broker,
-		validate,
-		published,
+		hosted,
+		client,
+		claim,
+		/** The source's review discussion service, as the worker serves it. */
+		reviews: hosted.reviewDiscussions(source.conversation),
 		harness,
-		authorization,
-		handshake,
-		createRuntime,
 		record,
 	};
 }
 
-describe("Regression #341 real daemon sibling broker admission", () => {
-	it("publishes four independent broker-owned conversations without replacing the source", async () => {
+describe("Regression #341 review siblings claimed in the source's worker", () => {
+	it("opens four discussions as claimed siblings in the source's worker without replacing the source", async () => {
 		const f = await fixture();
 		f.harness.setResponses([1, 2, 3, 4].map(() => fauxAssistantMessage("answer")));
-		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1", "f2", "f3", "f4"], "start");
+		const result = await f.reviews.start("run", ["f1", "f2", "f3", "f4"], "start");
 		expect(result.results.every((row) => row.outcome === "created")).toBe(true);
-		expect(f.registry.size).toBe(5);
+		const ids = result.results.map((row) => row.discussion!.sessionId);
+		const [status] = f.registry.list();
+		expect(status!.sessionIds).toHaveLength(5);
+		expect(status!.sessionIds).toEqual(expect.arrayContaining([f.source.conversation.id, ...ids]));
 		for (const row of result.results) {
-			const entry = f.registry.findOwner("ws", row.discussion!.sessionId)!;
-			expect(entry.lifecycle).toBe("active");
-			expect(entry.runtime.conversation.session.sessionManager.getSessionName()).toBe(
-				`Review: Finding ${row.findingId.slice(1)}`,
-			);
-			await entry.runtime.conversation.session.waitForIdle();
-			expect(entry.runtime.conversation.session.getActiveToolNames()).toEqual(["read"]);
-			await entry.runtime.conversation.session.setAgentMode("plan");
-			await entry.runtime.conversation.session.setAgentMode("build");
-			expect(entry.runtime.conversation.session.getActiveToolNames()).toEqual(["read"]);
-			expect(entry.runtime.conversation.summary().reviewDiscussion).not.toHaveProperty("readOnly");
-			expect(entry.leaseOwner).toBeDefined();
-			expect(f.broker.isDaemonRuntimeOwnerCurrent(entry.leaseOwner!, "ws", entry.sessionId)).toBe(true);
-			await entry.runtime.conversation.session.waitForIdle();
+			const id = row.discussion!.sessionId;
+			expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+			const child = f.hosted.get(id)!;
+			expect(child.kind).toBe("sibling");
+			expect(child.host).toBe(f.source.host);
+			const session = child.conversation.session;
+			expect(session.sessionManager.getSessionName()).toBe(`Review: Finding ${row.findingId.slice(1)}`);
+			await session.waitForIdle();
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+			await session.setAgentMode("plan");
+			await session.setAgentMode("build");
+			expect(session.getActiveToolNames()).toEqual(["read"]);
+			expect(child.conversation.summary().reviewDiscussion).not.toHaveProperty("readOnly");
 		}
-		expect(f.published).toHaveBeenCalledTimes(4);
-		expect(f.createRuntime).toHaveBeenCalledOnce();
-		await f.gate.waitForDrain();
+		expect(f.hosted.primary.conversation).toBe(f.source.conversation);
+		expect(f.launches).toHaveLength(1);
 	});
 
-	it.each([
-		{ workspace: "other", generation: 1 },
-		{ workspace: "ws", generation: 2 },
-	])("does not borrow runtime state from another workspace authority: %j", async ({ workspace, generation }) => {
+	it("does not borrow conversation state from another worker", async () => {
 		const f = await fixture();
 		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const first = (await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
-		const local = f.registry.findOwner("ws", first.sessionId)!;
-		await local.runtime.conversation.session.waitForIdle();
-		const ref = local.runtime.conversation.session.sessionRef!;
-		await f.registry.stopEntry(local, "test_detach");
-		const foreign = await openSibling(f.source, await SessionManager.open(ref));
-		f.createRuntime.mockResolvedValueOnce({
-			runtime: foreign,
-			sessionSelection: { kind: "resumed", requestedSessionId: ref.sessionId, sessionId: ref.sessionId },
+		const first = (await f.reviews.start("run", ["f1"], "start")).results[0]!.discussion!;
+		const local = f.hosted.get(first.sessionId)!;
+		await local.conversation.session.waitForIdle();
+		const ref = local.conversation.session.sessionRef!;
+		await local.host.close(local.conversation);
+		await vi.waitFor(() => expect(f.registry.host("ws", ref.sessionId)).toBeUndefined());
+		// A phone's open of the discussion spawns a worker of its own for it.
+		const other = await f.spawn(ref);
+		expect(f.registry.host("ws", ref.sessionId)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
+		const foreign = await openTestHost(f.factory, {
+			sessionManager: await SessionManager.open(ref),
+			cwd: f.root,
+			agentDir: f.root,
+			extensionMode: "rpc",
+			whenUnattached: "keep",
 		});
-		const authorization = {
-			...f.authorization,
-			workspace: { name: workspace, path: f.root },
-			workspaceGeneration: generation,
-		};
-		const request = f.handshake(ref.sessionId);
-		const prepared = await f.registry.getOrCreateEntry(
-			{ ...request, hello: { ...request.hello, workspace } },
-			authorization,
-		);
-		const admission = beginReviewSiblingAdmission({
-			workspaceName: workspace,
-			sessionId: ref.sessionId,
-			broker: f.broker,
-			lease: f.gate.tryAcquire()!,
-			validateWorkspace: async () => {},
-		});
-		admission.commit(prepared.entry.coordinator);
-		await f.registry.commitEntry(prepared.entry, prepared.sessionSelection, authorization, prepared.attachClaim);
-		admission.finalize();
-		admission.release();
-		prepared.attachClaim.release();
+		cleanups.push(() => foreign.host.dispose());
 		const busy = vi.spyOn(foreign.conversation.session, "isBusy", "get").mockReturnValue(true);
 		try {
-			expect((await f.sourceEntry.reviewDiscussions!.list("run")).discussions[0]!.status).toBe("completed");
+			expect((await f.reviews.list("run")).discussions[0]!.status).toBe("completed");
 		} finally {
 			busy.mockRestore();
 		}
 	});
 
-	it("rolls back a publication failure and can retry the same durable child", async () => {
+	it("fails a discussion whose claim the daemon refuses, opening nothing, and retries the same durable child", async () => {
 		const f = await fixture();
-		f.published.mockImplementationOnce(() => {
-			throw new Error("publication failed");
-		});
-		const failed = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
+		f.client.hosts.mockRejectedValueOnce(new WorkerRequestError("claimed", "another worker hosts that conversation"));
+		const failed = await f.reviews.start("run", ["f1"], "start");
 		expect(failed.results[0]!.outcome).toBe("failed");
 		const id = failed.results[0]!.discussion!.sessionId;
-		expect(f.registry.findOwner("ws", id)).toBeUndefined();
-		expect(f.broker.lookup("ws", id)).toBeUndefined();
+		expect(f.hosted.get(id)).toBeUndefined();
+		expect(f.registry.host("ws", id)).toBeUndefined();
 		f.harness.setResponses([fauxAssistantMessage("retry")]);
-		const retried = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry");
+		const retried = await f.reviews.start("run", ["f1"], "retry");
 		expect(retried.results[0]).toMatchObject({ outcome: "existing", discussion: { sessionId: id } });
-		await f.registry.findOwner("ws", id)!.runtime.conversation.session.waitForIdle();
-		await f.gate.waitForDrain();
+		expect(f.registry.host("ws", id)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		await f.hosted.get(id)!.conversation.session.waitForIdle();
 	});
 
-	it("fences shutdown and workspace validation failures without leaking pending claims", async () => {
+	it("refuses sibling claims once the workspace authority changed, leaking no claim", async () => {
 		const f = await fixture();
-		f.validate.mockImplementationOnce(async () => {
-			f.gate.close();
-		});
-		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
+		f.generations.set("ws", 2);
+		const result = await f.reviews.start("run", ["f1"], "start");
 		expect(result.results[0]!.outcome).toBe("failed");
 		const id = result.results[0]!.discussion!.sessionId;
-		expect(f.registry.findOwner("ws", id)).toBeUndefined();
-		expect(f.broker.lookup("ws", id)).toBeUndefined();
-		await f.gate.waitForDrain();
+		expect(f.client.hosts.mock.settledResults).toEqual([
+			{ type: "rejected", value: expect.objectContaining({ code: "fenced" }) },
+		]);
+		expect(f.hosted.get(id)).toBeUndefined();
+		expect(f.registry.host("ws", id)).toBeUndefined();
+		expect(f.registry.list()[0]!.sessionIds).toEqual([f.source.conversation.id]);
 	});
 
-	it("cleans a provisional lease when activation fails before publication", async () => {
+	it("claims nothing once the worker stops", async () => {
 		const f = await fixture();
-		const activate = vi.spyOn(ConversationCoordinator.prototype, "activateRuntime");
-		activate.mockImplementationOnce(() => {
-			throw new Error("activation failed");
-		});
-		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
+		f.hosted.beginStopping();
+		await expect(f.reviews.start("run", ["f1"], "start")).rejects.toThrow("ownership changed");
+		expect(f.client.hosts).not.toHaveBeenCalled();
+		expect(f.registry.list()[0]!.sessionIds).toEqual([f.source.conversation.id]);
+	});
+
+	it("releases the claim when the sibling fails to open, and retries the same durable child", async () => {
+		const f = await fixture();
+		vi.spyOn(f.source.host, "open").mockRejectedValueOnce(new Error("activation failed"));
+		const result = await f.reviews.start("run", ["f1"], "start");
 		expect(result.results[0]!.outcome).toBe("failed");
 		const id = result.results[0]!.discussion!.sessionId;
-		expect(f.registry.findOwner("ws", id)).toBeUndefined();
-		expect(f.broker.lookup("ws", id)).toBeUndefined();
-		activate.mockRestore();
+		expect(f.client.released).toHaveBeenCalledWith(id);
+		expect(f.hosted.get(id)).toBeUndefined();
+		expect(f.registry.host("ws", id)).toBeUndefined();
 		f.harness.setResponses([fauxAssistantMessage("retry")]);
-		expect((await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe(
-			"existing",
-		);
-		await f.registry.findOwner("ws", id)!.runtime.conversation.session.waitForIdle();
-		await f.gate.waitForDrain();
+		expect((await f.reviews.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("existing");
+		await f.hosted.get(id)!.conversation.session.waitForIdle();
 	});
 
-	it("does not seed through another TUI's producer ownership", async () => {
+	it("does not seed a discussion another worker hosts", async () => {
 		const f = await fixture();
-		f.validate.mockRejectedValueOnce(new Error("defer initialization"));
-		const first = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
+		f.client.hosts.mockRejectedValueOnce(new WorkerRequestError("not_live", "the worker is not live"));
+		const first = await f.reviews.start("run", ["f1"], "start");
+		expect(first.results[0]!.outcome).toBe("failed");
 		const id = first.results[0]!.discussion!.sessionId;
-		expect(await f.broker.acquireForTui({ connectionId: "tui", workspaceName: "ws", sessionId: id })).toMatchObject({
-			kind: "granted",
-		});
-		const ref = await SessionManager.findForResume(join(f.root, "sessions"), id);
-		const tuiManager = await SessionManager.open(ref!);
+		const ref = await SessionManager.findForResume(f.sessionDir, id);
+		// A phone opened the discussion first: a worker of its own hosts it, with the phone attached.
+		const other = await f.spawn(ref!, { attached: true });
+		const otherManager = await SessionManager.open(ref!);
 		try {
-			expect(tuiManager.getEntries()).toHaveLength(0);
-			expect((await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe(
-				"failed",
-			);
-			// If the losing service had seeded first, this owner's revision would be stale.
-			await tuiManager.logWriter.appendSessionInfo("TUI owns initialization");
-			expect(f.registry.findOwner("ws", id)).toBeUndefined();
-			expect(f.broker.lookup("ws", id)?.state).toBe("tui-owned");
+			expect(otherManager.getEntries()).toHaveLength(0);
+			expect((await f.reviews.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("failed");
+			expect(f.client.hosts.mock.settledResults.at(-1)).toEqual({
+				type: "rejected",
+				value: expect.objectContaining({ code: "claimed" }),
+			});
+			// Had the source's worker seeded the discussion, this writer's revision would be stale.
+			await otherManager.logWriter.appendSessionInfo("The other worker owns initialization");
+			expect(f.hosted.get(id)).toBeUndefined();
+			expect(f.registry.host("ws", id)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
 		} finally {
-			await tuiManager.closePersistence();
+			await otherManager.closePersistence();
 		}
-		await f.gate.waitForDrain();
 	});
 
-	it("revokes a pending launch before draining the source RPC stream", async () => {
+	it("gives a pending sibling launch up and releases its claim when the worker stops", async () => {
 		const f = await fixture();
-		let release!: () => void;
-		f.validate.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
-		);
-		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
-		const rejected = expect(starting).rejects.toThrow("unavailable");
-		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const id = (await f.sourceEntry.reviewDiscussions!.list("run")).discussions[0]!.sessionId;
-		const captured = f.registry.values();
-		f.registry.fenceReviewOperations(captured);
-		// Revocation now waits for stream closure while the parent is still active.
-		expect(captured[0]!.lifecycle).toBe("active");
-		release();
-		await rejected;
-		expect(f.registry.findOwner("ws", id)).toBeUndefined();
-		expect(f.broker.lookup("ws", id)).toBeUndefined();
-		expect(f.published).not.toHaveBeenCalled();
-		await f.gate.waitForDrain();
+		const claiming = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		f.client.hosts.mockImplementationOnce(async (sessionId, kind, parentSessionId) => {
+			claiming.resolve();
+			await proceed.promise;
+			return f.claim(sessionId, kind, parentSessionId);
+		});
+		const starting = f.reviews.start("run", ["f1"], "start");
+		await claiming.promise;
+		const id = f.client.hosts.mock.calls[0]![0];
+		f.hosted.beginStopping();
+		proceed.resolve();
+		expect((await starting).results[0]).toMatchObject({ outcome: "failed", errorCode: "launch_failed" });
+		expect(f.hosted.get(id)).toBeUndefined();
+		expect(f.client.released).toHaveBeenCalledWith(id);
+		expect(f.registry.host("ws", id)).toBeUndefined();
 	});
 
-	it("revalidates workspace authority after the child factory returns", async () => {
-		const f = await fixture();
-		f.validate.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("workspace replaced"));
-		const result = await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
-		expect(result.results[0]!.outcome).toBe("failed");
-		const id = result.results[0]!.discussion!.sessionId;
-		expect(f.registry.findOwner("ws", id)).toBeUndefined();
-		expect(f.broker.lookup("ws", id)).toBeUndefined();
-		expect(f.published).not.toHaveBeenCalled();
-		await f.gate.waitForDrain();
-	});
-
-	it("keeps reset idle-only and preserves the new child through an old-child TUI handoff", async () => {
+	it("keeps reset idle-only and hosts the reset child as a claimed sibling", async () => {
 		const f = await fixture();
 		let finishTurn!: () => void;
 		f.harness.setResponses([
@@ -476,58 +453,26 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 				return fauxAssistantMessage("answer");
 			},
 		]);
-		const first = (await f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start")).results[0]!.discussion!;
+		const first = (await f.reviews.start("run", ["f1"], "start")).results[0]!.discussion!;
 		await vi.waitFor(() => expect(finishTurn).toBeTypeOf("function"));
-		expect(
-			(await f.sourceEntry.reviewDiscussions!.reset(first.discussionId, first.sessionId, "busy-reset")).status,
-		).toBe("busy");
+		expect((await f.reviews.reset(first.discussionId, first.sessionId, "busy-reset")).status).toBe("busy");
 		finishTurn();
-		await f.registry.findOwner("ws", first.sessionId)!.runtime.conversation.session.waitForIdle();
-		let release!: () => void;
-		f.validate.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
-		);
-		const resetting = f.sourceEntry.reviewDiscussions!.reset(first.discussionId, first.sessionId, "reset");
-		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const oldChild = f.registry.findOwner("ws", first.sessionId)!;
-		const disposeRequested = Promise.withResolvers<void>();
-		const host = oldChild.runtime.host;
-		const close = host.close.bind(host);
-		vi.spyOn(host, "close").mockImplementation((conversation, event) => {
-			if (conversation === oldChild.runtime.conversation) disposeRequested.resolve();
-			return close(conversation, event);
-		});
-		const closeOldSession = vi.spyOn(oldChild.runtime.conversation.session, "dispose");
-		let acquired = false;
-		const acquiring = f.broker
-			.acquireForTui({ connectionId: "tui-old", workspaceName: "ws", sessionId: first.sessionId })
-			.then((result) => {
-				acquired = true;
-				return result;
-			});
-		// The handoff has reached the old child's disposal; the held reset keeps the child open.
-		await disposeRequested.promise;
-		await new Promise((resolve) => setTimeout(resolve, 50));
-		expect(closeOldSession).not.toHaveBeenCalled();
-		expect(acquired).toBe(false);
-		release();
-		const reset = await resetting;
+		await f.hosted.get(first.sessionId)!.conversation.session.waitForIdle();
+		const reset = await f.reviews.reset(first.discussionId, first.sessionId, "reset");
 		expect(reset.status).toBe("reset");
-		expect(reset.discussion.currentSessionId).not.toBe(first.sessionId);
-		expect(await acquiring).toMatchObject({ kind: "granted" });
-		const child = f.registry.findOwner("ws", reset.discussion.currentSessionId)!;
-		expect(child.lifecycle).toBe("active");
-		expect(child.runtime.conversation.session.isBusy).toBe(false);
-		expect(child.runtime.conversation.session.messages.filter((message) => message.role === "user")).toHaveLength(0);
-		expect(f.broker.lookup("ws", first.sessionId)?.state).toBe("tui-owned");
+		const resetId = reset.discussion.currentSessionId;
+		expect(resetId).not.toBe(first.sessionId);
+		expect(f.registry.host("ws", resetId)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		const child = f.hosted.get(resetId)!;
+		expect(child.kind).toBe("sibling");
+		expect(child.conversation.session.isBusy).toBe(false);
+		expect(child.conversation.session.messages.filter((message) => message.role === "user")).toHaveLength(0);
 	});
 
-	it("serializes an unloaded canonical outcome write ahead of a competing TUI", async () => {
+	it("claims an unloaded canonical source for an outcome write, and leaves one another worker hosts", async () => {
 		const f = await fixture();
-		const canonical = await SessionManager.create(f.root, join(f.root, "sessions"));
+		const canonical = await SessionManager.create(f.root, f.sessionDir);
+		const canonicalRef = canonical.getSessionRef()!;
 		const originalId = canonical.getSessionId();
 		const coldRecord = { ...f.record, runId: "cold-run" };
 		await anchorReviewRun(canonical, "cold-run");
@@ -535,96 +480,126 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		await appendReviewRun(f.source.conversation.session.sessionWriter, coldRecord);
 		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionWriter, ["cold-run"]);
 		await canonical.closePersistence();
-		let release!: () => void;
-		f.validate.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
-		);
-		const writing = f.sourceEntry.reviewDiscussions!.recordOutcome({
-			runId: "cold-run",
-			findingId: "f1",
-			status: "fixed",
+		const open = SessionManager.open.bind(SessionManager);
+		const writing = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		vi.spyOn(SessionManager, "open").mockImplementationOnce(async (ref, ...rest) => {
+			writing.resolve();
+			await proceed.promise;
+			return open(ref, ...rest);
 		});
-		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		let acquired = false;
-		const acquiring = f.broker
-			.acquireForTui({ connectionId: "tui", workspaceName: "ws", sessionId: originalId })
-			.then((result) => {
-				acquired = true;
-				return result;
-			});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(acquired).toBe(false);
-		release();
-		await writing;
-		expect(await acquiring).toMatchObject({ kind: "granted" });
+		const recorded = f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "fixed" });
+		await writing.promise;
+		// The write holds the source's claim: a phone's open of it reaches this worker, not a worker of its own.
+		expect(f.registry.host("ws", originalId)).toEqual({ workerId: f.worker.workerId, kind: "sibling" });
+		const routed = await f.registry.open(
+			{ workspaceName: "ws", workspaceGeneration: 1, sessionId: originalId },
+			{
+				origin: "phone",
+				prepare: () => Promise.reject(new Error("unexpected spawn")),
+				attach: (worker) => worker.workerId,
+			},
+		);
+		expect(routed).toBe(f.worker.workerId);
+		proceed.resolve();
+		await recorded;
+		expect(f.client.released).toHaveBeenCalledWith(originalId);
+		expect(f.registry.host("ws", originalId)).toBeUndefined();
 		expect(
 			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
 				?.status,
 		).toBe("fixed");
+		// Once a worker of its own hosts the source with a client attached, this worker no longer writes it.
+		const other = await f.spawn(canonicalRef, { attached: true });
 		await expect(
-			f.sourceEntry.reviewDiscussions!.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
-		).rejects.toThrow("owned");
-		expect(f.broker.lookup("ws", originalId)?.state).toBe("tui-owned");
-		await f.gate.waitForDrain();
+			f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "dismissed" }),
+		).rejects.toMatchObject({ code: "claimed" });
+		expect(f.registry.host("ws", originalId)).toEqual({ workerId: other.worker.workerId, kind: "primary" });
+		expect(
+			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
+				?.status,
+		).toBe("fixed");
+		expect(f.launches).toHaveLength(2);
 	});
 
-	it("keeps source admission alive after detach until its sibling launch settles", async () => {
+	it("retires a detached, idle worker that keeps the canonical source, then writes the outcome", async () => {
 		const f = await fixture();
-		let release!: () => void;
-		f.validate.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
+		const canonical = await SessionManager.create(f.root, f.sessionDir);
+		const canonicalRef = canonical.getSessionRef()!;
+		const originalId = canonical.getSessionId();
+		const coldRecord = { ...f.record, runId: "cold-run" };
+		await anchorReviewRun(canonical, "cold-run");
+		await appendReviewRunDurably(canonical.logWriter, coldRecord);
+		await appendReviewRun(f.source.conversation.session.sessionWriter, coldRecord);
+		await registerReviewHandoffAliases(canonical, f.source.conversation.session.sessionWriter, ["cold-run"]);
+		await canonical.closePersistence();
+		// The phone left the source's worker (a client move): detached and idle until its TTL runs.
+		const other = await f.spawn(canonicalRef);
+
+		const recorded = f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "fixed" });
+		// The claim retires that worker as its TTL would, and waits for its exit.
+		await waitUntil(() =>
+			f.registry.list().some((worker) => worker.workerId === other.worker.workerId && worker.state === "retiring"),
 		);
+		other.exit({ reason: "stopped" });
+		await recorded;
+		expect(f.client.released).toHaveBeenCalledWith(originalId);
+		expect(f.registry.host("ws", originalId)).toBeUndefined();
+		expect(
+			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
+				?.status,
+		).toBe("fixed");
+	});
+
+	it("keeps the worker active while a sibling launch is pending, so a retention stop is refused", async () => {
+		const f = await fixture();
+		const claiming = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		f.client.hosts.mockImplementationOnce(async (sessionId, kind, parentSessionId) => {
+			claiming.resolve();
+			await proceed.promise;
+			return f.claim(sessionId, kind, parentSessionId);
+		});
 		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
-		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const parent = f.registry.findOwner("ws", f.source.conversation.session.sessionId)!;
-		parent.coordinator.markDetached();
-		f.registry.scheduleRetention(parent, "phone_detached", 0);
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(parent.lifecycle).toBe("active");
-		release();
+		const starting = f.reviews.start("run", ["f1"], "start");
+		await claiming.promise;
+		// What `runWorker` reports to the registry and checks before it answers a stop.
+		expect(f.hosted.active()).toBe(true);
+		proceed.resolve();
 		const result = await starting;
 		expect(result.results[0]!.outcome).toBe("created");
-		const child = f.registry.findOwner("ws", result.results[0]!.discussion!.sessionId)!;
-		await child.runtime.conversation.session.waitForIdle();
-		expect(child.lifecycle).toBe("active");
+		const child = f.hosted.get(result.results[0]!.discussion!.sessionId)!;
+		await child.conversation.session.waitForIdle();
+		await vi.waitFor(() => expect(f.hosted.active()).toBe(false));
 	});
 
-	it("holds a concurrent phone attach until sibling publication completes", async () => {
+	it("routes a phone's open of a discussion being launched to the source's worker", async () => {
 		const f = await fixture();
-		let release!: () => void;
-		f.validate.mockImplementationOnce(
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
-		);
-		f.harness.setResponses([fauxAssistantMessage("answer")]);
-		const starting = f.sourceEntry.reviewDiscussions!.start("run", ["f1"], "start");
-		await vi.waitFor(() => expect(release).toBeTypeOf("function"));
-		const listing = await f.sourceEntry.reviewDiscussions!.list("run");
-		const id = listing.discussions[0]!.sessionId;
-		let attached = false;
-		const attaching = f.registry.getOrCreateEntry(f.handshake(id), f.authorization).then((value) => {
-			attached = true;
-			return value;
+		const opening = Promise.withResolvers<void>();
+		const proceed = Promise.withResolvers<void>();
+		const open = f.source.host.open.bind(f.source.host);
+		vi.spyOn(f.source.host, "open").mockImplementationOnce(async (...args) => {
+			opening.resolve();
+			await proceed.promise;
+			return open(...args);
 		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(attached).toBe(false);
-		release();
+		f.harness.setResponses([fauxAssistantMessage("answer")]);
+		const starting = f.reviews.start("run", ["f1"], "start");
+		await opening.promise;
+		const id = (await f.reviews.list("run")).discussions[0]!.sessionId;
+		const routed = await f.registry.open(
+			{ workspaceName: "ws", workspaceGeneration: 1, sessionId: id },
+			{
+				origin: "phone",
+				prepare: () => Promise.reject(new Error("unexpected spawn")),
+				attach: (worker) => worker.workerId,
+			},
+		);
+		expect(routed).toBe(f.worker.workerId);
+		proceed.resolve();
 		const started = await starting;
 		expect(started.results[0]!.outcome).toBe("created");
-		const entry = await attaching;
-		expect(entry.created).toBe(false);
-		expect(entry.entry).toBe(f.registry.findOwner("ws", id));
-		entry.attachClaim.release();
-		await entry.entry.runtime.conversation.session.waitForIdle();
-		expect(f.createRuntime).toHaveBeenCalledOnce();
+		await f.hosted.get(id)!.conversation.session.waitForIdle();
+		expect(f.launches).toHaveLength(1);
 	});
 });

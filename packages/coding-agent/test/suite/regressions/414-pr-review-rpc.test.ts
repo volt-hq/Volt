@@ -2,11 +2,21 @@ import { Buffer } from "node:buffer";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type HostFrame, INTENT_SCHEMAS, QUERY_SCHEMAS } from "@hansjm10/volt-protocol";
+import {
+	type ControlRelayFrame,
+	type ControlRelayOutcome,
+	type HostFrame,
+	INTENT_SCHEMAS,
+	QUERY_SCHEMAS,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
-import type { AuthorityLoss } from "../../../src/core/protocol/server/connection.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import { intentRegistry } from "../../../src/core/protocol/intents/index.ts";
+import type { IntentContext } from "../../../src/core/protocol/intents/types.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
+import { type AuthorityLoss, queryErrorReason, rejectionReason } from "../../../src/core/protocol/server/connection.ts";
 import {
 	createIrohRemoteRpcGrant,
 	getIrohRemoteStreamCapability,
@@ -57,6 +67,12 @@ const allCapabilities: IrohRemoteRpcCapability[] = [
 	"conversation.control.v1",
 	"worktrees.manage.v1",
 ];
+/** A phone's conversation stream, served as the worker hosting the conversation serves it. */
+interface ConversationScope {
+	readonly kind: "conversation";
+	readonly conversation: HostedConversation;
+}
+
 const review: RemoteStreamScope = { kind: "discovery", purpose: "review" };
 const manageWorktrees: RemoteStreamScope = { kind: "management", purpose: "manage_worktrees" };
 const resolveParams = Compile(QUERY_SCHEMAS.pr_review.params);
@@ -116,8 +132,13 @@ interface Stream {
 	readonly phone: ReturnType<typeof createIrohStreamPair>["phone"];
 }
 
-/** A device stream of `scope`, as the daemon serves it: the remote profile with the daemon's remote services. */
-async function stream(scope: RemoteStreamScope, options: StreamOptions = {}): Promise<Stream> {
+/**
+ * A device stream of `scope` on the remote profile: a workspace stream as the
+ * daemon serves it, with the daemon's remote services; a conversation stream
+ * as its worker serves it, relaying the daemon's intents and queries to the
+ * daemon's relay services.
+ */
+async function stream(scope: RemoteStreamScope | ConversationScope, options: StreamOptions = {}): Promise<Stream> {
 	const grant = createIrohRemoteRpcGrant(options.capabilities ?? allCapabilities);
 	const authorization: IrohRemoteClientAuthorizationSuccess = {
 		ok: true,
@@ -151,8 +172,39 @@ async function stream(scope: RemoteStreamScope, options: StreamOptions = {}): Pr
 		prReviews: () => options.prReviews ?? unexpected(),
 		unregisterWorkspace: unexpected,
 	};
-	const allows = remoteStreamAllows(scope);
 	const conversation = scope.kind === "conversation" ? scope.conversation : undefined;
+	const workspaceScope = scope.kind === "conversation" ? undefined : scope;
+	const allows = workspaceScope === undefined ? undefined : remoteStreamAllows(workspaceScope);
+	/** A relayed frame, run as the daemon runs a worker's `worker_forward`. */
+	const relay = async (frame: ControlRelayFrame): Promise<ControlRelayOutcome> => {
+		if (conversation === undefined) throw new Error("unexpected relay");
+		const ctx: IntentContext = {
+			services: remoteIntentServices(
+				host,
+				authorization,
+				{ kind: "relay", sessionId: conversation.id },
+				{ keep: { relayIds: new Set(["relay-1"]) } },
+			),
+			profile: { name: "remote", grant },
+		};
+		if (frame.type === "query") {
+			try {
+				return {
+					type: "result",
+					queryId: frame.queryId,
+					data: await queryRegistry.runFrame(ctx, frame.query, frame.params),
+				};
+			} catch (error) {
+				return { type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) };
+			}
+		}
+		try {
+			const invocation = await intentRegistry.invokeFrame(ctx, frame.type, frame.input);
+			return { type: "accepted", intentId: frame.intentId, ordinals: invocation.ordinals };
+		} catch (error) {
+			return { type: "rejected", intentId: frame.intentId, reason: rejectionReason(error) };
+		}
+	};
 	const pair = createIrohStreamPair();
 	const connection = serveIrohRemoteConnection({
 		...(conversation === undefined || options.conversationHost === undefined
@@ -161,8 +213,14 @@ async function stream(scope: RemoteStreamScope, options: StreamOptions = {}): Pr
 		stream: pair.host,
 		grant,
 		redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
-		...(conversation === undefined ? {} : { redirect: {} }),
-		services: () => remoteIntentServices(host, authorization, scope, { keep: {} }),
+		...(workspaceScope !== undefined
+			? { services: () => remoteIntentServices(host, authorization, workspaceScope, { keep: {} }) }
+			: {
+					redirect: {},
+					// The host's services are the daemon's, relayed.
+					services: () => ({ workspace: { name: authorization.workspace.name } }),
+					relay,
+				}),
 		...(allows === undefined ? {} : { allows }),
 		...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
 		...(options.authority === undefined ? {} : { authority: options.authority }),
