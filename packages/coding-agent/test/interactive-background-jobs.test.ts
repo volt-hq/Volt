@@ -26,6 +26,7 @@ import { PresentedToolComponent } from "../src/modes/interactive/components/pres
 import type { StreamingRenderCoalescer } from "../src/modes/interactive/components/streaming-render-coalescer.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
 import type { WorkStatus } from "../src/modes/interactive/components/work-status.ts";
+import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
@@ -135,7 +136,7 @@ async function createFixture(
 	}
 	const host = createFakeHost({ extensionMode: "tui" });
 	const { conversation } = createFakeConversation(harness.session);
-	const mode = new InteractiveMode(host.host, conversation, { tuiMode });
+	const mode = new InteractiveMode(TuiHost.start({ host: host.host, conversation }), { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;
 	const terminal = new VirtualTerminal(columns, 24);
 	access.renderer = createInteractiveTui({

@@ -7,6 +7,7 @@ import type { HostedConversation } from "../../../src/core/host/hosted-conversat
 import type { HostClient } from "../../../src/core/host/targets.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
+import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -74,8 +75,10 @@ async function fixture() {
 		lost: lost.promise,
 	};
 	const mode = new InteractiveMode(
-		host as unknown as ConversationHost,
-		conversation as unknown as HostedConversation,
+		TuiHost.start({
+			host: host as unknown as ConversationHost,
+			conversation: conversation as unknown as HostedConversation,
+		}),
 		{ tuiMode: "regular" },
 	);
 	const access = mode as unknown as TestAccess;

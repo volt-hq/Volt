@@ -10,16 +10,13 @@ import { InteractiveMode } from "../../../../src/modes/interactive/interactive-m
 
 type ShutdownThis = {
 	isShuttingDown: boolean;
-	runtimeDisposePromise: Promise<void> | undefined;
 	disposeRuntimeHost: () => Promise<void>;
 	unregisterSignalHandlers: () => void;
-	host: { close: () => Promise<void>; dispose: () => Promise<void> };
-	conversation: object;
+	tuiHost: { stopServing: () => void; dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	flushStdout: () => Promise<void>;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
-	releaseDaemonLeaseOnQuit: () => Promise<void>;
 	closeLspTrace: () => Promise<void>;
 	cleanupAllScratchDirectories: () => void;
 };
@@ -66,19 +63,17 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 		const dispose = deferred();
 		const context: ShutdownThis = {
 			isShuttingDown: false,
-			runtimeDisposePromise: undefined,
 			disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
 			unregisterSignalHandlers: vi.fn(() => {
 				order.push("unregister");
 			}),
-			host: {
-				close: vi.fn(() => {
+			tuiHost: {
+				stopServing: vi.fn(),
+				dispose: vi.fn(() => {
 					order.push("dispose");
 					return dispose.promise;
 				}),
-				dispose: vi.fn(async () => {}),
 			},
-			conversation: {},
 			ui: {
 				terminal: {
 					drainInput: vi.fn(async () => {
@@ -94,7 +89,6 @@ describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
 				rememberActiveProfile: vi.fn(),
 				flush: vi.fn(async () => {}),
 			},
-			releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
 			closeLspTrace: vi.fn(async () => {}),
 			cleanupAllScratchDirectories: vi.fn(),
 		};

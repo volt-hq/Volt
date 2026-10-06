@@ -78,13 +78,15 @@ import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { keyDisplayText } from "./modes/interactive/components/keybinding-hints.ts";
 import {
-	createDaemonAttach,
-	type DaemonAttach,
+	createDaemonLink,
+	DaemonLeases,
 	DaemonLeaseUnavailableError,
-	type DaemonLeaseWait,
-	isDaemonAttachSupported,
+	type DaemonLink,
+	isDaemonLinkSupported,
+	type LeaseWait,
 	openSessionWithDaemonLease,
-} from "./modes/interactive/daemon-attach.ts";
+} from "./modes/interactive/host/daemon-link.ts";
+import { TuiHost } from "./modes/interactive/host/tui-host.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
 import { canonicalizePath, isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
@@ -402,7 +404,7 @@ async function forkSessionOrExit(
  * wait ends: the interrupt binding stops the daemon's turn, and the clear or
  * exit binding cancels the open. Returns the function that stops reading keys.
  */
-function watchDaemonLeaseWait(sessionId: string, wait: DaemonLeaseWait): () => void {
+function watchDaemonLeaseWait(sessionId: string, wait: LeaseWait): () => void {
 	const keybindings = KeybindingsManager.create();
 	setKeybindings(keybindings);
 	console.log(
@@ -434,13 +436,13 @@ function watchDaemonLeaseWait(sessionId: string, wait: DaemonLeaseWait): () => v
 /**
  * The interactive TUI takes its daemon conversation lease before it opens an
  * existing session for writing (see openSessionWithDaemonLease). The leased
- * integration is handed to interactive mode, or released when the session is
+ * link is handed to the TUI host's leases, or released when the session is
  * not served interactively after all.
  */
 class StartupDaemonLease {
 	private readonly agentDir: string;
 	private readonly autoStart: boolean;
-	private attach: DaemonAttach | undefined;
+	private link: DaemonLink | undefined;
 
 	constructor(agentDir: string, autoStart: boolean) {
 		this.agentDir = agentDir;
@@ -452,23 +454,38 @@ class StartupDaemonLease {
 		// A session whose cwd is gone has no daemon workspace to lease it in.
 		if (cwd === undefined || !existsSync(cwd)) return SessionManager.open(ref);
 		const opened = await openSessionWithDaemonLease(ref, {
-			createAttach: () => createDaemonAttach({ cwd, agentDir: this.agentDir, autoStart: this.autoStart }),
+			createLink: () => createDaemonLink({ cwd, agentDir: this.agentDir, autoStart: this.autoStart }),
 			onWaiting: (wait) => watchDaemonLeaseWait(ref.sessionId, wait),
 		});
-		this.attach = opened.attach;
+		this.link = opened.link;
 		return opened.manager;
 	}
 
-	/** Hand the leased daemon integration to interactive mode. */
-	transfer(): DaemonAttach | undefined {
-		const attach = this.attach;
-		this.attach = undefined;
-		return attach;
+	/**
+	 * The TUI host's daemon leases: over the leased link, or a link created
+	 * for the conversation the TUI shows once the TUI serves it. Supported TUIs
+	 * keep a reconnecting link even when auto-start is off, so a daemon started
+	 * by another process can discover every already-running agent.
+	 */
+	leases(): DaemonLeases {
+		const link = this.link;
+		this.link = undefined;
+		return new DaemonLeases({
+			...(link === undefined ? {} : { link }),
+			createLink: (conversation) =>
+				createDaemonLink({
+					cwd: conversation.cwd,
+					agentDir: this.agentDir,
+					autoStart: conversation.session.settingsManager.getRemoteSettings().background === true,
+				}),
+		});
 	}
 
 	/** Release the lease when the session is not served interactively after all. */
 	async dispose(): Promise<void> {
-		await this.transfer()?.dispose();
+		const link = this.link;
+		this.link = undefined;
+		await link?.dispose();
 	}
 }
 
@@ -921,7 +938,7 @@ export async function main(args: string[], options?: MainOptions) {
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
 	const startupDaemonLease =
-		appMode === "interactive" && isDaemonAttachSupported()
+		appMode === "interactive" && isDaemonLinkSupported()
 			? new StartupDaemonLease(agentDir, startupSettingsManager.getRemoteSettings().background === true)
 			: undefined;
 	let initialSessionManager: SessionManager;
@@ -1197,7 +1214,14 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	};
 	time("createRuntime");
-	const host = new ConversationHost({ factory: createRuntime, agentDir, extensionMode: toExtensionMode(appMode) });
+	// The leases' open gate takes a resumed session's lease before the session opens.
+	const daemonLeases = startupDaemonLease?.leases();
+	const host = new ConversationHost({
+		factory: createRuntime,
+		agentDir,
+		extensionMode: toExtensionMode(appMode),
+		...(daemonLeases === undefined ? {} : { openGate: daemonLeases.openGate }),
+	});
 	const opened = await host.open({ kind: "adopt", sessionManager: sessionManagerOwner.transfer(), cwd: sessionCwd });
 	if (opened.cancelled) throw new Error("Startup session open was cancelled");
 	const conversation = opened.conversation;
@@ -1264,7 +1288,7 @@ export async function main(args: string[], options?: MainOptions) {
 
 		if (appMode !== "interactive") {
 			// Piped stdin turned an interactive start into a print run; the daemon gets the session back.
-			await startupDaemonLease?.dispose();
+			await daemonLeases?.dispose();
 		}
 		if (appMode === "rpc") {
 			printTimings();
@@ -1275,7 +1299,12 @@ export async function main(args: string[], options?: MainOptions) {
 				},
 			});
 		} else if (appMode === "interactive") {
-			const interactiveMode = new InteractiveMode(host, conversation, {
+			const tuiHost = TuiHost.start({
+				host,
+				conversation,
+				...(daemonLeases === undefined ? {} : { daemon: daemonLeases }),
+			});
+			const interactiveMode = new InteractiveMode(tuiHost, {
 				migratedProviders,
 				modelFallbackMessage,
 				modelScopePatterns: parsed.models,
@@ -1285,7 +1314,6 @@ export async function main(args: string[], options?: MainOptions) {
 				initialMessages: parsed.messages,
 				verbose: parsed.verbose,
 				...(parsed.tuiMode !== undefined ? { tuiMode: parsed.tuiMode } : {}),
-				daemonAttach: startupDaemonLease?.transfer(),
 			});
 			if (startupBenchmark) {
 				await interactiveMode.init();
@@ -1321,5 +1349,5 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 			return;
 		}
-	}).finally(() => startupDaemonLease?.dispose());
+	}).finally(() => daemonLeases?.dispose());
 }

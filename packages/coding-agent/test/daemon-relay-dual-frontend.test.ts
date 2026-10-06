@@ -1,10 +1,9 @@
 /**
  * §12.3.3 dual-frontend integration: a TUI-owned conversation served over the
- * daemon's byte relay. Real control server on a tmpdir socket, real relay
- * redemption via createDaemonClient().openRelay(), real relay-socket adapter,
- * a real conversation host over the faux provider, and the phone's stream
- * served on the remote profile as InteractiveMode.serveRelayConversation
- * serves it. Only the phone's Iroh stream is in memory.
+ * daemon's byte relay. Real control server on a tmpdir socket with a lease
+ * broker, the TUI host's real daemon link (lease, relay redemption, relayed
+ * intents), its relay serving on the remote profile, and a real conversation
+ * host over the faux provider. Only the phone's Iroh stream is in memory.
  */
 
 import { Buffer } from "node:buffer";
@@ -12,41 +11,21 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { LiveItem } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ConversationHost } from "../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
-import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
 import { type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/protocol/transport/iroh-transport.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
-import { writeIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake-reader.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
-import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlRequest, RelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
-import {
-	createIntegratedConversationHandshakeResponse,
-	type IntegratedConversationSessionSelection,
-} from "../src/daemon/handshake-responses.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
-import { type RelayLifecycleOwner, type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
-import {
-	createDaemonAttach,
-	createRelayWorkspaceUnregisterRetirement,
-	createTuiRelayAuthorization,
-	type DaemonAttach,
-	type DaemonRelayOffer,
-	getRelayServingSanitizerOptions,
-	type OpenedRelay,
-} from "../src/modes/interactive/daemon-attach.ts";
-import { adaptRelaySocketToIrohStream } from "../src/modes/interactive/relay-stream-adapter.ts";
-import { createTestSocketEndpoint } from "./socket-test-helpers.ts";
-import { createHostHarness } from "./suite/host-harness.ts";
+import { type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
+import { createDaemonLink } from "../src/modes/interactive/host/daemon-link.ts";
+import { createRelayWorkspaceUnregisterRetirement } from "../src/modes/interactive/host/relay-serving.ts";
+import { createTuiHarness, type TuiHarness } from "./suite/tui-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -150,66 +129,14 @@ async function connectRelayedPhone(relayed: RelayedPhoneStream): Promise<RemoteP
 	return phone;
 }
 
-/** The TUI's conversation, held by the TUI's own client, in a host over the faux provider. */
-async function openTuiConversation(): Promise<{
-	host: ConversationHost;
-	conversation: HostedConversation;
-	faux: FauxProvider;
-}> {
-	const harness = await createHostHarness({ whenUnattached: "keep" });
-	cleanups.push(() => harness.cleanup());
-	const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"), {
-		id: SESSION_ID,
-	});
-	const opened = await harness.host.open({ kind: "adopt", sessionManager });
-	if (opened.cancelled) throw new Error("A startup open cannot be cancelled");
-	await harness.host.attach(harness.client("tui"), opened.conversation);
-	return { host: harness.host, conversation: opened.conversation, faux: harness.faux };
-}
-
-interface DaemonHarness {
-	socketPath: string;
-	registry: RelayRegistry;
-	server: ControlServer;
-}
-
-async function startDaemonHarness(): Promise<DaemonHarness> {
-	const endpoint = createTestSocketEndpoint("volt-dualfe");
-	const registry = new RelayRegistry();
-	let server: ControlServer;
-	try {
-		server = await startControlServer({
-			socketPath: endpoint.socketPath,
-			version: "0.0.0-test",
-			handlers: {
-				onRequest: () => {},
-				relayAdmission: {
-					admitRelay: (hello, socket, bufferedRemainder) =>
-						registry.admit(hello.relayId, hello.relayToken, socket, bufferedRemainder),
-				},
-			},
-		});
-	} catch (error) {
-		endpoint.cleanup();
-		throw error;
-	}
-	cleanups.push(async () => {
-		await Promise.all(
-			registry.all().map((relay) => relay.close("host_shutdown", { pendingMessage: "daemon shutting down" })),
-		);
-		await server.close();
-		endpoint.cleanup();
-	});
-	return { socketPath: endpoint.socketPath, registry, server };
-}
-
 interface OwnedRelayDaemonHarness {
 	agentDir: string;
 	workspaceDir: string;
 	registry: RelayRegistry;
 	broker: LeaseBroker;
 	server: ControlServer;
-	attach: DaemonAttach;
+	/** The TUI host, its client connected and holding the session's lease. */
+	tui: TuiHarness;
 	/** The relayed frames the daemon ran for the TUI. */
 	relayedFrames: Array<Extract<ControlRequest, { type: "relay_rpc" }>["frame"]>;
 }
@@ -364,11 +291,7 @@ async function startOwnedRelayDaemonHarness(): Promise<OwnedRelayDaemonHarness> 
 		})}\n`,
 		{ mode: 0o600 },
 	);
-	const attach = createDaemonAttach({ cwd: workspaceDir, agentDir, autoStart: false });
-	await attach.start();
-	expect(await attach.acquire(SESSION_ID)).toMatchObject({ kind: "granted" });
 	cleanups.push(async () => {
-		await attach.dispose();
 		await Promise.all(
 			registry.all().map((relay) => relay.close("host_shutdown", { pendingMessage: "daemon shutting down" })),
 		);
@@ -376,47 +299,15 @@ async function startOwnedRelayDaemonHarness(): Promise<OwnedRelayDaemonHarness> 
 		rmSync(agentDir, { recursive: true, force: true });
 		rmSync(workspaceDir, { recursive: true, force: true });
 	});
-	return { agentDir, workspaceDir, registry, broker, server, attach, relayedFrames };
-}
-
-/** Daemon side of one phone attach: the phone stream paused behind a minted relay offer. */
-function mintPhoneRelay(registry: RelayRegistry, clientNodeId: string, streamId: string) {
-	const phone = createRelayedPhoneStream();
-	const settle = vi.fn();
-	const relay = registry.mint({
-		workspaceName: WORKSPACE.name,
-		sessionId: SESSION_ID,
-		clientNodeId,
-		ownerControlConnectionId: "control-tui",
-		connectionId: `conn-${clientNodeId}`,
-		streamId,
-		stream: phone.stream,
-		preamble: {
-			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE, initialInput: [] },
-			authorization: {
-				clientNodeId,
-				workspaceName: WORKSPACE.name,
-				workspacePath: WORKSPACE.path,
-				...createRelayWorkspaceMetadata(),
-				allowedTools: "",
-				rpcGrant: RPC_GRANT,
-			},
-			hostNodeId: "n-daemon-host",
-			relayMode: "development",
-			connectionId: `conn-${clientNodeId}`,
-			streamId,
-			resolvedTarget: {
-				sessionId: SESSION_ID,
-				selection: "resumed",
-				requestedSessionId: SESSION_ID,
-				workspaceName: WORKSPACE.name,
-				workspacePath: WORKSPACE.path,
-			},
-		},
-		rejectPending: () => {},
-		onSettled: settle,
+	// The TUI shows the session in the workspace; once its client is ready, its host leases the session.
+	const tui = await createTuiHarness({
+		link: createDaemonLink({ cwd: workspaceDir, agentDir, autoStart: false }),
+		startup: { id: SESSION_ID, cwd: workspaceDir },
 	});
-	return { phone, relay, settle };
+	cleanups.push(() => tui.cleanup());
+	await tui.connect();
+	expect(broker.lookup(WORKSPACE.name, SESSION_ID)?.state).toBe("tui-owned");
+	return { agentDir, workspaceDir, registry, broker, server, tui, relayedFrames };
 }
 
 function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: string, streamId: string) {
@@ -485,106 +376,6 @@ function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: str
 	return { phone, relay, settle, framesAtSettlement: () => framesAtSettlement };
 }
 
-/** The TUI's handshake response for a redeemed relay, as InteractiveMode.serveRelayConversation writes it. */
-function relayHandshakeResponse(opened: Pick<OpenedRelay, "preamble">) {
-	const handshake = opened.preamble.handshake;
-	const authorization = createTuiRelayAuthorization(opened.preamble.authorization);
-	const resolvedTarget = opened.preamble.resolvedTarget;
-	const sessionSelection: IntegratedConversationSessionSelection =
-		resolvedTarget.selection === "created"
-			? { kind: "created", sessionId: resolvedTarget.sessionId }
-			: {
-					kind: resolvedTarget.selection,
-					requestedSessionId: resolvedTarget.requestedSessionId ?? resolvedTarget.sessionId,
-					sessionId: resolvedTarget.sessionId,
-				};
-	return createIntegratedConversationHandshakeResponse(
-		{ hello: handshake.hello, response: handshake.response },
-		authorization,
-		resolvedTarget.sessionId,
-		sessionSelection,
-		// The phone verifies the saved host node id in the relayed handshake
-		// response, so the TUI must echo the daemon's identity from the preamble.
-		{ hostNodeId: opened.preamble.hostNodeId, relayMode: opened.preamble.relayMode },
-	);
-}
-
-/**
- * TUI side of one relay offer, mirroring InteractiveMode.serveRelayConversation:
- * redeem the token, adapt the socket, write the handshake response, then serve
- * the stream on the remote profile as a redirect client of the TUI's conversation.
- */
-async function serveRelayFromTui(
-	client: DaemonClient,
-	relay: RelayLifecycleOwner,
-	target: { host: ConversationHost; conversation: HostedConversation },
-): Promise<{ connection: ProtocolConnection; done: Promise<void> }> {
-	const opened = await client.openRelay({ relayId: relay.relayId, relayToken: relay.relayToken });
-	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
-	await writeIrohRemoteHandshakeResponse(relayedStream.send, relayHandshakeResponse(opened));
-	const authorization = createTuiRelayAuthorization(opened.preamble.authorization);
-	const connection = serveIrohRemoteConnection({
-		host: target.host,
-		conversation: target.conversation,
-		stream: relayedStream,
-		initialInput: opened.preamble.handshake.initialInput,
-		grant: authorization.client.rpcGrant,
-		redaction: getRelayServingSanitizerOptions(opened.preamble.authorization, tmpdir()),
-		// The phone stays on the TUI's conversation; a session change redirects it alone.
-		redirect: {},
-	});
-	const done = connection.closed.catch(() => undefined).finally(() => relayedStream.close());
-	return { connection, done };
-}
-
-/** TUI side of one owned relay offer, with relay intents forwarded to the daemon (serveRelayConversation). */
-async function serveOwnedRelayFromTui(
-	daemonAttach: DaemonAttach,
-	offer: DaemonRelayOffer,
-	openRelay: () => Promise<OpenedRelay>,
-	target: { host: ConversationHost; conversation: HostedConversation },
-): Promise<void> {
-	const opened = await openRelay();
-	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
-	const authorizationSubset = opened.preamble.authorization;
-	const authorization = createTuiRelayAuthorization(authorizationSubset);
-	const relayedSessionId = offer.sessionId;
-	const retirement = createRelayWorkspaceUnregisterRetirement(daemonAttach, () => relayedSessionId);
-	try {
-		await writeIrohRemoteHandshakeResponse(relayedStream.send, relayHandshakeResponse(opened));
-		const connection = serveIrohRemoteConnection({
-			host: target.host,
-			conversation: target.conversation,
-			stream: relayedStream,
-			initialInput: opened.preamble.handshake.initialInput,
-			grant: authorization.client.rpcGrant,
-			redaction: getRelayServingSanitizerOptions(authorizationSubset, tmpdir()),
-			redirect: {},
-			relay: async (frame) => {
-				const outcome = await daemonAttach.forwardRelayRpc(
-					authorizationSubset.clientNodeId,
-					relayedSessionId,
-					frame,
-				);
-				if (!outcome) throw new Error("daemon_unavailable");
-				if (frame.type === "unregister_workspace" && outcome.type === "accepted") {
-					retirement.unregistered();
-					// The answer is written first; then the stream ends.
-					setImmediate(() => void connection.close({ code: "workspace_unregistered" }));
-				}
-				return outcome;
-			},
-		});
-		await connection.closed;
-	} catch {
-		// Relay teardown surfaces to the phone via the daemon's close reason.
-	} finally {
-		await retirement.finalize();
-		relayedStream.close();
-		opened.finished();
-	}
-}
-
 /** The live items the phone received after its subscription's reset. */
 function liveItemsAfterReset(phone: RemotePhone): LiveItem[] {
 	const reset = phone.frames.findIndex((frame) => frame.type === "live" && frame.reset === true);
@@ -626,27 +417,18 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 	});
 
 	it("serves two co-attached phones from one TUI conversation: prompts land, the turn fans out, abort keeps both relays open", async () => {
-		const { socketPath, registry } = await startDaemonHarness();
-		const target = await openTuiConversation();
-		const { conversation } = target;
-
-		const client = createDaemonClient({
-			socketPath,
-			client: "tui",
-			version: "0.0.0-test",
-			reconnect: false,
-		});
-		cleanups.push(() => client.close());
+		const harness = await startOwnedRelayDaemonHarness();
+		const { registry, tui } = harness;
+		const conversation = tui.tuiHost.conversation;
 
 		// Two phones with distinct clientNodeIds attach concurrently; the daemon
-		// mints one relay offer each and the TUI redeems and serves both.
-		const attachA = mintPhoneRelay(registry, "n-phone-a", "st-1");
-		const attachB = mintPhoneRelay(registry, "n-phone-b", "st-2");
-		const [servedA, servedB] = await Promise.all([
-			serveRelayFromTui(client, attachA.relay, target),
-			serveRelayFromTui(client, attachB.relay, target),
-		]);
-		expect(registry.activeCount()).toBe(2);
+		// offers one relay each, and the TUI host redeems and serves both.
+		const attachA = mintOwnedPhoneRelay(harness, "n-phone-a", "st-1");
+		const attachB = mintOwnedPhoneRelay(harness, "n-phone-b", "st-2");
+		await vi.waitFor(() => {
+			expect(tui.tuiHost.relayCount()).toBe(2);
+			expect(registry.activeCount()).toBe(2);
+		});
 
 		// Both phones receive the TUI-written handshake success over the relay, then the conversation.
 		const [phoneA, phoneB] = await Promise.all([
@@ -656,7 +438,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 
 		// Phone A prompts; the TUI's in-process conversation runs it until it is aborted.
 		const started = Promise.withResolvers<void>();
-		target.faux.setResponses([
+		tui.faux.setResponses([
 			(_context, options) =>
 				new Promise((resolve) => {
 					started.resolve();
@@ -704,10 +486,10 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		// Phone A hangs up: its relay settles phone_disconnected and its serving
 		// connection ends, while phone B stays attached and live.
 		await phoneA.close();
-		await servedA.done;
 		await vi.waitFor(() => {
 			expect(attachA.settle).toHaveBeenCalledTimes(1);
 			expect(registry.activeCount()).toBe(1);
+			expect(tui.tuiHost.relayCount()).toBe(1);
 		});
 		expect(attachA.settle.mock.calls[0]?.[0]?.reason).toBe("phone_disconnected");
 
@@ -720,11 +502,13 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		expect(attachB.settle).not.toHaveBeenCalled();
 
 		await phoneB.close();
-		await servedB.done;
-		await vi.waitFor(() => expect(registry.activeCount()).toBe(0));
+		await vi.waitFor(() => {
+			expect(registry.activeCount()).toBe(0);
+			expect(tui.tuiHost.relayCount()).toBe(0);
+		});
 		// The phones leaving never closes the TUI's conversation.
 		expect(conversation.closed).toBe(false);
-	});
+	}, 20_000);
 
 	/**
 	 * A phone relayed through the TUI unregisters the TUI's workspace: the TUI
@@ -734,18 +518,13 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 	 */
 	async function unregisterThroughRelay(options: { pipelined?: object }) {
 		const harness = await startOwnedRelayDaemonHarness();
-		const target = await openTuiConversation();
-		const relayServers: Promise<void>[] = [];
-		harness.attach.onRelayOffer((offer, openRelay) => {
-			relayServers.push(serveOwnedRelayFromTui(harness.attach, offer, openRelay, target));
-		});
+		const { tui } = harness;
 
 		const attachA = mintOwnedPhoneRelay(harness, "n-phone-a", "st-unregister-1");
 		const attachB = mintOwnedPhoneRelay(harness, "n-phone-b", "st-unregister-2");
 		await vi.waitFor(() => {
-			expect(harness.attach.relayCount()).toBe(2);
+			expect(tui.tuiHost.relayCount()).toBe(2);
 			expect(harness.registry.activeCount()).toBe(2);
-			expect(relayServers).toHaveLength(2);
 		});
 		const [phoneA, phoneB] = await Promise.all([
 			connectRelayedPhone(attachA.phone),
@@ -763,11 +542,10 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 			expect(attachA.settle).toHaveBeenCalledTimes(1);
 			expect(attachB.settle).toHaveBeenCalledTimes(1);
 			expect(harness.registry.activeCount()).toBe(0);
-			expect(harness.attach.relayCount()).toBe(0);
+			expect(tui.tuiHost.relayCount()).toBe(0);
 		});
-		await Promise.all(relayServers);
 		await Promise.all([phoneA.ended, phoneB.ended]);
-		return { harness, target, attachA, attachB, phoneA, phoneB };
+		return { harness, tui, attachA, attachB, phoneA, phoneB };
 	}
 
 	const UNREGISTER_ACCEPTED = {
@@ -778,7 +556,7 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 	};
 
 	it("delivers relay unregister before retiring every relay, lease record, and local relay tracker", async () => {
-		const { harness, target, attachA, attachB, phoneA } = await unregisterThroughRelay({});
+		const { harness, tui, attachA, attachB, phoneA } = await unregisterThroughRelay({});
 
 		// The daemon ran the unregister; the TUI answered the phone with the daemon's outcome.
 		expect(harness.relayedFrames).toEqual([
@@ -795,9 +573,8 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		// Phone B's relay retires with the lease.
 		expect(attachB.settle.mock.calls[0]?.[0]?.reason).toBe("workspace_unregistered");
 		expect(harness.broker.lookup(WORKSPACE.name, SESSION_ID)).toBeUndefined();
-		expect(await harness.attach.listRuntimeStates(WORKSPACE.name)).toEqual(new Map());
 		// The TUI keeps its conversation.
-		expect(target.conversation.closed).toBe(false);
+		expect(tui.tuiHost.conversation.closed).toBe(false);
 	}, 20_000);
 
 	it("serves nothing a phone pipelined after its accepted unregister", async () => {

@@ -15,17 +15,15 @@ import { InteractiveMode } from "../../../../src/modes/interactive/interactive-m
 
 type ShutdownThis = {
 	isShuttingDown: boolean;
-	runtimeDisposePromise: Promise<void> | undefined;
 	disposeRuntimeHost: () => Promise<void>;
 	flushStdout: () => Promise<void>;
 	unregisterSignalHandlers: () => void;
-	host: { close: () => Promise<void>; dispose: () => Promise<void> };
-	conversation: object;
+	/** Closes the conversation, then hands the session back to the daemon. */
+	tuiHost: { stopServing: () => void; dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
 	sessionManager: SessionManager;
-	releaseDaemonLeaseOnQuit: () => Promise<void>;
 	closeLspTrace: () => Promise<void>;
 	cleanupAllScratchDirectories: () => void;
 };
@@ -73,17 +71,15 @@ function restoreStdoutIsTTY(): void {
 function createContext(order: string[], sessionManager = createSessionManager()): ShutdownThis {
 	return {
 		isShuttingDown: false,
-		runtimeDisposePromise: undefined,
 		disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
 		flushStdout: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).flushStdout,
 		unregisterSignalHandlers: vi.fn(),
-		host: {
-			close: vi.fn(async () => {
+		tuiHost: {
+			stopServing: vi.fn(),
+			dispose: vi.fn(async () => {
 				order.push("dispose");
 			}),
-			dispose: vi.fn(async () => {}),
 		},
-		conversation: {},
 		ui: {
 			terminal: {
 				drainInput: vi.fn(async () => {
@@ -99,7 +95,6 @@ function createContext(order: string[], sessionManager = createSessionManager())
 			flush: vi.fn(async () => {}),
 		},
 		sessionManager,
-		releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
 		closeLspTrace: vi.fn(async () => {}),
 		cleanupAllScratchDirectories: vi.fn(),
 	};
@@ -269,6 +264,6 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 		await callShutdown(context, { fromSignal: true });
 
 		expect(order).toEqual([]);
-		expect(context.host.close).not.toHaveBeenCalled();
+		expect(context.tuiHost.dispose).not.toHaveBeenCalled();
 	});
 });

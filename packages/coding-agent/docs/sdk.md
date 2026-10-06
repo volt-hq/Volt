@@ -1300,12 +1300,13 @@ const conversation = opened.conversation;
 
 ### InteractiveMode
 
-Full TUI interactive mode with editor, chat history, and all built-in commands. It anchors the conversation it shows and closes the host's conversations when it quits:
+Full TUI interactive mode with editor, chat history, and all built-in commands. It runs on a `TuiHost`, the TUI's host over the conversation host: the TUI anchors the conversation it shows, and quitting closes the host's conversations:
 
 ```typescript
-import { InteractiveMode } from "@hansjm10/volt-coding-agent";
+import { InteractiveMode, TuiHost } from "@hansjm10/volt-coding-agent";
 
-const mode = new InteractiveMode(host, conversation, {
+const tuiHost = TuiHost.start({ host, conversation });
+const mode = new InteractiveMode(tuiHost, {
   migratedProviders: [],
   modelFallbackMessage: undefined,
   initialMessage: "Hello",

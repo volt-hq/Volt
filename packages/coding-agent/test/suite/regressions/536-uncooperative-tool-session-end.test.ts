@@ -19,6 +19,7 @@ import { SessionManager, type SessionReference } from "../../../src/core/session
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { ExtensionAPI, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
+import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { openTestHost, type TestHost } from "../../utilities/host-client.ts";
@@ -163,7 +164,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
 	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
 		const { host, conversation, tempDir } = opened;
-		const mode = new InteractiveMode(host, conversation, { tuiMode: "regular" });
+		const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode: "regular" });
 		cleanups.push(() => mode.stop());
 		const access = mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});
