@@ -50,7 +50,7 @@ describe("the extensions' UI through the live state", () => {
 					ui = ctx.ui;
 				});
 			},
-			{ extensionMode: "tui" },
+			{ extensionMode: "rpc" },
 		);
 		cleanups.push(() => fixture.dispose());
 		const live = createLiveRecorder(DIALOGS);

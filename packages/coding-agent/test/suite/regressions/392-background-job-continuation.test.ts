@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
 import type { JobSummary } from "../../../src/core/tools/jobs.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness, type HarnessOptions } from "../harness.ts";
 
 // #392: a background job's completed or failed outcome resumes an idle
@@ -86,7 +87,7 @@ function collect(harness: Harness, ids: string[]) {
 }
 
 async function expectCollected(harness: Harness, calls = 4) {
-	await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
+	await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Collected background outcome."));
 	await harness.session.waitForIdle();
 	expect(harness.faux.state.callCount).toBe(calls);
 	await delay(10);
@@ -150,7 +151,7 @@ describe("#392 background outcome continuation", () => {
 		const newJob = allJobs.find((job) => job.label === "new")!;
 		collect(harness, [newJob.id]);
 		workers.get("new")!.resolve();
-		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
+		await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Collected background outcome."));
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(6);
 	});
@@ -270,7 +271,7 @@ describe("#392 background outcome continuation", () => {
 		]);
 		await harness.session.prompt("Continue independent work");
 		expect(harness.eventsOfType("compaction_end")).toHaveLength(1);
-		expect(harness.session.getLastAssistantText()).toBe("Continued after compaction.");
+		expect(lastAssistantText(harness.session)).toBe("Continued after compaction.");
 		collect(harness, [job.id]);
 		workers.get("work")!.resolve();
 		await expectCollected(harness, 6);
@@ -316,7 +317,7 @@ describe("#392 background outcome continuation", () => {
 			fauxAssistantMessage("Collected background outcome."),
 		]);
 		workers.get("new")!.resolve();
-		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
+		await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Collected background outcome."));
 		expect(harness.faux.state.callCount).toBe(6);
 	});
 
@@ -353,7 +354,7 @@ describe("#392 background outcome continuation", () => {
 		await harness.session.jobs.cancel(cancelled.id);
 		collect(harness, [survivor.id]);
 		workers.get("survivor")!.resolve();
-		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected background outcome."));
+		await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Collected background outcome."));
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(4);
 		expect(harness.session.jobs.get(cancelled.id).status).toBe("cancelled");
@@ -381,7 +382,7 @@ describe("#392 background outcome continuation", () => {
 		await prompt;
 		await delay(10);
 		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.getLastAssistantText()).toBe("Independent foreground result.");
+		expect(lastAssistantText(harness.session)).toBe("Independent foreground result.");
 	});
 
 	it("keeps a notice queued when a policy stops a later turn before its first request", async () => {
@@ -404,7 +405,7 @@ describe("#392 background outcome continuation", () => {
 		]);
 		await harness.session.prompt("Recover explicitly");
 		expect(harness.faux.state.callCount).toBe(3);
-		expect(harness.session.getLastAssistantText()).toBe("Explicitly authorized recovery.");
+		expect(lastAssistantText(harness.session)).toBe("Explicitly authorized recovery.");
 	});
 
 	it("disposal interrupts running work and runs no turn for it", async () => {

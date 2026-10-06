@@ -27,6 +27,7 @@ import type { CustomEditor } from "../../src/modes/interactive/components/custom
 import { TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createFakeConversation } from "../utilities/fake-conversation-host.ts";
+import { lastAssistantText, userMessagesForForking } from "../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 function deferred() {
@@ -130,17 +131,17 @@ describe("AgentSession background jobs", () => {
 
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		// The TUI shows the harness session; nothing here connects it to a host, so its in-process intents act
-		// as a client of its own.
+		// The TUI shows the harness session; nothing here connects its client to the host.
 		const tuiHost = TuiHost.start({
 			host: {} as ConversationHost,
 			conversation: createFakeConversation(harness.session).conversation,
 		});
-		vi.spyOn(tuiHost, "hostClient", "get").mockReturnValue({
-			id: "tui",
-			move: { kind: "in_place", onMoved: () => {} },
+		const mode = new InteractiveMode(tuiHost, {
+			settingsScope: {
+				cwd: harness.session.sessionManager.getCwd(),
+				projectTrusted: harness.settingsManager.isProjectTrusted(),
+			},
 		});
-		const mode = new InteractiveMode(tuiHost);
 		modes.push(mode);
 		const control = mode as unknown as {
 			renderer: TuiMainScreen;
@@ -197,7 +198,7 @@ describe("AgentSession background jobs", () => {
 		expect(harness.session.isBusy).toBe(false);
 		await harness.session.waitForIdle();
 		expect(harness.session.work.busy()).toBe(true);
-		expect(harness.session.getLastAssistantText()).toBe("Parent can continue independently.");
+		expect(lastAssistantText(harness.session)).toBe("Parent can continue independently.");
 		expect(backend.signal?.aborted).toBe(false);
 		expect(harness.session.work.get(job.id)).toMatchObject({ kind: "job", toolCallId: job.toolCallId });
 
@@ -217,7 +218,7 @@ describe("AgentSession background jobs", () => {
 			},
 		]);
 		backend.finish.resolve();
-		await vi.waitFor(() => expect(harness.session.getLastAssistantText()).toBe("Collected the result."));
+		await vi.waitFor(() => expect(lastAssistantText(harness.session)).toBe("Collected the result."));
 		await harness.session.waitForIdle();
 		expect(harness.session.work.busy()).toBe(false);
 		expect(harness.session.jobs.get(job.id)).toMatchObject({ status: "completed" });
@@ -260,7 +261,7 @@ describe("AgentSession background jobs", () => {
 		backend.finish.resolve();
 		await prompt;
 		await harness.session.waitForIdle();
-		expect(harness.session.getLastAssistantText()).toBe("Waited for the result.");
+		expect(lastAssistantText(harness.session)).toBe("Waited for the result.");
 		expect(notices(harness)).toHaveLength(0);
 		expect(noticeInputs(harness)).toEqual([]);
 		expect(harness.faux.state.callCount).toBe(3);
@@ -291,7 +292,7 @@ describe("AgentSession background jobs", () => {
 			},
 		]);
 		await harness.session.prompt("Run and read");
-		expect(harness.session.getLastAssistantText()).toBe("Read it.");
+		expect(lastAssistantText(harness.session)).toBe("Read it.");
 		expect(notices(harness)).toHaveLength(0);
 		expect(noticeInputs(harness)).toMatchObject([{ state: "withdrawn" }]);
 	});
@@ -709,7 +710,7 @@ describe("AgentSession background jobs", () => {
 		controlledBash();
 		const harness = await setup();
 		await startJob(harness);
-		const target = harness.session.getUserMessagesForForking()[0]!.entryId;
+		const target = userMessagesForForking(harness.session)[0]!.entryId;
 		await expect(harness.session.reload()).rejects.toThrow(/abort or wait/);
 		await expect(harness.session.navigateTree(target)).rejects.toThrow(/abort or wait/);
 		await expect(harness.session.setAgentMode("plan")).rejects.toThrow(/abort or wait/);
@@ -728,7 +729,7 @@ describe("AgentSession background jobs", () => {
 		backend.finish.resolve();
 		await settled(harness, job.id);
 		await harness.session.waitForIdle();
-		const target = harness.session.getUserMessagesForForking()[0]!.entryId;
+		const target = userMessagesForForking(harness.session)[0]!.entryId;
 		await harness.session.navigateTree(target);
 		const read = await jobsTool(harness).execute("read", { action: "read", id: job.id });
 		expect(jobOf(read).status).toBe("completed");

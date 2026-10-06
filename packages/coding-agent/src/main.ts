@@ -179,9 +179,9 @@ function toPrintOutputMode(appMode: AppMode): Exclude<Mode, "rpc"> {
 	return appMode === "json" ? "json" : "text";
 }
 
-/** The mode the CLI's conversations bind their extensions in (`ctx.mode`). */
+/** The mode the CLI's conversations bind their extensions in (`ctx.mode`): the TUI's host is an RPC host of its client. */
 function toExtensionMode(appMode: AppMode): ExtensionMode {
-	return appMode === "interactive" ? "tui" : appMode === "rpc" ? "rpc" : appMode === "json" ? "json" : "print";
+	return appMode === "interactive" || appMode === "rpc" ? "rpc" : appMode === "json" ? "json" : "print";
 }
 
 function isPlainRuntimeMetadataCommand(parsed: Args): boolean {
@@ -1306,9 +1306,15 @@ export async function main(args: string[], options?: MainOptions) {
 				...(daemonLeases === undefined ? {} : { daemon: daemonLeases }),
 				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
 			});
+			const activeProfile = settingsManager.getActiveProfile();
 			const interactiveMode = new InteractiveMode(tuiHost, {
 				migratedProviders,
-				modelScopePatterns: parsed.models,
+				// The TUI reads its own settings where the startup conversation runs until its client tells.
+				settingsScope: {
+					cwd: conversation.cwd,
+					projectTrusted: settingsManager.isProjectTrusted(),
+					...(activeProfile === undefined ? {} : { profile: activeProfile }),
+				},
 				autoTrustOnReloadCwd,
 				initialMessage,
 				initialImages,

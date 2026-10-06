@@ -295,10 +295,6 @@ export class SessionPlanning {
 		return next;
 	}
 
-	toggleAgentMode(): Promise<PlanningState> {
-		return this.enqueue(() => this.applyAgentMode(this.mode === "plan" ? "build" : "plan"));
-	}
-
 	/** Commit a draft plan update; resolves after the new revision commits. */
 	async updatePlan(input: {
 		planId?: string;

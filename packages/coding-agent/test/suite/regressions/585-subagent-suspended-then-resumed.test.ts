@@ -21,6 +21,7 @@ import { type SubagentDefinition, SubagentManager } from "../../../src/core/suba
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { conversationLines } from "../../../src/modes/interactive/components/work-inspector.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createSessionWorkView } from "../../utilities/work-view.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
@@ -224,7 +225,7 @@ describe("#585 subagent suspended after a restart, then resumed explicitly", () 
 			},
 		]);
 		await second.parent.session.prompt("What happened to the audit?");
-		expect(second.parent.session.getLastAssistantText()).toBe("The audit finished after the restart.");
+		expect(lastAssistantText(second.parent.session)).toBe("The audit finished after the restart.");
 
 		// The child's own log was reopened and prompted to finish its task.
 		expect(second.childPrompts).toEqual([[expect.stringContaining("You were interrupted before completing")]]);

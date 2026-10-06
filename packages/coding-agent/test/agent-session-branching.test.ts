@@ -18,6 +18,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { connectTestClient, openTestHost, type TestClient } from "./utilities/host-client.ts";
+import { userMessagesForForking } from "./utilities/session-reads.ts";
 import { API_KEY } from "./utilities.ts";
 
 describe.skipIf(!API_KEY)("AgentSession forking", () => {
@@ -90,7 +91,7 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		await session.prompt("Say hello");
 		await session.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
+		const userMessages = userMessagesForForking(session);
 		expect(userMessages.length).toBe(1);
 		expect(userMessages[0].text).toBe("Say hello");
 
@@ -115,7 +116,7 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		await session.prompt("Say hi");
 		await session.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
+		const userMessages = userMessagesForForking(session);
 		expect(userMessages.length).toBe(1);
 		expect(session.messages.length).toBeGreaterThan(0);
 
@@ -139,7 +140,7 @@ describe.skipIf(!API_KEY)("AgentSession forking", () => {
 		await session.prompt("Say three");
 		await session.waitForIdle();
 
-		const userMessages = session.getUserMessagesForForking();
+		const userMessages = userMessagesForForking(session);
 		expect(userMessages.length).toBe(3);
 
 		const secondMessage = userMessages[1];

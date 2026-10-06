@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionReference } from "../../../src/core/session-manager.ts";
+import { userMessagesForForking } from "../../utilities/session-reads.ts";
 import { createHostHarness, type HostHarness, moved } from "../host-harness.ts";
 
 function userTexts(messages: readonly { role: string; content?: unknown }[]): string[] {
@@ -36,7 +37,7 @@ describe("regression #585: fork and clone open a new conversation from an open o
 	it("forks before a user message: the branch up to its parent, its text returned, lineage recorded", async () => {
 		const { harness, source, client } = await setup();
 		const sourceRef = source.session.sessionRef as SessionReference;
-		const second = source.session.getUserMessagesForForking().find((message) => message.text === "second prompt");
+		const second = userMessagesForForking(source.session).find((message) => message.text === "second prompt");
 		if (!second) throw new Error("Expected the second user message");
 		const parentId = source.session.sessionManager.getEntry(second.entryId)?.parentId;
 

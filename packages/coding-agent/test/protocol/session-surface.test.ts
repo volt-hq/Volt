@@ -360,6 +360,8 @@ describe("the session surface on the local profile", () => {
 		expect(info).toEqual({
 			id: conversation.id,
 			cwd: conversation.cwd,
+			// A project without trust-requiring resources is trusted.
+			projectTrusted: true,
 			sessionDir: join(harness.tempDir, "sessions"),
 			sessionFile: join(harness.tempDir, "sessions", "sessions.sqlite"),
 			persisted: true,

@@ -86,9 +86,11 @@ interface AgentSession {
   // Queue input; resolves once the input is saved to the queue
   steer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void>;
   followUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void>;
-  getSteeringMessages(): readonly AgentSessionQueuedMessage[]; // { clientMessageId, text }
-  getFollowUpMessages(): readonly AgentSessionQueuedMessage[];
   clearQueue(): Promise<{ steering: string[]; followUp: string[] }>;
+  pendingMessageCount: number; // queued steering and follow-up input
+
+  // Run a user shell command (`!`); extensions' user_bash hooks see it first
+  runUserBash(command: string, options?: { excludeFromContext?: boolean; operations?: BashOperations }): Promise<BashResult>;
 
   // Send lossless JSON custom data
   sendCustomMessage<T>(message: CustomMessageInput<T>, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
@@ -104,11 +106,11 @@ interface AgentSession {
   lost: Promise<Error>;           // resolves if the session loses its log
 
   // Model control; each change commits an entry to the log
-  setModel(model: Model): Promise<void>;
-  setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  // source: "cycle" when a model-cycle control stepped to it (extensions' model_select carries it)
+  setModel(model: Model, options?: { persistDefault?: boolean; source?: "set" | "cycle" }): Promise<void>;
+  setThinkingLevel(level: ThinkingLevel, options?: { persistDefault?: boolean }): Promise<void>;
   setFastModeEnabled(enabled: boolean): Promise<void>;
-  cycleModel(): Promise<ModelCycleResult | undefined>;
-  cycleThinkingLevel(): ThinkingLevel | undefined;
+  getAvailableThinkingLevels(): ThinkingLevel[];
 
   // Planning
   planningState: PlanningState;
@@ -144,7 +146,7 @@ interface AgentSession {
 }
 ```
 
-Always await `setAgentMode()` before reading `planningState`, `agentMode`, or active tools. In particular, a Plan-to-Build transition waits for unrestricted MCP startup and direct-tool restoration before the returned Build state is exposed. Mode and plan-execution transitions are serialized in invocation order; a queued toggle derives its target only after earlier transitions commit.
+Always await `setAgentMode()` before reading `planningState`, `agentMode`, or active tools. In particular, a Plan-to-Build transition waits for unrestricted MCP startup and direct-tool restoration before the returned Build state is exposed. Mode and plan-execution transitions are serialized in invocation order: a later `setAgentMode()` applies only after earlier transitions commit.
 
 An `AgentSession` serves one log for its whole life. New-session, resume, fork, clone, and import open another conversation in a `ConversationHost` and move the client that asked there (see below). Approving a ready plan also goes through the host, since a `new_session` execution moves the client:
 
@@ -233,8 +235,9 @@ A client (`HostClient`) has:
 
 - `id`: the client scope its requests run in (`ClientScope.run(id, ...)`), so extension session actions reach the client whose command asked for them
 - `anchor`: the conversation closes when its anchor leaves it, whatever other clients remain; otherwise it closes when its last client leaves, or, with the host option `whenUnattached: "keep"` or `{ retainMs }`, stays open until the host closes it
+- `remote`: a paired remote device: the conversation's live `presence` counts it, it is never asked the project trust question of a conversation it opens, and the commands it invokes see `ctx.invokedBy` as `"remote"` (every other client's see `"local"`)
 - `surface`: the client's themes (`themes`: `getAllThemes()` and `setTheme(name)`), session actions (`commandContextActions`), `request_user_input` prompt (`userInput`), and error listener on the extensions of each conversation it joins. The host attaches it on every join. The first join of a client with a surface binds the conversation's extensions in the host's `extensionMode` (`ctx.mode`) and fires `session_start` once; later clients only add their surface. `ctx.ui.getAllThemes()` and `setTheme()` go to the last attached client with `themes`, and errors go to every client. Everything else extensions show is data in the conversation's live state (`live`).
-- `live`: the client's view of each conversation's live state (`conversation.liveState`), attached on every join before the surface: the extensions' status items, panels, title, notifications, and editor text, running tools' presentations, work, and the host requests (`select`, `confirm`, `input`, `editor`, `form`, and `dialog` dialogs, `editor_text`, `approval`s, MCP authorization) of the kinds its `acceptsHostRequest(kind)` takes. The data is [`UiNode`](ui-nodes.md) data and styled text, as RPC clients receive it ([rpc.md](rpc.md#extension-ui)). `apply(update)` receives the current state as a reset when the client joins, then every change; leaving delivers an empty reset. Answer a request with `conversation.liveState.answer(requestId, response, client.id)`: the first valid answer from an attached client that accepts the request's kind wins. A request stays pending when its clients leave, so a client that joins later finds it.
+- `live`: the client's view of each conversation's live state (`conversation.liveState`), attached on every join before the surface: the extensions' status items, panels, title, notifications, and editor text, running tools' presentations, work, and the host requests (`select`, `confirm`, `input`, `editor`, `form`, and `dialog` dialogs, `editor_text`, `approval`s, MCP authorization, provider sign-ins) of the kinds its `acceptsHostRequest(kind)` takes. The data is [`UiNode`](ui-nodes.md) data and styled text, as RPC clients receive it ([rpc.md](rpc.md#extension-ui)). `apply(update)` receives the current state as a reset when the client joins, then every change; leaving delivers an empty reset. Answer a request with `conversation.liveState.answer(requestId, response, client.id)`: the first valid answer from an attached client that accepts the request's kind wins. A request stays pending when its clients leave, so a client that joins later finds it.
 - `move`: how the client follows its structural intents. `{ kind: "in_place", prepare?, onMoved }` moves the client: `prepare(to, from)` runs once it left the source, before it joins `to` and `to`'s extensions start; `onMoved(to, from)` runs once it joined. `{ kind: "redirect", redirect(sessionId), hostTarget? }` keeps the client on its conversation and tells it where to reconnect; it never anchors.
 - `recoversInput`: an in-place client replays the durable queued input of each conversation it moves to before anything it runs there
 
@@ -457,7 +460,7 @@ await session.followUp("After you're done, also do this");
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued). They resolve once the input is saved to the queue, not when it is delivered. A steer or follow-up sent while the session is idle starts a turn.
 
-Every prompt, steer, follow-up, and queued extension message is a durable client input in the session log. Pass a `clientMessageId` to make a resubmission idempotent; input sent without one gets a `local-` identity. The queue is read from the log, so `getSteeringMessages()`, `getFollowUpMessages()`, and `queue_update` events list `{ clientMessageId, text }`, and input still queued when the process exits is recovered when the session is reopened. `clearQueue()` withdraws every queued input durably and returns the text of the user input it withdrew; RPC clients receive `client_input_outcome` with reason `queue_cleared` for their identified input. The queue holds at most 128 inputs, extension messages included. To inspect recoverable input without opening a session, use `clientInputRecovery(sessionManager.getConversationState())` from `@hansjm10/volt-agent-core`; its `records` are the queued inputs.
+Every prompt, steer, follow-up, and queued extension message is a durable client input in the session log. Pass a `clientMessageId` to make a resubmission idempotent; input sent without one gets a `local-` identity. The queue is read from the log: `queue_update` events list the queued steering and follow-up input as `{ clientMessageId, text }` whenever the queue changes (a protocol client reads it from its client fold's `queue`), `pendingMessageCount` counts it, and input still queued when the process exits is recovered when the session is reopened. `clearQueue()` withdraws every queued input durably and returns the text of the user input it withdrew; a `client_input_outcome` event with reason `queue_cleared` reports each identified input it withdrew. The queue holds at most 128 inputs, extension messages included. To inspect recoverable input without opening a session, use `clientInputRecovery(sessionManager.getConversationState())` from `@hansjm10/volt-agent-core`; its `records` are the queued inputs.
 
 ### Host inference accounting
 
@@ -1268,7 +1271,7 @@ await session.prompt("Get status and list files.");
 
 ## Run Modes
 
-The SDK exports run mode utilities for building custom interfaces on top of a `ConversationHost`. Each mode attaches its own client to the conversation it is given and moves in place with that client's session changes. Create the host with the mode's extension mode (`"tui"`, `"print"`, `"json"`, or `"rpc"`). The examples below share this factory and startup conversation:
+The SDK exports run mode utilities for building custom interfaces on top of a `ConversationHost`. Each mode attaches its own client to the conversation it is given and moves in place with that client's session changes. Create the host with the mode's extension mode: `"rpc"` for the interactive TUI and RPC mode, whose clients drive the host, and `"print"` or `"json"` for print runs (`ExtensionMode` is `"rpc" | "json" | "print"`). The examples below share this factory and startup conversation:
 
 ```typescript
 import {
@@ -1288,7 +1291,7 @@ const factory: ConversationFactory = async ({ cwd, sessionManager, sessionStartE
     diagnostics: services.diagnostics,
   };
 };
-const host = new ConversationHost({ factory, agentDir: getAgentDir(), extensionMode: "tui" });
+const host = new ConversationHost({ factory, agentDir: getAgentDir(), extensionMode: "rpc" });
 const opened = await host.open({
   kind: "adopt",
   sessionManager: await SessionManager.create(process.cwd()),
@@ -1300,15 +1303,17 @@ const conversation = opened.conversation;
 
 ### InteractiveMode
 
-Full TUI interactive mode with editor, chat history, and all built-in commands. It runs on a `TuiHost`, the TUI's host over the conversation host: the TUI anchors the conversation it shows, and quitting closes the host's conversations:
+Full TUI interactive mode with editor, chat history, and all built-in commands. The TUI is a protocol client: `new InteractiveMode(connection, options)` connects its client through a `TuiConnection` and reaches its conversations only through that client's intents, queries, and subscription. `TuiHost` is the in-process connection: it serves the TUI's client over a loopback connection on the local profile, the client anchors the conversation it shows, and quitting closes the host's conversations. Started without `daemon`, it runs without the Volt daemon (no leases, no relayed phones); `DaemonLeases` is internal to the `volt` CLI and not exported.
 
 ```typescript
 import { InteractiveMode, TuiHost } from "@hansjm10/volt-coding-agent";
 
-const tuiHost = TuiHost.start({ host, conversation });
+const tuiHost = TuiHost.start({ host, conversation, modelScopePatterns: ["claude-*"] });
 const mode = new InteractiveMode(tuiHost, {
-  migratedProviders: [],
-  modelFallbackMessage: undefined,
+  settingsScope: {
+    cwd: conversation.cwd,
+    projectTrusted: conversation.session.settingsManager.isProjectTrusted(),
+  },
   initialMessage: "Hello",
   initialImages: [],
   initialMessages: [],
@@ -1316,6 +1321,10 @@ const mode = new InteractiveMode(tuiHost, {
 
 await mode.run();
 ```
+
+- `TuiHost.start({host, conversation, daemon?, modelScopePatterns?})`: `modelScopePatterns` are the `--models` patterns a profile switch keeps.
+- `settingsScope: {cwd, projectTrusted, profile?}` says where the TUI reads its own display settings (theme, editor, alerts, and the other keys [Settings](settings.md#who-reads-a-setting) lists) until its client tells it where the conversation runs; from then on it follows the `conversation_info` and `settings` queries. Without it, the TUI starts with the process's cwd, untrusted, and no profile.
+- Other options: `migratedProviders`, `autoTrustOnReloadCwd`, `initialMessage`, `initialImages`, `initialMessages`, `verbose`, and `tuiMode`.
 
 ### runPrintMode
 

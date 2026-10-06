@@ -377,6 +377,8 @@ Each phase leaves `main` releasable.
 
 ### Phase 1: TUI client facade over an in-process host
 
+> **Implemented** by architecture rewrite Phase 6 on protocol 1.
+
 - Introduce a client-side conversation interface for InteractiveMode, backed by the RPC client with the local profile. It provides a state mirror from `get_state` plus events, commands, and the extension UI broker endpoints.
 - Run it against a runtime host in the TUI process (loopback transport, `src/core/rpc/loopback-transport.ts`; `InProcessRpcClient` shape).
 - Replace every direct `this.session.*` and `this.runtimeHost.*` use in `interactive-mode.ts` with the client interface. Appendix A is the starting inventory; this phase produces the verified one.

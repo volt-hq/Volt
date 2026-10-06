@@ -143,16 +143,17 @@ export interface HostClient {
 	/** A conversation closes when its anchor leaves, whatever other clients remain. */
 	readonly anchor?: boolean;
 	/**
-	 * A paired remote device: the conversation's live `presence` counts it, and
-	 * it is never asked the project trust question of a conversation it opens
-	 * (trusting a project lets its extensions run on the host).
+	 * A paired remote device: the conversation's live `presence` counts it, it
+	 * is never asked the project trust question of a conversation it opens
+	 * (trusting a project lets its extensions run on the host), and the
+	 * commands it invokes see `ctx.invokedBy` as `"remote"`.
 	 */
 	readonly remote?: boolean;
 	/**
 	 * The client's surface on each conversation's extensions, attached whenever
 	 * the client joins one. The host binds the extensions in its own mode.
 	 */
-	readonly surface?: Omit<ExtensionClient, "id" | "mode">;
+	readonly surface?: Omit<ExtensionClient, "id" | "mode" | "remote">;
 	/**
 	 * The client's view of each conversation's live state (extension status,
 	 * widgets, and title, notices, dialogs, approvals, MCP authorization),

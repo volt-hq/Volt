@@ -107,6 +107,7 @@ export type {
 	BeforeProviderRequestEventResult,
 	BuildSystemPromptOptions,
 	// Context
+	CommandInvoker,
 	CompactOptions,
 	// Events - Agent
 	ContextEvent,

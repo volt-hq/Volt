@@ -2,8 +2,9 @@ import { Buffer } from "node:buffer";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
+import { bashResultOperations } from "../utilities/session-reads.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function getEntryTypes(harness: Harness): string[] {
@@ -23,12 +24,7 @@ describe("AgentSession bash and persistence characterization", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		await harness.session.recordBashResult("echo hi", {
-			output: "hi",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-		});
+		await harness.session.runUserBash("echo hi", { operations: bashResultOperations({ output: "hi", exitCode: 0 }) });
 
 		expect(harness.session.hasPendingBashMessages).toBe(false);
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");
@@ -72,12 +68,7 @@ describe("AgentSession bash and persistence characterization", () => {
 
 		const firstPrompt = harness.session.prompt("start");
 		await sawToolStart;
-		await harness.session.recordBashResult("echo hi", {
-			output: "hi",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-		});
+		await harness.session.runUserBash("echo hi", { operations: bashResultOperations({ output: "hi", exitCode: 0 }) });
 
 		expect(harness.session.hasPendingBashMessages).toBe(true);
 		expect(harness.session.messages.some((message) => message.role === "bashExecution")).toBe(false);
@@ -99,7 +90,7 @@ describe("AgentSession bash and persistence characterization", () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 
-		const result = await harness.session.executeBash("printf 'hello'");
+		const result = await harness.session.runUserBash("printf 'hello'");
 
 		expect(result.output).toContain("hello");
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");
@@ -122,9 +113,8 @@ describe("AgentSession bash and persistence characterization", () => {
 			},
 		};
 
-		const bashPromise = harness.session.executeBash("sleep", undefined, { operations });
-		await new Promise((resolve) => setTimeout(resolve, 0));
-		expect(harness.session.isBashRunning).toBe(true);
+		const bashPromise = harness.session.runUserBash("sleep", { operations });
+		await vi.waitFor(() => expect(harness.session.isBashRunning).toBe(true));
 		harness.session.abortBash();
 
 		const result = await bashPromise;
@@ -187,12 +177,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			}
 		});
 
-		await harness.session.recordBashResult("echo hi", {
-			output: "hi",
-			exitCode: 0,
-			cancelled: false,
-			truncated: false,
-		});
+		await harness.session.runUserBash("echo hi", { operations: bashResultOperations({ output: "hi", exitCode: 0 }) });
 
 		expect(messageEndRoles).toEqual([]);
 	});
@@ -236,7 +221,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			},
 		};
 
-		const result = await harness.session.executeBash("custom", undefined, { operations });
+		const result = await harness.session.runUserBash("custom", { operations });
 
 		expect(result.output).toContain("hello from custom ops");
 		expect(harness.session.messages[harness.session.messages.length - 1]?.role).toBe("bashExecution");

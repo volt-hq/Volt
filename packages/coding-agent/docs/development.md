@@ -78,6 +78,19 @@ Each call retains at most a 4 KiB UTF-8 argument prefix. Recognizable credential
 
 Files and their directory are owner-only on Unix. On Windows the existing ACL-aware diagnostic writer installs a protected current-account DACL before writing; capture fails closed if those permissions cannot be established. Only the latest capture is retained.
 
+## Interactive mode: client and host
+
+The TUI is a protocol client of the host that runs its conversations ([architecture rewrite](architecture-rewrite-design.md) §10). `src/modes/interactive/` splits along that seam:
+
+- `host/`: the host half, imported only by `main.ts` and the package index (`TuiHost`). `tui-host.ts` (`TuiHost`) runs the conversation host the TUI process holds and serves the TUI's client over a loopback connection on the local profile; `daemon-link.ts` holds the daemon link and leases (startup lease, the open gate, release and reacquire on moves, Git observation); `relay-serving.ts` serves phones the daemon relays into the TUI's conversations. Phase 7 moves this seam into a conversation worker.
+- `client/`: the TUI's view of its conversation through its `ProtocolClient`. `tui-connection.ts` (`TuiConnection`, which `TuiHost` implements) is all InteractiveMode knows of its host; `tui-store.ts` holds the client fold and live lane of the conversation the client shows and follows its moves; `transcript-view.ts`, `work-view.ts`, `review-view.ts`, and `footer-model.ts` draw from it; `input.ts` and `session-commands.ts` turn the editor, keys, and commands into intents and queries; `tui-catalogs.ts` keeps the catalogs the status reads.
+- `components/` and `ui-node/`: terminal components, and the mapping of `UiNode` data to them.
+- `interactive-mode.ts`: the TUI itself, built from a `TuiConnection` and its options only. What only the terminal has stays local: display settings (its own `SettingsManager`, read where `conversation_info` says the conversation runs), keybindings, themes, the clipboard, `$EDITOR`, `/trust`, and the daemon's control plane (`/remote`, `/worktree`).
+
+The in-process extension surface (`TuiConnectOptions.terminal`: the terminal's themes and the `request_user_input` dialog) is the one remaining path from extensions into the TUI's process; Phase 7 replaces it with a host request kind and a `set_theme` directive.
+
+TUI tests use [`test/suite/tui-harness.ts`](../test/suite/tui-harness.ts): a `TuiHost` over the faux-provider host harness (`test/suite/host-harness.ts`), the TUI's client over loopback, and InteractiveMode rendering into a `VirtualTerminal` (`startMode()`, `submit()`, `waitForScreen()`, `choose()`). Daemon behavior runs against a scripted link (`createScriptedDaemonLink()`) that records lease calls and offers relayed phones (`relayPreamble()`, `connectRelayedPhone()`).
+
 ## Testing
 
 Run `npm run check` and only the tests affected by your changes, including every test file you create or modify. A full-suite run is not required before opening a PR. For docs-only changes, validate relevant links, examples, and metadata instead of unrelated runtime tests.
@@ -198,7 +211,8 @@ Artifacts are written under ignored `swebench-output/<run-id>/`: the prompt, `pa
 ```
 packages/
   ai/           # LLM provider abstraction
-  agent/        # Agent loop and message types  
+  protocol/     # Log entry schemas, protocol frames, UiNode, the contract artifact
+  agent/        # Conversation kernel: agent loop, log fold, delivery queue
   tui/          # Terminal UI components
-  coding-agent/ # CLI and interactive mode
+  coding-agent/ # CLI, conversation host, and interactive mode
 ```

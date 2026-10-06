@@ -348,7 +348,10 @@ export const setModelIntent = defineIntent({
 	async run(ctx, input) {
 		const { session } = targetOf(ctx);
 		const model = await findAvailableModel(session, input.provider, input.modelId, ctx.assertCurrent);
-		await session.setModel(model, { persistDefault: false });
+		await session.setModel(model, {
+			persistDefault: false,
+			...(input.source === undefined ? {} : { source: input.source }),
+		});
 		return model;
 	},
 });

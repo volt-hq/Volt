@@ -26,6 +26,7 @@ function conversationInfo(options: {
 	return {
 		id: options.sessionId ?? "0197f6e4-4cf9-7f44-a2d8-f8f7f49ee9d3",
 		cwd: "/tmp/project",
+		projectTrusted: true,
 		sessionDir: options.sessionDir ?? "/tmp/volt-sessions",
 		persisted: options.persisted ?? true,
 		defaultSessionDir: options.usesDefaultSessionDir ?? true,

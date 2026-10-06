@@ -29,6 +29,7 @@ import {
 	type TestClient,
 	type TestClientOptions,
 } from "../utilities/host-client.ts";
+import { userMessagesForForking } from "../utilities/session-reads.ts";
 import { testExtension } from "../utilities.ts";
 
 /** Open a conversation in a host of its own and attach an in-place anchor client to it. */
@@ -853,7 +854,7 @@ describe("conversation host client characterization", () => {
 
 		events.length = 0;
 		await runtime.session.prompt("hello");
-		const userMessage = runtime.session.getUserMessagesForForking()[0]!;
+		const userMessage = userMessagesForForking(runtime.session)[0]!;
 		const previousSessionRef = runtime.session.sessionRef;
 
 		const successResult = await runtime.fork(userMessage.entryId);

@@ -14,6 +14,7 @@ import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
 import { PresentedToolComponent } from "../../../src/modes/interactive/components/presented-tool.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
+import { lastAssistantText } from "../../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 const harnesses: Harness[] = [];
@@ -147,7 +148,7 @@ describe("#585 background job interrupted after a restart", () => {
 			},
 		]);
 		await second.session.prompt("What happened to the tests?");
-		expect(second.session.getLastAssistantText()).toBe("The tests were interrupted by the restart.");
+		expect(lastAssistantText(second.session)).toBe("The tests were interrupted by the restart.");
 	});
 
 	it("interrupts a job when its runtime closes, and the reopened conversation knows it", async () => {

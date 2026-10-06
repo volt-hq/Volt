@@ -121,7 +121,7 @@ export default function(volt) {
 				{ type: "project_trust", cwd: tempDir },
 				{
 					cwd: tempDir,
-					mode: "tui",
+					mode: "rpc",
 					hasUI: false,
 					ui: {
 						select: async () => undefined,
@@ -400,17 +400,6 @@ export default function(volt) {
 
 			const ctx = runner.createContext();
 			expect(ctx.mode).toBe("rpc");
-			expect(ctx.hasUI).toBe(true);
-		});
-
-		it("exposes tui mode with hasUI true when a TUI UI context is provided", async () => {
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			runner.bindCore(extensionActions, extensionContextActions);
-			runner.setUIContext({} as ExtensionUIContext, "tui");
-
-			const ctx = runner.createContext();
-			expect(ctx.mode).toBe("tui");
 			expect(ctx.hasUI).toBe(true);
 		});
 	});

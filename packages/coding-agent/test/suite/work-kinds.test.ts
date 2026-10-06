@@ -16,6 +16,7 @@ import type {
 	WorkRunContext,
 	WorkRunResult,
 } from "../../src/core/extensions/index.ts";
+import { queueOf } from "../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 import { createHostHarness, type HostHarness } from "./host-harness.ts";
 
@@ -74,10 +75,10 @@ describe("extension work kinds", () => {
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(0);
 		expect(harness.eventsOfType("agent_start")).toHaveLength(0);
-		expect(harness.session.getQueuedWorkNotices()).toEqual([
+		expect(queueOf(harness.session).notices).toEqual([
 			expect.objectContaining({ workId: record?.workId, title: "Sweep the repo", outcome: "completed" }),
 		]);
-		expect(harness.eventsOfType("queue_update").at(-1)?.notices).toEqual(harness.session.getQueuedWorkNotices());
+		expect(harness.eventsOfType("queue_update").at(-1)?.notices).toEqual(queueOf(harness.session).notices);
 
 		const requests: string[][] = [];
 		harness.setResponses([
@@ -95,7 +96,7 @@ describe("extension work kinds", () => {
 			],
 		]);
 		// The turn took the notice.
-		expect(harness.session.getQueuedWorkNotices()).toEqual([]);
+		expect(queueOf(harness.session).notices).toEqual([]);
 	});
 
 	it("starts only the owning extension's kinds", async () => {
@@ -176,7 +177,7 @@ describe("extension work kinds", () => {
 			]),
 		);
 		expect(harness.session.messages.some((message) => message.role === "custom")).toBe(false);
-		expect(harness.session.getQueuedWorkNotices()).toEqual([]);
+		expect(queueOf(harness.session).notices).toEqual([]);
 	});
 
 	it("reload removes the kinds: running work blocks it, work started as it runs is interrupted, and old contexts go stale", async () => {

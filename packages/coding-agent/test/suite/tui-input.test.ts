@@ -18,6 +18,7 @@ import type { ExtensionFactory } from "../../src/core/extensions/index.ts";
 import { queuedInput } from "../../src/modes/interactive/client/input.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
+import { lastAssistantText } from "../utilities/session-reads.ts";
 import { createTuiHarness, type TuiHarness, type TuiHarnessOptions, type TuiModeFixture } from "./tui-harness.ts";
 
 type ModeAccess = {
@@ -150,7 +151,7 @@ describe("the TUI's input as intents", () => {
 			await vi.waitFor(() => expect(userTexts(session)).toEqual(["first question", "steer me", "later on"]));
 			await tui.store.client.waitForIdle(10_000);
 			expect(await screen(tui)).not.toContain("Steering:");
-			expect(session.getLastAssistantText()).toBe("after the follow-up");
+			expect(lastAssistantText(session)).toBe("after the follow-up");
 		},
 	);
 
@@ -199,7 +200,7 @@ describe("the TUI's input as intents", () => {
 		await waitForScreen(tui, "Queued message for after compaction", "Steering: sent while compacting");
 		summary.release();
 		await compacting;
-		await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("after the compaction"));
+		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("after the compaction"));
 		expect(userTexts(session).at(-1)).toBe("sent while compacting");
 	});
 
@@ -304,7 +305,7 @@ describe("the TUI's input as intents", () => {
 		writeFileSync(image, Buffer.from(TINY_PNG_BASE64, "base64"));
 		harness.faux.setResponses([fauxAssistantMessage("I see it")]);
 		submit(tui, `what is in ${image}`);
-		await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("I see it"));
+		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("I see it"));
 		const prompt = session.messages.find((message) => message.role === "user");
 		expect(
 			prompt?.role === "user" && Array.isArray(prompt.content) ? prompt.content.map((part) => part.type) : [],
@@ -447,7 +448,7 @@ describe("the TUI's startup input", () => {
 		harness.faux.setResponses([fauxAssistantMessage("early reply")]);
 		submit(tui, "early prompt");
 		await tui.connect();
-		await vi.waitFor(() => expect(session.getLastAssistantText()).toBe("early reply"));
+		await vi.waitFor(() => expect(lastAssistantText(session)).toBe("early reply"));
 		expect(userTexts(session)).toEqual(["early prompt"]);
 	});
 
@@ -456,7 +457,7 @@ describe("the TUI's startup input", () => {
 		harness.faux.setResponses([fauxAssistantMessage("first reply"), fauxAssistantMessage("second reply")]);
 		await access.sendInitialMessages([{ text: "first" }, { text: "second" }]);
 		expect(userTexts(session)).toEqual(["first", "second"]);
-		expect(session.getLastAssistantText()).toBe("second reply");
+		expect(lastAssistantText(session)).toBe("second reply");
 	});
 
 	it("reports a rejected key action instead of leaking an unhandled rejection", async () => {

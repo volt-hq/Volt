@@ -1,7 +1,7 @@
 /**
  * The session's model selection and runtime settings: the model, thinking
  * level, and Fast mode the active branch names (all from the log), the object
- * each selection resolves to, model cycling, the scoped models, queue modes,
+ * each selection resolves to, the scoped models, queue modes,
  * and provider stream options. A selection the user makes also becomes the
  * settings default unless the caller opts out.
  */
@@ -14,7 +14,7 @@ import {
 	type Model,
 	modelsAreEqual,
 } from "@hansjm10/volt-ai";
-import type { AgentSessionEvent, ModelCycleResult } from "../agent-session.ts";
+import type { AgentSessionEvent } from "../agent-session.ts";
 import type { ExtensionRunner } from "../extensions/index.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager } from "../session-manager.ts";
@@ -30,6 +30,11 @@ function modelKey(provider: string, modelId: string): string {
 
 export interface DefaultPersistenceOptions {
 	persistDefault?: boolean;
+}
+
+/** How a model was chosen: picked (`set`, the default), or stepped to through the cycle scope (`cycle`). */
+export interface ModelSelectOptions extends DefaultPersistenceOptions {
+	source?: "set" | "cycle";
 }
 
 export interface ModelSettingsHost {
@@ -164,7 +169,7 @@ export class ModelSettings {
 	 * Validates that auth is configured, saves to session, and persists as the default unless disabled.
 	 * @throws Error if no auth is configured for the model
 	 */
-	async setModel(model: Model<Api>, options?: DefaultPersistenceOptions): Promise<void> {
+	async setModel(model: Model<Api>, options?: ModelSelectOptions): Promise<void> {
 		this.host.assertActive();
 		if (!this.host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -187,81 +192,7 @@ export class ModelSettings {
 		await this.host.settingsManager.flush();
 		this.host.assertActive();
 
-		await this.emitModelSelect(model, previousModel, "set");
-	}
-
-	/**
-	 * Cycle to next/previous model.
-	 * Uses scoped models (from --models flag) if available, otherwise all available models.
-	 * @param direction - "forward" (default) or "backward"
-	 * @returns The new model info, or undefined if only one model available
-	 */
-	async cycleModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		this.host.assertActive();
-		if (this.scoped.length > 0) {
-			return this.cycleScopedModel(direction);
-		}
-		return this.cycleAvailableModel(direction);
-	}
-
-	private async cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const scopedModels = this.scoped.filter((scoped) => this.host.modelRegistry.hasConfiguredAuth(scoped.model));
-		if (scopedModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = scopedModels.findIndex((sm) => modelsAreEqual(sm.model, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = scopedModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const next = scopedModels[nextIndex];
-		const thinkingLevel = this.thinkingLevelForModelSwitch(next.model, next.thinkingLevel);
-		const previousThinkingLevel = this.thinkingLevel;
-
-		await this.commitModelAndThinkingLevel(next.model, thinkingLevel);
-		this.host.assertActive();
-		this.host.syncPlanningRuntime();
-		this.host.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
-		if (this.supportsThinking() || thinkingLevel !== "off") {
-			this.host.settingsManager.setDefaultThinkingLevel(thinkingLevel);
-		}
-		this.publishThinkingLevelChange(thinkingLevel, previousThinkingLevel);
-		await this.host.settingsManager.flush();
-		this.host.assertActive();
-
-		await this.emitModelSelect(next.model, currentModel, "cycle");
-
-		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
-	}
-
-	private async cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const availableModels = await this.host.modelRegistry.getAvailable();
-		if (availableModels.length <= 1) return undefined;
-
-		const currentModel = this.model;
-		let currentIndex = availableModels.findIndex((m) => modelsAreEqual(m, currentModel));
-
-		if (currentIndex === -1) currentIndex = 0;
-		const len = availableModels.length;
-		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
-		const nextModel = availableModels[nextIndex];
-
-		const thinkingLevel = this.thinkingLevelForModelSwitch(nextModel);
-		const previousThinkingLevel = this.thinkingLevel;
-		await this.commitModelAndThinkingLevel(nextModel, thinkingLevel);
-		this.host.assertActive();
-		this.host.syncPlanningRuntime();
-		this.host.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
-		if (this.supportsThinking() || thinkingLevel !== "off") {
-			this.host.settingsManager.setDefaultThinkingLevel(thinkingLevel);
-		}
-		this.publishThinkingLevelChange(thinkingLevel, previousThinkingLevel);
-		await this.host.settingsManager.flush();
-		this.host.assertActive();
-
-		await this.emitModelSelect(nextModel, currentModel, "cycle");
-
-		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
+		await this.emitModelSelect(model, previousModel, options?.source ?? "set");
 	}
 
 	/**

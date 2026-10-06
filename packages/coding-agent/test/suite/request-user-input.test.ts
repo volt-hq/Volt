@@ -9,6 +9,7 @@ import {
 	type MountUserInputDialog,
 	promptUserInput,
 } from "../../src/modes/interactive/components/user-input-dialog.ts";
+import { lastAssistantText } from "../utilities/session-reads.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, type Harness, type HarnessOptions } from "./harness.ts";
 
@@ -52,7 +53,7 @@ describe("native structured questions", () => {
 	async function bind(harness: Harness, mount: MountUserInputDialog = async () => answered): Promise<() => void> {
 		const attachment = harness.session.attachExtensionClient({
 			id: "tui",
-			mode: "tui",
+			mode: "rpc",
 			// As the TUI's surface asks: in a dialog its terminal mounts.
 			userInput: (asked, signal) => promptUserInput(mount, asked, signal),
 		});
@@ -150,7 +151,7 @@ describe("native structured questions", () => {
 			(message) => message.role === "toolResult" && message.toolName === "request_user_input",
 		);
 		expect(result).toMatchObject({ isError: false, details: { ...answered, questions: request.questions } });
-		expect(h.session.getLastAssistantText()).toBe("Proceeding with CLI first.");
+		expect(lastAssistantText(h.session)).toBe("Proceeding with CLI first.");
 	});
 
 	it("stops on cancellation without executing later tools or asking again", async () => {
@@ -217,7 +218,7 @@ describe("native structured questions", () => {
 		expect(h.eventsOfType("tool_execution_end")[0]?.result).toMatchObject({
 			details: { status: "skipped", answers: {} },
 		});
-		expect(h.session.getLastAssistantText()).toContain("assumption");
+		expect(lastAssistantText(h.session)).toContain("assumption");
 	});
 
 	it.each(["abort", "dispose"] as const)("dismisses pending questions and settles on session %s", async (action) => {

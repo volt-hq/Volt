@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type ImageContent } from "@hansjm10
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { getClientMessageId } from "../../../src/core/messages.ts";
+import { queueOf } from "../../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 type UserMessage = Extract<AgentMessage, { role: "user" }>;
@@ -209,7 +210,7 @@ describe("regression #211: delivery payload isolation", () => {
 		await activeRun;
 		await harness.session.waitForIdle();
 		expect(harness.control.hasQueuedMessages()).toBe(true);
-		expect(harness.session.getSteeringMessages()).toEqual([{ clientMessageId, text }]);
+		expect(queueOf(harness.session).steering).toEqual([{ clientMessageId, text }]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("accepted");
 
 		await harness.control.continue();
@@ -227,7 +228,7 @@ describe("regression #211: delivery payload isolation", () => {
 				.context.messages.filter((message) => message.role === "user" && getMessageText(message) === text),
 		).toHaveLength(1);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("completed");
-		expect(harness.session.getSteeringMessages()).toEqual([]);
+		expect(queueOf(harness.session).steering).toEqual([]);
 		expect(harness.control.hasQueuedMessages()).toBe(false);
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});

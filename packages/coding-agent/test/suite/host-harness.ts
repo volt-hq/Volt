@@ -75,6 +75,8 @@ export interface HostHarnessOptions {
 	skillPaths?: string[];
 	/** Prompt template files or directories every session loads. */
 	promptTemplatePaths?: string[];
+	/** Theme files every session loads. */
+	themePaths?: string[];
 }
 
 export interface HostHarness {
@@ -153,6 +155,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 				...(options.promptTemplatePaths === undefined
 					? {}
 					: { additionalPromptTemplatePaths: options.promptTemplatePaths }),
+				...(options.themePaths === undefined ? {} : { additionalThemePaths: options.themePaths }),
 			},
 		});
 		const definitions = options.subagents;

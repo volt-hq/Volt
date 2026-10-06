@@ -10,17 +10,17 @@
  * conversation's durable queued input; a move recovers the input of the
  * conversation the client moved to. `dispose` closes the conversation,
  * disposes the host, then gives the lease back once the relayed phones heard
- * where to reconnect.
+ * where to reconnect. Until then, a process exit closes the language server
+ * traces of the conversations it hosts.
  */
 
-import type { HostRequestKind } from "@hansjm10/volt-protocol";
-import { LoopbackClient, type ProtocolClientOptions } from "../../../client/protocol-client.ts";
+import { LoopbackClient } from "../../../client/protocol-client.ts";
 import type { ConversationHost } from "../../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../../core/host/hosted-conversation.ts";
-import type { HostClient } from "../../../core/host/targets.ts";
 import { localProfile } from "../../../core/protocol/profiles.ts";
-import { type ServeConnectionOptions, serveConnection } from "../../../core/protocol/server/connection.ts";
+import { serveConnection } from "../../../core/protocol/server/connection.ts";
 import { createLoopbackRpcTransportPair } from "../../../core/protocol/transport/loopback-transport.ts";
+import type { TuiConnection, TuiConnectOptions } from "../client/tui-connection.ts";
 import type { AcquireOutcome, DaemonLeases } from "./daemon-link.ts";
 
 export interface TuiHostOptions {
@@ -33,33 +33,15 @@ export interface TuiHostOptions {
 	readonly modelScopePatterns?: readonly string[];
 }
 
-export interface TuiConnectOptions {
-	/** The host request kinds the TUI answers. */
-	readonly hostRequests?: readonly HostRequestKind[];
-	/** Milliseconds to wait for an intent's or query's answer. */
-	readonly requestTimeoutMs?: number;
-	/** Observes every host frame from the first. */
-	readonly onFrame?: ProtocolClientOptions["onFrame"];
-	/** An extension asked to shut down (`ctx.shutdown()`). */
-	readonly onShutdownRequested?: () => void;
-	/** The conversation the client is on lost its log. */
-	readonly onLost?: (error: Error) => void;
-	/** Called with the client before it says hello, so the TUI observes its changes from the first. */
-	readonly onClient?: (client: LoopbackClient) => void;
-	/** What the TUI's terminal offers the conversation's extensions beyond the protocol: themes and the user-input dialog. */
-	readonly terminal?: ServeConnectionOptions["terminal"];
-}
-
 const NO_LEASE: AcquireOutcome = { kind: "noop" };
 
-export class TuiHost {
+export class TuiHost implements TuiConnection {
 	readonly host: ConversationHost;
 	private readonly startup: HostedConversation;
 	private readonly daemon: DaemonLeases | undefined;
 	private readonly modelScopePatterns: readonly string[] | undefined;
 	/** The conversation the TUI's client is attached to, if any. */
 	private clientConversation: (() => HostedConversation | undefined) | undefined;
-	private connectedClient: HostClient | undefined;
 	private shown: HostedConversation;
 	private ready: Promise<void> | undefined;
 	private disposing: Promise<void> | undefined;
@@ -86,15 +68,16 @@ export class TuiHost {
 		return this.shown;
 	}
 
-	/**
-	 * The TUI's client as the host knows it, once it connected. The TUI's
-	 * commands that still act in process (until the end of Phase 6) act as
-	 * this client, so the moves they make reach the client as `ended{moved}`.
-	 */
-	get hostClient(): HostClient {
-		if (!this.connectedClient) throw new Error("The TUI's client is not connected");
-		return this.connectedClient;
-	}
+	/** A process exit stops the language server traces of the conversations the host serves, synchronously. */
+	private readonly closeLspTraces = (): void => {
+		for (const conversation of this.host.list()) {
+			try {
+				conversation.session.closeLspTraceSync();
+			} catch {
+				// The process is exiting: each trace closes on its own.
+			}
+		}
+	};
 
 	/**
 	 * Connect the TUI's client over a loopback connection on the local
@@ -103,6 +86,7 @@ export class TuiHost {
 	 */
 	async connect(options: TuiConnectOptions = {}): Promise<LoopbackClient> {
 		if (this.clientConversation) throw new Error("The TUI host already has its client");
+		process.on("exit", this.closeLspTraces);
 		const pair = createLoopbackRpcTransportPair();
 		const connection = serveConnection(pair.server, localProfile, {
 			host: this.host,
@@ -123,7 +107,6 @@ export class TuiHost {
 			...(options.terminal === undefined ? {} : { terminal: options.terminal }),
 		});
 		this.clientConversation = () => connection.conversation;
-		this.connectedClient = connection.client;
 		const client = new LoopbackClient(
 			{
 				name: "volt-tui",
@@ -216,6 +199,7 @@ export class TuiHost {
 				});
 				await this.host.dispose();
 			} finally {
+				process.off("exit", this.closeLspTraces);
 				await this.daemon?.dispose();
 			}
 		})();

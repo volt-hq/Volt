@@ -4,6 +4,7 @@ import type { SessionIntentResult } from "../../../src/core/extensions/index.ts"
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
+import { userMessagesForForking } from "../../utilities/session-reads.ts";
 import { createHostHarness } from "../host-harness.ts";
 
 describe("regression #585: extension session control returns the id of the session the client moved to", () => {
@@ -82,7 +83,7 @@ describe("regression #585: extension session control returns the id of the sessi
 	it("returns the new, resumed, and forked session's id from ctx.newSession, ctx.switchSession, and ctx.fork", async () => {
 		const { harness, source, results, seededIn, starts } = await setup();
 		const first = source.id;
-		const forkFrom = source.session.getUserMessagesForForking()[0]!.entryId;
+		const forkFrom = userMessagesForForking(source.session)[0]!.entryId;
 
 		// Print mode runs each command for its one client, which moves with each intent.
 		const exitCode = await runPrintMode(harness.host, source, {
@@ -111,7 +112,7 @@ describe("regression #585: extension session control returns the id of the sessi
 	it("returns only cancelled: true when an extension cancels, and the client stays on its session", async () => {
 		const { harness, source, results, seededIn, starts, cancelNext } = await setup();
 		const first = source.id;
-		const forkFrom = source.session.getUserMessagesForForking()[0]!.entryId;
+		const forkFrom = userMessagesForForking(source.session)[0]!.entryId;
 		cancelNext(true);
 
 		await runPrintMode(harness.host, source, {

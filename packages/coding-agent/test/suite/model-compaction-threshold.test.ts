@@ -1,6 +1,7 @@
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { lastAssistantText } from "../utilities/session-reads.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const harnesses: Harness[] = [];
@@ -54,7 +55,7 @@ describe("model-specific automatic compaction", () => {
 		harness.setResponses([fauxAssistantMessage("Next reply")]);
 		await harness.session.prompt("Next task");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-		expect(harness.session.getLastAssistantText()).toBe("Next reply");
+		expect(lastAssistantText(harness.session)).toBe("Next reply");
 	});
 
 	it("finishes tool execution before compacting and resumes with the checkpoint", async () => {
@@ -75,7 +76,7 @@ describe("model-specific automatic compaction", () => {
 		await harness.session.prompt("Run probe and finish");
 		expect(harness.eventsOfType("compaction_end")[0]).toMatchObject({ aborted: false, willRetry: true });
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
-		expect(harness.session.getLastAssistantText()).toBe("Continued successfully");
+		expect(lastAssistantText(harness.session)).toBe("Continued successfully");
 	});
 
 	it("uses the selected model's threshold when switching models before the next prompt", async () => {
@@ -92,6 +93,6 @@ describe("model-specific automatic compaction", () => {
 		await harness.session.prompt("Continue with the configured model");
 		expect(harness.eventsOfType("compaction_start")).toHaveLength(1);
 		expect(harness.eventsOfType("compaction_end")[0].result?.summary).toBe("Model switch checkpoint");
-		expect(harness.session.getLastAssistantText()).toBe("Large model reply");
+		expect(lastAssistantText(harness.session)).toBe("Large model reply");
 	});
 });

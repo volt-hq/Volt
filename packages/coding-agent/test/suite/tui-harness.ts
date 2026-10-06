@@ -21,6 +21,7 @@ import { IROH_REMOTE_ALPN } from "../../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { RelayPreamble } from "../../src/daemon/control-protocol.ts";
+import type { TuiConnectOptions } from "../../src/modes/interactive/client/tui-connection.ts";
 import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
 import {
 	type AcquireOutcome,
@@ -31,7 +32,7 @@ import {
 	type OpenedRelay,
 } from "../../src/modes/interactive/host/daemon-link.ts";
 import { adaptRelaySocketToIrohStream } from "../../src/modes/interactive/host/relay-serving.ts";
-import { type TuiConnectOptions, TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
+import { TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { TUI_HOST_REQUESTS } from "../../src/modes/interactive/live-view.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
@@ -108,7 +109,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 	const leases = link === undefined ? undefined : new DaemonLeases({ link, createLink: () => link });
 	const harness = await createHostHarness({
 		...hostOptions,
-		extensionMode: "tui",
+		extensionMode: "rpc",
 		...(leases === undefined ? {} : { openGate: leases.openGate }),
 	});
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -139,7 +140,17 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 			async startMode(modeOptions = {}) {
 				const tuiMode = modeOptions.tuiMode ?? "regular";
 				vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-				const mode = new InteractiveMode(tuiHost, { tuiMode });
+				const settings = startup.session.settingsManager;
+				const profile = settings.getActiveProfile();
+				const mode = new InteractiveMode(tuiHost, {
+					tuiMode,
+					// Where the startup conversation runs, as the volt CLI tells the TUI before its client connects.
+					settingsScope: {
+						cwd: startup.cwd,
+						projectTrusted: settings.isProjectTrusted(),
+						...(profile === undefined ? {} : { profile }),
+					},
+				});
 				const access = mode as unknown as ModeAccess;
 				const terminal = new VirtualTerminal(modeOptions.columns ?? 100, modeOptions.rows ?? 30);
 				access.renderer = createInteractiveTui({
