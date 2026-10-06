@@ -56,7 +56,7 @@ The TUI is an owner that something else can displace. Every displacement path (d
 | Tool policy for phone prompts | Full local tool set; `remote.allowTools` is not a ceiling (#50) | Client grant ∩ workspace ceiling ∩ `remote.allowTools` |
 | `conversation_in_use` | Never | When the runtime's tools exceed the attaching client's grant |
 | Process environment | The terminal's environment | Daemon login-shell environment (`docs/daemon.md`) |
-| Push and workspace commands | Forwarded to the daemon over `relay_rpc` | Executed in the daemon |
+| Push and workspace commands | Forwarded to the daemon over `relay_rpc` | Executed in the daemon (a worker forwards its phones' requests over `worker_forward`) |
 | Closing the TUI mid-turn | Turn is lost (RFC §1.3) | Not applicable |
 | Second TUI on the same session | Read-only (`held_by_tui`) | Takes over by draining |
 
@@ -189,7 +189,7 @@ TUI streams go through the daemon relay rather than to a socket the worker expos
 
 A worker keeps one control connection to the daemon (role `worker`, scoped to its conversation). Over it, the worker uses the integrations that `daemon-attach.ts` implements for TUI-owned conversations today. They move from the TUI to the worker:
 
-- push notification delivery (`relayNotificationDelivery`) and push-target registration (`relay_rpc`)
+- push notification delivery (`relayNotificationDelivery`), and the daemon-backed intents and queries of the worker's relayed phones (push-target registration, workspace and worktree changes, keep-awake, web search key) forwarded over `worker_forward`, with today's `relay_rpc` allowlist and scoped to the worker's own relays; `relay_rpc` as a TUI request is removed *(amended 2026-10-06)*
 - workspace unregister forwarding and its retirement handshake (`createRelayWorkspaceUnregisterRetirement`)
 - Git observation publishing for work and PR association (`publishGitObservation`)
 - worktree context binding and checkout pinning (`setWorktreeContext`, the local control connection that pins a checkout)
