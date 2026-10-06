@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { basename } from "node:path";
 import type { DaemonEnvironmentStatus } from "@hansjm10/volt-protocol/daemon-control";
+import { isStandaloneBinary } from "../config.ts";
 import { killProcessTree } from "../utils/shell.ts";
 
 export type { DaemonEnvironmentStatus } from "@hansjm10/volt-protocol/daemon-control";
@@ -39,6 +40,8 @@ const STDERR_TAIL_CHARS = 2_000;
 const SUPPORTED_SHELLS = new Set(["bash", "zsh", "fish", "sh", "dash", "ksh"]);
 // Valid in POSIX shells and fish; values arrive through the environment so no quoting is needed.
 const SHELL_COMMAND = '"$VOLT_ENV_NODE" -e "$VOLT_ENV_SCRIPT"';
+// A standalone binary reads `-e` as `--extension`, so it prints through its own internal subcommand.
+const STANDALONE_SHELL_COMMAND = '"$VOLT_ENV_NODE" daemon print-env';
 const ENV_SCRIPT =
 	"const m=process.env.VOLT_ENV_MARKER;delete process.env.VOLT_ENV_MARKER;process.stdout.write(m+JSON.stringify(process.env)+m);";
 const HELPER_VARIABLES = [DAEMON_RESOLVING_ENV_VARIABLE, "VOLT_ENV_NODE", "VOLT_ENV_SCRIPT", "VOLT_ENV_MARKER"];
@@ -102,8 +105,10 @@ export interface ResolveDaemonEnvironmentOptions {
 	readSessionEnvironment?: () => Promise<Record<string, string> | undefined>;
 	/** Login shell path. Defaults to the password database entry, then SHELL. */
 	shell?: string;
-	/** Node executable that prints the environment. Defaults to process.execPath. */
+	/** Node executable, or the standalone binary, that prints the environment. Defaults to process.execPath. */
 	nodePath?: string;
+	/** nodePath is a standalone binary, which prints through `daemon print-env`. Defaults to isStandaloneBinary. */
+	standalone?: boolean;
 	timeoutMs?: number;
 }
 
@@ -207,6 +212,7 @@ function createShellEnvironment(
 	shell: string,
 	home: string,
 	nodePath: string,
+	standalone: boolean,
 	marker: string,
 ): NodeJS.ProcessEnv {
 	const environment: NodeJS.ProcessEnv = { ...base };
@@ -214,9 +220,25 @@ function createShellEnvironment(
 	environment.SHELL ??= shell;
 	environment[DAEMON_RESOLVING_ENV_VARIABLE] = "1";
 	environment.VOLT_ENV_NODE = nodePath;
-	environment.VOLT_ENV_SCRIPT = ENV_SCRIPT;
+	if (!standalone) {
+		environment.VOLT_ENV_SCRIPT = ENV_SCRIPT;
+	}
 	environment.VOLT_ENV_MARKER = marker;
 	return environment;
+}
+
+/**
+ * `volt daemon print-env`: what ENV_SCRIPT prints, for a standalone binary.
+ * Writes this process's environment, without the marker, between two copies of
+ * the marker. False when no marker was given.
+ */
+export function printLoginShellEnvironment(): boolean {
+	const { VOLT_ENV_MARKER: marker, ...printed } = process.env;
+	if (!marker) {
+		return false;
+	}
+	process.stdout.write(marker + JSON.stringify(printed) + marker);
+	return true;
 }
 
 function extractPayload(stdout: string, marker: string): string | undefined {
@@ -230,6 +252,7 @@ function extractPayload(stdout: string, marker: string): string | undefined {
 
 function runLoginShell(
 	shell: string,
+	command: string,
 	environment: NodeJS.ProcessEnv,
 	cwd: string,
 	marker: string,
@@ -275,7 +298,7 @@ function runLoginShell(
 		try {
 			// Detached: a new session without a controlling terminal, so an
 			// interactive shell cannot take over the terminal voltd was started from.
-			child = spawn(shell, ["-i", "-l", "-c", SHELL_COMMAND], {
+			child = spawn(shell, ["-i", "-l", "-c", command], {
 				cwd,
 				env: environment,
 				detached: true,
@@ -395,15 +418,18 @@ export async function resolveDaemonEnvironment(
 	const shellBase = createShellBase(inherited, platform, serviceStart, sessionEnvironment);
 	const marker = `__VOLT_ENV_${randomUUID()}__`;
 	const home = inherited.HOME || homedir();
+	const standalone = options.standalone ?? isStandaloneBinary;
 	const environment = createShellEnvironment(
 		shellBase.environment,
 		shell,
 		home,
 		options.nodePath ?? process.execPath,
+		standalone,
 		marker,
 	);
 	const run = await runLoginShell(
 		shell,
+		standalone ? STANDALONE_SHELL_COMMAND : SHELL_COMMAND,
 		environment,
 		home,
 		marker,
