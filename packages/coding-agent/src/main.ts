@@ -1304,6 +1304,7 @@ export async function main(args: string[], options?: MainOptions) {
 				host,
 				conversation,
 				...(daemonLeases === undefined ? {} : { daemon: daemonLeases }),
+				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
 			});
 			const interactiveMode = new InteractiveMode(tuiHost, {
 				migratedProviders,

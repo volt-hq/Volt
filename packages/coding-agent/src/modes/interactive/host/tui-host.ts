@@ -29,6 +29,8 @@ export interface TuiHostOptions {
 	readonly conversation: HostedConversation;
 	/** The daemon leases, whose open gate the host was built with. Without them, the TUI runs without the daemon. */
 	readonly daemon?: DaemonLeases;
+	/** The model scope patterns the TUI started with (`--models`), which a profile switch keeps. */
+	readonly modelScopePatterns?: readonly string[];
 }
 
 export interface TuiConnectOptions {
@@ -50,6 +52,7 @@ export class TuiHost {
 	readonly host: ConversationHost;
 	private readonly startup: HostedConversation;
 	private readonly daemon: DaemonLeases | undefined;
+	private readonly modelScopePatterns: readonly string[] | undefined;
 	/** The conversation the TUI's client is attached to, if any. */
 	private clientConversation: (() => HostedConversation | undefined) | undefined;
 	private shown: HostedConversation;
@@ -63,6 +66,7 @@ export class TuiHost {
 		this.startup = options.conversation;
 		this.shown = options.conversation;
 		this.daemon = options.daemon;
+		this.modelScopePatterns = options.modelScopePatterns;
 	}
 
 	/** Host the TUI's conversations in `options.host`, starting with `options.conversation`. */
@@ -98,8 +102,11 @@ export class TuiHost {
 			anchor: true,
 			// The TUI's prompts reach extensions as interactive input.
 			inputSource: "interactive",
-			// The TUI's abort stops the run without delivering its queued input.
-			services: () => ({ abortRun: (session) => session.abort("host_action") }),
+			services: () => ({
+				// The TUI's abort stops the run without delivering its queued input.
+				abortRun: (session) => session.abort("host_action"),
+				...(this.modelScopePatterns === undefined ? {} : { modelScopePatterns: this.modelScopePatterns }),
+			}),
 			...(options.onShutdownRequested === undefined ? {} : { onShutdownRequested: options.onShutdownRequested }),
 			onLost: (_conversation, error) => {
 				this.stopServing();

@@ -52,6 +52,8 @@ export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "openGate" |
 	link?: DaemonLink;
 	/** The startup conversation's id and cwd: a new id in the harness's temp dir by default. */
 	startup?: { id?: string; cwd?: string };
+	/** The model scope patterns the TUI started with (`--models`). */
+	modelScopePatterns?: readonly string[];
 }
 
 /** InteractiveMode over the TUI host, rendering into a virtual terminal. */
@@ -99,7 +101,7 @@ interface ModeAccess {
 }
 
 export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise<TuiHarness> {
-	const { link, startup: startupOptions, ...hostOptions } = options;
+	const { link, startup: startupOptions, modelScopePatterns, ...hostOptions } = options;
 	const leases = link === undefined ? undefined : new DaemonLeases({ link, createLink: () => link });
 	const harness = await createHostHarness({
 		...hostOptions,
@@ -119,6 +121,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 			host: harness.host,
 			conversation: startup,
 			...(leases === undefined ? {} : { daemon: leases }),
+			...(modelScopePatterns === undefined ? {} : { modelScopePatterns }),
 		});
 		return {
 			...harness,
