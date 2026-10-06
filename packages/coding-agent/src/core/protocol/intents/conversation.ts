@@ -169,6 +169,11 @@ export const abortRetryIntent = defineIntent({
 	},
 });
 
+/**
+ * A user shell command, run on the host: extensions see `user_bash` first and
+ * may return its result or the operations it runs with; the live `bash` value
+ * shows it until its entry commits.
+ */
 export const bashIntent = defineIntent({
 	name: "bash",
 	label: "Run shell command",
@@ -179,8 +184,8 @@ export const bashIntent = defineIntent({
 	requires: control,
 	whileBusy: "run",
 	run(ctx, input) {
-		return targetOf(ctx).session.executeBash(input.command, undefined, {
-			excludeFromContext: input.excludeFromContext,
+		return targetOf(ctx).session.runUserBash(input.command, {
+			...(input.excludeFromContext === undefined ? {} : { excludeFromContext: input.excludeFromContext }),
 		});
 	},
 	accept: (result) => ({ result }),

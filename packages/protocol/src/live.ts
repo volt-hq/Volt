@@ -12,13 +12,13 @@
  * and a gap in `seq` means the client must resubscribe after its position.
  *
  * Keys name a value family and, for keyed families, an id:
- * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, or
+ * `phase`, `git`, `prompt_cache`, `usage`, `intents`, `ext_title`, `bash`, or
  * `host_request/<requestId>`, `ext_status/<extension>/<name>`,
  * `ext_panel/<extension>/<name>`, `work/<workId>`. A value's `kind` is its
  * key's family, and an extension's status items and panels are keyed by its
- * manifest id. A `patch` item updates the node of an `ext_panel` or `work`
- * value in place (ui-patch.ts); a client that cannot apply it resubscribes
- * after its position.
+ * manifest id. A `patch` item updates the node of an `ext_panel`, `work`, or
+ * `bash` value in place (ui-patch.ts); a client that cannot apply it
+ * resubscribes after its position.
  *
  * Host requests (dialogs, forms, approvals, MCP authorization) are live values
  * until answered; any client that accepts the request's kind may answer with
@@ -53,6 +53,7 @@ import {
 	UiNodeStyledTextSchema,
 	UiNodeTextSchema,
 	UiNodeTokenSchema,
+	UiTerminalNodeSchema,
 } from "./ui-node.ts";
 import { UiPatchSchema } from "./ui-patch.ts";
 import { WorkProgressSchema } from "./work.ts";
@@ -74,6 +75,7 @@ export const HOST_REQUEST_KINDS = [
 	"dialog",
 	"approval",
 	"mcp_auth",
+	"provider_auth",
 	"editor_text",
 ] as const;
 
@@ -96,8 +98,9 @@ export const HostDialogActionSchema = Type.Object(
  * A question the host asks a client. Answers: `select`, `input`, and `editor`
  * take `{value}`; `confirm` takes `{confirmed}`; `form` takes `{values}`;
  * `dialog` takes `{value}` with an action id; `approval` takes `{decision}`;
- * `editor_text` takes `{value}` with the client's editor text; every kind may
- * be answered `{cancelled}`.
+ * `provider_auth` takes `{value}` only for its `manual` flow; `editor_text`
+ * takes `{value}` with the client's editor text; every kind may be answered
+ * `{cancelled}`.
  */
 export const HostRequestSchema = Type.Union([
 	Type.Object(
@@ -110,8 +113,15 @@ export const HostRequestSchema = Type.Union([
 		closed,
 	),
 	Type.Object({ kind: Type.Literal("confirm"), title: Type.String(), message: Type.String(), timeoutMs }, closed),
+	/** With `secret`, the client masks what the user types and keeps it out of any history; the host asks only one client. */
 	Type.Object(
-		{ kind: Type.Literal("input"), title: Type.String(), placeholder: Type.Optional(Type.String()), timeoutMs },
+		{
+			kind: Type.Literal("input"),
+			title: Type.String(),
+			placeholder: Type.Optional(Type.String()),
+			secret: Type.Optional(Type.Boolean()),
+			timeoutMs,
+		},
 		closed,
 	),
 	Type.Object({ kind: Type.Literal("editor"), title: Type.String(), prefill: Type.Optional(Type.String()) }, closed),
@@ -168,6 +178,25 @@ export const HostRequestSchema = Type.Union([
 			expiresAt: Type.Optional(Type.String()),
 			intervalMs: Type.Optional(Type.Integer({ minimum: 0 })),
 			message: Type.Optional(Type.String()),
+		},
+		closed,
+	),
+	/**
+	 * A provider sign-in waiting for the user, asked only of the client that
+	 * started it: `browser` (open `url` and sign in), `device` (enter
+	 * `userCode` at `url`), or `manual` (open `url`, then paste the redirect URL
+	 * or code it shows as the answer, unless the host receives it first). The
+	 * host ends the request when the sign-in ends; cancelling it cancels the
+	 * sign-in.
+	 */
+	Type.Object(
+		{
+			kind: Type.Literal("provider_auth"),
+			provider: Type.String(),
+			flow: stringEnum(["browser", "device", "manual"]),
+			url: Type.Optional(Type.String()),
+			userCode: Type.Optional(Type.String()),
+			instructions: Type.Optional(Type.String()),
 		},
 		closed,
 	),
@@ -316,6 +345,26 @@ export const LiveWorkValueSchema = Type.Object(
 	closed,
 );
 
+/**
+ * A user shell command (`!`, or `!!` with `excludeFromContext`) and its
+ * output so far: set when it starts and cleared once its `bashExecution` entry
+ * commits; `output` grows by `append_lines` patches. It has an `exitCode` or
+ * `cancelled` once the command ended, while its entry waits for the running
+ * turn.
+ */
+export const LiveBashValueSchema = Type.Object(
+	{
+		kind: Type.Literal("bash"),
+		command: Type.String(),
+		excludeFromContext: Type.Optional(Type.Boolean()),
+		output: UiTerminalNodeSchema,
+		exitCode: Type.Optional(Type.Integer()),
+		cancelled: Type.Optional(Type.Boolean()),
+		truncated: Type.Optional(Type.Boolean()),
+	},
+	closed,
+);
+
 /** Every live value, keyed by kind. */
 export const LIVE_VALUE_SCHEMAS = {
 	phase: LivePhaseValueSchema,
@@ -328,6 +377,7 @@ export const LIVE_VALUE_SCHEMAS = {
 	ext_panel: LiveExtensionPanelValueSchema,
 	ext_title: LiveExtensionTitleValueSchema,
 	work: LiveWorkValueSchema,
+	bash: LiveBashValueSchema,
 } as const;
 
 export type LiveValueKind = keyof typeof LIVE_VALUE_SCHEMAS;
@@ -343,6 +393,7 @@ export const LiveValueSchema = Type.Union([
 	LiveExtensionPanelValueSchema,
 	LiveExtensionTitleValueSchema,
 	LiveWorkValueSchema,
+	LiveBashValueSchema,
 ]);
 export type LiveValue = Static<typeof LiveValueSchema>;
 
@@ -354,6 +405,7 @@ export const LIVE_SINGLETON_KINDS = [
 	"usage",
 	"intents",
 	"ext_title",
+	"bash",
 ] as const satisfies readonly LiveValueKind[];
 
 /** Families with one value per id: the key is `<kind>/<id>`. */
@@ -478,19 +530,19 @@ export const LiveSetItemSchema = Type.Object(
 /** Remove one keyed value. */
 export const LiveClearItemSchema = Type.Object({ type: Type.Literal("clear"), key: LiveKeySchema }, closed);
 
-/** Keyed families whose node a `patch` item updates: a panel's `node` and a work item's `detail`. */
-export const LIVE_PATCHABLE_KINDS = ["ext_panel", "work"] as const satisfies readonly LiveValueKind[];
+/** Values whose node a `patch` item updates: a panel's `node`, a work item's `detail`, and a shell command's `output`. */
+export const LIVE_PATCHABLE_KINDS = ["ext_panel", "work", "bash"] as const satisfies readonly LiveValueKind[];
 
 export const LivePatchKeySchema = Type.String({
-	pattern: `^(?:work/${KEY_ID}|ext_panel/${EXTENSION_KEY_ID})$`,
-	"x-volt-expected": "be the live key of a panel or work item",
+	pattern: `^(?:bash|work/${KEY_ID}|ext_panel/${EXTENSION_KEY_ID})$`,
+	"x-volt-expected": "be the live key of a panel, work item, or shell command",
 });
 
 /**
- * Update one keyed value's node in place. `ops` apply to the node as a
- * one-node tree: an `ext_panel` value's `node`, which stays one node, or a
- * `work` value's `detail` (the empty tree without one), which stays at most
- * one node.
+ * Update one value's node in place. `ops` apply to the node as a one-node
+ * tree: an `ext_panel` value's `node`, which stays one node; a `work` value's
+ * `detail` (the empty tree without one), which stays at most one node; or a
+ * `bash` value's `output`, which stays one terminal node.
  */
 export const LivePatchItemSchema = Type.Object(
 	{ type: Type.Literal("patch"), key: LivePatchKeySchema, ops: UiPatchSchema },

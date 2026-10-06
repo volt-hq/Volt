@@ -14,6 +14,13 @@ import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema } from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
+import {
+	AuthProviderSchema,
+	LspStatusSchema,
+	ProviderAuthMethodSchema,
+	RpcPersonalitySchema,
+	RpcTransportSchema,
+} from "./host-settings.ts";
 import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema, IntentOptionSchema } from "./intents.ts";
 import {
 	RpcMcpCapabilitiesResponseSchema,
@@ -195,7 +202,13 @@ export const QUERY_SCHEMAS = {
 		params: EmptyInputSchema,
 		result: Type.Object(
 			{
-				models: Type.Array(RpcCatalogModelSchema),
+				/** `auth`: how requests to the model authenticate, with a subscription (`oauth`) or a key. */
+				models: Type.Array(
+					Type.Object(
+						{ ...RpcCatalogModelSchema.properties, auth: Type.Optional(ProviderAuthMethodSchema) },
+						closed,
+					),
+				),
 				cycleScope: Type.Array(ClientModelRefSchema),
 			},
 			closed,
@@ -218,7 +231,10 @@ export const QUERY_SCHEMAS = {
 			closed,
 		),
 	},
-	/** Host settings that intents change; refetched on `changed{settings}`. */
+	/**
+	 * Host settings that intents change; refetched on `changed{settings}`. The
+	 * optional fields reach local clients only.
+	 */
 	settings: {
 		params: EmptyInputSchema,
 		result: Type.Object(
@@ -229,6 +245,20 @@ export const QUERY_SCHEMAS = {
 				autoRetry: Type.Boolean(),
 				/** The active settings profile, `""` without one: compaction intents name it as `expectedProfile`. */
 				profile: Type.String(),
+				/** The conversation model's compaction threshold in tokens; 0 uses the context-limit default. */
+				compactionThresholdTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+				/** The settings profiles defined, by name. */
+				profiles: Type.Optional(Type.Array(Type.String())),
+				personality: Type.Optional(RpcPersonalitySchema),
+				transport: Type.Optional(RpcTransportSchema),
+				/** `provider/modelId`, or null when reviews use the conversation's model. */
+				reviewModel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+				/** `off`, or minutes of keepalive after work finishes (0: only while working). */
+				promptCacheKeepAlive: Type.Optional(Type.Union([Type.Literal("off"), Type.Number({ minimum: 0 })])),
+				imageAutoResize: Type.Optional(Type.Boolean()),
+				blockImages: Type.Optional(Type.Boolean()),
+				httpIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+				enableInstallTelemetry: Type.Optional(Type.Boolean()),
 			},
 			closed,
 		),
@@ -270,6 +300,18 @@ export const QUERY_SCHEMAS = {
 		result: Type.Object({ webSearch: RpcWebSearchStatusSchema }, closed),
 	},
 	subagent_definitions: { params: EmptyInputSchema, result: RpcListSubagentsResponseSchema },
+	/** The conversation's language servers, as a snapshot that starts and installs nothing. */
+	"lsp.status": { params: EmptyInputSchema, result: LspStatusSchema },
+	/**
+	 * Save a diagnostic capture of the conversation's recent tool calls (their
+	 * argument samples with credentials redacted) and name the file it wrote.
+	 */
+	debug_report: { params: EmptyInputSchema, result: Type.Object({ path: Type.String() }, closed) },
+	/** The providers a client may sign in to, and how their requests authenticate now; never credentials. */
+	"auth.providers": {
+		params: EmptyInputSchema,
+		result: Type.Object({ providers: Type.Array(AuthProviderSchema) }, closed),
+	},
 	/**
 	 * A work item's output as plain text without terminal control sequences:
 	 * what running work produced so far, or what its result kept. Only the

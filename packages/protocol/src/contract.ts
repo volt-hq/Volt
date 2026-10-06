@@ -127,6 +127,17 @@ import {
 	RpcGitStatusCountsSchema,
 } from "./git-context.ts";
 import {
+	AuthProviderSchema,
+	HostSettingsValuesSchema,
+	LspServerStatusSchema,
+	LspStatusSchema,
+	ModelScopeEntrySchema,
+	ProviderAuthMethodSchema,
+	ProviderAuthSourceSchema,
+	RpcPersonalitySchema,
+	RpcTransportSchema,
+} from "./host-settings.ts";
+import {
 	BUILTIN_INTENT_NAMES,
 	BuiltinIntentNameSchema,
 	DynamicIntentFrameSchema,
@@ -681,6 +692,17 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	// Queries
 	QueryName: QueryNameSchema,
 	EditorCompletionItem: EditorCompletionItemSchema,
+
+	// Host settings, language servers, and provider credentials
+	Personality: RpcPersonalitySchema,
+	Transport: RpcTransportSchema,
+	HostSettingsValues: HostSettingsValuesSchema,
+	ModelScopeEntry: ModelScopeEntrySchema,
+	LspServerStatus: LspServerStatusSchema,
+	LspStatus: LspStatusSchema,
+	ProviderAuthMethod: ProviderAuthMethodSchema,
+	ProviderAuthSource: ProviderAuthSourceSchema,
+	AuthProvider: AuthProviderSchema,
 
 	// Live lane and host requests
 	HostRequestKind: HostRequestKindSchema,

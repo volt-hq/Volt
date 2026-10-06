@@ -81,10 +81,13 @@ describe("native structured questions", () => {
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
 	});
 
-	it("does not advertise questions to sessions an RPC client opened", async () => {
+	it("advertises questions while a client that asks them is attached, whatever mode bound the session", async () => {
 		const h = await setup();
 		await h.session.attachExtensionClient({ id: "rpc-client", mode: "rpc" }).ready;
-		await bind(h);
+		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
+		const detach = await bind(h);
+		expect(h.session.getActiveToolNames()).toContain("request_user_input");
+		detach();
 		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
 	});
 

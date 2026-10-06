@@ -160,5 +160,11 @@ export interface HostClient {
 	 * conversation it moves to, before anything it runs there afterwards.
 	 */
 	readonly recoversInput?: boolean;
+	/**
+	 * A paired device on the remote profile. It is never asked the project
+	 * trust question of a conversation it opens: trusting a project lets its
+	 * extensions run on the host.
+	 */
+	readonly remote?: boolean;
 	readonly move: HostClientMove;
 }

@@ -15,10 +15,12 @@
  * values `host_request/<requestId>` until they end. A request reaches only the
  * attached clients that accept its kind (and, for a request asked of one host
  * client, only that client's views), and only such a client may answer it:
- * the first valid answer wins. A request ends when it is answered, when its
+ * the first valid answer wins. A provider sign-in and a secret input are
+ * always asked of one client. A request asked of one client ends once none
+ * of that client's views is attached. A request ends when it is answered, when its
  * requester aborts it, when it times out, or when the conversation closes. It
  * outlives the clients that saw it, so a client that attaches later, or
- * reconnects, finds it again.
+ * reconnects, finds it again; one asked of one client ends with that client.
  *
  * Streaming items (the streaming assistant message and running tools) are
  * part of the state until the entry that commits them is applied
@@ -91,7 +93,7 @@ export interface LiveClient {
 
 /** Why a host request ended without an answer. */
 export type HostRequestCancelReason =
-	/** No attached client accepted its kind when it was asked. */
+	/** No attached client accepted its kind when it was asked, or the client it was asked of left. */
 	| "unavailable"
 	/** Its requester aborted it. */
 	| "aborted"
@@ -681,7 +683,15 @@ function answers(request: HostRequest, response: HostResponse): boolean {
 		case "mcp_auth":
 			// An authorization completes through its own intents; a client can only dismiss it.
 			return false;
+		case "provider_auth":
+			// A sign-in completes on the host; only a manual one takes the pasted redirect URL or code.
+			return request.flow === "manual" && "value" in response;
 	}
+}
+
+/** Whether `request` carries a credential, or a sign-in only the client that started it may see. */
+function isPrivateRequest(request: HostRequest): boolean {
+	return request.kind === "provider_auth" || (request.kind === "input" && request.secret === true);
 }
 
 /** A whole-millisecond timeout, or none for an absent, non-positive, or non-finite one. */
@@ -765,7 +775,18 @@ export class LiveState {
 			if (this.clients.get(clientId) !== attached) return;
 			this.clients.delete(clientId);
 			this.deliver(attached, { reset: true, basedOn: this.readHead(), items: [] });
+			this.endOrphanedRequests();
 		};
+	}
+
+	/** End the requests asked of a host client none of whose views is attached any more: nobody can answer them. */
+	private endOrphanedRequests(): void {
+		for (const entry of [...this.pending.values()]) {
+			const client = entry.client;
+			if (client === undefined) continue;
+			if ([...this.clients.values()].some((attached) => belongsTo(attached, client))) continue;
+			this.settle(entry, { status: "cancelled", reason: "unavailable" });
+		}
 	}
 
 	/** Whether an attached client (of the host client `client`, when given) accepts host requests of `kind`. */
@@ -861,12 +882,16 @@ export class LiveState {
 	/**
 	 * Ask the attached clients that accept `request`'s kind. Resolves with the
 	 * first valid answer, or cancelled. Rejects for a malformed request or the
-	 * id of a pending one.
+	 * id of a pending one, and for a provider sign-in or secret input that is
+	 * not asked of one client.
 	 */
 	request(request: HostRequest, options: HostRequestOptions = {}): Promise<HostRequestOutcome> {
 		const requestId = options.id ?? randomUUID();
 		if (!isRequestId(requestId)) {
 			return Promise.reject(new TypeError(`Invalid host request id ${JSON.stringify(requestId)}`));
+		}
+		if (options.client === undefined && isPrivateRequest(request)) {
+			return Promise.reject(new TypeError(`A ${request.kind} host request is asked of one client`));
 		}
 		const value: LiveValue = { kind: "host_request", requestId, request };
 		if (!isLiveValue(value)) return Promise.reject(new TypeError(`Invalid ${request.kind} host request`));

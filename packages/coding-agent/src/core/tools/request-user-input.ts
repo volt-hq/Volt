@@ -139,7 +139,7 @@ export function createRequestUserInputToolDefinition(
 					throw new Error("Option labels must be unique within each question.");
 				}
 			}
-			const asked = ctx?.mode === "tui" && ctx.hasUI ? options?.ask?.(request, signal) : undefined;
+			const asked = ctx?.hasUI ? options?.ask?.(request, signal) : undefined;
 			if (asked === undefined) return resultFor(request, { status: "unavailable", answers: {} });
 			const response = await asked;
 			signal?.throwIfAborted();

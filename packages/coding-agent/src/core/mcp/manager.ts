@@ -97,14 +97,6 @@ function makeCallId(): string {
 	return `mcpcall_${randomUUID().replace(/-/g, "")}`;
 }
 
-function getCallerSurface(ctx: McpGatewayExecutionContext): McpCallerSurface {
-	if (ctx.mode === "tui") return "tui";
-	if (ctx.mode === "rpc") return "rpc";
-	if (ctx.mode === "print") return "print";
-	if (ctx.mode === "json") return "json";
-	return "unknown";
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1002,7 +994,7 @@ export class McpManager {
 			const text = readResourceResultToText(result);
 			const shaped = this.outputStore.shapeOutput(text);
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: uri,
 				kind: "resource",
@@ -1015,7 +1007,7 @@ export class McpManager {
 			return { action: "read_resource", server: serverId, resourceUri: uri, ...shaped };
 		} catch (error) {
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: uri,
 				kind: "resource",
@@ -1071,7 +1063,7 @@ export class McpManager {
 			const text = getPromptResultToText(result);
 			const shaped = this.outputStore.shapeOutput(text);
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: name,
 				kind: "prompt",
@@ -1085,7 +1077,7 @@ export class McpManager {
 			return { action: "get_prompt", server: serverId, prompt: name, ...shaped };
 		} catch (error) {
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: name,
 				kind: "prompt",
@@ -1117,7 +1109,7 @@ export class McpManager {
 					? this.outputStore.read(cacheId, input)
 					: this.outputStore.readStructured(cacheId, input);
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: "cache",
 				item: cacheId,
 				kind: "cache",
@@ -1130,7 +1122,7 @@ export class McpManager {
 			return { action: "read_cache", ...chunk };
 		} catch (error) {
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: "cache",
 				item: cacheId,
 				kind: "cache",
@@ -1214,7 +1206,7 @@ export class McpManager {
 				...(shaped.cache ? { cacheId: shaped.cache.id } : {}),
 			});
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: toolName,
 				kind: "tool",
@@ -1252,7 +1244,7 @@ export class McpManager {
 			supervisor.recordCall(recent);
 			this.emit({ type: "mcp_call_end", call: recent });
 			await this.writeAudit({
-				callerSurface: getCallerSurface(context),
+				callerSurface: context.surface,
 				server: serverId,
 				item: toolName,
 				kind: "tool",

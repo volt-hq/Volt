@@ -32,6 +32,7 @@ import {
 	RESERVED_EXTENSION_IDS,
 } from "./extensions.ts";
 import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
+import { HostSettingsValuesSchema, ModelScopeEntrySchema, ProviderAuthMethodSchema } from "./host-settings.ts";
 import { RpcMcpAuthResponseSchema, RpcMcpServerResponseSchema } from "./mcp.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
 import { RpcPreparePrReviewResponseSchema, RpcPrReviewPrepareRequestSchema } from "./pr-review.ts";
@@ -176,6 +177,11 @@ export const INTENT_SCHEMAS = {
 	// Run control
 	abort: { input: EmptyInputSchema },
 	abort_retry: { input: EmptyInputSchema },
+	/**
+	 * Run a user shell command on the host (`excludeFromContext`: the model
+	 * never sees its output). Extensions' `user_bash` hooks see it first; the
+	 * live `bash` value shows it until its entry commits.
+	 */
 	bash: {
 		input: Type.Object({ command: Type.String(), excludeFromContext: Type.Optional(Type.Boolean()) }, closed),
 		output: RpcBashResultSchema,
@@ -428,6 +434,71 @@ export const INTENT_SCHEMAS = {
 	upload_device_logs: {
 		input: Type.Object({ fileName: Type.Optional(Type.String()), content: Type.String() }, closed),
 		output: Type.Object({ path: Type.String(), byteCount: Type.Integer({ minimum: 0 }) }, closed),
+	},
+	/** Change settings the host reads; the conversation applies them at once. */
+	set_settings: { input: HostSettingsValuesSchema },
+	/**
+	 * Switch the settings profile, with `create` making a global one of that
+	 * name first: the conversation reloads its resources and extensions, then
+	 * takes the profile's model scope and default model. `warnings` say what of
+	 * the profile could not apply.
+	 */
+	set_profile: {
+		input: Type.Object(
+			{ name: Type.String({ minLength: 1, maxLength: 128, pattern: "\\S" }), create: Type.Optional(Type.Boolean()) },
+			closed,
+		),
+		output: Type.Object(
+			{ profile: Type.String(), created: Type.Boolean(), warnings: Type.Array(Type.String()) },
+			closed,
+		),
+	},
+	/**
+	 * The models the conversation's model-cycle control steps through, in
+	 * order; none for every available model. `persist` saves them as the
+	 * settings' `enabledModels`.
+	 */
+	set_model_scope: {
+		input: Type.Object(
+			{ models: Type.Array(ModelScopeEntrySchema, { maxItems: 512 }), persist: Type.Optional(Type.Boolean()) },
+			closed,
+		),
+	},
+
+	// Language servers
+	/** Stop every running language server, shared ones included; they start again on next use. */
+	"lsp.restart": { input: EmptyInputSchema, output: Type.Object({ stopped: Type.Integer({ minimum: 0 }) }, closed) },
+	/** Trace language server traffic to `path` (relative to the conversation's cwd), or stop tracing with null. */
+	"lsp.set_trace": {
+		input: Type.Object({ path: Type.Union([Type.String({ minLength: 1 }), Type.Null()]) }, closed),
+		output: Type.Object({ traceFile: Type.Optional(Type.String()) }, closed),
+	},
+
+	// Provider credentials
+	/**
+	 * Sign in to a provider. The host runs the provider's login and asks only
+	 * the invoking client: `provider_auth` while a sign-in page or device code
+	 * waits, and `input` requests (`secret` for an API key). Not cancelled: the
+	 * model the conversation selected when it had none, and what kept it from
+	 * selecting one.
+	 */
+	"auth.login": {
+		input: Type.Object({ provider: Type.String({ minLength: 1 }), method: ProviderAuthMethodSchema }, closed),
+		output: Type.Union([
+			IntentCancelledSchema,
+			Type.Object(
+				{
+					model: Type.Optional(Type.Object(RpcAgentOptionsModelSelectionSchema.properties, closed)),
+					warning: Type.Optional(Type.String()),
+				},
+				closed,
+			),
+		]),
+	},
+	/** Remove a provider's stored credentials; environment variables and `models.json` stay. */
+	"auth.logout": {
+		input: Type.Object({ provider: Type.String({ minLength: 1 }) }, closed),
+		output: Type.Object({ removed: ProviderAuthMethodSchema }, closed),
 	},
 
 	// MCP servers

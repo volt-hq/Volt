@@ -18,6 +18,7 @@ export * from "./extensions.ts";
 export * from "./frames.ts";
 export * from "./git-context.ts";
 export * from "./helpers.ts";
+export * from "./host-settings.ts";
 export * from "./intents.ts";
 export * from "./live.ts";
 export * from "./mcp.ts";
