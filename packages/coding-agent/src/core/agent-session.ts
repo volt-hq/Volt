@@ -2072,10 +2072,9 @@ export class AgentSession {
 	/**
 	 * Attach a client to the session's extensions. The first client to attach
 	 * binds them: its mode becomes `ctx.mode` and `session_start` fires once.
-	 * Later clients add their surface: theme calls go to the last attached
-	 * client with themes, errors go to every client, and session actions go to
-	 * the client the call runs for (see `ClientScope`), or to the oldest
-	 * attached client outside any client scope. `ready` settles once the
+	 * Later clients add their surface: errors go to every client, and session
+	 * actions go to the client the call runs for (see `ClientScope`), or to the
+	 * oldest attached client outside any client scope. `ready` settles once the
 	 * extensions are bound.
 	 */
 	attachExtensionClient(client: ExtensionClient): ExtensionClientAttachment {

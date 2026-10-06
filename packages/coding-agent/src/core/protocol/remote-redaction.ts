@@ -29,7 +29,7 @@
  *
  * A user shell command's live output and a provider sign-in or secret input
  * asked of a local client never reach a remote client, nor do their patches
- * and clears.
+ * and clears; nor does a `set_theme` directive, which only a terminal shows.
  */
 
 import { Buffer } from "node:buffer";
@@ -718,6 +718,8 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				return sent([sanitizeUi(notice)]);
 			}
 			case "directive":
+				// A theme is a terminal's to show.
+				if (item.directive === "set_theme") return [];
 				return sent([sanitize(item)]);
 		}
 	};

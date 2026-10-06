@@ -8401,6 +8401,28 @@
 						}
 					},
 					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"questions"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "user_input"
+						},
+						"questions": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/UserInputQuestion"
+							},
+							"minItems": 1,
+							"maxItems": 3
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},
@@ -8416,7 +8438,8 @@
 				"approval",
 				"mcp_auth",
 				"provider_auth",
-				"editor_text"
+				"editor_text",
+				"user_input"
 			]
 		},
 		"HostResponse": {
@@ -8488,6 +8511,31 @@
 						},
 						"message": {
 							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"status",
+						"answers"
+					],
+					"properties": {
+						"status": {
+							"type": "string",
+							"enum": [
+								"answered",
+								"skipped"
+							]
+						},
+						"answers": {
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {
+									"$ref": "#/$defs/UserInputAnswer"
+								}
+							}
 						}
 					},
 					"additionalProperties": false
@@ -11403,29 +11451,56 @@
 			"additionalProperties": false
 		},
 		"LiveItem.directive": {
-			"type": "object",
-			"required": [
-				"type",
-				"directive",
-				"text"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "directive"
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"directive",
+						"text"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "directive"
+						},
+						"directive": {
+							"type": "string",
+							"enum": [
+								"set_editor_text",
+								"insert_editor_text"
+							]
+						},
+						"text": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
 				},
-				"directive": {
-					"type": "string",
-					"enum": [
-						"set_editor_text",
-						"insert_editor_text"
-					]
-				},
-				"text": {
-					"type": "string"
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"directive",
+						"name"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "directive"
+						},
+						"directive": {
+							"type": "string",
+							"const": "set_theme"
+						},
+						"name": {
+							"type": "string",
+							"minLength": 1
+						}
+					},
+					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"LiveItem.notice": {
 			"type": "object",
@@ -23244,6 +23319,82 @@
 						"maxLength": 160,
 						"pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
 					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"UserInputAnswer": {
+			"type": "object",
+			"required": [
+				"answers"
+			],
+			"properties": {
+				"answers": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"minItems": 1,
+					"maxItems": 2
+				}
+			},
+			"additionalProperties": false
+		},
+		"UserInputOption": {
+			"type": "object",
+			"required": [
+				"label",
+				"description"
+			],
+			"properties": {
+				"label": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 100,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
+				},
+				"description": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 300,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"UserInputQuestion": {
+			"type": "object",
+			"required": [
+				"id",
+				"header",
+				"question",
+				"options"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^[a-z][a-z0-9_]*$",
+					"maxLength": 64
+				},
+				"header": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 24,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
+				},
+				"question": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 500,
+					"pattern": "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$"
+				},
+				"options": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/UserInputOption"
+					},
+					"minItems": 2,
+					"maxItems": 3
 				}
 			},
 			"additionalProperties": false
