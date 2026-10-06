@@ -2264,6 +2264,9 @@
 					"type": "string",
 					"maxLength": 128,
 					"pattern": "^[^\\u0000\\r\\n]{1,128}$"
+				},
+				"workspaceRegistration": {
+					"$ref": "#/$defs/Control.WorkspaceRegistration"
 				}
 			},
 			"additionalProperties": false
@@ -3279,6 +3282,9 @@
 					"$ref": "#/$defs/Control.Response.conversation_opened"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.workspace_confirmation_required"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.worker_forward_result"
 				},
 				{
@@ -3378,6 +3384,10 @@
 				},
 				"workspaceName": {
 					"type": "string"
+				},
+				"localOnly": {
+					"type": "boolean",
+					"const": true
 				},
 				"spawned": {
 					"type": "boolean"
@@ -3758,6 +3768,31 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Response.workspace_confirmation_required": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"directory",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "workspace_confirmation_required"
+				},
+				"id": {
+					"type": "string"
+				},
+				"directory": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/Control.SensitiveDirectoryReason"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Response.worktree_prune_result": {
 			"type": "object",
 			"required": [
@@ -3920,6 +3955,15 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"Control.SensitiveDirectoryReason": {
+			"type": "string",
+			"enum": [
+				"root",
+				"home",
+				"contains_agent_dir",
+				"inside_agent_dir"
+			]
 		},
 		"Control.WorkerAgentConfig": {
 			"type": "object",
@@ -4437,6 +4481,13 @@
 				"lease_transferred"
 			]
 		},
+		"Control.WorkspaceRegistration": {
+			"type": "string",
+			"enum": [
+				"shared",
+				"local"
+			]
+		},
 		"Control.WorkspaceStatus": {
 			"type": "object",
 			"required": [
@@ -4455,6 +4506,10 @@
 					"items": {
 						"type": "string"
 					}
+				},
+				"localOnly": {
+					"type": "boolean",
+					"const": true
 				}
 			},
 			"additionalProperties": false

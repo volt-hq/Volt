@@ -123,6 +123,8 @@ export const ControlWorkspaceStatusSchema = Type.Object(
 		path: Type.String(),
 		/** Workspace-specific headless tool grant, when configured. */
 		allowedTools: Type.Optional(Type.Array(Type.String())),
+		/** Local to this host: paired devices neither see nor reach it unless their grant names it (D17). */
+		localOnly: Type.Optional(Type.Literal(true)),
 	},
 	closed,
 );
@@ -404,6 +406,23 @@ export type WorkerSpawnOptions = Static<typeof WorkerSpawnOptionsSchema>;
 
 /** A stored session: its id, and the session directory it is stored in (the opener's default for its cwd otherwise). */
 const storedSession = { sessionId: LogSessionIdSchema, sessionDir: Type.Optional(PathSchema) };
+
+/**
+ * Why a directory is never registered as a workspace without asking (D17):
+ * a filesystem root, the user's home directory (or one containing it), a
+ * directory containing Volt's agent directory, or one inside it.
+ */
+export const SensitiveDirectoryReasonSchema = stringEnum(["root", "home", "contains_agent_dir", "inside_agent_dir"]);
+export type SensitiveDirectoryReason = Static<typeof SensitiveDirectoryReasonSchema>;
+
+/**
+ * How a TUI's open registers the conversation's directory when no workspace
+ * holds it: `shared` (paired devices with access to all workspaces reach
+ * it) or `local` (local to this host; no paired device reaches it unless its
+ * grant names it).
+ */
+export const WorkspaceRegistrationSchema = stringEnum(["shared", "local"]);
+export type WorkspaceRegistration = Static<typeof WorkspaceRegistrationSchema>;
 
 /** What a TUI opens: a new conversation, one a worker hosts or the store keeps, or a copy of a stored one's branch. */
 export const ConversationOpenTargetSchema = Type.Union([
@@ -893,6 +912,12 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		spawn: WorkerSpawnOptionsSchema,
 		/** The TUI process across its connections; a `--no-session` conversation admits only the client that opened it. */
 		clientKey: codePoints(1, 128, SINGLE_LINE),
+		/**
+		 * How to register the conversation's directory when no workspace holds
+		 * it: required for a sensitive one (else `workspace_confirmation_required`),
+		 * `shared` by default for any other; ignored when a workspace holds it.
+		 */
+		workspaceRegistration: Type.Optional(WorkspaceRegistrationSchema),
 	}),
 	/** Worker: its primary conversation is open and its log locked; offers may follow. */
 	worker_ready: withId("worker_ready", { sessionIds: Type.Array(LogSessionIdSchema, { maxItems: 1 }) }),
@@ -1093,10 +1118,22 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		/** `created` for a new or forked conversation; `resumed` otherwise. */
 		selection: stringEnum(["created", "resumed"]),
 		workspaceName: Type.String(),
+		/** The workspace is local to this host: no paired device reaches it unless its grant names it (D17). */
+		localOnly: Type.Optional(Type.Literal(true)),
 		/** Whether this open spawned the worker; otherwise it attached to a live one, which keeps its spawn-only options. */
 		spawned: Type.Boolean(),
 		/** The open's spawn-only options that differ from the live worker's, which kept its own. */
 		ignoredOptions: Type.Array(WorkerSpawnOnlyOptionSchema),
+	}),
+	/**
+	 * A TUI's open of a conversation in a sensitive directory no workspace
+	 * holds: the daemon registers it only once asked how (`conversation_open`
+	 * again with `workspaceRegistration`). Nothing was opened or registered.
+	 */
+	workspace_confirmation_required: withId("workspace_confirmation_required", {
+		/** The directory that would be registered (its real path). */
+		directory: Type.String(),
+		reason: SensitiveDirectoryReasonSchema,
 	}),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
@@ -1124,6 +1161,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
 	CONTROL_RESPONSE_SCHEMAS.relay_rpc_result,
 	CONTROL_RESPONSE_SCHEMAS.conversation_opened,
+	CONTROL_RESPONSE_SCHEMAS.workspace_confirmation_required,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,

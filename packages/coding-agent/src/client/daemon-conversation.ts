@@ -9,7 +9,12 @@
 import type { Duplex } from "node:stream";
 import { createJsonlStreamRpcTransport, type RpcTransport } from "../core/protocol/transport/transport.ts";
 import type { DaemonClient } from "../daemon/control-client.ts";
-import type { ControlRequest, ControlResponse, WorkerSpawnOnlyOption } from "../daemon/control-protocol.ts";
+import type {
+	ControlRequest,
+	ControlResponse,
+	SensitiveDirectoryReason,
+	WorkerSpawnOnlyOption,
+} from "../daemon/control-protocol.ts";
 
 export type ConversationOpenRequest = Omit<Extract<ControlRequest, { type: "conversation_open" }>, "type" | "id">;
 export type ConversationOpened = Extract<ControlResponse, { type: "conversation_opened" }>;
@@ -21,6 +26,24 @@ export class DaemonConversationOpenError extends Error {
 		super(message);
 		this.name = "DaemonConversationOpenError";
 		this.code = code;
+	}
+}
+
+/**
+ * The conversation's directory is sensitive and no workspace holds it (D17):
+ * ask the user, then open again with `workspaceRegistration` (`shared`, or
+ * `local` for a workspace no paired device reaches).
+ */
+export class WorkspaceConfirmationRequiredError extends Error {
+	readonly directory: string;
+	readonly reason: SensitiveDirectoryReason;
+	constructor(directory: string, reason: SensitiveDirectoryReason) {
+		super(
+			`Register ${directory} as a Volt workspace? Paired devices with access to all workspaces could read files there.`,
+		);
+		this.name = "WorkspaceConfirmationRequiredError";
+		this.directory = directory;
+		this.reason = reason;
 	}
 }
 
@@ -44,7 +67,9 @@ function relayTransport(stream: Duplex): RpcTransport {
 
 /**
  * Open a conversation through the daemon `client` is connected to (as a TUI)
- * and dial the TUI's end of its stream. Rejects with the daemon's refusal.
+ * and dial the TUI's end of its stream. Rejects with the daemon's refusal,
+ * or with `WorkspaceConfirmationRequiredError` for a sensitive directory no
+ * workspace holds.
  */
 export async function openDaemonConversation(
 	client: DaemonClient,
@@ -52,6 +77,9 @@ export async function openDaemonConversation(
 ): Promise<{ readonly opened: ConversationOpened; readonly transport: RpcTransport }> {
 	const response = await client.request({ type: "conversation_open", ...request });
 	if (response.type === "error") throw new DaemonConversationOpenError(response.code, response.message);
+	if (response.type === "workspace_confirmation_required") {
+		throw new WorkspaceConfirmationRequiredError(response.directory, response.reason);
+	}
 	if (response.type !== "conversation_opened") throw new Error(`The daemon answered ${response.type}`);
 	const stream = await client.openConversationRelay({ relayId: response.relayId, relayToken: response.relayToken });
 	return { opened: response, transport: relayTransport(stream) };

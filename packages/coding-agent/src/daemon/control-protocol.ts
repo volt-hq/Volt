@@ -68,6 +68,7 @@ export type {
 	RelayPreamble,
 	RemoteTransportHealth,
 	RemoteTransportReasonCode,
+	SensitiveDirectoryReason,
 	WorkerAgentConfig,
 	WorkerAuthorityLoss,
 	WorkerHostKind,
@@ -77,6 +78,7 @@ export type {
 	WorkerSpawnOptions,
 	WorkerSpawnSpec,
 	WorkerStopReason,
+	WorkspaceRegistration,
 } from "@hansjm10/volt-protocol/daemon-control";
 
 export const PROTOCOL_VERSION = 5;

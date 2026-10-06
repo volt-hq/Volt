@@ -528,14 +528,18 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
 			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
-		registerWorkspace: async (name, path) => {
-			if (!(await stateManager.insertWorkspace({ name, path }))) return false;
+		registerWorkspace: async (name, path, localOnly) => {
+			if (
+				!(await stateManager.insertWorkspace({ name, path, ...(localOnly ? { localOnly: true as const } : {}) }))
+			) {
+				return false;
+			}
 			await auditLogger
 				.log({
 					type: "workspace_registered",
 					workspace: name,
 					success: true,
-					details: { path, source: "tui_open" },
+					details: { path, source: "tui_open", visibility: localOnly ? "local" : "shared" },
 				})
 				.catch(() => {});
 			return true;
@@ -730,6 +734,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				const workspaces: ControlWorkspaceStatus[] = state.state.workspaces.map((workspace) => ({
 					name: workspace.name,
 					path: workspace.path,
+					...(workspace.localOnly === true ? { localOnly: true as const } : {}),
 					...(workspace.allowedTools === undefined
 						? {}
 						: {
@@ -813,7 +818,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					state.getHostState().workspaceGenerations?.find((record) => record.workspaceName === request.name)
 						?.generation;
 				const previousGeneration = generationOf();
-				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath });
+				// An explicit registration shares the workspace, a local-only one included (D17).
+				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath }, undefined, "shared");
 				// A replace fences the old authority: its workers retire before the replace is reported (W4).
 				if (previousGeneration !== undefined && generationOf() !== previousGeneration) {
 					await workers.fenceWorkspace(request.name);

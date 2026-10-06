@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { HostFrame } from "@hansjm10/volt-protocol";
@@ -190,6 +191,41 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		expect(await phone.intent("prompt", { message: "hi" })).toMatchObject({ type: "accepted" });
 		await expect.poll(() => assistantText(phone.frames), { timeout: 5000 }).toContain("hello to both");
 		await vi.waitFor(() => expect(JSON.stringify(client.state.entries)).toContain("hello to both"));
+	}, 60_000);
+
+	it("keeps a workspace local to the host out of reach of a phone granted all workspaces (D17)", async () => {
+		const harness = await startHarness();
+		const tui = await harness.connect("tui");
+		// The harness's root holds its agent directory: sensitive, registered local to the host.
+		const root = realpathSync.native(join(harness.agentDir, ".."));
+		const local = await openDaemonConversation(tui, {
+			target: { kind: "new" },
+			spawn: { env: {}, config: {}, cwd: root, persist: true, session: {} },
+			clientKey: "tui-1",
+			workspaceRegistration: "local",
+		});
+		cleanups.push(async () => local.transport.close());
+		const localName = local.opened.workspaceName;
+		expect((await harness.status()).workspaces).toContainEqual({ name: localName, path: root, localOnly: true });
+
+		const paired = await pair(harness);
+		const ref = await harness.createSession();
+		const shared = await paired.openConversation({ target: "session", sessionId: ref.sessionId });
+		expect(shared.handshake).toMatchObject({ success: true, workspace: harness.workspaceName });
+		// It neither sees the local workspace nor opens a conversation there.
+		expect(shared.handshake).toMatchObject({ remoteHost: { workspaceNames: [harness.workspaceName] } });
+		expect(JSON.stringify(shared.handshake.remoteHost)).not.toContain(localName);
+		const refused = await paired.openConversation(
+			{ target: "session", sessionId: local.opened.sessionId },
+			localName,
+		);
+		// It reads as unregistered: the phone does not learn the workspace exists.
+		expect(refused.handshake).toMatchObject({ success: false, outcome: "workspace_unregistered" });
+		expect(refused.phone).toBeUndefined();
+		// No pairing ticket grants it either.
+		expect(
+			await harness.control.request({ type: "pair_request", workspaceName: localName, access: "chat" }),
+		).toMatchObject({ type: "error", code: "workspace_local_only" });
 	}, 60_000);
 
 	it("stops the running turn at once when the client that opened the worker is revoked", async () => {

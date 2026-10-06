@@ -50,6 +50,7 @@ import {
 	type IrohRemoteSanitizerOptions,
 	type IrohRemoteTicketPayload,
 	type IrohRemoteWorkspace,
+	isIrohRemoteClientAllowedForWorkspace,
 	listenIrohRemoteControlServer,
 	normalizeIrohRemoteAllowTools,
 	parseIrohRemoteAllowTools,
@@ -1630,6 +1631,18 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.label).toBe("renamed phone");
 		expect(reconnected.client).not.toHaveProperty("allowedTools");
 		expect(reconnected.client.lastSeenAt).toBe(200);
+	});
+
+	test("keeps a local-only workspace from an all-workspace grant, but not from a grant that names it", async () => {
+		const workspaces = [{ name: "shared" }, { name: "private", localOnly: true as const }];
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: [] }, "shared", workspaces)).toBe(true);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: [] }, "private", workspaces)).toBe(false);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: ["private"] }, "private", workspaces)).toBe(
+			true,
+		);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: ["private"] }, "shared", workspaces)).toBe(
+			false,
+		);
 	});
 
 	test("registers a workspace insert-only: a taken name, in any case, is never replaced", async () => {

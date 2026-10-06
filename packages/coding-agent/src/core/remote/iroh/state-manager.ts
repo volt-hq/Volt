@@ -7,7 +7,6 @@ import {
 	authorizeIrohRemoteClient,
 	type IrohRemoteClientAuthorizationResult,
 	type IrohRemoteClientAuthorizationSuccess,
-	isIrohRemoteClientAllowedForWorkspace,
 } from "./authorization.ts";
 import type { IrohRemoteHello } from "./handshake.ts";
 import { canonicalizePersistedIrohRemoteAllowTools } from "./protocol.ts";
@@ -32,6 +31,7 @@ import {
 	getIrohRemoteWorkspaceStatuses,
 	type IrohRemoteWorkspaceAvailabilityClassifier,
 	type IrohRemoteWorkspaceStatus,
+	isIrohRemoteClientAllowedForWorkspace,
 	upsertIrohRemoteWorkspace,
 } from "./workspace.ts";
 
@@ -201,10 +201,14 @@ export class IrohRemoteHostStateManager {
 		return this.runExclusive(async () => cloneHostState(await this.loadUnlocked()));
 	}
 
-	async upsertWorkspace(workspace: IrohRemoteWorkspace, allowTools?: string): Promise<IrohRemoteWorkspace> {
+	async upsertWorkspace(
+		workspace: IrohRemoteWorkspace,
+		allowTools?: string,
+		visibility?: "shared",
+	): Promise<IrohRemoteWorkspace> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
-			const savedWorkspace = upsertIrohRemoteWorkspace(state, workspace, allowTools);
+			const savedWorkspace = upsertIrohRemoteWorkspace(state, workspace, allowTools, visibility);
 			await this.saveUnlocked(state);
 			return cloneWorkspace(savedWorkspace);
 		});
@@ -907,7 +911,7 @@ function isAuthorizationCurrentInState(
 	return (
 		client?.rpcGrant?.revision === authorization.client.rpcGrant.revision &&
 		client.allowedTools === authorization.client.allowedTools &&
-		isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name) &&
+		isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name, state.workspaces) &&
 		workspace?.path === authorization.workspace.path &&
 		workspace.allowedTools === authorization.workspace.allowedTools &&
 		workspaceGeneration === authorization.workspaceGeneration

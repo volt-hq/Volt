@@ -329,6 +329,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ spawn: { ...SPAWN_OPTIONS, config: { ...SPAWN_OPTIONS.config, unexpected: true } } },
 		{ spawn: { ...SPAWN_OPTIONS, session: { model: "sonnet", thinking: "huge" } } },
 		{ spawn: { ...SPAWN_OPTIONS, config: { flags: { "a=b": true } } } },
+		{ workspaceRegistration: "public" },
 	],
 	worker_ready: [{ sessionIds: "s-1" }],
 	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }],
@@ -440,6 +441,12 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-1", ordinals: [], result: { registered: true } },
 	},
 	relay_push_delivery_result: { type: "relay_push_delivery_result", id: "16", status: "sent" },
+	workspace_confirmation_required: {
+		type: "workspace_confirmation_required",
+		id: "21",
+		directory: "/home/user",
+		reason: "home",
+	},
 	conversation_opened: {
 		type: "conversation_opened",
 		id: "20",
@@ -462,6 +469,7 @@ const RESPONSES: ByType<ControlResponse> = {
 
 const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string, unknown>> } = {
 	conversation_opened: [{ ignoredOptions: ["env"] }, { selection: "created_after_missing" }, { spawned: undefined }],
+	workspace_confirmation_required: [{ reason: "sensitive" }, { directory: undefined }],
 	error: [{ code: undefined }],
 	lease_granted: [{ handoff: "hot" }],
 	lease_pending: [{ viewerFeedId: undefined }],

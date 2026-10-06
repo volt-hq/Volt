@@ -12,6 +12,7 @@ import { createWorkerSpawnOptions } from "../src/cli/agent-options.ts";
 import { parseArgs } from "../src/cli/args.ts";
 import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
+import { sensitiveDirectoryReason } from "../src/daemon/sensitive-directory.ts";
 import { resolveWorkerProjectTrust } from "../src/daemon/worker/conversation-factory.ts";
 import { workerEnvironment } from "../src/daemon/worker-launcher.ts";
 import {
@@ -208,5 +209,29 @@ describe("TUI spawn options", () => {
 		expect(resolveWorkerProjectTrust(agentDir, plain, undefined)).toBe(false);
 		// An explicit refusal holds even where nothing needs trust.
 		expect(resolveWorkerProjectTrust(agentDir, plain, { cwd: plain, trusted: false })).toBe(false);
+	});
+
+	it("finds the directories never registered without asking: a root, a home, the agent directory's ancestors and insides", () => {
+		const context = { homes: ["/home/user"], agentDirs: ["/home/user/.volt/agent"], caseInsensitive: false };
+		expect(sensitiveDirectoryReason("/", context)).toBe("root");
+		expect(sensitiveDirectoryReason("/home/user", context)).toBe("contains_agent_dir");
+		expect(sensitiveDirectoryReason("/home/user/.volt", context)).toBe("contains_agent_dir");
+		expect(sensitiveDirectoryReason("/home/user/.volt/agent", context)).toBe("contains_agent_dir");
+		expect(sensitiveDirectoryReason("/home/user/.volt/agent/daemon", context)).toBe("inside_agent_dir");
+		// With the agent directory elsewhere, the home directory and those containing it are still sensitive.
+		const elsewhere = { ...context, agentDirs: ["/opt/volt/agent"] };
+		expect(sensitiveDirectoryReason("/home/user", elsewhere)).toBe("home");
+		expect(sensitiveDirectoryReason("/home/user/", elsewhere)).toBe("home");
+		expect(sensitiveDirectoryReason("/home", elsewhere)).toBe("home");
+		expect(sensitiveDirectoryReason("/opt", elsewhere)).toBe("contains_agent_dir");
+		// A project under the home directory is not sensitive.
+		expect(sensitiveDirectoryReason("/home/user/projects/app", context)).toBeUndefined();
+		expect(sensitiveDirectoryReason("/srv/work", context)).toBeUndefined();
+		// Case decides only where the filesystems ignore it.
+		expect(sensitiveDirectoryReason("/Home/User", elsewhere)).toBeUndefined();
+		expect(sensitiveDirectoryReason("/Home/User", { ...elsewhere, caseInsensitive: true })).toBe("home");
+		expect(sensitiveDirectoryReason("/HOME/USER/.VOLT", { ...context, caseInsensitive: true })).toBe(
+			"contains_agent_dir",
+		);
 	});
 });

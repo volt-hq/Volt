@@ -4,8 +4,10 @@
  * create, and session binding (worktrees design §5.2.1).
  */
 
+import { realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
-import { VERSION } from "../../config.ts";
+import { getAgentDir, VERSION } from "../../config.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
@@ -13,6 +15,7 @@ import {
 	type ControlWorktreeStatus,
 } from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
+import { sensitiveDirectoryReason } from "../../daemon/sensitive-directory.ts";
 import { type EnsureDaemonResult, ensureDaemonRunning } from "../../daemon/spawn.ts";
 import { isPathInside } from "../../daemon/workspace-directory.ts";
 
@@ -21,7 +24,9 @@ import { isPathInside } from "../../daemon/workspace-directory.ts";
  * path-prefix match first, then (§5.2.2) a worktree_resolve lookup so a TUI
  * launched inside a daemon-managed worktree binds to the PARENT workspace
  * instead of auto-registering a bogus workspace under ~/.volt/agent/worktrees.
- * Only when both miss is the cwd auto-registered.
+ * Only when both miss is the cwd auto-registered, and never a sensitive
+ * directory (a root, the home directory, or one containing or inside the
+ * agent directory, D17): that stays unregistered until the user registers it.
  */
 export async function resolveDaemonWorkspaceForCwd(
 	client: Pick<DaemonClient, "request">,
@@ -51,7 +56,7 @@ export async function resolveDaemonWorkspaceForCwd(
 	if (match) {
 		return { name: match.name, path: match.path };
 	}
-	if (options.register === false) return undefined;
+	if (options.register === false || isSensitiveDirectory(resolvedCwd)) return undefined;
 	// Auto-register the cwd so phones can reach sessions opened here.
 	const takenNames = new Set(status.workspaces.map((workspace) => workspace.name));
 	const base = basename(resolvedCwd) || "workspace";
@@ -65,6 +70,27 @@ export async function resolveDaemonWorkspaceForCwd(
 		return { name: candidate, path: resolvedCwd };
 	}
 	return undefined;
+}
+
+/** The real path of `path`, or `path` resolved when it cannot be read. */
+function realOrResolved(path: string): string {
+	try {
+		return realpathSync.native(path);
+	} catch {
+		return resolve(path);
+	}
+}
+
+/** Whether `cwd` is a directory never registered as a workspace without asking (D17). */
+function isSensitiveDirectory(cwd: string): boolean {
+	const homes = [homedir(), process.env.HOME].filter((home): home is string => home !== undefined && home.length > 0);
+	const agentDir = getAgentDir();
+	return (
+		sensitiveDirectoryReason(realOrResolved(cwd), {
+			homes: [...homes, ...homes.map(realOrResolved)],
+			agentDirs: [resolve(agentDir), realOrResolved(agentDir)],
+		}) !== undefined
+	);
 }
 
 export interface DaemonWorktreeControl {

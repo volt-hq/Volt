@@ -33,7 +33,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
-import { basename, join } from "node:path";
+import { homedir } from "node:os";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import { uuidv7 } from "@hansjm10/volt-agent-core";
 import type { IrohRemoteAuditEventInput } from "../core/remote/iroh/audit.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
@@ -46,6 +47,7 @@ import type {
 	ControlRequest,
 	ControlResponse,
 	LocalRelayPreamble,
+	SensitiveDirectoryReason,
 	WorkerSessionOptions,
 	WorkerSpawnOnlyOption,
 } from "./control-protocol.ts";
@@ -63,6 +65,7 @@ import {
 	type RelayLifecycleOwner,
 	RelayRegistry,
 } from "./relay-stream.ts";
+import { sensitiveDirectoryReason } from "./sensitive-directory.ts";
 import { type LiveWorker, WorkerOpenError, type WorkerRegistry, type WorkerSpawnInput } from "./worker-registry.ts";
 import {
 	checkWorkerSpawnOptions,
@@ -84,13 +87,26 @@ export interface TuiConversationsOptions {
 	currentGeneration(workspaceName: string): number | undefined;
 	/**
 	 * Register a workspace for a TUI's working directory no workspace contains
-	 * (D17), only when no workspace has the name; resolves whether it did.
+	 * (D17), local to this host when `localOnly`, only when no workspace has
+	 * the name; resolves whether it did.
 	 */
-	registerWorkspace(name: string, path: string): Promise<boolean>;
+	registerWorkspace(name: string, path: string, localOnly: boolean): Promise<boolean>;
 	/** Bind a session created in a managed worktree to it, so it stays there across restarts. */
 	bindWorktreeSession(workspaceName: string, worktreeId: string, sessionId: string): Promise<void>;
 	sendTo(connectionId: string, event: ControlEvent): boolean;
 	audit(event: IrohRemoteAuditEventInput): void;
+}
+
+/** A sensitive directory no workspace holds: the TUI asks how to register it, and opens again. */
+class WorkspaceConfirmationRequired extends Error {
+	readonly directory: string;
+	readonly reason: SensitiveDirectoryReason;
+	constructor(directory: string, reason: SensitiveDirectoryReason) {
+		super(`${directory} is not registered as a workspace; registering it needs the user's answer`);
+		this.name = "WorkspaceConfirmationRequired";
+		this.directory = directory;
+		this.reason = reason;
+	}
 }
 
 /** Names an auto-registration tries before it gives up. */
@@ -224,10 +240,20 @@ export class TuiConversations {
 				sessionId: resolved.sessionId,
 				selection: resolved.selection,
 				workspaceName,
+				// The TUI tells its user when a workspace it asked to share or keep local already had its own visibility.
+				...(resolved.placement.workspace.localOnly === true ? { localOnly: true as const } : {}),
 				spawned: opened.spawned,
 				ignoredOptions: opened.ignoredOptions,
 			};
 		} catch (error) {
+			if (error instanceof WorkspaceConfirmationRequired) {
+				return {
+					type: "workspace_confirmation_required",
+					id: request.id,
+					directory: error.directory,
+					reason: error.reason,
+				};
+			}
 			if (error instanceof TuiOpenError) return refuse(error.code, error.message);
 			if (error instanceof WorkerOpenError) return refuse(error.outcome ?? "open_failed", error.message);
 			return refuse("open_failed", errorMessage(error));
@@ -439,7 +465,7 @@ export class TuiConversations {
 			};
 		}
 		const cwd = await realDirectory(spawn.cwd);
-		const placement = await this.placement(cwd);
+		const placement = await this.placement(cwd, request);
 		const sessionDir = target.sessionDir ?? defaultDirectory(cwd);
 		if (target.kind === "new") {
 			if (!spawn.persist) {
@@ -507,7 +533,7 @@ export class TuiConversations {
 		}
 		// The conversation runs in the real directory its root was resolved from, not through a link re-pointed later.
 		const cwd = await realDirectory(cwdOverride ?? storedCwd);
-		const placement = await this.placement(cwd);
+		const placement = await this.placement(cwd, request);
 		return {
 			placement,
 			sessionId: ref.sessionId,
@@ -569,7 +595,7 @@ export class TuiConversations {
 	 * worktree containing it, else the innermost registered workspace
 	 * containing it, else a workspace registered for it (D17).
 	 */
-	private async placement(cwd: string): Promise<Placement> {
+	private async placement(cwd: string, request: ConversationOpenRequest): Promise<Placement> {
 		const workspaces = this.options.workspaces();
 		let worktreeMatch: { worktree: IrohRemoteWorkspaceWorktree; root: string } | undefined;
 		for (const worktree of await this.options.worktrees()) {
@@ -583,7 +609,27 @@ export class TuiConversations {
 		}
 		const containing = await this.containingWorkspace(workspaces, cwd);
 		if (containing !== undefined) return containing;
-		return this.register(cwd);
+		return this.register(cwd, request);
+	}
+
+	/** The real paths a directory's sensitivity is decided by: the user's home directories, and the agent directory. */
+	private async sensitivityContext(
+		env: Readonly<Record<string, string>>,
+	): Promise<{ readonly homes: readonly string[]; readonly agentDirs: readonly string[] }> {
+		const real = async (paths: readonly (string | undefined)[]): Promise<string[]> => {
+			const resolved: string[] = [];
+			for (const path of paths) {
+				if (path === undefined || path.length === 0 || !isAbsolute(path)) continue;
+				resolved.push(resolve(path));
+				const realPath = await realPathOrUndefined(path);
+				if (realPath !== undefined) resolved.push(realPath);
+			}
+			return resolved;
+		};
+		return {
+			homes: await real([homedir(), process.env.HOME, env.HOME, env.USERPROFILE]),
+			agentDirs: await real([this.options.agentDir]),
+		};
 	}
 
 	private async containingWorkspace(
@@ -599,12 +645,21 @@ export class TuiConversations {
 		return match;
 	}
 
-	/** Register `cwd` as a workspace named after it, unless one now contains it. */
-	private register(cwd: string): Promise<Placement> {
+	/**
+	 * Register `cwd` as a workspace named after it, unless one now contains it:
+	 * as the open asks (`workspaceRegistration`), else shared, except that a
+	 * sensitive directory is never registered without being asked how (D17).
+	 */
+	private register(cwd: string, request: ConversationOpenRequest): Promise<Placement> {
 		const registration = this.registering.then(async (): Promise<Placement> => {
 			const workspaces = this.options.workspaces();
 			const containing = await this.containingWorkspace(workspaces, cwd);
 			if (containing !== undefined) return containing;
+			const reason = sensitiveDirectoryReason(cwd, await this.sensitivityContext(request.spawn.env));
+			if (reason !== undefined && request.workspaceRegistration === undefined) {
+				throw new WorkspaceConfirmationRequired(cwd, reason);
+			}
+			const visibility = request.workspaceRegistration ?? "shared";
 			const taken = new Set(workspaces.map((workspace) => getIrohRemoteWorkspaceNameAlias(workspace.name)));
 			const directoryName = basename(cwd);
 			const base =
@@ -613,7 +668,7 @@ export class TuiConversations {
 			for (let suffix = 1; suffix <= MAX_REGISTRATION_ATTEMPTS; suffix++) {
 				const name = suffix === 1 ? base : `${base}-${suffix}`;
 				if (taken.has(getIrohRemoteWorkspaceNameAlias(name))) continue;
-				if (!(await this.options.registerWorkspace(name, cwd))) continue;
+				if (!(await this.options.registerWorkspace(name, cwd, visibility === "local"))) continue;
 				const workspace = this.options.workspaces().find((candidate) => candidate.name === name);
 				if (workspace === undefined) break;
 				return { workspace, root: cwd };

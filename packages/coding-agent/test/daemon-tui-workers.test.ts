@@ -28,6 +28,7 @@ import {
 	DaemonConversationOpenError,
 	openDaemonConversation,
 	openNotices,
+	WorkspaceConfirmationRequiredError,
 } from "../src/client/daemon-conversation.ts";
 import { ProtocolClient } from "../src/client/protocol-client.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -466,5 +467,58 @@ describe("conversations TUIs open in workers", () => {
 		await new Promise((resolve) => setTimeout(resolve, 1_500));
 		expect(catalogs).not.toContain("settings");
 		expect(await client.query("settings")).toMatchObject({ blockImages: false });
+	}, 60_000);
+
+	it("asks before registering a home directory, or one containing the agent directory, and registers it shared or local (D17)", async () => {
+		const harness = await startHarness();
+		const tui = await harness.connect("tui");
+		// The TUI's home directory: a fresh one, so nothing of the host's is registered.
+		const home = realpathSync.native(mkdtempSync(join(tmpdir(), "volt-tui-home-")));
+		cleanups.push(async () => rmSync(home, { recursive: true, force: true }));
+		const request = (cwd: string): ConversationOpenRequest => ({
+			target: { kind: "new" },
+			spawn: spawnOptions(cwd, { env: { HOME: home } }),
+			clientKey: "tui-1",
+		});
+		const workspaceOf = async (path: string) =>
+			(await harness.status()).workspaces.find((workspace) => workspace.path === path);
+
+		const refused = openDaemonConversation(tui, request(home));
+		await expect(refused).rejects.toBeInstanceOf(WorkspaceConfirmationRequiredError);
+		await expect(refused).rejects.toMatchObject({ directory: home, reason: "home" });
+		expect(await workspaceOf(home)).toBeUndefined();
+		expect((await harness.status()).workers).toEqual([]);
+
+		// A project in the home directory is not sensitive: it registers as before.
+		const project = join(home, "project");
+		mkdirSync(project);
+		const opened = await openDaemonConversation(tui, request(project));
+		cleanups.push(() => opened.transport.close() as Promise<void>);
+		expect(await workspaceOf(project)).toEqual({ name: "project", path: project });
+
+		// Asked, the user shares the home directory.
+		const shared = await openDaemonConversation(tui, { ...request(home), workspaceRegistration: "shared" });
+		cleanups.push(() => shared.transport.close() as Promise<void>);
+		expect(await workspaceOf(home)).toEqual({ name: basename(home), path: home });
+
+		// The harness's root holds its agent directory: registered local to this host when the user keeps it.
+		const root = realpathSync.native(join(harness.agentDir, ".."));
+		await expect(openDaemonConversation(tui, request(root))).rejects.toMatchObject({
+			directory: root,
+			reason: "contains_agent_dir",
+		});
+		const local = await openDaemonConversation(tui, { ...request(root), workspaceRegistration: "local" });
+		cleanups.push(() => local.transport.close() as Promise<void>);
+		expect(local.opened.localOnly).toBe(true);
+		expect(await workspaceOf(root)).toEqual({ name: local.opened.workspaceName, path: root, localOnly: true });
+		expect(
+			harness
+				.audit()
+				.filter((event) => event.type === "workspace_registered" && event.details?.source === "tui_open"),
+		).toEqual([
+			expect.objectContaining({ details: expect.objectContaining({ path: project, visibility: "shared" }) }),
+			expect.objectContaining({ details: expect.objectContaining({ path: home, visibility: "shared" }) }),
+			expect.objectContaining({ details: expect.objectContaining({ path: root, visibility: "local" }) }),
+		]);
 	}, 60_000);
 });

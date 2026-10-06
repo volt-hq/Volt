@@ -70,6 +70,7 @@ import {
 	DaemonEnvironmentStatusSchema,
 	DaemonRemotePolicyStatusSchema,
 	RemoteTransportHealthSchema,
+	SensitiveDirectoryReasonSchema,
 	WorkerAgentConfigSchema,
 	WorkerAuthorityLossSchema,
 	WorkerHostKindSchema,
@@ -79,6 +80,7 @@ import {
 	WorkerSpawnOptionsSchema,
 	WorkerSpawnSpecSchema,
 	WorkerStopReasonSchema,
+	WorkspaceRegistrationSchema,
 } from "./daemon-control.ts";
 import {
 	BashExecutionMessageSchema,
@@ -691,6 +693,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	"Control.WorkerSpawnOptions": WorkerSpawnOptionsSchema,
 	"Control.WorkerSpawnOnlyOption": WorkerSpawnOnlyOptionSchema,
 	"Control.ConversationOpenTarget": ConversationOpenTargetSchema,
+	"Control.SensitiveDirectoryReason": SensitiveDirectoryReasonSchema,
+	"Control.WorkspaceRegistration": WorkspaceRegistrationSchema,
 	"Control.WorkerAuthorityLoss": WorkerAuthorityLossSchema,
 	"Control.WorkerRelayAuthority": WorkerRelayAuthoritySchema,
 };

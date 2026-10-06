@@ -40,7 +40,6 @@ export {
 	type IrohRemoteClientAuthorizationFailure,
 	type IrohRemoteClientAuthorizationResult,
 	type IrohRemoteClientAuthorizationSuccess,
-	isIrohRemoteClientAllowedForWorkspace,
 } from "./authorization.ts";
 export {
 	attachCompletionNotifications,
@@ -272,6 +271,7 @@ export {
 	type IrohRemoteWorkspaceAvailabilityStatus,
 	type IrohRemoteWorkspaceMetadataSnapshot,
 	type IrohRemoteWorkspaceStatus,
+	isIrohRemoteClientAllowedForWorkspace,
 	parseIrohRemoteWorkspaceSpec,
 	selectIrohRemoteWorkspace,
 	upsertIrohRemoteWorkspace,
