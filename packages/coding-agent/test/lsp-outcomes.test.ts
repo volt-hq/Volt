@@ -1,4 +1,5 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
@@ -49,10 +50,14 @@ function manager(root: string, args: string[] = []): LspManager {
 	owned.push(value);
 	return value;
 }
-afterEach(() => {
+afterEach(async () => {
 	for (const value of owned.splice(0)) value.dispose();
 	vi.unstubAllEnvs();
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+	// Disposal kills a server's process tree with taskkill on Windows, which returns before the
+	// processes released their cwd; rm retries the EBUSY that leaves.
+	await Promise.all(
+		roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })),
+	);
 });
 
 describe("diagnostic evidence", () => {

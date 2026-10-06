@@ -1,16 +1,20 @@
 import { execFileSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, delimiter, join, sep } from "node:path";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	detectGitOperation,
+	GIT_CLOSE_GRACE_MS,
 	GitContextObservationBinding,
 	GitContextProvider,
 	parseGitStatusPorcelainV2,
 } from "../src/core/git-context-provider.ts";
 import { GitContextProviderPool } from "../src/core/git-context-provider-pool.ts";
 import { discoverGitWorktree, getGitRepositoryDisplayName } from "../src/core/git-repository.ts";
+import * as childProcess from "../src/utils/child-process.ts";
 
 const SHA1 = "0123456789abcdef0123456789abcdef01234567";
 const SHA256 = `${SHA1}0123456789abcdef01234567`;
@@ -439,6 +443,51 @@ describe("GitContextProvider", () => {
 		provider = await GitContextProvider.create(repository, { maxStdoutBytes: 64 });
 		expect(provider.getSnapshot()).toBeNull();
 		provider.dispose();
+	});
+
+	it("closes once the scans it stopped exit, and never waits past the grace for one that does not", async () => {
+		const repository = createSyntheticWorktree("closing-repository");
+		// A Git command whose kill lands closes its output; one whose kill does not never does.
+		const command = () =>
+			Object.assign(new EventEmitter(), {
+				stdout: new PassThrough(),
+				stderr: new PassThrough(),
+				pid: undefined,
+				kill: vi.fn(() => true),
+			});
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+		const spawn = vi.spyOn(childProcess, "spawnProcess");
+		try {
+			const exiting = command();
+			exiting.kill.mockImplementation(() => exiting.emit("close", null));
+			spawn.mockReturnValueOnce(exiting as never);
+			const stopped = new GitContextProvider(repository, { commandTimeoutMs: 60_000 });
+			const stoppedScan = stopped.refresh();
+			stopped.dispose();
+			expect(exiting.kill).toHaveBeenCalledWith("SIGKILL");
+			await stopped.waitForClosed();
+			await stoppedScan;
+
+			const stuck = command();
+			spawn.mockReturnValueOnce(stuck as never);
+			const provider = new GitContextProvider(repository, { commandTimeoutMs: 60_000 });
+			const scan = provider.refresh();
+			provider.dispose();
+			expect(stuck.kill).toHaveBeenCalledWith("SIGKILL");
+			let closed = false;
+			const closing = provider.waitForClosed().then(() => {
+				closed = true;
+			});
+			await vi.advanceTimersByTimeAsync(GIT_CLOSE_GRACE_MS - 1);
+			expect(closed).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			await closing;
+			stuck.emit("close", null);
+			await scan;
+		} finally {
+			spawn.mockRestore();
+			vi.useRealTimers();
+		}
 	});
 
 	it("streams large untracked listings past the per-record output bound", async () => {

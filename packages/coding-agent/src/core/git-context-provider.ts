@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import { RPC_GIT_CONTEXT_REF_MAX_CHARS, RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "@hansjm10/volt-protocol";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { spawnProcess } from "../utils/child-process.ts";
+import { terminateProcessTree } from "../utils/shell.ts";
 import { discoverGitWorktree, type GitWorktreeLocation, getGitRepositoryDisplayName } from "./git-repository.ts";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 2500;
@@ -16,6 +17,8 @@ const WATCH_DEBOUNCE_MS = 100;
 /** Upper bound on how long repeated scheduleRefresh() calls may postpone one scan. */
 const MAX_REFRESH_DEFER_MS = 1000;
 const MAX_OPERATION_MARKER_BYTES = 4096;
+/** How long a disposed provider's close waits for the Git commands it stopped to exit. */
+export const GIT_CLOSE_GRACE_MS = 2_000;
 
 const STATUS_ARGS = [
 	"--no-pager",
@@ -463,6 +466,7 @@ export class GitContextProvider {
 	private observationCount = 0;
 	private rerunRequested = false;
 	private disposed = false;
+	private closed: Promise<void> | undefined;
 
 	constructor(cwd: string, options: GitContextProviderOptions = {}) {
 		this.cwd = cwd;
@@ -577,8 +581,31 @@ export class GitContextProvider {
 		if (this.scheduledRefresh) clearTimeout(this.scheduledRefresh);
 		this.scheduledRefresh = null;
 		this.scheduledRefreshDeadline = null;
-		for (const child of this.children) child.kill("SIGKILL");
+		const exits: Promise<void>[] = [];
+		for (const child of this.children) {
+			exits.push(new Promise((resolve) => child.once("close", () => resolve())));
+			// Git for Windows' git.exe launches the real Git, which a kill of the launcher alone leaves running.
+			if (process.platform === "win32" && child.pid !== undefined) void terminateProcessTree(child.pid);
+			else child.kill("SIGKILL");
+		}
 		this.children.clear();
+		if (exits.length === 0) return;
+		let timer: NodeJS.Timeout | undefined;
+		const grace = new Promise<void>((resolve) => {
+			timer = setTimeout(resolve, GIT_CLOSE_GRACE_MS);
+			timer.unref?.();
+		});
+		// A command that outlives its kill is left behind: closing never waits on it for longer.
+		this.closed = Promise.race([Promise.all(exits), grace]).then(() => clearTimeout(timer));
+	}
+
+	/**
+	 * Resolves once the Git commands that disposal stopped have exited, or
+	 * after {@link GIT_CLOSE_GRACE_MS}: until then a command keeps the worktree
+	 * as its cwd, and Windows cannot remove it.
+	 */
+	waitForClosed(): Promise<void> {
+		return this.closed ?? Promise.resolve();
 	}
 
 	private async performRefresh(signal?: AbortSignal): Promise<GitContextObservation> {

@@ -1390,6 +1390,8 @@ export class AgentSession {
 				this._releaseGitContextProvider();
 				this._events.clearListeners();
 				this._navigation.clearListeners();
+				// A provider the release disposed may still be stopping a scan in the session's worktree.
+				return this.gitContextProvider.waitForClosed();
 			},
 			closeDiagnostics: () => this._diagnostics.close(),
 		});
