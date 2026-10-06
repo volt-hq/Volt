@@ -317,10 +317,11 @@ conversation at a time:
   which serves it from its in-process session. Prompts from either side appear
   on both; the TUI footer shows `📱 n` while phones are attached.
 - **daemon-draining** — a TUI asked to take over while a remote turn is
-  streaming. At startup the TUI prints a waiting line, and `/resume` shows the
-  wait in the TUI (the interrupt key stops the remote turn, Ctrl+C cancels the
-  open); new prompts from phones are rejected `busy` with a one-second retry
-  hint, and ownership transfers at the turn boundary.
+  streaming. At startup the TUI prints a waiting line; `/resume` asks in a
+  dialog (**Stop remote turn** stops it, **Cancel** keeps the current session
+  and leaves the target with the daemon); new prompts from phones are rejected
+  `busy` with a one-second retry hint, and ownership transfers at the turn
+  boundary.
 
 Every process that writes a session holds that session's lock (see
 [Sessions](sessions.md#one-volt-process-per-session)), so the TUI takes the

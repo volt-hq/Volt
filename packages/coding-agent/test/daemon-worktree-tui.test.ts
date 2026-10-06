@@ -41,12 +41,9 @@ import {
 	resolveWorktreeParentCheckout,
 	WorktreeManager,
 } from "../src/daemon/worktree-manager.ts";
-import {
-	createDaemonAttach,
-	getRelayServingSanitizerOptions,
-	openDaemonWorktreeControl,
-	resolveDaemonWorkspaceForCwd,
-} from "../src/modes/interactive/daemon-attach.ts";
+import { createDaemonLink } from "../src/modes/interactive/host/daemon-link.ts";
+import { getRelayServingSanitizerOptions } from "../src/modes/interactive/host/relay-serving.ts";
+import { openDaemonWorktreeControl, resolveDaemonWorkspaceForCwd } from "../src/modes/interactive/worktree-control.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHostHarness } from "./suite/host-harness.ts";
 import { adoptTestSession, connectTestClient } from "./utilities/host-client.ts";
@@ -316,7 +313,7 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 	};
 }
 
-describe("createDaemonAttach + control server integration", () => {
+describe("createDaemonLink + control server integration", () => {
 	it("advertises the worktrees capability and lease-acquires under the parent workspace on a worktree_resolve hit", async () => {
 		const harness = await startControlHarness((connection, request) => {
 			if (request.type === "status") {
@@ -350,7 +347,7 @@ describe("createDaemonAttach + control server integration", () => {
 		// The TUI's cwd is INSIDE a daemon-managed worktree, not the parent repo.
 		const worktreeCwd = join(getWorktreesRoot(harness.agentDir), "--parent-repo--", "fix-login");
 		mkdirSync(worktreeCwd, { recursive: true });
-		const attach = createDaemonAttach({ cwd: worktreeCwd, agentDir: harness.agentDir });
+		const attach = createDaemonLink({ cwd: worktreeCwd, agentDir: harness.agentDir });
 		cleanups.push(() => attach.dispose());
 		await attach.start();
 		const outcome = await attach.acquire("s-worktree");
@@ -386,7 +383,7 @@ describe("createDaemonAttach + control server integration", () => {
 			}
 			connection.send({ type: "ok", id: request.id });
 		});
-		const attach = createDaemonAttach({ cwd: join(HOST_PARENT_PATH, "sub"), agentDir: harness.agentDir });
+		const attach = createDaemonLink({ cwd: join(HOST_PARENT_PATH, "sub"), agentDir: harness.agentDir });
 		cleanups.push(() => attach.dispose());
 		await attach.start();
 

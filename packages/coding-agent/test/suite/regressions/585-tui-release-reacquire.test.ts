@@ -1,277 +1,340 @@
-import { setKeybindings, type TUI } from "@hansjm10/volt-tui";
+import type { HostFrame, HostRequest, LiveValue } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { LoopbackClient } from "../../../src/client/protocol-client.ts";
 import { ConversationLock } from "../../../src/core/conversation-log/conversation-lock.ts";
-import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../../../src/core/host/targets.ts";
-import { KeybindingsManager } from "../../../src/core/keybindings.ts";
-import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import { initTheme } from "../../../src/core/theme/runtime.ts";
-import { DaemonLeaseWaitComponent } from "../../../src/modes/interactive/components/daemon-lease-wait.ts";
 import {
-	type AcquireOutcome,
-	createDisabledDaemonAttach,
-	type DaemonAttach,
-	type DaemonLeaseWait,
-} from "../../../src/modes/interactive/daemon-attach.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { connectTestClient, type TestClient } from "../../utilities/host-client.ts";
-import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
+	connectRelayedPhone,
+	createScriptedDaemonLink,
+	createTuiHarness,
+	relayPreamble,
+	type ScriptedDaemonLink,
+	type TuiHarness,
+} from "../tui-harness.ts";
 
-type Outcomes = Map<string, () => AcquireOutcome>;
+type HostRequestValue = Extract<LiveValue, { kind: "host_request" }>;
 
-/** A connected daemon integration recording lease calls into `steps`. */
-function fakeAttach(steps: string[], outcomes: Outcomes): DaemonAttach {
-	return {
-		...createDisabledDaemonAttach(),
-		connectionState: () => "connected",
-		acquire: vi.fn(async (sessionId: string): Promise<AcquireOutcome> => {
-			steps.push(`acquire:${sessionId}`);
-			return outcomes.get(sessionId)?.() ?? { kind: "granted", handoff: "none" };
-		}),
-		release: vi.fn(async (sessionId: string, reason?: string) => {
-			steps.push(`release:${sessionId}:${reason}`);
-		}),
-		viewerAbort: vi.fn(async (viewerFeedId: string) => {
-			steps.push(`abort:${viewerFeedId}`);
-		}),
-	};
+/** The host requests the TUI's client holds. */
+function hostRequests(client: LoopbackClient): HostRequestValue[] {
+	return [...client.live.values.values()].filter((value): value is HostRequestValue => value.kind === "host_request");
 }
 
-interface ModeDouble {
-	host: ConversationHost;
-	client: HostClient;
-	readonly conversation: HostedConversation;
-	daemonLeaseTail: Promise<void>;
-	daemonRelayServers: Map<Promise<void>, string>;
-	showError: ReturnType<typeof vi.fn>;
-	showStatus: ReturnType<typeof vi.fn>;
-	showDaemonLeaseWait: (sessionId: string, wait: DaemonLeaseWait) => () => void;
+/** The dialog the client was asked, once it arrives. */
+async function dialogOf(client: LoopbackClient, title: string | RegExp): Promise<HostRequestValue> {
+	let found: HostRequestValue | undefined;
+	await vi.waitFor(() => {
+		found = hostRequests(client).find(
+			(value) =>
+				value.request.kind === "dialog" &&
+				(typeof title === "string" ? value.request.title === title : title.test(value.request.title)),
+		);
+		expect(found).toBeDefined();
+	});
+	return found!;
 }
 
-function call<T>(mode: ModeDouble, method: string, ...args: unknown[]): Promise<T> {
-	const implementation = Reflect.get(InteractiveMode.prototype, method) as (...values: unknown[]) => Promise<T>;
-	return implementation.apply(mode, args);
+function actionsOf(request: HostRequest): string[] {
+	return request.kind === "dialog" ? request.actions.map((action) => action.label) : [];
 }
 
-describe("regression #585: the TUI releases the session it leaves and acquires the one it opens", () => {
-	const cleanups: Array<() => Promise<void> | void> = [];
-	let steps: string[];
-	let outcomes: Outcomes;
-	let fixture: ExtensionRuntime;
-	/** The TUI's client of its host: its surface moves with it. */
-	let runtime: TestClient;
-	let mode: ModeDouble;
+describe("regression #585: the TUI host releases the session the TUI leaves and acquires the one it opens", () => {
+	let link: ScriptedDaemonLink;
+	let harness: TuiHarness;
+	let frames: HostFrame[];
 
 	beforeEach(async () => {
-		steps = [];
-		outcomes = new Map();
-		fixture = await createExtensionRuntime(
-			(volt) => {
+		link = createScriptedDaemonLink();
+		frames = [];
+		harness = await createTuiHarness({
+			link,
+			extension: (volt) => {
 				volt.on("session_start", (_event, ctx) => {
-					steps.push(`start:${ctx.sessionManager.getSessionId()}`);
+					link.steps.push(`start:${ctx.sessionManager.getSessionId()}`);
 				});
 				volt.on("session_shutdown", (_event, ctx) => {
-					steps.push(`shutdown:${ctx.sessionManager.getSessionId()}`);
+					link.steps.push(`shutdown:${ctx.sessionManager.getSessionId()}`);
 				});
 			},
-			{ extensionMode: "tui" },
-		);
-		cleanups.push(() => fixture.dispose());
-		const tui = await connectTestClient(fixture.host, fixture.conversation, { id: "tui", surface: {} });
-		runtime = tui;
-		const fields = {
-			host: fixture.host,
-			client: tui.client,
-			// The conversation the TUI shows follows its client's moves.
-			get conversation() {
-				return tui.conversation;
-			},
-			options: { daemonAttach: fakeAttach(steps, outcomes) },
-			daemonChangeObservation: { bind: vi.fn(), dispose: vi.fn() },
-			daemonRelayServers: new Map<Promise<void>, string>(),
-			daemonLeaseTail: Promise.resolve(),
-			isShuttingDown: false,
-			endingLostSession: false,
-			statusContainer: { clear: vi.fn() },
-			showStatus: vi.fn(),
-			showError: vi.fn(),
-			showWarning: vi.fn(),
-			renderCurrentSessionState: vi.fn(),
-			updatePhoneFooterIndicator: vi.fn(),
-			createProjectTrustContext: (cwd: string) => ({ cwd, mode: "tui", hasUI: false }),
-			showDaemonLeaseWait: () => () => {},
-		};
-		mode = Object.defineProperties(
-			Object.create(InteractiveMode.prototype),
-			Object.getOwnPropertyDescriptors(fields),
-		) as ModeDouble;
-		await call(mode, "initDaemonAttach");
-		steps.splice(0);
+		});
 	});
 
 	afterEach(async () => {
-		while (cleanups.length > 0) await cleanups.pop()?.();
+		await harness.cleanup();
 	});
 
-	async function storedSession(): Promise<SessionReference> {
-		const manager = await SessionManager.create(fixture.tempDir, runtime.session.sessionManager.getSessionDir());
-		await manager.logWriter.appendSessionInfo("stored");
-		const ref = manager.getSessionRef();
-		if (!ref) throw new Error("the session is not stored");
-		await manager.closePersistence();
-		return ref;
-	}
+	const connect = () => harness.connect({ onFrame: (frame) => frames.push(frame) });
 
-	it("on /new, releases the session it left once it closed and its relayed phones ended, then acquires the new one", async () => {
-		const source = runtime.session.sessionId;
-		const relay = Promise.withResolvers<void>();
-		mode.daemonRelayServers.set(relay.promise, source);
+	it("takes the lease of the session it shows once its client is ready, then recovers the session's queued input", async () => {
+		const source = harness.startup.id;
+		const recover = vi.spyOn(harness.startup, "startRecoveredClientInputs");
 
-		const created = await runtime.newSession();
-		if (created.cancelled) throw new Error("the new session was cancelled");
-		await vi.waitFor(() => expect(steps).toEqual([`start:${created.sessionId}`, `shutdown:${source}`]));
-		// The phone relayed into the session the TUI left hears where to reconnect first.
-		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(steps).toHaveLength(2);
-		relay.resolve();
-		await vi.waitFor(() => expect(steps).toHaveLength(4));
-		await mode.daemonLeaseTail;
-		expect(steps).toEqual([
-			`start:${created.sessionId}`,
-			`shutdown:${source}`,
-			`release:${source}:switch`,
-			`acquire:${created.sessionId}`,
-		]);
+		await connect();
+
+		expect(link.steps).toEqual([`start:${source}`, `acquire:${source}`]);
+		expect(recover).toHaveBeenCalledOnce();
+		expect(recover.mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(link.acquire).mock.invocationCallOrder[0]!);
+
+		// A reconnect that reacquires the lease recovers it again.
+		link.reacquire(source, { kind: "granted", handoff: "none" });
+		await vi.waitFor(() => expect(recover).toHaveBeenCalledTimes(2));
 	});
 
-	it("on /resume, acquires the target before opening it, then releases the session it left", async () => {
-		const source = runtime.session.sessionId;
-		const target = await storedSession();
+	it("leaves the queued input of a session another TUI holds queued, and says so", async () => {
+		const source = harness.startup.id;
+		link.outcomes.set(source, () => ({ kind: "denied", reason: "held_by_tui" }));
+		const recover = vi.spyOn(harness.startup, "startRecoveredClientInputs");
 
-		const resumed = await call<{ cancelled: boolean }>(mode, "handleResumeSession", target);
-		await mode.daemonLeaseTail;
+		await connect();
 
-		expect(resumed).toMatchObject({ cancelled: false, sessionId: target.sessionId });
-		expect(runtime.session.sessionId).toBe(target.sessionId);
-		expect(steps).toEqual([
-			`acquire:${target.sessionId}`,
-			`start:${target.sessionId}`,
-			`shutdown:${source}`,
-			`release:${source}:switch`,
-			// The handover points the daemon at the session the TUI shows; its lease is already held.
-			`acquire:${target.sessionId}`,
-		]);
-	});
-
-	it("shows an error and stays when the target is open for writing elsewhere, handing its lease back", async () => {
-		const source = runtime.session.sessionId;
-		const target = await storedSession();
-		const elsewhere = ConversationLock.acquire(target.sessionDirectory, target.sessionId);
-		cleanups.push(() => elsewhere.close());
-
-		const resumed = await call<{ cancelled: boolean }>(mode, "handleResumeSession", target);
-
-		expect(resumed).toEqual({ cancelled: true });
-		expect(runtime.session.sessionId).toBe(source);
-		expect(mode.showError).toHaveBeenCalledWith(
-			expect.stringContaining(`Session ${target.sessionId} is already open`),
+		expect(recover).not.toHaveBeenCalled();
+		expect(frames.flatMap((frame) => (frame.type === "live" ? frame.items : []))).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				level: "warning",
+				message: "This conversation is open in another desktop window; live sharing is disabled here.",
+			}),
 		);
-		expect(steps).toEqual([`acquire:${target.sessionId}`, `release:${target.sessionId}:switch`, `acquire:${source}`]);
+	});
+
+	it("on new_session, releases the session it left once it closed and its relayed phones ended, then acquires the new one", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const relayed = await link.offerRelay({ sessionId: source }, relayPreamble(source, harness.tempDir));
+		if (!relayed) throw new Error("The TUI did not serve the phone");
+		const phone = await connectRelayedPhone(relayed, source);
+		expect(harness.tuiHost.relayCount()).toBe(1);
+		link.steps.splice(0);
+		void relayed.finished.then(() => link.steps.push("relay ended"));
+
+		const accepted = await client.intent("new_session", {});
+		const target = accepted.conversation;
+		if (target === undefined) throw new Error("new_session named no conversation");
+
+		await vi.waitFor(() =>
+			expect(link.steps).toEqual([
+				`start:${target}`,
+				`shutdown:${source}`,
+				// The phone relayed into the session the TUI left hears where to reconnect first.
+				"relay ended",
+				`release:${source}:switch`,
+				`acquire:${target}`,
+			]),
+		);
+		await phone.ended;
+		expect(phone.frames).toContainEqual({ type: "ended", subscriptionId: "s1", reason: "closed" });
+		expect(harness.tuiHost.relayCount()).toBe(0);
+	});
+
+	it("on switch_session, acquires the target before opening it, then releases the session it left", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		link.steps.splice(0);
+
+		const accepted = await client.intent("switch_session", { sessionId: target.sessionId });
+
+		expect(accepted.conversation).toBe(target.sessionId);
+		await vi.waitFor(() =>
+			expect(link.steps).toEqual([
+				`acquire:${target.sessionId}`,
+				`start:${target.sessionId}`,
+				`shutdown:${source}`,
+				`release:${source}:switch`,
+				// The handover points the daemon at the session the TUI shows; its lease is already held.
+				`acquire:${target.sessionId}`,
+			]),
+		);
+		expect(harness.tuiHost.conversation.id).toBe(target.sessionId);
+	});
+
+	it("refuses a target open for writing elsewhere, handing its lease back", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		const elsewhere = ConversationLock.acquire(target.sessionDirectory, target.sessionId);
+		link.steps.splice(0);
+
+		try {
+			await expect(client.intent("switch_session", { sessionId: target.sessionId })).rejects.toThrow(
+				`Session ${target.sessionId} is already open`,
+			);
+		} finally {
+			elsewhere.close();
+		}
+
+		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(link.steps).toEqual([
+			`acquire:${target.sessionId}`,
+			`release:${target.sessionId}:switch`,
+			`acquire:${source}`,
+		]);
 	});
 
 	it("points the daemon back at the session it shows when a resume took no lease and failed", async () => {
-		const source = runtime.session.sessionId;
-		const target = await storedSession();
-		outcomes.set(target.sessionId, () => ({ kind: "noop" }));
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		link.outcomes.set(target.sessionId, () => ({ kind: "noop" }));
 		const elsewhere = ConversationLock.acquire(target.sessionDirectory, target.sessionId);
-		cleanups.push(() => elsewhere.close());
+		link.steps.splice(0);
 
-		expect(await call(mode, "handleResumeSession", target)).toEqual({ cancelled: true });
-		expect(runtime.session.sessionId).toBe(source);
-		expect(steps).toEqual([`acquire:${target.sessionId}`, `release:${target.sessionId}:switch`, `acquire:${source}`]);
+		try {
+			await expect(client.intent("switch_session", { sessionId: target.sessionId })).rejects.toThrow();
+		} finally {
+			elsewhere.close();
+		}
+
+		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(link.steps).toEqual([
+			`acquire:${target.sessionId}`,
+			`release:${target.sessionId}:switch`,
+			`acquire:${source}`,
+		]);
 	});
 
-	it("shows an error and opens nothing when another TUI holds the target's lease", async () => {
-		const source = runtime.session.sessionId;
-		const target = await storedSession();
-		outcomes.set(target.sessionId, () => ({ kind: "denied", reason: "held_by_tui" }));
+	it("refuses, opening nothing, when another TUI holds the target's lease", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		link.outcomes.set(target.sessionId, () => ({ kind: "denied", reason: "held_by_tui" }));
+		link.steps.splice(0);
 
-		const resumed = await call<{ cancelled: boolean }>(mode, "handleResumeSession", target);
-
-		expect(resumed).toEqual({ cancelled: true });
-		expect(runtime.session.sessionId).toBe(source);
-		expect(mode.showError).toHaveBeenCalledWith(
+		await expect(client.intent("switch_session", { sessionId: target.sessionId })).rejects.toThrow(
 			`Session ${target.sessionId} is open in another Volt window (held_by_tui). Quit it there, then retry.`,
 		);
-		expect(steps).toEqual([`acquire:${target.sessionId}`, `release:${target.sessionId}:switch`, `acquire:${source}`]);
+
+		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.host.get(target.sessionId)).toBeUndefined();
+		expect(link.steps).toEqual([
+			`acquire:${target.sessionId}`,
+			`release:${target.sessionId}:switch`,
+			`acquire:${source}`,
+		]);
 	});
 
-	it("waits in the TUI for the daemon's turn: stopping it opens the session, cancelling keeps the current one", async () => {
-		const source = runtime.session.sessionId;
-		const cancelled = await storedSession();
-		outcomes.set(cancelled.sessionId, () => ({
+	it("asks the client that resumes to wait for the daemon's turn: cancelling keeps the session it shows", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		link.outcomes.set(target.sessionId, () => ({
 			kind: "pending",
 			viewerFeedId: "vf-cancel",
 			granted: new Promise<never>(() => {}),
 		}));
-		const endWait = vi.fn();
-		mode.showDaemonLeaseWait = (_sessionId, wait) => {
-			queueMicrotask(() => wait.cancel());
-			return endWait;
-		};
+		link.steps.splice(0);
 
-		expect(await call(mode, "handleResumeSession", cancelled)).toEqual({ cancelled: true });
-		expect(endWait).toHaveBeenCalledOnce();
-		expect(mode.showStatus).toHaveBeenCalledWith(
-			`Cancelled opening session ${cancelled.sessionId}; the daemon keeps it.`,
+		const switching = client.intent("switch_session", { sessionId: target.sessionId });
+		const wait = await dialogOf(
+			client,
+			`Waiting for the remote turn in session ${target.sessionId} to finish before opening it here`,
 		);
-		expect(mode.showError).not.toHaveBeenCalled();
-		expect(runtime.session.sessionId).toBe(source);
-		expect(steps).toEqual([
-			`acquire:${cancelled.sessionId}`,
-			`release:${cancelled.sessionId}:switch`,
+		expect(actionsOf(wait.request)).toEqual(["Stop remote turn", "Cancel"]);
+		client.answer(wait.requestId, { value: "cancel" });
+
+		await expect(switching).resolves.toMatchObject({ result: { cancelled: true } });
+		expect(hostRequests(client)).toEqual([]);
+		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.host.get(target.sessionId)).toBeUndefined();
+		expect(link.steps).toEqual([
+			`acquire:${target.sessionId}`,
+			`release:${target.sessionId}:switch`,
 			`acquire:${source}`,
-		]);
-
-		steps.splice(0);
-		const drained = await storedSession();
-		const granted = Promise.withResolvers<{ handoff: "warm" }>();
-		outcomes.set(drained.sessionId, () => ({ kind: "pending", viewerFeedId: "vf-stop", granted: granted.promise }));
-		const waited: string[] = [];
-		mode.showDaemonLeaseWait = (sessionId, wait) => {
-			waited.push(sessionId);
-			wait.abortRemoteTurn();
-			queueMicrotask(() => granted.resolve({ handoff: "warm" }));
-			return () => {};
-		};
-
-		const resumed = await call<{ cancelled: boolean }>(mode, "handleResumeSession", drained);
-		await mode.daemonLeaseTail;
-		expect(resumed).toMatchObject({ cancelled: false, sessionId: drained.sessionId });
-		expect(waited).toEqual([drained.sessionId]);
-		expect(steps).toEqual([
-			`acquire:${drained.sessionId}`,
-			"abort:vf-stop",
-			`start:${drained.sessionId}`,
-			`shutdown:${source}`,
-			`release:${source}:switch`,
-			`acquire:${drained.sessionId}`,
 		]);
 	});
 
-	it("maps the wait's keys: interrupt stops the remote turn once, clear cancels", () => {
-		initTheme("dark");
-		setKeybindings(KeybindingsManager.create());
-		const wait = { abortRemoteTurn: vi.fn(), cancel: vi.fn() };
-		const view = new DaemonLeaseWaitComponent({ requestRender: vi.fn() } as unknown as TUI, "s-1", wait);
-		cleanups.push(() => view.dispose());
+	it("stops the daemon's turn when asked, then opens the session once the lease is granted", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const target = await harness.storeSession();
+		const granted = Promise.withResolvers<{ handoff: "warm" }>();
+		link.outcomes.set(target.sessionId, () => ({
+			kind: "pending",
+			viewerFeedId: "vf-stop",
+			granted: granted.promise,
+		}));
+		link.steps.splice(0);
 
-		view.handleInput("\x1b");
-		view.handleInput("\x1b");
-		expect(wait.abortRemoteTurn).toHaveBeenCalledOnce();
-		expect(wait.cancel).not.toHaveBeenCalled();
-		view.handleInput("\x03");
-		expect(wait.cancel).toHaveBeenCalledOnce();
+		const switching = client.intent("switch_session", { sessionId: target.sessionId });
+		const wait = await dialogOf(client, /^Waiting for the remote turn/);
+		client.answer(wait.requestId, { value: "stop_remote_turn" });
+		const stopping = await dialogOf(client, `Stopping the remote turn in session ${target.sessionId}...`);
+		expect(actionsOf(stopping.request)).toEqual(["Cancel"]);
+		expect(link.steps).toEqual([`acquire:${target.sessionId}`, "abort:vf-stop"]);
+		granted.resolve({ handoff: "warm" });
+
+		await expect(switching).resolves.toMatchObject({ conversation: target.sessionId });
+		// The grant cleared the dialog.
+		await vi.waitFor(() => expect(hostRequests(client)).toEqual([]));
+		await vi.waitFor(() =>
+			expect(link.steps).toEqual([
+				`acquire:${target.sessionId}`,
+				"abort:vf-stop",
+				`start:${target.sessionId}`,
+				`shutdown:${source}`,
+				`release:${source}:switch`,
+				`acquire:${target.sessionId}`,
+			]),
+		);
+	});
+
+	it("asks only the client that resumes: a phone relayed into the same conversation neither sees nor answers the wait", async () => {
+		const client = await connect();
+		const source = harness.startup.id;
+		const relayed = await link.offerRelay({ sessionId: source }, relayPreamble(source, harness.tempDir));
+		if (!relayed) throw new Error("The TUI did not serve the phone");
+		const phone = await connectRelayedPhone(relayed, source, ["dialog", "confirm", "select"]);
+		const target = await harness.storeSession();
+		link.outcomes.set(target.sessionId, () => ({
+			kind: "pending",
+			viewerFeedId: "vf-phone",
+			granted: new Promise<never>(() => {}),
+		}));
+
+		const switching = client.intent("switch_session", { sessionId: target.sessionId });
+		const wait = await dialogOf(client, /^Waiting for the remote turn/);
+		phone.send({ type: "host_response", requestId: wait.requestId, response: { value: "stop_remote_turn" } });
+		// The phone's answer reaches nothing: the TUI's dialog stays, and the daemon's turn runs on.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		expect(hostRequests(client).map((value) => value.requestId)).toEqual([wait.requestId]);
+		expect(link.steps).not.toContain("abort:vf-phone");
+		expect(
+			phone.frames.some(
+				(frame) =>
+					frame.type === "live" &&
+					frame.items.some((item) => item.type === "set" && item.value.kind === "host_request"),
+			),
+		).toBe(false);
+
+		client.answer(wait.requestId, { value: "cancel" });
+		await expect(switching).resolves.toMatchObject({ result: { cancelled: true } });
+	});
+
+	it("serves a relay offered for the target of a resume once the client moved there, and lets other offers expire", async () => {
+		const client = await connect();
+		const target = await harness.storeSession();
+		const granted = Promise.withResolvers<{ handoff: "cold" }>();
+		link.outcomes.set(target.sessionId, () => ({
+			kind: "pending",
+			viewerFeedId: "vf-relay",
+			granted: granted.promise,
+		}));
+
+		// An offer for a session the TUI does not show expires.
+		expect(await link.offerRelay({ sessionId: "s-elsewhere" }, relayPreamble("s-elsewhere", harness.tempDir))).toBe(
+			undefined,
+		);
+
+		const switching = client.intent("switch_session", { sessionId: target.sessionId });
+		await dialogOf(client, /^Waiting for the remote turn/);
+		const offered = link.offerRelay(
+			{ sessionId: target.sessionId },
+			relayPreamble(target.sessionId, harness.tempDir),
+		);
+		granted.resolve({ handoff: "cold" });
+		await switching;
+		const relayed = await offered;
+		if (!relayed) throw new Error("The TUI did not serve the phone of the session it opened");
+		const phone = await connectRelayedPhone(relayed, target.sessionId);
+		expect(phone.frames.some((frame) => frame.type === "fatal")).toBe(false);
+		await phone.close();
 	});
 });

@@ -2,6 +2,7 @@
  * Run modes for the coding agent.
  */
 
+export { TuiHost, type TuiHostOptions } from "./interactive/host/tui-host.ts";
 export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
 export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
 export {
