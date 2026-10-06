@@ -12,7 +12,7 @@ import {
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
-	isWorkerRequestType,
+	isRequestAllowedFor,
 	PROTOCOL_VERSION,
 } from "./control-protocol.ts";
 
@@ -291,7 +291,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				return;
 			}
 			// A worker sends worker requests only, and nothing else may.
-			if ((connection.client === "worker") !== isWorkerRequestType(message.type)) {
+			if (!isRequestAllowedFor(connection.client, message.type)) {
 				connection.send({
 					type: "error",
 					id: message.id,

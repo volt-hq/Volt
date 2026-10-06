@@ -170,6 +170,31 @@ const REQUESTS: ByType<ControlRequest> = {
 	worker_hosts: { type: "worker_hosts", id: "32", sessionId: "s-2", kind: "child", parentSessionId: "s-1" },
 	worker_released: { type: "worker_released", id: "33", sessionId: "s-2" },
 	worker_stop_result: { type: "worker_stop_result", id: "34", stopId: "stop-1", outcome: "refused_active" },
+	worker_forward: {
+		type: "worker_forward",
+		id: "35",
+		relayId: "rl-1",
+		frame: { type: "register_push_target", intentId: "i-2", input: PUSH_TARGET },
+	},
+	worker_notification_delivery: {
+		type: "worker_notification_delivery",
+		id: "36",
+		relayId: "rl-1",
+		notification: {
+			eventId: "review:one:completed",
+			hostNodeId: HOST_NODE_ID,
+			kind: "work_finished",
+			title: "Your review is ready",
+			body: "PR #151 completed with 4 findings.",
+			sessionId: "s-1",
+			workspaceName: "volt",
+			workId: "review:one",
+			workKind: "review",
+		},
+	},
+	worker_moved: { type: "worker_moved", id: "37", from: "s-1", to: "s-2" },
+	worker_last_session: { type: "worker_last_session", id: "38", relayId: "rl-1", sessionId: "s-2" },
+	worker_authority: { type: "worker_authority", id: "39", relayId: "rl-1" },
 };
 
 const REVIEW_NOTIFICATION = {
@@ -269,6 +294,11 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_hosts: [{ kind: "primary" }, { sessionId: undefined }],
 	worker_released: [{ sessionId: 1 }],
 	worker_stop_result: [{ outcome: "maybe" }, { stopId: undefined }],
+	worker_forward: [{ frame: undefined }, { relayId: 1 }],
+	worker_notification_delivery: [{ notification: { ...REVIEW_NOTIFICATION, title: "r".repeat(129) } }],
+	worker_moved: [{ to: undefined }],
+	worker_last_session: [{ sessionId: undefined }],
+	worker_authority: [{ relayId: undefined }],
 };
 
 const STATUS_RESULT: Extract<ControlResponse, { type: "status_result" }> = {
@@ -366,6 +396,12 @@ const RESPONSES: ByType<ControlResponse> = {
 		frame: { type: "accepted", intentId: "i-1", ordinals: [], result: { registered: true } },
 	},
 	relay_push_delivery_result: { type: "relay_push_delivery_result", id: "16", status: "sent" },
+	worker_forward_result: {
+		type: "worker_forward_result",
+		id: "17",
+		frame: { type: "accepted", intentId: "i-2", ordinals: [], result: { registered: true } },
+	},
+	worker_authority_result: { type: "worker_authority_result", id: "18", authority: "current" },
 };
 
 const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string, unknown>> } = {
@@ -409,11 +445,14 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 		{ frame: { type: "fatal", code: "revoked" } },
 	],
 	relay_push_delivery_result: [{ status: "maybe" }],
+	worker_forward_result: [{ frame: undefined }, { frame: { type: "changed", catalog: "host" } }],
+	worker_authority_result: [{ authority: "lost" }],
 };
 
 const EVENTS: ByType<ControlEvent> = {
 	relay_offer: {
 		type: "relay_offer",
+		clientKind: "phone",
 		relayId: "rl-1",
 		relayToken: "tok",
 		workspaceName: "volt",
@@ -446,10 +485,12 @@ const EVENTS: ByType<ControlEvent> = {
 		},
 	},
 	worker_stop: { type: "worker_stop", stopId: "stop-1", reason: "retention", force: false },
+	relay_authority: { type: "relay_authority", relayId: "rl-1", loss: "revoked" },
+	worker_abort: { type: "worker_abort", sessionId: "s-1" },
 };
 
 const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unknown>> } = {
-	relay_offer: [{ relayToken: undefined }],
+	relay_offer: [{ relayToken: undefined }, { clientKind: "tui" }],
 	relay_closed: [{ reason: "other" }],
 	viewer_end: [{ reason: "drained" }],
 	theme_snapshot: [{ tokens: { accent: 1 } }],
@@ -457,6 +498,8 @@ const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unkno
 	pairing_progress: [{ phase: "scanning" }, { qrLines: "line" }],
 	worker_spawn: [{ spec: { workerId: "w-1" } }],
 	worker_stop: [{ reason: "bored" }, { force: undefined }],
+	relay_authority: [{ loss: "current" }],
+	worker_abort: [{ sessionId: undefined }],
 };
 
 /** Apply a patch and decode it as the wire would: `undefined` removes a field at any depth. */
@@ -756,6 +799,7 @@ describe("control version negotiation", () => {
 describe("relay preamble", () => {
 	const preamble: RelayPreamble = {
 		type: "relay_preamble",
+		kind: "phone",
 		relayId: "rl-7",
 		handshake: {
 			hello: {

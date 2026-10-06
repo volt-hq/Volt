@@ -7,7 +7,7 @@ import { findSessionInfoById, SessionManager } from "../../../src/core/session-m
 import { connectTestClient } from "../../utilities/host-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
-/** A phone's client: it follows its structural intents by redirect, through `hostTarget` when given. */
+/** A client that follows its structural intents by redirect, opening their targets through `hostTarget` when given. */
 function redirectClient(
 	redirects: string[],
 	hostTarget?: (target: RedirectTarget) => Promise<{ commit(): Promise<void>; abort(): Promise<void> }>,
@@ -17,7 +17,7 @@ function redirectClient(
 		move: {
 			kind: "redirect",
 			redirect: (sessionId) => void redirects.push(sessionId),
-			...(hostTarget === undefined ? {} : { hostTarget }),
+			...(hostTarget === undefined ? {} : { hostTarget, hostsClientMoves: true }),
 		},
 	};
 }
@@ -194,6 +194,25 @@ describe("regression #585: executing a plan in a new session hands it off throug
 		await target.startRecoveredClientInputs();
 		expect(target.session.messages.at(-1)?.role).toBe("assistant");
 		expect(target.session.planningState.plan).toMatchObject({ id: ready.id, phase: "active" });
+	});
+
+	it("redirects a client's own move without opening its target where its host takes only extension-started moves", async () => {
+		const { harness, source, ready } = await setup();
+		const redirects: string[] = [];
+		const hostTarget = vi.fn(async () => ({ commit: async () => {}, abort: async () => {} }));
+		const phone: HostClient = {
+			id: "phone",
+			move: { kind: "redirect", redirect: (sessionId) => void redirects.push(sessionId), hostTarget },
+		};
+		await harness.host.attach(phone, source);
+		cleanups.push(() => harness.host.detach(phone));
+
+		const result = await executePlan(harness.host, phone, ready.id, ready.revision, "new_session");
+
+		expect(hostTarget).not.toHaveBeenCalled();
+		expect(redirects).toEqual([result.selectedSessionId]);
+		expect(harness.host.list()).toEqual([source]);
+		expect(source.session.planningState.plan).toMatchObject({ id: ready.id, phase: "handed_off" });
 	});
 
 	it("prepares the hosted target before writing through the source, and abandons it when that write fails", async () => {

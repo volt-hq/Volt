@@ -19,7 +19,7 @@ import { getDefaultSessionDirPath, SessionManager } from "../core/session-manage
 import type { SessionWriter } from "../core/session-writer.ts";
 import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
-import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
+import { getResolvedTargetSessionId } from "./conversation-open.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import {
 	getWorktreeCheckoutPath,

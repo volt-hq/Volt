@@ -356,6 +356,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		for (const sessionId of ["old", "phone-session"]) {
 			daemon.server.sendTo(ownerConnectionId, {
 				type: "relay_offer",
+				clientKind: "phone",
 				relayId: `rl-${sessionId}`,
 				relayToken: `token-${sessionId}`,
 				workspaceName: "ws",

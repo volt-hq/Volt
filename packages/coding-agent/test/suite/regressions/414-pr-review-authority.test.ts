@@ -11,7 +11,6 @@ import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
 import type { ChangeAssociationService } from "../../../src/daemon/change-association.ts";
-import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import type { IrohIncomingLike, IrohModuleLike, IrohNodeIdLike } from "../../../src/daemon/iroh-native.ts";
 import { createIrohDaemonService } from "../../../src/daemon/iroh-service.ts";
 import type { VoltdRuntimeServices } from "../../../src/daemon/main.ts";
@@ -332,7 +331,7 @@ async function fixture(grant = capabilities) {
 	await expect.poll(() => service.statusExtras?.().remoteTransport?.state).toBe("ready");
 	const createWorktree = vi.spyOn(WorktreeManager.prototype, "create");
 	const createSession = vi.spyOn(SessionManager, "create");
-	const openRuntime = vi.spyOn(IntegratedRuntimeRegistry.prototype, "getOrCreateEntry");
+	const openWorker = vi.spyOn(WorkerRegistry.prototype, "open");
 	const prompt = vi.spyOn(AgentSession.prototype, "prompt");
 	const runGit = vi.spyOn(reviewGit, "runPrReviewGit");
 	const before = {
@@ -358,7 +357,7 @@ async function fixture(grant = capabilities) {
 		async expectNoEffects(allowFetch = false) {
 			expect(createWorktree).not.toHaveBeenCalled();
 			expect(createSession).not.toHaveBeenCalled();
-			expect(openRuntime).not.toHaveBeenCalled();
+			expect(openWorker).not.toHaveBeenCalled();
 			expect(prompt).not.toHaveBeenCalled();
 			expect(harness.eventsOfType("agent_start")).toEqual([]);
 			expect(fetch).not.toHaveBeenCalled();

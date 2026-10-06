@@ -15,7 +15,6 @@ export interface IrohRemoteSessionContextsRpcBackend {
 export function createIrohRemoteSessionContextsRpcBackend(options: {
 	workspaceName: string;
 	sessionDirectory: string;
-	getLiveStartingGitContext(sessionId: string): RpcGitContext | null | undefined;
 	getChangeContext(sessionId: string): RpcSessionChangeContext | undefined;
 }): IrohRemoteSessionContextsRpcBackend {
 	return {
@@ -23,23 +22,13 @@ export function createIrohRemoteSessionContextsRpcBackend(options: {
 			if (workspaceName !== options.workspaceName) {
 				throw new Error("Session context workspace mismatch");
 			}
-			const liveContexts = new Map<string, RpcGitContext | null>();
-			const persistedSessionIds: string[] = [];
-			for (const sessionId of sessionIds) {
-				const liveContext = options.getLiveStartingGitContext(sessionId);
-				if (liveContext === undefined) {
-					persistedSessionIds.push(sessionId);
-				} else {
-					liveContexts.set(sessionId, liveContext);
-				}
-			}
-			const persistedContexts = await SessionManager.readStartingGitContexts(
-				options.sessionDirectory,
-				persistedSessionIds,
-			);
+			// The host of a conversation records its starting Git context in its log.
+			const startingContexts = await SessionManager.readStartingGitContexts(options.sessionDirectory, [
+				...sessionIds,
+			]);
 			return sessionIds.map((sessionId) => ({
 				sessionId,
-				startingGitContext: liveContexts.get(sessionId) ?? persistedContexts.get(sessionId) ?? null,
+				startingGitContext: startingContexts.get(sessionId) ?? null,
 				changeContext: options.getChangeContext(sessionId) ?? null,
 			}));
 		},

@@ -25,6 +25,7 @@ import { SessionManager, type SessionReference } from "../../src/core/session-ma
 import type { LogWriter } from "../../src/core/session-writer.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { RelayPreamble } from "../../src/daemon/control-protocol.ts";
+import { adaptRelaySocketToIrohStream } from "../../src/daemon/worker/serve-phone.ts";
 import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
 import {
 	type AcquireOutcome,
@@ -34,7 +35,6 @@ import {
 	type DaemonRelayOffer,
 	type OpenedRelay,
 } from "../../src/modes/interactive/host/daemon-link.ts";
-import { adaptRelaySocketToIrohStream } from "../../src/modes/interactive/host/relay-serving.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { TUI_HOST_REQUESTS } from "../../src/modes/interactive/live-view.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
@@ -393,6 +393,7 @@ export function relayPreamble(
 	const streamId = options.streamId ?? "st-1";
 	return {
 		type: "relay_preamble",
+		kind: "phone",
 		relayId: "rl-1",
 		handshake: {
 			hello: {

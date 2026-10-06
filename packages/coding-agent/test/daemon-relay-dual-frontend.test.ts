@@ -24,7 +24,6 @@ import { LeaseBroker } from "../src/daemon/lease-broker.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
 import { type RelayOutcome, RelayRegistry } from "../src/daemon/relay-stream.ts";
 import { createDaemonLink } from "../src/modes/interactive/host/daemon-link.ts";
-import { createRelayWorkspaceUnregisterRetirement } from "../src/modes/interactive/host/relay-serving.ts";
 import { createTuiHarness, type TuiHarness } from "./suite/tui-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
@@ -337,6 +336,7 @@ function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: str
 		streamId,
 		stream: phone.stream,
 		preamble: {
+			kind: "phone",
 			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE, initialInput: [] },
 			authorization: {
 				clientNodeId,
@@ -366,6 +366,7 @@ function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: str
 	}
 	harness.server.sendTo(ownerControlConnectionId, {
 		type: "relay_offer",
+		clientKind: "phone",
 		relayId: relay.relayId,
 		relayToken: relay.relayToken,
 		workspaceName: WORKSPACE.name,
@@ -402,21 +403,6 @@ function busy(phone: RemotePhone): boolean | undefined {
 }
 
 describe("dual-frontend relayed conversation (§12.3.3)", () => {
-	it("releases the session's lease once, for the unregistered workspace, after a relayed unregister", async () => {
-		const release = vi.fn(async () => {});
-		const retirement = createRelayWorkspaceUnregisterRetirement({ release }, () => SESSION_ID);
-		// Nothing was unregistered: the relay ends without releasing the lease.
-		await retirement.finalize();
-		expect(release).not.toHaveBeenCalled();
-
-		retirement.unregistered();
-		expect(release).not.toHaveBeenCalled();
-		await retirement.finalize();
-		await retirement.finalize();
-		expect(release).toHaveBeenCalledTimes(1);
-		expect(release).toHaveBeenCalledWith(SESSION_ID, "workspace_unregistered");
-	});
-
 	it("serves two co-attached phones from one TUI conversation: prompts land, the turn fans out, abort keeps both relays open", async () => {
 		const harness = await startOwnedRelayDaemonHarness();
 		const { registry, tui } = harness;

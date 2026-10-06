@@ -38,8 +38,8 @@ import {
 } from "../../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../../daemon/paths.ts";
 import { ensureDaemonRunning, probeDaemon, readPublishedDaemonEndpoint } from "../../../daemon/spawn.ts";
+import { servePhoneRelay } from "../../../daemon/worker/serve-phone.ts";
 import { resolveDaemonWorkspaceForCwd } from "../worktree-control.ts";
-import { serveRelayedPhone } from "./relay-serving.ts";
 
 export type DaemonLinkState = "connected" | "reconnecting" | "gone" | "disabled";
 
@@ -952,13 +952,30 @@ export class DaemonLeases {
 		if (!served || !link || !served.serving()) return;
 		const conversation = served.shown();
 		if (offer.sessionId !== conversation.id) return;
-		const server = serveRelayedPhone({
-			host: served.host,
-			conversation,
-			openRelay,
-			link,
-			agentDir: getAgentDir(),
-		});
+		const server = (async () => {
+			// The conversation is closing: the TUI is leaving it.
+			if (conversation.closed) return;
+			let relay: OpenedRelay;
+			try {
+				relay = await openRelay();
+			} catch {
+				return;
+			}
+			const clientNodeId = relay.preamble.authorization.clientNodeId;
+			await servePhoneRelay({
+				host: served.host,
+				conversation,
+				relay,
+				agentDir: getAgentDir(),
+				daemon: {
+					forward: (frame) => link.forwardRelayRpc(clientNodeId, conversation.id, frame),
+					deliverNotification: (notification) =>
+						link.relayNotificationDelivery.deliverNotification(clientNodeId, conversation.id, notification),
+					// A phone that unregistered the workspace retires the session's lease once it is answered.
+					unregistered: () => link.release(conversation.id, "workspace_unregistered"),
+				},
+			});
+		})();
 		this.relays.set(server, conversation.id);
 		void server.finally(() => this.relays.delete(server));
 		await server;

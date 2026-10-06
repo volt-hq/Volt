@@ -121,6 +121,7 @@ export class InProcessConnector implements ConversationConnector {
 			anchor: true,
 			redirect: {
 				hostTarget: async () => HOSTED_HERE,
+				hostsClientMoves: true,
 				hostsStoredSessions: true,
 				onRedirected: (sessionId) => {
 					const to = this.host.get(sessionId);

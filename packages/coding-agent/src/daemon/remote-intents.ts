@@ -34,7 +34,6 @@ import {
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import { Compile } from "typebox/compile";
-import type { HostedConversation } from "../core/host/hosted-conversation.ts";
 import {
 	type IntentHostTheme,
 	type IntentKeepAwakeService,
@@ -57,7 +56,6 @@ import {
 } from "../core/remote/iroh/session-contexts.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
-import type { ReviewDiscussionService } from "../core/review-discussions.ts";
 import { getReviewDiscussionLink } from "../core/review-discussions.ts";
 import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
@@ -109,20 +107,13 @@ export interface RemoteIntentHost {
 export interface RemoteStreamKeep {
 	/** The requesting stream's id. */
 	readonly streamId?: string;
-	/** The requesting conversation's runtime, by session id. */
-	readonly sessionId?: string;
-	/** The requesting relays, for a stream a TUI serves. */
+	/** The requesting relays, for a stream a worker or a TUI serves. */
 	readonly relayIds?: ReadonlySet<string>;
 }
 
-/** The kind of stream a device opened: a conversation, or one workspace purpose. */
+/** The kind of stream a device opened: a relayed conversation, or one workspace purpose. */
 export type RemoteStreamScope =
-	| {
-			readonly kind: "conversation";
-			readonly conversation: HostedConversation;
-			readonly reviewDiscussions?: ReviewDiscussionService;
-	  }
-	/** Frames a TUI relays for a phone on the TUI's session `sessionId`. */
+	/** Frames the host serving a phone's conversation `sessionId` relays to the daemon. */
 	| { readonly kind: "relay"; readonly sessionId: string }
 	| { readonly kind: "discovery"; readonly purpose: IrohRemoteWorkspaceDiscoveryTarget["purpose"] }
 	| { readonly kind: "management"; readonly purpose: IrohRemoteWorkspaceManagementTarget["purpose"] };
@@ -142,7 +133,7 @@ const PURPOSE_FRAMES: Readonly<Record<string, { intents: readonly string[]; quer
 export function remoteStreamAllows(
 	scope: RemoteStreamScope,
 ): ((kind: "intent" | "query", name: string) => boolean) | undefined {
-	if (scope.kind === "conversation" || scope.kind === "relay") return undefined;
+	if (scope.kind === "relay") return undefined;
 	const frames = PURPOSE_FRAMES[scope.purpose];
 	return (kind, name) => (kind === "intent" ? frames?.intents : frames?.queries)?.includes(name) === true;
 }
@@ -229,17 +220,15 @@ function timestamp(value: string | Date): string {
 }
 
 /**
- * The sessions of the stream's workspace, newest first: its stored sessions,
- * the live summary of the stream's conversation, the worktree each is bound
- * to, which host process serves it, and the daemon's change association.
+ * The sessions of the stream's workspace, newest first: its stored sessions
+ * (`currentId` the stream's own), the worktree each is bound to, which host
+ * process serves it, and the daemon's change association.
  */
 export async function listRemoteWorkspaceSessions(
 	host: Pick<RemoteIntentHost, "agentDir" | "stateManager" | "listRuntimeStates" | "getChangeContext">,
 	authorization: IrohRemoteClientAuthorizationSuccess,
-	current?: HostedConversation | string,
+	currentId?: string,
 ): Promise<SessionListItem[]> {
-	const conversation = typeof current === "string" ? undefined : current;
-	const currentId = typeof current === "string" ? current : current?.id;
 	const workspace = authorization.workspace;
 	// Titles are redacted before they are cut, so a cut never leaves part of a root.
 	const titles = createIrohRemoteProjectionSanitizer({
@@ -282,24 +271,6 @@ export async function listRemoteWorkspaceSessions(
 				...(info.startingGitContext === undefined ? {} : { startingGitContext: info.startingGitContext }),
 			},
 			info.cwd,
-		);
-	}
-	if (conversation) {
-		const live = conversation.summary();
-		add(
-			{
-				sessionId: live.sessionId,
-				...(live.reviewDiscussion ? { reviewDiscussion: live.reviewDiscussion } : {}),
-				...(live.sessionName === undefined ? {} : { sessionName: live.sessionName }),
-				createdAt: timestamp(live.createdAt),
-				modifiedAt: timestamp(live.modifiedAt),
-				messageCount: live.messageCount,
-				firstMessage: live.firstMessage,
-				current: true,
-				...(live.origin === undefined ? {} : { origin: live.origin }),
-				...(live.startingGitContext === undefined ? {} : { startingGitContext: live.startingGitContext }),
-			},
-			live.cwd,
 		);
 	}
 	try {
@@ -363,8 +334,7 @@ export function remoteIntentServices(
 	const workspaceName = authorization.workspace.name;
 	const audit = (event: Omit<Parameters<IrohRemoteAuditLogger["log"]>[0], "clientNodeId" | "workspace">) =>
 		logAudit(host.auditLogger, { ...event, clientNodeId: authorization.client.nodeId, workspace: workspaceName });
-	const source =
-		scope.kind === "conversation" || scope.kind === "relay" ? "remote_rpc" : `remote_workspace_${scope.kind}_stream`;
+	const source = scope.kind === "relay" ? "remote_rpc" : `remote_workspace_${scope.kind}_stream`;
 
 	const worktrees = (): IrohRemoteWorktreeRpcBackend => host.worktrees(authorization);
 	const createWorktree: IntentWorkspaceServices["createWorktree"] = async (createOptions) => {
@@ -443,8 +413,7 @@ export function remoteIntentServices(
 			throw error;
 		}
 	};
-	const current =
-		scope.kind === "conversation" ? scope.conversation : scope.kind === "relay" ? scope.sessionId : undefined;
+	const current = scope.kind === "relay" ? scope.sessionId : undefined;
 	const listSessions: IntentWorkspaceServices["listSessions"] = () =>
 		listRemoteWorkspaceSessions(host, authorization, current);
 	const resolvePrReview: IntentWorkspaceServices["resolvePrReview"] = async (request: PrReviewSourceRequest) => {
@@ -510,14 +479,10 @@ export function remoteIntentServices(
 		...(host.hostTheme === undefined ? {} : { hostTheme: () => host.hostTheme?.() }),
 	};
 	switch (scope.kind) {
-		case "conversation":
 		case "relay":
 			return {
 				...hostServices,
 				pushTargets: host.pushTargets(authorization),
-				...(scope.kind === "conversation" && scope.reviewDiscussions !== undefined
-					? { reviewDiscussions: scope.reviewDiscussions }
-					: {}),
 				workspace: {
 					name: workspaceName,
 					unregister,

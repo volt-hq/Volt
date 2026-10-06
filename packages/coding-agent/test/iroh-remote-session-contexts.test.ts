@@ -223,7 +223,7 @@ describe("session_contexts workspace discovery", () => {
 		});
 	});
 
-	test("backend combines live, targeted persisted, and Work-store context without all-session listing", async () => {
+	test("backend combines targeted persisted and Work-store context without all-session listing", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "volt-session-context-backend-"));
 		temporaryDirectories.push(directory);
 		const persistedId = "session-persisted";
@@ -234,21 +234,17 @@ describe("session_contexts workspace discovery", () => {
 		const sessionBackend = createIrohRemoteSessionContextsRpcBackend({
 			workspaceName: "volt",
 			sessionDirectory: directory,
-			getLiveStartingGitContext: (sessionId) => (sessionId === "session-live" ? gitContext : undefined),
 			getChangeContext: (sessionId) => {
 				workLookups.push(sessionId);
 				return sessionId === persistedId ? changeContext : undefined;
 			},
 		});
 
-		await expect(
-			sessionBackend.getSessionContexts("volt", ["session-live", persistedId, "session-missing"]),
-		).resolves.toEqual([
-			{ sessionId: "session-live", startingGitContext: gitContext, changeContext: null },
+		await expect(sessionBackend.getSessionContexts("volt", [persistedId, "session-missing"])).resolves.toEqual([
 			{ sessionId: persistedId, startingGitContext: gitContext, changeContext },
 			{ sessionId: "session-missing", startingGitContext: null, changeContext: null },
 		]);
-		expect(workLookups).toEqual(["session-live", persistedId, "session-missing"]);
+		expect(workLookups).toEqual([persistedId, "session-missing"]);
 		expect(listSpy).not.toHaveBeenCalled();
 	});
 

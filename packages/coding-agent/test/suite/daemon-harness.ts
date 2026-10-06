@@ -2,21 +2,32 @@
  * A daemon on a temporary agent directory, run in this process with its real
  * control socket (Phase 7 plan §7, "New harness"). Its conversation workers
  * run in this process too (`InProcessWorkerLauncher`) and connect over that
- * socket with role `worker`; they reach the faux provider this harness
- * registers, so no real provider is involved. One workspace is registered.
+ * socket with role `worker`; they load the faux provider extension fixture,
+ * which registers this harness's faux provider, so no real provider is
+ * involved. One workspace is registered.
  */
 
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createFauxProvider, type FauxProvider } from "@hansjm10/volt-ai";
+import { ExtensionPermissionStore, extensionFingerprint } from "../../src/core/extensions/permissions.ts";
+import type { IrohRemoteAuditEvent } from "../../src/core/remote/iroh/audit.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../../src/daemon/control-client.ts";
 import type { ControlResponse, WorkerSpawnSpec } from "../../src/daemon/control-protocol.ts";
 import { runVoltDaemon, type VoltdRuntimeServices, type VoltdServiceExtension } from "../../src/daemon/main.ts";
+import { getDaemonPaths } from "../../src/daemon/paths.ts";
 import { probeDaemon } from "../../src/daemon/spawn.ts";
 import { InProcessWorkerLauncher, type WorkerLauncher } from "../../src/daemon/worker-launcher.ts";
 import type { LiveWorker, WorkerClientKind, WorkerRegistry } from "../../src/daemon/worker-registry.ts";
+import { manifest as fauxManifest, offerFauxProvider } from "../fixtures/faux-provider-extension.ts";
+
+const FAUX_EXTENSION_PATH = realpathSync.native(
+	fileURLToPath(new URL("../fixtures/faux-provider-extension.ts", import.meta.url)),
+);
 
 export interface DaemonHarnessOptions {
 	/** Daemon service extensions beside the control plane, such as the Iroh service. */
@@ -25,6 +36,8 @@ export interface DaemonHarnessOptions {
 	readonly workerLauncher?: WorkerLauncher;
 	/** `remote.detachedRuntimeTtlMs`; the daemon's default otherwise. */
 	readonly detachedRuntimeTtlMs?: number;
+	/** Single-file extensions (absolute paths) the workers' conversations load beside the faux provider; none may declare permissions. */
+	readonly workerExtensions?: readonly string[];
 }
 
 /** What a harness worker opens beside its stored session. */
@@ -54,6 +67,10 @@ export interface DaemonHarness {
 		options?: { spawn?: HarnessSpawn; attach?: WorkerClientKind },
 	): Promise<{ worker: LiveWorker; release: () => void }>;
 	status(): Promise<Extract<ControlResponse, { type: "status_result" }>>;
+	/** Another control connection of `client` kind, closed with the harness. */
+	connect(client: "tui" | "cli"): Promise<DaemonClient>;
+	/** The daemon's audit log so far. */
+	audit(): IrohRemoteAuditEvent[];
 	/** Shut the daemon down; resolves with its exit code. */
 	shutdown(): Promise<number>;
 	/** Shut the daemon down and remove its directory. */
@@ -67,25 +84,24 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 	mkdirSync(join(workspacePath, "ws"), { recursive: true });
 	const workspaceDir = join(workspacePath, "ws");
 	mkdirSync(agentDir, { recursive: true });
-	const faux = createFauxProvider();
+	// A provider name of its own, so harnesses alive together do not collide.
+	const faux = createFauxProvider({ provider: `faux-${randomUUID().slice(0, 8)}` });
+	const withdrawFaux = offerFauxProvider(faux);
 	const model = faux.getModel();
 	writeFileSync(
-		join(agentDir, "models.json"),
+		join(agentDir, "settings.json"),
 		`${JSON.stringify({
-			providers: {
-				[model.provider]: {
-					api: model.api,
-					apiKey: "faux-key",
-					baseUrl: model.baseUrl,
-					models: [{ id: model.id }],
-				},
-			},
+			defaultProvider: model.provider,
+			defaultModel: model.id,
+			extensionPaths: [FAUX_EXTENSION_PATH, ...(options.workerExtensions ?? [])],
 		})}\n`,
 	);
-	writeFileSync(
-		join(agentDir, "settings.json"),
-		`${JSON.stringify({ defaultProvider: model.provider, defaultModel: model.id })}\n`,
-	);
+	new ExtensionPermissionStore(agentDir).acknowledge({
+		id: fauxManifest.id,
+		fingerprint: extensionFingerprint({ id: fauxManifest.id, path: FAUX_EXTENSION_PATH }),
+		permissions: [...fauxManifest.permissions],
+		version: "local",
+	});
 
 	let services: VoltdRuntimeServices | undefined;
 	const capture: VoltdServiceExtension = (runtime) => {
@@ -114,6 +130,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 		reconnect: false,
 	});
 	await control.connect();
+	const clients: DaemonClient[] = [];
 	const workspaceName = "ws";
 	const registered = await control.request({ type: "workspace_register", name: workspaceName, path: workspaceDir });
 	if (registered.type !== "ok") throw new Error(`The harness workspace was not registered: ${registered.type}`);
@@ -133,7 +150,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 				await control.request({ type: "shutdown" }).catch(() => undefined);
 				return await daemon;
 			} finally {
-				await control.close().catch(() => undefined);
+				await Promise.all([control, ...clients].map((client) => client.close().catch(() => undefined)));
 			}
 		})();
 		return stopped;
@@ -182,12 +199,33 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 			if (status.type !== "status_result") throw new Error(`Unexpected ${status.type}`);
 			return status;
 		},
+		async connect(client) {
+			const connection = createDaemonClient({
+				socketPath: probe.socketPath,
+				client,
+				version: "test",
+				...(probe.authToken === undefined ? {} : { authToken: probe.authToken }),
+				reconnect: false,
+			});
+			clients.push(connection);
+			await connection.connect();
+			return connection;
+		},
+		audit() {
+			const path = getDaemonPaths(agentDir).auditPath;
+			if (!existsSync(path)) return [];
+			return readFileSync(path, "utf8")
+				.split("\n")
+				.filter((line) => line.length > 0)
+				.map((line) => JSON.parse(line) as IrohRemoteAuditEvent);
+		},
 		shutdown,
 		dispose() {
 			disposed ??= (async () => {
 				try {
 					await shutdown();
 				} finally {
+					withdrawFaux();
 					rmSync(root, { recursive: true, force: true });
 				}
 			})();

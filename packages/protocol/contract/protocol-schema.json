@@ -796,6 +796,12 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Event.worker_stop"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.relay_authority"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.worker_abort"
 				}
 			]
 		},
@@ -872,6 +878,27 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Event.relay_authority": {
+			"type": "object",
+			"required": [
+				"type",
+				"relayId",
+				"loss"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "relay_authority"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"loss": {
+					"$ref": "#/$defs/Control.WorkerAuthorityLoss"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Event.relay_closed": {
 			"type": "object",
 			"required": [
@@ -897,6 +924,7 @@
 			"type": "object",
 			"required": [
 				"type",
+				"clientKind",
 				"relayId",
 				"relayToken",
 				"workspaceName",
@@ -909,6 +937,10 @@
 				"type": {
 					"type": "string",
 					"const": "relay_offer"
+				},
+				"clientKind": {
+					"type": "string",
+					"const": "phone"
 				},
 				"relayId": {
 					"type": "string"
@@ -982,6 +1014,25 @@
 						"cancelled",
 						"error"
 					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.worker_abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_abort"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -1287,6 +1338,7 @@
 				"lease_transferred",
 				"workspace_unregistered",
 				"host_shutdown",
+				"worker_exited",
 				"error"
 			]
 		},
@@ -1338,6 +1390,9 @@
 					"$ref": "#/$defs/Frame.intent.set_web_search_key"
 				},
 				{
+					"$ref": "#/$defs/Frame.intent.upload_device_logs"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.sessions"
 				},
 				{
@@ -1371,6 +1426,7 @@
 			"type": "object",
 			"required": [
 				"type",
+				"kind",
 				"relayId",
 				"handshake",
 				"authorization",
@@ -1382,6 +1438,10 @@
 				"type": {
 					"type": "string",
 					"const": "relay_preamble"
+				},
+				"kind": {
+					"type": "string",
+					"const": "phone"
 				},
 				"relayId": {
 					"type": "string"
@@ -1680,6 +1740,21 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_released"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_forward"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_notification_delivery"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_moved"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_last_session"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_authority"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_stop_result"
@@ -2261,6 +2336,52 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Request.worker_authority": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_authority"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_forward": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"frame"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_forward"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"frame": {
+					"$ref": "#/$defs/Control.RelayFrame"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Request.worker_hosts": {
 			"type": "object",
 			"required": [
@@ -2285,6 +2406,81 @@
 				},
 				"parentSessionId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_last_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_last_session"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_moved": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"from",
+				"to"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_moved"
+				},
+				"id": {
+					"type": "string"
+				},
+				"from": {
+					"type": "string"
+				},
+				"to": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_notification_delivery": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"notification"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_notification_delivery"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
+					"type": "string"
+				},
+				"notification": {
+					"$ref": "#/$defs/IrohRemotePushNotification"
 				}
 			},
 			"additionalProperties": false
@@ -2693,6 +2889,12 @@
 					"$ref": "#/$defs/Control.Response.relay_rpc_result"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.worker_forward_result"
+				},
+				{
+					"$ref": "#/$defs/Control.Response.worker_authority_result"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.relay_push_delivery_result"
 				}
 			]
@@ -3046,6 +3248,48 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Response.worker_authority_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"authority"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_authority_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"authority": {
+					"$ref": "#/$defs/Control.WorkerRelayAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worker_forward_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"frame"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_forward_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"frame": {
+					"$ref": "#/$defs/Control.RelayOutcome"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Response.worktree_prune_result": {
 			"type": "object",
 			"required": [
@@ -3209,6 +3453,13 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.WorkerAuthorityLoss": {
+			"type": "string",
+			"enum": [
+				"revoked",
+				"workspace_unregistered"
+			]
+		},
 		"Control.WorkerHostKind": {
 			"type": "string",
 			"enum": [
@@ -3222,6 +3473,14 @@
 			"enum": [
 				"phone",
 				"tui"
+			]
+		},
+		"Control.WorkerRelayAuthority": {
+			"type": "string",
+			"enum": [
+				"current",
+				"revoked",
+				"workspace_unregistered"
 			]
 		},
 		"Control.WorkerSpawnSpec": {

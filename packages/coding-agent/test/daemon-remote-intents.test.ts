@@ -3,15 +3,18 @@
  * (src/daemon/remote-intents.ts): the workspace session listing, workspace
  * unregistering, keep-awake and the web search key, device log uploads,
  * worktrees, pull request review answers, session contexts, the intents and
- * queries each workspace stream purpose serves, and the daemon's admission of
- * work on the conversations it hosts. Wire behavior runs over protocol 1
- * frames on the remote profile, as the daemon serves its streams.
+ * queries each workspace stream purpose serves, and the admission of work on
+ * a phone's conversation. Wire behavior runs over protocol 1 frames on the
+ * remote profile, as the daemon serves its workspace streams and as a worker
+ * serves a phone's conversation, relaying the daemon's intents and queries.
  */
 
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	type ControlRelayFrame,
+	type ControlRelayOutcome,
 	type HostFrame,
 	type PrReviewPrepareResponse,
 	type PrReviewResolveResponse,
@@ -20,11 +23,15 @@ import {
 } from "@hansjm10/volt-protocol";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { intentRegistry } from "../src/core/protocol/intents/index.ts";
 import {
+	type IntentContext,
 	type IntentKeepAwakeService,
 	type IntentWebSearchKeyService,
 	WorkspaceIntentError,
 } from "../src/core/protocol/intents/types.ts";
+import { queryRegistry } from "../src/core/protocol/queries/index.ts";
+import { queryErrorReason, rejectionReason } from "../src/core/protocol/server/connection.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
@@ -145,6 +152,53 @@ async function storeSession(
 
 function byId<T extends { sessionId: string }>(items: readonly T[]): Map<string, T> {
 	return new Map(items.map((item) => [item.sessionId, item]));
+}
+
+/** The relay a phone's conversation stream is relayed over, kept by a workspace unregister. */
+const RELAY_ID = "relay-1";
+
+/**
+ * Run a relayed phone frame as the daemon runs a worker's `worker_forward`:
+ * with the relay's authorization and the relay scope of the conversation.
+ */
+function relayToDaemon(
+	host: RemoteIntentHost,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+	sessionId: string,
+): (frame: ControlRelayFrame) => Promise<ControlRelayOutcome> {
+	return async (frame) => {
+		const ctx: IntentContext = {
+			services: remoteIntentServices(
+				host,
+				authorization,
+				{ kind: "relay", sessionId },
+				{ keep: { relayIds: new Set([RELAY_ID]) } },
+			),
+			profile: { name: "remote", grant: GRANT },
+		};
+		if (frame.type === "query") {
+			try {
+				return {
+					type: "result",
+					queryId: frame.queryId,
+					data: await queryRegistry.runFrame(ctx, frame.query, frame.params),
+				};
+			} catch (error) {
+				return { type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) };
+			}
+		}
+		try {
+			const invocation = await intentRegistry.invokeFrame(ctx, frame.type, frame.input);
+			return {
+				type: "accepted",
+				intentId: frame.intentId,
+				ordinals: invocation.ordinals,
+				...(invocation.result === undefined ? {} : { result: invocation.result }),
+			};
+		} catch (error) {
+			return { type: "rejected", intentId: frame.intentId, reason: rejectionReason(error) };
+		}
+	};
 }
 
 describe("listRemoteWorkspaceSessions", () => {
@@ -437,7 +491,7 @@ describe("remote intent services over protocol frames", () => {
 		agentDir: string;
 	}
 
-	/** A daemon-hosted conversation whose session lives in a subfolder of the workspace, stored with the workspace's sessions. */
+	/** A worker-hosted conversation whose session lives in a subfolder of the workspace, stored with the workspace's sessions. */
 	async function hostedConversation(): Promise<ConversationSetup> {
 		const harness = await createHostHarness({ whenUnattached: "keep" });
 		cleanups.push(() => harness.cleanup());
@@ -451,15 +505,15 @@ describe("remote intent services over protocol frames", () => {
 		return { harness, conversation: opened.conversation, workspacePath, agentDir };
 	}
 
-	/** A conversation stream, served as the daemon serves the conversations it hosts. */
+	/**
+	 * A phone's conversation stream, served as the worker hosting the
+	 * conversation serves it (servePhoneRelay): the daemon's intents and
+	 * queries are relayed to the daemon, and the rest are the conversation's own.
+	 */
 	async function conversationStream(
 		setup: ConversationSetup,
 		host: RemoteIntentHost,
-		options: {
-			admission?: Admission;
-			workspaceUnregister?: RemoteIntentServicesOptions["workspaceUnregister"];
-			authorization?: IrohRemoteClientAuthorizationSuccess;
-		} = {},
+		options: { admission?: Admission; authorization?: IrohRemoteClientAuthorizationSuccess } = {},
 	): Promise<RemotePhone> {
 		const { harness, conversation } = setup;
 		const authorization = options.authorization ?? authorizationFor(setup.workspacePath);
@@ -472,18 +526,8 @@ describe("remote intent services over protocol frames", () => {
 			grant: GRANT,
 			redaction: { workspacePath: authorization.workspace.path, remoteWorkspacePath: "/workspace" },
 			redirect: {},
-			services: () =>
-				remoteIntentServices(
-					host,
-					authorization,
-					{ kind: "conversation", conversation },
-					{
-						keep: { streamId: "stream-1", sessionId: conversation.id },
-						...(options.workspaceUnregister === undefined
-							? {}
-							: { workspaceUnregister: options.workspaceUnregister }),
-					},
-				),
+			services: () => ({ workspace: { name: authorization.workspace.name } }),
+			relay: relayToDaemon(host, authorization, conversation.id),
 			admit: (intent) => admitRemoteIntent(intent, admission),
 		});
 		const phone = connectRemotePhone(pair.phone);
@@ -495,7 +539,7 @@ describe("remote intent services over protocol frames", () => {
 		return phone;
 	}
 
-	it("answers the sessions query with the workspace's sessions and the conversation's live summary", async () => {
+	it("answers the relayed sessions query with the workspace's stored sessions, the conversation's current", async () => {
 		const setup = await hostedConversation();
 		const { conversation, workspacePath, agentDir } = setup;
 		const owner = createSessionManagerTestOwner();
@@ -526,7 +570,7 @@ describe("remote intent services over protocol frames", () => {
 			type: "result",
 			data: { sessions: [{ sessionId: "s-root", current: false }], hasMore: false, nextCursor: null },
 		});
-		// The open conversation's stored row is replaced by its live summary, not listed twice.
+		// The open conversation is listed once, from its log.
 		const all = (await phone.query("sessions")) as Frame<"result">;
 		const listed = (all.data as { sessions: Array<{ sessionId: string }> }).sessions.map((item) => item.sessionId);
 		expect(listed).toEqual([conversation.id, "s-root"]);
@@ -537,20 +581,14 @@ describe("remote intent services over protocol frames", () => {
 		expect(JSON.stringify(phone.frames)).not.toContain(setup.harness.tempDir);
 	});
 
-	it("unregisters only the stream's workspace, keeping the requesting stream, and audits each outcome", async () => {
+	it("unregisters only the stream's workspace, keeping the requesting relay, audits each outcome, and ends the stream", async () => {
 		const setup = await hostedConversation();
 		const unregisterWorkspace = vi
 			.fn<RemoteIntentHost["unregisterWorkspace"]>()
 			.mockRejectedValueOnce(new WorkspaceIntentError("workspace_has_worktrees", { worktreeCount: 1 }))
 			.mockResolvedValueOnce({ closedStreamCount: 2, stoppedRuntimeCount: 1 });
 		const host = fakeHost(setup.agentDir, { unregisterWorkspace });
-		const lifecycle: string[] = [];
-		const phone = await conversationStream(setup, host, {
-			workspaceUnregister: {
-				begin: () => lifecycle.push("begin"),
-				end: (succeeded) => lifecycle.push(`end:${succeeded}`),
-			},
-		});
+		const phone = await conversationStream(setup, host);
 
 		expect(await phone.intent("unregister_workspace", { workspaceName: "other" })).toMatchObject({
 			type: "rejected",
@@ -563,15 +601,17 @@ describe("remote intent services over protocol frames", () => {
 			type: "rejected",
 			reason: { code: "failed", message: "workspace_has_worktrees" },
 		});
+		const from = phone.frames.length;
 		expect(await phone.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
 			type: "accepted",
 			result: { workspaceName: "ws", unregistered: true },
 		});
-		expect(unregisterWorkspace).toHaveBeenCalledWith("ws", {
-			streamId: "stream-1",
-			sessionId: setup.conversation.id,
-		});
-		expect(lifecycle).toEqual(["begin", "end:false", "begin", "end:true"]);
+		expect(unregisterWorkspace).toHaveBeenCalledWith("ws", { relayIds: new Set([RELAY_ID]) });
+		// The accepted answer is the stream's last frame before it ends.
+		await phone.waitFor(
+			(frame): frame is Frame<"fatal"> => frame.type === "fatal" && frame.code === "workspace_unregistered",
+			{ from },
+		);
 		expect(host.audit).toEqual([
 			{
 				type: "workspace_unregistered",
@@ -590,6 +630,42 @@ describe("remote intent services over protocol frames", () => {
 				success: true,
 				details: { closedStreamCount: 2, stoppedRuntimeCount: 1, source: "remote_rpc" },
 			},
+		]);
+	});
+
+	it("begins and ends a workspace stream's own unregister around the registry change, keeping that stream", async () => {
+		const workspacePath = tempDir();
+		const unregisterWorkspace = vi
+			.fn<RemoteIntentHost["unregisterWorkspace"]>()
+			.mockRejectedValueOnce(new WorkspaceIntentError("workspace_has_worktrees", { worktreeCount: 1 }))
+			.mockResolvedValueOnce({ closedStreamCount: 0, stoppedRuntimeCount: 0 });
+		const host = fakeHost(join(workspacePath, "agent"), { unregisterWorkspace });
+		const lifecycle: string[] = [];
+		const phone = await workspaceStream(
+			host,
+			authorizationFor(workspacePath),
+			{ kind: "management", purpose: "unregister_workspace" },
+			{
+				workspaceUnregister: {
+					begin: () => lifecycle.push("begin"),
+					end: (succeeded) => lifecycle.push(`end:${succeeded}`),
+				},
+			},
+		);
+
+		expect(await phone.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "workspace_has_worktrees" },
+		});
+		expect(await phone.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+			type: "accepted",
+			result: { workspaceName: "ws", unregistered: true },
+		});
+		expect(unregisterWorkspace).toHaveBeenCalledWith("ws", { streamId: "stream-1" });
+		expect(lifecycle).toEqual(["begin", "end:false", "begin", "end:true"]);
+		expect(host.audit.map((event) => [event.success, event.details?.source])).toEqual([
+			[false, "remote_workspace_management_stream"],
+			[true, "remote_workspace_management_stream"],
 		]);
 	});
 
@@ -683,7 +759,7 @@ describe("remote intent services over protocol frames", () => {
 		}
 	});
 
-	it("uploads device logs under the workspace and audits each upload", async () => {
+	it("uploads device logs under the workspace through the daemon, which audits each upload", async () => {
 		const setup = await hostedConversation();
 		const host = fakeHost(setup.agentDir);
 		const phone = await conversationStream(setup, host);
@@ -720,7 +796,7 @@ describe("remote intent services over protocol frames", () => {
 		]);
 	});
 
-	it("admits work on the daemon's terms: draining is busy, shutdown refuses work, subagents only stop", async () => {
+	it("admits work on the host's terms, relayed intents too: draining is busy, shutdown refuses work, subagents only stop", async () => {
 		const setup = await hostedConversation();
 		const keepAwake: IntentKeepAwakeService = {
 			status: () => ({ enabled: false, state: "disabled" }),
