@@ -5,9 +5,10 @@
  * assistant message the live lane builds and the tool calls it runs. Rows
  * draw the projected entries' payloads and the presentations the host
  * computed: a committed call's `view.presentation`, a running call's live
- * `presentation` as its `patch`es left it, a custom message's
+ * `presentation` as its `patch`es left it, a call whose arguments still
+ * stream as the host presents them as they stand, a custom message's
  * `view.presentation`. The view runs no presenter; a call the host has not
- * presented yet (its arguments still stream) shows its tool's name.
+ * presented yet shows its tool's name.
  *
  * A user shell command the live `bash` value shows has a row from when it
  * starts: at the end of the transcript, or below it while a turn holds the
@@ -551,9 +552,17 @@ export class TranscriptView {
 				streaming.coalescer.update(assistant.message);
 			}
 			for (const block of assistant.message.content) {
-				if (block.type !== "toolCall" || this.tools.has(block.id)) continue;
-				this.createRow(block.name, block.id);
-				streaming.calls.push(block.id);
+				if (block.type !== "toolCall") continue;
+				let row = this.tools.get(block.id);
+				if (row === undefined) {
+					row = this.createRow(block.name, block.id);
+					streaming.calls.push(block.id);
+				}
+				// A call that does not run yet looks as its arguments stand.
+				const presentation = assistant.presentations.get(block.id);
+				if (presentation !== undefined && row.state === "pending" && row.presentation !== presentation) {
+					row.update({ presentation, state: "pending" });
+				}
 			}
 		}
 		for (const [toolCallId, tool] of live.tools) {

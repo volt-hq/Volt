@@ -9,6 +9,10 @@
  * mode; regular mode has no sidebar, so they render above the editor there.
  * The slot follows the screen mode at each render. A panel shows at most
  * `maxRows` rows: the rest are cut and counted.
+ *
+ * The panels' interactive components (actions, forms, cards, trees) take the
+ * keyboard through a `PanelFocus`: Tab moves through them in slot order, and
+ * moving past either end, or cancelling, gives it back.
  */
 
 import type { ExtensionPanelPlacementSchema, LiveValue, UiNode } from "@hansjm10/volt-protocol";
@@ -16,6 +20,8 @@ import {
 	type Component,
 	concatRenderFrames,
 	createRenderFrame,
+	FocusGroup,
+	getKeybindings,
 	type RenderFrame,
 	sliceRenderFrame,
 	type TuiMode,
@@ -118,6 +124,20 @@ export class UiPanels {
 		return this.entries.get(key)?.view;
 	}
 
+	/**
+	 * The interactive components the panels render in screen mode `mode`, in
+	 * the order the keyboard reaches them: above the editor, below it, then
+	 * the sidebar.
+	 */
+	focusables(mode: TuiMode): Component[] {
+		const slots: ExtensionPanelPlacement[] = ["aboveEditor", "belowEditor", "sidebar"];
+		return slots.flatMap((slot) =>
+			[...this.entries.values()]
+				.filter((entry) => panelSlot(entry.panel.placement, mode) === slot)
+				.flatMap((entry) => entry.view.children.filter((child) => typeof child.handleInput === "function")),
+		);
+	}
+
 	/** Remove every panel. */
 	clear(): void {
 		for (const entry of this.entries.values()) entry.view.dispose();
@@ -149,5 +169,37 @@ export class UiPanels {
 			sliceRenderFrame(frame, 0, maxRows - 1),
 			createRenderFrame([theme.fg("muted", truncateToWidth(`… ${hidden} more rows`, width, ""))]),
 		]);
+	}
+}
+
+/**
+ * Keyboard focus in the extension panels: `tui.focus.next` and
+ * `tui.focus.previous` move through their interactive components (a card's
+ * own parts first), and moving past either end, or `tui.select.cancel`,
+ * leaves the panels. Other keys go to the focused component.
+ */
+export class PanelFocus extends FocusGroup {
+	private readonly onLeave: () => void;
+
+	constructor(onLeave: () => void) {
+		super([], { wrap: false });
+		this.onLeave = onLeave;
+	}
+
+	override handleInput(data: string): void {
+		const keybindings = getKeybindings();
+		if (keybindings.matches(data, "tui.focus.next")) {
+			if (!this.moveFocus(1)) this.onLeave();
+			return;
+		}
+		if (keybindings.matches(data, "tui.focus.previous")) {
+			if (!this.moveFocus(-1)) this.onLeave();
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.cancel")) {
+			this.onLeave();
+			return;
+		}
+		super.handleInput(data);
 	}
 }

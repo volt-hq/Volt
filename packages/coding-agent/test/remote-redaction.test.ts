@@ -252,6 +252,56 @@ describe("remote frame redactor", () => {
 		).toBeUndefined();
 	});
 
+	it("keeps a notice's detail and the presentations of calls whose arguments stream with local clients", () => {
+		const redactor = redactorFor(workspacePath);
+		const frame = redactor.redact({
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 4,
+			seq: 1,
+			reset: true,
+			items: [
+				{
+					type: "assistant_start",
+					message: {
+						role: "assistant",
+						content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: {} }],
+						api: "faux",
+						provider: "faux",
+						model: "faux-1",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 0,
+					},
+				},
+				{ type: "toolcall_presentation", toolCallId: "tool-1", presentation: { title: `read ${hostFile}` } },
+				{
+					type: "notice",
+					level: "error",
+					message: "agent_start: boom",
+					source: "some-extension",
+					detail: `Error: boom\n    at ${hostFile}:1:1`,
+				},
+			],
+		});
+		const wire = JSON.stringify(frame);
+		expect(wire).not.toContain("toolcall_presentation");
+		expect(wire).not.toContain("detail");
+		expect(frame).toMatchObject({
+			items: [
+				{ type: "assistant_start" },
+				{ type: "notice", message: "agent_start: boom", source: "some-extension" },
+			],
+		});
+	});
+
 	it("never rewrites identifiers the client sent, and rewrites host ones only when they name a root", () => {
 		const redactor = redactorFor(workspacePath);
 		// An identifier the client chose reaches it as sent.

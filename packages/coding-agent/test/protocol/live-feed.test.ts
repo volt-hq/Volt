@@ -161,6 +161,34 @@ describe("live feed", () => {
 		expect(committed && "view" in committed ? committed.view?.presentation : undefined).toEqual(live);
 	});
 
+	it("presents a call as its arguments stream, before it runs, and the presentations leave with the message", async () => {
+		const { harness, items } = await feedHarness({ initialActiveToolNames: ["bash"] });
+		const command = "printf 'presented while streaming'";
+		harness.setResponses([
+			fauxAssistantMessage([fauxText("Running"), fauxToolCall("bash", { command })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("done"),
+		]);
+		await harness.session.prompt("run it");
+		await harness.session.waitForIdle();
+
+		const all = items();
+		const presented = all.filter(
+			(item): item is Extract<LiveItem, { type: "toolcall_presentation" }> => item.type === "toolcall_presentation",
+		);
+		expect(presented.length).toBeGreaterThan(0);
+		// The call is presented before it runs, with its arguments complete at last.
+		const start = all.findIndex((item) => item.type === "tool" && item.op === "start");
+		expect(all.indexOf(presented[0]!)).toBeLessThan(start);
+		expect(presented.at(-1)?.presentation.title).toEqual([{ text: "$ ", bold: true }, { text: command }]);
+		// A client folding them holds the presentation with the streaming message until the call runs.
+		const fold = foldLiveItems(emptyLiveFold(), all.slice(0, start));
+		const toolCallId = presented.at(-1)?.toolCallId ?? "";
+		expect(fold.assistant?.presentations.get(toolCallId)).toEqual(presented.at(-1)?.presentation);
+		// The next message streams without it.
+		const next = all.findLastIndex((item) => item.type === "assistant_start");
+		expect(foldLiveItems(emptyLiveFold(), all.slice(0, next + 1)).assistant?.presentations.size).toBe(0);
+	});
+
 	it("carries a scheduled retry's start time and error in the phase, and raises a host notice when retries give up", async () => {
 		const { harness, items } = await feedHarness({
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },

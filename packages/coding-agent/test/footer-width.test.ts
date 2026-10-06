@@ -1,10 +1,13 @@
+import type { RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
 import { visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
-import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
-import type { PromptCacheStatus } from "../src/core/prompt-cache-status.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
-import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
+import { withTransientUsage } from "../src/modes/interactive/client/footer-model.ts";
+import {
+	FooterComponent,
+	type FooterViewModel,
+	formatCwdForFooter,
+} from "../src/modes/interactive/components/footer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 type AssistantUsage = {
@@ -15,7 +18,8 @@ type AssistantUsage = {
 	cost: { total: number };
 };
 
-function createSession(options: {
+/** A footer view model as the TUI's store and catalogs would give it. */
+function viewModel(options: {
 	sessionName: string;
 	modelId?: string;
 	provider?: string;
@@ -28,26 +32,17 @@ function createSession(options: {
 	contextWindow?: number;
 	contextPercent?: number | null;
 	contextWarningTokens?: number;
-	promptCache?: PromptCacheStatus;
-}): AgentSession {
+	promptCache?: RpcPromptCacheStatus;
+	providerCount?: number;
+}): FooterViewModel {
 	const usage = options.usage;
-	const entries =
-		usage === undefined
-			? []
-			: [
-					{
-						type: "message",
-						message: {
-							role: "assistant",
-							usage,
-						},
-					},
-				];
-
 	const contextWindow = options.contextWindow ?? 200_000;
 	const contextTokens = options.contextTokens === undefined ? 24_600 : options.contextTokens;
-	const session = {
-		fastModeEnabled: options.fastModeEnabled ?? false,
+	const prompt = usage === undefined ? 0 : usage.input + usage.cacheRead + usage.cacheWrite;
+	return {
+		cwd: "/tmp/project",
+		gitBranch: "main",
+		sessionName: options.sessionName || null,
 		model: {
 			id: options.modelId ?? "test-model",
 			provider: options.provider ?? "test",
@@ -55,40 +50,31 @@ function createSession(options: {
 			reasoning: options.reasoning ?? false,
 		},
 		thinkingLevel: options.thinkingLevel ?? "off",
-		sessionManager: {
-			getEntries: () => entries,
-			getSessionName: () => options.sessionName,
-			getCwd: () => "/tmp/project",
+		fastMode: options.fastModeEnabled ?? false,
+		availableProviderCount: options.providerCount ?? 1,
+		usingSubscription: options.usingSubscription ?? false,
+		autoCompact: true,
+		contextWarningTokens: options.contextWarningTokens ?? 350_000,
+		usage: {
+			input: usage?.input ?? 0,
+			output: usage?.output ?? 0,
+			cacheRead: usage?.cacheRead ?? 0,
+			cacheWrite: usage?.cacheWrite ?? 0,
+			cost: usage?.cost.total ?? 0,
+			...(prompt > 0 && usage ? { latestCacheHitRate: (usage.cacheRead / prompt) * 100 } : {}),
+			contextUsage: {
+				tokens: contextTokens,
+				contextWindow,
+				percent: options.contextPercent === undefined ? 12.3 : options.contextPercent,
+			},
 		},
-		getContextUsage: () => ({
-			tokens: contextTokens,
-			contextWindow,
-			percent: options.contextPercent === undefined ? 12.3 : options.contextPercent,
-		}),
-		getPromptCacheStatus: () => options.promptCache,
-		modelRegistry: {
-			isUsingOAuth: () => options.usingSubscription ?? false,
-		},
-		settingsManager: {
-			getContextWarningTokens: () => options.contextWarningTokens ?? 350_000,
-		},
+		promptCache: options.promptCache,
+		statuses: new Map(),
 	};
-
-	return session as unknown as AgentSession;
 }
 
-function createFooterData(providerCount: number): ReadonlyFooterDataProvider {
-	const provider = {
-		getGitBranch: () => "main",
-		getExtensionStatuses: () => new Map<string, string>(),
-		getAvailableProviderCount: () => providerCount,
-		onBranchChange: (callback: () => void) => {
-			void callback;
-			return () => {};
-		},
-	};
-
-	return provider;
+function footerOf(model: FooterViewModel, requestRender?: () => void): FooterComponent {
+	return new FooterComponent(() => model, requestRender);
 }
 
 describe("formatCwdForFooter", () => {
@@ -109,8 +95,8 @@ describe("FooterComponent width handling", () => {
 
 	it("keeps all lines within width for wide session names", () => {
 		const width = 93;
-		const session = createSession({ sessionName: "한글".repeat(30) });
-		const footer = new FooterComponent(session, createFooterData(1));
+		const session = viewModel({ sessionName: "한글".repeat(30) });
+		const footer = footerOf({ ...session, availableProviderCount: 1 });
 
 		const lines = footer.render(width).lines;
 		for (const line of lines) {
@@ -120,7 +106,7 @@ describe("FooterComponent width handling", () => {
 
 	it("keeps stats line within width for wide model and provider names", () => {
 		const width = 60;
-		const session = createSession({
+		const session = viewModel({
 			sessionName: "",
 			modelId: "模".repeat(30),
 			provider: "공급자",
@@ -134,7 +120,7 @@ describe("FooterComponent width handling", () => {
 				cost: { total: 1.234 },
 			},
 		});
-		const footer = new FooterComponent(session, createFooterData(2));
+		const footer = footerOf({ ...session, availableProviderCount: 2 });
 
 		const lines = footer.render(width).lines;
 		for (const line of lines) {
@@ -143,16 +129,16 @@ describe("FooterComponent width handling", () => {
 	});
 
 	it.each([80, 120, 160])("shows Fast mode alongside thinking at width %s", (width) => {
-		const footer = new FooterComponent(
-			createSession({
+		const footer = footerOf(
+			viewModel({
 				sessionName: "",
 				modelId: "gpt-5.4",
 				provider: "openai",
 				reasoning: true,
 				thinkingLevel: "high",
 				fastModeEnabled: true,
+				providerCount: 2,
 			}),
-			createFooterData(2),
 		);
 
 		const workspaceLine = stripAnsi(footer.render(width).lines[0]);
@@ -162,15 +148,15 @@ describe("FooterComponent width handling", () => {
 
 	it("preserves Fast mode and thinking when a long model name is truncated", () => {
 		const width = 40;
-		const footer = new FooterComponent(
-			createSession({
+		const footer = footerOf(
+			viewModel({
 				sessionName: "",
 				modelId: "gpt-5.4-very-long-model-name-that-needs-truncation",
 				reasoning: true,
 				thinkingLevel: "high",
 				fastModeEnabled: true,
+				providerCount: 2,
 			}),
-			createFooterData(2),
 		);
 
 		const workspaceLine = stripAnsi(footer.render(width).lines[0]);
@@ -179,15 +165,14 @@ describe("FooterComponent width handling", () => {
 	});
 
 	it.each([11, 12, 13])("keeps the Fast suffix within a narrow width of %s", (width) => {
-		const footer = new FooterComponent(
-			createSession({
+		const footer = footerOf(
+			viewModel({
 				sessionName: "",
 				modelId: "gpt-5.4",
 				reasoning: true,
 				thinkingLevel: "high",
 				fastModeEnabled: true,
 			}),
-			createFooterData(1),
 		);
 
 		const workspaceLine = stripAnsi(footer.render(width).lines[0]);
@@ -196,74 +181,33 @@ describe("FooterComponent width handling", () => {
 	});
 
 	it("does not show the Fast marker when Fast mode is disabled", () => {
-		const footer = new FooterComponent(
-			createSession({
+		const footer = footerOf(
+			viewModel({
 				sessionName: "",
 				reasoning: true,
 				thinkingLevel: "high",
 			}),
-			createFooterData(1),
 		);
 
 		expect(stripAnsi(footer.render(120).lines[0])).not.toContain("fast");
 	});
 
 	it.each(["off", "low", "high"])("keeps the Fast marker independent of thinking level %s", (thinkingLevel) => {
-		const footer = new FooterComponent(
-			createSession({
+		const footer = footerOf(
+			viewModel({
 				sessionName: "",
 				reasoning: true,
 				thinkingLevel,
 				fastModeEnabled: true,
 			}),
-			createFooterData(1),
 		);
 
 		const workspaceLine = stripAnsi(footer.render(120).lines[0]);
 		expect(workspaceLine).toContain(`fast · ${thinkingLevel}`);
 	});
 
-	it("reuses session aggregates until invalidated", () => {
-		let entryReads = 0;
-		let contextReads = 0;
-		const session = createSession({
-			sessionName: "",
-			usage: {
-				input: 100,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: { total: 0 },
-			},
-		});
-		const getEntries = session.sessionManager.getEntries.bind(session.sessionManager);
-		session.sessionManager.getEntries = () => {
-			entryReads++;
-			return getEntries();
-		};
-		const getContextUsage = session.getContextUsage.bind(session);
-		session.getContextUsage = () => {
-			contextReads++;
-			return getContextUsage();
-		};
-		const footer = new FooterComponent(session, createFooterData(1));
-
-		footer.render(120).lines;
-		footer.render(100).lines;
-		expect(entryReads).toBe(1);
-		expect(contextReads).toBe(1);
-
-		footer.invalidate();
-		footer.render(120).lines;
-		expect(entryReads).toBe(2);
-		expect(contextReads).toBe(2);
-	});
-
 	it("labels subscription billing without showing a misleading zero cost", () => {
-		const footer = new FooterComponent(
-			createSession({ sessionName: "", usingSubscription: true }),
-			createFooterData(1),
-		);
+		const footer = footerOf(viewModel({ sessionName: "", usingSubscription: true }));
 
 		const statsLine = stripAnsi(footer.render(120).lines[1]);
 		expect(statsLine).toContain("subscription");
@@ -271,7 +215,7 @@ describe("FooterComponent width handling", () => {
 	});
 
 	it("shows the latest cache hit rate when cache usage is present", () => {
-		const session = createSession({
+		const session = viewModel({
 			sessionName: "",
 			usage: {
 				input: 100,
@@ -281,14 +225,14 @@ describe("FooterComponent width handling", () => {
 				cost: { total: 0.001 },
 			},
 		});
-		const footer = new FooterComponent(session, createFooterData(1));
+		const footer = footerOf({ ...session, availableProviderCount: 1 });
 
 		const statsLine = stripAnsi(footer.render(120).lines[1]);
 		expect(statsLine).toContain("CH25.0%");
 	});
 
 	it("shows transient isolated-workflow usage without changing the workspace session", () => {
-		const session = createSession({
+		const session = viewModel({
 			sessionName: "parent-session",
 			modelId: "parent-model",
 			reasoning: true,
@@ -301,15 +245,26 @@ describe("FooterComponent width handling", () => {
 				cost: { total: 0.1 },
 			},
 		});
-		const footer = new FooterComponent(session, createFooterData(1));
-		footer.setTransientUsage({
-			model: { ...session.model!, id: "review-model", contextWindow: 100_000 },
+		let transient: Parameters<typeof withTransientUsage>[1] = {
+			model: {
+				id: "review-model",
+				name: "review-model",
+				provider: "test",
+				api: "openai-completions",
+				baseUrl: "",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 1_000,
+			},
 			thinkingLevel: "high",
 			fastModeEnabled: true,
 			contextUsage: { tokens: 75_000, contextWindow: 100_000, percent: 75 },
 			totals: { input: 300, output: 30, cacheRead: 150, cacheWrite: 0, cost: 0.3 },
 			latestCacheHitRate: 50,
-		});
+		};
+		const footer = new FooterComponent(() => withTransientUsage(session, transient));
 
 		const workflowLines = footer.render(120).lines.map(stripAnsi);
 		expect(workflowLines[0]).toContain("project · main · parent-session");
@@ -318,7 +273,7 @@ describe("FooterComponent width handling", () => {
 		expect(workflowLines[1]).toContain("$0.300");
 		expect(workflowLines[1]).toContain("CH50.0%");
 
-		footer.setTransientUsage(undefined);
+		transient = undefined;
 		const restoredLines = footer.render(120).lines.map(stripAnsi);
 		expect(restoredLines[0]).toContain("parent-model · low");
 		expect(restoredLines[1]).toContain("context 12.3%/200k auto");
@@ -338,12 +293,11 @@ describe("FooterComponent width handling", () => {
 
 		it("counts down the documented retention window", () => {
 			vi.useFakeTimers({ now });
-			const footer = new FooterComponent(
-				createSession({
+			const footer = footerOf(
+				viewModel({
 					sessionName: "",
 					promptCache: { kind: "retained", lastRequestAt: now - 1_000, expiresAt: now + 299_000 },
 				}),
-				createFooterData(1),
 			);
 
 			expect(renderStats(footer)).toContain("cache 5m");
@@ -355,8 +309,8 @@ describe("FooterComponent width handling", () => {
 
 		it("shows the idle keepalive window, then the expiry countdown", () => {
 			vi.useFakeTimers({ now });
-			const footer = new FooterComponent(
-				createSession({
+			const footer = footerOf(
+				viewModel({
 					sessionName: "",
 					promptCache: {
 						kind: "retained",
@@ -365,7 +319,6 @@ describe("FooterComponent width handling", () => {
 						keepAliveUntil: now + 720_000,
 					},
 				}),
-				createFooterData(1),
 			);
 
 			expect(renderStats(footer)).toContain("cache warm 12m");
@@ -377,59 +330,67 @@ describe("FooterComponent width handling", () => {
 
 		it("shows hours for long retention windows", () => {
 			vi.useFakeTimers({ now });
-			const footer = new FooterComponent(
-				createSession({
+			const footer = footerOf(
+				viewModel({
 					sessionName: "",
 					promptCache: { kind: "retained", lastRequestAt: now, expiresAt: now + 86_400_000 },
 				}),
-				createFooterData(1),
 			);
 
 			expect(renderStats(footer)).toContain("cache 24h");
 		});
 
 		it("marks a cold cache after a model change", () => {
-			const footer = new FooterComponent(
-				createSession({ sessionName: "", promptCache: { kind: "model_changed" } }),
-				createFooterData(1),
-			);
+			const footer = footerOf(viewModel({ sessionName: "", promptCache: { kind: "model_changed" } }));
 
 			expect(footer.render(160).lines[1]).toContain(theme.fg("warning", "cache cold"));
 		});
 
 		it("omits the status without a published window or while showing workflow usage", () => {
 			vi.useFakeTimers({ now });
-			const unknown = new FooterComponent(
-				createSession({ sessionName: "", promptCache: { kind: "retained", lastRequestAt: now } }),
-				createFooterData(1),
+			const unknown = footerOf(
+				viewModel({ sessionName: "", promptCache: { kind: "retained", lastRequestAt: now } }),
 			);
 			expect(renderStats(unknown)).not.toContain("cache");
 
-			const session = createSession({
+			const session = viewModel({
 				sessionName: "",
 				promptCache: { kind: "retained", lastRequestAt: now, expiresAt: now + 300_000 },
 			});
-			const transient = new FooterComponent(session, createFooterData(1));
-			transient.setTransientUsage({
-				model: session.model!,
-				thinkingLevel: "off",
-				fastModeEnabled: false,
-				contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
-				totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
-				latestCacheHitRate: undefined,
-			});
+			const workflow = session.model;
+			if (workflow === undefined) throw new Error("The view model names no model");
+			const transient = footerOf(
+				withTransientUsage(session, {
+					model: {
+						id: workflow.id,
+						name: workflow.id,
+						provider: workflow.provider,
+						api: "openai-completions",
+						baseUrl: "",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: workflow.contextWindow,
+						maxTokens: 1_000,
+					},
+					thinkingLevel: "off",
+					fastModeEnabled: false,
+					contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
+					totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
+					latestCacheHitRate: undefined,
+				}),
+			);
 			expect(renderStats(transient)).not.toContain("cache");
 		});
 
 		it("requests a render when the countdown changes while idle", () => {
 			vi.useFakeTimers({ now });
 			const requestRender = vi.fn();
-			const footer = new FooterComponent(
-				createSession({
+			const footer = footerOf(
+				viewModel({
 					sessionName: "",
 					promptCache: { kind: "retained", lastRequestAt: now - 1_000, expiresAt: now + 61_000 },
 				}),
-				createFooterData(1),
 				requestRender,
 			);
 
@@ -452,25 +413,23 @@ describe("FooterComponent width handling", () => {
 	});
 
 	it("warns at the configured absolute context threshold", () => {
-		const warningFooter = new FooterComponent(
-			createSession({
+		const warningFooter = footerOf(
+			viewModel({
 				sessionName: "",
 				contextTokens: 350_000,
 				contextWindow: 1_000_000,
 				contextPercent: 35,
 				contextWarningTokens: 350_000,
 			}),
-			createFooterData(1),
 		);
-		const mutedFooter = new FooterComponent(
-			createSession({
+		const mutedFooter = footerOf(
+			viewModel({
 				sessionName: "",
 				contextTokens: 350_000,
 				contextWindow: 1_000_000,
 				contextPercent: 35,
 				contextWarningTokens: 400_000,
 			}),
-			createFooterData(1),
 		);
 
 		expect(warningFooter.render(120).lines[1]).toContain(theme.fg("warning", "35.0%/1.0M auto"));

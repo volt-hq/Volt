@@ -702,6 +702,7 @@ const STREAMING_ITEM_TYPES: ReadonlySet<LiveItem["type"]> = new Set([
 	"assistant_start",
 	"assistant_delta",
 	"assistant_end",
+	"toolcall_presentation",
 	"tool",
 ]);
 

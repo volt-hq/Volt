@@ -1,11 +1,7 @@
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import type { RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
 import { type Component, createRenderFrame, type RenderFrame, truncateToWidth, visibleWidth } from "@hansjm10/volt-tui";
-import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
-import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
-import { getPromptCacheRefreshUsage } from "../../../core/prompt-cache-keepalive.ts";
-import type { PromptCacheStatus } from "../../../core/prompt-cache-status.ts";
-import type { SessionUsageProjection } from "../../../core/session-usage.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 
 /**
@@ -39,7 +35,7 @@ function promptCacheCountdownUnit(remainingMs: number): number {
 	return remainingMs > HOUR_MS ? HOUR_MS : MINUTE_MS;
 }
 
-function formatPromptCacheStatus(status: PromptCacheStatus | undefined, now: number): string | undefined {
+function formatPromptCacheStatus(status: RpcPromptCacheStatus | undefined, now: number): string | undefined {
 	if (!status) return undefined;
 	if (status.kind === "model_changed") return theme.fg("warning", "cache cold");
 	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
@@ -55,7 +51,7 @@ function formatPromptCacheStatus(status: PromptCacheStatus | undefined, now: num
 }
 
 /** Instant the rendered cache countdown next changes, or undefined when it is static. */
-function nextPromptCacheChangeAt(status: PromptCacheStatus | undefined, now: number): number | undefined {
+function nextPromptCacheChangeAt(status: RpcPromptCacheStatus | undefined, now: number): number | undefined {
 	if (status?.kind !== "retained") return undefined;
 	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
 		const keepAlive = status.keepAliveUntil - now;
@@ -69,16 +65,53 @@ function nextPromptCacheChangeAt(status: PromptCacheStatus | undefined, now: num
 	return status.expiresAt - (Math.ceil(remaining / unit) - 1) * unit;
 }
 
-type FooterSnapshot = {
-	totalInput: number;
-	totalOutput: number;
-	totalCacheRead: number;
-	totalCacheWrite: number;
-	totalCost: number;
-	latestCacheHitRate: number | undefined;
-	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
-	promptCache: PromptCacheStatus | undefined;
-};
+/** The model the footer names: its provider and id, whether it reasons, and its context window. */
+export interface FooterModel {
+	readonly provider: string;
+	readonly id: string;
+	readonly reasoning: boolean;
+	readonly contextWindow: number;
+}
+
+/** Token use and cost, and the retained context's size. */
+export interface FooterUsage {
+	readonly input: number;
+	readonly output: number;
+	readonly cacheRead: number;
+	readonly cacheWrite: number;
+	readonly cost: number;
+	/** The share of the latest request's prompt read from the cache, in percent. */
+	readonly latestCacheHitRate?: number;
+	readonly contextUsage?: {
+		readonly tokens: number | null;
+		readonly contextWindow: number;
+		readonly percent: number | null;
+	};
+}
+
+/** What the footer shows: the conversation's workspace, model, usage, and status items. */
+export interface FooterViewModel {
+	/** The conversation's working directory; empty until it is known. */
+	readonly cwd: string;
+	/** The Git branch, `detached`, or null outside a repository. */
+	readonly gitBranch: string | null;
+	readonly sessionName: string | null;
+	readonly model: FooterModel | undefined;
+	readonly thinkingLevel: string;
+	readonly fastMode: boolean;
+	/** Providers the model selection spans; above one, wide footers name the model's provider. */
+	readonly availableProviderCount: number;
+	/** The model's requests draw from a subscription login. */
+	readonly usingSubscription: boolean;
+	readonly autoCompact: boolean;
+	/** Context tokens from which the context shows as a warning; 0 never warns. */
+	readonly contextWarningTokens: number;
+	readonly usage: FooterUsage;
+	/** The model's prompt-cache retention; none for usage of another conversation shown in its place. */
+	readonly promptCache: RpcPromptCacheStatus | undefined;
+	/** Status items by key, shown in key order on one line. */
+	readonly statuses: ReadonlyMap<string, string>;
+}
 
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
@@ -95,52 +128,24 @@ export function formatCwdForFooter(cwd: string, home: string | undefined): strin
 }
 
 /**
- * Footer component that shows pwd, token stats, and context usage.
- * Computes token/context stats from session, gets git branch and extension statuses from provider.
+ * Footer component that shows the workspace, the model, token stats, context
+ * usage, and status items: a view of its view model, read at every render.
  */
 export class FooterComponent implements Component {
-	private autoCompactEnabled = true;
-	private session: AgentSession;
-	private footerData: ReadonlyFooterDataProvider;
-	private snapshot?: FooterSnapshot;
-	private transientUsage?: SessionUsageProjection;
+	private readonly model: () => FooterViewModel;
 	private readonly requestRender: (() => void) | undefined;
 	private cacheRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 	private cacheRefreshAt: number | undefined;
 
-	/** `requestRender` lets the prompt-cache countdown refresh while the session is idle. */
-	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, requestRender?: () => void) {
-		this.session = session;
-		this.footerData = footerData;
+	/** `requestRender` lets the prompt-cache countdown refresh while the conversation is idle. */
+	constructor(model: () => FooterViewModel, requestRender?: () => void) {
+		this.model = model;
 		this.requestRender = requestRender;
 	}
 
-	setSession(session: AgentSession): void {
-		this.session = session;
-		this.snapshot = undefined;
-		this.transientUsage = undefined;
-		this.clearCacheRefresh();
-	}
+	invalidate(): void {}
 
-	setAutoCompactEnabled(enabled: boolean): void {
-		this.autoCompactEnabled = enabled;
-	}
-
-	setTransientUsage(usage: SessionUsageProjection | undefined): void {
-		this.transientUsage = usage;
-	}
-
-	/** Clear session-derived aggregates. Git branch caching is handled by the provider. */
-	invalidate(): void {
-		this.snapshot = undefined;
-	}
-
-	/**
-	 * Clean up resources.
-	 * Git watcher cleanup now handled by provider.
-	 */
 	dispose(): void {
-		// Git watcher cleanup handled by provider
 		this.clearCacheRefresh();
 	}
 
@@ -164,83 +169,31 @@ export class FooterComponent implements Component {
 		this.cacheRefreshTimer.unref?.();
 	}
 
-	private getSnapshot(): FooterSnapshot {
-		if (this.snapshot) return this.snapshot;
-
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-		let latestCacheHitRate: number | undefined;
-		for (const entry of this.session.sessionManager.getEntries()) {
-			const refreshUsage = getPromptCacheRefreshUsage(entry);
-			if (refreshUsage) {
-				totalInput += refreshUsage.input;
-				totalOutput += refreshUsage.output;
-				totalCacheRead += refreshUsage.cacheRead;
-				totalCacheWrite += refreshUsage.cacheWrite;
-				totalCost += refreshUsage.cost.total;
-			} else if (entry.type === "message" && entry.message.role === "assistant") {
-				totalInput += entry.message.usage.input;
-				totalOutput += entry.message.usage.output;
-				totalCacheRead += entry.message.usage.cacheRead;
-				totalCacheWrite += entry.message.usage.cacheWrite;
-				totalCost += entry.message.usage.cost.total;
-				const latestPromptTokens =
-					entry.message.usage.input + entry.message.usage.cacheRead + entry.message.usage.cacheWrite;
-				latestCacheHitRate =
-					latestPromptTokens > 0 ? (entry.message.usage.cacheRead / latestPromptTokens) * 100 : undefined;
-			}
-		}
-		this.snapshot = {
-			totalInput,
-			totalOutput,
-			totalCacheRead,
-			totalCacheWrite,
-			totalCost,
-			latestCacheHitRate,
-			contextUsage: this.session.getContextUsage(),
-			promptCache: this.session.getPromptCacheStatus(),
-		};
-		return this.snapshot;
-	}
-
 	render(width: number): RenderFrame {
 		if (width <= 0) return createRenderFrame([]);
-		const snapshot = this.getSnapshot();
-		const transientUsage = this.transientUsage;
-		const totalInput = transientUsage?.totals.input ?? snapshot.totalInput;
-		const totalOutput = transientUsage?.totals.output ?? snapshot.totalOutput;
-		const totalCacheRead = transientUsage?.totals.cacheRead ?? snapshot.totalCacheRead;
-		const totalCacheWrite = transientUsage?.totals.cacheWrite ?? snapshot.totalCacheWrite;
-		const totalCost = transientUsage?.totals.cost ?? snapshot.totalCost;
-		const latestCacheHitRate = transientUsage ? transientUsage.latestCacheHitRate : snapshot.latestCacheHitRate;
-		const contextUsage = transientUsage ? transientUsage.contextUsage : snapshot.contextUsage;
-		const activeModel = transientUsage?.model ?? this.session.model;
-		const activeThinkingLevel = transientUsage ? transientUsage.thinkingLevel : this.session.thinkingLevel;
-		const fastModeEnabled = transientUsage ? transientUsage.fastModeEnabled : this.session.fastModeEnabled;
+		const view = this.model();
+		const { usage } = view;
+		const activeModel = view.model;
+		const fastModeEnabled = view.fastMode;
 
-		const cwd = this.session.sessionManager.getCwd();
+		const cwd = view.cwd;
 		const workspace =
 			width < 100
 				? basename(resolve(cwd)) || cwd
 				: formatCwdForFooter(cwd, process.env.HOME || process.env.USERPROFILE);
 		const workspaceParts = [workspace];
-		const branch = this.footerData.getGitBranch();
-		if (branch) workspaceParts.push(branch);
-		const sessionName = this.session.sessionManager.getSessionName();
-		if (sessionName) workspaceParts.push(sessionName);
+		if (view.gitBranch) workspaceParts.push(view.gitBranch);
+		if (view.sessionName) workspaceParts.push(view.sessionName);
 
 		const workspaceSide =
 			theme.fg("text", workspaceParts[0]!) +
 			(workspaceParts.length > 1 ? theme.fg("dim", ` · ${workspaceParts.slice(1).join(" · ")}`) : "");
 		const modelName = activeModel?.id || "no-model";
 		const provider =
-			width >= 100 && this.footerData.getAvailableProviderCount() > 1 && activeModel
+			width >= 100 && view.availableProviderCount > 1 && activeModel
 				? theme.fg("dim", `(${activeModel.provider}) `)
 				: "";
-		const thinking = activeModel?.reasoning ? theme.fg("dim", ` · ${activeThinkingLevel || "off"}`) : "";
+		const thinking = activeModel?.reasoning ? theme.fg("dim", ` · ${view.thinkingLevel || "off"}`) : "";
 		const model = theme.fg("text", modelName);
 		const fastLabel = theme.bold(theme.fg("warning", "fast"));
 		const fast = fastModeEnabled ? `${theme.fg("dim", " · ")}${fastLabel}` : "";
@@ -274,12 +227,13 @@ export class FooterComponent implements Component {
 		const workspacePadding = " ".repeat(Math.max(0, width - workspaceWidth - modelWidth));
 		const workspaceLine = `${fittedWorkspace}${workspacePadding}${modelSide}`;
 
+		const contextUsage = usage.contextUsage;
 		const contextWindow = contextUsage?.contextWindow ?? activeModel?.contextWindow ?? 0;
 		const contextPercentValue = contextUsage?.percent ?? 0;
 		const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
-		const autoIndicator = this.autoCompactEnabled ? " auto" : "";
+		const autoIndicator = view.autoCompact ? " auto" : "";
 		const contextDisplay = `${contextPercent}%/${formatTokens(contextWindow)}${autoIndicator}`.replace("?%", "?");
-		const contextWarningTokens = this.session.settingsManager.getContextWarningTokens();
+		const contextWarningTokens = view.contextWarningTokens;
 		const contextTokens = contextUsage?.tokens;
 		const reachedTokenWarning =
 			contextWarningTokens > 0 &&
@@ -294,18 +248,16 @@ export class FooterComponent implements Component {
 					: theme.fg("muted", contextDisplay);
 
 		const detailParts = [`${theme.fg("dim", "context")} ${contextValue}`];
-		const usingSubscription = activeModel ? this.session.modelRegistry.isUsingOAuth(activeModel) : false;
-		if (usingSubscription) detailParts.push(theme.fg("dim", "subscription"));
-		if (totalCost) detailParts.push(theme.fg("dim", `$${totalCost.toFixed(3)}`));
-		if (totalInput) detailParts.push(theme.fg("dim", `↑${formatTokens(totalInput)}`));
-		if (totalOutput) detailParts.push(theme.fg("dim", `↓${formatTokens(totalOutput)}`));
-		if (totalCacheRead) detailParts.push(theme.fg("dim", `R${formatTokens(totalCacheRead)}`));
-		if (totalCacheWrite) detailParts.push(theme.fg("dim", `W${formatTokens(totalCacheWrite)}`));
-		if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
-			detailParts.push(theme.fg("dim", `CH${latestCacheHitRate.toFixed(1)}%`));
+		if (view.usingSubscription) detailParts.push(theme.fg("dim", "subscription"));
+		if (usage.cost) detailParts.push(theme.fg("dim", `$${usage.cost.toFixed(3)}`));
+		if (usage.input) detailParts.push(theme.fg("dim", `↑${formatTokens(usage.input)}`));
+		if (usage.output) detailParts.push(theme.fg("dim", `↓${formatTokens(usage.output)}`));
+		if (usage.cacheRead) detailParts.push(theme.fg("dim", `R${formatTokens(usage.cacheRead)}`));
+		if (usage.cacheWrite) detailParts.push(theme.fg("dim", `W${formatTokens(usage.cacheWrite)}`));
+		if ((usage.cacheRead > 0 || usage.cacheWrite > 0) && usage.latestCacheHitRate !== undefined) {
+			detailParts.push(theme.fg("dim", `CH${usage.latestCacheHitRate.toFixed(1)}%`));
 		}
-		// Isolated workflows show another model's usage; the session's cache status does not apply.
-		const promptCache = transientUsage ? undefined : snapshot.promptCache;
+		const promptCache = view.promptCache;
 		const now = Date.now();
 		const promptCacheLabel = formatPromptCacheStatus(promptCache, now);
 		if (promptCacheLabel) detailParts.push(promptCacheLabel);
@@ -316,9 +268,8 @@ export class FooterComponent implements Component {
 		const detailLine = truncateToWidth(detailParts.join(theme.fg("dim", " · ")), width, theme.fg("dim", "…"));
 		const lines = [workspaceLine, detailLine];
 
-		const extensionStatuses = this.footerData.getExtensionStatuses();
-		if (extensionStatuses.size > 0) {
-			const sortedStatuses = Array.from(extensionStatuses.entries())
+		if (view.statuses.size > 0) {
+			const sortedStatuses = Array.from(view.statuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
 				.map(([, text]) => sanitizeStatusText(text));
 			lines.push(truncateToWidth(sortedStatuses.join(" "), width, theme.fg("dim", "…")));

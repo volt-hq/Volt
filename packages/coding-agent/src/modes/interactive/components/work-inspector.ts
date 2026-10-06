@@ -5,7 +5,9 @@
  * text, read with `work_output` again whenever its live value changes; the
  * actions are the ones its kind allows:
  * cancel, resume suspended work, and open the conversation it runs in or
- * produced. A conversation the work runs in opens as a read-only view.
+ * produced. A conversation the work runs in opens as a read-only view, which
+ * loads its older entries as it scrolls up when it has them, and lists its
+ * own work, whose conversations open the same way at any depth.
  * Inspecting never starts inference or stops work by itself.
  */
 
@@ -66,8 +68,14 @@ export interface WorkConversation {
 	readonly title: string;
 	/** Whether the conversation is open and may still change. */
 	readonly live: boolean;
+	/** Whether older entries than its messages show remain to load. */
+	readonly earlier?: boolean;
+	/** Its own work: the conversations it links open from it. */
+	readonly work?: WorkSource;
 	/** Its messages, oldest first, and the one streaming now. */
 	messages(): readonly unknown[];
+	/** Load the messages before the oldest one shown. */
+	loadEarlier?(): Promise<void>;
 	subscribe(listener: () => void): () => void;
 	dispose(): void;
 }
@@ -95,6 +103,8 @@ export interface WorkInspectorOptions {
 	onClose: () => void;
 	/** The item to show first. */
 	workId?: string;
+	/** The conversation whose work it shows, when it is not the TUI's own. */
+	title?: string;
 }
 
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f‪-‮⁦-⁩]/g;
@@ -287,6 +297,8 @@ export class WorkInspector implements Component {
 	private rowCount = 0;
 	// The conversation opened from the item in detail.
 	private conversation?: { view: WorkConversation; unsubscribe: () => void };
+	/** The opened conversation's own work, shown over this inspector until it closes. */
+	private nested?: WorkInspector;
 
 	constructor(source: WorkSource, options: WorkInspectorOptions) {
 		this.source = source;
@@ -312,6 +324,7 @@ export class WorkInspector implements Component {
 
 	invalidate(): void {
 		this.detailView.invalidate();
+		this.nested?.invalidate();
 	}
 
 	dispose(): void {
@@ -319,6 +332,7 @@ export class WorkInspector implements Component {
 		this.disposed = true;
 		this.unsubscribe();
 		clearInterval(this.timer);
+		this.closeNested();
 		this.closeConversation();
 		this.detailView.dispose();
 	}
@@ -346,6 +360,10 @@ export class WorkInspector implements Component {
 			this.close();
 			return;
 		}
+		if (this.nested) {
+			this.nested.handleInput(data);
+			return;
+		}
 		this.ensureSelection(this.source.items());
 		const view = this.selected();
 		switch (this.mode) {
@@ -362,7 +380,12 @@ export class WorkInspector implements Component {
 					this.closeConversation();
 					this.mode = "detail";
 					this.resetScroll();
-				} else this.scroll(data);
+				} else if (keys.matches(data, "tui.select.confirm")) {
+					this.openNested();
+				} else {
+					this.loadEarlierAtTop(data);
+					this.scroll(data);
+				}
 				break;
 			case "detail":
 				if (keys.matches(data, "tui.select.cancel")) {
@@ -453,10 +476,62 @@ export class WorkInspector implements Component {
 	}
 
 	private closeConversation(): void {
+		this.closeNested();
 		const conversation = this.conversation;
 		this.conversation = undefined;
 		conversation?.unsubscribe();
 		conversation?.view.dispose();
+	}
+
+	/** Show the opened conversation's own work over this inspector, when it has any. */
+	private openNested(): void {
+		const view = this.conversation?.view;
+		const work = view?.work;
+		if (!view || !work || work.items().length === 0) return;
+		this.closeNested();
+		const nested = new WorkInspector(work, {
+			getHeight: this.options.getHeight,
+			requestRender: this.options.requestRender,
+			title: view.title,
+			onClose: () => {
+				if (this.nested === nested) this.nested = undefined;
+				this.options.requestRender();
+			},
+		});
+		this.nested = nested;
+	}
+
+	private closeNested(): void {
+		const nested = this.nested;
+		this.nested = undefined;
+		nested?.dispose();
+	}
+
+	/** Moving up from the top of a conversation that has older entries loads them. */
+	private loadEarlierAtTop(data: string): void {
+		const view = this.conversation?.view;
+		if (!view?.earlier || !view.loadEarlier || (this.follow && this.rowCount > this.viewportRows)) return;
+		if (this.scrollTop > 0) return;
+		const keys = getKeybindings();
+		const upward =
+			keys.matches(data, "tui.select.up") ||
+			keys.matches(data, "tui.select.pageUp") ||
+			keys.matches(data, "tui.altScreen.top");
+		if (!upward) return;
+		const before = this.rowCount;
+		void view.loadEarlier().then(
+			() => {
+				if (this.disposed || this.conversation?.view !== view) return;
+				// The rows shown stay where they are: the loaded ones come before them.
+				this.follow = false;
+				this.scrollTop = Math.max(0, this.scrollTop + (this.rowCount - before));
+				this.options.requestRender();
+			},
+			(error: unknown) => {
+				this.notice = error instanceof Error ? error.message : String(error);
+				this.options.requestRender();
+			},
+		);
 	}
 
 	private resetScroll(): void {
@@ -520,6 +595,7 @@ export class WorkInspector implements Component {
 	}
 
 	render(width: number): RenderFrame {
+		if (this.nested) return this.nested.render(width);
 		const height = Math.max(1, this.options.getHeight());
 		const innerWidth = Math.max(1, width - 4);
 		const items = this.source.items();
@@ -550,7 +626,8 @@ export class WorkInspector implements Component {
 		const bodyRows = Math.max(0, height - visibleFooter.length - 3);
 		const body = lines.slice(0, bodyRows);
 		while (body.length < bodyRows) body.push("");
-		const title = truncateToWidth("─ Work ", width - 2, "");
+		const heading = this.options.title === undefined ? "Work" : `Work · ${workDisplayText(this.options.title)}`;
+		const title = truncateToWidth(`─ ${heading.replace(/\s+/g, " ")} `, width - 2, "");
 		const border = (text: string) => theme.fg("borderAccent", text);
 		return createRenderFrame([
 			border(`╭${title}${"─".repeat(Math.max(0, width - 2 - visibleWidth(title)))}╮`),
@@ -714,19 +791,26 @@ export class WorkInspector implements Component {
 	}
 
 	private renderConversation(width: number, height: number): { lines: string[]; footer: string[] } {
+		const conversation = this.conversation?.view;
+		const work = conversation?.work?.items().length ?? 0;
 		const footer = this.hints(
 			[
 				[["tui.select.up", "tui.select.down"], "scroll"],
 				["app.work.follow", "follow"],
+				...(work > 0 ? [["tui.select.confirm", `its work (${work})`] as const] : []),
 				["tui.select.cancel", "back"],
 			],
 			width,
 		);
-		const conversation = this.conversation?.view;
 		if (!conversation) return { lines: [], footer };
 		const heading = `${theme.bold(theme.fg("accent", workDisplayText(conversation.title)))}${theme.fg("dim", conversation.live ? " · read-only" : " · closed, read-only")}`;
 		const transcript = conversationLines(conversation.messages(), width);
 		const content = transcript.length > 0 ? transcript : ["", theme.fg("muted", "No messages yet.")];
+		if (conversation.earlier) {
+			content.unshift(
+				theme.fg("dim", `↑ Earlier entries: ${keyDisplayText("tui.select.up")} at the top loads them`),
+			);
+		}
 		const footerRows = Math.min(footer.length, Math.max(1, height - 4));
 		this.viewportRows = Math.max(1, height - footerRows - 5);
 		this.rowCount = content.length;

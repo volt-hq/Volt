@@ -115,8 +115,8 @@ export interface DaemonLink {
 	onEvent(handler: (event: ControlEvent) => void): () => void;
 	/** Re-acquire outcomes after a daemon reconnect (session.reload on warm). */
 	onReacquired(handler: (sessionId: string, outcome: AcquireOutcome) => void): void;
+	/** Phones relayed through this link and served now. */
 	relayCount(): number;
-	onRelayCountChange(callback: (count: number) => void): void;
 	connectionState(): DaemonLinkState;
 	workspaceName(): string | undefined;
 	dispose(): Promise<void>;
@@ -154,7 +154,6 @@ export function createDisabledDaemonLink(): DaemonLink {
 		relayCount() {
 			return 0;
 		},
-		onRelayCountChange() {},
 		connectionState() {
 			return "disabled";
 		},
@@ -293,20 +292,13 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 	let starting: Promise<void> | undefined;
 	let resolvingWorkspace: Promise<void> | undefined;
 	const eventHandlers = new Set<(event: ControlEvent) => void>();
-	const relayCountCallbacks = new Set<(count: number) => void>();
 	let relayOfferHandler: ((offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>) => void) | undefined;
 	let reacquiredHandler: ((sessionId: string, outcome: AcquireOutcome) => void) | undefined;
 
 	const log = options.log ?? (() => {});
 
 	const setRelayCount = (next: number) => {
-		if (next === activeRelays) {
-			return;
-		}
 		activeRelays = next;
-		for (const callback of Array.from(relayCountCallbacks)) {
-			callback(next);
-		}
 	};
 
 	const parseAcquireResponse = (
@@ -695,9 +687,6 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 		relayCount() {
 			return activeRelays;
 		},
-		onRelayCountChange(callback) {
-			relayCountCallbacks.add(callback);
-		},
 		connectionState() {
 			return state;
 		},
@@ -793,7 +782,6 @@ export class DaemonLeases {
 	private readonly gitObservation: GitContextObservationBinding;
 	/** The conversation whose Git observation is published: while it is the one the TUI shows. */
 	private observed: HostedConversation | undefined;
-	private readonly relayCountListeners = new Set<(count: number) => void>();
 	private readonly eventListeners = new Set<(event: ControlEvent) => void>();
 	private disposed: Promise<void> | undefined;
 
@@ -829,16 +817,9 @@ export class DaemonLeases {
 		return outcome;
 	}
 
-	/** Phones relayed into the conversation the TUI shows. */
+	/** Phones relayed into the conversations the TUI hosts and served now. */
 	relayCount(): number {
 		return this.link?.relayCount() ?? 0;
-	}
-
-	onRelayCountChange(listener: (count: number) => void): () => void {
-		this.relayCountListeners.add(listener);
-		return () => {
-			this.relayCountListeners.delete(listener);
-		};
 	}
 
 	/** The daemon events the link receives. */
@@ -881,9 +862,6 @@ export class DaemonLeases {
 
 	private adopt(link: DaemonLink): DaemonLink {
 		this.link = link;
-		link.onRelayCountChange((count) => {
-			for (const listener of [...this.relayCountListeners]) listener(count);
-		});
 		link.onEvent((event) => {
 			for (const listener of [...this.eventListeners]) listener(event);
 		});

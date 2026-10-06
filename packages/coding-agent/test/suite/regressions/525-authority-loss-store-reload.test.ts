@@ -11,7 +11,6 @@ import {
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-services.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import type { HostActionRequest } from "../../../src/core/session/host-actions.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
@@ -20,9 +19,7 @@ import type { UserInputRequest, UserInputResponse } from "../../../src/core/user
 import type { WorkContext, WorkExecution } from "../../../src/core/work/registry.ts";
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
-import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import type { createInteractiveTui } from "../../../src/modes/interactive/interactive-mode.ts";
-import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestHost } from "../../utilities/host-client.ts";
 import { createLiveRecorder } from "../../utilities/live-recorder.ts";
@@ -177,15 +174,6 @@ describe("regression #525: ending a session whose saved state could not be confi
 		return Number(match[1]);
 	}
 
-	function createFooterData(): ReadonlyFooterDataProvider {
-		return {
-			getGitBranch: () => null,
-			getExtensionStatuses: () => new Map<string, string>(),
-			getAvailableProviderCount: () => 1,
-			onBranchChange: () => () => {},
-		};
-	}
-
 	/** InteractiveMode as the client of a conversation over the faux provider, without the main input loop. */
 	async function startInteractiveMode(responses: string[], options: { extensionFactory?: ExtensionFactory } = {}) {
 		const harness = await createTuiHarness({
@@ -202,7 +190,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		return { access, terminal: tui.terminal, conversation: harness.startup, handleFatalRuntimeError, exit };
 	}
 
-	it("keeps the footer rendering and wakes busy waiters after a lost lock fails the next commit", async () => {
+	it("wakes busy waiters after a lost lock fails the next commit", async () => {
 		const unhandledRejections: unknown[] = [];
 		const onUnhandledRejection = (reason: unknown) => {
 			unhandledRejections.push(reason);
@@ -218,8 +206,6 @@ describe("regression #525: ending a session whose saved state could not be confi
 		await runtime.session.prompt("tui prompt");
 		const sessionRef = requireSessionRef(runtime.session);
 		const staleSession = runtime.session;
-		const renderedFooter = new FooterComponent(staleSession, createFooterData());
-		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
 
 		await loseConversationLock(staleSession.sessionManager);
 		const stalePrompt = Promise.allSettled([staleSession.prompt("stale prompt")]);
@@ -229,11 +215,6 @@ describe("regression #525: ending a session whose saved state could not be confi
 		await stalePrompt;
 		await withinTimeout(staleSession.waitForNotBusy(), "waitForNotBusy()");
 		expect(staleSession.isBusy).toBe(false);
-
-		// Every frame renders the footer; it must not throw after the loss.
-		renderedFooter.invalidate();
-		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
-		expect(stripAnsi(new FooterComponent(staleSession, createFooterData()).render(120).lines[0])).toContain("faux-1");
 
 		// The store keeps what was committed; the stale prompt never landed and nothing reloads.
 		expect(await readStoredMessageTexts(sessionRef)).toEqual(["tui prompt", "tui reply"]);

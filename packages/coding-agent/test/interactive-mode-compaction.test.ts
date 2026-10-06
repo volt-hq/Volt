@@ -2,12 +2,10 @@ import type { JsonValue } from "@hansjm10/volt-ai";
 import type { ProjectedEntry } from "@hansjm10/volt-protocol";
 import { Container } from "@hansjm10/volt-tui";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
-type CompactionEndEvent = Extract<AgentSessionEvent, { type: "compaction_end" }>;
 type CompactionEntry = Extract<ProjectedEntry, { type: "compaction" }>;
 
 function createCompactionContext() {
@@ -15,11 +13,6 @@ function createCompactionContext() {
 	const chatContainer = new Container();
 	vi.spyOn(chatContainer, "clear");
 	return {
-		footer: { invalidate: vi.fn() },
-		autoCompactionEscapeHandler: undefined as (() => void) | undefined,
-		autoCompactionLoader: undefined,
-		defaultEditor: {},
-		statusContainer: { clear: vi.fn() },
 		chatContainer,
 		toolOutputExpanded: false,
 		getMarkdownThemeWithSettings: () => undefined,
@@ -29,11 +22,6 @@ function createCompactionContext() {
 		ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
 	};
 }
-
-const handleStatusEvent = Reflect.get(InteractiveMode.prototype, "handleStatusEvent") as (
-	this: ReturnType<typeof createCompactionContext>,
-	event: CompactionEndEvent,
-) => Promise<void>;
 
 const showCompacted = Reflect.get(InteractiveMode.prototype, "showCompacted") as (
 	this: ReturnType<typeof createCompactionContext>,
@@ -63,9 +51,10 @@ function usageLines(chat: Container): string[] {
 }
 
 describe("InteractiveMode extension shutdown", () => {
-	test("shuts down at once when idle, else once the session settles", () => {
-		const session = { isBusy: true };
-		const fakeThis = { session, shutdownRequested: false, shutdown: vi.fn(async () => undefined) };
+	test("shuts down at once when idle, else once the conversation settles", () => {
+		// The store's run phase: busy while an operation holds the conversation.
+		const phase = { busy: true };
+		const fakeThis = { store: { phase }, shutdownRequested: false, shutdown: vi.fn(async () => undefined) };
 		const onShutdownRequested = Reflect.get(InteractiveMode.prototype, "onShutdownRequested") as (
 			this: typeof fakeThis,
 		) => void;
@@ -73,29 +62,13 @@ describe("InteractiveMode extension shutdown", () => {
 		onShutdownRequested.call(fakeThis);
 		expect(fakeThis.shutdownRequested).toBe(true);
 		expect(fakeThis.shutdown).not.toHaveBeenCalled();
-		session.isBusy = false;
+		phase.busy = false;
 		onShutdownRequested.call(fakeThis);
 		expect(fakeThis.shutdown).toHaveBeenCalledOnce();
 	});
 });
 
 describe("InteractiveMode compaction", () => {
-	test("leaves the chat to the compaction's entry at compaction_end", async () => {
-		const fakeThis = createCompactionContext();
-
-		await handleStatusEvent.call(fakeThis, {
-			type: "compaction_end",
-			reason: "manual",
-			result: { firstKeptEntryId: "kept", tokensBefore: 123, summary: "summary" },
-			aborted: false,
-			willRetry: false,
-		});
-
-		expect(fakeThis.chatContainer.clear).not.toHaveBeenCalled();
-		expect(fakeThis.chatContainer.render(120).lines).toEqual([]);
-		expect(fakeThis.showError).not.toHaveBeenCalled();
-	});
-
 	test("appends the compaction's summary, then every request it made", () => {
 		const fakeThis = createCompactionContext();
 		const request = { provider: "test-provider", model: "test-model" };
@@ -137,7 +110,6 @@ describe("InteractiveMode compaction", () => {
 			`Chunked compaction request 3 (stop): 800 cached / ${(1000).toLocaleString()} prompt tokens — 80.0% hit`,
 			"Chunked compaction request 4 (stop): 0 cached / 100 prompt tokens — 0.0% hit",
 		]);
-		expect(fakeThis.footer.invalidate).toHaveBeenCalledOnce();
 	});
 
 	test("shows unavailable cache data and ignores malformed records without losing later requests", () => {
@@ -166,31 +138,5 @@ describe("InteractiveMode compaction", () => {
 			"Native compaction request 4 (stop): cache usage unavailable",
 		]);
 		expect(fakeThis.showError).not.toHaveBeenCalled();
-	});
-
-	test("defers requested shutdown from agent_end until the session settles", async () => {
-		const fakeThis = {
-			footer: { invalidate: vi.fn() },
-			settingsManager: { getShowTerminalProgress: () => false },
-			ui: { requestRender: vi.fn(), terminal: { setProgress: vi.fn() } },
-			loadingAnimation: undefined,
-			statusContainer: { clear: vi.fn() },
-			stopWorkingElapsedTicker: vi.fn(),
-			scheduleTurnDoneAlert: vi.fn(),
-			scheduleWorkSummary: vi.fn(),
-			updateEditorBorderColor: vi.fn(),
-			checkShutdownRequested: vi.fn(async () => undefined),
-			session: { planningState: { mode: "build", plan: null } },
-		};
-		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleStatusEvent") as (
-			this: typeof fakeThis,
-			event: { type: "agent_end"; messages: []; willRetry: false } | { type: "agent_settled" },
-		) => Promise<void>;
-
-		await handleEvent.call(fakeThis, { type: "agent_end", messages: [], willRetry: false });
-		expect(fakeThis.checkShutdownRequested).not.toHaveBeenCalled();
-
-		await handleEvent.call(fakeThis, { type: "agent_settled" });
-		expect(fakeThis.checkShutdownRequested).toHaveBeenCalledOnce();
 	});
 });

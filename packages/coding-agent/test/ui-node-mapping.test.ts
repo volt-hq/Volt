@@ -19,11 +19,11 @@ import {
 	visibleWidth,
 } from "@hansjm10/volt-tui";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ProtocolClient } from "../src/client/protocol-client.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
-import { LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import {
-	createRegistryIntentSink,
+	createClientIntentSink,
 	formSubmitIntent,
 	type UiIntentSink,
 } from "../src/modes/interactive/ui-node/intents.ts";
@@ -319,7 +319,7 @@ describe("UiNode mapping", () => {
 		expect(tree.getSelectedId()).toBe("src/a.ts");
 	});
 
-	it("merges form values over the submit input and reports registry rejections", async () => {
+	it("merges form values over the submit input and reports rejected intents", async () => {
 		expect(
 			formSubmitIntent({ type: "save", input: { id: 7, name: "old" } }, { name: "new", note: undefined }),
 		).toEqual({
@@ -327,14 +327,19 @@ describe("UiNode mapping", () => {
 			input: { id: 7, name: "new" },
 		});
 		const errors: string[] = [];
-		const sink = createRegistryIntentSink({
-			context: () => ({ services: {}, profile: LOCAL_INTENT_PROFILE }),
-			onError: (message) => errors.push(message),
-		});
+		const sent: unknown[] = [];
+		const client = {
+			intent: async (name: string, input: unknown) => {
+				sent.push([name, input]);
+				throw new Error(`Unknown intent: ${name}`);
+			},
+		} as unknown as ProtocolClient;
+		const sink = createClientIntentSink({ client: () => client, onError: (message) => errors.push(message) });
 		sink.send({ type: "extension.command.nobody.nothing" });
 		await vi.waitFor(() => expect(errors).toEqual(["Unknown intent: extension.command.nobody.nothing"]));
-		const throwing = createRegistryIntentSink({
-			context: () => {
+		expect(sent).toEqual([["extension.command.nobody.nothing", {}]]);
+		const throwing = createClientIntentSink({
+			client: () => {
 				throw new Error("no conversation");
 			},
 			onError: (message) => errors.push(message),

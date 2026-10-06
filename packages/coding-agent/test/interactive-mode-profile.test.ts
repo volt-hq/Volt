@@ -55,7 +55,6 @@ type SwitchProfileContext = {
 		setModel: (model: Model<string>, options?: SetModelOptions) => Promise<void>;
 		setThinkingLevel: (level: ThinkingLevel, options?: DefaultPersistenceOptions) => Promise<void>;
 	};
-	footer: { invalidate: () => void };
 	updateEditorBorderColor: () => void;
 	showStatus: (message: string) => void;
 	showWarning: (message: string) => void;
@@ -72,8 +71,7 @@ type ApplyScopedModelsContext = {
 		};
 		setScopedModels: (scopedModels: ScopedModelUpdate[]) => void;
 	};
-	updateAvailableProviderCount: () => Promise<void>;
-	footer: { invalidate: () => void };
+	catalogs: { refresh: (...names: string[]) => void };
 	updateEditorBorderColor: () => void;
 };
 
@@ -182,7 +180,6 @@ describe("InteractiveMode profile selector", () => {
 					setThinkingLevel: vi.fn(),
 				},
 			},
-			footer: { value: { invalidate: vi.fn() } },
 			updateEditorBorderColor: { value: vi.fn() },
 			showStatus: { value: vi.fn() },
 			showWarning: { value: vi.fn() },
@@ -251,7 +248,6 @@ describe("InteractiveMode profile selector", () => {
 				}),
 			},
 			session: { value: session },
-			footer: { value: { invalidate: vi.fn() } },
 			updateEditorBorderColor: { value: vi.fn() },
 			showStatus: { value: vi.fn() },
 			showWarning: { value: vi.fn() },
@@ -320,7 +316,6 @@ describe("InteractiveMode profile selector", () => {
 				}),
 			},
 			session: { value: session },
-			footer: { value: { invalidate: vi.fn() } },
 			updateEditorBorderColor: { value: vi.fn() },
 			showStatus: { value: vi.fn() },
 			showWarning: { value: vi.fn() },
@@ -421,7 +416,6 @@ describe("InteractiveMode profile selector", () => {
 							session.setThinkingLevel(level, options),
 					},
 				},
-				footer: { value: { invalidate: vi.fn() } },
 				updateEditorBorderColor: { value: vi.fn() },
 				showStatus: { value: vi.fn() },
 				showWarning: { value: vi.fn() },
@@ -506,7 +500,6 @@ describe("InteractiveMode profile selector", () => {
 				reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
 				applyScopedModelsFromSettings: { value: vi.fn(async () => {}) },
 				session: { value: session },
-				footer: { value: { invalidate: vi.fn() } },
 				updateEditorBorderColor: { value: vi.fn() },
 				showStatus: { value: vi.fn() },
 				showWarning: { value: vi.fn() },
@@ -548,8 +541,7 @@ describe("InteractiveMode profile selector", () => {
 				},
 				setScopedModels,
 			},
-			updateAvailableProviderCount: vi.fn(async () => {}),
-			footer: { invalidate: vi.fn() },
+			catalogs: { refresh: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
 		};
 

@@ -11286,6 +11286,9 @@
 					"$ref": "#/$defs/LiveItem.assistant_end"
 				},
 				{
+					"$ref": "#/$defs/LiveItem.toolcall_presentation"
+				},
+				{
 					"$ref": "#/$defs/LiveItem.tool"
 				},
 				{
@@ -11419,6 +11422,9 @@
 				},
 				"source": {
 					"type": "string"
+				},
+				"detail": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -11506,6 +11512,27 @@
 				},
 				"patch": {
 					"$ref": "#/$defs/ToolPresentationPatch"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.toolcall_presentation": {
+			"type": "object",
+			"required": [
+				"type",
+				"toolCallId",
+				"presentation"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "toolcall_presentation"
+				},
+				"toolCallId": {
+					"type": "string"
+				},
+				"presentation": {
+					"$ref": "#/$defs/ToolPresentation"
 				}
 			},
 			"additionalProperties": false

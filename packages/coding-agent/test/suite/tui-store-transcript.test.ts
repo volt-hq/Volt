@@ -154,6 +154,32 @@ describe("the TUI's transcript from its store", () => {
 		},
 	);
 
+	it("shows a call as the host presents it while its arguments stream, before it runs", async () => {
+		const { harness, tui, session } = await start();
+		const live = harness.startup.liveState;
+		const message = assistant(session, [{ type: "toolCall", id: "call-streaming", name: "bash", arguments: {} }], {
+			stopReason: "toolUse",
+		});
+		live.stream([
+			{ type: "assistant_start", message },
+			{
+				type: "toolcall_presentation",
+				toolCallId: "call-streaming",
+				presentation: { title: [{ text: "$ ", bold: true }, { text: "make che" }] },
+			},
+		]);
+		await waitForScreen(tui, "$ make che");
+		live.stream([
+			{
+				type: "toolcall_presentation",
+				toolCallId: "call-streaming",
+				presentation: { title: [{ text: "$ ", bold: true }, { text: "make check" }] },
+			},
+		]);
+		const shown = await waitForScreen(tui, "$ make check");
+		expect(shown).not.toContain("[running]");
+	});
+
 	it("shows why an aborted turn's calls never ran, and a failed turn's error", async () => {
 		const { tui, session } = await start();
 		await session.sessionWriter.appendMessage({ role: "user", content: "try it", timestamp: Date.now() });

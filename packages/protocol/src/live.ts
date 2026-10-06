@@ -2,8 +2,9 @@
  * The live lane (RFC §6.1): ephemeral state carried by `live{subscriptionId,
  * basedOn, seq, reset?, items}` frames.
  *
- * Streaming items (assistant start/delta/end and tool progress) are scoped by
- * `basedOn`, the ordinal they build on: a client discards them when a frame
+ * Streaming items (assistant start/delta/end, the presentations of the tool
+ * calls it streams, and tool progress) are scoped by `basedOn`, the ordinal
+ * they build on: a client discards them when a frame
  * arrives with a different `basedOn`, or when it applies the entry that
  * commits them (the assistant message, the tool result). Keyed state (`set`
  * and `clear`) persists until the host clears it, replaces it, or resets the
@@ -504,6 +505,17 @@ export const LiveAssistantDeltaItemSchema = Type.Object(
 /** The streaming assistant message finished; the entry that commits it follows. */
 export const LiveAssistantEndItemSchema = Type.Object({ type: Type.Literal("assistant_end") }, closed);
 
+/**
+ * How a tool call of the streaming assistant message looks while its
+ * arguments stream: the host presents it as they stand, at most every 100 ms,
+ * until the call runs and its `tool` items carry its presentation. It leaves
+ * with the streaming message. Local clients only.
+ */
+export const LiveToolCallPresentationItemSchema = Type.Object(
+	{ type: Type.Literal("toolcall_presentation"), toolCallId: Type.String(), presentation: ToolPresentationSchema },
+	closed,
+);
+
 /** A partial tool result's content; how the call looks is its presentation. */
 export const LiveToolPartialSchema = Type.Object(
 	{ content: Type.Array(Type.Union([TextContentSchema, ImageContentSchema])) },
@@ -573,6 +585,8 @@ export const LiveNoticeItemSchema = Type.Object(
 		message: UiNodeStyledTextSchema,
 		/** What raised it: an extension's id, or {@link HOST_NOTICE_SOURCE}. */
 		source: Type.Optional(Type.String()),
+		/** Diagnostic detail, such as the stack of an extension's error. Local clients only. */
+		detail: Type.Optional(Type.String()),
 	},
 	closed,
 );
@@ -595,6 +609,7 @@ export const LIVE_ITEM_SCHEMAS = {
 	assistant_start: LiveAssistantStartItemSchema,
 	assistant_delta: LiveAssistantDeltaItemSchema,
 	assistant_end: LiveAssistantEndItemSchema,
+	toolcall_presentation: LiveToolCallPresentationItemSchema,
 	tool: LiveToolItemSchema,
 	set: LiveSetItemSchema,
 	clear: LiveClearItemSchema,
@@ -607,6 +622,7 @@ export const LiveItemSchema = Type.Union([
 	LiveAssistantStartItemSchema,
 	LiveAssistantDeltaItemSchema,
 	LiveAssistantEndItemSchema,
+	LiveToolCallPresentationItemSchema,
 	LiveToolItemSchema,
 	LiveSetItemSchema,
 	LiveClearItemSchema,

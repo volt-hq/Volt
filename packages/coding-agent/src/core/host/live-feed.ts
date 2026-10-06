@@ -7,7 +7,8 @@
  * leave the live state when the entry that commits them is applied (an MCP
  * call, which no entry commits, when it ends). A running call carries its
  * presentation, which changes at most every 100 ms as patches of the one the
- * live state holds (presentation-state.ts).
+ * live state holds (presentation-state.ts); a call whose arguments still
+ * stream is presented as they stand, as often.
  *
  * The feed also raises the host's own notices (source `host`): a compaction
  * cancelled or failed, retries that gave up, and an Anthropic subscription
@@ -21,7 +22,7 @@ import { HOST_NOTICE_SOURCE, type LiveItem, type LiveToolPartial, type LiveValue
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
-import { ToolPresentationState } from "../ui/presentation-state.ts";
+import { ArgumentPresentations, ToolPresentationState } from "../ui/presentation-state.ts";
 import { ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, usesAnthropicSubscription } from "./host-notices.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
@@ -187,6 +188,13 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			stream([{ type: "tool", op: "update", toolCallId, toolName, ...change }]);
 		},
 	});
+	const argumentPresentations = new ArgumentPresentations({
+		presenters: () => session.presenters,
+		cwd: () => session.sessionManager.getCwd(),
+		publish: (toolCallId, presentation) => {
+			if (live.snapshot().assistant) stream([{ type: "toolcall_presentation", toolCallId, presentation }]);
+		},
+	});
 	const notice = (level: "info" | "warning" | "error", message: string): void => {
 		if (closed) return;
 		try {
@@ -223,17 +231,34 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 	const onEvent = (event: AgentSessionEvent): void => {
 		switch (event.type) {
 			case "message_start":
-				if (event.message.role === "assistant") stream([{ type: "assistant_start", message: event.message }]);
+				if (event.message.role === "assistant") {
+					argumentPresentations.clear();
+					stream([{ type: "assistant_start", message: event.message }]);
+				}
 				return;
 			case "message_update": {
 				if (event.message.role !== "assistant") return;
-				const slim = slimAssistantEvent(event.assistantMessageEvent);
+				const assistantEvent = event.assistantMessageEvent;
+				const slim = slimAssistantEvent(assistantEvent);
 				if (slim) stream([{ type: "assistant_delta", event: slim }]);
+				if (
+					assistantEvent.type === "toolcall_start" ||
+					assistantEvent.type === "toolcall_delta" ||
+					assistantEvent.type === "toolcall_end"
+				) {
+					const block = event.message.content[assistantEvent.contentIndex];
+					if (block?.type === "toolCall") {
+						const args = isRecord(block.arguments) ? block.arguments : {};
+						argumentPresentations.update(block.id, block.name, args, assistantEvent.type === "toolcall_end");
+					}
+				}
 				return;
 			}
 			case "message_end":
+				if (event.message.role !== "assistant") return;
+				argumentPresentations.clear();
 				// The committed entry usually ended the stream already.
-				if (event.message.role === "assistant" && live.snapshot().assistant) stream([{ type: "assistant_end" }]);
+				if (live.snapshot().assistant) stream([{ type: "assistant_end" }]);
 				return;
 			case "tool_execution_start": {
 				const args = isRecord(event.args) ? event.args : undefined;
@@ -355,8 +380,10 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 		if (closed) return;
 		if (entry.type === "message") {
 			const message = entry.message;
-			if (message.role === "assistant") live.commit({ role: "assistant" });
-			else if (message.role === "toolResult") {
+			if (message.role === "assistant") {
+				argumentPresentations.clear();
+				live.commit({ role: "assistant" });
+			} else if (message.role === "toolResult") {
 				presentations.drop(message.toolCallId);
 				live.commit({ role: "tool", toolCallId: message.toolCallId });
 			}
@@ -399,6 +426,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			if (closed) return;
 			closed = true;
 			presentations.close();
+			argumentPresentations.close();
 			for (const unsubscribe of unsubscribers.splice(0).reverse()) {
 				try {
 					unsubscribe();

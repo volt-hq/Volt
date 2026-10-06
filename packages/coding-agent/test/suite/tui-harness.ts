@@ -230,10 +230,8 @@ export function createScriptedDaemonLink(): ScriptedDaemonLink {
 	let relays = 0;
 	let offerHandler: ((offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>) => void) | undefined;
 	let reacquiredHandler: ((sessionId: string, outcome: AcquireOutcome) => void) | undefined;
-	const relayCountListeners = new Set<(count: number) => void>();
 	const setRelays = (count: number): void => {
 		relays = count;
-		for (const listener of relayCountListeners) listener(count);
 	};
 	return {
 		...createDisabledDaemonLink(),
@@ -265,9 +263,6 @@ export function createScriptedDaemonLink(): ScriptedDaemonLink {
 			reacquiredHandler = handler;
 		},
 		relayCount: () => relays,
-		onRelayCountChange(callback) {
-			relayCountListeners.add(callback);
-		},
 		async offerRelay(offer, preamble) {
 			const handler = offerHandler;
 			if (!handler) throw new Error("The TUI serves no relays");

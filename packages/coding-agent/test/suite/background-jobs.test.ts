@@ -147,7 +147,6 @@ describe("AgentSession background jobs", () => {
 			isInitialized: boolean;
 			setupKeyHandlers(): void;
 			setupEditorSubmitHandler(): void;
-			observeSessionStatus(session: Harness["session"]): void;
 			shutdown(): Promise<void>;
 			showWarning(message: string): void;
 			showError(message: string): void;
@@ -160,7 +159,6 @@ describe("AgentSession background jobs", () => {
 		control.renderer.setFocus(control.defaultEditor);
 		control.renderer.start();
 		control.isInitialized = true;
-		control.observeSessionStatus(harness.session);
 		vi.spyOn(control, "shutdown").mockResolvedValue();
 		vi.spyOn(control, "showWarning");
 		vi.spyOn(control, "showError");

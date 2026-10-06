@@ -1,7 +1,8 @@
 /**
- * The TUI's live view of its client's live frames: work progress shows while
- * its live value is set, and a reset of the live state ends it; panels follow
- * their values and, patched, show as the client's live fold holds them; an
+ * The TUI's live view of its client's live frames: work whose live value
+ * clears, or that a reset no longer carries, detached; panels follow their
+ * values and, patched, show as the client's live fold holds them; notices
+ * reach the TUI with their source and detail, the host's own included; an
  * `editor_text` request is answered at once with the editor's text.
  */
 
@@ -21,14 +22,13 @@ function createHost(overrides: Partial<LiveViewHost> = {}): LiveViewHost {
 	return {
 		showRequest: async () => undefined,
 		answer: () => {},
-		setStatus: () => {},
 		setPanel: () => {},
 		setTitle: () => {},
 		notify: () => {},
 		setEditorText: () => {},
 		insertEditorText: () => {},
 		editorText: () => undefined,
-		showWork: () => {},
+		workDetached: () => {},
 		liveValue: () => undefined,
 		...overrides,
 	};
@@ -45,25 +45,46 @@ function followFold(createView: (liveValue: (key: string) => LiveValue | undefin
 }
 
 describe("TUI live view", () => {
-	it("shows work progress until its value clears or the live state resets", () => {
-		const shown: Array<[string, string | undefined]> = [];
-		const view = new TuiLiveView(
-			createHost({ showWork: (workId, value) => shown.push([workId, value?.progress?.text]) }),
-		);
+	it("reports work detached when its value clears or a reset no longer carries it", () => {
+		const detached: string[] = [];
+		const view = new TuiLiveView(createHost({ workDetached: (workId) => detached.push(workId) }));
 		const work = (workId: string, text: string) =>
 			({
 				type: "set",
 				key: `work/${workId}`,
 				value: { kind: "work", workId, progress: { text } },
 			}) as const;
-		view.apply({ reset: false, items: [work("a", "one"), work("b", "two")] });
-		view.apply({ reset: false, items: [{ type: "clear", key: "work/a" }] });
+		view.apply({ reset: false, items: [work("a", "one"), work("b", "two"), work("c", "three")] });
+		view.apply({ reset: false, items: [work("a", "one again"), { type: "clear", key: "work/a" }] });
+		// A reset that still carries work keeps it running.
+		view.apply({ reset: true, items: [work("c", "three")] });
 		view.apply({ reset: true, items: [] });
-		expect(shown).toEqual([
-			["a", "one"],
-			["b", "two"],
-			["a", undefined],
-			["b", undefined],
+		expect(detached).toEqual(["a", "b", "c"]);
+	});
+
+	it("shows every notice with its source and detail, the host's own included", () => {
+		const notices: unknown[][] = [];
+		const view = new TuiLiveView(
+			createHost({ notify: (level, message, source, detail) => notices.push([level, message, source, detail]) }),
+		);
+		view.apply({
+			reset: false,
+			items: [
+				{ type: "notice", level: "error", message: "Compaction cancelled", source: "host" },
+				{
+					type: "notice",
+					level: "error",
+					message: "tool_call: boom",
+					source: "ci",
+					detail: "Error: boom\n    at x",
+				},
+				{ type: "notice", level: "info", message: "hello" },
+			],
+		});
+		expect(notices).toEqual([
+			["error", "Compaction cancelled", "host", undefined],
+			["error", "tool_call: boom", "ci", "Error: boom\n    at x"],
+			["info", "hello", undefined, undefined],
 		]);
 	});
 

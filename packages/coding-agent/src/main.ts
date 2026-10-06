@@ -1227,7 +1227,7 @@ export async function main(args: string[], options?: MainOptions) {
 	const conversation = opened.conversation;
 	time("openStartupConversation");
 	await runWithOwnedConversationHost(host, async (transferRuntime) => {
-		const { services, session, modelFallbackMessage } = conversation;
+		const { services, session } = conversation;
 		const { settingsManager, modelRegistry, resourceLoader } = services;
 		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
@@ -1308,7 +1308,6 @@ export async function main(args: string[], options?: MainOptions) {
 			});
 			const interactiveMode = new InteractiveMode(tuiHost, {
 				migratedProviders,
-				modelFallbackMessage,
 				modelScopePatterns: parsed.models,
 				autoTrustOnReloadCwd,
 				initialMessage,
