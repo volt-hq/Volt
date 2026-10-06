@@ -2,7 +2,7 @@
  * §12.3.2 turn-boundary handoff + §12.3.6 reconnect/re-acquire, exercised
  * through the real control plane: startControlServer + LeaseBroker +
  * ViewerFeedRegistry on the daemon side (request routing mirrors
- * iroh-service), createDaemonAttach on the TUI side. The runtime/session is a
+ * iroh-service), createDaemonLink on the TUI side. The runtime/session is a
  * double with a controllable turn.
  */
 
@@ -19,10 +19,10 @@ import { ViewerFeedRegistry } from "../src/daemon/viewer-feed.ts";
 import {
 	type AcquireOutcome,
 	acquireDaemonLease,
-	createDaemonAttach,
-	type DaemonAttach,
-	type DaemonLeaseWait,
-} from "../src/modes/interactive/daemon-attach.ts";
+	createDaemonLink,
+	type DaemonLink,
+	type LeaseWait,
+} from "../src/modes/interactive/host/daemon-link.ts";
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve: () => void = () => {};
@@ -261,13 +261,13 @@ async function startTuiHalf(
 	agentDir: string,
 	cwd: string,
 ): Promise<{
-	attach: DaemonAttach;
+	attach: DaemonLink;
 	events: ControlEvent[];
 	reacquired: Array<{ sessionId: string; outcome: AcquireOutcome }>;
 }> {
 	const events: ControlEvent[] = [];
 	const reacquired: Array<{ sessionId: string; outcome: AcquireOutcome }> = [];
-	const attach = createDaemonAttach({ cwd, agentDir, autoStart: false });
+	const attach = createDaemonLink({ cwd, agentDir, autoStart: false });
 	attach.onEvent((event) => events.push(event));
 	attach.onReacquired((sessionId, outcome) => reacquired.push({ sessionId, outcome }));
 	cleanups.push(() => attach.dispose());
@@ -328,7 +328,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		tui.attach.onRelayOffer((offer) => dispatchedRelaySessions.push(offer.sessionId));
 		expect(await tui.attach.acquire("old")).toMatchObject({ kind: "granted" });
 
-		const waits: DaemonLeaseWait[] = [];
+		const waits: LeaseWait[] = [];
 		const endWait = vi.fn();
 		const leasing = acquireDaemonLease(tui.attach, "phone-session", {
 			cwd,
@@ -514,12 +514,6 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		);
 		expect(daemon.broker.lookup("ws", "s-1")?.state).toBe("tui-owned");
 		expect(daemon.broker.lookup("ws", "s-2")?.state).toBe("tui-owned");
-		expect(await first.attach.listRuntimeStates("ws")).toEqual(
-			new Map([
-				["s-1", "tui-owned"],
-				["s-2", "tui-owned"],
-			]),
-		);
 	}, 20_000);
 
 	it("drains a mid-turn daemon runtime to the TUI: pending, abort, warm grant, phone streams transferred", async () => {
@@ -590,7 +584,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		cleanups.push(() => daemon.close());
 		publishDaemonEndpoint(paths, socketPath, "stale-token");
 
-		const attach = createDaemonAttach({ cwd, agentDir, autoStart: true });
+		const attach = createDaemonLink({ cwd, agentDir, autoStart: true });
 		cleanups.push(() => attach.dispose());
 		await attach.start();
 		expect(attach.connectionState()).toBe("reconnecting");

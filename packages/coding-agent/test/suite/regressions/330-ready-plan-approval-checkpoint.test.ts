@@ -10,6 +10,7 @@ import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../../../src/modes/interactive/components/plan-inspector.ts";
 import type { PlanDetailsComponent } from "../../../src/modes/interactive/components/plan-status.ts";
+import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { adoptTestSession } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
@@ -88,7 +89,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 			},
 			{ extensionMode: "tui" },
 		);
-		const mode = new InteractiveMode(host, conversation);
+		const mode = new InteractiveMode(TuiHost.start({ host, conversation }));
 		const control = mode as unknown as ModeControl;
 		const terminal = new VirtualTerminal(columns, rows);
 		control.renderer = new TuiMainScreen(terminal, false, harness.tempDir);

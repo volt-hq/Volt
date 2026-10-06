@@ -21,6 +21,7 @@ import type { WorkContext, WorkExecution } from "../../../src/core/work/registry
 import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
+import { TuiHost } from "../../../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
@@ -190,7 +191,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 	/** Drive InteractiveMode on a real host and VirtualTerminal, without the main input loop. */
 	async function startInteractiveMode(opened: TestHost & { tempDir: string }) {
 		const { host, conversation, tempDir } = opened;
-		const mode = new InteractiveMode(host, conversation, { tuiMode: "regular" });
+		const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode: "regular" });
 		cleanups.push(() => mode.stop());
 		const access = mode as unknown as InteractiveAccess;
 		const handleFatalRuntimeError = vi.fn(async () => {});

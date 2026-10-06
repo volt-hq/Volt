@@ -3,14 +3,13 @@ import { type Component, type Container, Text, type TUI, type TuiMode } from "@h
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import type { ConversationHost } from "../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../src/core/host/targets.ts";
 import { stopThemeWatcher } from "../src/core/theme/runtime.ts";
 import type { CustomEditor } from "../src/modes/interactive/components/custom-editor.ts";
 import type { PlanInspectorComponent } from "../src/modes/interactive/components/plan-inspector.ts";
 import { UserInputDialog } from "../src/modes/interactive/components/user-input-dialog.ts";
 import { WorkInspector } from "../src/modes/interactive/components/work-inspector.ts";
+import { TuiHost } from "../src/modes/interactive/host/tui-host.ts";
 import { createInteractiveTui, InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
@@ -30,9 +29,8 @@ type TestAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	host: ConversationHost;
+	tuiHost: TuiHost;
 	client: HostClient;
-	conversation: HostedConversation;
 	showSessionExtensions(session: AgentSession): void;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
@@ -96,7 +94,7 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 	// The TUI's host binds the session's extensions in TUI mode when the TUI attaches.
 	const { host } = createFakeHost({ extensionMode: "tui" });
 	const { conversation } = createFakeConversation(harness.session);
-	const mode = new InteractiveMode(host, conversation, { tuiMode });
+	const mode = new InteractiveMode(TuiHost.start({ host, conversation }), { tuiMode });
 	fixtures.push({ mode, harness });
 	const access = mode as unknown as TestAccess;
 	const terminal = new VirtualTerminal(columns, 24);
@@ -113,7 +111,7 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 	access.activateView(access.conversationView, access.editor, false);
 	access.isInitialized = true;
 	access.ui.start();
-	await access.host.attach(access.client, access.conversation);
+	await access.tuiHost.attach(access.client);
 	access.showSessionExtensions(harness.session);
 	access.subscribeToAgent(harness.session);
 	await terminal.waitForRender();

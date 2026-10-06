@@ -68,6 +68,27 @@ export class SessionImportFileNotFoundError extends Error {
 /** What happens to a conversation whose last client left: it closes, stays open, or closes after `retainMs` without a client. */
 export type WhenUnattached = "close" | "keep" | { readonly retainMs: number };
 
+/**
+ * What an open gate took for one client's open, such as the target's lease:
+ * committed once the client moved to the conversation it opened, aborted when
+ * the open failed or the client stayed where it was. An abort runs once
+ * whatever opened closed again.
+ */
+export interface OpenGateHold {
+	commit(): void;
+	abort(): Promise<void>;
+}
+
+/**
+ * Admits a client's open of `target` once the client's conversation accepted
+ * the change and before anything opens: a hold, `cancelled` to open nothing,
+ * or a rejection that fails the open.
+ */
+export type OpenGate = (
+	target: ConversationTarget,
+	client: HostClient,
+) => Promise<OpenGateHold | { readonly cancelled: true }>;
+
 export interface ConversationHostOptions {
 	readonly factory: ConversationFactory;
 	readonly agentDir: string;
@@ -75,6 +96,8 @@ export interface ConversationHostOptions {
 	readonly extensionMode: ExtensionMode;
 	/** Default: "close". */
 	readonly whenUnattached?: WhenUnattached;
+	/** Runs before each conversation a client's structural intent opens, such as a host taking the target's lease. */
+	readonly openGate?: OpenGate;
 }
 
 export interface OpenConversationOptions {
@@ -85,8 +108,6 @@ export interface OpenConversationOptions {
 	 * its Git workspace context when the cwd matches.
 	 */
 	readonly from?: HostedConversation;
-	/** Runs once the source accepted the change, before the target opens, such as a host acquiring a lease. */
-	readonly onOpening?: () => Promise<void>;
 	readonly subagentContext?: SubagentRuntimeContext;
 	readonly projectTrustContext?: (cwd: string) => ProjectTrustContext;
 	/** Default: "owner" with a subagent context, else "clients". */
@@ -149,6 +170,12 @@ interface Attachment {
 	detachSurface?: () => void;
 }
 
+/** The client a structural intent opens a conversation for, and its check that the intent is still current. */
+interface Opener {
+	readonly client: HostClient;
+	readonly assertCurrent?: () => void;
+}
+
 function extractUserMessageText(content: string | Array<{ type: string; text?: string }>): string {
 	if (typeof content === "string") {
 		return content;
@@ -206,6 +233,7 @@ export class ConversationHost {
 	private readonly agentDir: string;
 	private readonly extensionMode: ExtensionMode;
 	private readonly whenUnattached: WhenUnattached;
+	private readonly openGate: OpenGate | undefined;
 	private readonly conversations = new Set<HostedConversation>();
 	private readonly closing = new Map<HostedConversation, Promise<void>>();
 	private readonly attachments = new Map<string, Attachment>();
@@ -225,6 +253,7 @@ export class ConversationHost {
 		this.agentDir = options.agentDir;
 		this.extensionMode = options.extensionMode;
 		this.whenUnattached = options.whenUnattached ?? "close";
+		this.openGate = options.openGate;
 		this.onOpened((conversation) => this.watchSettings(conversation));
 		this.onClosed((conversation) => {
 			this.settingsWatches.get(conversation)?.();
@@ -307,16 +336,21 @@ export class ConversationHost {
 	 * runtime left open is reconciled first. A failed open closes whatever it
 	 * created and leaves `from` as it was.
 	 */
-	open(target: ConversationTarget, options: OpenConversationOptions = {}): Promise<OpenConversationResult> {
-		return this.openTarget(target, options, false);
+	async open(target: ConversationTarget, options: OpenConversationOptions = {}): Promise<OpenConversationResult> {
+		return (await this.openTarget(target, options, false)).result;
 	}
 
-	/** `open`; with `fromStaysOpen`, the opener leaves `from` open for other clients, so it may be busy. */
+	/**
+	 * `open`; with `fromStaysOpen`, the opener leaves `from` open for other
+	 * clients, so it may be busy. An open for an `opener` passes the host's
+	 * gate first; the caller commits or aborts the hold it returns.
+	 */
 	private async openTarget(
 		target: ConversationTarget,
 		options: OpenConversationOptions,
 		fromStaysOpen: boolean,
-	): Promise<OpenConversationResult> {
+		opener?: Opener,
+	): Promise<{ readonly result: OpenConversationResult; readonly hold?: OpenGateHold }> {
 		let accepted: boolean;
 		try {
 			accepted = await this.acceptOpen(target, options, fromStaysOpen);
@@ -330,51 +364,87 @@ export class ConversationHost {
 		}
 		if (!accepted) {
 			if (target.kind === "adopt") await closeLocalSessionManager(target.sessionManager);
-			return { cancelled: true };
+			return { result: { cancelled: true } };
 		}
+		const gate = opener ? await this.passGate(target, opener, options.from, fromStaysOpen) : {};
+		if (gate === undefined) return { result: { cancelled: true } };
 		const from = options.from;
 		const importPath = target.kind === "import" ? resolvePath(target.path) : undefined;
 		let selectedText: string | undefined;
-		let sessionManager: SessionManager;
-		switch (target.kind) {
-			case "new":
-				sessionManager = await this.createNewSessionManager(target, from);
-				break;
-			case "session": {
-				if (from?.id === target.ref.sessionId) {
-					throw new Error(
-						"Cannot replace the current session with a different persisted reference using the same session ID",
-					);
+		let conversation: HostedConversation;
+		try {
+			let sessionManager: SessionManager;
+			switch (target.kind) {
+				case "new":
+					sessionManager = await this.createNewSessionManager(target, from);
+					break;
+				case "session": {
+					if (from?.id === target.ref.sessionId) {
+						throw new Error(
+							"Cannot replace the current session with a different persisted reference using the same session ID",
+						);
+					}
+					if (this.get(target.ref.sessionId)) {
+						throw new Error(`Session ${target.ref.sessionId} is already open in this host`);
+					}
+					sessionManager = await SessionManager.open(target.ref, target.cwdOverride);
+					break;
 				}
-				if (this.get(target.ref.sessionId)) {
-					throw new Error(`Session ${target.ref.sessionId} is already open in this host`);
+				case "fork": {
+					const branched = await this.createBranchedSessionManager(target.source, target.entryId, target.position);
+					sessionManager = branched.sessionManager;
+					selectedText = branched.selectedText;
+					break;
 				}
-				sessionManager = await SessionManager.open(target.ref, target.cwdOverride);
-				break;
+				case "import":
+					sessionManager = await this.createImportedSessionManager(importPath!, target, from);
+					break;
+				case "adopt":
+					sessionManager = target.sessionManager;
+					break;
 			}
-			case "fork": {
-				const branched = await this.createBranchedSessionManager(target.source, target.entryId, target.position);
-				sessionManager = branched.sessionManager;
-				selectedText = branched.selectedText;
-				break;
-			}
-			case "import":
-				sessionManager = await this.createImportedSessionManager(importPath!, target, from);
-				break;
-			case "adopt":
-				sessionManager = target.sessionManager;
-				break;
+			conversation = await this.createConversation(target, sessionManager, options);
+		} catch (error) {
+			// Whatever opened closed again, releasing its log.
+			await gate.hold?.abort().catch(() => undefined);
+			throw error;
 		}
-		const conversation = await this.createConversation(target, sessionManager, options);
 		this.conversations.add(conversation);
 		for (const listener of [...this.openedListeners]) listener(conversation);
-		return { cancelled: false, conversation, ...(selectedText === undefined ? {} : { selectedText }) };
+		return {
+			result: { cancelled: false, conversation, ...(selectedText === undefined ? {} : { selectedText }) },
+			...(gate.hold === undefined ? {} : { hold: gate.hold }),
+		};
 	}
 
 	/**
-	 * Check that the opener may leave its source, let the source's extensions
-	 * cancel, and run the opener's preparation. Resolves false when cancelled.
+	 * Admit `opener`'s open of `target` through the host's gate, once its
+	 * intent is still current. Resolves the gate's hold, or undefined when the
+	 * gate cancelled the open. The gate may wait, so the source is checked
+	 * again after it: a failure there gives back what the gate took.
 	 */
+	private async passGate(
+		target: ConversationTarget,
+		opener: Opener,
+		from: HostedConversation | undefined,
+		fromStaysOpen: boolean,
+	): Promise<{ readonly hold?: OpenGateHold } | undefined> {
+		opener.assertCurrent?.();
+		if (!this.openGate) return {};
+		const gated = await this.openGate(target, opener.client);
+		if ("cancelled" in gated) return undefined;
+		try {
+			opener.assertCurrent?.();
+			if (from?.closed) throw new Error("The source conversation is closed");
+			if (from && !fromStaysOpen) from.assertCanLeave();
+		} catch (error) {
+			await gated.abort().catch(() => undefined);
+			throw error;
+		}
+		return { hold: gated };
+	}
+
+	/** Check that the opener may leave its source and let the source's extensions cancel. Resolves false when cancelled. */
 	private async acceptOpen(
 		target: ConversationTarget,
 		options: OpenConversationOptions,
@@ -399,7 +469,6 @@ export class ConversationHost {
 			if (from.closed) throw new Error("The source conversation is closed");
 			if (!fromStaysOpen) from.assertCanLeave();
 		}
-		await options.onOpening?.();
 		return true;
 	}
 
@@ -703,19 +772,21 @@ export class ConversationHost {
 	 * source per its anchor and the host's unattached rule. One client's
 	 * structural intents run one at a time; `assertCurrent` runs before the
 	 * intent opens anything, once the source accepted the change, and right
-	 * before the move, and fails the intent while nothing moved. `beforeMove`
-	 * runs once the target opened, while the source is still open and fenced
-	 * for the leave, so a handoff writes its acknowledgement through the
-	 * source's own writer; a failure there discards the target and keeps the
-	 * client on the source. After the move, an in-place client that recovers
-	 * input replays the target's durable queued input; `withSession` then runs
-	 * against the new conversation unless that recovery failed, and `publish`
-	 * makes the last durable write, whose failure closes the new conversation.
-	 * The target's project trust prompts ask a local client, in the source's
-	 * live state, unless `projectTrustContext` says otherwise.
-	 * A client that follows moves by redirect, leaving a source its other
-	 * clients keep open, may leave it busy, and the source is not fenced for
-	 * its leave.
+	 * before the move, and fails the intent while nothing moved. The host's
+	 * gate admits the open once the source accepted it; its hold commits once
+	 * the client moved, and aborts once a target the client did not move to
+	 * closed again. `beforeMove` runs once the target opened, while the
+	 * source is still open and fenced for the leave, so a handoff writes its
+	 * acknowledgement through the source's own writer; a failure there
+	 * discards the target and keeps the client on the source. After the move,
+	 * an in-place client that recovers input replays the target's durable
+	 * queued input; `withSession` then runs against the new conversation
+	 * unless that recovery failed, and `publish` makes the last durable write,
+	 * whose failure closes the new conversation. The target's project trust
+	 * prompts ask a local client, in the source's live state, unless
+	 * `projectTrustContext` says otherwise. A client that follows moves by
+	 * redirect, leaving a source its other clients keep open, may leave it
+	 * busy, and the source is not fenced for its leave.
 	 */
 	async openFor(
 		client: HostClient,
@@ -727,12 +798,12 @@ export class ConversationHost {
 			publish?: (to: HostedConversation) => Promise<void>;
 		} = {},
 	): Promise<OpenForResult> {
-		const { assertCurrent, beforeMove, withSession, publish, onOpening, ...openOptions } = options;
+		const { assertCurrent, beforeMove, withSession, publish, ...openOptions } = options;
 		const moved = await this.serialize(client.id, async () => {
 			assertCurrent?.();
 			const from = this.conversationOf(client);
 			const fromStaysOpen = from !== undefined && this.staysOpenWithout(client, from);
-			const opened = await this.openTarget(
+			const { result: opened, hold } = await this.openTarget(
 				target,
 				{
 					// Trust prompts reach the local client that asked for the open, in the conversation it leaves.
@@ -744,12 +815,9 @@ export class ConversationHost {
 							}),
 					...openOptions,
 					...(from === undefined ? {} : { from }),
-					onOpening: async () => {
-						assertCurrent?.();
-						await onOpening?.();
-					},
 				},
 				fromStaysOpen,
+				{ client, ...(assertCurrent === undefined ? {} : { assertCurrent }) },
 			);
 			if (opened.cancelled) return undefined;
 			const to = opened.conversation;
@@ -763,11 +831,17 @@ export class ConversationHost {
 				await this.move(client, to);
 			} catch (error) {
 				releaseSource?.();
-				if (this.clientsOf(to).length === 0 && !to.closed) {
-					await this.discard(to).catch(() => undefined);
+				if (this.clientsOf(to).length > 0) {
+					// The client moved; only what followed the move failed.
+					hold?.commit();
+					throw error;
 				}
+				// A close already under way is joined: the hold aborts once the target closed.
+				await this.discard(to).catch(() => undefined);
+				await hold?.abort().catch(() => undefined);
 				throw error;
 			}
+			hold?.commit();
 			// A source that stays open for its other clients admits work again.
 			if (from && !from.closed) releaseSource?.();
 			return opened;

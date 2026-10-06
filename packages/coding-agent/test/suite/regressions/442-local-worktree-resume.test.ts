@@ -31,7 +31,6 @@ import {
 	WorktreeRetentionSweeper,
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
-import { createDisabledDaemonAttach } from "../../../src/modes/interactive/daemon-attach.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
@@ -682,7 +681,6 @@ describe("#442 local archived-worktree resume", () => {
 			host: runtime.host,
 			conversation: runtime.conversation,
 			client: runtime.client,
-			daemonAttach: createDisabledDaemonAttach(),
 			statusContainer: { clear: vi.fn() },
 			showError,
 		}) as InteractiveMode;

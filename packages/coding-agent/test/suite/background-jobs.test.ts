@@ -23,6 +23,7 @@ import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
 import { type JobSnapshot, type JobSummary, jobOfDetails } from "../../src/core/tools/jobs.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
+import { TuiHost } from "../../src/modes/interactive/host/tui-host.ts";
 import { InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { createFakeConversation } from "../utilities/fake-conversation-host.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
@@ -129,7 +130,12 @@ describe("AgentSession background jobs", () => {
 	function setupInteractive(harness: Harness) {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 		// The TUI shows the harness session; nothing here attaches it to a host.
-		const mode = new InteractiveMode({} as ConversationHost, createFakeConversation(harness.session).conversation);
+		const mode = new InteractiveMode(
+			TuiHost.start({
+				host: {} as ConversationHost,
+				conversation: createFakeConversation(harness.session).conversation,
+			}),
+		);
 		modes.push(mode);
 		const control = mode as unknown as {
 			renderer: TuiMainScreen;

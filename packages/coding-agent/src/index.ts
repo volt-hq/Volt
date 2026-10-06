@@ -946,6 +946,8 @@ export {
 	type RpcModeOptions,
 	runPrintMode,
 	runRpcMode,
+	TuiHost,
+	type TuiHostOptions,
 } from "./modes/index.ts";
 export {
 	DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,

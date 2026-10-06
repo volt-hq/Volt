@@ -21,7 +21,12 @@ import type {
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "../../src/core/extensions/index.ts";
-import { ConversationHost, type OpenForResult, type WhenUnattached } from "../../src/core/host/conversation-host.ts";
+import {
+	ConversationHost,
+	type OpenForResult,
+	type OpenGate,
+	type WhenUnattached,
+} from "../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { LiveClient } from "../../src/core/host/live-state.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
@@ -59,6 +64,8 @@ export interface HostHarnessOptions {
 	settings?: ExtensionSettings;
 	/** More extensions every session loads after the recording extension. */
 	extensions?: readonly ExtensionDefinition[];
+	/** The host's open gate. */
+	openGate?: OpenGate;
 }
 
 export interface HostHarness {
@@ -162,6 +169,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 		agentDir: tempDir,
 		extensionMode: options.extensionMode ?? "print",
 		...(options.whenUnattached === undefined ? {} : { whenUnattached: options.whenUnattached }),
+		...(options.openGate === undefined ? {} : { openGate: options.openGate }),
 	});
 
 	return {
