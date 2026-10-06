@@ -147,7 +147,7 @@ function requireArg(args: string[], index: number, label: string): string {
 }
 
 function cliMcpContext(): McpGatewayExecutionContext {
-	return { mode: "print", caller: "user" };
+	return { surface: "cli", caller: "user" };
 }
 
 function parseOptionalJsonArgs(value: string | undefined): Record<string, unknown> | undefined {

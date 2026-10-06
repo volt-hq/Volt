@@ -11,7 +11,6 @@ import type { AgentAbortSource, AgentMessage, ThinkingLevel } from "@hansjm10/vo
 import {
 	type AssistantMessage,
 	createProviderError,
-	getProviders,
 	type ImageContent,
 	type Message,
 	type Model,
@@ -83,7 +82,6 @@ import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
 	ExtensionUIDialogOptions,
-	ProjectTrustContext,
 	SessionIntentResult,
 	ToolInfo,
 } from "../../core/extensions/index.ts";
@@ -111,7 +109,7 @@ import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts
 import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
 import { describeFastModeChange } from "../../core/protocol/intents/state.ts";
 import { queryRegistry } from "../../core/protocol/queries/index.ts";
-import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import { BEDROCK_PROVIDER_ID, isApiKeyLoginProvider } from "../../core/provider-auth.ts";
 import { serveIrohRemoteConnection } from "../../core/remote/iroh/connection.ts";
 import { uploadIrohRemoteDeviceLog } from "../../core/remote/iroh/device-log-rpc.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
@@ -413,24 +411,6 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 
 function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
 	return providerId in defaultModelPerProvider;
-}
-
-const BEDROCK_PROVIDER_ID = "amazon-bedrock";
-
-const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
-
-export function isApiKeyLoginProvider(
-	providerId: string,
-	oauthProviderIds: ReadonlySet<string>,
-	builtInProviderIds: ReadonlySet<string> = BUILT_IN_MODEL_PROVIDERS,
-): boolean {
-	if (BUILT_IN_PROVIDER_DISPLAY_NAMES[providerId]) {
-		return true;
-	}
-	if (builtInProviderIds.has(providerId)) {
-		return false;
-	}
-	return !oauthProviderIds.has(providerId);
 }
 
 /**
@@ -2860,21 +2840,6 @@ export class InteractiveMode {
 			this.showError(`Extension panel ${key}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		this.ui.requestRender();
-	}
-
-	/** The trust prompts of a conversation the TUI opens, shown before its extensions bind. */
-	private createProjectTrustContext(cwd: string): ProjectTrustContext {
-		return {
-			cwd,
-			mode: "tui",
-			hasUI: true,
-			ui: {
-				select: (title, options, opts) => this.showExtensionSelector(title, options, opts),
-				confirm: (title, message, opts) => this.showExtensionConfirm(title, message, opts),
-				input: (title, placeholder, opts) => this.showExtensionInput(title, placeholder, opts),
-				notify: (message, type) => this.showExtensionNotice(type ?? "info", message),
-			},
-		};
 	}
 
 	private createLiveView(): TuiLiveView {
@@ -7779,7 +7744,6 @@ export class InteractiveMode {
 				const result = await openStoredSession(this.host, this.client, sessionRef, {
 					...(cwdOverride === undefined ? {} : { cwdOverride }),
 					withSession: options?.withSession,
-					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 				});
 				switched = !result.cancelled;
 				return result;

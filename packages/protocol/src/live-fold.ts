@@ -4,8 +4,8 @@
  * receives them, so both hold the same state.
  *
  * Keyed values (`set`, `clear`) persist until cleared or reset; a `patch`
- * changes a panel's node or a work item's detail in place, so a reset carries
- * the patched value. A running tool's presentation is replaced by a tool
+ * changes a panel's node, a work item's detail, or a shell command's output
+ * in place, so a reset carries the patched value. A running tool's presentation is replaced by a tool
  * item's `presentation` and patched by its `patch`, and a reset carries the
  * patched presentation too. Streaming
  * items (the streaming assistant message and running tools) build on the
@@ -69,8 +69,9 @@ export class LivePatchError extends Error {
 
 /**
  * `value` with `ops` applied to its node: a panel's `node`, which stays one
- * node, or a work item's `detail` (the empty tree without one), which stays
- * at most one node. Throws {@link LivePatchError} when they do not apply.
+ * node; a work item's `detail` (the empty tree without one), which stays at
+ * most one node; or a shell command's `output`, which stays one terminal
+ * node. Throws {@link LivePatchError} when they do not apply.
  */
 export function patchLiveValue(value: LiveValue, ops: readonly UiPatchOp[]): LiveValue {
 	const apply = (tree: readonly UiNode[]): UiNode[] => {
@@ -90,6 +91,13 @@ export function patchLiveValue(value: LiveValue, ops: readonly UiPatchOp[]): Liv
 		const [detail, ...rest] = apply(value.detail === undefined ? [] : [value.detail]);
 		if (rest.length > 0) throw new LivePatchError("Work detail is at most one node");
 		return detail === undefined ? work : { ...work, detail };
+	}
+	if (value.kind === "bash") {
+		const [output, ...rest] = apply([value.output]);
+		if (output?.type !== "terminal" || rest.length > 0) {
+			throw new LivePatchError("A shell command's output stays one terminal node");
+		}
+		return { ...value, output };
 	}
 	throw new LivePatchError(`A ${value.kind} value has no node to patch`);
 }

@@ -541,6 +541,94 @@ describe("remote redaction of patched panels", () => {
 	});
 });
 
+describe("remote redaction of local-only live values", () => {
+	const live = (seq: number, items: LiveItem[], reset = false): HostFrame => ({
+		type: "live",
+		subscriptionId: "s1",
+		basedOn: 1,
+		seq,
+		...(reset ? { reset: true } : {}),
+		items,
+	});
+	const items = (frame: HostFrame | undefined): LiveItem[] => (frame?.type === "live" ? frame.items : []);
+	const bash = {
+		kind: "bash" as const,
+		command: `cat ${hostFile}`,
+		output: { type: "terminal" as const, key: "output", lines: ["secret"] },
+	};
+	const status = { kind: "ext_status" as const, extension: "ci", text: "ok" };
+
+	it("never sends a user shell command, its patches, or its clear", () => {
+		const redactor = redactorFor(workspacePath);
+		const reset = redactor.redact(
+			live(
+				1,
+				[
+					{ type: "set", key: "bash", value: bash },
+					{ type: "set", key: "ext_status/ci/s", value: status },
+				],
+				true,
+			),
+		);
+		expect(items(reset)).toEqual([{ type: "set", key: "ext_status/ci/s", value: status }]);
+		expect(
+			redactor.redact(
+				live(2, [{ type: "patch", key: "bash", ops: [{ op: "append_lines", path: ["output"], lines: ["more"] }] }]),
+			),
+		).toBeUndefined();
+		expect(redactor.redact(live(3, [{ type: "clear", key: "bash" }]))).toBeUndefined();
+	});
+
+	it("never sends a provider sign-in or a secret input, nor their clears", () => {
+		const redactor = redactorFor(workspacePath);
+		const signIn: LiveItem = {
+			type: "set",
+			key: "host_request/r1",
+			value: {
+				kind: "host_request",
+				requestId: "r1",
+				request: {
+					kind: "provider_auth",
+					provider: "anthropic",
+					flow: "device",
+					url: "https://x.invalid",
+					userCode: "C",
+				},
+			},
+		};
+		const secret: LiveItem = {
+			type: "set",
+			key: "host_request/r2",
+			value: { kind: "host_request", requestId: "r2", request: { kind: "input", title: "API key", secret: true } },
+		};
+		const plain: LiveItem = {
+			type: "set",
+			key: "host_request/r3",
+			value: { kind: "host_request", requestId: "r3", request: { kind: "input", title: "Name" } },
+		};
+		expect(items(redactor.redact(live(1, [signIn, secret, plain], true)))).toEqual([plain]);
+		expect(
+			redactor.redact(
+				live(2, [
+					{ type: "clear", key: "host_request/r1" },
+					{ type: "clear", key: "host_request/r2" },
+				]),
+			),
+		).toBeUndefined();
+		expect(items(redactor.redact(live(3, [{ type: "clear", key: "host_request/r3" }])))).toEqual([
+			{ type: "clear", key: "host_request/r3" },
+		]);
+	});
+
+	it("never asks a remote client a provider sign-in, whatever it accepts and is granted", () => {
+		const profile = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath, remoteWorkspacePath: "/workspace" },
+		});
+		expect([...profile.hostRequests(["provider_auth", "input", "mcp_auth"])].sort()).toEqual(["input", "mcp_auth"]);
+	});
+});
+
 describe("remote redaction of tool presentations", () => {
 	const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
 	const presentation = (lines: string[]): ToolPresentation => ({

@@ -221,7 +221,7 @@ export function createDiscoveryBenchmarkFixture(catalog: DiscoveryCatalog, state
 	const execute = async (input: McpGatewayInput) => {
 		const started = performance.now();
 		// These are exactly the success-path operations used by the model gateway.
-		const result = await manager.handleGatewayInput(input, { mode: "unknown", caller: "model" });
+		const result = await manager.handleGatewayInput(input, { surface: "model", caller: "model" });
 		const formatted = manager.formatGatewayResult(input.action, result);
 		const durationMs = performance.now() - started;
 		const bytes = Buffer.byteLength(formatted.text);

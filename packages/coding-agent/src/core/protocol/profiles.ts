@@ -224,13 +224,18 @@ function remoteIncludes(entry: CommittedSessionEntry): boolean {
 	}
 }
 
-/** The capability a remote client needs to be asked a host request of `kind`. */
-function hostRequestCapability(kind: HostRequestKind): RemoteCapability {
+/**
+ * The capability a remote client needs to be asked a host request of `kind`;
+ * none for a provider sign-in, which a remote client is never asked.
+ */
+function hostRequestCapability(kind: HostRequestKind): RemoteCapability | undefined {
 	switch (kind) {
 		case "approval":
 			return "host.manage.v1";
 		case "mcp_auth":
 			return "integrations.manage.v1";
+		case "provider_auth":
+			return undefined;
 		default:
 			return "conversation.control.v1";
 	}
@@ -287,7 +292,12 @@ export function remoteProfile(options: RemoteProfileOptions): Profile {
 		sourceCut: (text: string): string => sanitizer.sanitizeCutText(text),
 		limits,
 		hostRequests: (accepts: readonly HostRequestKind[]) =>
-			new Set(accepts.filter((kind) => granted.has(hostRequestCapability(kind)))),
+			new Set(
+				accepts.filter((kind) => {
+					const capability = hostRequestCapability(kind);
+					return capability !== undefined && granted.has(capability);
+				}),
+			),
 		intents: { name: "remote" as const, grant: options.grant },
 		conversations: (id: string, linkedFrom?: string) => bound !== undefined && (id === bound || linkedFrom === bound),
 		...(bound === undefined ? {} : { bound }),

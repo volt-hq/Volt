@@ -323,12 +323,14 @@ describe("intent runs", () => {
 		expect(exported.outcome.mode).toBe("plan");
 		expect(exported.result).toBeUndefined();
 		const plan = await queryRegistry.run(contextOf(client), "settings", {});
-		expect(plan).toEqual({
+		expect(plan).toMatchObject({
 			steeringMode: client.session.steeringMode,
 			followUpMode: client.session.followUpMode,
 			autoCompaction: false,
 			autoRetry: client.session.autoRetryEnabled,
 			profile: "",
+			compactionThresholdTokens: 0,
+			profiles: [],
 		});
 	});
 

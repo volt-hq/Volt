@@ -504,12 +504,8 @@ export class SessionExtensionBinding {
 	}
 
 	private terminalClientChanged(previous: ExtensionClient | undefined): void {
-		// request_user_input is offered only while a terminal client is attached.
-		if (
-			this.bound &&
-			this.extensionMode === "tui" &&
-			(this.terminalClient() === undefined) !== (previous === undefined)
-		) {
+		// request_user_input is offered only while a client that asks its questions is attached.
+		if (this.bound && (this.terminalClient() === undefined) !== (previous === undefined)) {
 			this.host.tools().syncPlanningRuntime();
 		}
 	}
@@ -761,15 +757,15 @@ export class SessionExtensionBinding {
 
 	/** Route the runner's UI, command context actions, and errors through the attached clients. */
 	private applyExtensionBindings(runner: ExtensionRunner): void {
-		// TUI and RPC sessions keep UI while no client shows it: dialogs then resolve to their defaults.
+		// Sessions clients drive keep UI while no client shows it: dialogs then resolve to their defaults.
+		// Print and JSON runs have none.
 		runner.setUIContext(
 			(owner) => this.uiFor(owner),
 			this.extensionMode,
 			() =>
 				this.terminalClient() !== undefined ||
 				this.acceptsDialogs() ||
-				this.extensionMode === "tui" ||
-				this.extensionMode === "rpc",
+				(this.extensionMode !== "print" && this.extensionMode !== "json"),
 		);
 		runner.bindCommandContext(this.commandActions);
 

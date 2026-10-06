@@ -540,8 +540,9 @@ export class AgentSession {
 			parentSessionId: () => this.sessionManager.getHeader()?.parentSession?.sessionId,
 			warn: () => {
 				const message = "Could not retain optional background-job performance diagnostics.";
+				// A client that shows the session's UI hears it; without one it goes to stderr.
 				const uiContext = this._extensions.uiContext;
-				if (uiContext && this._extensions.mode === "tui") uiContext.notify(message, "warning");
+				if (uiContext) uiContext.notify(message, "warning");
 				else console.error(message);
 			},
 		});
@@ -617,8 +618,10 @@ export class AgentSession {
 			settingsManager: this.settingsManager,
 			gitContextProvider: this.gitContextProvider,
 			admissionGate: this._admissionGate,
+			liveState: this.liveState,
 			conversation: () => this._conversation,
 			sessionWriter: () => this._sessionWriter,
+			extensionRunner: () => this.extensionRunner,
 			assertActive: () => this._assertActive(),
 			assertNotLost: () => this._assertNotLost(),
 			isDisposed: () => this._disposed,
@@ -2301,6 +2304,16 @@ export class AgentSession {
 	}
 
 	/**
+	 * Run a user shell command (`!`, or `!!` with `excludeFromContext`) for a
+	 * client: extensions see `user_bash` first and may return its result, which
+	 * is recorded as given, or the operations it runs with. The live `bash`
+	 * value shows it until its entry commits.
+	 */
+	runUserBash(command: string, options: { excludeFromContext?: boolean } = {}): Promise<BashResult> {
+		return this._trackAdmittedAncillaryWork(this._bash.runUserCommand(command, options));
+	}
+
+	/**
 	 * Record a bash execution result in session history.
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 * Resolves after the result commits, or at once when it is deferred until
@@ -2378,6 +2391,17 @@ export class AgentSession {
 
 	/** Apply changed prompt-cache keepalive settings to the running schedule. */
 	promptCacheSettingsChanged(): void {
+		this._promptCache.publish();
+	}
+
+	/**
+	 * Apply the settings the session holds after they changed: the
+	 * personality's system prompt, the transport, and prompt-cache keepalive.
+	 */
+	applySettings(): void {
+		this._assertActive();
+		this._tools.refreshSystemPrompt();
+		this._modelSettings.setTransport(this.settingsManager.getTransport());
 		this._promptCache.publish();
 	}
 

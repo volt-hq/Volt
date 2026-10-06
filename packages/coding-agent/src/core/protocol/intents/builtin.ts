@@ -73,6 +73,15 @@ import {
 	reloadIntent,
 	setLabelIntent,
 } from "./session.ts";
+import {
+	authLoginIntent,
+	authLogoutIntent,
+	lspRestartIntent,
+	lspSetTraceIntent,
+	setModelScopeIntent,
+	setProfileIntent,
+	setSettingsIntent,
+} from "./settings.ts";
 import type { IntentDefinition } from "./types.ts";
 import { cancelWorkIntent, openWorkIntent, resumeWorkIntent, startSubagentIntent } from "./work.ts";
 
@@ -139,6 +148,13 @@ export function createBuiltinIntents() {
 		set_keep_awake: setKeepAwakeIntent,
 		set_web_search_key: setWebSearchKeyIntent,
 		upload_device_logs: uploadDeviceLogsIntent,
+		set_settings: setSettingsIntent,
+		set_profile: setProfileIntent,
+		set_model_scope: setModelScopeIntent,
+		"lsp.restart": lspRestartIntent,
+		"lsp.set_trace": lspSetTraceIntent,
+		"auth.login": authLoginIntent,
+		"auth.logout": authLogoutIntent,
 		"mcp.connect": mcpConnectIntent,
 		"mcp.disconnect": mcpDisconnectIntent,
 		"mcp.refresh": mcpRefreshIntent,
