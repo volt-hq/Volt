@@ -5687,18 +5687,23 @@ class IrohDaemonService {
 			case "worker_worktree_restore": {
 				const workerId = this.workers.workerOf(connection.connectionId);
 				const key = workerId === undefined ? undefined : this.workers.keyOf(workerId);
-				// Only a checkout of the worker's own workspace, under its current authority. The worktree manager
-				// requires the session's stored cwd to be `path` and the checkout to be one of that workspace's.
-				const generation = this.services.state
-					.getHostState()
-					.workspaceGenerations?.find((record) => record.workspaceName === key?.workspaceName)?.generation;
-				if (key === undefined || generation !== key.workspaceGeneration) {
-					return refuse("not_current", "the worker's workspace authority changed");
+				// Only a session the worker hosts (claimed before it opens), while the worker serves under its
+				// workspace's current authority. The worktree manager also requires the session's stored cwd to
+				// be `path` and the checkout to be one of the worker's workspace's.
+				if (workerId === undefined || key === undefined || !this.workers.isServing(workerId)) {
+					return refuse("not_current", "the worker no longer serves its workspace");
+				}
+				if (!this.workers.workerHosts(workerId, request.sessionRef.sessionId)) {
+					return refuse("not_hosted", "the worker does not host that conversation");
 				}
 				const held = [...this.workerWorktreePins.values()].filter(
 					(pin) => pin.connectionId === connection.connectionId,
 				).length;
 				if (held >= MAX_WORKER_HOSTED_SESSIONS) return refuse("too_many", "the worker holds too many pins");
+				// Reserved before the restore, so concurrent requests count against the cap.
+				const pinId = randomUUID();
+				const reserved = { connectionId: connection.connectionId, release: () => {} };
+				this.workerWorktreePins.set(pinId, reserved);
 				let unpin: () => void;
 				try {
 					unpin = await this.worktrees.acquireLocalSessionWorktree(
@@ -5707,17 +5712,21 @@ class IrohDaemonService {
 						request.path,
 					);
 				} catch (error) {
+					if (this.workerWorktreePins.get(pinId) === reserved) this.workerWorktreePins.delete(pinId);
 					return refuse(
 						error instanceof WorktreeCapacityError ? error.code : "worktree_restore_failed",
 						error instanceof Error ? error.message : String(error),
 					);
 				}
 				// The pin ends with the worker's connection, if the worker does not release it first.
-				if (this.workers.workerOf(connection.connectionId) !== workerId) {
+				if (
+					this.workerWorktreePins.get(pinId) !== reserved ||
+					this.workers.workerOf(connection.connectionId) !== workerId
+				) {
+					if (this.workerWorktreePins.get(pinId) === reserved) this.workerWorktreePins.delete(pinId);
 					unpin();
 					return refuse("not_registered", "the worker's connection closed");
 				}
-				const pinId = randomUUID();
 				this.workerWorktreePins.set(pinId, { connectionId: connection.connectionId, release: unpin });
 				connection.send({ type: "worker_worktree_pinned", id: request.id, pinId });
 				return;

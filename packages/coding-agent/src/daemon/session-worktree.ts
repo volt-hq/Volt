@@ -38,6 +38,18 @@ interface LocalWorktreeOwnership {
 // replacements retain it before disposing the old session, without a protection gap.
 const localWorktrees = new WeakMap<SessionManager, LocalWorktreeOwnership>();
 
+/** This process is a conversation worker: it reaches its daemon only over its own connection. */
+let conversationWorkerProcess = false;
+
+/**
+ * Mark this process as a conversation worker. A managed checkout opened
+ * without the worker's route then fails instead of reaching for a daemon
+ * (which, its own daemon gone, would start another from inside the worker).
+ */
+export function markConversationWorkerProcess(): void {
+	conversationWorkerProcess = true;
+}
+
 export function retainLocalSessionWorktree(source: SessionManager, target: SessionManager): void {
 	const ownership = localWorktrees.get(source);
 	if (!ownership || localWorktrees.has(target) || source.getCwd() !== target.getCwd()) return;
@@ -116,6 +128,9 @@ export async function restoreLocalSessionWorktree(
 				throw error;
 			}
 			return;
+		}
+		if (conversationWorkerProcess) {
+			throw new Error("A conversation worker restores a managed checkout only through its daemon connection");
 		}
 		const ensured = await ensureDaemonRunning(agentDir);
 		if (!ensured.healthy) {

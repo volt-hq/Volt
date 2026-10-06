@@ -183,6 +183,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			parentSessionManager: runtimeOptions.sessionManager,
 			...(runtimeOptions.subagentContext ? { subagentContext: runtimeOptions.subagentContext } : {}),
 			retainRuntimeOnDispose: options.onSubagentRuntimeCreated !== undefined,
+			...(options.worktreeDaemon === undefined ? {} : { worktreeDaemon: options.worktreeDaemon }),
 			onRuntimeCreated: options.onSubagentRuntimeCreated
 				? (event) =>
 						options.onSubagentRuntimeCreated?.({

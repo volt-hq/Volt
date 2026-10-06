@@ -14,7 +14,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { closeSync, constants, openSync, readdirSync, rmSync, statSync } from "node:fs";
+import { closeSync, constants, lstatSync, openSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ENV_AGENT_DIR } from "../config.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
@@ -158,25 +158,51 @@ export class ProcessWorkerLauncher implements WorkerLauncher {
 			logPath,
 			exited,
 			kill: () => {
-				if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+				if (child.exitCode !== null || child.signalCode !== null) return;
+				// Its process group: the worker and the children it did not detach (language and MCP servers).
+				if (process.platform !== "win32" && child.pid !== undefined) {
+					try {
+						process.kill(-child.pid, "SIGKILL");
+						return;
+					} catch {
+						// Fall back to the worker itself.
+					}
+				}
+				child.kill("SIGKILL");
 			},
 		};
 	}
 
-	/** Remove the oldest logs of workers that are not running, keeping the newest `MAX_WORKER_LOGS - 1`. */
+	/**
+	 * Remove the oldest logs of workers that are not running, keeping the
+	 * newest `MAX_WORKER_LOGS - 1`. Only regular files are logs; anything
+	 * that cannot be read or removed is left, and never fails a launch.
+	 */
 	private pruneLogs(directory: string): void {
-		let logs: Array<{ path: string; mtimeMs: number }>;
+		let names: string[];
 		try {
-			logs = readdirSync(directory)
-				.filter((name) => name.endsWith(".log") && !this.running.has(name.slice(0, -".log".length)))
-				.map((name) => {
-					const path = join(directory, name);
-					return { path, mtimeMs: statSync(path).mtimeMs };
-				});
+			names = readdirSync(directory);
 		} catch {
 			return;
 		}
+		const logs: Array<{ path: string; mtimeMs: number }> = [];
+		for (const name of names) {
+			if (!name.endsWith(".log") || this.running.has(name.slice(0, -".log".length))) continue;
+			const path = join(directory, name);
+			try {
+				const stats = lstatSync(path);
+				if (stats.isFile()) logs.push({ path, mtimeMs: stats.mtimeMs });
+			} catch {
+				// Gone already.
+			}
+		}
 		logs.sort((left, right) => right.mtimeMs - left.mtimeMs);
-		for (const { path } of logs.slice(MAX_WORKER_LOGS - 1)) rmSync(path, { force: true });
+		for (const { path } of logs.slice(MAX_WORKER_LOGS - 1)) {
+			try {
+				rmSync(path, { force: true });
+			} catch {
+				// Left for a later launch.
+			}
+		}
 	}
 }

@@ -377,7 +377,10 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 				type: "ok",
 			},
 		);
-		// It restores and pins only a managed checkout of its own workspace's session, and releases only its own pins.
+		// It restores and pins only a managed checkout of a session it hosts, and releases only its own pins.
+		expect(
+			await client.request({ type: "worker_worktree_restore", path: harness.workspacePath, sessionRef: ref }),
+		).toMatchObject({ type: "error", code: "not_hosted" });
 		expect(
 			await client.request({ type: "worker_worktree_restore", path: harness.workspacePath, sessionRef: otherRef }),
 		).toMatchObject({ type: "error", code: "worktree_restore_failed" });

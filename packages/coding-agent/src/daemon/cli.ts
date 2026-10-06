@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { open } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { getAgentDir, VERSION } from "../config.ts";
+import { killTrackedDetachedChildren } from "../utils/shell.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse, RemoteTransportHealth } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
@@ -647,7 +648,9 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 		case "worker": {
 			// Internal and unlisted: the daemon starts one per conversation worker.
 			const code = await runWorkerProcess(agentDir);
-			// Language servers, watchers, and pools may outlive the conversations; the worker is done.
+			// Language servers, watchers, and pools may outlive the conversations; the worker is done,
+			// and so are the detached process trees its tools started.
+			killTrackedDetachedChildren();
 			process.exit(code);
 			return true;
 		}

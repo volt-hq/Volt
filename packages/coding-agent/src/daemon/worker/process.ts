@@ -10,11 +10,15 @@
  * process exits even if closing its conversations hangs, so a worker never
  * outlives its daemon for long and a restarted daemon (which waits for it on
  * the worker gate) starts. SIGTERM or SIGINT stop it as a forced stop does; a
- * second one exits at once.
+ * second one exits at once. Every exit ends the detached process trees its
+ * tools started. A managed checkout is restored only through its daemon
+ * connection, never by starting a daemon of its own.
  */
 
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { initTheme } from "../../core/theme/runtime.ts";
+import { killTrackedDetachedChildren } from "../../utils/shell.ts";
+import { markConversationWorkerProcess } from "../session-worktree.ts";
 import { WORKER_EXIT_CODES, type WorkerBootstrap, type WorkerExitReason } from "../worker-launcher.ts";
 import { runWorker, WORKER_TURN_CAP_MS } from "./host.ts";
 
@@ -86,6 +90,7 @@ function exitCode(reason: WorkerExitReason): number {
 /** Run the worker the daemon's launch describes; resolves with the process' exit code. */
 export async function runWorkerProcess(agentDir: string): Promise<number> {
 	process.title = "volt-worker";
+	markConversationWorkerProcess();
 	let bootstrap: WorkerBootstrap;
 	try {
 		bootstrap = await readBootstrap();
@@ -111,12 +116,16 @@ export async function runWorkerProcess(agentDir: string): Promise<number> {
 		console.error(`${new Date().toISOString()} worker ${workerId} stopping (${reason})`);
 		deadline ??= setTimeout(() => {
 			console.error(`${new Date().toISOString()} worker ${workerId} did not finish stopping; exiting`);
+			killTrackedDetachedChildren();
 			process.exit(exitCode(reason));
 		}, WORKER_TURN_CAP_MS + EXIT_DEADLINE_MARGIN_MS);
 		deadline.unref();
 	};
 	const onSignal = (signal: NodeJS.Signals) => {
-		if (halt.signal.aborted) process.exit(CRASHED_EXIT_CODE);
+		if (halt.signal.aborted) {
+			killTrackedDetachedChildren();
+			process.exit(CRASHED_EXIT_CODE);
+		}
 		console.error(`${new Date().toISOString()} worker ${workerId} received ${signal}`);
 		halt.abort();
 	};

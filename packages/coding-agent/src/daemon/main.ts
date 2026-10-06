@@ -308,7 +308,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	if (gate.status === "timed_out") {
 		log(
 			"error",
-			`conversation workers of a previous daemon still run after ${Math.round(gate.waitedMs / 1000)}s; not starting (see ${getWorkerLogDirectory(agentDir)})`,
+			`conversation workers of a previous daemon still run after ${Math.round(gate.waitedMs / 1000)}s; not starting (the first line of each log in ${getWorkerLogDirectory(agentDir)} names its worker's pid)`,
 		);
 		return finishBeforeServing(VOLTD_EXIT_WORKERS_RUNNING);
 	}
