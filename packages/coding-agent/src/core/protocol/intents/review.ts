@@ -36,6 +36,7 @@ import {
 	IntentRejectedError,
 	type IntentReviewOptions,
 	type IntentView,
+	missingCapability,
 } from "./types.ts";
 
 const control = ["conversation.control.v1"] as const;
@@ -81,8 +82,11 @@ function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput):
 
 /**
  * The auxiliary tools a local client named for a review: tools of the
- * conversation that do not read or change the live workspace. The review's
- * immutable snapshot tools are always on.
+ * conversation besides its workspace file tools (read, grep, find, ls, edit,
+ * write), as the TUI's review tools are. With any, the passes run in a
+ * disposable checkout of the reviewed head; a command-capable tool such as
+ * `bash` is otherwise unrestricted, and sees what the review's prompts carry
+ * (a pull request's text included). The immutable snapshot tools are always on.
  */
 function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): readonly string[] | undefined {
 	if (tools === undefined) return undefined;
@@ -169,11 +173,49 @@ async function completeBaseBranches(ctx: IntentContext, prefix: string): Promise
 }
 
 /**
+ * Reads of the workspace's Git history and code host, by cwd, in flight or
+ * fresh for `ttlMs`: completing as a user types reads each once.
+ */
+function readsPerCwd<T>(ttlMs: number, read: (cwd: string) => Promise<T>): (cwd: string) => Promise<T> {
+	const reads = new Map<string, { readonly at: number; readonly value: Promise<T> }>();
+	return (cwd) => {
+		const now = Date.now();
+		for (const [key, cached] of reads) {
+			if (now - cached.at >= ttlMs) reads.delete(key);
+		}
+		const cached = reads.get(cwd);
+		if (cached) return cached.value;
+		const value = read(cwd);
+		reads.set(cwd, { at: now, value });
+		return value;
+	};
+}
+
+const recentCommits = readsPerCwd(5_000, (cwd) => listRecentCommits(cwd).catch(() => ({ error: "git log failed" })));
+
+/** The current branch's pull request, probed through the code host at most every 30 seconds. */
+const currentPullRequest = readsPerCwd(30_000, (cwd) => probeCurrentBranchPullRequest(cwd).catch(() => undefined));
+
+/**
+ * Whether completing may read the workspace's Git history or code host for
+ * the client: a remote client only with the capabilities a review start
+ * needs, in a trusted project, as a remote review requires.
+ */
+function readsWorkspace(ctx: IntentContext): boolean {
+	if (ctx.profile.name === "local") return true;
+	return (
+		missingCapability(ctx.profile.grant, control) === undefined &&
+		targetOf(ctx).session.settingsManager.isProjectTrusted()
+	);
+}
+
+/**
  * Recent commits of the workspace (the TUI picker's list), newest first, by
  * abbreviated hash prefix, bounded. Not a git repository: no candidates.
  */
 async function completeCommits(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
-	const commits = await listRecentCommits(targetOf(ctx).session.sessionManager.getCwd());
+	if (!readsWorkspace(ctx)) return [];
+	const commits = await recentCommits(targetOf(ctx).session.sessionManager.getCwd());
 	if (!Array.isArray(commits)) return [];
 	const normalizedPrefix = prefix.toLowerCase();
 	return commits
@@ -190,30 +232,9 @@ async function completeCommits(ctx: IntentContext, prefix: string): Promise<Inte
 		});
 }
 
-/** How long the current branch's pull request, once probed, answers completions without probing again. */
-const CURRENT_PULL_REQUEST_TTL_MS = 30_000;
-
-/** Probes of the current branch's pull request by cwd, in flight or recent: completing never probes per keystroke. */
-const currentPullRequests = new Map<
-	string,
-	{ readonly at: number; readonly probe: ReturnType<typeof probeCurrentBranchPullRequest> }
->();
-
-/** The current branch's pull request, probed through the code host at most once per {@link CURRENT_PULL_REQUEST_TTL_MS}. */
-function currentPullRequest(cwd: string): ReturnType<typeof probeCurrentBranchPullRequest> {
-	const now = Date.now();
-	for (const [key, cached] of currentPullRequests) {
-		if (now - cached.at >= CURRENT_PULL_REQUEST_TTL_MS) currentPullRequests.delete(key);
-	}
-	const cached = currentPullRequests.get(cwd);
-	if (cached) return cached.probe;
-	const probe = probeCurrentBranchPullRequest(cwd).catch(() => undefined);
-	currentPullRequests.set(cwd, { at: now, probe });
-	return probe;
-}
-
 /** The current branch's pull request (the TUI picker's first choice), when its number starts with `prefix`. */
 async function completePullRequests(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
+	if (!readsWorkspace(ctx)) return [];
 	const pullRequest = await currentPullRequest(targetOf(ctx).session.sessionManager.getCwd());
 	if (!pullRequest) return [];
 	const value = String(pullRequest.number);

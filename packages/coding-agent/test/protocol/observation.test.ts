@@ -54,7 +54,12 @@ interface Client {
 /** Ids of intents and queries, unique across every client. */
 let ids = 0;
 
-async function connect(harness: HostHarness, conversation: HostedConversation, profile: Profile): Promise<Client> {
+async function connect(
+	harness: HostHarness,
+	conversation: HostedConversation,
+	profile: Profile,
+	hostRequests: readonly string[] = [],
+): Promise<Client> {
 	const pair = createLoopbackRpcTransportPair();
 	const connection = serveConnection(pair.server, profile, { host: harness.host, conversation, anchor: false });
 	const frames: HostFrame[] = [];
@@ -70,7 +75,7 @@ async function connect(harness: HostHarness, conversation: HostedConversation, p
 		});
 		return found!;
 	};
-	send({ type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests: [] } });
+	send({ type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests } });
 	await connection.ready;
 	return {
 		frames,
@@ -331,6 +336,13 @@ describe("review passes as observed children", () => {
 			phone.query("history", { before: 1_000, limit: 10 }, { conversation: pass.id }),
 		).resolves.toMatchObject({ type: "query_error", reason: { code: "unavailable" } });
 		await expect(client.subscribe(pass.id, "local")).resolves.toMatchObject({ type: "snapshot" });
+		// An observer is never asked a child's host requests: with no client of its own, a pass's dialog has no answer.
+		const asker = await connect(harness, conversation, localProfile, ["confirm"]);
+		cleanups.push(() => asker.close());
+		await expect(asker.subscribe(pass.id, "asked")).resolves.toMatchObject({ type: "snapshot" });
+		await expect(pass.liveState.request({ kind: "confirm", title: "Run it?", message: "Proceed?" })).resolves.toEqual(
+			{ status: "cancelled", reason: "unavailable" },
+		);
 
 		await conversation.session.reviewPasses.close(pass);
 		await vi.waitFor(() =>
@@ -355,6 +367,28 @@ describe("review passes as observed children", () => {
 		await expect(phone.intent("review_uncommitted", { tools: ["bash"] })).resolves.toMatchObject({
 			type: "rejected",
 			reason: { code: "not_allowed", message: "tools is not available over remote host" },
+		});
+
+		// Completing a review reads the workspace's history for a device that may start reviews, and for no other.
+		const complete = { intent: "review_commit", field: "ref", prefix: "" };
+		await expect(phone.query("intent_completions", complete)).resolves.toMatchObject({
+			type: "result",
+			data: { completions: [{ label: "initial" }] },
+		});
+		const observer = await connect(
+			harness,
+			conversation,
+			remoteProfile({
+				grant: createIrohRemoteRpcGrant(["conversation.observe.v1"]),
+				redaction: { workspacePath: repo, remoteWorkspacePath: "/workspace" },
+				bound: conversation.id,
+			}),
+		);
+		cleanups.push(() => observer.close());
+		await expect(observer.query("intent_completions", complete)).resolves.toEqual({
+			type: "result",
+			queryId: expect.any(String),
+			data: { completions: [] },
 		});
 
 		const discovery = held(DISCOVERY_REPORT);
@@ -516,12 +550,24 @@ describe("closed descendants read from their logs", () => {
 		// Reading the grandchild reads its parent's log for the link, then its own, a read per snapshot tail.
 		const tight = await connect(harness, parent, remote(parent, harness.tempDir, { snapshotTail: 1, readBurst: 4 }));
 		cleanups.push(() => tight.close());
+		const reads = vi.spyOn(SessionManager, "openReadOnly");
+		// A query the profile refuses, or with invalid parameters, reads no log.
+		await expect(
+			tight.query("history", { before: -1, limit: 5 }, { conversation: grandchild }),
+		).resolves.toMatchObject({ type: "query_error", reason: { code: "invalid_input" } });
+		expect(reads).not.toHaveBeenCalled();
 		await expect(
 			tight.query("history", { before: 1_000_000, limit: 5 }, { conversation: grandchild }),
 		).resolves.toMatchObject({
 			type: "query_error",
 			reason: { code: "unavailable", retryAfterMs: expect.any(Number) },
 		});
+		expect(reads).toHaveBeenCalledTimes(1);
+		// A log too long for the budget is charged what it held before it loads again: it is not reloaded.
+		await expect(
+			tight.query("history", { before: 1_000_000, limit: 5 }, { conversation: grandchild }),
+		).resolves.toMatchObject({ type: "query_error", reason: { code: "unavailable" } });
+		expect(reads).toHaveBeenCalledTimes(1);
 		void tight.subscribe(child, "child").catch(() => undefined);
 		await vi.waitFor(() => expect(tight.frames.some((frame) => frame.type === "fatal")).toBe(true));
 		expect(tight.frames.some((frame) => frame.type === "snapshot")).toBe(false);

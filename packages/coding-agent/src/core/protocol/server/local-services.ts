@@ -88,8 +88,8 @@ export function createLocalIntentServices(
 			const authStorage = session.modelRegistry.authStorage;
 			const modelRegistry = session.modelRegistry;
 			const settingsManager = session.settingsManager;
-			// Immutable snapshot tools only, unless a local client named auxiliary tools of the conversation;
-			// never workspace tools. A remote review gets no extension tools at all.
+			// Immutable snapshot tools only, unless a local client named auxiliary tools of the conversation
+			// (never its workspace file tools). A remote review gets no auxiliary or extension tools at all.
 			const tools = reviewOptions.remote
 				? REMOTE_REVIEW_TOOL_NAMES
 				: (reviewOptions.tools ?? REMOTE_REVIEW_TOOL_NAMES);

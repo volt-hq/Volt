@@ -20,8 +20,20 @@ export const CHILD_LINK_MAX_DEPTH = 8;
 /** Most closed logs one search for a closed descendant reads for their links. */
 export const CLOSED_LINK_MAX_LOGS = 32;
 
-/** The open conversation `record` of `conversation` links: a subagent's child, or the pass a review runs now. */
-function openChild(conversation: HostedConversation, record: WorkRecord): HostedConversation | undefined {
+/** Who reads children: a remote observer never reads a local-only child, or what it links. */
+export interface ChildObserver {
+	readonly remote?: boolean;
+}
+
+/**
+ * The open conversation `record` of `conversation` links that `observer` may
+ * read: a subagent's child, or the pass a review runs now.
+ */
+function openChild(
+	conversation: HostedConversation,
+	record: WorkRecord,
+	observer: ChildObserver,
+): HostedConversation | undefined {
 	const id = record.child?.conversation;
 	if (id === undefined) return undefined;
 	const child =
@@ -30,7 +42,8 @@ function openChild(conversation: HostedConversation, record: WorkRecord): Hosted
 			: record.kind === "review"
 				? conversation.session.reviewPasses.get(id)
 				: undefined;
-	return child && !child.closed && child.id === id ? child : undefined;
+	if (!child || child.closed || child.id !== id) return undefined;
+	return observer.remote === true && child.localOnly ? undefined : child;
 }
 
 /**
@@ -41,18 +54,19 @@ function openChild(conversation: HostedConversation, record: WorkRecord): Hosted
 export function linkedChildConversation(
 	conversation: HostedConversation,
 	id: string,
+	observer: ChildObserver = {},
 	depth = CHILD_LINK_MAX_DEPTH,
 ): HostedConversation | undefined {
 	const linked: HostedConversation[] = [];
 	for (const record of conversation.work.list()) {
-		const child = openChild(conversation, record);
+		const child = openChild(conversation, record, observer);
 		if (!child) continue;
 		if (child.id === id) return child;
 		linked.push(child);
 	}
 	if (depth <= 1) return undefined;
 	for (const child of linked) {
-		const found = linkedChildConversation(child, id, depth - 1);
+		const found = linkedChildConversation(child, id, observer, depth - 1);
 		if (found) return found;
 	}
 	return undefined;
@@ -93,6 +107,7 @@ export async function findClosedDescendant(
 	conversation: HostedConversation,
 	id: string,
 	read: ClosedLogReader,
+	observer: ChildObserver = {},
 ): Promise<ClosedChildLink | undefined> {
 	let open: HostedConversation[] = [conversation];
 	let closed: ClosedChildLink[] = [];
@@ -105,7 +120,7 @@ export async function findClosedDescendant(
 			for (const record of parent.work.list()) {
 				const childId = record.child?.conversation;
 				if (childId === undefined || seen.has(childId)) continue;
-				const child = openChild(parent, record);
+				const child = openChild(parent, record, observer);
 				if (childId === id) return child ? undefined : closedLink(record, parent.id);
 				if (child) {
 					seen.add(childId);

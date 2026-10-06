@@ -175,7 +175,8 @@ const reviewOptions = {
 	scopeMode: Type.Optional(stringEnum(["incremental", "full"])),
 	/**
 	 * Auxiliary tools of the conversation the review passes may use besides
-	 * their immutable snapshot tools, such as `bash` (local clients only).
+	 * their immutable snapshot tools, such as `bash`, run in a disposable
+	 * checkout of the reviewed head (local clients only).
 	 */
 	tools: Type.Optional(
 		Type.Array(Type.String({ minLength: 1, maxLength: REVIEW_TOOL_NAME_MAX_CHARS }), {

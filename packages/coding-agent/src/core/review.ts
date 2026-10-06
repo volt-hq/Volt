@@ -1294,16 +1294,17 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 		session.dispose();
 		await session.waitForClosed();
 	};
-	if (options.signal?.aborted) {
-		await closePass();
-		throw new Error("Review aborted");
-	}
-	if (conversation) {
+	if (conversation && !options.signal?.aborted) {
 		try {
 			await options.onConversation?.(conversation.id);
 		} catch {
 			// Pass observers are passive and cannot fail an isolated review pass.
 		}
+	}
+	// Checked once the pass is linked: nothing awaits from here until the abort listener is registered.
+	if (options.signal?.aborted) {
+		await closePass();
+		throw new Error("Review aborted");
 	}
 	const publishUsage = (): SessionUsageTotals => {
 		const usage = collectSessionUsage(session);

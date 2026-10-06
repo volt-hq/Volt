@@ -750,6 +750,9 @@ export function serveConnection(
 		return conversation && profile.conversations(id) ? conversation : undefined;
 	};
 
+	/** A remote client never reads a local-only child, or what it links. */
+	const observer = { remote: profile.name !== "local" };
+
 	/**
 	 * A child a client may read but not act on: an open conversation the
 	 * client's conversation links by its work (a subagent's child, a review's
@@ -758,22 +761,28 @@ export function serveConnection(
 	 */
 	const resolveChild = (id: string): HostedConversation | undefined => {
 		if (!home || !profile.conversations(id, home.id)) return undefined;
-		const child = linkedChildConversation(home, id);
-		return child && (profile.name === "local" || !child.localOnly) ? child : undefined;
+		return linkedChildConversation(home, id, observer);
 	};
 
 	/** Links to closed children found from the client's conversation, by that conversation and the child. */
 	const closedLinks = new Map<string, ClosedChildLink>();
+	/** Snapshot tails of the closed logs read last, by conversation: a read of one again charges as much before it loads. */
+	const closedPages = new Map<string, number>();
+	/** Open children whose close ends their subscriptions here. */
+	const watchedChildren = new WeakSet<HostedConversation>();
 
 	/**
 	 * A closed child's log, read-only, charged as a replay that long: one read
-	 * before it loads, and one more per snapshot tail of entries it holds.
+	 * per snapshot tail of entries it holds, one of them (or as many as it held
+	 * when this connection read it last) before it loads, the rest after.
 	 * Undefined when the log cannot be read, or is not the subagent
 	 * conversation of the conversation whose work links it. Throws
 	 * {@link ReadsExhaustedError} when the budget does not cover it.
 	 */
 	const readClosedLog = async (link: ClosedChildLink): Promise<SessionManager | undefined> => {
-		if (!reads.take(1)) throw new ReadsExhaustedError();
+		// A log read before charges what it held then before it loads again: a log too long to read is not reloaded.
+		const charged = closedPages.get(link.conversation) ?? 1;
+		if (!reads.take(charged)) throw new ReadsExhaustedError();
 		let manager: SessionManager;
 		try {
 			manager = await SessionManager.openReadOnly(link.ref);
@@ -782,9 +791,14 @@ export function serveConnection(
 		}
 		let kept = false;
 		try {
-			if (!reads.take(Math.max(0, Math.ceil(manager.getOrdinal() / profile.limits.snapshotTail) - 1))) {
-				throw new ReadsExhaustedError();
+			const pages = Math.max(1, Math.ceil(manager.getOrdinal() / profile.limits.snapshotTail));
+			closedPages.delete(link.conversation);
+			closedPages.set(link.conversation, pages);
+			for (const oldest of closedPages.keys()) {
+				if (closedPages.size <= MAX_CLOSED_LINKS) break;
+				closedPages.delete(oldest);
 			}
+			if (!reads.take(Math.max(0, pages - charged))) throw new ReadsExhaustedError();
 			const header = manager.getHeader();
 			kept =
 				header?.origin === "subagent" &&
@@ -807,7 +821,7 @@ export function serveConnection(
 		const key = `${home.id}\u0000${id}`;
 		const remembered = closedLinks.get(key);
 		if (remembered) return remembered;
-		const link = await findClosedDescendant(home, id, readClosedLog);
+		const link = await findClosedDescendant(home, id, readClosedLog, observer);
 		if (!link) return undefined;
 		closedLinks.set(key, link);
 		for (const oldest of closedLinks.keys()) {
@@ -1062,9 +1076,19 @@ export function serveConnection(
 		refuse: (code: QueryErrorCode, message: string, retryAfterMs?: number) => void,
 	): Promise<void> => {
 		const notOpen = (): void => refuse("unavailable", `Conversation ${id} is not open`);
+		if (!queryRegistry.has(frame.query)) {
+			refuse("unknown_query", `Unknown query: ${frame.query}`);
+			return;
+		}
 		if (!queryRegistry.readsClosedLogs(frame.query)) {
-			if (queryRegistry.has(frame.query)) notOpen();
-			else refuse("unknown_query", `Unknown query: ${frame.query}`);
+			notOpen();
+			return;
+		}
+		// A query the profile refuses, or with invalid parameters, reads nothing.
+		try {
+			queryRegistry.admit({ profile: profile.intents }, frame.query, frame.params);
+		} catch (error) {
+			write({ type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) });
 			return;
 		}
 		let log: SessionManager | undefined;
@@ -1167,6 +1191,8 @@ export function serveConnection(
 		const candidates = new Map<HostedConversation, string>();
 		if (home && host?.conversationOf(client) === home) candidates.set(home, client.id);
 		for (const subscription of subscriptions.values()) {
+			// A child is observe-only: its requests are not the client's to answer.
+			if (resolveTarget(subscription.conversation.id) !== subscription.conversation) continue;
 			if (!candidates.has(subscription.conversation)) {
 				candidates.set(subscription.conversation, `${connectionId}:${subscription.id}`);
 			}
@@ -1244,7 +1270,8 @@ export function serveConnection(
 			profile,
 			sink,
 			live: frame.live ?? true,
-			accepts: (kind) => accepts.has(kind),
+			// A child's host requests never wait for an observer: they resolve as if no client were there.
+			accepts: (kind) => target !== undefined && accepts.has(kind),
 		});
 		subscriptions.set(frame.subscriptionId, subscription);
 		void conversation.lost.then(() => {
@@ -1253,12 +1280,9 @@ export function serveConnection(
 			subscription.end({ reason: "lost" });
 		});
 		// A child is not the host's: its subscriptions end when it closes, such as a review's pass once it ran.
-		if (!target) {
-			void conversation.whenClosed().then(() => {
-				if (subscriptions.get(frame.subscriptionId) !== subscription) return;
-				subscriptions.delete(frame.subscriptionId);
-				subscription.end({ reason: "closed" });
-			});
+		if (!target && !watchedChildren.has(conversation)) {
+			watchedChildren.add(conversation);
+			void conversation.whenClosed().then(() => endSubscriptionsOn(conversation, { reason: "closed" }));
 		}
 		try {
 			subscription.start(frame.after);
