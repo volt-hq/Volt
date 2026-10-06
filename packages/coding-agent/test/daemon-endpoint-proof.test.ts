@@ -45,6 +45,8 @@ async function startImpostor(path: string, ack: Record<string, unknown>): Promis
 	const received: string[] = [];
 	const server = createServer((socket: Socket) => {
 		const decoder = new ControlLineDecoder();
+		// Its clients hang up on it mid-answer (EPIPE on Windows pipes).
+		socket.on("error", () => {});
 		socket.on("data", (chunk) => {
 			received.push(chunk.toString("utf8"));
 			for (const message of decoder.push(chunk)) {
