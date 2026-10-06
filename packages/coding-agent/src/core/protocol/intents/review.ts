@@ -8,7 +8,14 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type { IntentOption } from "@hansjm10/volt-protocol";
 import { openReviewFindings } from "../../host/review-handoff.ts";
-import { listBaseBranches, type ReviewTarget, reviewTargetForRerun } from "../../review.ts";
+import {
+	listBaseBranches,
+	listRecentCommits,
+	MUTABLE_WORKSPACE_REVIEW_TOOLS,
+	probeCurrentBranchPullRequest,
+	type ReviewTarget,
+	reviewTargetForRerun,
+} from "../../review.ts";
 import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../review-discussions.ts";
 import { publishReviewRun } from "../../review-publish.ts";
 import {
@@ -18,7 +25,7 @@ import {
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
 } from "../../review-state.ts";
-import { targetOf } from "./conversation.ts";
+import { localOnlyInput, targetOf } from "./conversation.ts";
 import { boundedDisplayString, MAX_INTENT_COMPLETIONS, MAX_INTENT_LABEL_LENGTH } from "./dynamic.ts";
 import { isIntentStateBusy } from "./state.ts";
 import {
@@ -26,6 +33,7 @@ import {
 	INTENT_ENABLED,
 	type IntentAvailability,
 	type IntentContext,
+	IntentRejectedError,
 	type IntentReviewOptions,
 	type IntentView,
 } from "./types.ts";
@@ -62,14 +70,42 @@ interface ReviewControlsInput {
 	effort?: "low" | "standard" | "high";
 	includeOptional?: boolean;
 	scopeMode?: "incremental" | "full";
+	tools?: string[];
+}
+
+/** A review start: refused on remote profiles that name auxiliary tools, else as reviews are available. */
+function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput): IntentAvailability {
+	const tools = localOnlyInput<ReviewControlsInput>(["tools"])(view, input);
+	return tools.enabled ? reviewAvailability(view) : tools;
+}
+
+/**
+ * The auxiliary tools a local client named for a review: tools of the
+ * conversation that do not read or change the live workspace. The review's
+ * immutable snapshot tools are always on.
+ */
+function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): readonly string[] | undefined {
+	if (tools === undefined) return undefined;
+	const available = new Set(
+		targetOf(ctx)
+			.session.getAllTools()
+			.map((tool) => tool.name),
+	);
+	const refused = tools.filter((name) => !available.has(name) || MUTABLE_WORKSPACE_REVIEW_TOOLS.has(name));
+	if (refused.length > 0) {
+		throw new IntentRejectedError("invalid_input", `Not available to reviews: ${refused.join(", ")}`);
+	}
+	return tools;
 }
 
 /** Remote reviews confirm before they start, require project trust, and sanitize failures. */
 function reviewOptions(ctx: IntentContext, input: ReviewControlsInput): IntentReviewOptions {
 	const remote = ctx.profile.name === "remote";
+	const tools = remote ? undefined : reviewTools(ctx, input.tools);
 	return {
 		remote,
 		requireConfirmation: remote,
+		...(tools === undefined ? {} : { tools }),
 		controls: {
 			...(input.focus ? { focus: input.focus } : {}),
 			...(input.scope
@@ -108,7 +144,7 @@ const reviewStart = {
 	whileBusy: "reject",
 	confirm: {},
 	sourceOwned: true,
-	available: reviewAvailability,
+	available: reviewStartAvailability,
 	accept: acceptReview,
 } as const;
 
@@ -130,6 +166,60 @@ async function completeBaseBranches(ctx: IntentContext, prefix: string): Promise
 			.slice(0, MAX_INTENT_COMPLETIONS)
 			.map((branch) => ({ value: branch }))
 	);
+}
+
+/**
+ * Recent commits of the workspace (the TUI picker's list), newest first, by
+ * abbreviated hash prefix, bounded. Not a git repository: no candidates.
+ */
+async function completeCommits(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
+	const commits = await listRecentCommits(targetOf(ctx).session.sessionManager.getCwd());
+	if (!Array.isArray(commits)) return [];
+	const normalizedPrefix = prefix.toLowerCase();
+	return commits
+		.filter((commit) => /^[0-9a-f]+$/i.test(commit.sha) && commit.sha.toLowerCase().startsWith(normalizedPrefix))
+		.slice(0, MAX_INTENT_COMPLETIONS)
+		.map((commit) => {
+			const label = boundedDisplayString(commit.subject, MAX_INTENT_LABEL_LENGTH);
+			const description = boundedDisplayString(commit.date, MAX_INTENT_LABEL_LENGTH);
+			return {
+				value: commit.sha,
+				...(label === undefined ? {} : { label }),
+				...(description === undefined ? {} : { description }),
+			};
+		});
+}
+
+/** How long the current branch's pull request, once probed, answers completions without probing again. */
+const CURRENT_PULL_REQUEST_TTL_MS = 30_000;
+
+/** Probes of the current branch's pull request by cwd, in flight or recent: completing never probes per keystroke. */
+const currentPullRequests = new Map<
+	string,
+	{ readonly at: number; readonly probe: ReturnType<typeof probeCurrentBranchPullRequest> }
+>();
+
+/** The current branch's pull request, probed through the code host at most once per {@link CURRENT_PULL_REQUEST_TTL_MS}. */
+function currentPullRequest(cwd: string): ReturnType<typeof probeCurrentBranchPullRequest> {
+	const now = Date.now();
+	for (const [key, cached] of currentPullRequests) {
+		if (now - cached.at >= CURRENT_PULL_REQUEST_TTL_MS) currentPullRequests.delete(key);
+	}
+	const cached = currentPullRequests.get(cwd);
+	if (cached) return cached.probe;
+	const probe = probeCurrentBranchPullRequest(cwd).catch(() => undefined);
+	currentPullRequests.set(cwd, { at: now, probe });
+	return probe;
+}
+
+/** The current branch's pull request (the TUI picker's first choice), when its number starts with `prefix`. */
+async function completePullRequests(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
+	const pullRequest = await currentPullRequest(targetOf(ctx).session.sessionManager.getCwd());
+	if (!pullRequest) return [];
+	const value = String(pullRequest.number);
+	if (!value.startsWith(prefix.trim())) return [];
+	const label = boundedDisplayString(`#${value} ${pullRequest.title}`, MAX_INTENT_LABEL_LENGTH);
+	return [{ value, ...(label === undefined ? {} : { label }), description: "Current branch" }];
 }
 
 export const reviewUncommittedIntent = defineIntent({
@@ -169,6 +259,8 @@ export const reviewPrIntent = defineIntent({
 		"Review a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context.",
 	presentation: { kind: "card", group: "Review", priority: 80, icon: "arrow.triangle.pull" },
 	slash: { name: "review", example: "/review pr [number]" },
+	completions: ["number"],
+	complete: (ctx, _field, prefix) => completePullRequests(ctx, prefix),
 	run: (ctx, input) =>
 		runReview(ctx, { kind: "pr", number: input.number?.trim() || undefined }, reviewOptions(ctx, input)),
 });
@@ -180,6 +272,8 @@ export const reviewCommitIntent = defineIntent({
 	description: "Review a commit from workspace history; its metadata and diff are sent to the review model.",
 	presentation: { kind: "card", group: "Review", priority: 70, icon: "clock.arrow.circlepath" },
 	slash: { name: "review", example: "/review commit <ref>" },
+	completions: ["ref"],
+	complete: (ctx, _field, prefix) => completeCommits(ctx, prefix),
 	run: (ctx, input) => runReview(ctx, { kind: "commit", sha: input.ref }, reviewOptions(ctx, input)),
 });
 

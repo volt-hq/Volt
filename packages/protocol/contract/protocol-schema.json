@@ -8857,6 +8857,16 @@
 						"incremental",
 						"full"
 					]
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 128
+					},
+					"maxItems": 64,
+					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -8894,6 +8904,16 @@
 						"incremental",
 						"full"
 					]
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 128
+					},
+					"maxItems": 64,
+					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -8955,6 +8975,16 @@
 						"incremental",
 						"full"
 					]
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 128
+					},
+					"maxItems": 64,
+					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -9117,6 +9147,16 @@
 						"incremental",
 						"full"
 					]
+				},
+				"tools": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 128
+					},
+					"maxItems": 64,
+					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -12760,6 +12800,9 @@
 				},
 				"detail": {
 					"$ref": "#/$defs/UiNode"
+				},
+				"child": {
+					"$ref": "#/$defs/WorkChild"
 				}
 			},
 			"additionalProperties": false,

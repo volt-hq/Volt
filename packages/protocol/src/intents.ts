@@ -59,6 +59,11 @@ const closed = { additionalProperties: false } as const;
 /** Outcomes of non-input intents the host remembers per conversation, so a retried intent id answers the same. */
 export const INTENT_OUTCOME_WINDOW = 256;
 
+/** Most auxiliary tools a review start names. */
+export const REVIEW_TOOLS_MAX = 64;
+/** Longest tool name a review start names, in characters. */
+export const REVIEW_TOOL_NAME_MAX_CHARS = 128;
+
 /** Longest intent name, in characters. */
 export const INTENT_NAME_MAX_CHARS = 160;
 
@@ -167,6 +172,16 @@ const reviewOptions = {
 	effort: Type.Optional(stringEnum(["low", "standard", "high"])),
 	includeOptional: Type.Optional(Type.Boolean()),
 	scopeMode: Type.Optional(stringEnum(["incremental", "full"])),
+	/**
+	 * Auxiliary tools of the conversation the review passes may use besides
+	 * their immutable snapshot tools, such as `bash` (local clients only).
+	 */
+	tools: Type.Optional(
+		Type.Array(Type.String({ minLength: 1, maxLength: REVIEW_TOOL_NAME_MAX_CHARS }), {
+			maxItems: REVIEW_TOOLS_MAX,
+			uniqueItems: true,
+		}),
+	),
 };
 
 const runId = RpcConversationIdentifierSchema;

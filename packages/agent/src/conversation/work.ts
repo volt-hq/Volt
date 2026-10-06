@@ -28,6 +28,7 @@ export interface WorkRecord {
 	readonly delivery: WorkDelivery;
 	readonly resume: boolean;
 	readonly toolCallId?: string;
+	/** The conversation the work runs in: the one it started with, or the latest checkpoint's (a review's pass). */
 	readonly child?: WorkChild;
 	/** Remote capabilities a client needs to act on the work, as its kind declared when it started. */
 	readonly requires?: readonly RemoteCapability[];
@@ -106,7 +107,7 @@ export function reduceWork(
 	if (!record) return fail(`unknown work ${JSON.stringify(entry.payload.workId)}`);
 	if (record.outcome !== undefined) fail(`work ${JSON.stringify(record.workId)} already finished`);
 	if (entry.type === "work_checkpoint") {
-		const { state, progress, detail } = entry.payload;
+		const { state, progress, detail, child } = entry.payload;
 		if (state !== undefined && !CHECKPOINT_STATES[record.state].includes(state)) {
 			fail(`work cannot move from ${record.state} to ${state}`);
 		}
@@ -115,6 +116,7 @@ export function reduceWork(
 			...(state === undefined ? {} : { state }),
 			...(progress === undefined ? {} : { progress }),
 			...(detail === undefined ? {} : { detail }),
+			...(child === undefined ? {} : { child }),
 			updatedOrdinal: entry.ordinal,
 			checkpoints: record.checkpoints + 1,
 		});

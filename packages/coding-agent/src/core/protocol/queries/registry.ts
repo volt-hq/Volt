@@ -47,6 +47,13 @@ export class QueryRegistry {
 		return Object.hasOwn(this.definitions, name);
 	}
 
+	/** Whether query `name` reads a closed child's log. */
+	readsClosedLogs(name: string): boolean {
+		if (!this.has(name)) return false;
+		const definition: QueryDefinition<QueryName> = this.definitions[name];
+		return definition.closedLogs === true;
+	}
+
 	/** Admit and run a query with typed parameters. */
 	run<N extends QueryName>(ctx: IntentContext, name: N, params: QueryParams<N>): Promise<QueryResult<N>> {
 		return this.runUnchecked(ctx, name, params) as Promise<QueryResult<N>>;
@@ -81,7 +88,7 @@ export class QueryRegistry {
 			: formatSchemaError(schema, validator.Errors(admitted));
 		if (invalid !== undefined)
 			throw new QueryRejectedError("invalid_input", `Invalid ${name} parameters: ${invalid}`);
-		if (definition.scope === "conversation" && !ctx.target) {
+		if (definition.scope === "conversation" && !ctx.target && !(definition.closedLogs && ctx.closedLog)) {
 			throw new QueryRejectedError("unavailable", `${name} needs a conversation`);
 		}
 		return definition.run(ctx, admitted as never);

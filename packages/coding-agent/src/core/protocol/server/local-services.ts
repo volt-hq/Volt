@@ -1,8 +1,8 @@
 /**
  * What a local protocol connection gives intents beyond the conversation:
  * aborts that deliver queued input, detached reviews run as the
- * conversation's `review` work, the conversation's subagents, and subscription
- * usage.
+ * conversation's `review` work (each pass a conversation its clients
+ * observe), the conversation's subagents, and subscription usage.
  */
 
 import type { RpcSubagentDefinition } from "@hansjm10/volt-protocol";
@@ -88,6 +88,12 @@ export function createLocalIntentServices(
 			const authStorage = session.modelRegistry.authStorage;
 			const modelRegistry = session.modelRegistry;
 			const settingsManager = session.settingsManager;
+			// Immutable snapshot tools only, unless a local client named auxiliary tools of the conversation;
+			// never workspace tools. A remote review gets no extension tools at all.
+			const tools = reviewOptions.remote
+				? REMOTE_REVIEW_TOOL_NAMES
+				: (reviewOptions.tools ?? REMOTE_REVIEW_TOOL_NAMES);
+			const parentResourceLoader = reviewOptions.remote ? undefined : session.resourceLoader;
 			const reviewed = reviewWorkTarget(prepared.resolution);
 			try {
 				await conversation.work.start(
@@ -106,9 +112,10 @@ export function createLocalIntentServices(
 								sanitizeRemoteErrors: reviewOptions.remote,
 								thinkingLevel,
 								fastModeEnabled,
-								// Immutable snapshot tools only: reviews get no workspace or command-capable tools.
-								tools: REMOTE_REVIEW_TOOL_NAMES,
+								parentResourceLoader,
+								tools,
 								signal: ctx.signal,
+								passes: session.reviewPasses,
 								work: ctx,
 							});
 							if (reviewOptions.remote && result.status === "failed") {

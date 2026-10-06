@@ -7,6 +7,7 @@ import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { minimatch } from "minimatch";
 import type { AgentSession, AgentSessionEvent } from "./agent-session.ts";
+import type { AgentSessionServices } from "./agent-session-services.ts";
 import type { AuthStorage } from "./auth-storage.ts";
 import {
 	type CodeHostProvider,
@@ -15,6 +16,7 @@ import {
 } from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
 import type { SessionIntentResult, ToolDefinition } from "./extensions/types.ts";
+import type { HostedConversation } from "./host/hosted-conversation.ts";
 import { createReviewPromotion } from "./host/review-handoff.ts";
 import type { NewSessionIntentOptions } from "./host/session-intents.ts";
 import type { CustomMessageInput } from "./messages.ts";
@@ -27,6 +29,7 @@ import {
 	readPrReviewBinding,
 } from "./pr-review-binding.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import type { ReviewPasses } from "./review-passes.ts";
 import { reviewUsageDetail, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
@@ -132,7 +135,15 @@ export const MAX_PULL_REQUEST_NUMBER = 2_147_483_647;
 const MAX_PULL_REQUEST_NUMBER_TEXT = String(MAX_PULL_REQUEST_NUMBER);
 const CURRENT_PR_PROBE_TIMEOUT_MS = 1_500;
 const CURRENT_PR_TITLE_MAX_BYTES = 160;
-const MUTABLE_WORKSPACE_REVIEW_TOOLS = new Set(["read", "grep", "find", "ls", "edit", "write"]);
+/** Tools a review never uses: they read or change the live workspace, not the review's immutable snapshot. */
+export const MUTABLE_WORKSPACE_REVIEW_TOOLS: ReadonlySet<string> = new Set([
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"edit",
+	"write",
+]);
 
 interface CommandResult {
 	ok: boolean;
@@ -746,6 +757,10 @@ export interface RunReviewOptions {
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	/** Local-only observer; never forward this warning into review/session/protocol data. */
 	onDiagnosticRetentionWarning?: (message: string) => void | Promise<void>;
+	/** Host each pass as a conversation of these passes while it runs, instead of a bare session. */
+	passes?: ReviewPasses;
+	/** A hosted pass's conversation opened, before its first prompt: the review now runs in it. */
+	onPassConversation?: (conversation: string) => Promise<void> | void;
 	workflowId?: string;
 	workflowAction?: string;
 	/** Host-owned accounting, independent of passive UI observers. */
@@ -772,6 +787,8 @@ export interface ReviewWorkflowSession {
 	/** Writes the session's review records; its view is the session the review belongs to. */
 	sessionWriter?: SessionWriter;
 	resourceLoader: ResourceLoader;
+	/** Where the review's passes run as conversations its clients observe. */
+	reviewPasses?: ReviewPasses;
 	sendCustomMessage<T>(
 		message: CustomMessageInput<T>,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -877,8 +894,10 @@ export interface ExecuteReviewWorkflowOptions {
 	onSessionEvent?: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
 	onDiagnosticRetentionWarning?: RunReviewOptions["onDiagnosticRetentionWarning"];
-	/** The review's work: its stage and accounting so far, live and as a checkpoint per pass. */
-	work?: Pick<WorkContext, "progress" | "checkpoint">;
+	/** Host each pass as a conversation, which the review's work links as its `child` while the pass runs. */
+	passes?: ReviewPasses;
+	/** The review's work: its stage and accounting so far, live and as a checkpoint per pass, and the pass it runs in. */
+	work?: Pick<WorkContext, "progress" | "checkpoint"> & Partial<Pick<WorkContext, "child">>;
 }
 
 export type ExecuteReviewWorkflowResult =
@@ -1174,6 +1193,35 @@ interface ReviewPassOptions<TReport> {
 	onPass?: RunReviewOptions["onPass"];
 	onEvent: (event: AgentSessionEvent) => void;
 	onUsage?: (usage: ReviewUsageSnapshot) => void;
+	/** Host the pass as a conversation of these passes while it runs. */
+	passes?: ReviewPasses;
+	/** The pass reads the pull request text the code host provided: only local clients may observe it. */
+	readsCodeHostContext: boolean;
+	onConversation?: RunReviewOptions["onPassConversation"];
+}
+
+/** What a hosted pass's conversation was created with: the pass's own resources over the review's services. */
+function reviewPassServices(
+	options: Pick<
+		ReviewPassOptions<unknown>,
+		"cwd" | "agentDir" | "authStorage" | "settingsManager" | "modelRegistry" | "resourceLoader"
+	>,
+	session: AgentSession,
+): AgentSessionServices {
+	return {
+		cwd: options.cwd,
+		projectCwd: options.cwd,
+		lexicalProjectCwd: options.cwd,
+		agentDir: options.agentDir,
+		authStorage: options.authStorage,
+		settingsManager: options.settingsManager,
+		modelRegistry: options.modelRegistry,
+		resourceLoader: options.resourceLoader,
+		gitContextProvider: session.gitContextProvider,
+		// The pass's session owns its Git context provider and releases it as it closes.
+		releaseGitContextProvider: () => {},
+		diagnostics: [],
+	};
 }
 
 class ReviewPassError extends Error {
@@ -1226,10 +1274,36 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 				model,
 			),
 	});
-	if (options.signal?.aborted) {
+	// A hosted pass is a conversation the reviewing conversation's clients observe while it runs.
+	let conversation: HostedConversation | undefined;
+	try {
+		conversation = options.passes?.adopt(
+			{ session, services: reviewPassServices(options, session), diagnostics: [] },
+			{ localOnly: options.readsCodeHostContext },
+		);
+	} catch (error) {
 		session.dispose();
 		await session.waitForClosed();
+		throw error;
+	}
+	const closePass = async (): Promise<void> => {
+		if (conversation) {
+			await options.passes?.close(conversation);
+			return;
+		}
+		session.dispose();
+		await session.waitForClosed();
+	};
+	if (options.signal?.aborted) {
+		await closePass();
 		throw new Error("Review aborted");
+	}
+	if (conversation) {
+		try {
+			await options.onConversation?.(conversation.id);
+		} catch {
+			// Pass observers are passive and cannot fail an isolated review pass.
+		}
 	}
 	const publishUsage = (): SessionUsageTotals => {
 		const usage = collectSessionUsage(session);
@@ -1305,8 +1379,7 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 	} finally {
 		unsubscribe();
 		options.signal?.removeEventListener("abort", onAbort);
-		session.dispose();
-		await session.waitForClosed();
+		await closePass();
 	}
 }
 
@@ -1458,6 +1531,9 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("discovery", event),
 					onUsage,
+					passes: options.passes,
+					readsCodeHostContext: snapshot.codeHostContext !== undefined,
+					onConversation: options.onPassConversation,
 				});
 				usage = candidatePass.usage;
 				staticInspectionOnly &&= candidatePass.staticInspectionOnly;
@@ -1511,6 +1587,9 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("verification", event),
 					onUsage,
+					passes: options.passes,
+					readsCodeHostContext: snapshot.codeHostContext !== undefined,
+					onConversation: options.onPassConversation,
 				});
 				usage = verificationPass.usage;
 				staticInspectionOnly &&= verificationPass.staticInspectionOnly;
@@ -1575,6 +1654,9 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 				onPass: options.onPass,
 				onEvent: (event) => onSessionEvent("presentation", event),
 				onUsage,
+				passes: options.passes,
+				readsCodeHostContext: false,
+				onConversation: options.onPassConversation,
 			});
 			presentationReport = presentationPass.report;
 			usage = presentationPass.usage;
@@ -1614,6 +1696,9 @@ export async function runReview(options: RunReviewOptions): Promise<ReviewRunRes
 					onPass: options.onPass,
 					onEvent: (event) => onSessionEvent("presentation", event),
 					onUsage,
+					passes: options.passes,
+					readsCodeHostContext: false,
+					onConversation: options.onPassConversation,
 				});
 				challengePresentation = pass.report.challenge!;
 				staticInspectionOnly &&= pass.staticInspectionOnly;
@@ -1803,6 +1888,9 @@ export async function executeReviewWorkflow(
 		},
 		onUsage: options.onUsage,
 		onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
+		passes: options.passes,
+		// The review's work runs in each pass while it runs: clients follow its `child` to observe it.
+		onPassConversation: (conversation) => work?.child?.({ conversation }),
 		workflowId: prepared.workflowId,
 		workflowAction: prepared.action,
 		incrementalPlan: prepared.incrementalPlan,
@@ -2088,6 +2176,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 					onSessionEvent: admitted?.onSessionEvent,
 					onUsage: admitted?.onUsage,
 					onDiagnosticRetentionWarning: options.onDiagnosticRetentionWarning,
+					passes: options.session.reviewPasses,
 					work: ctx,
 				});
 			} catch (error) {

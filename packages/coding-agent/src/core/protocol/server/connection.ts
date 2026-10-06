@@ -30,6 +30,13 @@
  * frame. A malformed frame ends the connection with `fatal`, an oversized one
  * with `fatal{frame_too_large}`.
  *
+ * A client reads, but never acts on, the children its conversation's work
+ * links (a subagent's conversation, the pass a review runs now), directly or
+ * through linked children: an open child by subscription until it closes,
+ * and a closed subagent child from its log (`subscribe` answers a snapshot,
+ * then `ended{closed}`; `history`, `content`, and `work_output` read it).
+ * Reading a closed log costs reads as a replay that long does.
+ *
  * A connection without a conversation serves host intents and queries only
  * (a workspace stream).
  */
@@ -74,9 +81,9 @@ import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
 import { SessionManager } from "../../session-manager.ts";
-import { linkedSubagentConversation, linkingSubagentWork } from "../../subagents/work.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { EDITOR_TEXT_TIMEOUT_MS } from "../../ui/extension-ui.ts";
+import { type ClosedChildLink, findClosedDescendant, linkedChildConversation } from "../../work/children.ts";
 import { withdrawQueuedInput } from "../intents/conversation.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
@@ -90,6 +97,9 @@ import { logSnapshot, Subscription, type SubscriptionEnd, subscriptionReads } fr
 
 /** Frames a connection holds for its intent and query lane, at most. */
 const MAX_PENDING_FRAMES = 256;
+
+/** Links to closed children a connection remembers, at most. */
+const MAX_CLOSED_LINKS = 64;
 
 /** Intents that may move the client to another conversation. */
 const STRUCTURAL_INTENTS: ReadonlySet<string> = new Set([
@@ -409,6 +419,14 @@ const FREE_QUERIES: ReadonlySet<string> = new Set([
 	"web_search_status",
 ]);
 
+/** Reading a closed log would cost more reads than the connection's budget still holds. */
+class ReadsExhaustedError extends Error {
+	constructor() {
+		super("Too many reads requested");
+		this.name = "ReadsExhaustedError";
+	}
+}
+
 /** Snapshots, replays, and queries a connection may still request: a refilling bucket. */
 class ReadBudget {
 	private readonly burst: number;
@@ -727,26 +745,73 @@ export function serveConnection(
 	};
 
 	/**
-	 * A subagent child a client may read but not act on: an open conversation
-	 * the client's conversation links by subagent work in its log, directly or
-	 * through linked children, when the profile admits children of it.
+	 * A child a client may read but not act on: an open conversation the
+	 * client's conversation links by its work (a subagent's child, a review's
+	 * pass), directly or through linked children, when the profile admits
+	 * children of it. A remote client never reads a local-only child.
 	 */
 	const resolveChild = (id: string): HostedConversation | undefined => {
 		if (!home || !profile.conversations(id, home.id)) return undefined;
-		return linkedSubagentConversation(home, id);
+		const child = linkedChildConversation(home, id);
+		return child && (profile.name === "local" || !child.localOnly) ? child : undefined;
+	};
+
+	/** Links to closed children found from the client's conversation, by that conversation and the child. */
+	const closedLinks = new Map<string, ClosedChildLink>();
+
+	/**
+	 * A closed child's log, read-only, charged as a replay that long: one read
+	 * before it loads, and one more per snapshot tail of entries it holds.
+	 * Undefined when the log cannot be read, or is not the subagent
+	 * conversation of the conversation whose work links it. Throws
+	 * {@link ReadsExhaustedError} when the budget does not cover it.
+	 */
+	const readClosedLog = async (link: ClosedChildLink): Promise<SessionManager | undefined> => {
+		if (!reads.take(1)) throw new ReadsExhaustedError();
+		let manager: SessionManager;
+		try {
+			manager = await SessionManager.openReadOnly(link.ref);
+		} catch {
+			return undefined;
+		}
+		let kept = false;
+		try {
+			if (!reads.take(Math.max(0, Math.ceil(manager.getOrdinal() / profile.limits.snapshotTail) - 1))) {
+				throw new ReadsExhaustedError();
+			}
+			const header = manager.getHeader();
+			kept =
+				header?.origin === "subagent" &&
+				header.parentSession?.sessionId === link.parent &&
+				manager.getSessionId() === link.conversation;
+			return kept ? manager : undefined;
+		} finally {
+			if (!kept) await manager.closePersistence().catch(() => undefined);
+		}
 	};
 
 	/**
-	 * A subagent child a client may read that closed: its conversation is not
-	 * open, but the subagent work that links it records its log.
+	 * A closed child a client may read: its conversation is not open, but work
+	 * that the client's conversation links at any depth records its log. The
+	 * search reads closed children's logs as {@link readClosedLog} does; a
+	 * link found is remembered, since a log's links never change.
 	 */
-	const resolveClosedChild = (id: string) => {
+	const resolveClosedChild = async (id: string): Promise<ClosedChildLink | undefined> => {
 		if (!home || !profile.conversations(id, home.id)) return undefined;
-		const linking = linkingSubagentWork(home, id);
-		return linking?.record.child?.ref === undefined ? undefined : linking;
+		const key = `${home.id}\u0000${id}`;
+		const remembered = closedLinks.get(key);
+		if (remembered) return remembered;
+		const link = await findClosedDescendant(home, id, readClosedLog);
+		if (!link) return undefined;
+		closedLinks.set(key, link);
+		for (const oldest of closedLinks.keys()) {
+			if (closedLinks.size <= MAX_CLOSED_LINKS) break;
+			closedLinks.delete(oldest);
+		}
+		return link;
 	};
 
-	/** A conversation a client may subscribe to or read: a target, or a subagent child. */
+	/** A conversation a client may subscribe to or read: a target, or a linked child. */
 	const resolveReadable = (id: string | undefined): HostedConversation | undefined => {
 		const target = resolveTarget(id);
 		if (target || id === undefined) return target;
@@ -838,7 +903,7 @@ export function serveConnection(
 		const conversation = home === undefined ? undefined : resolveTarget(frame.conversation);
 		if (frame.conversation !== undefined && !conversation) {
 			if (resolveChild(frame.conversation)) {
-				reject({ code: "read_only", message: "Subagent conversations are observe-only" });
+				reject({ code: "read_only", message: "Child conversations are observe-only" });
 				return;
 			}
 			reject({ code: "ended", message: `Conversation ${frame.conversation} is not open` });
@@ -960,6 +1025,10 @@ export function serveConnection(
 			return;
 		}
 		const conversation = home === undefined ? undefined : resolveReadable(frame.conversation);
+		if (frame.conversation !== undefined && !conversation && home !== undefined) {
+			await runClosedQuery(frame, frame.conversation, refuse);
+			return;
+		}
 		if ((frame.conversation !== undefined && !conversation) || conversation?.closed) {
 			refuse("unavailable", `Conversation ${frame.conversation ?? home?.id} is not open`);
 			return;
@@ -971,6 +1040,50 @@ export function serveConnection(
 			write({ type: "result", queryId: frame.queryId, data });
 		} catch (error) {
 			write({ type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) });
+		}
+	};
+
+	/**
+	 * A query of a conversation that is not open: the queries that read logs
+	 * (`history`, `content`, `work_output`) read a closed child's log, charged
+	 * as reading it costs; every other query, or any other conversation, is
+	 * refused as not open.
+	 */
+	const runClosedQuery = async (
+		frame: QueryEnvelope,
+		id: string,
+		refuse: (code: QueryErrorCode, message: string, retryAfterMs?: number) => void,
+	): Promise<void> => {
+		const notOpen = (): void => refuse("unavailable", `Conversation ${id} is not open`);
+		if (!queryRegistry.readsClosedLogs(frame.query)) {
+			if (queryRegistry.has(frame.query)) notOpen();
+			else refuse("unknown_query", `Unknown query: ${frame.query}`);
+			return;
+		}
+		let log: SessionManager | undefined;
+		try {
+			const link = await resolveClosedChild(id);
+			log = link === undefined ? undefined : await readClosedLog(link);
+		} catch (error) {
+			if (error instanceof ReadsExhaustedError) {
+				refuse("unavailable", `Too many ${frame.query} reads; retry later`, Math.min(30_000, reads.retryAfterMs));
+			} else notOpen();
+			return;
+		}
+		if (!log) {
+			notOpen();
+			return;
+		}
+		const closedLog = log;
+		try {
+			const data = await ClientScope.run(client.id, () =>
+				queryRegistry.runFrame({ ...intentContext(undefined), closedLog }, frame.query, frame.params),
+			);
+			write({ type: "result", queryId: frame.queryId, data });
+		} catch (error) {
+			write({ type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) });
+		} finally {
+			await closedLog.closePersistence().catch(() => undefined);
 		}
 	};
 
@@ -1059,55 +1172,39 @@ export function serveConnection(
 	};
 
 	/**
-	 * A closed subagent child, read-only: its log as a snapshot from its last
-	 * position, then `ended{closed}`. The log must be the subagent conversation
-	 * of the conversation whose work links it. A read costs one read up front
-	 * and, once the log is loaded, one more per snapshot tail of entries it
-	 * holds, as a replay that long does.
+	 * A closed child, read-only: its log as a snapshot from its last position,
+	 * then `ended{closed}`. A read the connection's budget does not cover ends
+	 * the connection, as too many subscriptions do.
 	 */
-	const subscribeClosedChild = async (
-		frame: Static<typeof SubscribeFrameSchema>,
-		linking: NonNullable<ReturnType<typeof resolveClosedChild>>,
-	): Promise<void> => {
+	const subscribeClosedChild = async (frame: Static<typeof SubscribeFrameSchema>): Promise<void> => {
 		const ended = () => write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
-		const ref = linking.record.child?.ref;
-		if (!ref || !reads.take(1)) {
-			if (ref) void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
-			else ended();
-			return;
-		}
-		let manager: SessionManager;
+		let log: SessionManager | undefined;
 		try {
-			manager = await SessionManager.openReadOnly(ref);
-		} catch {
-			ended();
-			return;
-		}
-		try {
-			const ordinal = manager.getOrdinal();
-			if (closing) return;
-			if (!reads.take(Math.max(0, Math.ceil(ordinal / profile.limits.snapshotTail) - 1))) {
+			const link = await resolveClosedChild(frame.conversation);
+			log = link === undefined ? undefined : await readClosedLog(link);
+		} catch (error) {
+			if (error instanceof ReadsExhaustedError) {
 				void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
 				return;
 			}
-			const header = manager.getHeader();
-			if (
-				header?.origin === "subagent" &&
-				header.parentSession?.sessionId === linking.parent.id &&
-				manager.getSessionId() === frame.conversation
-			) {
+			log = undefined;
+		}
+		if (log) {
+			try {
+				if (closing) return;
+				const ordinal = log.getOrdinal();
 				write({
 					type: "snapshot",
 					subscriptionId: frame.subscriptionId,
-					conversation: manager.getSessionId(),
+					conversation: log.getSessionId(),
 					ordinal,
-					state: logSnapshot(manager, profile, ordinal),
+					state: logSnapshot(log, profile, ordinal),
 				});
+			} catch {
+				// A log that cannot be read ends the subscription like one that does not exist.
+			} finally {
+				await log.closePersistence().catch(() => undefined);
 			}
-		} catch {
-			// A log that cannot be read ends the subscription like one that does not exist.
-		} finally {
-			await manager.closePersistence().catch(() => undefined);
 		}
 		ended();
 	};
@@ -1121,10 +1218,10 @@ export function serveConnection(
 			void close({ code: "invalid_frame", message: `More than ${profile.limits.subscriptions} subscriptions` });
 			return;
 		}
-		const conversation = resolveReadable(frame.conversation);
+		const target = resolveTarget(frame.conversation);
+		const conversation = target ?? resolveChild(frame.conversation);
 		if (!conversation || conversation.closed) {
-			const closedChild = conversation === undefined ? resolveClosedChild(frame.conversation) : undefined;
-			if (closedChild) return subscribeClosedChild(frame, closedChild);
+			if (conversation === undefined && home !== undefined) return subscribeClosedChild(frame);
 			write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
 			return;
 		}
@@ -1148,6 +1245,14 @@ export function serveConnection(
 			subscriptions.delete(frame.subscriptionId);
 			subscription.end({ reason: "lost" });
 		});
+		// A child is not the host's: its subscriptions end when it closes, such as a review's pass once it ran.
+		if (!target) {
+			void conversation.whenClosed().then(() => {
+				if (subscriptions.get(frame.subscriptionId) !== subscription) return;
+				subscriptions.delete(frame.subscriptionId);
+				subscription.end({ reason: "closed" });
+			});
+		}
 		try {
 			subscription.start(frame.after);
 		} catch {

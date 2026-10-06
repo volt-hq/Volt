@@ -6,6 +6,7 @@ import {
 	type IntentShortcut,
 	type QueryName,
 	type QueryResult,
+	type RemoteCapability,
 	type RpcSessionListItem,
 } from "@hansjm10/volt-protocol";
 import type { ExtensionRunner } from "../../extensions/runner.ts";
@@ -17,6 +18,7 @@ import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalRevie
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-target-metadata.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "../../review-usage.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
+import type { WorkOutput } from "../../work/registry.ts";
 import { targetOf } from "../intents/conversation.ts";
 import { mcpManagerOf, workspaceService } from "../intents/host.ts";
 import { intentRegistry } from "../intents/index.ts";
@@ -286,23 +288,46 @@ export const subagentDefinitionsQuery = defineQuery({
 	},
 });
 
+/**
+ * The output of work `workId` and the capabilities a remote client needs to
+ * read it: of the target conversation's work, or of a closed child's log,
+ * whose records keep the output of their finished work and what their kind
+ * required when they started.
+ */
+function workOutputOf(
+	ctx: IntentContext,
+	workId: string,
+): { readonly requires: readonly RemoteCapability[]; readonly output: WorkOutput | undefined } {
+	if (ctx.closedLog) {
+		const record = ctx.closedLog.getConversationState().work.get(workId);
+		if (!record) return { requires: [], output: undefined };
+		const kept = record.result?.output;
+		return {
+			requires: record.requires ?? [],
+			output: { text: kept?.text ?? "", truncated: kept?.truncated ?? false, final: record.outcome !== undefined },
+		};
+	}
+	const { work } = targetOf(ctx).conversation;
+	return { requires: work.requires(workId), output: work.output(workId) };
+}
+
 export const workOutputQuery = defineQuery({
 	name: "work_output",
 	scope: "conversation",
 	remote: "safe",
 	requires: observe,
+	closedLogs: true,
 	async run(ctx, params) {
-		const { work } = targetOf(ctx).conversation;
+		const { requires, output } = workOutputOf(ctx, params.workId);
 		// A remote client needs what the work's kind requires too: a host action's output takes host management.
 		if (ctx.profile.name !== "local") {
-			const missing = missingCapability(ctx.profile.grant, work.requires(params.workId));
+			const missing = missingCapability(ctx.profile.grant, requires);
 			if (missing !== undefined) {
 				throw new QueryRejectedError("not_allowed", `Remote capability required: ${missing}`, {
 					requiredCapability: missing,
 				});
 			}
 		}
-		const output = work.output(params.workId);
 		if (!output) throw new QueryRejectedError("invalid_input", `Unknown work ${JSON.stringify(params.workId)}`);
 		// Plain text, its paths redacted for the subscriber before it is cut into chunks.
 		let plain = stripVTControlCharacters(output.text)

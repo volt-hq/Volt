@@ -77,7 +77,7 @@ A subscription streams one conversation's projected log and, unless `live: false
 | `lost` | The conversation lost its log. |
 | `shutdown` | The host is shutting down. |
 
-A client may subscribe to the conversation it is on, to another open conversation of the host, or, observe-only, to the conversation of a subagent its conversation links by `subagent` work (`work_started.child.conversation`), directly or through linked children. While the child is open the subscription follows it; once it closed (it ended, or a restart suspended it), the host answers a snapshot of the child's log, then `ended{closed}`.
+A client may subscribe to the conversation it is on, to another open conversation of the host, or, observe-only, to a child its conversation's work links (the work item's `child.conversation`): a subagent's conversation, or the pass a review runs now. Children link at any depth through the children they link. While a child is open the subscription follows it and ends `closed` when it closes. A closed subagent child (it ended, or a restart suspended it) is read from its log: the host answers a snapshot, then `ended{closed}`, and `history`, `content`, and `work_output` with its `conversation` read it too. Only the work records of the client's conversation and its children's logs locate a closed child, and reading a closed log costs reads as a replay of its length does. A review pass keeps no log: once it ends it cannot be read. Paired devices never observe a pass that reads the pull request text the code host provided.
 
 ### Entries and positions
 
@@ -103,7 +103,7 @@ A snapshot's `state` is `{leafId, entries, earlier, model, thinkingLevel, fastMo
 Long-running work of a conversation is a work item: a background job (`job`), a subagent (`subagent`), a review (`review`), a host action awaiting the user's approval (`host_action`), or an extension's work (`ext:<extension>/<kind>`). Its `work_started`, `work_checkpoint`, and `work_finished` entries describe it, and the client fold's `work` holds every open item and the 64 most recently finished, each with its kind, title, state, outcome, latest checkpointed progress and detail, and result metadata (`summary`, `child`, whether it has `output`), never its input or output text.
 
 - **States.** Open work is `awaiting_approval` (a host action), `running`, or `cancelling`; it ends `completed`, `failed`, `cancelled`, or `interrupted`. Open work with a live `work/<workId>` value runs on the host now. Open work of a resumable kind (`resume: true`, subagents) without one is suspended since a restart: it runs again only after `resume_work`, and `cancel_work` ends it. Other work a restart left open ends `interrupted` when the conversation opens again.
-- **Progress.** Checkpoints are coarse (state changes, and kind phases at most every 10 seconds, at most 256 per item); the live value carries the fine-grained progress and detail (`UiNode` data) while the work runs.
+- **Progress.** Checkpoints are coarse (state changes, and kind phases at most every 10 seconds, at most 256 per item); the live value carries the fine-grained progress and detail (`UiNode` data) while the work runs. A checkpoint's `child` moves the item to the conversation it runs in from then on: a review checkpoints each pass as it opens, and a client follows the item's `child` to watch the review's passes and their usage.
 - **Output.** `work_output` reads a work item's output by id: what running work produced so far, or what its result kept (its newest 50 KB).
 - **Delivery.** A completed or failed item of a `wake` kind (jobs) queues a `work_notice` message and starts a turn when the conversation is idle; a `message` kind's notice rides the next turn instead. Notices carry the result's metadata, not its output.
 - **Actions.** `cancel_work`, `open_work`, and `resume_work` act on an item as its kind allows: an item a kind does not let clients cancel is refused with `not_allowed`.
@@ -210,7 +210,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 | `open_work` | `{workId}`: a subagent's conversation, open or closed, to subscribe to; a finished review's findings in a new session, which moves the client | `{conversation}`, or `accepted{conversation}` for a move |
 | `resume_work` | `{workId}`: continue a subagent suspended since a restart | |
 | `start_subagent` | `{agent, prompt}`: start a subagent as work of the conversation | `{workId, conversation}` |
-| `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls | `{workId}` |
+| `review_uncommitted`, `review_branch`, `review_pr`, `review_commit` | review target and controls; `tools?`: auxiliary tools of the conversation the passes may use besides their snapshot tools (local clients only) | `{workId}` |
 | `review_rerun`, `review_open_session`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_export_feedback`, `review_start_discussions`, `review_reset_discussion` | see the contract | |
 | `set_default_model` | `{provider, modelId}`: the default for new conversations | |
 | `set_default_thinking_level` | `{level}` | |
@@ -239,7 +239,7 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | Query | Params | Result |
 |---|---|---|
 | `intents` | | Every intent's descriptor: input schema, scope, fence, remote safety, required capabilities, availability, state, slash alias. |
-| `intent_completions` | `{intent, field, prefix?}` | Completions for one input field. |
+| `intent_completions` | `{intent, field, prefix?}` | Completions for one input field, such as `review_branch.base`, `review_commit.ref`, and `review_pr.number` (the current branch's pull request). |
 | `editor_completions` | `{text, cursor}` | `{prefix, items (≤ 50)}`: completions from the extensions' completion providers for the token ending at `cursor` (in Unicode scalars); `items` replace `prefix`. The host waits at most one second; the remote profile asks only providers that opted in. |
 | `history` | `{before, limit (≤ 200), branch?}` | `{entries, earlier}`: projected entries before ordinal `before`, newest last; with `branch`, the path from the root to that entry. Entries are projected exactly as the subscription sends them. |
 | `content` | `{entryId, part?, offset?}` | `{entryId, part, parts, content}`: one text, thinking, or image block of an entry in full. Text comes in chunks of up to 12,000 Unicode scalars from `offset`, with `nextOffset` and `totalScalars`. |

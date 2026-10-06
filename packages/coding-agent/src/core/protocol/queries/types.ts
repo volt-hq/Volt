@@ -15,6 +15,8 @@ export interface QueryDefinition<N extends QueryName> {
 	readonly remote: "safe" | "unsafe";
 	/** The remote capabilities a run needs. */
 	readonly requires: readonly RemoteCapability[];
+	/** The query also reads a closed child's log, read-only (`ctx.closedLog`), when no runtime serves it. */
+	readonly closedLogs?: true;
 	run(ctx: IntentContext, params: QueryParams<N>): Promise<QueryResult<N>>;
 }
 

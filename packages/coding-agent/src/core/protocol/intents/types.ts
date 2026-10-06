@@ -43,6 +43,7 @@ import type { HostClient } from "../../host/targets.ts";
 import type { PlanningState } from "../../planning.ts";
 import type { ReviewRunControls, ReviewTarget, ReviewWorkflowResult } from "../../review.ts";
 import type { ReviewDiscussionService } from "../../review-discussions.ts";
+import type { SessionManager } from "../../session-manager.ts";
 import type { SettingsManager } from "../../settings-manager.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
 import type { Profile } from "../profiles.ts";
@@ -77,6 +78,8 @@ export interface IntentReviewOptions {
 	readonly requireConfirmation: boolean;
 	readonly controls?: Partial<ReviewRunControls>;
 	readonly parentRunId?: string;
+	/** Auxiliary tools of the conversation the passes may use besides their snapshot tools (local clients only). */
+	readonly tools?: readonly string[];
 }
 
 /** Subagents of the conversation, on hosts that let clients start them. */
@@ -187,6 +190,12 @@ export interface IntentContext {
 	readonly assertCurrent?: () => void;
 	/** A protocol connection's subscriber profile: what `history` and `content` project. */
 	readonly subscriber?: Profile;
+	/**
+	 * The log of a closed conversation the client may read, opened read-only:
+	 * what the queries that read logs (`history`, `content`, `work_output`)
+	 * read when no runtime serves the conversation. Set without a target.
+	 */
+	readonly closedLog?: SessionManager;
 	/** The source of the `input` event the prompts it sends raise; `rpc` by default. */
 	readonly inputSource?: InputSource;
 }

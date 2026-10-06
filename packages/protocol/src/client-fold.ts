@@ -125,6 +125,7 @@ export const ClientWorkItemSchema = Type.Object(
 		delivery: WorkDeliverySchema,
 		resume: Type.Boolean(),
 		toolCallId: Type.Optional(LogEntryIdSchema),
+		/** The conversation the work runs in: its `work_started` child, or the latest checkpoint's (a review's pass). */
 		child: Type.Optional(WorkChildSchema),
 		/** The kind opens the work's conversation (`open_work`). */
 		opens: Type.Optional(Type.Boolean()),
@@ -545,6 +546,7 @@ class ClientStateBuilder {
 				...(payload.state === undefined ? {} : { state: payload.state }),
 				...(payload.progress === undefined ? {} : { progress: payload.progress }),
 				...(payload.detail === undefined ? {} : { detail: payload.detail }),
+				...(payload.child === undefined ? {} : { child: payload.child }),
 				updatedOrdinal: ordinal,
 			}),
 		);
