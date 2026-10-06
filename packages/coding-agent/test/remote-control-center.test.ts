@@ -89,6 +89,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 			},
 		],
 		phoneConnections: 1,
+		workers: [],
 		remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
 		workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
 		clients: [

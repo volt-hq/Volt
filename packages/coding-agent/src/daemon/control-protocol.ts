@@ -11,6 +11,8 @@ import {
 	ControlResponseSchema,
 	type RemoteTransportHealth,
 	type RemoteTransportReasonCode,
+	WORKER_REQUEST_TYPES,
+	type WorkerRequestType,
 } from "@hansjm10/volt-protocol/daemon-control";
 import {
 	type IrohRemotePushNotification,
@@ -44,6 +46,9 @@ export type {
 	ControlRequest,
 	ControlResponse,
 	ControlRevokedClientStatus,
+	ControlWorkerOrigin,
+	ControlWorkerState,
+	ControlWorkerStatus,
 	ControlWorkspaceStatus,
 	ControlWorktreeStatus,
 	DaemonRemotePolicyStatus,
@@ -55,9 +60,12 @@ export type {
 	RelayPreamble,
 	RemoteTransportHealth,
 	RemoteTransportReasonCode,
+	WorkerHostKind,
+	WorkerSpawnSpec,
+	WorkerStopReason,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -167,6 +175,13 @@ function isWithinNotificationBudgets(notification: IrohRemotePushNotification): 
 		const value = fields[field];
 		return typeof value !== "string" || Buffer.byteLength(value, "utf8") <= budget;
 	});
+}
+
+const WORKER_REQUESTS: ReadonlySet<string> = new Set(WORKER_REQUEST_TYPES);
+
+/** Whether `type` is a request only a worker connection may send. */
+export function isWorkerRequestType(type: string): type is WorkerRequestType {
+	return WORKER_REQUESTS.has(type);
 }
 
 /** A request the contract schema accepts, with a relayed notification inside its UTF-8 budgets. */

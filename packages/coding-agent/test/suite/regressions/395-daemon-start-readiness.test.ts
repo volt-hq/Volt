@@ -47,6 +47,7 @@ function healthyProbe(pid = child.pid): ControlSocketProbe {
 			clients: [],
 			remoteTransport: { state: "starting" },
 			keepAwake: { enabled: false, state: "disabled" },
+			workers: [],
 		},
 	};
 }

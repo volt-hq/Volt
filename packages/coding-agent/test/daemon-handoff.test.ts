@@ -144,6 +144,7 @@ async function startDaemonHalf(
 					workspaces,
 					clients: [],
 					keepAwake: { enabled: false, state: "disabled" },
+					workers: [],
 				});
 				return;
 			case "workspace_register":

@@ -23,6 +23,7 @@ import {
 	waitForDaemonExit,
 } from "./spawn.ts";
 import { inspectVoltdStateFiles, regenerateInvalidVoltdState } from "./state.ts";
+import { InProcessWorkerLauncher } from "./worker-launcher.ts";
 
 const STOP_TIMEOUT_MS = DAEMON_SHUTDOWN_TIMEOUT_MS; // 60s drain cap + margin
 const STOP_SIGNAL_GRACE_TIMEOUT_MS = 5_000;
@@ -364,6 +365,13 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	for (const client of status.clients) {
 		console.error(`  ${client.clientNodeId}${client.label ? ` (${client.label})` : ""}`);
 	}
+	console.error(`workers: ${status.workers.length}`);
+	for (const worker of status.workers) {
+		const clients = worker.clients.local + worker.clients.remote;
+		console.error(
+			`  ${worker.workerId} (pid ${worker.pid}): ${worker.state}, opened by ${worker.origin}, ${worker.workspaceName}/${worker.sessionIds.join(", ")} (clients ${clients})`,
+		);
+	}
 	console.error(`leases: ${status.leases.length}`);
 	for (const lease of status.leases) {
 		console.error(
@@ -623,6 +631,7 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 					agentDir,
 					foreground: true,
 					prepareEnvironment: () => resolveDaemonEnvironment({ serviceStart: rest.includes("--service") }),
+					workerLauncher: new InProcessWorkerLauncher(),
 				},
 				[createIrohDaemonService()],
 			);

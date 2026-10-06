@@ -30,7 +30,7 @@ import {
 	beginReviewSiblingAdmission,
 	withReviewSourceWriteLease,
 } from "../../../src/daemon/review-sibling-admission.ts";
-import type { IrohRemoteAgentRuntime } from "../../../src/modes/rpc/iroh-remote-agent-runtime.ts";
+import type { IrohRemoteAgentRuntime } from "../../../src/daemon/worker/conversation-factory.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { anchorLiveReviewRun, anchorReviewRun } from "../../utilities/review-runs.ts";
 import { createHarness } from "../harness.ts";

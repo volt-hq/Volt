@@ -20,7 +20,7 @@ import {
 	collectClientAuthorityInvalidationStreams,
 } from "../src/daemon/iroh-service.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
-import type { IrohRemoteAgentRuntime } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
+import type { IrohRemoteAgentRuntime } from "../src/daemon/worker/conversation-factory.ts";
 import { createTestDaemonRuntime, createTestSession } from "./iroh-stream-doubles.ts";
 import { createHostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";

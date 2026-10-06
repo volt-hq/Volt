@@ -790,6 +790,12 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Event.daemon_shutdown"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.worker_spawn"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.worker_stop"
 				}
 			]
 		},
@@ -980,6 +986,48 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.Event.worker_spawn": {
+			"type": "object",
+			"required": [
+				"type",
+				"spec"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_spawn"
+				},
+				"spec": {
+					"$ref": "#/$defs/Control.WorkerSpawnSpec"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.worker_stop": {
+			"type": "object",
+			"required": [
+				"type",
+				"stopId",
+				"reason",
+				"force"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_stop"
+				},
+				"stopId": {
+					"type": "string"
+				},
+				"reason": {
+					"$ref": "#/$defs/Control.WorkerStopReason"
+				},
+				"force": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.Fatal": {
 			"type": "object",
 			"required": [
@@ -1071,6 +1119,44 @@
 							"type": "string"
 						},
 						"relayToken": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": true
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"role",
+						"protocolVersion",
+						"workerId",
+						"workerToken",
+						"pid",
+						"version"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "hello"
+						},
+						"role": {
+							"type": "string",
+							"const": "worker"
+						},
+						"protocolVersion": {
+							"type": "number"
+						},
+						"workerId": {
+							"type": "string"
+						},
+						"workerToken": {
+							"type": "string"
+						},
+						"pid": {
+							"type": "number"
+						},
+						"version": {
 							"type": "string"
 						}
 					},
@@ -1579,6 +1665,24 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.relay_notification_delivery"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_ready"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_open_failed"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_activity"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_hosts"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_released"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_stop_result"
 				}
 			]
 		},
@@ -2132,6 +2236,155 @@
 				},
 				"viewerFeedId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_activity": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"active"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_activity"
+				},
+				"id": {
+					"type": "string"
+				},
+				"active": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_hosts": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId",
+				"kind"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_hosts"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				},
+				"kind": {
+					"$ref": "#/$defs/Control.WorkerHostKind"
+				},
+				"parentSessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_open_failed": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_open_failed"
+				},
+				"id": {
+					"type": "string"
+				},
+				"outcome": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string",
+					"maxLength": 1024,
+					"pattern": "^[\\s\\S]{0,1024}$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_ready": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionIds"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_ready"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_released": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_released"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_stop_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"stopId",
+				"outcome"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_stop_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"stopId": {
+					"type": "string"
+				},
+				"outcome": {
+					"type": "string",
+					"enum": [
+						"stopped",
+						"refused_active"
+					]
 				}
 			},
 			"additionalProperties": false
@@ -2711,7 +2964,8 @@
 				"workspaces",
 				"clients",
 				"remoteTransport",
-				"keepAwake"
+				"keepAwake",
+				"workers"
 			],
 			"properties": {
 				"type": {
@@ -2782,6 +3036,12 @@
 				},
 				"keepAwake": {
 					"$ref": "#/$defs/Control.KeepAwakeStatus"
+				},
+				"workers": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/Control.WorkerStatus"
+					}
 				}
 			},
 			"additionalProperties": false
@@ -2948,6 +3208,181 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"Control.WorkerHostKind": {
+			"type": "string",
+			"enum": [
+				"child",
+				"sibling",
+				"moved"
+			]
+		},
+		"Control.WorkerOrigin": {
+			"type": "string",
+			"enum": [
+				"phone",
+				"tui"
+			]
+		},
+		"Control.WorkerSpawnSpec": {
+			"type": "object",
+			"required": [
+				"workerId",
+				"origin",
+				"workspace",
+				"session",
+				"cwd",
+				"root",
+				"projectCwd",
+				"toolPolicy",
+				"projectTrusted"
+			],
+			"properties": {
+				"workerId": {
+					"type": "string"
+				},
+				"origin": {
+					"$ref": "#/$defs/Control.WorkerOrigin"
+				},
+				"workspace": {
+					"type": "object",
+					"required": [
+						"name",
+						"path",
+						"generation"
+					],
+					"properties": {
+						"name": {
+							"type": "string"
+						},
+						"path": {
+							"type": "string"
+						},
+						"generation": {
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						}
+					},
+					"additionalProperties": false
+				},
+				"session": {
+					"$ref": "#/$defs/SessionReference"
+				},
+				"cwd": {
+					"type": "string"
+				},
+				"root": {
+					"type": "string"
+				},
+				"projectCwd": {
+					"type": "string"
+				},
+				"baseRef": {
+					"type": "string"
+				},
+				"toolPolicy": {
+					"type": "object",
+					"required": [
+						"tools",
+						"allowUnlistedExtensionTools"
+					],
+					"properties": {
+						"tools": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						},
+						"allowUnlistedExtensionTools": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				"projectTrusted": {
+					"type": "boolean"
+				},
+				"profile": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorkerState": {
+			"type": "string",
+			"enum": [
+				"starting",
+				"live",
+				"retiring"
+			]
+		},
+		"Control.WorkerStatus": {
+			"type": "object",
+			"required": [
+				"workerId",
+				"pid",
+				"state",
+				"origin",
+				"workspaceName",
+				"sessionIds",
+				"clients"
+			],
+			"properties": {
+				"workerId": {
+					"type": "string"
+				},
+				"pid": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 9007199254740991
+				},
+				"state": {
+					"$ref": "#/$defs/Control.WorkerState"
+				},
+				"origin": {
+					"$ref": "#/$defs/Control.WorkerOrigin"
+				},
+				"workspaceName": {
+					"type": "string"
+				},
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"clients": {
+					"type": "object",
+					"required": [
+						"local",
+						"remote"
+					],
+					"properties": {
+						"local": {
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						},
+						"remote": {
+							"type": "integer",
+							"minimum": 0,
+							"maximum": 9007199254740991
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.WorkerStopReason": {
+			"type": "string",
+			"enum": [
+				"retention",
+				"authority",
+				"shutdown",
+				"lease_transferred"
+			]
 		},
 		"Control.WorkspaceStatus": {
 			"type": "object",

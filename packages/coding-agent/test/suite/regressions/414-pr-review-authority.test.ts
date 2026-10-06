@@ -19,6 +19,7 @@ import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationAuthority } from "../../../src/daemon/pr-review-checkout.ts";
 import * as reviewGit from "../../../src/daemon/pr-review-git.ts";
 import { VoltdStateStore } from "../../../src/daemon/state.ts";
+import { WorkerRegistry } from "../../../src/daemon/worker-registry.ts";
 import { getWorktreesRoot, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
@@ -282,6 +283,20 @@ async function fixture(grant = capabilities) {
 			async close() {},
 			async quiesce() {},
 		},
+		// No conversation opens here.
+		workers: new WorkerRegistry({
+			launcher: {
+				launch() {
+					throw new Error("no workers in this test");
+				},
+			},
+			agentDir,
+			socketPath: () => "unused",
+			sendTo: () => false,
+			currentGeneration: () => 1,
+			detachedRuntimeTtlMs: () => 60_000,
+			audit() {},
+		}),
 		// Streams record client activity for PR status polling; nothing else may touch the change association.
 		changes: new Proxy(
 			{},

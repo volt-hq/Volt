@@ -13,7 +13,7 @@ import {
 import { IrohRemoteOutcomeError } from "../../../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
-import { createIrohRemoteAgentRuntimeWithSessionSelection } from "../../../src/modes/rpc/iroh-remote-agent-runtime.ts";
+import { createIrohRemoteAgentRuntimeWithSessionSelection } from "../../../src/daemon/worker/conversation-factory.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 

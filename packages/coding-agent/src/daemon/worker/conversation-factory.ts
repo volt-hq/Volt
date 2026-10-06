@@ -20,14 +20,14 @@ import {
 	type SubagentRuntimeCreatedEvent,
 	type SubagentRuntimeRegistration,
 } from "../../core/subagents/index.ts";
+import { runMigrations } from "../../migrations.ts";
+import { resolvePath } from "../../utils/paths.ts";
 import {
 	createSessionManagerTargetStore,
 	type IrohRemoteSessionTarget,
 	type ResolvedSessionTargetWithManager,
 	resolveIrohRemoteSessionTarget,
-} from "../../daemon/session-target.ts";
-import { runMigrations } from "../../migrations.ts";
-import { resolvePath } from "../../utils/paths.ts";
+} from "../session-target.ts";
 
 export interface IrohRemoteAgentRuntimeOptions {
 	/** Legacy unresolved grant used by direct callers. Daemon runtimes pass toolPolicy instead. */

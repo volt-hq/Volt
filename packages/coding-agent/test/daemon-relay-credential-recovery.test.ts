@@ -366,6 +366,7 @@ describe("managed relay credential recovery", () => {
 			clients: [],
 			remoteTransport: { state: "ready" },
 			keepAwake: { enabled: false, state: "disabled" },
+			workers: [],
 		};
 		expect(ControlValidators.response.Check(base)).toBe(true);
 		for (const state of ["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"]) {

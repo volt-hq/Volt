@@ -72,6 +72,8 @@ import {
 } from "./paths.ts";
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
+import type { WorkerLauncher } from "./worker-launcher.ts";
+import { WorkerRegistry } from "./worker-registry.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
 export interface Clock {
@@ -95,6 +97,8 @@ export interface VoltdConfig {
 	 * lock is held. Omitted (tests) keeps the inherited environment.
 	 */
 	prepareEnvironment?: () => Promise<DaemonEnvironmentResolution>;
+	/** How conversation workers start. Without one, the daemon refuses to spawn any (tests of the control plane). */
+	workerLauncher?: WorkerLauncher;
 }
 
 export interface VoltdProcessLifecycle {
@@ -167,6 +171,8 @@ export interface VoltdRuntimeServices {
 	changes: ChangeAssociationService;
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
+	/** The conversation workers the daemon supervises. */
+	workers: WorkerRegistry;
 	keepAwake: KeepAwakeController;
 	/** Stored Brave Search API key for the web_search tool, persisted in auth.json. */
 	webSearchKey: { set(apiKey: string | null): void; readonly configured: boolean };
@@ -446,6 +452,24 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	const extensionInstances: VoltdServiceExtensionInstance[] = [];
 	let controlServer: ControlServer | undefined;
+	const workers = new WorkerRegistry({
+		launcher: config.workerLauncher ?? {
+			launch() {
+				throw new Error("This daemon runs no conversation workers");
+			},
+		},
+		agentDir,
+		socketPath: () => paths.socketPath,
+		sendTo: (connectionId, event) => controlServer?.sendTo(connectionId, event) ?? false,
+		currentGeneration: (workspaceName) => {
+			const hostState = state.getHostState();
+			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
+			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
+		},
+		detachedRuntimeTtlMs: () => state.state.settings.detachedRuntimeTtlMs,
+		audit: (event) => void auditLogger.log(event).catch(() => {}),
+		log: (level, message, details) => logger.log(level, "workers", message, details),
+	});
 
 	const keepAwake = new KeepAwakeController({
 		...config.keepAwake,
@@ -510,6 +534,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				);
 			}
 		}
+		// Their clients are gone: each worker finishes its turn (60 s cap), closes its conversations, and exits.
+		await workers.stopAll();
 		await keepAwake.shutdown().catch(() => {});
 		await changes.close().catch(() => {});
 		await state.close().catch(() => {});
@@ -597,6 +623,16 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	};
 
 	const handleRequest = async (connection: ControlConnection, request: ControlRequest): Promise<void> => {
+		switch (request.type) {
+			case "worker_ready":
+			case "worker_open_failed":
+			case "worker_activity":
+			case "worker_hosts":
+			case "worker_released":
+			case "worker_stop_result":
+				connection.send(workers.handleWorkerRequest(connection.connectionId, request));
+				return;
+		}
 		for (const extension of extensionInstances) {
 			if (await extension.handleRequest?.(connection, request)) {
 				return;
@@ -663,6 +699,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 						detachedRuntimeTtlMs: state.state.settings.detachedRuntimeTtlMs,
 					},
 					keepAwake: keepAwake.status,
+					workers: workers.list(),
 				});
 				return;
 			}
@@ -913,6 +950,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			handlers: {
 				onRequest: handleRequest,
 				isShuttingDown: () => shutdownPhase !== "running",
+				workerAdmission: {
+					admitWorker: (hello, connection) => workers.admitWorker(hello, connection.connectionId),
+				},
 				relayAdmission: {
 					admitRelay(hello, socket, bufferedRemainder) {
 						for (const extension of extensionInstances) {
@@ -924,6 +964,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					},
 				},
 				onConnectionClosed(connection) {
+					if (connection.client === "worker") workers.onConnectionClosed(connection.connectionId);
 					for (const extension of extensionInstances) {
 						extension.onConnectionClosed?.(connection);
 					}
@@ -1072,6 +1113,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		changes,
 		auditLogger,
 		controlServer,
+		workers,
 		keepAwake,
 		webSearchKey,
 		requestShutdown,

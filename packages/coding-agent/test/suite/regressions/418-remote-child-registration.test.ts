@@ -53,6 +53,7 @@ describe("#418 explicit current-directory registration", () => {
 			workspaces: [structuredClone(parent)],
 			clients: [],
 			keepAwake: { enabled: false, state: "disabled" },
+			workers: [],
 		};
 		requests = [];
 		override = undefined;
