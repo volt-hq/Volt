@@ -2,10 +2,10 @@ import { setKeybindings } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { isApiKeyLoginProvider } from "../src/core/provider-auth.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../src/core/provider-display-names.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { OAuthSelectorComponent } from "../src/modes/interactive/components/oauth-selector.ts";
-import { isApiKeyLoginProvider } from "../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const originalOpenAiApiKey = process.env.OPENAI_API_KEY;

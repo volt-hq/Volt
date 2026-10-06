@@ -1297,6 +1297,7 @@ export async function main(args: string[], options?: MainOptions) {
 				onReady: () => {
 					void conversation.startRecoveredClientInputs().catch(() => undefined);
 				},
+				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
 			});
 		} else if (appMode === "interactive") {
 			const tuiHost = TuiHost.start({

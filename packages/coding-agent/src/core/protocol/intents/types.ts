@@ -174,6 +174,8 @@ export interface IntentServices {
 	readonly workspace?: IntentWorkspaceServices;
 	/** The theme the host shares, when it shares one. */
 	readonly hostTheme?: () => IntentHostTheme | undefined;
+	/** The model patterns the host started with (`--models`): a profile switch scopes models by them, not by settings. */
+	readonly modelScopePatterns?: readonly string[];
 }
 
 /** One invocation's context: the target conversation (conversation scope), the host's services, and the profile. */

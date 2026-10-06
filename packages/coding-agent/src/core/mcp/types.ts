@@ -29,7 +29,8 @@ export type McpServerStatus =
 	| "disconnected";
 export type McpAuthState = "none" | "required" | "pending" | "authenticated" | "failed";
 export type McpRecentCallStatus = "started" | "completed" | "failed" | "cancelled";
-export type McpCallerSurface = "model" | "tui" | "rpc" | "mobile" | "print" | "json" | "unknown";
+/** Who called: the model through a tool, a local or remote protocol client, or the `volt mcp` command line. */
+export type McpCallerSurface = "model" | "local" | "remote" | "cli";
 export type McpMetadataCategory = "tools" | "resources" | "prompts";
 
 export interface McpSettings {
@@ -376,7 +377,7 @@ export interface McpClientFactory {
 }
 
 export interface McpGatewayExecutionContext {
-	mode: "tui" | "rpc" | "json" | "print" | "unknown";
+	surface: McpCallerSurface;
 	caller?: "model" | "user";
 	restrictedTrustedRead?: boolean;
 }

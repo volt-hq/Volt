@@ -180,6 +180,25 @@ describe("LiveState patches", () => {
 		expect(live.get("ext_panel/ci/log")).toEqual(panel);
 	});
 
+	it("patches a shell command's output, which stays one terminal node", () => {
+		const live = new LiveState();
+		const bash: LiveValue = {
+			kind: "bash",
+			command: "make",
+			output: { type: "terminal", key: "output", lines: ["one"] },
+		};
+		live.set("bash", bash);
+		live.patch("bash", [{ op: "append_lines", path: ["output"], lines: ["two", "three"], omittedLines: 1 }]);
+		expect(live.get("bash")).toEqual({
+			...bash,
+			output: { type: "terminal", key: "output", lines: ["two", "three"], omittedLines: 1 },
+		});
+		expect(() => live.patch("bash", [{ op: "remove", path: [] }])).toThrow(LivePatchError);
+		expect(() =>
+			live.patch("bash", [{ op: "replace", path: [], node: { type: "text", key: "output", text: "x" } }]),
+		).toThrow(LivePatchError);
+	});
+
 	it("folds patches as the host does, and tells a client that cannot apply one", () => {
 		const fold = foldLiveItems(emptyLiveFold(), [
 			{ type: "set", key: "ext_panel/ci/log", value: panel },
@@ -421,6 +440,45 @@ describe("LiveState host requests", () => {
 		expect(live.answer("m", { value: "ABCD" }, "client")).toBe("invalid");
 		expect(live.answer("m", { cancelled: true }, "client")).toBe("accepted");
 		await expect(auth).resolves.toMatchObject({ status: "answered", response: { cancelled: true } });
+	});
+
+	it("asks a provider sign-in or a secret input of one client only, and takes a pasted code only for a manual sign-in", async () => {
+		const live = new LiveState();
+		live.attach("client", createLiveRecorder(["input", "provider_auth"]));
+		const secret: HostRequest = { kind: "input", title: "API key", secret: true };
+		const device: HostRequest = { kind: "provider_auth", provider: "p", flow: "device", userCode: "C" };
+		await expect(live.request(secret)).rejects.toThrow(TypeError);
+		await expect(live.request(device)).rejects.toThrow(TypeError);
+
+		const signIn = live.request(device, { id: "d", client: "client" });
+		expect(live.answer("d", { value: "C" }, "client")).toBe("invalid");
+		expect(live.answer("d", { cancelled: true }, "client")).toBe("accepted");
+		await expect(signIn).resolves.toMatchObject({ response: { cancelled: true } });
+		const manual = live.request(
+			{ kind: "provider_auth", provider: "p", flow: "manual", url: "u" },
+			{ id: "m", client: "client" },
+		);
+		expect(live.answer("m", { value: "http://localhost/?code=1" }, "client")).toBe("accepted");
+		await expect(manual).resolves.toMatchObject({ response: { value: "http://localhost/?code=1" } });
+	});
+
+	it("ends a request asked of one client once none of its views is attached", async () => {
+		const live = new LiveState();
+		const detachOwn = live.attach("connection", createLiveRecorder(["select"]));
+		const detachView = live.attach("connection:s1", { ...createLiveRecorder(["select"]), owner: "connection" });
+		live.attach("other", createLiveRecorder(["select"]));
+		const asked = live.request({ kind: "select", title: "Pick", options: ["a"] }, { client: "connection" });
+		const shared = live.request({ kind: "select", title: "Anyone", options: ["a"] });
+		detachView();
+		expect(live.pendingRequests()).toHaveLength(2);
+		detachOwn();
+		await expect(asked).resolves.toEqual({ status: "cancelled", reason: "unavailable" });
+		// A request asked of any client outlives the ones that saw it.
+		expect(live.pendingRequests().map((entry) => entry.request)).toEqual([
+			{ kind: "select", title: "Anyone", options: ["a"] },
+		]);
+		live.close();
+		await expect(shared).resolves.toEqual({ status: "cancelled", reason: "closed" });
 	});
 
 	it("rejects malformed requests and request ids", async () => {

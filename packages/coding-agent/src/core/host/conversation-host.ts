@@ -52,6 +52,7 @@ import {
 } from "./hosted-conversation.ts";
 import { sameFilesystemLocation } from "./session-summaries.ts";
 import type { ConversationTarget, HostClient } from "./targets.ts";
+import { clientTrustContext } from "./trust-prompts.ts";
 
 /** Thrown when an import names a JSONL file that does not exist. */
 export class SessionImportFileNotFoundError extends Error {
@@ -781,8 +782,10 @@ export class ConversationHost {
 	 * an in-place client that recovers input replays the target's durable
 	 * queued input; `withSession` then runs against the new conversation
 	 * unless that recovery failed, and `publish` makes the last durable write,
-	 * whose failure closes the new conversation. A client that follows moves
-	 * by redirect, leaving a source its other clients keep open, may leave it
+	 * whose failure closes the new conversation. The target's project trust
+	 * prompts ask a local client, in the source's live state, unless
+	 * `projectTrustContext` says otherwise. A client that follows moves by
+	 * redirect, leaving a source its other clients keep open, may leave it
 	 * busy, and the source is not fenced for its leave.
 	 */
 	async openFor(
@@ -802,7 +805,17 @@ export class ConversationHost {
 			const fromStaysOpen = from !== undefined && this.staysOpenWithout(client, from);
 			const { result: opened, hold } = await this.openTarget(
 				target,
-				{ ...openOptions, ...(from === undefined ? {} : { from }) },
+				{
+					// Trust prompts reach the local client that asked for the open, in the conversation it leaves.
+					...(from === undefined || client.remote === true || openOptions.projectTrustContext !== undefined
+						? {}
+						: {
+								projectTrustContext: (cwd: string) =>
+									clientTrustContext(from, client.id, this.extensionMode, cwd),
+							}),
+					...openOptions,
+					...(from === undefined ? {} : { from }),
+				},
 				fromStaysOpen,
 				{ client, ...(assertCurrent === undefined ? {} : { assertCurrent }) },
 			);

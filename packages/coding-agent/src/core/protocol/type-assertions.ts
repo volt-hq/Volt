@@ -11,10 +11,12 @@
  */
 
 import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { Transport } from "@hansjm10/volt-ai";
 import type {
 	Assert,
 	JsonWireShape,
 	LogMessage,
+	LspServerStatusSchema,
 	MutualExtends,
 	RpcBashResultSchema,
 	RpcCompactionResultSchema,
@@ -28,16 +30,19 @@ import type {
 	RpcMcpResourceSummarySchema,
 	RpcMcpServerSummarySchema,
 	RpcMcpToolSummarySchema,
+	RpcPersonalitySchema,
 	RpcPromptCacheStatusSchema,
 	RpcReviewCoverageSchema,
 	RpcReviewFindingSchema,
 	RpcSubscriptionUsageReportSchema,
 	RpcThinkingLevelSchema,
+	RpcTransportSchema,
 	SessionReferenceSchema,
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import type { BashResult } from "../bash-executor.ts";
 import type { CompactionResult } from "../compaction/index.ts";
+import type { LspServerStatus } from "../lsp/manager.ts";
 import type {
 	McpOAuthBrowserCompleteResult,
 	McpOAuthBrowserStartResult,
@@ -52,6 +57,7 @@ import type {
 	McpServerSummary,
 	McpToolSummary,
 } from "../mcp/types.ts";
+import type { Personality } from "../personality.ts";
 import type { PromptCacheStatus } from "../prompt-cache-status.ts";
 import type { ReviewCoverage, ReviewFinding } from "../review.ts";
 import type { SessionReference } from "../session-manager.ts";
@@ -69,6 +75,11 @@ type _bashResult = Assert<MutualExtends<Static<typeof RpcBashResultSchema>, Json
 type _compactionResult = Assert<MutualExtends<Static<typeof RpcCompactionResultSchema>, CompactionResult>>;
 type _reviewFinding = Assert<MutualExtends<Static<typeof RpcReviewFindingSchema>, ReviewFinding>>;
 type _reviewCoverage = Assert<MutualExtends<Static<typeof RpcReviewCoverageSchema>, ReviewCoverage>>;
+
+// Host settings and language servers
+type _personality = Assert<MutualExtends<Static<typeof RpcPersonalitySchema>, Personality>>;
+type _transport = Assert<MutualExtends<Static<typeof RpcTransportSchema>, Transport>>;
+type _lspServerStatus = Assert<MutualExtends<Static<typeof LspServerStatusSchema>, LspServerStatus>>;
 
 // MCP module shapes
 type _mcpCapabilities = Assert<MutualExtends<Static<typeof RpcMcpCapabilitiesResponseSchema>, McpRpcCapabilities>>;

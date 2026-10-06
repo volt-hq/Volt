@@ -26,6 +26,10 @@
  * host paths outside the workspace, such as the agent directory: a client
  * receives the summary before the quoted error. The live `presence` value is
  * for local clients only and never sent.
+ *
+ * A user shell command's live output and a provider sign-in or secret input
+ * asked of a local client never reach a remote client, nor do their patches
+ * and clears.
  */
 
 import { Buffer } from "node:buffer";
@@ -134,6 +138,18 @@ function patchBetween(held: LiveValue, next: LiveValue): UiPatchOp[] | undefined
 	return jsonBytes(ops) < jsonBytes(next) ? ops : undefined;
 }
 
+/**
+ * Whether a remote client never receives `value`: a user shell command's
+ * output (`bash` is a local intent), or a provider sign-in or secret input,
+ * which the host asks only of the local client that started it.
+ */
+function isLocalOnlyValue(value: LiveValue): boolean {
+	if (value.kind === "bash") return true;
+	if (value.kind !== "host_request") return false;
+	const request = value.request;
+	return request.kind === "provider_auth" || (request.kind === "input" && request.secret === true);
+}
+
 /** What a sent item did to the value the client holds under a patchable key: what it held before, and after. */
 interface HeldChange {
 	readonly key: string;
@@ -240,6 +256,8 @@ interface StreamingView {
 	readonly held: Map<string, LiveValue>;
 	/** The redacted presentations of running tools the client holds, by tool call id. */
 	readonly presentations: Map<string, ToolPresentation>;
+	/** Raw keys of local-only values the client was not sent: their patches and clears are not sent either. */
+	readonly withheld: Set<string>;
 }
 
 function newView(basedOn: number): StreamingView {
@@ -252,6 +270,7 @@ function newView(basedOn: number): StreamingView {
 		seq: 0,
 		held: new Map(),
 		presentations: new Map(),
+		withheld: new Set(),
 	};
 }
 
@@ -602,6 +621,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 	const sanitizeUi = <T>(value: T): T => cutAware(sanitize(joinRootedSpans(value)));
 
 	const redactValue = (value: LiveValue): LiveValue | undefined => {
+		if (isLocalOnlyValue(value)) return undefined;
 		// Work progress the host cut loses a root's start the cut left; the value keeps the host's bound for it.
 		if (value.kind === "work") {
 			return redactedWorkPhase(
@@ -663,6 +683,11 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				if (item.key.startsWith("host_request/") && item.value.kind !== "host_request") return [];
 				// Who else is attached is the host's to tell local clients only.
 				if (item.value.kind === "presence") return [];
+				if (isLocalOnlyValue(item.value)) {
+					view.withheld.add(item.key);
+					return [];
+				}
+				view.withheld.delete(item.key);
 				const value = redactValue(item.value);
 				if (value === undefined) return [];
 				const set: LiveItem = { type: "set", key: redactKey(item.key), value };
@@ -670,6 +695,7 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			}
 			case "clear": {
 				if (item.key === "presence") return [];
+				if (view.withheld.delete(item.key)) return [];
 				if (item.key.startsWith("host_request/")) optionMaps.delete(item.key.slice("host_request/".length));
 				const clear: LiveItem = { type: "clear", key: redactKey(item.key) };
 				return [view.held.has(item.key) ? { item: clear, held: hold(view, item.key, undefined) } : { item: clear }];
@@ -764,7 +790,10 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 			// A client discards running tools, and their presentations, with the streaming state.
 			view.presentations.clear();
 		}
-		if (frame.reset === true) view.held.clear();
+		if (frame.reset === true) {
+			view.held.clear();
+			view.withheld.clear();
+		}
 		view.raw = foldLiveFrame(view.raw, { basedOn: frame.basedOn, reset: frame.reset, items: [] });
 		const sent: Sent[] = [];
 		for (const item of frame.items) {

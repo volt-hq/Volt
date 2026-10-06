@@ -11,6 +11,7 @@ import {
 import type { ExtensionRunner } from "../../extensions/runner.ts";
 import { getMcpRpcCapabilities, listMcpRpcServers } from "../../mcp/rpc.ts";
 import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
+import { listAuthProviders } from "../../provider-auth.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
 import { getReviewGeneral } from "../../review-links.ts";
 import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalReviewRuns } from "../../review-state.ts";
@@ -30,6 +31,7 @@ import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.t
 
 const observe = ["conversation.observe.v1"] as const;
 const integrations = ["integrations.manage.v1"] as const;
+const hostManage = ["host.manage.v1"] as const;
 
 // ============================================================================
 // Intents
@@ -172,6 +174,15 @@ export const sessionsQuery = defineQuery({
 	},
 });
 
+/** A setting the host could not read (an invalid stored value) is left out. */
+function readable<T>(read: () => T): T | undefined {
+	try {
+		return read();
+	} catch {
+		return undefined;
+	}
+}
+
 export const settingsQuery = defineQuery({
 	name: "settings",
 	scope: "conversation",
@@ -179,12 +190,31 @@ export const settingsQuery = defineQuery({
 	requires: observe,
 	async run(ctx) {
 		const { session } = targetOf(ctx);
-		return {
+		const settings = session.settingsManager;
+		const model = session.model;
+		const shared = {
 			steeringMode: session.steeringMode,
 			followUpMode: session.followUpMode,
 			autoCompaction: session.autoCompactionEnabled,
 			autoRetry: session.autoRetryEnabled,
-			profile: session.settingsManager.getActiveProfile() ?? "",
+			profile: settings.getActiveProfile() ?? "",
+		};
+		// The rest stays with clients in the host's trust domain.
+		if (ctx.profile.name !== "local") return shared;
+		const keepAlive = settings.getPromptCacheKeepAlive();
+		const httpIdleTimeoutMs = readable(() => settings.getHttpIdleTimeoutMs());
+		return {
+			...shared,
+			compactionThresholdTokens: model ? settings.getCompactionThresholdTokens(`${model.provider}/${model.id}`) : 0,
+			profiles: settings.getProfileNames(),
+			personality: settings.getPersonality(),
+			transport: settings.getTransport(),
+			reviewModel: settings.getReviewModel() ?? null,
+			promptCacheKeepAlive: keepAlive.enabled ? keepAlive.idleWindowMs / 60_000 : ("off" as const),
+			imageAutoResize: settings.getImageAutoResize(),
+			blockImages: settings.getBlockImages(),
+			...(httpIdleTimeoutMs === undefined ? {} : { httpIdleTimeoutMs }),
+			enableInstallTelemetry: settings.getEnableInstallTelemetry(),
 		};
 	},
 });
@@ -329,6 +359,49 @@ export const workOutputQuery = defineQuery({
 });
 
 // ============================================================================
+// Language servers, diagnostics, and provider credentials
+// ============================================================================
+
+export const lspStatusQuery = defineQuery({
+	name: "lsp.status",
+	scope: "conversation",
+	remote: "unsafe",
+	requires: hostManage,
+	async run(ctx) {
+		const status = targetOf(ctx).session.getLspStatus();
+		return {
+			enabled: status.enabled,
+			...(status.workspaceRoot === undefined ? {} : { workspaceRoot: status.workspaceRoot }),
+			servers: status.servers.map((server) => ({ ...server })),
+			...(status.traceFile === undefined ? {} : { traceFile: status.traceFile }),
+		};
+	},
+});
+
+export const debugReportQuery = defineQuery({
+	name: "debug_report",
+	scope: "conversation",
+	remote: "unsafe",
+	requires: hostManage,
+	async run(ctx) {
+		return { path: await targetOf(ctx).session.captureToolProgressDiagnostics() };
+	},
+});
+
+export const authProvidersQuery = defineQuery({
+	name: "auth.providers",
+	scope: "host",
+	remote: "unsafe",
+	requires: hostManage,
+	async run(ctx) {
+		const registry = targetOf(ctx).session.modelRegistry;
+		// Logins saved by other volt processes count too.
+		registry.refreshFromDisk();
+		return { providers: listAuthProviders(registry) };
+	},
+});
+
+// ============================================================================
 // The connection's workspace
 // ============================================================================
 
@@ -380,8 +453,9 @@ export const prReviewQuery = defineQuery({
 // MCP
 // ============================================================================
 
-function mcpExecutionContext(): McpGatewayExecutionContext {
-	return { mode: "rpc", caller: "user" };
+/** A client's MCP read: the caller is its profile's client. */
+function mcpExecutionContext(ctx: IntentContext): McpGatewayExecutionContext {
+	return { surface: ctx.profile.name, caller: "user" };
 }
 
 const mcp = { scope: "host", remote: "safe", requires: integrations } as const;
@@ -432,7 +506,7 @@ export const mcpResourceQuery = defineQuery({
 	name: "mcp.resource",
 	async run(ctx, params) {
 		return {
-			result: await mcpManagerOf(ctx).readResource(params.server, params.resourceUri, mcpExecutionContext()),
+			result: await mcpManagerOf(ctx).readResource(params.server, params.resourceUri, mcpExecutionContext(ctx)),
 		};
 	},
 });
@@ -451,7 +525,7 @@ export const mcpPromptQuery = defineQuery({
 			params.server,
 			params.prompt,
 			{ action: "get_prompt", arguments: params.arguments, argumentsJson: params.argumentsJson },
-			mcpExecutionContext(),
+			mcpExecutionContext(ctx),
 		);
 		return { result };
 	},
@@ -611,6 +685,9 @@ export const BUILTIN_QUERIES = {
 	host_status: hostStatusQuery,
 	web_search_status: webSearchStatusQuery,
 	subagent_definitions: subagentDefinitionsQuery,
+	"lsp.status": lspStatusQuery,
+	debug_report: debugReportQuery,
+	"auth.providers": authProvidersQuery,
 	conversation_info: conversationInfoQuery,
 	resources: resourcesQuery,
 	tools: toolsQuery,

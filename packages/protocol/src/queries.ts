@@ -10,10 +10,16 @@
 
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
-import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { ExtensionIdSchema, ExtensionSettingsViewSchema, ExtensionSummarySchema } from "./extensions.ts";
 import { stringEnum } from "./helpers.ts";
+import {
+	AuthProviderSchema,
+	LspStatusSchema,
+	RpcPersonalitySchema,
+	RpcTransportSchema,
+	ScopedModelSchema,
+} from "./host-settings.ts";
 import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema, IntentOptionSchema } from "./intents.ts";
 import {
 	RpcMcpCapabilitiesResponseSchema,
@@ -28,7 +34,7 @@ import {
 	RpcMcpToolsResponseSchema,
 } from "./mcp.ts";
 import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
-import { RpcConversationIdentifierSchema, RpcQueueModeSchema, RpcThinkingLevelSchema } from "./primitives.ts";
+import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
 import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
 import { IrohRemoteSessionIdSchema, IrohRemoteWorkingDirectorySchema } from "./remote-handshake.ts";
@@ -90,13 +96,6 @@ export const IntentShortcutSchema = Type.Object(
 	closed,
 );
 export type IntentShortcut = Static<typeof IntentShortcutSchema>;
-
-/** A model of a cycle scope, with the thinking level the scope gives it. */
-export const ScopedModelSchema = Type.Object(
-	{ ...ClientModelRefSchema.properties, thinkingLevel: Type.Optional(RpcThinkingLevelSchema) },
-	closed,
-);
-export type ScopedModel = Static<typeof ScopedModelSchema>;
 
 /** Longest `sessions` search text, in characters. */
 export const SESSIONS_SEARCH_MAX_CHARS = 1_024;
@@ -259,7 +258,10 @@ export const QUERY_SCHEMAS = {
 			closed,
 		),
 	},
-	/** Host settings that intents change; refetched on `changed{settings}`. */
+	/**
+	 * Host settings that intents change; refetched on `changed{settings}`. The
+	 * optional fields reach local clients only.
+	 */
 	settings: {
 		params: EmptyInputSchema,
 		result: Type.Object(
@@ -270,6 +272,20 @@ export const QUERY_SCHEMAS = {
 				autoRetry: Type.Boolean(),
 				/** The active settings profile, `""` without one: compaction intents name it as `expectedProfile`. */
 				profile: Type.String(),
+				/** The conversation model's compaction threshold in tokens; 0 uses the context-limit default. */
+				compactionThresholdTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+				/** The settings profiles defined, by name. */
+				profiles: Type.Optional(Type.Array(Type.String())),
+				personality: Type.Optional(RpcPersonalitySchema),
+				transport: Type.Optional(RpcTransportSchema),
+				/** `provider/modelId`, or null when reviews use the conversation's model. */
+				reviewModel: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+				/** `off`, or minutes of keepalive after work finishes (0: only while working). */
+				promptCacheKeepAlive: Type.Optional(Type.Union([Type.Literal("off"), Type.Number({ minimum: 0 })])),
+				imageAutoResize: Type.Optional(Type.Boolean()),
+				blockImages: Type.Optional(Type.Boolean()),
+				httpIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0 })),
+				enableInstallTelemetry: Type.Optional(Type.Boolean()),
 			},
 			closed,
 		),
@@ -311,6 +327,18 @@ export const QUERY_SCHEMAS = {
 		result: Type.Object({ webSearch: RpcWebSearchStatusSchema }, closed),
 	},
 	subagent_definitions: { params: EmptyInputSchema, result: RpcListSubagentsResponseSchema },
+	/** The conversation's language servers, as a snapshot that starts and installs nothing. */
+	"lsp.status": { params: EmptyInputSchema, result: LspStatusSchema },
+	/**
+	 * Save a diagnostic capture of the conversation's recent tool calls (their
+	 * argument samples with credentials redacted) and name the file it wrote.
+	 */
+	debug_report: { params: EmptyInputSchema, result: Type.Object({ path: Type.String() }, closed) },
+	/** The providers a client may sign in to, and how their requests authenticate now; never credentials. */
+	"auth.providers": {
+		params: EmptyInputSchema,
+		result: Type.Object({ providers: Type.Array(AuthProviderSchema) }, closed),
+	},
 	/** Where the conversation's log lives. */
 	conversation_info: { params: EmptyInputSchema, result: ConversationInfoSchema },
 	/** The resources the conversation loaded and what loading them reported; refetched on `changed{resources}`. */
