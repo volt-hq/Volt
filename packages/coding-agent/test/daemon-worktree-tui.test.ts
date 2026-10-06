@@ -203,6 +203,7 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
 					workspaces: handlers.workspaces,
 					clients: [],
 					keepAwake: { enabled: false, state: "disabled" },
+					workers: [],
 				};
 			}
 			if (full.type === "worktree_resolve") {
@@ -310,6 +311,7 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 		workspaces,
 		clients: [],
 		keepAwake: { enabled: false, state: "disabled" },
+		workers: [],
 	};
 }
 

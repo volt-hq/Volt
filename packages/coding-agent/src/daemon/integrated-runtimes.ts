@@ -27,12 +27,6 @@ import { getDefaultSessionDir, SessionManager, type SessionReference } from "../
 import type { SessionWriter } from "../core/session-writer.ts";
 import type { SubagentRuntimeRegistration } from "../core/subagents/index.ts";
 import {
-	createIrohRemoteAgentRuntimeWithSessionSelection,
-	type IrohRemoteAgentRuntime,
-	type IrohRemoteAgentRuntimeConversationTarget,
-	type IrohRemoteSubagentRuntimeCreatedEvent,
-} from "../modes/rpc/iroh-remote-agent-runtime.ts";
-import {
 	type DetachedRuntimeRetentionHandle,
 	scheduleDetachedRuntimeRetention,
 } from "../remote/integrated-runtime-retention.ts";
@@ -46,6 +40,12 @@ import {
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
 import type { DaemonRuntimeOwnerCapability } from "./lease-broker.ts";
 import type { ReviewSiblingAdmission } from "./review-sibling-admission.ts";
+import {
+	createIrohRemoteAgentRuntimeWithSessionSelection,
+	type IrohRemoteAgentRuntime,
+	type IrohRemoteAgentRuntimeConversationTarget,
+	type IrohRemoteSubagentRuntimeCreatedEvent,
+} from "./worker/conversation-factory.ts";
 import { isPathInside, resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import { getRegisteredWorkingDirectoryForWorktree, type WorktreeRuntimePreparation } from "./worktree-manager.ts";
 

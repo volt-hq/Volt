@@ -15,7 +15,7 @@ import {
 	createIrohRemoteAgentRuntime,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
-} from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
+} from "../src/daemon/worker/conversation-factory.ts";
 import { registerOnCreatedModelRegistries } from "./utilities.ts";
 
 const SAVED_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "HOME"] as const;

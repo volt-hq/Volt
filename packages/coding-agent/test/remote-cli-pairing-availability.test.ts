@@ -50,6 +50,7 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 					clients: [],
 					remoteTransport: mockDaemon.remoteTransport,
 					keepAwake: { enabled: false, state: "disabled" },
+					workers: [],
 				};
 			}
 			return {

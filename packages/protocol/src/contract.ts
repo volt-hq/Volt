@@ -60,11 +60,17 @@ import {
 	ControlRequestSchema,
 	ControlResponseSchema,
 	ControlRevokedClientStatusSchema,
+	ControlWorkerOriginSchema,
+	ControlWorkerStateSchema,
+	ControlWorkerStatusSchema,
 	ControlWorkspaceStatusSchema,
 	ControlWorktreeStatusSchema,
 	DaemonEnvironmentStatusSchema,
 	DaemonRemotePolicyStatusSchema,
 	RemoteTransportHealthSchema,
+	WorkerHostKindSchema,
+	WorkerSpawnSpecSchema,
+	WorkerStopReasonSchema,
 } from "./daemon-control.ts";
 import {
 	BashExecutionMessageSchema,
@@ -665,6 +671,12 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	"Control.HelloAck": ControlHelloAckSchema,
 	"Control.Fatal": ControlFatalSchema,
 	"Control.RelayPreamble": ControlRelayPreambleSchema,
+	"Control.WorkerState": ControlWorkerStateSchema,
+	"Control.WorkerOrigin": ControlWorkerOriginSchema,
+	"Control.WorkerStatus": ControlWorkerStatusSchema,
+	"Control.WorkerHostKind": WorkerHostKindSchema,
+	"Control.WorkerStopReason": WorkerStopReasonSchema,
+	"Control.WorkerSpawnSpec": WorkerSpawnSpecSchema,
 };
 
 /** Protocol schemas registered under their own names, before the per-intent, per-query, and per-frame entries. */

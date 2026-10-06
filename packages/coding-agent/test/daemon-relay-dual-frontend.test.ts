@@ -189,6 +189,7 @@ async function startOwnedRelayDaemonHarness(): Promise<OwnedRelayDaemonHarness> 
 					workspaces: workspaceRegistered ? [{ name: WORKSPACE.name, path: workspaceDir }] : [],
 					clients: [],
 					keepAwake: { enabled: false, state: "disabled" },
+					workers: [],
 				});
 				return;
 			case "lease_acquire": {

@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { chmodSync, lstatSync, rmSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import {
@@ -12,12 +13,16 @@ import {
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
+	isWorkerRequestType,
 	PROTOCOL_VERSION,
 } from "./control-protocol.ts";
 
 export interface ControlConnection {
 	readonly connectionId: string;
-	readonly client: ControlClientKind;
+	/** A TUI or CLI control client, or a conversation worker the daemon spawned. */
+	readonly client: ControlClientKind | "worker";
+	/** The worker a worker connection was admitted for. */
+	readonly workerId?: string;
 	readonly pid: number;
 	readonly version: string;
 	/** Capabilities from the control hello (empty for old clients). */
@@ -31,6 +36,14 @@ export interface RelayAdmission {
 	admitRelay(hello: Extract<HelloMessage, { role: "relay" }>, socket: Socket, bufferedRemainder: Buffer): boolean;
 }
 
+export interface WorkerAdmission {
+	/**
+	 * Admit a worker hello on `connection`: its token must be the unused one
+	 * its spawn issued. One worker per connection; a refused hello closes it.
+	 */
+	admitWorker(hello: Extract<HelloMessage, { role: "worker" }>, connection: ControlConnection): boolean;
+}
+
 export interface ControlServerHandlers {
 	/**
 	 * Handle one request; respond via connection.send (possibly multiple times
@@ -39,6 +52,7 @@ export interface ControlServerHandlers {
 	onRequest(connection: ControlConnection, request: ControlRequest): Promise<void> | void;
 	onConnectionClosed?(connection: ControlConnection): void;
 	relayAdmission?: RelayAdmission;
+	workerAdmission?: WorkerAdmission;
 	/** When true, hellos are rejected with error "shutting_down". */
 	isShuttingDown?(): boolean;
 	log?(level: "info" | "warn" | "error", message: string): void;
@@ -55,6 +69,7 @@ export interface ControlServerOptions {
 export interface ControlServer {
 	readonly socketPath: string;
 	connections(): ControlConnection[];
+	/** Send `event` to every control client; workers only get the events addressed to them. */
 	broadcast(event: ControlEvent): void;
 	sendTo(connectionId: string, event: ControlEvent): boolean;
 	/**
@@ -94,6 +109,14 @@ export function retainControlConnectionResource(connection: ControlConnection, r
 
 let controlConnectionSequence = 0;
 
+/** Compare a presented token with the expected one in constant time. */
+function tokenMatches(presented: string | undefined, expected: string): boolean {
+	if (presented === undefined) return false;
+	const actual = Buffer.from(presented, "utf8");
+	const wanted = Buffer.from(expected, "utf8");
+	return actual.length === wanted.length && timingSafeEqual(actual, wanted);
+}
+
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
 	const { socketPath, version, authToken, handlers } = options;
 	const connections = new Map<string, ControlConnectionImpl>();
@@ -116,18 +139,20 @@ export async function startControlServer(options: ControlServerOptions): Promise
 
 	class ControlConnectionImpl implements ControlConnection {
 		readonly connectionId: string;
-		readonly client: ControlClientKind;
+		readonly client: ControlClientKind | "worker";
+		readonly workerId: string | undefined;
 		readonly pid: number;
 		readonly version: string;
 		readonly capabilities: ReadonlySet<string>;
 		private readonly socket: Socket;
 
-		constructor(socket: Socket, hello: Extract<HelloMessage, { role: "control" }>) {
+		constructor(socket: Socket, hello: Extract<HelloMessage, { role: "control" | "worker" }>) {
 			this.connectionId = `c-${++controlConnectionSequence}`;
-			this.client = hello.client;
+			this.client = hello.role === "worker" ? "worker" : hello.client;
+			this.workerId = hello.role === "worker" ? hello.workerId : undefined;
 			this.pid = hello.pid;
 			this.version = hello.version;
-			this.capabilities = new Set(hello.capabilities ?? []);
+			this.capabilities = new Set(hello.role === "control" ? (hello.capabilities ?? []) : []);
 			this.socket = socket;
 			connectionResources.set(this, { closed: false, releases: new Set() });
 		}
@@ -154,6 +179,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		const decoder = new ControlLineDecoder();
 		let established: ControlConnectionImpl | undefined;
 		let handedOffToRelay = false;
+		/** A hello was refused: nothing more is read from the socket. */
+		let refused = false;
 
 		const fatal = (error: string) => {
 			try {
@@ -191,7 +218,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				socket.end(encodeControlLine(ack));
 				return false;
 			}
-			if (hello.role === "control" && authToken !== undefined && hello.controlToken !== authToken) {
+			if (hello.role === "control" && authToken !== undefined && !tokenMatches(hello.controlToken, authToken)) {
 				const ack: HelloAck = {
 					type: "hello_ack",
 					ok: false,
@@ -234,7 +261,19 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				}
 				return false;
 			}
-			established = new ControlConnectionImpl(socket, hello);
+			const connection = new ControlConnectionImpl(socket, hello);
+			if (hello.role === "worker" && handlers.workerAdmission?.admitWorker(hello, connection) !== true) {
+				const ack: HelloAck = {
+					type: "hello_ack",
+					ok: false,
+					error: "auth_failed",
+					version,
+					protocolVersion: PROTOCOL_VERSION,
+				};
+				socket.end(encodeControlLine(ack));
+				return false;
+			}
+			established = connection;
 			pendingSockets.delete(socket);
 			connections.set(established.connectionId, established);
 			const ack: HelloAck = {
@@ -251,7 +290,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		const handleMessage = (message: unknown): void => {
 			const connection = established;
 			if (!connection) {
-				handleHello(message);
+				// One hello per connection: a refused one ends it.
+				if (!refused && !handleHello(message) && !handedOffToRelay) refused = true;
 				return;
 			}
 			if (!admitControlRequest(message)) {
@@ -260,6 +300,16 @@ export async function startControlServer(options: ControlServerOptions): Promise
 						? ((message as { id: string }).id ?? "")
 						: "";
 				connection.send({ type: "error", id, code: "invalid_request", message: "unrecognized control request" });
+				return;
+			}
+			// A worker sends worker requests only, and nothing else may.
+			if ((connection.client === "worker") !== isWorkerRequestType(message.type)) {
+				connection.send({
+					type: "error",
+					id: message.id,
+					code: "forbidden",
+					message: `${message.type} is not available on this connection`,
+				});
 				return;
 			}
 			if (!acceptingRequests || handlers.isShuttingDown?.()) {
@@ -306,7 +356,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 				// any trailing bytes must stay undecoded (they are raw relay payload).
 				decoder.pushEach(chunk, (message) => {
 					handleMessage(message);
-					return handedOffToRelay ? "stop" : "continue";
+					return handedOffToRelay || refused ? "stop" : "continue";
 				});
 			} catch {
 				fatal("frame_too_large");
@@ -359,7 +409,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		},
 		broadcast(event: ControlEvent) {
 			for (const connection of connections.values()) {
-				connection.send(event);
+				if (connection.client !== "worker") connection.send(event);
 			}
 		},
 		sendTo(connectionId: string, event: ControlEvent) {

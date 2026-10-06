@@ -1,12 +1,15 @@
 /**
  * The voltd control plane: JSONL over the daemon's local socket, shared by
- * the daemon, the TUI, and the CLI.
+ * the daemon, the TUI, the CLI, and the conversation workers it supervises.
  *
  * A connection opens with a hello. A control hello is answered by a
  * `hello_ack` and then carries requests (each answered by responses with the
- * same `id`) and unsolicited events. A relay hello hands the socket to one
- * phone stream: after the ack the daemon writes one `relay_preamble` line and
- * the rest of the socket is raw relay bytes.
+ * same `id`) and unsolicited events. A worker hello is admitted with the
+ * single-use token its spawn issued, and then carries the worker requests
+ * and the events the daemon sends its worker: one worker per connection. A
+ * relay hello hands the socket to one phone stream: after the ack the daemon
+ * writes one `relay_preamble` line and the rest of the socket is raw relay
+ * bytes.
  *
  * Every message is closed except the version-negotiation envelopes (hellos,
  * `hello_ack`, `fatal`), whose unknown fields are ignored so peers of
@@ -14,7 +17,7 @@
  */
 
 import { type Static, type TSchema, type TString, Type } from "typebox";
-import { SessionReferenceSchema } from "./entries.ts";
+import { LogSessionIdSchema, SessionReferenceSchema } from "./entries.ts";
 import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, ResultFrameSchema } from "./frames.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
@@ -22,6 +25,7 @@ import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificat
 import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
 import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
 import {
+	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
 	IrohRemoteHandshakeSuccessSchema,
 	IrohRemoteHelloSchema,
 	IrohRemoteRelayModeSchema,
@@ -218,6 +222,81 @@ export const RemoteTransportHealthSchema = Type.Object(
 export type RemoteTransportHealth = Static<typeof RemoteTransportHealthSchema>;
 export type RemoteTransportReasonCode = (typeof REMOTE_TRANSPORT_REASON_CODES)[number];
 
+/**
+ * A conversation worker in the daemon's registry: `starting` until it reports
+ * ready, `live` while it serves, `retiring` once it was asked to stop (or lost
+ * its control connection) until its process exits.
+ */
+export const ControlWorkerStateSchema = stringEnum(["starting", "live", "retiring"]);
+export type ControlWorkerState = Static<typeof ControlWorkerStateSchema>;
+
+/** Who caused a worker to start: its tool policy and environment follow. */
+export const ControlWorkerOriginSchema = stringEnum(["phone", "tui"]);
+export type ControlWorkerOrigin = Static<typeof ControlWorkerOriginSchema>;
+
+export const ControlWorkerStatusSchema = Type.Object(
+	{
+		workerId: Type.String(),
+		pid: NonNegativeIntegerSchema,
+		state: ControlWorkerStateSchema,
+		origin: ControlWorkerOriginSchema,
+		workspaceName: Type.String(),
+		/** Every conversation the worker hosts: its primary, then what it claimed. */
+		sessionIds: Type.Array(LogSessionIdSchema),
+		/** Relayed streams, offered or open, by client kind. */
+		clients: Type.Object({ local: NonNegativeIntegerSchema, remote: NonNegativeIntegerSchema }, closed),
+	},
+	closed,
+);
+export type ControlWorkerStatus = Static<typeof ControlWorkerStatusSchema>;
+
+/** Why a worker hosts a conversation beside the one it was spawned for. */
+export const WorkerHostKindSchema = stringEnum(["child", "sibling", "moved"]);
+export type WorkerHostKind = Static<typeof WorkerHostKindSchema>;
+
+/** Why the daemon asks a worker to stop. */
+export const WorkerStopReasonSchema = stringEnum(["retention", "authority", "shutdown", "lease_transferred"]);
+export type WorkerStopReason = Static<typeof WorkerStopReasonSchema>;
+
+/**
+ * What a worker opens when it starts, sent over its control connection after
+ * the hello: the daemon resolved the conversation, its placement, and its
+ * policy; the worker only opens the stored log and holds its lock.
+ */
+export const WorkerSpawnSpecSchema = Type.Object(
+	{
+		workerId: Type.String(),
+		origin: ControlWorkerOriginSchema,
+		workspace: Type.Object(
+			{
+				name: Type.String(),
+				path: Type.String(),
+				generation: NonNegativeIntegerSchema,
+			},
+			closed,
+		),
+		/** The stored log the worker opens first, its primary. */
+		session: SessionReferenceSchema,
+		/** The conversation's working directory. */
+		cwd: Type.String(),
+		/** The root the working directory stays inside: the workspace, or its worktree checkout. */
+		root: Type.String(),
+		/** Where project resources are read from; the root by default. */
+		projectCwd: Type.String(),
+		/** The managed worktree's base ref, for the Git context. */
+		baseRef: Type.Optional(Type.String()),
+		/** Fixed for the worker's lifetime (D9). */
+		toolPolicy: Type.Object(
+			{ tools: Type.Array(Type.String()), allowUnlistedExtensionTools: Type.Boolean() },
+			closed,
+		),
+		projectTrusted: Type.Boolean(),
+		profile: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type WorkerSpawnSpec = Static<typeof WorkerSpawnSpecSchema>;
+
 /** How voltd resolved the environment its runtimes and tools use. */
 export const DaemonEnvironmentStatusSchema = Type.Object(
 	{
@@ -321,6 +400,20 @@ export const ControlHelloSchema = Type.Union([
 			relayId: Type.String(),
 			/** Single-use token from the relay_offer. */
 			relayToken: Type.String(),
+		},
+		open,
+	),
+	Type.Object(
+		{
+			type: Type.Literal("hello"),
+			role: Type.Literal("worker"),
+			protocolVersion: Type.Number(),
+			/** The worker the daemon spawned. */
+			workerId: Type.String(),
+			/** Single-use token the spawn issued; a second hello with it is refused. */
+			workerToken: Type.String(),
+			pid: Type.Number(),
+			version: Type.String(),
 		},
 		open,
 	),
@@ -529,7 +622,42 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		sessionId: Type.String(),
 		notification: IrohRemotePushNotificationSchema,
 	}),
+	/** Worker: its primary conversation is open and its log locked; offers may follow. */
+	worker_ready: withId("worker_ready", { sessionIds: Type.Array(LogSessionIdSchema, { maxItems: 1 }) }),
+	/** Worker: its primary could not open; the waiting opens fail with this outcome. */
+	worker_open_failed: withId("worker_open_failed", {
+		/** A phone handshake outcome, such as conversation_locked or session_unavailable. */
+		outcome: Type.Optional(stringEnum(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)),
+		message: codePoints(0, 1024),
+	}),
+	/** Worker: whether any conversation it hosts is active (a turn, running work, or a hold). */
+	worker_activity: withId("worker_activity", { active: Type.Boolean() }),
+	/** Worker: claim a conversation before opening it. Refused (`claimed`) when another worker hosts it. */
+	worker_hosts: withId("worker_hosts", {
+		sessionId: LogSessionIdSchema,
+		kind: WorkerHostKindSchema,
+		/** The hosted conversation the claimed one belongs to: a child's parent, a sibling's source, a move's source. */
+		parentSessionId: LogSessionIdSchema,
+	}),
+	/** Worker: it closed a conversation it claimed, and released its log. */
+	worker_released: withId("worker_released", { sessionId: LogSessionIdSchema }),
+	/** Worker: its answer to `worker_stop`, from its own idle check when the stop arrived. */
+	worker_stop_result: withId("worker_stop_result", {
+		stopId: Type.String(),
+		outcome: stringEnum(["stopped", "refused_active"]),
+	}),
 } as const;
+
+/** The requests a worker connection may send; a control connection may send none of them. */
+export const WORKER_REQUEST_TYPES = [
+	"worker_ready",
+	"worker_open_failed",
+	"worker_activity",
+	"worker_hosts",
+	"worker_released",
+	"worker_stop_result",
+] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
+export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 
 export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.status,
@@ -560,6 +688,12 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.viewer_abort,
 	CONTROL_REQUEST_SCHEMAS.relay_rpc,
 	CONTROL_REQUEST_SCHEMAS.relay_notification_delivery,
+	CONTROL_REQUEST_SCHEMAS.worker_ready,
+	CONTROL_REQUEST_SCHEMAS.worker_open_failed,
+	CONTROL_REQUEST_SCHEMAS.worker_activity,
+	CONTROL_REQUEST_SCHEMAS.worker_hosts,
+	CONTROL_REQUEST_SCHEMAS.worker_released,
+	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
 ]);
 export type ControlRequest = Static<typeof ControlRequestSchema>;
 
@@ -600,6 +734,8 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		relayCredential: Type.Optional(ControlRelayCredentialStatusSchema),
 		remotePolicy: Type.Optional(DaemonRemotePolicyStatusSchema),
 		keepAwake: ControlKeepAwakeStatusSchema,
+		/** Conversation workers the daemon supervises. */
+		workers: Type.Array(ControlWorkerStatusSchema),
 	}),
 	keep_awake_result: withId("keep_awake_result", { keepAwake: ControlKeepAwakeStatusSchema }),
 	clients_result: withId("clients_result", { clients: Type.Array(ControlClientStatusSchema) }),
@@ -691,6 +827,14 @@ export const CONTROL_EVENT_SCHEMAS = {
 		error: Type.Optional(Type.String()),
 	}),
 	daemon_shutdown: event("daemon_shutdown", {}),
+	/** To a worker after its hello: the conversation it opens. */
+	worker_spawn: event("worker_spawn", { spec: WorkerSpawnSpecSchema }),
+	/**
+	 * To a worker: stop. Answered by `worker_stop_result`. A worker that is
+	 * active may refuse a stop that is not forced; a forced stop cannot be
+	 * refused and aborts a turn still running after 60 s.
+	 */
+	worker_stop: event("worker_stop", { stopId: Type.String(), reason: WorkerStopReasonSchema, force: Type.Boolean() }),
 } as const;
 
 export const ControlEventSchema = Type.Union([
@@ -701,5 +845,7 @@ export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.keep_awake_changed,
 	CONTROL_EVENT_SCHEMAS.pairing_progress,
 	CONTROL_EVENT_SCHEMAS.daemon_shutdown,
+	CONTROL_EVENT_SCHEMAS.worker_spawn,
+	CONTROL_EVENT_SCHEMAS.worker_stop,
 ]);
 export type ControlEvent = Static<typeof ControlEventSchema>;

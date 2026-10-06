@@ -159,6 +159,17 @@ const REQUESTS: ByType<ControlRequest> = {
 			planId: "plan-1",
 		},
 	},
+	worker_ready: { type: "worker_ready", id: "29", sessionIds: ["s-1"] },
+	worker_open_failed: {
+		type: "worker_open_failed",
+		id: "30",
+		outcome: "conversation_locked",
+		message: "conversation is open in another Volt process on the host",
+	},
+	worker_activity: { type: "worker_activity", id: "31", active: true },
+	worker_hosts: { type: "worker_hosts", id: "32", sessionId: "s-2", kind: "child", parentSessionId: "s-1" },
+	worker_released: { type: "worker_released", id: "33", sessionId: "s-2" },
+	worker_stop_result: { type: "worker_stop_result", id: "34", stopId: "stop-1", outcome: "refused_active" },
 };
 
 const REVIEW_NOTIFICATION = {
@@ -252,6 +263,12 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ notification: { ...REVIEW_NOTIFICATION, hostNodeId: "A".repeat(64) } },
 		{ notification: { ...REVIEW_NOTIFICATION, workspaceName: undefined, workspace: "volt" } },
 	],
+	worker_ready: [{ sessionIds: "s-1" }],
+	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }],
+	worker_activity: [{ active: "yes" }],
+	worker_hosts: [{ kind: "primary" }, { sessionId: undefined }],
+	worker_released: [{ sessionId: 1 }],
+	worker_stop_result: [{ outcome: "maybe" }, { stopId: undefined }],
 };
 
 const STATUS_RESULT: Extract<ControlResponse, { type: "status_result" }> = {
@@ -284,6 +301,17 @@ const STATUS_RESULT: Extract<ControlResponse, { type: "status_result" }> = {
 	],
 	remotePolicy: { allowTools: ["read", "bash"], detachedRuntimeTtlMs: 1_800_000 },
 	keepAwake: { enabled: true, state: "active", method: "caffeinate" },
+	workers: [
+		{
+			workerId: "w-1",
+			pid: 4242,
+			state: "live",
+			origin: "phone",
+			workspaceName: "volt",
+			sessionIds: ["s-1", "s-2"],
+			clients: { local: 0, remote: 1 },
+		},
+	],
 };
 
 const WORKTREE = {
@@ -403,6 +431,21 @@ const EVENTS: ByType<ControlEvent> = {
 	},
 	pairing_progress: { type: "pairing_progress", requestId: "pr-1", phase: "waiting" },
 	daemon_shutdown: { type: "daemon_shutdown" },
+	worker_spawn: {
+		type: "worker_spawn",
+		spec: {
+			workerId: "w-1",
+			origin: "phone",
+			workspace: { name: "volt", path: "/tmp/volt", generation: 3 },
+			session: { sessionDirectory: "/sessions", storeId: "store", sessionId: "s-1", sessionGeneration: "gen" },
+			cwd: "/tmp/volt/src",
+			root: "/tmp/volt",
+			projectCwd: "/tmp/volt",
+			toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+			projectTrusted: false,
+		},
+	},
+	worker_stop: { type: "worker_stop", stopId: "stop-1", reason: "retention", force: false },
 };
 
 const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unknown>> } = {
@@ -412,6 +455,8 @@ const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unkno
 	theme_snapshot: [{ tokens: { accent: 1 } }],
 	keep_awake_changed: [{ keepAwake: undefined }],
 	pairing_progress: [{ phase: "scanning" }, { qrLines: "line" }],
+	worker_spawn: [{ spec: { workerId: "w-1" } }],
+	worker_stop: [{ reason: "bored" }, { force: undefined }],
 };
 
 /** Apply a patch and decode it as the wire would: `undefined` removes a field at any depth. */
@@ -648,9 +693,18 @@ describe("control version negotiation", () => {
 		relayId: "rl-7",
 		relayToken: "tK",
 	};
+	const workerHello: HelloMessage = {
+		type: "hello",
+		role: "worker",
+		protocolVersion: PROTOCOL_VERSION,
+		workerId: "w-1",
+		workerToken: "tW",
+		pid: 4243,
+		version: "0.9.0",
+	};
 
-	it("accepts control and relay hellos, ignoring fields from other protocol versions", () => {
-		for (const hello of [controlHello, relayHello]) {
+	it("accepts control, relay, and worker hellos, ignoring fields from other protocol versions", () => {
+		for (const hello of [controlHello, relayHello, workerHello]) {
 			expect(ControlValidators.hello.Check(roundTrip(hello))).toBe(true);
 			expect(ControlValidators.hello.Check({ ...hello, protocolVersion: 3, futureField: { nested: true } })).toBe(
 				true,
@@ -670,6 +724,8 @@ describe("control version negotiation", () => {
 			{ ...controlHello, protocolVersion: "2" },
 			{ ...relayHello, relayToken: undefined },
 			{ ...relayHello, relayId: 7 },
+			{ ...workerHello, workerToken: undefined },
+			{ ...workerHello, workerId: 7 },
 		]) {
 			expect(ControlValidators.hello.Check(JSON.parse(JSON.stringify(hello))), JSON.stringify(hello)).toBe(false);
 		}

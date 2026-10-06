@@ -22,16 +22,13 @@ export interface DaemonClientEndpoint {
 	authToken?: string;
 }
 
-export interface DaemonClientOptions {
+interface DaemonClientCommonOptions {
 	socketPath: string;
-	client: ControlClientKind;
 	version: string;
 	/** Per-daemon instance token read from the local pidfile. */
 	authToken?: string;
 	/** Re-read daemon discovery metadata before every dial after the first. */
 	refreshEndpoint?(): DaemonClientEndpoint | undefined;
-	/** Capabilities advertised in the control hello (e.g. "worktrees"). */
-	capabilities?: string[];
 	onEvent?(event: ControlEvent): void;
 	onConnectionStateChange?(state: DaemonClientConnectionState): void;
 	/** Reconnect forever with backoff (default true for TUI clients). */
@@ -40,6 +37,20 @@ export interface DaemonClientOptions {
 	maxBackoffMs?: number;
 	helloTimeoutMs?: number;
 }
+
+/** A control client (a TUI or the CLI), or the conversation worker a spawn admitted. */
+export type DaemonClientOptions = DaemonClientCommonOptions &
+	(
+		| {
+				client: ControlClientKind;
+				/** Capabilities advertised in the control hello (e.g. "worktrees"). */
+				capabilities?: string[];
+		  }
+		| {
+				/** The worker this connection speaks for, with its single-use spawn token. */
+				worker: { workerId: string; workerToken: string };
+		  }
+	);
 
 export interface RelayOfferInfo {
 	relayId: string;
@@ -227,16 +238,28 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 
 			dialed.on("connect", () => {
 				dialed.write(
-					encodeControlLine({
-						type: "hello",
-						role: "control",
-						protocolVersion: PROTOCOL_VERSION,
-						pid: process.pid,
-						version: options.version,
-						client: options.client,
-						...(dialEndpoint.authToken === undefined ? {} : { controlToken: dialEndpoint.authToken }),
-						...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
-					}),
+					encodeControlLine(
+						"worker" in options
+							? {
+									type: "hello",
+									role: "worker",
+									protocolVersion: PROTOCOL_VERSION,
+									workerId: options.worker.workerId,
+									workerToken: options.worker.workerToken,
+									pid: process.pid,
+									version: options.version,
+								}
+							: {
+									type: "hello",
+									role: "control",
+									protocolVersion: PROTOCOL_VERSION,
+									pid: process.pid,
+									version: options.version,
+									client: options.client,
+									...(dialEndpoint.authToken === undefined ? {} : { controlToken: dialEndpoint.authToken }),
+									...(options.capabilities === undefined ? {} : { capabilities: options.capabilities }),
+								},
+					),
 				);
 			});
 			dialed.on("data", (chunk) => {
