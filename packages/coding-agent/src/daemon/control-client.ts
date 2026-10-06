@@ -98,6 +98,11 @@ export interface DaemonClient {
 	waitForResponse(id: string): Promise<ControlResponse>;
 	/** Dial a fresh control endpoint with role:"relay"; returns the raw duplex after the preamble. */
 	openRelay(offer: RelayOfferInfo): Promise<{ preamble: RelayPreamble; stream: Duplex }>;
+	/**
+	 * Dial the TUI's end of a conversation `conversation_opened` answered:
+	 * the raw duplex after the relay hello's ack (no preamble).
+	 */
+	openConversationRelay(relay: RelayOfferInfo): Promise<Duplex>;
 	close(): Promise<void>;
 }
 
@@ -457,6 +462,119 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 		});
 	};
 
+	/**
+	 * Dial a relay hello for `offer`, proving its token on that connection:
+	 * the raw duplex after the ack, and after the preamble line when
+	 * `withPreamble` (a worker redeeming an offer; a TUI's end has none).
+	 */
+	const dialRelay = (
+		offer: RelayOfferInfo,
+		withPreamble: boolean,
+	): Promise<{ preamble: RelayPreamble | undefined; stream: Duplex }> => {
+		// Established clients use the exact endpoint that issued the offer;
+		// direct relay-only clients retain the original static endpoint.
+		const relayEndpoint = connectedEndpoint ?? endpoint;
+		return new Promise((resolve, reject) => {
+			const relaySocket = createConnection(relayEndpoint.socketPath);
+			const decoder = new ControlLineDecoder();
+			// The hello proves the offer's token on this connection without sending it; only the daemon
+			// that minted the offer can prove it back.
+			let proven: { readonly binding: HelloBinding; readonly proof: HelloProof } | undefined;
+			let acked = false;
+			let settled = false;
+			// An endpoint that never greets, or never answers, is no daemon: the open fails like a dial would.
+			const handshakeTimer = setTimeout(() => fail(new Error("relay hello timed out")), helloTimeoutMs);
+			handshakeTimer.unref?.();
+
+			const fail = (error: Error) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(handshakeTimer);
+				relaySocket.destroy();
+				reject(error);
+			};
+
+			const handOver = (preamble: RelayPreamble | undefined) => {
+				settled = true;
+				clearTimeout(handshakeTimer);
+				relaySocket.removeListener("data", onData);
+				relaySocket.pause();
+				const remainder = decoder.drainRemainder();
+				if (remainder.length > 0) {
+					relaySocket.unshift(remainder);
+				}
+				resolve({ preamble, stream: relaySocket });
+			};
+
+			const onData = (chunk: Buffer) => {
+				try {
+					// One line at a time: bytes after the ack (and the preamble) are
+					// raw relay payload and must never be JSON-decoded.
+					decoder.pushEach(chunk, (message) => {
+						// The daemon speaks first: the challenge the hello's proof covers.
+						if (proven === undefined) {
+							if (!ControlValidators.helloChallenge.Check(message)) {
+								fail(new Error("daemon did not greet with a challenge"));
+								return "stop";
+							}
+							const binding: HelloBinding = {
+								challenge: message.nonce,
+								socketPath: relayEndpoint.socketPath,
+							};
+							proven = { binding, proof: createHelloProof("relay", offer.relayToken, binding) };
+							relaySocket.write(
+								encodeControlLine({
+									type: "hello",
+									role: "relay",
+									protocolVersion: PROTOCOL_VERSION,
+									relayId: offer.relayId,
+									relayProof: proven.proof,
+								}),
+							);
+							return "continue";
+						}
+						if (!acked) {
+							if (!ControlValidators.helloAck.Check(message) || !message.ok) {
+								fail(new Error("relay hello rejected"));
+								return "stop";
+							}
+							if (
+								!daemonProofMatches(
+									"relay",
+									offer.relayToken,
+									proven.binding,
+									proven.proof,
+									message.daemonProof,
+								)
+							) {
+								fail(new Error("the relay endpoint did not prove it holds the offer's token"));
+								return "stop";
+							}
+							acked = true;
+							if (withPreamble) return "continue";
+							handOver(undefined);
+							return "stop";
+						}
+						if (!ControlValidators.relayPreamble.Check(message)) {
+							fail(new Error("expected relay preamble"));
+							return "stop";
+						}
+						handOver(message);
+						return "stop";
+					});
+				} catch (error) {
+					fail(error instanceof Error ? error : new Error(String(error)));
+				}
+			};
+
+			relaySocket.on("data", onData);
+			relaySocket.on("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
+			relaySocket.on("close", () => fail(new DaemonClientClosedError("relay connection closed")));
+		});
+	};
+
 	return {
 		get connectionState() {
 			return state;
@@ -498,103 +616,13 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			}
 			return registerPending(id);
 		},
-		openRelay(offer: RelayOfferInfo) {
-			// Established clients use the exact endpoint that issued the offer;
-			// direct relay-only clients retain the original static endpoint.
-			const relayEndpoint = connectedEndpoint ?? endpoint;
-			return new Promise((resolve, reject) => {
-				const relaySocket = createConnection(relayEndpoint.socketPath);
-				const decoder = new ControlLineDecoder();
-				// The hello proves the offer's token on this connection without sending it; only the daemon
-				// that minted the offer can prove it back.
-				let proven: { readonly binding: HelloBinding; readonly proof: HelloProof } | undefined;
-				let acked = false;
-				let settled = false;
-				// An endpoint that never greets, or never answers, is no daemon: the open fails like a dial would.
-				const handshakeTimer = setTimeout(() => fail(new Error("relay hello timed out")), helloTimeoutMs);
-				handshakeTimer.unref?.();
-
-				const fail = (error: Error) => {
-					if (settled) {
-						return;
-					}
-					settled = true;
-					clearTimeout(handshakeTimer);
-					relaySocket.destroy();
-					reject(error);
-				};
-
-				const onData = (chunk: Buffer) => {
-					try {
-						// One line at a time: bytes after the preamble are raw relay
-						// payload and must never be JSON-decoded.
-						decoder.pushEach(chunk, (message) => {
-							// The daemon speaks first: the challenge the hello's proof covers.
-							if (proven === undefined) {
-								if (!ControlValidators.helloChallenge.Check(message)) {
-									fail(new Error("daemon did not greet with a challenge"));
-									return "stop";
-								}
-								const binding: HelloBinding = {
-									challenge: message.nonce,
-									socketPath: relayEndpoint.socketPath,
-								};
-								proven = { binding, proof: createHelloProof("relay", offer.relayToken, binding) };
-								relaySocket.write(
-									encodeControlLine({
-										type: "hello",
-										role: "relay",
-										protocolVersion: PROTOCOL_VERSION,
-										relayId: offer.relayId,
-										relayProof: proven.proof,
-									}),
-								);
-								return "continue";
-							}
-							if (!acked) {
-								if (!ControlValidators.helloAck.Check(message) || !message.ok) {
-									fail(new Error("relay hello rejected"));
-									return "stop";
-								}
-								if (
-									!daemonProofMatches(
-										"relay",
-										offer.relayToken,
-										proven.binding,
-										proven.proof,
-										message.daemonProof,
-									)
-								) {
-									fail(new Error("the relay endpoint did not prove it holds the offer's token"));
-									return "stop";
-								}
-								acked = true;
-								return "continue";
-							}
-							if (!ControlValidators.relayPreamble.Check(message)) {
-								fail(new Error("expected relay preamble"));
-								return "stop";
-							}
-							settled = true;
-							clearTimeout(handshakeTimer);
-							relaySocket.removeListener("data", onData);
-							relaySocket.pause();
-							const remainder = decoder.drainRemainder();
-							if (remainder.length > 0) {
-								relaySocket.unshift(remainder);
-							}
-							resolve({ preamble: message, stream: relaySocket });
-							return "stop";
-						});
-					} catch (error) {
-						fail(error instanceof Error ? error : new Error(String(error)));
-					}
-				};
-
-				relaySocket.on("data", onData);
-				relaySocket.on("error", (error) => fail(error instanceof Error ? error : new Error(String(error))));
-				relaySocket.on("close", () => fail(new DaemonClientClosedError("relay connection closed")));
-			});
+		async openRelay(offer: RelayOfferInfo) {
+			const opened = await dialRelay(offer, true);
+			if (!opened.preamble) throw new Error("expected relay preamble");
+			return { preamble: opened.preamble, stream: opened.stream };
+		},
+		async openConversationRelay(relay: RelayOfferInfo) {
+			return (await dialRelay(relay, false)).stream;
 		},
 		async close() {
 			closed = true;

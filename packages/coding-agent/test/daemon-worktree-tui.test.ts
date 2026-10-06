@@ -8,9 +8,10 @@
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { getAgentDir } from "../src/config.ts";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import type { ConversationFactoryResult } from "../src/core/host/hosted-conversation.ts";
@@ -25,7 +26,7 @@ import {
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlRequest,
 	type ControlResponse,
-	type RelayPreamble,
+	type PhoneRelayPreamble,
 } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
@@ -248,6 +249,14 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
 		expect(resolved).toEqual({ name: "project", path: projectPath });
 		const register = client.requests.find((req) => req.type === "workspace_register");
 		expect(register).toMatchObject({ name: "project", path: projectPath });
+	});
+
+	it("never auto-registers a sensitive directory: the home directory, or the agent directory and what contains it (D17)", async () => {
+		const client = createFakeClient({ workspaces: [{ name: "repo", path: HOST_PARENT_PATH }] });
+		for (const path of [homedir(), getAgentDir(), join(getAgentDir(), "daemon"), dirname(getAgentDir())]) {
+			expect(await resolveDaemonWorkspaceForCwd(client, path)).toBeUndefined();
+		}
+		expect(client.requests.some((req) => req.type === "workspace_register")).toBe(false);
 	});
 
 	it("prefers the longest path-prefix match after checking managed worktrees", async () => {
@@ -508,7 +517,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		workspaces: [{ name: "repo", status: "available" }],
 		allowedTools: "read",
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-	} satisfies RelayPreamble["authorization"];
+	} satisfies PhoneRelayPreamble["authorization"];
 
 	it("keeps the parent root for non-worktree conversations", () => {
 		expect(getRelaySanitizerOptions(authorizationBase, HOST_AGENT_DIR)).toEqual({

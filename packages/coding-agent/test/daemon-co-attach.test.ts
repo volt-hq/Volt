@@ -239,12 +239,15 @@ describe.runIf(nativeIrohAvailable)("phones co-attached to a conversation worker
 		// The turn ends: the worker retires once the TTL passed, and exits.
 		turn.resolve();
 		await vi.waitFor(async () => expect((await harness.status()).workers).toEqual([]), { timeout: 10_000 });
-		expect(harness.audit()).toContainEqual(
-			expect.objectContaining({
-				type: "worker_exited",
-				success: true,
-				details: expect.objectContaining({ reason: "stopped", sessionIds: [ref.sessionId] }),
-			}),
+		// The audit log is appended after the registry dropped the worker.
+		await vi.waitFor(() =>
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_exited",
+					success: true,
+					details: expect.objectContaining({ reason: "stopped", sessionIds: [ref.sessionId] }),
+				}),
+			),
 		);
 	}, 60_000);
 

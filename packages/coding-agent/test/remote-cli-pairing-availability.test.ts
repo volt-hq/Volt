@@ -66,6 +66,9 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 		async openRelay() {
 			throw new Error("not used");
 		},
+		async openConversationRelay() {
+			throw new Error("not used");
+		},
 		async close() {},
 	}),
 }));

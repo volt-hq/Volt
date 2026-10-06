@@ -50,6 +50,7 @@ import {
 	type IrohRemoteSanitizerOptions,
 	type IrohRemoteTicketPayload,
 	type IrohRemoteWorkspace,
+	isIrohRemoteClientAllowedForWorkspace,
 	listenIrohRemoteControlServer,
 	normalizeIrohRemoteAllowTools,
 	parseIrohRemoteAllowTools,
@@ -1630,6 +1631,28 @@ describe("Iroh remote core helpers", () => {
 		expect(reconnected.client.label).toBe("renamed phone");
 		expect(reconnected.client).not.toHaveProperty("allowedTools");
 		expect(reconnected.client.lastSeenAt).toBe(200);
+	});
+
+	test("keeps a local-only workspace from an all-workspace grant, but not from a grant that names it", async () => {
+		const workspaces = [{ name: "shared" }, { name: "private", localOnly: true as const }];
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: [] }, "shared", workspaces)).toBe(true);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: [] }, "private", workspaces)).toBe(false);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: ["private"] }, "private", workspaces)).toBe(
+			true,
+		);
+		expect(isIrohRemoteClientAllowedForWorkspace({ allowedWorkspaces: ["private"] }, "shared", workspaces)).toBe(
+			false,
+		);
+	});
+
+	test("registers a workspace insert-only: a taken name, in any case, is never replaced", async () => {
+		const stateManager = new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() });
+		expect(await stateManager.insertWorkspace({ name: "alpha", path: "/alpha" })).toBe(true);
+		expect(await stateManager.insertWorkspace({ name: "alpha", path: "/elsewhere" })).toBe(false);
+		expect(await stateManager.insertWorkspace({ name: "ALPHA", path: "/elsewhere" })).toBe(false);
+		const state = await stateManager.getState();
+		expect(state.workspaces).toEqual([{ name: "alpha", path: "/alpha" }]);
+		expect(state.workspaceGenerations?.filter((record) => record.workspaceName === "alpha")).toHaveLength(1);
 	});
 
 	test("host engine authorizes paired clients across registered workspaces without another pairing secret", async () => {

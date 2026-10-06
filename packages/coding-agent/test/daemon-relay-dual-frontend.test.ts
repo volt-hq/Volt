@@ -18,7 +18,7 @@ import { type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/protocol/t
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
-import type { ControlRequest, RelayPreamble } from "../src/daemon/control-protocol.ts";
+import type { ControlRequest, PhoneRelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
@@ -32,13 +32,13 @@ const SESSION_ID = "s-relay";
 const WORKSPACE = { name: "ws", path: "/tmp/ws" };
 const RPC_GRANT = createIrohRemotePresetAccess("full").rpcGrant;
 const RELAY_WORKSPACE_NAMES = [WORKSPACE.name, "beta"];
-const RELAY_WORKSPACES: RelayPreamble["authorization"]["workspaces"] = [
+const RELAY_WORKSPACES: PhoneRelayPreamble["authorization"]["workspaces"] = [
 	{ name: WORKSPACE.name, status: "available" },
 	{ name: "beta", status: "available" },
 	{ name: "offline", status: "missing" },
 ];
 
-function createRelayWorkspaceMetadata(): Pick<RelayPreamble["authorization"], "workspaceNames" | "workspaces"> {
+function createRelayWorkspaceMetadata(): Pick<PhoneRelayPreamble["authorization"], "workspaceNames" | "workspaces"> {
 	return {
 		workspaceNames: [...RELAY_WORKSPACE_NAMES],
 		workspaces: RELAY_WORKSPACES.map((workspace) => ({ ...workspace })),

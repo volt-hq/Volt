@@ -9,14 +9,22 @@
  * attaches. While it runs it reports whether any conversation it hosts is
  * active, debounced.
  *
- * The daemon relays clients to it: a phone's relay offer names a
- * conversation it hosts, and the worker redeems it and serves the stream
- * (`serve-phone.ts`). The phone's daemon-backed intents and queries, its
- * completion pushes, and its authority go to the daemon over the worker's
- * connection, scoped to that relay; a lost authority ends the stream with
- * its fatal code. The phone's own structural intents redirect it, the
- * target's log written here and opened wherever it reconnects; the moves an
- * extension command starts for it open here (D1).
+ * A phone's open spawns it with the phone's tool policy; a TUI's with the
+ * TUI's environment and its spawn-only and session-level options, which
+ * every conversation it creates is built from (`conversation-factory.ts`),
+ * and for `--no-session` around an in-memory primary (D15). Every hosted
+ * conversation's settings and credentials are watched (D12).
+ *
+ * The daemon relays clients to it: a relay offer names a conversation it
+ * hosts and the client's kind, and the worker redeems it and serves the
+ * stream: a phone's on the remote profile (`serve-phone.ts`), a TUI's on the
+ * local profile (`serve-local.ts`). The phone's daemon-backed intents and
+ * queries, its completion pushes, and its authority go to the daemon over
+ * the worker's connection, scoped to that relay; a lost authority ends the
+ * stream with its fatal code. A client's own structural intents redirect it,
+ * the target's log written here and opened wherever it reconnects; the moves
+ * an extension command starts for it open here (D1), and so do all of an
+ * in-memory conversation's (D15), whose logs exist nowhere else.
  *
  * It stops when the daemon asks: a stop that is not forced is refused when a
  * hosted conversation is active as it arrives; otherwise the worker admits
@@ -48,16 +56,18 @@ import type { WorkerSpawnSpec } from "../control-protocol.ts";
 import { createDaemonLogger } from "../log.ts";
 import { getDaemonPaths } from "../paths.ts";
 import { admitRemoteIntent } from "../remote-intents.ts";
-import { resolveIrohRemoteSessionTarget } from "../session-target.ts";
+import { type ResolvedSessionTargetWithManager, resolveIrohRemoteSessionTarget } from "../session-target.ts";
 import { holdWorkerGate } from "../worker-gate.ts";
 import type { WorkerExit, WorkerExitReason, WorkerLaunchRequest } from "../worker-launcher.ts";
 import { isPathInside } from "../workspace-directory.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
+	resolveWorkerProjectTrust,
 } from "./conversation-factory.ts";
 import { WorkerDaemonClient, type WorkerRelayOffer, type WorkerStopEvent } from "./daemon-client.ts";
 import { WorkerConversations } from "./hosted.ts";
+import { serveLocalRelay } from "./serve-local.ts";
 import { servePhoneRelay } from "./serve-phone.ts";
 
 /** How long a worker waits for the conversation it opens after its hello. */
@@ -108,16 +118,22 @@ async function assertInsideRoot(root: string, cwd: string): Promise<void> {
 }
 
 /**
- * Open `ref` for writing, retrying while another holder has its lock: a
- * replacement opens once the previous holder exited. Gives up at `retryMs`,
- * or once `signal` aborts, with the lock's error.
+ * Open `ref` for writing (in `cwd`, when given, instead of its stored one),
+ * retrying while another holder has its lock: a replacement opens once the
+ * previous holder exited. Gives up at `retryMs`, or once `signal` aborts,
+ * with the lock's error.
  */
-async function openRetryingLock(ref: SessionReference, retryMs: number, signal: AbortSignal): Promise<SessionManager> {
+async function openRetryingLock(
+	ref: SessionReference,
+	retryMs: number,
+	signal: AbortSignal,
+	cwd?: string,
+): Promise<SessionManager> {
 	const deadline = Date.now() + retryMs;
 	let delayMs = LOCK_RETRY_FIRST_DELAY_MS;
 	for (;;) {
 		try {
-			return await SessionManager.open(ref);
+			return await SessionManager.open(ref, cwd);
 		} catch (error) {
 			if (!(error instanceof ConversationLockedError) || signal.aborted || Date.now() + delayMs > deadline) {
 				throw error;
@@ -136,7 +152,7 @@ async function openRetryingLock(ref: SessionReference, retryMs: number, signal: 
 	}
 }
 
-/** Open the spawn's stored conversation in a host of its own. */
+/** Open the spawn's conversation in a host of its own: a stored log, or for a TUI's `--no-session` one in memory. */
 async function openPrimary(
 	spec: WorkerSpawnSpec,
 	agentDir: string,
@@ -146,26 +162,45 @@ async function openPrimary(
 		event: IrohRemoteSubagentRuntimeCreatedEvent,
 	) => ReturnType<WorkerConversations["registerChild"]>,
 ): Promise<{ host: ConversationHost; conversation: HostedConversation }> {
-	const ref = spec.session;
-	const target = await resolveIrohRemoteSessionTarget(
-		{ kind: "session", sessionId: ref.sessionId },
-		{ name: spec.workspace.name, path: spec.workspace.path },
-		{
-			list: async () => [{ id: ref.sessionId, ref }],
-			find: async (sessionId) => (sessionId === ref.sessionId ? ref : undefined),
-			open: (opened) => openRetryingLock(opened, lock.retryMs, lock.signal),
-			create: () => Promise.reject(new Error("A worker opens a stored conversation")),
-		},
-	);
+	const workspace = { name: spec.workspace.name, path: spec.workspace.path };
+	const primary = spec.session;
+	const target: ResolvedSessionTargetWithManager<SessionManager> =
+		"inMemory" in primary
+			? {
+					sessionId: primary.sessionId,
+					selection: "created",
+					workspaceName: workspace.name,
+					workspacePath: workspace.path,
+					sessionManager: SessionManager.inMemory(spec.cwd, { id: primary.sessionId }),
+				}
+			: await resolveIrohRemoteSessionTarget({ kind: "session", sessionId: primary.sessionId }, workspace, {
+					list: async () => [{ id: primary.sessionId, ref: primary }],
+					find: async (sessionId) => (sessionId === primary.sessionId ? primary : undefined),
+					// A TUI's stored conversation runs in the directory it opened it in.
+					open: (opened) =>
+						openRetryingLock(opened, lock.retryMs, lock.signal, spec.origin === "tui" ? spec.cwd : undefined),
+					create: () => Promise.reject(new Error("A worker opens a stored conversation")),
+				});
 	const { runtime } = await createIrohRemoteAgentRuntimeWithSessionSelection({
 		agentDir,
-		toolPolicy: spec.toolPolicy,
 		cwd: spec.cwd,
 		projectCwd: spec.projectCwd,
 		workspaceName: spec.workspace.name,
 		...(spec.baseRef === undefined ? {} : { baseRef: spec.baseRef }),
-		...(spec.profile === undefined ? {} : { profile: spec.profile }),
-		projectTrusted: spec.projectTrusted,
+		...(spec.origin === "phone"
+			? {
+					toolPolicy: spec.toolPolicy,
+					projectTrusted: spec.projectTrusted,
+					...(spec.profile === undefined ? {} : { profile: spec.profile }),
+				}
+			: {
+					cli: {
+						config: spec.config,
+						sessionOptions: spec.sessionOptions,
+						...(spec.modelScopePatterns === undefined ? {} : { modelScopePatterns: spec.modelScopePatterns }),
+					},
+					...(spec.config.profile === undefined ? {} : { profile: spec.config.profile }),
+				}),
 		resolvedSessionTarget: target,
 		validateCwd: (cwd) => assertInsideRoot(spec.root, cwd),
 		onSubagentRuntimeCreated,
@@ -209,6 +244,8 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const halted = new AbortController();
 	/** The streams the worker serves, by relay. */
 	const served = new Map<string, ProtocolConnection>();
+	/** What the worker was spawned with, once it arrived. */
+	let spawned: WorkerSpawnSpec | undefined;
 	/** Relays whose client lost its authority, with the fatal code their stream ends with. */
 	const losses = new Map<string, AuthorityLoss>();
 	const serving = new Set<Promise<void>>();
@@ -296,9 +333,11 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const onRelayOffer = (offer: WorkerRelayOffer): void => {
 		// An offer the worker does not take expires; the daemon tells the client to retry.
 		const target = conversations?.get(offer.sessionId);
-		if (stopping || !target || !conversations) return;
+		if (stopping || !target || !conversations || !spawned) return;
 		const hosted = conversations;
+		const spec = spawned;
 		const relayId = offer.relayId;
+		const conversation = target.conversation;
 		const task = (async () => {
 			let relay: Awaited<ReturnType<WorkerDaemonClient["openRelay"]>>;
 			try {
@@ -306,11 +345,45 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 			} catch {
 				return;
 			}
-			const conversation = target.conversation;
+			const finished = () => served.delete(relayId);
+			const onConnection = (connection: ProtocolConnection) => {
+				served.set(relayId, connection);
+				// A loss pushed before the stream was served ends it now.
+				const loss = losses.get(relayId);
+				if (loss !== undefined) void connection.close({ code: loss });
+			};
+			// The daemon names the client's kind in its offer and its preamble alike.
+			if (relay.preamble.kind !== offer.clientKind) {
+				relay.stream.destroy();
+				return;
+			}
+			if (relay.preamble.kind === "local") {
+				await serveLocalRelay({
+					host: target.host,
+					conversation,
+					relay: { preamble: relay.preamble, stream: relay.stream, finished },
+					// A TUI's structural intents redirect it; an extension's moves open here, and an in-memory
+					// conversation's every move does (D15): its targets exist nowhere else.
+					redirect: {
+						hostTarget: (moved) => hosted.hostMoved(conversation, moved),
+						hostsStoredSessions: true,
+						hostsClientMoves: spec.origin === "tui" && "inMemory" in spec.session,
+						onRedirected: (sessionId, created) => {
+							// A conversation the move created carries the source's change association.
+							if (created) void client.moved(conversation.id, sessionId).catch(() => undefined);
+						},
+					},
+					admit: (intent) =>
+						admitRemoteIntent(intent, { shuttingDown: stopping !== undefined, draining: false, subagent: false }),
+					reviewDiscussions: hosted.reviewDiscussions(conversation),
+					onConnection,
+				});
+				return;
+			}
 			await servePhoneRelay({
 				host: target.host,
 				conversation,
-				relay: { ...relay, finished: () => served.delete(relayId) },
+				relay: { preamble: relay.preamble, stream: relay.stream, finished },
 				agentDir: request.agentDir,
 				daemon: {
 					forward: (frame) => client.forward(relayId, frame),
@@ -336,15 +409,9 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					}),
 				authority: () => losses.get(relayId),
 				reviewDiscussions: hosted.reviewDiscussions(conversation),
-				onConnection: (connection) => {
-					served.set(relayId, connection);
-					// A loss pushed before the stream was served ends it now.
-					const loss = losses.get(relayId);
-					if (loss !== undefined) void connection.close({ code: loss });
-				},
+				onConnection,
 			});
-			losses.delete(relayId);
-		})();
+		})().finally(() => losses.delete(relayId));
 		serving.add(task);
 		void task.finally(() => serving.delete(task));
 	};
@@ -383,10 +450,26 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	let opened: { host: ConversationHost; conversation: HostedConversation };
 	try {
 		const open = client.spawnSpec(SPAWN_SPEC_TIMEOUT_MS).then(async (spec) => {
+			spawned = spec;
 			const hosted = new WorkerConversations({
 				client,
 				workspaceName: spec.workspace.name,
 				log: createDaemonLogger({ logPath: getDaemonPaths(request.agentDir).logPath }).child("compaction"),
+				// Settings or credentials another process wrote: the clients on that conversation refetch them.
+				onCatalogChanged: (conversation, catalog) => {
+					for (const connection of served.values()) {
+						if (connection.conversation === conversation) connection.changed(catalog);
+					}
+				},
+				// As the conversation's factory decides it: a TUI's decision for its own project, else the saved one.
+				projectTrusted: (cwd) =>
+					resolveWorkerProjectTrust(
+						request.agentDir,
+						cwd,
+						spec.origin === "tui" && spec.config.trust !== undefined
+							? { cwd: spec.cwd, trusted: spec.config.trust }
+							: undefined,
+					),
 			});
 			conversations = hosted;
 			const result = await openPrimary(

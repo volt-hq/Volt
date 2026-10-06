@@ -329,7 +329,7 @@ async function handleStatusCommand(args: string[]): Promise<void> {
 		}
 		console.error(`workspaces: ${response.workspaces.length}`);
 		for (const workspace of response.workspaces) {
-			console.error(`  ${workspace.name} -> ${workspace.path}`);
+			console.error(`  ${workspace.name} -> ${workspace.path}${workspace.localOnly ? " (local only)" : ""}`);
 		}
 		console.error(`paired clients: ${response.clients.length}`);
 		for (const client of response.clients) {

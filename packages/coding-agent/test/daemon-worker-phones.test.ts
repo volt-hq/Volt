@@ -1,8 +1,11 @@
 import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { openDaemonConversation } from "../src/client/daemon-conversation.ts";
+import { ProtocolClient } from "../src/client/protocol-client.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
 import { createIrohDaemonService } from "../src/daemon/iroh-service.ts";
@@ -155,6 +158,76 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		]);
 		await opened.close();
 		await expect.poll(async () => (await harness.status()).workers[0]?.clients.remote).toBe(0);
+	}, 60_000);
+
+	it("relays a phone into the worker a TUI opened, beside the TUI, with that worker's tools", async () => {
+		const harness = await startHarness();
+		harness.faux.setResponses([fauxAssistantMessage("hello to both")]);
+		const tui = await harness.connect("tui");
+		const { opened, transport } = await openDaemonConversation(tui, {
+			target: { kind: "new" },
+			spawn: {
+				env: {},
+				config: { tools: ["read"] },
+				cwd: harness.workspacePath,
+				persist: true,
+				session: {},
+			},
+			clientKey: "tui-1",
+		});
+		const client = new ProtocolClient({ followMoves: "reconnect" });
+		cleanups.push(() => client.stop());
+		await client.connect(transport);
+
+		const paired = await pair(harness, { access: "chat" });
+		const { phone } = await attach(paired, opened.sessionId);
+		expect((await harness.status()).workers).toEqual([
+			expect.objectContaining({
+				origin: "tui",
+				sessionIds: [opened.sessionId],
+				clients: { local: 1, remote: 1 },
+			}),
+		]);
+		expect(await phone.intent("prompt", { message: "hi" })).toMatchObject({ type: "accepted" });
+		await expect.poll(() => assistantText(phone.frames), { timeout: 5000 }).toContain("hello to both");
+		await vi.waitFor(() => expect(JSON.stringify(client.state.entries)).toContain("hello to both"), {
+			timeout: 10_000,
+		});
+	}, 60_000);
+
+	it("keeps a workspace local to the host out of reach of a phone granted all workspaces (D17)", async () => {
+		const harness = await startHarness();
+		const tui = await harness.connect("tui");
+		// The harness's root holds its agent directory: sensitive, registered local to the host.
+		const root = realpathSync.native(join(harness.agentDir, ".."));
+		const local = await openDaemonConversation(tui, {
+			target: { kind: "new" },
+			spawn: { env: {}, config: {}, cwd: root, persist: true, session: {} },
+			clientKey: "tui-1",
+			workspaceRegistration: "local",
+		});
+		cleanups.push(async () => local.transport.close());
+		const localName = local.opened.workspaceName;
+		expect((await harness.status()).workspaces).toContainEqual({ name: localName, path: root, localOnly: true });
+
+		const paired = await pair(harness);
+		const ref = await harness.createSession();
+		const shared = await paired.openConversation({ target: "session", sessionId: ref.sessionId });
+		expect(shared.handshake).toMatchObject({ success: true, workspace: harness.workspaceName });
+		// It neither sees the local workspace nor opens a conversation there.
+		expect(shared.handshake).toMatchObject({ remoteHost: { workspaceNames: [harness.workspaceName] } });
+		expect(JSON.stringify(shared.handshake.remoteHost)).not.toContain(localName);
+		const refused = await paired.openConversation(
+			{ target: "session", sessionId: local.opened.sessionId },
+			localName,
+		);
+		// It reads as unregistered: the phone does not learn the workspace exists.
+		expect(refused.handshake).toMatchObject({ success: false, outcome: "workspace_unregistered" });
+		expect(refused.phone).toBeUndefined();
+		// No pairing ticket grants it either.
+		expect(
+			await harness.control.request({ type: "pair_request", workspaceName: localName, access: "chat" }),
+		).toMatchObject({ type: "error", code: "workspace_local_only" });
 	}, 60_000);
 
 	it("stops the running turn at once when the client that opened the worker is revoked", async () => {
@@ -319,8 +392,12 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		const harness = await startHarness({ workerLauncher: launcher });
 		const ref = await harness.createSession();
 		await attach(await pair(harness), ref.sessionId);
-		const relayId = harness.audit().find((event) => event.type === "relay_opened")?.details?.relayId;
-		if (typeof relayId !== "string") throw new Error("No relay");
+		// The daemon audits the relay after the phone's handshake may already have reached it.
+		const relayId = await vi.waitFor(() => {
+			const id = harness.audit().find((event) => event.type === "relay_opened")?.details?.relayId;
+			if (typeof id !== "string") throw new Error("No relay");
+			return id;
+		});
 
 		// A second worker, which the test plays, for another conversation.
 		let other: Promise<DaemonClient> | undefined;

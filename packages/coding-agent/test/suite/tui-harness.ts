@@ -24,8 +24,8 @@ import { IROH_REMOTE_ALPN } from "../../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import type { LogWriter } from "../../src/core/session-writer.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
-import type { RelayPreamble } from "../../src/daemon/control-protocol.ts";
-import { adaptRelaySocketToIrohStream } from "../../src/daemon/worker/serve-phone.ts";
+import type { PhoneRelayPreamble } from "../../src/daemon/control-protocol.ts";
+import { adaptRelaySocketToIrohStream } from "../../src/daemon/relay-stream.ts";
 import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
 import {
 	type AcquireOutcome,
@@ -286,7 +286,7 @@ export interface ScriptedDaemonLink extends DaemonLink {
 	/** Offer the TUI a phone's relay with `preamble`; resolves once the TUI took it, or undefined when it let it expire. */
 	offerRelay(
 		offer: Partial<DaemonRelayOffer> & { sessionId: string },
-		preamble: RelayPreamble,
+		preamble: PhoneRelayPreamble,
 	): Promise<RelayedStream | undefined>;
 	/** Reconnect: the daemon reacquires the session leased last with `outcome`. */
 	reacquire(sessionId: string, outcome: AcquireOutcome): void;
@@ -388,7 +388,7 @@ export function relayPreamble(
 	sessionId: string,
 	workspacePath: string,
 	options: { clientNodeId?: string; streamId?: string } = {},
-): RelayPreamble {
+): PhoneRelayPreamble {
 	const clientNodeId = options.clientNodeId ?? "n-phone";
 	const streamId = options.streamId ?? "st-1";
 	return {

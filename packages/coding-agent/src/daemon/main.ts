@@ -76,6 +76,7 @@ import {
 } from "./paths.ts";
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
+import { TuiConversations } from "./tui-conversations.ts";
 import { waitForWorkerGate } from "./worker-gate.ts";
 import type { WorkerLauncher } from "./worker-launcher.ts";
 import { WorkerRegistry } from "./worker-registry.ts";
@@ -503,17 +504,52 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
 		detachedRuntimeTtlMs: () => state.state.settings.detachedRuntimeTtlMs,
-		sessionInWorkspace: async (workspaceName, sessionId) => {
+		sessionInWorkspace: async (workspaceName, sessionId, sessionDirectory) => {
 			const workspace = state.getHostState().workspaces.find((candidate) => candidate.name === workspaceName);
 			if (!workspace) return false;
-			return (
-				(await SessionManager.findForResume(getDefaultSessionDir(workspace.path, agentDir), sessionId)) !==
-				undefined
-			);
+			for (const directory of [getDefaultSessionDir(workspace.path, agentDir), sessionDirectory]) {
+				if (directory !== undefined && (await SessionManager.findForResume(directory, sessionId)) !== undefined) {
+					return true;
+				}
+			}
+			return false;
 		},
 		audit: (event) => void auditLogger.log(event).catch(() => {}),
 		log: (level, message, details) => logger.log(level, "workers", message, details),
 	});
+	// The conversations TUIs open in workers, and the streams that reach them.
+	const tuiConversations = new TuiConversations({
+		agentDir,
+		workers,
+		workspaces: () => state.getHostState().workspaces,
+		worktrees: () => stateManager.listWorktrees(),
+		currentGeneration: (workspaceName) => {
+			const hostState = state.getHostState();
+			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
+			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
+		},
+		registerWorkspace: async (name, path, localOnly) => {
+			if (
+				!(await stateManager.insertWorkspace({ name, path, ...(localOnly ? { localOnly: true as const } : {}) }))
+			) {
+				return false;
+			}
+			await auditLogger
+				.log({
+					type: "workspace_registered",
+					workspace: name,
+					success: true,
+					details: { path, source: "tui_open", visibility: localOnly ? "local" : "shared" },
+				})
+				.catch(() => {});
+			return true;
+		},
+		bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
+			stateManager.bindWorktreeSession(workspaceName, worktreeId, sessionId),
+		sendTo: (connectionId, event) => controlServer?.sendTo(connectionId, event) ?? false,
+		audit: (event) => void auditLogger.log(event).catch(() => {}),
+	});
+	workers.onWorkerExited((workerId) => tuiConversations.workerExited(workerId));
 
 	const keepAwake = new KeepAwakeController({
 		...config.keepAwake,
@@ -578,8 +614,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				);
 			}
 		}
-		// Their clients are gone: each worker finishes its turn (60 s cap), closes its conversations, and exits.
+		// Each worker finishes its turn (60 s cap), tells its TUIs it shuts down, closes its conversations, and exits.
 		await workers.stopAll();
+		tuiConversations.close();
 		await keepAwake.shutdown().catch(() => {});
 		await changes.close().catch(() => {});
 		await state.close().catch(() => {});
@@ -676,6 +713,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			case "worker_stop_result":
 				connection.send(await workers.handleWorkerRequest(connection.connectionId, request));
 				return;
+			case "conversation_open":
+				connection.send(await tuiConversations.open(connection, request));
+				return;
 		}
 		for (const extension of extensionInstances) {
 			if (await extension.handleRequest?.(connection, request)) {
@@ -694,6 +734,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				const workspaces: ControlWorkspaceStatus[] = state.state.workspaces.map((workspace) => ({
 					name: workspace.name,
 					path: workspace.path,
+					...(workspace.localOnly === true ? { localOnly: true as const } : {}),
 					...(workspace.allowedTools === undefined
 						? {}
 						: {
@@ -777,7 +818,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					state.getHostState().workspaceGenerations?.find((record) => record.workspaceName === request.name)
 						?.generation;
 				const previousGeneration = generationOf();
-				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath });
+				// An explicit registration shares the workspace, a local-only one included (D17).
+				await stateManager.upsertWorkspace({ name: request.name, path: workspacePath }, undefined, "shared");
 				// A replace fences the old authority: its workers retire before the replace is reported (W4).
 				if (previousGeneration !== undefined && generationOf() !== previousGeneration) {
 					await workers.fenceWorkspace(request.name);
@@ -1008,6 +1050,11 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				},
 				relayAdmission: {
 					admitRelay(hello, binding, socket, bufferedRemainder) {
+						if (
+							tuiConversations.admitRelay(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder)
+						) {
+							return true;
+						}
 						for (const extension of extensionInstances) {
 							if (extension.admitRelay?.(hello.relayId, hello.relayProof, binding, socket, bufferedRemainder)) {
 								return true;

@@ -34,7 +34,7 @@ import {
 	type ControlEvent,
 	ControlValidators,
 	type LeaseReleaseReason,
-	type RelayPreamble,
+	type PhoneRelayPreamble,
 } from "../../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../../daemon/paths.ts";
 import { ensureDaemonRunning, probeDaemon, readPublishedDaemonEndpoint } from "../../../daemon/spawn.ts";
@@ -60,7 +60,7 @@ export interface DaemonRelayOffer {
 }
 
 export interface OpenedRelay {
-	preamble: RelayPreamble;
+	preamble: PhoneRelayPreamble;
 	stream: Duplex;
 	/** Mark the relay finished locally (updates the relay count). */
 	finished(): void;
@@ -357,6 +357,12 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 		}
 		handler(offer, async () => {
 			const opened = await activeClient.openRelay({ relayId: offer.relayId, relayToken: offer.relayToken });
+			// The daemon offers a TUI phones only.
+			if (opened.preamble.kind !== "phone") {
+				opened.stream.destroy();
+				throw new Error("The daemon relayed a client the TUI does not serve");
+			}
+			const preamble = opened.preamble;
 			const key = relayKey(offer.clientNodeId, offer.sessionId);
 			activeRelayIds.set(key, { relayId: offer.relayId, workspaceName: offer.workspaceName });
 			setRelayCount(activeRelays + 1);
@@ -371,7 +377,7 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 				}
 			};
 			opened.stream.once("close", finish);
-			return { preamble: opened.preamble, stream: opened.stream, finished: finish };
+			return { preamble, stream: opened.stream, finished: finish };
 		});
 	};
 
@@ -497,7 +503,7 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 				capabilities: [CONTROL_WORKTREES_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 				reconnect: true,
 				onEvent: (event) => {
-					if (event.type === "relay_offer") {
+					if (event.type === "relay_offer" && event.clientKind === "phone") {
 						handleRelayOffer(event);
 					}
 					// relay_closed: the socket close callback decrements the count;

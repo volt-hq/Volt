@@ -1406,9 +1406,8 @@ describe.skipIf(!nativeAvailable)("TUI release/reacquire relay admission (#585)"
 			if (initialOffer?.type !== "relay_offer") throw new Error("initial relay offer missing");
 			const initialRelay = await tui.openRelay(initialOffer);
 			relaySockets.push(initialRelay.stream);
-			expect(initialRelay.preamble.resolvedTarget).toMatchObject({
-				sessionId: sourceSessionId,
-				selection: "resumed",
+			expect(initialRelay.preamble).toMatchObject({
+				resolvedTarget: { sessionId: sourceSessionId, selection: "resumed" },
 			});
 
 			// The TUI moves to the replacement: it acquires the new session's lease
@@ -1474,10 +1473,12 @@ describe.skipIf(!nativeAvailable)("TUI release/reacquire relay admission (#585)"
 			expect(directOffer.sessionId).toBe(replacementSessionId);
 			const directRelay = await tui.openRelay(directOffer);
 			relaySockets.push(directRelay.stream);
-			expect(directRelay.preamble.resolvedTarget).toMatchObject({
-				sessionId: replacementSessionId,
-				selection: "resumed",
-				requestedSessionId: replacementSessionId,
+			expect(directRelay.preamble).toMatchObject({
+				resolvedTarget: {
+					sessionId: replacementSessionId,
+					selection: "resumed",
+					requestedSessionId: replacementSessionId,
+				},
 			});
 
 			const currentStatus = await control.request({ type: "status" });

@@ -13,6 +13,12 @@ export interface IrohRemoteWorkspace {
 	name: string;
 	path: string;
 	allowedTools?: string;
+	/**
+	 * Local to this host (D17): a sensitive directory a TUI registered without
+	 * sharing it. Paired devices neither see nor reach it unless their grant
+	 * names it; an all-workspace grant does not. Absent for a shared workspace.
+	 */
+	localOnly?: true;
 }
 
 export interface IrohRemoteWorkspaceGeneration {
@@ -294,10 +300,13 @@ function parseIrohRemoteWorkspaceGeneration(value: unknown): IrohRemoteWorkspace
 export function parseIrohRemoteWorkspace(value: unknown): IrohRemoteWorkspace {
 	const workspace = expectRecord(value, "Iroh remote workspace");
 	const allowedTools = expectOptionalAllowTools(workspace.allowedTools, "workspace allowedTools");
+	const localOnly =
+		workspace.localOnly === undefined ? false : expectBoolean(workspace.localOnly, "workspace localOnly");
 	return {
 		name: expectString(workspace.name, "workspace name"),
 		path: expectString(workspace.path, "workspace path"),
 		allowedTools: allowedTools === undefined ? undefined : normalizeIrohRemoteAllowTools(allowedTools),
+		...(localOnly ? { localOnly: true } : {}),
 	};
 }
 

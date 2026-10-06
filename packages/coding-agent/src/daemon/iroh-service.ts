@@ -35,10 +35,7 @@ import {
 	type IrohRemoteAgentOptionsRpcBackend,
 } from "../core/remote/iroh/agent-options.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
-import {
-	hashIrohRemotePairingSecret,
-	isIrohRemoteClientAllowedForWorkspace,
-} from "../core/remote/iroh/authorization.ts";
+import { hashIrohRemotePairingSecret } from "../core/remote/iroh/authorization.ts";
 import { serveIrohRemoteConnection } from "../core/remote/iroh/connection.ts";
 import {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
@@ -84,7 +81,10 @@ import {
 	type IrohRemoteHostStateManager,
 	isIrohRemoteWorkspaceHasWorktreesError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
+import {
+	getIrohRemoteWorkspaceAvailabilityStatus,
+	isIrohRemoteClientAllowedForWorkspace,
+} from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
@@ -100,9 +100,9 @@ import {
 	type HelloBinding,
 	type HelloProof,
 	isRemoteTransportPairingAvailable,
+	type PhoneRelayPreamble,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
 	type RelayCloseReason,
-	type RelayPreamble,
 	type RemoteTransportHealth,
 	STANDALONE_REMOTE_TRANSPORT_MESSAGE,
 } from "./control-protocol.ts";
@@ -3433,7 +3433,7 @@ class IrohDaemonService {
 				if (
 					!this.admission.isOpen ||
 					client?.rpcGrant?.revision !== authorization.client.rpcGrant.revision ||
-					!isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name) ||
+					!isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name, state.workspaces) ||
 					client.allowedTools !== authorization.client.allowedTools ||
 					workspace?.path !== authorization.workspace.path ||
 					workspace.allowedTools !== authorization.workspace.allowedTools ||
@@ -4143,7 +4143,7 @@ class IrohDaemonService {
 			worktree: IrohRemoteWorkspaceWorktree | undefined;
 			workingDirectory: string | undefined;
 		},
-	): Omit<RelayPreamble, "type" | "relayId"> {
+	): Omit<PhoneRelayPreamble, "type" | "relayId"> {
 		const authorization = handshake.authorization;
 		const worktree = target.worktree;
 		return {
@@ -4280,8 +4280,13 @@ class IrohDaemonService {
 		}
 		for (const relay of relaysOf()) void relay.close("error", { pendingMessage: "conversation reopened; retry" });
 		try {
-			// A fresh pairing replaces the worker serving the conversation, as it replaced a daemon runtime.
-			if (authorization.paired && target !== "new" && this.workers.hosts(workspaceName, sessionId)) {
+			// A fresh pairing replaces the phone-opened worker serving the conversation, as it replaced a daemon
+			// runtime; a TUI's worker keeps serving its TUI (the phone uses its tools, D9, or is refused).
+			if (
+				authorization.paired &&
+				target !== "new" &&
+				this.workers.host(workspaceName, sessionId)?.origin === "phone"
+			) {
 				await this.workers.retireHost(workspaceName, sessionId, "authority");
 			}
 			await this.dependencies.beforeAuthorizedStreamPublication?.("conversation", authorization);
@@ -4319,8 +4324,9 @@ class IrohDaemonService {
 								},
 							);
 						}
+						// A TUI-opened worker keeps its own tools for every client (#50).
 						if (
-							worker.origin === "phone" &&
+							worker.spec.origin === "phone" &&
 							!isIrohRemoteRuntimeToolPolicyWithin(worker.spec.toolPolicy, resolved.toolPolicy)
 						) {
 							throw createConversationOpenError(
@@ -4977,6 +4983,23 @@ class IrohDaemonService {
 			typeof (request as Record<string, unknown>).workspaceName === "string"
 				? ((request as Record<string, unknown>).workspaceName as string)
 				: undefined;
+		// A device's new grant does not reach a workspace local to this host (D17): no ticket pairs into one.
+		if (
+			workspaceName !== undefined &&
+			!isIrohRemoteClientAllowedForWorkspace(
+				{ allowedWorkspaces: [] },
+				workspaceName,
+				this.services.state.getHostState().workspaces,
+			)
+		) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "workspace_local_only",
+				message: `Workspace ${workspaceName} is local to this host; paired devices cannot reach it. Register it as a shared workspace to pair into it.`,
+			});
+			return;
+		}
 		const requestId = randomUUID();
 		let relayCredentialClaim: IrohManagedRelayCredentialClaim | undefined;
 		let pairingPublished = false;
@@ -5452,12 +5475,11 @@ class IrohDaemonService {
 		if (!client) {
 			return { ok: false, code: "not_found", message: "paired client not found" };
 		}
-		if (!isIrohRemoteClientAllowedForWorkspace(client, scope.workspaceName)) {
+		const workspaces = (await this.stateManager.getState()).workspaces;
+		if (!isIrohRemoteClientAllowedForWorkspace(client, scope.workspaceName, workspaces)) {
 			return { ok: false, code: "not_allowed", message: "client is not authorized for the relay workspace" };
 		}
-		const workspace = (await this.stateManager.getState()).workspaces.find(
-			(candidate) => candidate.name === scope.workspaceName,
-		);
+		const workspace = workspaces.find((candidate) => candidate.name === scope.workspaceName);
 		if (!workspace) {
 			return { ok: false, code: "not_found", message: `no registered workspace named ${scope.workspaceName}` };
 		}
@@ -5542,6 +5564,8 @@ class IrohDaemonService {
 		frame: ControlRelayFrame,
 		keep: ReadonlySet<string>,
 	): Promise<{ ok: true; frame: ControlRelayOutcome } | { ok: false; code: string; message: string }> {
+		// The daemon's own relays are phones'; a TUI's local relays forward nothing.
+		if (relay.preamble.kind !== "phone") return { ok: false, code: "not_found", message: "not a phone's relay" };
 		const metadata = relay.preamble.authorization;
 		const current = await this.currentRelayAuthorization({
 			clientNodeId: relay.clientNodeId,

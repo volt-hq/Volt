@@ -148,9 +148,18 @@ export class WorkerDaemonClient {
 		return this.request({ type: "worker_activity", active });
 	}
 
-	/** Claim `sessionId` before opening it; rejects with code `claimed` when another worker hosts it. */
-	hosts(sessionId: string, kind: WorkerHostKind, parentSessionId: string): Promise<ControlResponse> {
-		return this.request({ type: "worker_hosts", sessionId, kind, parentSessionId });
+	/**
+	 * Claim `sessionId` (`inMemory`: a conversation in no store) before
+	 * opening it; rejects with code `claimed` when another worker hosts it.
+	 */
+	hosts(sessionId: string, kind: WorkerHostKind, parentSessionId: string, inMemory = false): Promise<ControlResponse> {
+		return this.request({
+			type: "worker_hosts",
+			sessionId,
+			kind,
+			parentSessionId,
+			...(inMemory ? { inMemory: true as const } : {}),
+		});
 	}
 
 	released(sessionId: string): Promise<ControlResponse> {

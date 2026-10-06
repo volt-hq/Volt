@@ -47,8 +47,8 @@ export interface PhoneConversation {
 
 export interface PairedPhone {
 	readonly nodeId: string;
-	/** Open a conversation stream with `conversation` as the hello's target. */
-	openConversation(conversation: Record<string, unknown>): Promise<PhoneConversation>;
+	/** Open a conversation stream with `conversation` as the hello's target, in the harness's workspace or `workspace`. */
+	openConversation(conversation: Record<string, unknown>, workspace?: string): Promise<PhoneConversation>;
 	/** Open a workspace stream for `purpose`, after its handshake. */
 	openWorkspace(mode: "workspaceDiscovery" | "workspaceManagement", purpose: string): Promise<PhoneConversation>;
 	close(): Promise<void>;
@@ -144,7 +144,8 @@ export async function pairPhone(
 
 		return {
 			nodeId,
-			openConversation: (conversation) => open({ conversation }),
+			openConversation: (conversation, workspace) =>
+				open({ conversation, ...(workspace === undefined ? {} : { workspace }) }),
 			openWorkspace: (mode, purpose) => open({ [mode]: { purpose } }),
 			close: async () => {
 				for (const connection of connections) {

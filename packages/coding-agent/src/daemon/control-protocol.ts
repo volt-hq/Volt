@@ -55,21 +55,30 @@ export type {
 	ControlWorkerStatus,
 	ControlWorkspaceStatus,
 	ControlWorktreeStatus,
+	ConversationOpenTarget,
 	DaemonRemotePolicyStatus,
 	HelloAck,
 	HelloMessage,
 	HelloProof,
 	LeaseReleaseReason,
 	LeaseState,
+	LocalRelayPreamble,
+	PhoneRelayPreamble,
 	RelayCloseReason,
 	RelayPreamble,
 	RemoteTransportHealth,
 	RemoteTransportReasonCode,
+	SensitiveDirectoryReason,
+	WorkerAgentConfig,
 	WorkerAuthorityLoss,
 	WorkerHostKind,
 	WorkerRelayAuthority,
+	WorkerSessionOptions,
+	WorkerSpawnOnlyOption,
+	WorkerSpawnOptions,
 	WorkerSpawnSpec,
 	WorkerStopReason,
+	WorkspaceRegistration,
 } from "@hansjm10/volt-protocol/daemon-control";
 
 export const PROTOCOL_VERSION = 5;
@@ -292,9 +301,11 @@ export function isWorkerRequestType(type: string): type is WorkerRequestType {
  * Whether a connection of `client` may send a request of `type`: a worker
  * sends worker requests and its conversations' Git observations
  * (`change_observe`, which the daemon authorizes per session), and nothing
- * else; a control client sends no worker request.
+ * else; a control client sends no worker request, and only a TUI opens
+ * conversations (`conversation_open`).
  */
 export function isRequestAllowedFor(client: "tui" | "cli" | "worker", type: string): boolean {
+	if (type === "conversation_open") return client === "tui";
 	return type === "change_observe" || (client === "worker") === isWorkerRequestType(type);
 }
 

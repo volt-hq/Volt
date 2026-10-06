@@ -7,7 +7,9 @@
  * extension starts for a client of the worker (moved). A claim for a
  * conversation another worker hosts is refused; a stored session an
  * extension switches to is then left to that worker. Each hosted
- * conversation's Git state is reported to the daemon for change association.
+ * conversation's Git state is reported to the daemon for change association,
+ * and its settings and credentials are watched for changes other processes
+ * write (D12).
  */
 
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
@@ -24,6 +26,7 @@ import type { DaemonLogger } from "../log.ts";
 import { observeCompactionFailures } from "./compaction-failure-log.ts";
 import type { IrohRemoteSubagentRuntimeCreatedEvent } from "./conversation-factory.ts";
 import { type WorkerDaemonClient, WorkerRequestError } from "./daemon-client.ts";
+import { watchConversationSettings } from "./settings-watcher.ts";
 
 /** How long a sibling claim waits for the worker that hosted the conversation to exit. */
 const SIBLING_CLAIM_WAIT_MS = 15_000;
@@ -65,6 +68,8 @@ export class WorkerConversations {
 	private readonly client: WorkerDaemonClient;
 	private readonly workspaceName: string;
 	private readonly log: ReturnType<DaemonLogger["child"]>;
+	private readonly onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
+	private readonly projectTrusted: (cwd: string) => boolean;
 	private readonly hosted = new Map<string, WorkerConversation>();
 	private readonly observations = new Map<string, GitContextObservationBinding>();
 	/** Sessions claimed and not yet open here: released if they never open. */
@@ -78,10 +83,16 @@ export class WorkerConversations {
 		workspaceName: string;
 		/** Where failed compactions are recorded: clients only see them while connected. */
 		log: ReturnType<DaemonLogger["child"]>;
+		/** Settings or credentials another process wrote changed what a hosted conversation's clients see. */
+		onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
+		/** Whether the project in `cwd` is trusted now: a project's settings reload only while it is. */
+		projectTrusted: (cwd: string) => boolean;
 	}) {
 		this.client = options.client;
 		this.workspaceName = options.workspaceName;
 		this.log = options.log;
+		this.onCatalogChanged = options.onCatalogChanged;
+		this.projectTrusted = options.projectTrusted;
 		this.reviews = new HostReviewDiscussionService({
 			findRuntime: (ref, requester) => {
 				if (!this.isHosted(requester)) throw new Error("Review requester runtime is unavailable");
@@ -152,12 +163,17 @@ export class WorkerConversations {
 	 * `claimed` when another worker hosts it. A sibling claim waits while the
 	 * daemon retires a detached, idle worker that hosted it (`retiring`).
 	 */
-	private async claim(sessionId: string, kind: WorkerHostKind, parentSessionId: string): Promise<void> {
+	private async claim(
+		sessionId: string,
+		kind: WorkerHostKind,
+		parentSessionId: string,
+		inMemory = false,
+	): Promise<void> {
 		const deadline = Date.now() + SIBLING_CLAIM_WAIT_MS;
 		for (;;) {
 			if (this.stopping) throw new Error("The worker is stopping");
 			try {
-				await this.client.hosts(sessionId, kind, parentSessionId);
+				await this.client.hosts(sessionId, kind, parentSessionId, inMemory);
 				break;
 			} catch (error) {
 				if (!(error instanceof WorkerRequestError) || error.code !== "retiring" || Date.now() >= deadline)
@@ -176,6 +192,11 @@ export class WorkerConversations {
 	private track(hosted: WorkerConversation): void {
 		const sessionId = hosted.conversation.id;
 		const stopCompactionLog = observeCompactionFailures(hosted.conversation, this.workspaceName, this.log);
+		const stopWatching = watchConversationSettings(
+			hosted.conversation,
+			(catalog) => this.onCatalogChanged(hosted.conversation, catalog),
+			this.projectTrusted,
+		);
 		void hosted.conversation.lost.then(() => {
 			if (!hosted.conversation.closed) void hosted.host.close(hosted.conversation).catch(() => undefined);
 		});
@@ -194,6 +215,7 @@ export class WorkerConversations {
 		binding.bind(hosted.conversation.session.gitContextProvider);
 		void hosted.conversation.whenClosed().then(() => {
 			stopCompactionLog();
+			stopWatching();
 			binding.dispose();
 			if (this.observations.get(sessionId) === binding) this.observations.delete(sessionId);
 			if (this.hosted.get(sessionId) !== hosted) return;
@@ -220,7 +242,13 @@ export class WorkerConversations {
 		if (!parent || parent.conversation.closed) {
 			throw new Error(`Parent conversation is not hosted for subagent session ${event.sessionId}`);
 		}
-		await this.claim(event.sessionId, "child", event.parentSessionId);
+		// The child of an in-memory conversation is in memory too.
+		await this.claim(
+			event.sessionId,
+			"child",
+			event.parentSessionId,
+			event.conversation.session.sessionRef === undefined,
+		);
 		let state: "prepared" | "committed" | "rolled-back" = "prepared";
 		return {
 			commit: () => {
@@ -307,7 +335,13 @@ export class WorkerConversations {
 	async hostMoved(from: HostedConversation, target: RedirectTarget): Promise<HostedRedirect | undefined> {
 		if (!this.isHosted(from)) throw new Error("The conversation the client left is not hosted here");
 		try {
-			await this.claim(target.sessionId, "moved", from.id);
+			// A target the move opened here follows its source's storage: in memory for an in-memory source.
+			await this.claim(
+				target.sessionId,
+				"moved",
+				from.id,
+				target.conversation !== undefined && target.conversation.session.sessionRef === undefined,
+			);
 		} catch (error) {
 			if (target.conversation === undefined && error instanceof WorkerRequestError && error.code === "claimed") {
 				return undefined;

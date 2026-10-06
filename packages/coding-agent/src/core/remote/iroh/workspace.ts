@@ -59,10 +59,16 @@ export async function getIrohRemoteWorkspaceAvailabilityStatus(
 	}
 }
 
+/**
+ * Register or update `workspace`. A new workspace is local-only when
+ * `workspace.localOnly` says so; an existing one keeps its visibility unless
+ * `visibility` changes it (`shared`: an explicit registration shares it).
+ */
 export function upsertIrohRemoteWorkspace(
 	state: IrohRemoteHostState,
 	workspace: IrohRemoteWorkspace,
 	allowTools?: string,
+	visibility?: "shared",
 ): IrohRemoteWorkspace {
 	assertIrohRemoteWorkspaceName(workspace.name);
 	const nameAlias = getIrohRemoteWorkspaceNameAlias(workspace.name);
@@ -77,6 +83,7 @@ export function upsertIrohRemoteWorkspace(
 		name: workspace.name,
 		path: workspace.path,
 		...(savedAllowedTools === undefined ? {} : { allowedTools: normalizeIrohRemoteAllowTools(savedAllowedTools) }),
+		...(workspace.localOnly === true ? { localOnly: true } : {}),
 	};
 	const existing = state.workspaces.find((entry) => entry.name === workspace.name);
 	if (!existing) {
@@ -84,6 +91,8 @@ export function upsertIrohRemoteWorkspace(
 		state.workspaces.push(savedWorkspace);
 		return savedWorkspace;
 	}
+	// Sharing widens who may reach the workspace: nothing to fence.
+	if (visibility === "shared") delete existing.localOnly;
 
 	const nextAllowedTools = savedWorkspace.allowedTools ?? existing.allowedTools;
 	if (existing.path === savedWorkspace.path && existing.allowedTools === nextAllowedTools) {
@@ -126,14 +135,28 @@ export function getAvailableIrohRemoteWorkspaceNames(workspaces: readonly IrohRe
 	return workspaces.filter((entry) => entry.status === "available").map((entry) => entry.name);
 }
 
-/** Scope host workspace metadata to the catalog visible to one paired client. */
+/**
+ * Whether a paired client may reach the registered workspace `workspaceName`
+ * of `workspaces`: one its grant names, or, with an all-workspace grant, any
+ * that is not local-only (D17).
+ */
+export function isIrohRemoteClientAllowedForWorkspace(
+	client: Pick<IrohRemoteClient, "allowedWorkspaces">,
+	workspaceName: string,
+	workspaces: readonly Pick<IrohRemoteWorkspace, "name" | "localOnly">[],
+): boolean {
+	if (client.allowedWorkspaces.length > 0) return client.allowedWorkspaces.includes(workspaceName);
+	return workspaces.find((workspace) => workspace.name === workspaceName)?.localOnly !== true;
+}
+
+/** Scope host workspace metadata to the catalog visible to one paired client: never a local-only workspace it was not granted. */
 export function createAuthorizedIrohRemoteWorkspaceMetadata(
 	workspaces: readonly IrohRemoteWorkspaceStatus[],
 	client: Pick<IrohRemoteClient, "allowedWorkspaces">,
+	registered: readonly Pick<IrohRemoteWorkspace, "name" | "localOnly">[],
 ): IrohRemoteWorkspaceMetadataSnapshot {
-	const allowedWorkspaceNames = client.allowedWorkspaces.length === 0 ? undefined : new Set(client.allowedWorkspaces);
 	const authorizedWorkspaces = workspaces
-		.filter((workspace) => allowedWorkspaceNames === undefined || allowedWorkspaceNames.has(workspace.name))
+		.filter((workspace) => isIrohRemoteClientAllowedForWorkspace(client, workspace.name, registered))
 		.map((workspace) => ({ ...workspace }));
 	return {
 		workspaceNames: getAvailableIrohRemoteWorkspaceNames(authorizedWorkspaces),

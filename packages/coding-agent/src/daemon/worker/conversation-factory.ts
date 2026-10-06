@@ -1,6 +1,19 @@
+/**
+ * The conversations a worker hosts, created as the CLI creates its own: a
+ * phone-opened worker's with the phone's tool policy (D9), a TUI-opened
+ * worker's from the TUI's spawn-only and session-level options (Phase 7 plan
+ * §1, "Spawn"), which the in-process modes' factory in `main.ts` builds from
+ * the same CLI arguments (`cli/agent-options.ts`).
+ */
+
 import { join } from "node:path";
+import { buildSessionOptions } from "../../cli/agent-options.ts";
 import { ENV_AGENT_DIR, getAgentDir } from "../../config.ts";
-import { createAgentSessionFromServices, createAgentSessionServices } from "../../core/agent-session-services.ts";
+import {
+	type AgentSessionDiagnostic,
+	createAgentSessionFromServices,
+	createAgentSessionServices,
+} from "../../core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
 import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
@@ -8,6 +21,7 @@ import { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
+import { resolveModelScope } from "../../core/model-resolver.ts";
 import {
 	type IrohRemoteRuntimeToolPolicy,
 	parseIrohRemoteAllowTools,
@@ -20,8 +34,10 @@ import {
 	type SubagentRuntimeCreatedEvent,
 	type SubagentRuntimeRegistration,
 } from "../../core/subagents/index.ts";
+import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { runMigrations } from "../../migrations.ts";
-import { resolvePath } from "../../utils/paths.ts";
+import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
+import type { WorkerAgentConfig, WorkerSessionOptions } from "../control-protocol.ts";
 import {
 	createSessionManagerTargetStore,
 	type IrohRemoteSessionTarget,
@@ -29,6 +45,46 @@ import {
 	resolveIrohRemoteSessionTarget,
 } from "../session-target.ts";
 import type { SessionWorktreeDaemon } from "../session-worktree.ts";
+import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../worktree-manager.ts";
+
+/** What a TUI opened its worker with: every conversation the worker creates is built from it. */
+export interface WorkerCliOptions {
+	readonly config: WorkerAgentConfig;
+	readonly sessionOptions: WorkerSessionOptions;
+	readonly modelScopePatterns?: readonly string[];
+}
+
+/**
+ * Where a conversation in `cwd` takes its project trust from: the parent
+ * checkout of a managed worktree, and none for one whose parent is unknown
+ * (worktrees-design §5.2.1).
+ */
+function projectTrustPath(agentDir: string, cwd: string): string | undefined {
+	const path =
+		resolveWorktreeParentCheckout(agentDir, cwd) ?? (isPathUnderWorktreesRoot(agentDir, cwd) ? undefined : cwd);
+	return path === undefined ? undefined : canonicalizePath(resolvePath(path));
+}
+
+/**
+ * The project trust of a conversation in `cwd`: the decision its opener (a
+ * TUI) made for the project it opened in, `decided`, applies to that project
+ * only; elsewhere, and without one, a project without resources that need
+ * trust is trusted, and one with them is trusted only by its saved decision.
+ * Read again whenever it matters: a project that had nothing to trust may
+ * gain it.
+ */
+export function resolveWorkerProjectTrust(
+	agentDir: string,
+	cwd: string,
+	decided: { readonly cwd: string; readonly trusted: boolean } | undefined,
+): boolean {
+	const trustPath = projectTrustPath(agentDir, cwd);
+	if (decided !== undefined && trustPath !== undefined && trustPath === projectTrustPath(agentDir, decided.cwd)) {
+		return decided.trusted;
+	}
+	if (!hasTrustRequiringProjectResources(cwd)) return true;
+	return trustPath !== undefined && new ProjectTrustStore(agentDir).get(trustPath) === true;
+}
 
 export interface IrohRemoteAgentRuntimeOptions {
 	/** Legacy unresolved grant used by direct callers. Daemon runtimes pass toolPolicy instead. */
@@ -61,6 +117,8 @@ export interface IrohRemoteAgentRuntimeOptions {
 	validateCwd?: (cwd: string) => Promise<void> | void;
 	/** The worker's route to its daemon for managed checkouts. */
 	worktreeDaemon?: SessionWorktreeDaemon;
+	/** A TUI-opened worker's options, in place of a phone's `toolPolicy`. */
+	cli?: WorkerCliOptions;
 }
 
 export interface IrohRemoteSubagentRuntimeCreatedEvent extends SubagentRuntimeCreatedEvent {
@@ -155,23 +213,50 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	// per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
 	const gitContextProviderPool = new GitContextProviderPool();
+	const cli = options.cli;
+	// The TUI's decision is for the project its first conversation opened in.
+	const decidedTrust = cli?.config.trust === undefined ? undefined : { cwd: options.cwd, trusted: cli.config.trust };
 	const createRuntime: ConversationFactory = async (runtimeOptions) => {
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
-		const settingsManager = SettingsManager.create(projectCwd, runtimeOptions.agentDir, {
+		// A TUI's conversation reads its settings and resources where it runs, as the CLI's do.
+		const settingsCwd = cli === undefined ? projectCwd : runtimeOptions.cwd;
+		const settingsManager = SettingsManager.create(settingsCwd, runtimeOptions.agentDir, {
 			profile,
-			projectTrusted,
+			projectTrusted:
+				cli === undefined
+					? projectTrusted
+					: resolveWorkerProjectTrust(runtimeOptions.agentDir, runtimeOptions.cwd, decidedTrust),
 		});
 		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 		const services = await createAgentSessionServices({
 			authStorage,
 			cwd: runtimeOptions.cwd,
-			projectCwd,
+			projectCwd: settingsCwd,
 			agentDir: runtimeOptions.agentDir,
 			settingsManager,
 			workspaceName: runtimeOptions.workspaceName ?? options.workspaceName,
 			baseRef: runtimeOptions.baseRef ?? options.baseRef,
 			gitContextProviderPool,
+			...(cli === undefined
+				? {}
+				: {
+						// `registerFlag` values from the TUI's arguments.
+						extensionFlagValues: new Map(Object.entries(cli.config.flags ?? {})),
+						resourceLoaderOptions: {
+							additionalExtensionPaths: cli.config.extensions,
+							additionalSkillPaths: cli.config.skills,
+							additionalPromptTemplatePaths: cli.config.promptTemplates,
+							additionalThemePaths: cli.config.themes,
+							noExtensions: cli.config.noExtensions,
+							noSkills: cli.config.noSkills,
+							noPromptTemplates: cli.config.noPromptTemplates,
+							noThemes: cli.config.noThemes,
+							noContextFiles: cli.config.noContextFiles,
+							systemPrompt: cli.config.systemPrompt,
+							appendSystemPrompt: cli.config.appendSystemPrompt,
+						},
+					}),
 		});
 		const subagentManager = new SubagentManager({
 			createRuntime,
@@ -196,19 +281,73 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 				: undefined,
 		});
 		try {
-			const created = await createAgentSessionFromServices({
-				services,
-				sessionManager: runtimeOptions.sessionManager,
-				sessionStartEvent: runtimeOptions.sessionStartEvent,
-				tools,
-				allowUnlistedExtensionTools,
-				subagentToolManager: subagentManager,
-				lspServerPool,
-			});
+			const diagnostics: AgentSessionDiagnostic[] = [...services.diagnostics];
+			let created: Awaited<ReturnType<typeof createAgentSessionFromServices>>;
+			if (cli === undefined) {
+				created = await createAgentSessionFromServices({
+					services,
+					sessionManager: runtimeOptions.sessionManager,
+					sessionStartEvent: runtimeOptions.sessionStartEvent,
+					tools,
+					allowUnlistedExtensionTools,
+					subagentToolManager: subagentManager,
+					lspServerPool,
+				});
+			} else {
+				const { modelRegistry, resourceLoader } = services;
+				if (cli.config.lsp) settingsManager.applyOverrides({ lsp: { enabled: true } });
+				// As the CLI fails to start, an extension that does not load fails the open.
+				diagnostics.push(
+					...resourceLoader.getExtensions().errors.map(({ path, error }) => ({
+						type: "error" as const,
+						message: `Failed to load extension "${path}": ${error}`,
+					})),
+				);
+				const modelPatterns = cli.modelScopePatterns ?? settingsManager.getEnabledModels();
+				const scopedModels =
+					modelPatterns && modelPatterns.length > 0
+						? await resolveModelScope([...modelPatterns], modelRegistry)
+						: [];
+				const { sessionStartEvent, sessionManager } = runtimeOptions;
+				const hasExistingSession = sessionStartEvent?.reason !== "new" && sessionManager.getBranch().length > 0;
+				const built = buildSessionOptions(
+					{ ...cli.config, ...cli.sessionOptions },
+					scopedModels,
+					hasExistingSession,
+					modelRegistry,
+					settingsManager,
+				);
+				diagnostics.push(...built.diagnostics);
+				const sessionOptions = built.options;
+				if (cli.config.apiKey !== undefined) {
+					if (sessionOptions.model) authStorage.setRuntimeApiKey(sessionOptions.model.provider, cli.config.apiKey);
+					else {
+						diagnostics.push({
+							type: "error",
+							message: "--api-key requires a model to be specified via --model, --provider/--model, or --models",
+						});
+					}
+				}
+				created = await createAgentSessionFromServices({
+					services,
+					sessionManager,
+					sessionStartEvent,
+					model: sessionOptions.model,
+					thinkingLevel: sessionOptions.thinkingLevel,
+					agentMode: sessionStartEvent ? undefined : sessionOptions.agentMode,
+					scopedModels: sessionOptions.scopedModels,
+					tools: sessionOptions.tools,
+					allowUnlistedExtensionTools: sessionOptions.allowUnlistedExtensionTools,
+					excludeTools: sessionOptions.excludeTools,
+					noTools: sessionOptions.noTools,
+					subagentToolManager: subagentManager,
+					lspServerPool,
+				});
+			}
 			return {
 				...created,
 				services,
-				diagnostics: services.diagnostics,
+				diagnostics,
 			};
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
@@ -262,7 +401,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 		if (errors.length > 0) {
 			throw new Error(errors.map((diagnostic) => diagnostic.message).join("\n"));
 		}
-		if (!opened.conversation.session.model) {
+		// A TUI opens without a model, as the CLI starts without one: its user logs in first.
+		if (cli === undefined && !opened.conversation.session.model) {
 			throw new Error(formatNoModelsAvailableMessage());
 		}
 		return { runtime, sessionSelection: sessionTarget.selection };

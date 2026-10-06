@@ -24,6 +24,7 @@ import {
 	createAuthorizedIrohRemoteWorkspaceMetadata,
 	type IrohRemoteWorkspaceAvailabilityClassifier,
 	type IrohRemoteWorkspaceStatus,
+	isIrohRemoteClientAllowedForWorkspace,
 } from "./workspace.ts";
 
 export const DEFAULT_IROH_REMOTE_PAIRING_SECRET_TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -188,7 +189,16 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (!registeredWorkspace) {
+	// A workspace local to this host (D17) that the client's grant does not name reads to it as unregistered:
+	// a new device's grant, or an all-workspace one, neither reaches it nor learns it exists.
+	const hiddenWorkspace =
+		registeredWorkspace?.localOnly === true &&
+		!isIrohRemoteClientAllowedForWorkspace(
+			existingClient ?? { allowedWorkspaces: [] },
+			registeredWorkspace.name,
+			state.workspaces,
+		);
+	if (!registeredWorkspace || hiddenWorkspace) {
 		return {
 			ok: false,
 			error: `workspace is not registered: ${hello.workspace}`,
@@ -219,7 +229,7 @@ export function authorizeIrohRemoteClient(
 		};
 	}
 
-	if (existingClient && !isIrohRemoteClientAllowedForWorkspace(existingClient, workspace.name)) {
+	if (existingClient && !isIrohRemoteClientAllowedForWorkspace(existingClient, workspace.name, state.workspaces)) {
 		return {
 			ok: false,
 			client: existingClient,
@@ -353,7 +363,7 @@ export function authorizeIrohRemoteClient(
 			pairingSecretConsumed: true,
 			workspace,
 			...getWorkspaceGenerationProperty(state, workspace.name),
-			...createAuthorizedIrohRemoteWorkspaceMetadata(workspaceCatalog, client),
+			...createAuthorizedIrohRemoteWorkspaceMetadata(workspaceCatalog, client, state.workspaces),
 		};
 	}
 
@@ -373,7 +383,7 @@ export function authorizeIrohRemoteClient(
 		pairingSecretConsumed: false,
 		workspace,
 		...getWorkspaceGenerationProperty(state, workspace.name),
-		...createAuthorizedIrohRemoteWorkspaceMetadata(workspaceCatalog, existingClient),
+		...createAuthorizedIrohRemoteWorkspaceMetadata(workspaceCatalog, existingClient, state.workspaces),
 	};
 }
 
@@ -406,10 +416,6 @@ export function findIrohRemoteRevokedClient(
 	nodeId: string,
 ): IrohRemoteRevokedClient | undefined {
 	return getRevokedClients(state).find((client) => client.nodeId === nodeId);
-}
-
-export function isIrohRemoteClientAllowedForWorkspace(client: IrohRemoteClient, workspaceName: string): boolean {
-	return client.allowedWorkspaces.length === 0 || client.allowedWorkspaces.includes(workspaceName);
 }
 
 export function hashIrohRemotePairingSecret(secret: string): string {

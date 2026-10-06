@@ -9,9 +9,10 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
-import { type ImageContent, modelsAreEqual } from "@hansjm10/volt-ai";
+import type { ImageContent } from "@hansjm10/volt-ai";
 import { ProcessTerminal, setKeybindings } from "@hansjm10/volt-tui";
 import chalk from "chalk";
+import { buildSessionOptions, resolveCliPaths } from "./cli/agent-options.ts";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
@@ -37,11 +38,9 @@ import type { ConversationFactory } from "./core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
 import { LspServerPool } from "./core/lsp/server-pool.ts";
-import type { ModelRegistry } from "./core/model-registry.ts";
-import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
+import { resolveModelScope } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
-import type { CreateAgentSessionOptions } from "./core/sdk.ts";
 import {
 	formatMissingSessionCwdPrompt,
 	getMissingSessionCwdIssue,
@@ -80,7 +79,7 @@ import {
 } from "./modes/interactive/host/daemon-link.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
-import { canonicalizePath, isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { canonicalizePath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupSelfUpdateQuarantine } from "./utils/self-update-native-quarantine.ts";
 
 /**
@@ -572,111 +571,6 @@ async function createSessionManager(
 	}
 
 	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
-}
-
-function buildSessionOptions(
-	parsed: Args,
-	scopedModels: ScopedModel[],
-	hasExistingSession: boolean,
-	modelRegistry: ModelRegistry,
-	settingsManager: SettingsManager,
-): {
-	options: CreateAgentSessionOptions;
-	diagnostics: AgentSessionDiagnostic[];
-} {
-	const options: CreateAgentSessionOptions = {};
-	const diagnostics: AgentSessionDiagnostic[] = [];
-
-	// Model from CLI
-	// - supports --provider <name> --model <pattern>
-	// - supports --model <provider>/<pattern>
-	if (parsed.model) {
-		const resolved = resolveCliModel({
-			cliProvider: parsed.provider,
-			cliModel: parsed.model,
-			cliThinking: parsed.thinking,
-			modelRegistry,
-		});
-		if (resolved.warning) {
-			diagnostics.push({ type: "warning", message: resolved.warning });
-		}
-		if (resolved.error) {
-			diagnostics.push({ type: "error", message: resolved.error });
-		}
-		if (resolved.model) {
-			options.model = resolved.model;
-			// Allow "--model <pattern>:<thinking>" as a shorthand.
-			// Explicit --thinking still takes precedence (applied later).
-			if (!parsed.thinking && resolved.thinkingLevel) {
-				options.thinkingLevel = resolved.thinkingLevel;
-			}
-		}
-	}
-
-	if (!options.model && scopedModels.length > 0 && !hasExistingSession) {
-		// Check if saved default is in scoped models - use it if so, otherwise first scoped model
-		const savedProvider = settingsManager.getDefaultProvider();
-		const savedModelId = settingsManager.getDefaultModel();
-		const savedModel = savedProvider && savedModelId ? modelRegistry.find(savedProvider, savedModelId) : undefined;
-		const savedInScope = savedModel ? scopedModels.find((sm) => modelsAreEqual(sm.model, savedModel)) : undefined;
-
-		if (savedInScope) {
-			options.model = savedInScope.model;
-			// Use thinking level from scoped model config if explicitly set
-			if (!parsed.thinking && savedInScope.thinkingLevel) {
-				options.thinkingLevel = savedInScope.thinkingLevel;
-			}
-		} else {
-			options.model = scopedModels[0].model;
-			// Use thinking level from first scoped model if explicitly set
-			if (!parsed.thinking && scopedModels[0].thinkingLevel) {
-				options.thinkingLevel = scopedModels[0].thinkingLevel;
-			}
-		}
-	}
-
-	// Thinking level from CLI (takes precedence over scoped model thinking levels set above)
-	if (parsed.thinking) {
-		options.thinkingLevel = parsed.thinking;
-	}
-	if (parsed.plan) {
-		options.agentMode = "plan";
-	}
-
-	// Scoped models for Ctrl+P cycling
-	// Keep thinking level undefined when not explicitly set in the model pattern.
-	// Undefined means "inherit current session thinking level" during cycling.
-	if (scopedModels.length > 0) {
-		options.scopedModels = scopedModels.map((sm) => ({
-			model: sm.model,
-			thinkingLevel: sm.thinkingLevel,
-		}));
-	}
-
-	// API key from CLI - set in authStorage
-	// (handled by caller before createAgentSession)
-
-	// Tools
-	if (parsed.noTools) {
-		options.noTools = "all";
-	} else if (parsed.noBuiltinTools) {
-		options.noTools = "builtin";
-	}
-	if (parsed.tools) {
-		options.tools = [...parsed.tools];
-	}
-	if (parsed.allowUnlistedExtensionTools) {
-		options.allowUnlistedExtensionTools = true;
-	}
-	if (parsed.excludeTools) {
-		options.excludeTools = [...parsed.excludeTools];
-	}
-
-	return { options, diagnostics };
-}
-
-function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
-	return paths?.map((value) => (isLocalPath(value) ? resolvePath(value, cwd) : value));
 }
 
 async function promptForMissingSessionCwd(

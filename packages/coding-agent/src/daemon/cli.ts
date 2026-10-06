@@ -368,7 +368,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	console.error(`phone connections: ${status.phoneConnections}`);
 	console.error(`workspaces: ${status.workspaces.length}`);
 	for (const workspace of status.workspaces) {
-		console.error(`  ${workspace.name} -> ${workspace.path}`);
+		console.error(`  ${workspace.name} -> ${workspace.path}${workspace.localOnly ? " (local only)" : ""}`);
 	}
 	console.error(`paired clients: ${status.clients.length}`);
 	for (const client of status.clients) {
