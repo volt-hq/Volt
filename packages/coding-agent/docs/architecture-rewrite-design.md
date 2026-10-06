@@ -249,7 +249,7 @@ Deleted outright:
 | `list_jobs`, `read_job`, `cancel_job`, `subagent_*`, `cancel_workflow`, `list_review_workflows` | Work intents and work-output queries |
 | `new_session`, `switch_session*`, `fork`, `clone` | Intents that return a conversation id, followed by a new subscription |
 | `conversation_bootstrap` resync and overflow, `report_stream_discontinuity` | Removed: resume by ordinal |
-| Daemon `viewer_*`, TUI lease states, `relay_rpc` | Removed (daemon-hosted conversations RFC) |
+| Daemon `viewer_*`, TUI lease states, `relay_rpc` | Removed (daemon-hosted conversations RFC). A worker forwards its relayed phones' daemon-backed intents and queries (push targets, workspace and worktree changes, keep-awake, web search key) over `worker_forward` on its worker connection, with the same allowlist, scoped to that worker's own relays *(amended 2026-10-06)* |
 
 ## 7. One Work Primitive
 
