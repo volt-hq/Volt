@@ -4,10 +4,12 @@
  * fake shell script; the developer's real login shell and dotfiles never run.
  */
 
+import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { handleDaemonCommand } from "../src/daemon/cli.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlResponse } from "../src/daemon/control-protocol.ts";
 import {
@@ -227,6 +229,35 @@ describe.skipIf(process.platform === "win32")("resolveDaemonEnvironment", () => 
 		expect(readSessionEnvironment).not.toHaveBeenCalled();
 	});
 
+	it("runs a standalone binary's `daemon print-env` by absolute path and adopts what it prints", async () => {
+		const shell = writeShell("zsh", [`printf '%s' "$4" > "$HOME/command"`, 'exec /bin/sh -c "$4"'].join("\n"));
+		// Stands in for the binary: records how it ran, then prints like `volt daemon print-env`.
+		const binary = writeShell(
+			"volt",
+			[
+				`printf '%s|%s' "$*" "\${VOLT_ENV_SCRIPT-unset}" > "$HOME/binary-run"`,
+				`printf '%s{"PATH":"/from/binary/bin","FROM_BINARY":"1"}%s' "$VOLT_ENV_MARKER" "$VOLT_ENV_MARKER"`,
+			].join("\n"),
+			"standalone",
+		);
+		const inherited = terminalEnvironment();
+		const target = { ...inherited };
+
+		const result = await resolveDaemonEnvironment({
+			target,
+			inherited,
+			platform: "darwin",
+			shell,
+			nodePath: binary,
+			standalone: true,
+		});
+
+		expect(readFileSync(join(tempDir, "command"), "utf8")).toBe('"$VOLT_ENV_NODE" daemon print-env');
+		expect(readFileSync(join(tempDir, "binary-run"), "utf8")).toBe("daemon print-env|unset");
+		expect(result).toMatchObject({ failed: false, status: { source: "login-shell", base: "minimal", shell } });
+		expect(target).toMatchObject({ PATH: "/from/binary/bin", FROM_BINARY: "1", VOLT_CODING_AGENT_DIR: "/agent/dir" });
+	});
+
 	it("kills a hung shell tree at the timeout and keeps the inherited environment", async () => {
 		const shell = writeShell(
 			"bash",
@@ -338,6 +369,55 @@ describe.skipIf(process.platform === "win32")("readSystemdUserEnvironment", () =
 		for (const bin of [failing, malformed, nonString, missing]) {
 			await expect(readSystemdUserEnvironment({ PATH: bin }), bin).resolves.toBeUndefined();
 		}
+	});
+});
+
+describe("volt daemon print-env", () => {
+	let exitCode: typeof process.exitCode;
+
+	beforeEach(() => {
+		exitCode = process.exitCode;
+		process.exitCode = undefined;
+	});
+
+	afterEach(() => {
+		process.exitCode = exitCode;
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+
+	function captureStdout(): () => string {
+		const write = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+		return () => write.mock.calls.map(([chunk]) => String(chunk)).join("");
+	}
+
+	it("prints its environment as JSON between two markers, without the marker", async () => {
+		const marker = `__VOLT_ENV_${randomUUID()}__`;
+		vi.stubEnv("VOLT_ENV_MARKER", marker);
+		vi.stubEnv("FROM_PROFILE", 'quote " backslash \\ newline \n equals = ok');
+		const printed = captureStdout();
+
+		await expect(handleDaemonCommand(["daemon", "print-env"], { agentDir: tempDir })).resolves.toBe(true);
+
+		const { VOLT_ENV_MARKER: _marker, ...expected } = process.env;
+		const output = printed();
+		expect(output).toBe(marker + JSON.stringify(expected) + marker);
+		expect(JSON.parse(output.slice(marker.length, -marker.length))).toMatchObject({
+			FROM_PROFILE: 'quote " backslash \\ newline \n equals = ok',
+		});
+		expect(output.slice(marker.length, -marker.length)).not.toContain(marker);
+		expect(process.exitCode ?? 0).toBe(0);
+	});
+
+	it("prints nothing and fails outside environment resolution", async () => {
+		vi.stubEnv("VOLT_ENV_MARKER", undefined);
+		vi.spyOn(console, "error").mockImplementation(() => {});
+		const printed = captureStdout();
+
+		await expect(handleDaemonCommand(["daemon", "print-env"], { agentDir: tempDir })).resolves.toBe(true);
+
+		expect(printed()).toBe("");
+		expect(process.exitCode).toBe(1);
 	});
 });
 

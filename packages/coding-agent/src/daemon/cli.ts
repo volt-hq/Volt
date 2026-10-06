@@ -9,12 +9,13 @@ import { createIrohDaemonService } from "./iroh-service.ts";
 import {
 	type DaemonEnvironmentBase,
 	type DaemonEnvironmentStatus,
+	printLoginShellEnvironment,
 	resolveDaemonEnvironment,
 } from "./login-environment.ts";
 import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
-import { formatRelayAccessStatus, isRemoteAccessReady } from "./relay-access-status.ts";
+import { formatRelayAccessStatus, isPhoneTransportAbsent, isRemoteAccessReady } from "./relay-access-status.ts";
 import { installDaemonService, refreshDaemonService, uninstallDaemonService } from "./service-install.ts";
 import {
 	classifyPublishedDaemonGeneration,
@@ -39,7 +40,8 @@ function printDaemonUsage(): void {
 Commands:
   start                 Start the background daemon (no-op if already running).
   stop                  Ask the daemon to shut down gracefully.
-  status [--json]       Show daemon status; exit 0 only when phone transport and relay access are ready.
+  status [--json]       Show daemon status; exit 0 only when phone transport and relay access are ready,
+                        or when this build has no phone transport.
   restart               Stop then start; persistent state survives.
   regenerate-state      Back up invalid state and regenerate it after confirmation.
   keep-awake [on|off]   Prevent the host from sleeping while voltd runs; no arg prints state.
@@ -330,6 +332,11 @@ function formatUptime(startedAtMs: number): string {
 	return hours > 0 ? `${hours}h${minutes}m${seconds}s` : minutes > 0 ? `${minutes}m${seconds}s` : `${seconds}s`;
 }
 
+/** Remote access is ready, or this build has none to offer and the daemon serves local clients only. */
+function isDaemonStatusHealthy(status: StatusResult): boolean {
+	return isRemoteAccessReady(status) || isPhoneTransportAbsent(status);
+}
+
 async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	const status = await requestStatus(agentDir);
 	if (!status) {
@@ -343,7 +350,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	}
 	if (json) {
 		console.log(JSON.stringify({ running: true, ...status, id: undefined, type: undefined }));
-		if (!isRemoteAccessReady(status)) process.exitCode = 1;
+		if (!isDaemonStatusHealthy(status)) process.exitCode = 1;
 		return;
 	}
 	console.error(`voltd ${status.version} (protocol ${status.protocolVersion})`);
@@ -381,7 +388,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 			`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
 		);
 	}
-	if (!isRemoteAccessReady(status)) process.exitCode = 1;
+	if (!isDaemonStatusHealthy(status)) process.exitCode = 1;
 }
 
 async function daemonKeepAwake(agentDir: string, args: string[]): Promise<void> {
@@ -640,6 +647,13 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 			process.exit(code);
 			return true;
 		}
+		case "print-env":
+			// Internal and unlisted: voltd runs it in the user's login shell from a standalone binary.
+			if (!printLoginShellEnvironment()) {
+				console.error("Error: volt daemon print-env is internal to voltd's environment resolution");
+				process.exitCode = 1;
+			}
+			return true;
 		case "worker": {
 			// Internal and unlisted: the daemon starts one per conversation worker.
 			const code = await runWorkerProcess(agentDir);

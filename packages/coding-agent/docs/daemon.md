@@ -34,7 +34,7 @@ when another process starts it.
 ```
 volt daemon start                 Start the background daemon.
 volt daemon stop                  Graceful shutdown (state flushed, phones notified).
-volt daemon status [--json]       Status; exit 0 only when phone transport and relay access are ready.
+volt daemon status [--json]       Status; exit 0 only when phone transport and relay access are ready, or the build has no phone transport.
 volt daemon restart               Stop then start; persistent state survives.
 volt daemon logs [-f] [-n N]      Tail the daemon log.
 volt daemon install-service       Register a login service (launchd/systemd).
@@ -42,7 +42,7 @@ volt daemon uninstall-service     Remove the login service.
 volt daemon run --foreground      Run in this process (internal; used by start and the login service).
 
 volt remote pair [--workspace <name>]   Create a pairing ticket, wait for the phone.
-volt remote status [--json]             Same status view as volt daemon status.
+volt remote status [--json]             Same status view; exit 0 only when phone transport and relay access are ready.
 volt remote clients                     List paired clients.
 volt remote credential revoke           Reset this daemon's managed relay credentials.
 volt remote revoke <node-id>            Revoke a client and close its connections.
@@ -497,8 +497,9 @@ supported.
   reports relay access and `relayCredential.nextRefreshAt` the next automatic
   check. Both daemon and remote status exit nonzero unless phone transport is
   `ready` and managed relay access is not `expired`, `subscription_inactive`, or
-  `revocation_pending`; local daemon workspace/client maintenance remains
-  available while it is not ready.
+  `revocation_pending`, except that `volt daemon status` exits 0 when the build
+  has no phone transport (`native_binding_missing`); local daemon
+  workspace/client maintenance remains available while it is not ready.
 - A protocol mismatch → the running daemon is from another Volt version and
   speaks another control protocol, so the TUI and CLI cannot use it. Run
   `volt daemon restart` after upgrading Volt.

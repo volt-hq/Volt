@@ -34,6 +34,17 @@ export function isRemoteAccessReady(status: {
 	);
 }
 
+/**
+ * This build has no phone transport: a standalone binary, an install without
+ * the optional native binding, or a platform with none. The daemon still serves
+ * local clients and workers; only remote access is unavailable.
+ */
+export function isPhoneTransportAbsent(status: { remoteTransport?: RemoteTransportHealth }): boolean {
+	return (
+		status.remoteTransport?.state === "unavailable" && status.remoteTransport.reasonCode === "native_binding_missing"
+	);
+}
+
 /** One-line relay access summary plus recovery guidance for unavailable states. */
 export function formatRelayAccessStatus(
 	relayCredential: ControlRelayCredentialStatus,

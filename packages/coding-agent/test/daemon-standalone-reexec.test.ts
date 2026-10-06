@@ -14,6 +14,7 @@ import { delimiter, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type * as Config from "../src/config.ts";
 import { handleDaemonCommand } from "../src/daemon/cli.ts";
+import { resolveDaemonEnvironment } from "../src/daemon/login-environment.ts";
 import { handleRemoteControlCommand } from "../src/daemon/remote-cli.ts";
 import { getDaemonServiceInvocation, getServiceNodePath } from "../src/daemon/service-install.ts";
 import { resolveDaemonCliInvocation, spawnDetachedDaemon, startInstalledDaemon } from "../src/daemon/spawn.ts";
@@ -127,6 +128,25 @@ describe("a standalone binary re-executes itself", () => {
 		);
 		expect(launches()).toEqual([{ program: "daemon", args: ["start"], execArgv: [] }]);
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"prints its login-shell environment as `volt daemon print-env`, never as Node's `-e`",
+		async () => {
+			const shell = join(root, "zsh");
+			writeFileSync(
+				shell,
+				`#!/bin/sh\nprintf '%s' "$4" > ${JSON.stringify(join(root, "command"))}\nexec /bin/sh -c "$4"\n`,
+			);
+			chmodSync(shell, 0o755);
+			// A service start hands the shell this environment, NODE_OPTIONS and the hijacking PATH included.
+			const inherited = { ...process.env, HOME: root };
+
+			await resolveDaemonEnvironment({ target: { ...inherited }, inherited, serviceStart: true, shell });
+
+			expect(readFileSync(join(root, "command"), "utf8")).toBe('"$VOLT_ENV_NODE" daemon print-env');
+			expect(launches()).toEqual([{ program: "daemon", args: ["print-env"], execArgv: [] }]);
+		},
+	);
 
 	it("records itself in the login service definition", () => {
 		expect(getDaemonServiceInvocation(join(root, "agent")).programArguments).toEqual([
