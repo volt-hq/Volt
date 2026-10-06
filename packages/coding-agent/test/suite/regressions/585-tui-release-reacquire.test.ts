@@ -1,6 +1,6 @@
 import type { HostFrame, HostRequest, LiveValue } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { LoopbackClient } from "../../../src/client/protocol-client.ts";
+import type { ProtocolClient } from "../../../src/client/protocol-client.ts";
 import { ConversationLock } from "../../../src/core/conversation-log/conversation-lock.ts";
 import {
 	connectRelayedPhone,
@@ -14,12 +14,12 @@ import {
 type HostRequestValue = Extract<LiveValue, { kind: "host_request" }>;
 
 /** The host requests the TUI's client holds. */
-function hostRequests(client: LoopbackClient): HostRequestValue[] {
+function hostRequests(client: ProtocolClient): HostRequestValue[] {
 	return [...client.live.values.values()].filter((value): value is HostRequestValue => value.kind === "host_request");
 }
 
 /** The dialog the client was asked, once it arrives. */
-async function dialogOf(client: LoopbackClient, title: string | RegExp): Promise<HostRequestValue> {
+async function dialogOf(client: ProtocolClient, title: string | RegExp): Promise<HostRequestValue> {
 	let found: HostRequestValue | undefined;
 	await vi.waitFor(() => {
 		found = hostRequests(client).find(
@@ -101,7 +101,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 		const relayed = await link.offerRelay({ sessionId: source }, relayPreamble(source, harness.tempDir));
 		if (!relayed) throw new Error("The TUI did not serve the phone");
 		const phone = await connectRelayedPhone(relayed, source);
-		expect(harness.tuiHost.relayCount()).toBe(1);
+		expect(harness.relayCount()).toBe(1);
 		link.steps.splice(0);
 		void relayed.finished.then(() => link.steps.push("relay ended"));
 
@@ -121,7 +121,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 		);
 		await phone.ended;
 		expect(phone.frames).toContainEqual({ type: "ended", subscriptionId: "s1", reason: "closed" });
-		expect(harness.tuiHost.relayCount()).toBe(0);
+		expect(harness.relayCount()).toBe(0);
 	});
 
 	it("on switch_session, acquires the target before opening it, then releases the session it left", async () => {
@@ -143,7 +143,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 				`acquire:${target.sessionId}`,
 			]),
 		);
-		expect(harness.tuiHost.conversation.id).toBe(target.sessionId);
+		expect(harness.connector.conversation.id).toBe(target.sessionId);
 	});
 
 	it("refuses a target open for writing elsewhere, handing its lease back", async () => {
@@ -161,7 +161,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 			elsewhere.close();
 		}
 
-		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.connector.conversation.id).toBe(source);
 		expect(link.steps).toEqual([
 			`acquire:${target.sessionId}`,
 			`release:${target.sessionId}:switch`,
@@ -183,7 +183,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 			elsewhere.close();
 		}
 
-		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.connector.conversation.id).toBe(source);
 		expect(link.steps).toEqual([
 			`acquire:${target.sessionId}`,
 			`release:${target.sessionId}:switch`,
@@ -202,7 +202,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 			`Session ${target.sessionId} is open in another Volt window (held_by_tui). Quit it there, then retry.`,
 		);
 
-		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.connector.conversation.id).toBe(source);
 		expect(harness.host.get(target.sessionId)).toBeUndefined();
 		expect(link.steps).toEqual([
 			`acquire:${target.sessionId}`,
@@ -232,7 +232,7 @@ describe("regression #585: the TUI host releases the session the TUI leaves and 
 
 		await expect(switching).resolves.toMatchObject({ result: { cancelled: true } });
 		expect(hostRequests(client)).toEqual([]);
-		expect(harness.tuiHost.conversation.id).toBe(source);
+		expect(harness.connector.conversation.id).toBe(source);
 		expect(harness.host.get(target.sessionId)).toBeUndefined();
 		expect(link.steps).toEqual([
 			`acquire:${target.sessionId}`,

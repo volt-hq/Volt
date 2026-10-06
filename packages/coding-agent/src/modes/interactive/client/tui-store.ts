@@ -7,7 +7,8 @@
  * The transcript is the active branch from its newest compaction, as the
  * model sees the conversation: the compaction, the entries it kept, then
  * everything after it. When the client moves (`ended{moved}`), the store
- * holds nothing until the target's snapshot resets it; a snapshot of the same
+ * holds nothing until the target's snapshot resets it: it is moving, and
+ * what the TUI sends waits for the target (`settled`). A snapshot of the same
  * conversation (a resync, or a resubscription after a gap) resets it as well.
  * A subscription that ends otherwise (`ended{lost}`, at shutdown `closed`)
  * ends what the store shows.
@@ -82,7 +83,8 @@ export function transcriptOf(branch: readonly ProjectedEntry[]): ProjectedEntry[
 }
 
 interface ShowingWaiter {
-	readonly conversation: string;
+	/** The conversation waited for; any one the client does not move away from when undefined. */
+	readonly conversation: string | undefined;
 	readonly resolve: () => void;
 	readonly reject: (error: Error) => void;
 }
@@ -91,6 +93,8 @@ export class TuiStore {
 	private attached: ProtocolClient | undefined;
 	/** The conversation of the last snapshot, until the client moves. */
 	private shown: string | undefined;
+	/** The conversation the client moves to, until its snapshot resets the store. */
+	private movingTo: string | undefined;
 	private branchCache: { readonly state: ClientState; readonly branch: readonly ProjectedEntry[] } | undefined;
 	private transcriptCache:
 		| { readonly branch: readonly ProjectedEntry[]; readonly transcript: readonly ProjectedEntry[] }
@@ -124,6 +128,11 @@ export class TuiStore {
 	/** The conversation the store shows: none before the first snapshot, and none while the client moves. */
 	get conversation(): string | undefined {
 		return this.shown;
+	}
+
+	/** The conversation the client moves to, until its snapshot resets the store. */
+	get moving(): string | undefined {
+		return this.movingTo;
 	}
 
 	/** The live value under `key`, if any. */
@@ -173,6 +182,18 @@ export class TuiStore {
 		return new Promise((resolve, reject) => this.waiters.add({ conversation, resolve, reject }));
 	}
 
+	/**
+	 * Resolves once the store shows a conversation the client is not moving
+	 * away from: at once unless the client moves, else once the snapshot of
+	 * where it moves to reset the store. Rejects when the subscription ends or
+	 * the client fails first. What the TUI sends while its client moves waits
+	 * here, in the order it was sent.
+	 */
+	settled(): Promise<void> {
+		if (this.movingTo === undefined) return Promise.resolve();
+		return new Promise((resolve, reject) => this.waiters.add({ conversation: undefined, resolve, reject }));
+	}
+
 	/** Have the host project the conversation afresh: a reset follows, with the presentations it presents now. */
 	resync(): void {
 		this.attached?.resync();
@@ -180,6 +201,8 @@ export class TuiStore {
 
 	private apply(change: ProtocolClientChange): void {
 		if (change === undefined) {
+			// A client that failed moves nowhere.
+			this.movingTo = undefined;
 			this.settleWaiters(new Error("The TUI's connection to its host ended"));
 			return;
 		}
@@ -187,6 +210,7 @@ export class TuiStore {
 			case "snapshot": {
 				const moved = this.shown !== change.conversation;
 				this.shown = change.conversation;
+				this.movingTo = undefined;
 				this.emit({ type: "reset", conversation: change.conversation, moved });
 				this.settleWaiters();
 				return;
@@ -200,9 +224,11 @@ export class TuiStore {
 			case "ended":
 				if (change.reason === "moved") {
 					this.shown = undefined;
+					this.movingTo = change.target;
 					this.emit({ type: "moving", target: change.target });
 				} else if (change.reason !== "unsubscribed") {
 					this.shown = undefined;
+					this.movingTo = undefined;
 					this.emit({ type: "ended", reason: change.reason });
 					this.settleWaiters(new Error(`The conversation's subscription ended: ${change.reason}`));
 				}
@@ -223,7 +249,7 @@ export class TuiStore {
 	private settleWaiters(error?: Error): void {
 		for (const waiter of [...this.waiters]) {
 			if (error !== undefined) waiter.reject(error);
-			else if (waiter.conversation === this.shown) waiter.resolve();
+			else if (waiter.conversation === this.shown || waiter.conversation === undefined) waiter.resolve();
 			else continue;
 			this.waiters.delete(waiter);
 		}

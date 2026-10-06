@@ -8,6 +8,16 @@ export type {
 	JsonValue,
 } from "@hansjm10/volt-ai";
 export { type Args, parseArgs } from "./cli/args.ts";
+// Connectors: how the TUI reaches the conversations of its host
+export {
+	type ConnectorOpenOptions,
+	type ConnectorTarget,
+	type ConnectThroughOptions,
+	type ConversationConnector,
+	connectThrough,
+	type OpenedConversation,
+} from "./client/conversation-connector.ts";
+export { InProcessConnector, type InProcessConnectorOptions } from "./client/in-process-connector.ts";
 // Protocol clients: in-process loopback, a `volt --mode rpc` child, or any transport
 export {
 	createLoopbackClient,
@@ -944,10 +954,6 @@ export {
 	type RpcModeOptions,
 	runPrintMode,
 	runRpcMode,
-	type TuiConnection,
-	type TuiConnectOptions,
-	TuiHost,
-	type TuiHostOptions,
 	type TuiSettingsScope,
 } from "./modes/index.ts";
 export {

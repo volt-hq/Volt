@@ -49,7 +49,7 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 
 	/** A phone the daemon relays into the conversation the TUI shows, served by the TUI host. */
 	async function relayPhone(harness: TuiHarness, link: ReturnType<typeof createScriptedDaemonLink>) {
-		const sessionId = harness.tuiHost.conversation.id;
+		const sessionId = harness.connector.conversation.id;
 		const relayed = await link.offerRelay({ sessionId }, relayPreamble(sessionId, harness.tempDir));
 		if (!relayed) throw new Error("The TUI did not serve the phone");
 		const phone: RemotePhone = await connectRelayedPhone(relayed, sessionId);
@@ -66,7 +66,7 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 				redirect: (sessionId) => void detachments.push({ kind: "redirected", sessionId }),
 			},
 		};
-		await harness.host.attach(phone, harness.tuiHost.conversation);
+		await harness.host.attach(phone, harness.connector.conversation);
 		return { phone, detachments };
 	}
 
@@ -92,14 +92,14 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		expect(phone.frames.at(-1)).toEqual({ type: "ended", subscriptionId: "s1", reason: "moved", target: targetId });
 
 		// The TUI stays on its session and keeps its lease; the new conversation never opened here.
-		expect(harness.tuiHost.conversation.id).toBe(sourceId);
+		expect(harness.connector.conversation.id).toBe(sourceId);
 		expect(harness.events.map((event) => [event.type, event.sessionId])).toEqual([
 			["session_before_switch", sourceId],
 		]);
 		expect(link.steps).toEqual([]);
 		await expectStoredAndUnlocked(harness.sessionDir, targetId);
 		await client.promptAndWait("still here");
-		expect(harness.tuiHost.conversation.id).toBe(sourceId);
+		expect(harness.connector.conversation.id).toBe(sourceId);
 	});
 
 	it("keeps the phone on the session when the TUI's extensions cancel the switch", async () => {
@@ -169,7 +169,7 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		expect(switched).toEqual({ cancelled: false, sessionId: created.sessionId, seeded: false });
 
 		// The TUI stays; no conversation opened or closed here.
-		expect(harness.tuiHost.conversation.id).toBe(sourceId);
+		expect(harness.connector.conversation.id).toBe(sourceId);
 		expect(
 			harness.events.filter((event) => event.type === "session_start" || event.type === "session_shutdown"),
 		).toEqual([]);
@@ -198,7 +198,7 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		expect(result.started).toBe(true);
 		expect(result.selectedSessionId).not.toBe(sourceId);
 		// The TUI stays on its session, whose plan is handed off.
-		expect(harness.tuiHost.conversation.id).toBe(sourceId);
+		expect(harness.connector.conversation.id).toBe(sourceId);
 		expect(session.planningState.plan).toMatchObject({ id: ready.id, phase: "handed_off" });
 		await expectStoredAndUnlocked(harness.sessionDir, result.selectedSessionId);
 		const info = await findSessionInfoById(harness.sessionDir, result.selectedSessionId);
@@ -224,9 +224,9 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		const anonymous = await link.offerRelay({ sessionId }, { ...preamble, hostNodeId: undefined });
 		if (!anonymous) throw new Error("The TUI did not take the offer");
 		await anonymous.finished;
-		expect(harness.tuiHost.relayCount()).toBe(0);
+		expect(harness.relayCount()).toBe(0);
 		// A TUI that quits serves no more phones: the offer expires.
-		harness.tuiHost.stopServing();
+		harness.connector.stopServing();
 		expect(await link.offerRelay({ sessionId }, preamble)).toBeUndefined();
 	});
 });

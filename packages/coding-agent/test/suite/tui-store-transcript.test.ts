@@ -303,10 +303,11 @@ describe("the TUI follows its client's subscription", () => {
 			await access.handleClearCommand();
 			expect(suspend).toHaveBeenCalledOnce();
 
-			const target = harness.tuiHost.conversation;
+			const target = harness.connector.conversation;
 			expect(target.id).not.toBe(harness.startup.id);
 			expect(tui.store.conversation).toBe(target.id);
-			expect(harness.startup.closed).toBe(true);
+			// The conversation it left closes once the one it moved to started.
+			await vi.waitFor(() => expect(harness.startup.closed).toBe(true));
 			expect(access.sessionRenderSuspension).toBeUndefined();
 			const shown = await waitForScreen(tui, "New session started");
 			expect(shown).not.toContain("a prompt in the first conversation");

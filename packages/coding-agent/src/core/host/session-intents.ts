@@ -94,8 +94,8 @@ function intentSource(
 		throw new Error("Finding discussion identity is source-linked; reset context from the source review");
 	}
 	if (conversation.lifetime === "owner") throw new PinnedConversationError();
-	// A client that moves in place may not leave a busy conversation; the host checks again before it opens anything.
-	if (client.move.kind === "in_place") conversation.assertNotBusy();
+	// A client that moves in place, or anchors the conversation, may not leave it busy; the host checks again before it opens anything.
+	if (client.move.kind === "in_place" || client.anchor === true) conversation.assertNotBusy();
 	const generation = conversation.session.conversationGenerationRevision;
 	return {
 		conversation,
@@ -121,8 +121,10 @@ interface MoveOptions {
 /**
  * Open `target` from `source` and move the client there: in place, or, for a
  * client that follows moves by redirect, by opening the target where the
- * client's `hostTarget` takes it over, or by writing its log for the host the
- * client reconnects through. A redirected client's `withSession` never runs.
+ * client's `hostTarget` takes it over (a switch only when its move hosts
+ * stored sessions), or by writing its log for the host the client reconnects
+ * through. A redirected client's `withSession` runs only against a target
+ * opened here, once a client joined it (see `ConversationHost.openFor`).
  */
 async function moveClient(
 	host: ConversationHost,
@@ -173,7 +175,7 @@ async function moveClient(
 		};
 	}
 	const hostTarget = move.hostTarget;
-	if (hostTarget && target.kind !== "session") {
+	if (hostTarget && (target.kind !== "session" || move.hostsStoredSessions === true)) {
 		const opened = await host.openFor(client, target, {
 			assertCurrent: source.assertCurrent,
 			beforeMove: async (from, to) => {
@@ -203,12 +205,13 @@ async function moveClient(
 					throw error;
 				}
 			},
+			...(options.withSession === undefined ? {} : { withSession: options.withSession }),
 		});
 		if (opened.cancelled) return opened;
 		return {
 			cancelled: false,
 			sessionId: opened.sessionId,
-			seeded: false,
+			seeded: opened.seeded,
 			...(opened.selectedText === undefined ? {} : { selectedText: opened.selectedText }),
 		};
 	}

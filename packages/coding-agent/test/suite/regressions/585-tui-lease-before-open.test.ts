@@ -227,7 +227,7 @@ describe.each(["regular", "fullscreen"] as const)(
 			tui.terminal.sendInput("\x1b");
 
 			await expect(resuming).resolves.toEqual({ cancelled: true });
-			expect(harness.tuiHost.conversation.id).toBe(shown);
+			expect(harness.connector.conversation.id).toBe(shown);
 			expect(link.steps).toEqual([
 				`acquire:${shown}`,
 				`acquire:${target.sessionId}`,
@@ -248,7 +248,7 @@ describe.each(["regular", "fullscreen"] as const)(
 			granted.resolve({ handoff: "warm" });
 
 			await expect(resuming).resolves.toMatchObject({ cancelled: false, sessionId: target.sessionId });
-			expect(harness.tuiHost.conversation.id).toBe(target.sessionId);
+			expect(harness.connector.conversation.id).toBe(target.sessionId);
 			await tui.terminal.waitForRender();
 			expect(tui.screen()).not.toContain("Stopping the remote turn");
 		});

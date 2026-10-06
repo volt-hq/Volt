@@ -965,9 +965,9 @@ export class DaemonLeases {
 	}
 
 	/**
-	 * The open gate. A stored session the TUI's client resumes may be hosted
-	 * by the daemon, and granting its lease frees its lock, so the lease is
-	 * taken first. A pending lease waits for the daemon's turn, asking the
+	 * The open gate. A stored session the TUI's client (the anchor of its
+	 * conversations) resumes may be hosted by the daemon, and granting its
+	 * lease frees its lock, so the lease is taken first. A pending lease waits for the daemon's turn, asking the
 	 * client through a dialog only it answers; cancelling the wait cancels the
 	 * open. A session in no registered workspace needs no lease (the daemon
 	 * cannot host it); its workspace is registered once the TUI opened it. A
@@ -985,7 +985,7 @@ export class DaemonLeases {
 			!served ||
 			!link ||
 			target.kind !== "session" ||
-			client.move.kind !== "in_place" ||
+			client.anchor !== true ||
 			link.connectionState() === "disabled"
 		) {
 			return NO_HOLD;

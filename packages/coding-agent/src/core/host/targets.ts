@@ -88,7 +88,8 @@ export interface RedirectTarget {
 	/**
 	 * The conversation the intent opened in the client's host, which the callee
 	 * takes over; absent for a switch to a stored conversation, which opens
-	 * wherever the client reconnects.
+	 * wherever the client reconnects, unless the client's move hosts stored
+	 * sessions too.
 	 */
 	readonly conversation?: HostedConversation;
 }
@@ -134,13 +135,23 @@ export type HostClientMove =
 			 * is written and closed for the host the client reconnects through.
 			 */
 			readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
+			/**
+			 * With `hostTarget`, a switch to a stored conversation opens it in
+			 * this host too, as a new, forked, or imported one does, so the client
+			 * reconnects to a conversation open here (the TUI in its in-process
+			 * host).
+			 */
+			readonly hostsStoredSessions?: boolean;
 	  };
 
 /** A client of hosted conversations: a TUI view, an RPC connection, a phone stream, a print run. */
 export interface HostClient {
 	/** Matches the client scope the client's requests run in. */
 	readonly id: string;
-	/** A conversation closes when its anchor leaves, whatever other clients remain. */
+	/**
+	 * A conversation closes when its anchor leaves, whatever other clients
+	 * remain, so an anchor may not leave a busy one, however it follows moves.
+	 */
 	readonly anchor?: boolean;
 	/**
 	 * A paired remote device: the conversation's live `presence` counts it, it

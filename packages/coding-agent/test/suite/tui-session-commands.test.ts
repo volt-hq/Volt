@@ -179,7 +179,7 @@ describe("the TUI's session commands as intents", () => {
 			submit(tui, "/clear");
 			await waitForScreen(tui, "New session started");
 			expect(tui.store.conversation).not.toBe(before);
-			expect(harness.tuiHost.conversation.id).toBe(tui.store.conversation);
+			expect(harness.connector.conversation.id).toBe(tui.store.conversation);
 			// The turn stopped, and its message committed, before the client moved.
 			expect(stopReasons).toEqual(["aborted"]);
 			expect(tui.store.transcript()).toEqual([]);

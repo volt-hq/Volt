@@ -19,7 +19,7 @@ type ShutdownThis = {
 	flushStdout: () => Promise<void>;
 	unregisterSignalHandlers: () => void;
 	/** Closes the conversation, then hands the session back to the daemon. */
-	connection: { stopServing: () => void; dispose: () => Promise<void> };
+	connector: { stopServing: () => void; dispose: () => Promise<void> };
 	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
 	stop: () => void;
 	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
@@ -71,7 +71,7 @@ function createContext(order: string[], info = conversationInfo()): ShutdownThis
 		disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
 		flushStdout: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).flushStdout,
 		unregisterSignalHandlers: vi.fn(),
-		connection: {
+		connector: {
 			stopServing: vi.fn(),
 			dispose: vi.fn(async () => {
 				order.push("dispose");
@@ -262,6 +262,6 @@ describe("InteractiveMode.shutdown ordering (#5080)", () => {
 		await callShutdown(context, { fromSignal: true });
 
 		expect(order).toEqual([]);
-		expect(context.connection.dispose).not.toHaveBeenCalled();
+		expect(context.connector.dispose).not.toHaveBeenCalled();
 	});
 });

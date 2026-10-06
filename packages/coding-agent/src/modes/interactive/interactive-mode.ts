@@ -1,6 +1,7 @@
 /**
  * Interactive mode for the coding agent: the TUI as a protocol client of the
- * host it connects through (client/tui-connection.ts; `TuiHost` in process).
+ * host it reaches through its connector (client/conversation-connector.ts;
+ * `InProcessConnector` in process), following its moves by reconnecting.
  * Its transcript and status (footer, indicators, alerts, plan, work,
  * extension UI) draw the store that follows the client, and their actions go
  * out as intents; its input (the editor, its keys, and the slash menu) and
@@ -76,6 +77,11 @@ import {
 } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
+import {
+	type ConnectorOpenOptions,
+	type ConversationConnector,
+	connectThrough,
+} from "../../client/conversation-connector.ts";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -166,7 +172,6 @@ import {
 } from "./client/session-commands.ts";
 import { TranscriptView } from "./client/transcript-view.ts";
 import { TuiCatalogs } from "./client/tui-catalogs.ts";
-import type { TuiConnection, TuiConnectOptions } from "./client/tui-connection.ts";
 import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
 import { ConversationWork } from "./client/work-view.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
@@ -499,8 +504,8 @@ export function createInteractiveTuiReference(getTui: () => TUI): TUI {
 }
 
 export class InteractiveMode {
-	/** What the TUI connects its client through: the host of its conversations. */
-	private readonly connection: TuiConnection;
+	/** What the TUI connects its client through: how it reaches the conversations of its host. */
+	private readonly connector: ConversationConnector;
 	/** What the TUI's protocol client holds of the conversation it shows: the fold of its log and its live lane. */
 	private readonly store = new TuiStore();
 	/** The store's transcript in the chat: messages, tool calls as the host presents them, and what streams. */
@@ -696,8 +701,8 @@ export class InteractiveMode {
 	/** Whether the chat shows the project trust warning of the conversation it shows. */
 	private trustWarningShown = false;
 
-	constructor(connection: TuiConnection, options: InteractiveModeOptions = {}) {
-		this.connection = connection;
+	constructor(connector: ConversationConnector, options: InteractiveModeOptions = {}) {
+		this.connector = connector;
 		this.settingsScope = options.settingsScope ?? { cwd: process.cwd(), projectTrusted: false };
 		this.settingsManager = this.createDisplaySettings();
 		this.liveView = this.createLiveView();
@@ -1129,23 +1134,29 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		});
 
-		this.connection.onThemeSnapshot((themeName) => this.applyDaemonThemeSnapshot(themeName));
+		this.connector.onThemeSnapshot((themeName) => this.applyDaemonThemeSnapshot(themeName));
 	}
 
 	/**
-	 * Connect the TUI's client to its host and show its conversation. The UI
-	 * runs first: the conversation's session_start dialogs show through the
-	 * live view before the conversation is ready. The TUI reads its own
-	 * settings where the conversation runs; what its extensions contribute
-	 * shows before its messages, its slash commands and shortcuts as its
-	 * intents catalog lists them, its resources as the `resources` query
-	 * lists them; then the models its cycle steps through, when scoped.
+	 * Connect the TUI's client through its connector and show its
+	 * conversation; the client follows each move by reconnecting. The UI runs
+	 * first: the conversation's session_start dialogs show through the live
+	 * view before the conversation is ready. The TUI reads its own settings
+	 * where the conversation runs; what its extensions contribute shows before
+	 * its messages, its slash commands and shortcuts as its intents catalog
+	 * lists them, its resources as the `resources` query lists them; then the
+	 * models its cycle steps through, when scoped.
 	 */
 	private async connect(): Promise<void> {
-		await this.connection.connect({
+		await connectThrough(this.connector, {
+			name: "volt-tui",
 			hostRequests: TUI_HOST_REQUESTS,
 			requestTimeoutMs: TUI_REQUEST_TIMEOUT_MS,
 			onClient: (client) => this.store.attach(client),
+			// What the connector says about a conversation it opened, such as options its host did not apply.
+			onOpened: (opened) => {
+				for (const notice of opened.notices) this.showWarning(notice);
+			},
 			onShutdownRequested: () => this.onShutdownRequested(),
 			onLost: (error) => {
 				this.lostCause = error;
@@ -1841,7 +1852,7 @@ export class InteractiveMode {
 	 * protocol: its themes, and the dialog that asks the request_user_input
 	 * tool's questions.
 	 */
-	private terminalSurface(): NonNullable<TuiConnectOptions["terminal"]> {
+	private terminalSurface(): NonNullable<ConnectorOpenOptions["terminal"]> {
 		return {
 			themes: {
 				getAllThemes: () => getAvailableThemesWithPaths(),
@@ -3107,6 +3118,8 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
+			// The client moves: nothing runs here to stop, and the conversation it moves to shows soon.
+			if (this.store.moving !== undefined) return;
 			const target = this.connected ? this.input.interruptible() : undefined;
 			if (target !== undefined) {
 				this.runKeyAction(() => this.interrupt(target));
@@ -3540,6 +3553,7 @@ export class InteractiveMode {
 				const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 				if (command) {
 					await this.clientConnected.promise;
+					await this.store.settled();
 					if (this.input.bashRunning()) {
 						this.showWarning("A bash command is already running. Press Esc to cancel it first.");
 						this.editor.setText(text);
@@ -3580,7 +3594,7 @@ export class InteractiveMode {
 	private async endLostConversation(): Promise<void> {
 		if (this.isShuttingDown || this.endingLostSession) return;
 		this.endingLostSession = true;
-		this.connection.stopServing();
+		this.connector.stopServing();
 		const unsentDraft = this.editor.getText();
 		// Pending dialogs settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
@@ -3904,7 +3918,7 @@ export class InteractiveMode {
 	 */
 	private disposeRuntimeHost(): Promise<void> {
 		// The TUI's conversation closes with its UI still attached; extension UI is released before disposal.
-		return this.connection.dispose({ beforeDispose: () => this.leaveConversation() });
+		return this.connector.dispose({ beforeDispose: () => this.leaveConversation() });
 	}
 
 	private async flushStdout(): Promise<void> {
@@ -3930,7 +3944,7 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
-		this.connection.stopServing();
+		this.connector.stopServing();
 		this.dismissWorkInspector?.();
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
@@ -4151,9 +4165,12 @@ export class InteractiveMode {
 	 * Send what the user wrote: an extension command runs at once; other text
 	 * goes out with the images it names, as a prompt while the conversation is
 	 * idle, else queued as steering (or `followUp`) until the host delivers it.
+	 * Text sent while the client moves waits, in order, for the conversation
+	 * it moves to, and goes out as that conversation's state calls for.
 	 */
 	private async sendText(text: string, options: { followUp: boolean }): Promise<void> {
 		await this.clientConnected.promise;
+		await this.store.settled();
 		const command = this.input.extensionCommand(text);
 		if (command !== undefined) {
 			await this.input.runCommand(command);
@@ -4904,7 +4921,7 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const center = new RemoteControlCenterComponent(createRemoteControlBackend(getAgentDir()), {
 				getTerminalRows: () => this.ui.terminal.rows,
-				getCurrentWorkspaceName: () => this.connection.daemonWorkspaceName(),
+				getCurrentWorkspaceName: () => this.connector.daemonWorkspaceName(),
 				getCurrentWorkspacePath: () => conversation.cwd,
 				currentSessionId: conversation.id,
 				requestRender: () => this.ui.requestRender(),

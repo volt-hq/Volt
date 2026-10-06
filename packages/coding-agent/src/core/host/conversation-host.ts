@@ -10,9 +10,10 @@
  * extensions (in the host's extension mode), then the source's
  * `session_shutdown` when it closes. A source
  * closes when its anchor leaves, or when its last client leaves and the host
- * closes unattached conversations. A client that moves in place may not leave
- * a busy source; a client that follows moves by redirect may while other
- * clients keep the source open, and the source is not fenced for its leave.
+ * closes unattached conversations. A client that moves in place, or anchors
+ * its source, may not leave a busy source; a client that follows moves by
+ * redirect may while other clients keep the source open, and the source is not
+ * fenced for its leave.
  * No client may leave an owner-lifetime conversation such as a subagent's.
  * A client served for another host can instead be redirected: the target's
  * log is written here and the client reconnects to it through that host.
@@ -247,6 +248,8 @@ export class ConversationHost {
 	private readonly settingsWatches = new Map<HostedConversation, () => void>();
 	/** Settings managers reloading a change another conversation saved: their reloads do not spread it again. */
 	private readonly reloadingSettings = new Set<SettingsManager>();
+	/** Settles once a client's join started each conversation's extensions. */
+	private readonly starts = new WeakMap<HostedConversation, PromiseWithResolvers<void>>();
 
 	constructor(options: ConversationHostOptions) {
 		this.factory = options.factory;
@@ -706,7 +709,10 @@ export class ConversationHost {
 	 * and hears `onMoved` once it joined. If the client cannot join `to`, it
 	 * returns to the source. Once it joined, the source closes per its anchor
 	 * and the host's unattached rule, even if the client's own move handler
-	 * fails.
+	 * fails. A client that follows moves by redirect joins `to` when it
+	 * reconnects: a source it anchors stays fenced until `to` started there
+	 * (or closed), then closes, so `to`'s `session_start` comes first, as an
+	 * in-place anchor's does.
 	 */
 	async move(client: HostClient, to: HostedConversation): Promise<void> {
 		const attachment = this.attachments.get(client.id);
@@ -737,16 +743,22 @@ export class ConversationHost {
 		} catch (error) {
 			errors.push(error);
 		}
-		if (anchorLeaving) this.anchorsLeaving.delete(from);
-		if (from) {
-			try {
-				const closed = await this.afterLeave(from, client, {
-					reason: shutdownReasonFor(to),
-					targetSessionRef: to.session.sessionRef,
-				});
-				if (!closed) releaseSource?.();
-			} catch (error) {
-				errors.push(error);
+		const event = { reason: shutdownReasonFor(to), targetSessionRef: to.session.sessionRef };
+		if (from && move.kind === "redirect" && anchorLeaving) {
+			// What closes the source fails nothing here: the client moved.
+			void this.started(to)
+				.then(() => this.afterLeave(from, client, event))
+				.catch(() => undefined)
+				.finally(() => this.anchorsLeaving.delete(from));
+		} else {
+			if (anchorLeaving) this.anchorsLeaving.delete(from);
+			if (from) {
+				try {
+					const closed = await this.afterLeave(from, client, event);
+					if (!closed) releaseSource?.();
+				} catch (error) {
+					errors.push(error);
+				}
 			}
 		}
 		if (errors.length === 1) throw errors[0];
@@ -782,11 +794,16 @@ export class ConversationHost {
 	 * an in-place client that recovers input replays the target's durable
 	 * queued input; `withSession` then runs against the new conversation
 	 * unless that recovery failed, and `publish` makes the last durable write,
-	 * whose failure closes the new conversation. The target's project trust
+	 * whose failure closes the new conversation. A client that follows moves
+	 * by redirect reconnects to the new conversation: its `withSession` waits
+	 * until a client joined it (its extensions started), a source the client
+	 * anchored closed, and its durable queued input recovered, and is skipped
+	 * when it closes first or that recovery failed. The target's project trust
 	 * prompts ask a local client, in the source's live state, unless
 	 * `projectTrustContext` says otherwise. A client that follows moves by
 	 * redirect, leaving a source its other clients keep open, may leave it
-	 * busy, and the source is not fenced for its leave.
+	 * busy unless it anchors the source, and the source is not fenced for its
+	 * leave.
 	 */
 	async openFor(
 		client: HostClient,
@@ -842,22 +859,23 @@ export class ConversationHost {
 				throw error;
 			}
 			hold?.commit();
-			// A source that stays open for its other clients admits work again.
-			if (from && !from.closed) releaseSource?.();
-			return opened;
+			// A source that stays open for its other clients admits work again; one its anchor left closes.
+			if (from && !from.closed && !this.anchorsLeaving.has(from)) releaseSource?.();
+			return { opened, from };
 		});
 		if (!moved) return { cancelled: true };
-		const to = moved.conversation;
+		const { opened, from } = moved;
+		const to = opened.conversation;
 		let seedable = true;
-		if (client.move.kind === "in_place" && client.recoversInput) {
-			// Older durable input runs before anything the client does here. A failed
-			// recovery is diagnosed and leaves its queue visible; nothing is seeded.
-			try {
-				// Recovered turns belong to no client, whoever asked for the move.
-				await ClientScope.exit(() => to.startRecoveredClientInputs());
-			} catch {
-				seedable = false;
+		if (client.move.kind === "redirect") {
+			// The seed follows the session_start of the client that reconnects, and the close of a source it anchored, as an in-place client's does.
+			if (withSession) {
+				seedable = await this.started(to);
+				if (seedable && from !== undefined && client.anchor === true) await from.whenClosed();
+				seedable = seedable && (await this.recovered(to));
 			}
+		} else if (client.recoversInput) {
+			seedable = await this.recovered(to);
 		}
 		let seeded = false;
 		if (withSession && seedable) {
@@ -877,7 +895,7 @@ export class ConversationHost {
 			sessionId: to.id,
 			seeded,
 			conversation: to,
-			...(moved.selectedText === undefined ? {} : { selectedText: moved.selectedText }),
+			...(opened.selectedText === undefined ? {} : { selectedText: opened.selectedText }),
 		};
 	}
 
@@ -1034,12 +1052,45 @@ export class ConversationHost {
 			});
 			attachment.detachSurface = extensions.detach;
 			await extensions.ready;
+			this.startSignal(conversation).resolve();
 		} catch (error) {
 			if (this.attachments.get(client.id) === attachment) this.attachments.delete(client.id);
 			attachment.detachLive?.();
 			attachment.detachLive = undefined;
 			if (client.remote) this.publishPresence(conversation);
 			throw error;
+		}
+	}
+
+	private startSignal(conversation: HostedConversation): PromiseWithResolvers<void> {
+		let signal = this.starts.get(conversation);
+		if (!signal) {
+			signal = Promise.withResolvers<void>();
+			this.starts.set(conversation, signal);
+		}
+		return signal;
+	}
+
+	/** Resolves true once a client's join started `conversation`'s extensions (its `session_start` ran), false when it closed first. */
+	private started(conversation: HostedConversation): Promise<boolean> {
+		return Promise.race([
+			this.startSignal(conversation).promise.then(() => true),
+			conversation.whenClosed().then(() => false),
+		]);
+	}
+
+	/**
+	 * Replay `conversation`'s durable queued input, before anything a client
+	 * runs there; resolves false when it failed, which is diagnosed and leaves
+	 * the queue visible.
+	 */
+	private async recovered(conversation: HostedConversation): Promise<boolean> {
+		try {
+			// Recovered turns belong to no client, whoever asked for the move.
+			await ClientScope.exit(() => conversation.startRecoveredClientInputs());
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
@@ -1089,9 +1140,12 @@ export class ConversationHost {
 		return false;
 	}
 
-	/** Whether `from` stays open when `client`, which follows moves by redirect, leaves it for other clients. */
+	/**
+	 * Whether `from` stays open when `client`, which follows moves by redirect
+	 * and does not anchor it, leaves it for other clients.
+	 */
 	private staysOpenWithout(client: HostClient, from: HostedConversation): boolean {
-		if (client.move.kind !== "redirect" || this.anchorsLeaving.has(from)) return false;
+		if (client.move.kind !== "redirect" || client.anchor === true || this.anchorsLeaving.has(from)) return false;
 		return this.clientsOf(from).some((other) => other.id !== client.id);
 	}
 
