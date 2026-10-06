@@ -229,7 +229,11 @@ describe("extension runtime toggle", () => {
 		expect(runner.getRegisteredCommands().map((command) => command.name)).not.toContain("toggled-cmd");
 		expect(runner.getRegisteredIntents()).toEqual([]);
 		expect(runner.getCompletionProviders()).toEqual([]);
-		expect([...runner.getShortcuts({}).values()].map((shortcut) => shortcut.extensionId)).not.toContain("toggled");
+		expect(
+			runner
+				.getExtensions()
+				.flatMap((extension) => [...extension.shortcuts.values()].map((shortcut) => shortcut.extensionId)),
+		).not.toContain("toggled");
 		expect(runner.getWorkKinds()).toEqual([]);
 		await expect(intentRegistry.invokeFrame(context(), "extension.intent.toggled.ping", {})).rejects.toMatchObject({
 			code: "unknown_intent",

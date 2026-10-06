@@ -119,6 +119,12 @@ export class BashExecutionComponent extends Container {
 		this.displayDirty = true;
 	}
 
+	/** Show `output` in place of what the component shows. */
+	setOutput(output: string): void {
+		this.outputLines = [];
+		this.appendOutput(output);
+	}
+
 	setComplete(
 		exitCode: number | undefined,
 		cancelled: boolean,

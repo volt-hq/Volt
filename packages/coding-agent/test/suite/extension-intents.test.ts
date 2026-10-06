@@ -343,7 +343,8 @@ describe("extension intents", () => {
 			"Completion provider issues is already registered",
 		]);
 		const runner = client.session.extensionRunner;
-		expect([...runner.getShortcuts({}).values()].map((shortcut) => [shortcut.shortcut, shortcut.intent])).toEqual([
+		const shortcuts = runner.getExtensions().flatMap((extension) => [...extension.shortcuts.values()]);
+		expect(shortcuts.map((shortcut) => [shortcut.shortcut, shortcut.intent])).toEqual([
 			["ctrl+shift+o", `extension.intent.${EXTENSION}.ok`],
 			["ctrl+shift+k", `extension.intent.${EXTENSION}.ok`],
 			["ctrl+shift+j", `extension.command.${EXTENSION}.ship`],

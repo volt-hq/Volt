@@ -76,7 +76,7 @@ describe("InteractiveMode aborted stream snapshots (#105)", () => {
 			showImages: () => true,
 			imageWidthCells: () => 60,
 			toolCallWork: () => [],
-			takeLocalBashRow: () => undefined,
+			pendingShellRows: new Container(),
 			workNoticeShown: () => {},
 		});
 		view.sync([]);

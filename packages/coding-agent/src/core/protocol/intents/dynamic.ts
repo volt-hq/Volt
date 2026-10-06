@@ -211,7 +211,8 @@ function createPromptTemplateIntent(template: PromptTemplate, index: number, tok
 		category: "prompt",
 		source: "prompt",
 		presentation: { kind: "palette", group: "Prompts" },
-		slash: { name: template.name, example: `/${template.name}` },
+		// The example names the template's arguments, which a text client shows as it completes the name.
+		slash: { name: template.name, example: argumentHint ? `/${template.name} ${argumentHint}` : `/${template.name}` },
 		remote: "safe",
 		whileBusy: "queue",
 		promptName: template.name,

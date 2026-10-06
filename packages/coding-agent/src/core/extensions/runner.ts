@@ -13,10 +13,8 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonValue, Model } from "@hansjm10/volt-ai";
 import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
-import type { KeyId } from "@hansjm10/volt-tui";
 import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
-import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
@@ -52,7 +50,6 @@ import type {
 	ExtensionLifetime,
 	ExtensionMode,
 	ExtensionRuntime,
-	ExtensionShortcut,
 	ExtensionUIContext,
 	InputEvent,
 	InputEventResult,
@@ -92,52 +89,6 @@ interface ServicesPolicyOptions {
 	origin?: ExtensionOperationOrigin;
 	strict?: boolean;
 }
-
-// Extension shortcuts compete with canonical keybinding ids from keybindings.json.
-// Only main-view global shortcuts are reserved here. Picker-specific bindings are not.
-const RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS = [
-	"app.interrupt",
-	"app.clear",
-	"app.exit",
-	"app.suspend",
-	"app.plan.togglePane",
-	"app.thinking.cycle",
-	"app.model.cycleForward",
-	"app.model.cycleBackward",
-	"app.model.select",
-	"app.tools.expand",
-	"app.thinking.toggle",
-	"app.editor.external",
-	"app.message.followUp",
-	"tui.input.submit",
-	"tui.select.confirm",
-	"tui.select.cancel",
-	"tui.input.copy",
-	"tui.editor.deleteToLineEnd",
-] as const;
-
-type BuiltInKeyBindings = Partial<Record<KeyId, { keybinding: string; restrictOverride: boolean }>>;
-
-const buildBuiltinKeybindings = (resolvedKeybindings: KeybindingsConfig): BuiltInKeyBindings => {
-	const builtinKeybindings = {} as BuiltInKeyBindings;
-	for (const [keybinding, keys] of Object.entries(resolvedKeybindings)) {
-		if (keys === undefined) continue;
-		const keyList = Array.isArray(keys) ? keys : [keys];
-		const restrictOverride = (RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS as readonly string[]).includes(keybinding);
-		for (const key of keyList) {
-			const normalizedKey = key.toLowerCase() as KeyId;
-			// If multiple actions bind the same key, the reserved action wins so extensions
-			// remain blocked by reserved shortcuts regardless of iteration order.
-			const existing = builtinKeybindings[normalizedKey];
-			if (existing?.restrictOverride && !restrictOverride) continue;
-			builtinKeybindings[normalizedKey] = {
-				keybinding,
-				restrictOverride,
-			};
-		}
-	}
-	return builtinKeybindings;
-};
 
 /** Combined result from all before_agent_start handlers */
 interface BeforeAgentStartCombinedResult {
@@ -513,7 +464,6 @@ export class ExtensionRunner {
 	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: true });
 	private reloadHandler: ReloadHandler = async () => {};
 	private shutdownHandler: ShutdownHandler = () => {};
-	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
 	private servicesManager: ExtensionServicesManager | undefined;
@@ -853,53 +803,29 @@ export class ExtensionRunner {
 		return new Map(this.runtime.flagValues);
 	}
 
-	getShortcuts(resolvedKeybindings: KeybindingsConfig): Map<KeyId, ExtensionShortcut> {
-		this.shortcutDiagnostics = [];
-		const builtinKeybindings = buildBuiltinKeybindings(resolvedKeybindings);
-		const extensionShortcuts = new Map<KeyId, ExtensionShortcut>();
-
-		const addDiagnostic = (message: string, path: string) => {
-			this.shortcutDiagnostics.push({ type: "warning", message, path });
-			if (!this.hasUI()) {
-				console.warn(message);
-			}
-		};
-
+	/**
+	 * Keys more than one extension binds: the last extension's binding wins,
+	 * as the `intents` catalog lists it. A client keeps the keys off its own
+	 * reserved ones.
+	 */
+	getShortcutDiagnostics(): ResourceDiagnostic[] {
+		const diagnostics: ResourceDiagnostic[] = [];
+		const owners = new Map<string, string>();
 		for (const ext of this.extensions) {
-			for (const [key, shortcut] of ext.shortcuts) {
-				const normalizedKey = key.toLowerCase() as KeyId;
-
-				const builtInKeybinding = builtinKeybindings[normalizedKey];
-				if (builtInKeybinding?.restrictOverride === true) {
-					addDiagnostic(
-						`Extension shortcut '${key}' from extension ${ext.id} conflicts with built-in shortcut. Skipping.`,
-						ext.path,
-					);
-					continue;
+			for (const key of ext.shortcuts.keys()) {
+				const normalizedKey = key.toLowerCase();
+				const owner = owners.get(normalizedKey);
+				if (owner !== undefined && owner !== ext.id) {
+					diagnostics.push({
+						type: "warning",
+						message: `Extension shortcut conflict: '${key}' registered by both extensions ${owner} and ${ext.id}. Using extension ${ext.id}.`,
+						path: ext.path,
+					});
 				}
-
-				if (builtInKeybinding?.restrictOverride === false) {
-					addDiagnostic(
-						`Extension shortcut conflict: '${key}' is built-in shortcut for ${builtInKeybinding.keybinding} and extension ${ext.id}. Using extension ${ext.id}.`,
-						ext.path,
-					);
-				}
-
-				const existingExtensionShortcut = extensionShortcuts.get(normalizedKey);
-				if (existingExtensionShortcut) {
-					addDiagnostic(
-						`Extension shortcut conflict: '${key}' registered by both extensions ${existingExtensionShortcut.extensionId} and ${ext.id}. Using extension ${ext.id}.`,
-						ext.path,
-					);
-				}
-				extensionShortcuts.set(normalizedKey, shortcut);
+				owners.set(normalizedKey, ext.id);
 			}
 		}
-		return extensionShortcuts;
-	}
-
-	getShortcutDiagnostics(): ResourceDiagnostic[] {
-		return this.shortcutDiagnostics;
+		return diagnostics;
 	}
 
 	invalidate(

@@ -69,6 +69,12 @@ export interface HostHarnessOptions {
 	openGate?: OpenGate;
 	/** Global settings every session reads (the agent directory's `settings.json`). */
 	globalSettings?: Partial<Settings>;
+	/** The faux provider's models; one model that does not think by default. */
+	models?: NonNullable<Parameters<typeof createFauxProvider>[0]>["models"];
+	/** Skill files or directories every session loads. */
+	skillPaths?: string[];
+	/** Prompt template files or directories every session loads. */
+	promptTemplatePaths?: string[];
 }
 
 export interface HostHarness {
@@ -90,7 +96,7 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 	if (options.globalSettings !== undefined) {
 		writeFileSync(join(tempDir, "settings.json"), JSON.stringify(options.globalSettings));
 	}
-	const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
+	const faux = createFauxProvider({ models: options.models ?? [{ id: "faux-1", reasoning: false }] });
 	faux.setResponses((options.responses ?? ["one", "two", "three"]).map((text) => fauxAssistantMessage(text)));
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -143,6 +149,10 @@ export async function createHostHarness(options: HostHarnessOptions = {}): Promi
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
+				...(options.skillPaths === undefined ? {} : { additionalSkillPaths: options.skillPaths }),
+				...(options.promptTemplatePaths === undefined
+					? {}
+					: { additionalPromptTemplatePaths: options.promptTemplatePaths }),
 			},
 		});
 		const definitions = options.subagents;

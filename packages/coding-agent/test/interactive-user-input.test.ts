@@ -17,7 +17,6 @@ type TestAccess = {
 	activeView: View;
 	editorContainer: Container;
 	planInspector: PlanInspectorComponent;
-	pendingUserInputs: string[];
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 };
 
@@ -158,7 +157,6 @@ describe.each(["regular", "fullscreen"] as const)("native questions in %s Intera
 		expect(access.editor.getText()).toBe(savedText);
 		expect(access.editor.getExpandedText()).toBe(draft);
 		expect(access.editor.getCursor()).toEqual(cursor);
-		expect(access.pendingUserInputs).toEqual([]);
 		expect(harness.eventsOfType("tool_execution_end")[0]?.result.details).toMatchObject({
 			status: "answered",
 			answers: { storage: { answers: ["x"] }, scope: { answers: ["Project files"] } },

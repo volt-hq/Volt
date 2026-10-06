@@ -111,8 +111,8 @@ export class TuiHost {
 			// The TUI's prompts reach extensions as interactive input.
 			inputSource: "interactive",
 			services: () => ({
-				// The TUI's abort stops the run without delivering its queued input.
-				abortRun: (session) => session.abort("host_action"),
+				// The TUI's abort is the user's interrupt key: it stops the run without delivering its queued input.
+				abortRun: (session) => session.abort("keyboard_interrupt"),
 				...(this.modelScopePatterns === undefined ? {} : { modelScopePatterns: this.modelScopePatterns }),
 			}),
 			...(options.onShutdownRequested === undefined ? {} : { onShutdownRequested: options.onShutdownRequested }),

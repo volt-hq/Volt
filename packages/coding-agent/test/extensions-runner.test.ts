@@ -19,7 +19,6 @@ import type {
 	ExtensionUIContext,
 	ProviderConfig,
 } from "../src/core/extensions/types.ts";
-import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
@@ -28,7 +27,6 @@ describe("ExtensionRunner", () => {
 	let extensionsDir: string;
 	let sessionManager: SessionManager;
 	let modelRegistry: ModelRegistry;
-	const defaultKeybindings = new KeybindingsManager().getEffectiveConfig();
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "volt-runner-test-"));
@@ -140,233 +138,7 @@ export default function(volt) {
 	});
 
 	describe("shortcut conflicts", () => {
-		it("warns when extension shortcut conflicts with built-in", async () => {
-			const extCode = `
-				export const manifest = { id: "conflict", displayName: "conflict" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+c", {
-						description: "Conflicts with built-in",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "conflict.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(defaultKeybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
-			expect(shortcuts.has("ctrl+c")).toBe(false);
-
-			warnSpy.mockRestore();
-		});
-
-		it.each([
-			{
-				name: "default binding",
-				shortcut: "alt+p" as KeyId,
-				keybindings: defaultKeybindings,
-			},
-			{
-				name: "remapped binding",
-				shortcut: "ctrl+shift+x" as KeyId,
-				keybindings: {
-					...defaultKeybindings,
-					"app.plan.togglePane": "ctrl+shift+x" as KeyId,
-				},
-			},
-		])("blocks extension conflicts with the plan-pane action using the $name", async ({ shortcut, keybindings }) => {
-			const extensionPath = path.join(extensionsDir, "plan-pane-conflict.ts");
-			fs.writeFileSync(
-				extensionPath,
-				`export const manifest = { id: "plan-pane-conflict", displayName: "plan-pane-conflict" };
-export default function(volt) {
-	volt.registerShortcut("${shortcut}", {
-		description: "Conflicts with global plan-pane toggle",
-		intent: "noop",
-	});
-}`,
-			);
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(keybindings);
-			const message = `Extension shortcut '${shortcut}' from extension plan-pane-conflict conflicts with built-in shortcut. Skipping.`;
-
-			expect(shortcuts.has(shortcut)).toBe(false);
-			expect(runner.getShortcutDiagnostics()).toEqual([
-				{
-					type: "warning",
-					message,
-					path: extensionPath,
-				},
-			]);
-			expect(warnSpy).toHaveBeenCalledWith(message);
-
-			warnSpy.mockRestore();
-		});
-
-		it("allows a shortcut when the reserved set no longer contains the default key", async () => {
-			const extCode = `
-				export const manifest = { id: "rebinding", displayName: "rebinding" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+p", {
-						description: "Uses freed default",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "rebinding.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...defaultKeybindings, "app.model.cycleForward": "ctrl+n" as KeyId };
-			const shortcuts = runner.getShortcuts(keybindings);
-
-			expect(shortcuts.has("ctrl+p")).toBe(true);
-			expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
-
-			warnSpy.mockRestore();
-		});
-
-		it("warns but allows when extension uses non-reserved built-in shortcut", async () => {
-			const pasteImageKey = Array.isArray(defaultKeybindings["app.clipboard.pasteImage"])
-				? (defaultKeybindings["app.clipboard.pasteImage"][0] ?? "")
-				: defaultKeybindings["app.clipboard.pasteImage"];
-			const extCode = `
-				export const manifest = { id: "non-reserved", displayName: "non-reserved" };
-				export default function(volt) {
-					volt.registerShortcut("${pasteImageKey}", {
-						description: "Overrides non-reserved",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "non-reserved.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(defaultKeybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining("built-in shortcut for app.clipboard.pasteImage"),
-			);
-			expect(shortcuts.has(pasteImageKey as KeyId)).toBe(true);
-
-			warnSpy.mockRestore();
-		});
-
-		it("blocks shortcuts for reserved actions even when rebound", async () => {
-			const extCode = `
-				export const manifest = { id: "rebound-reserved", displayName: "rebound-reserved" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+x", {
-						description: "Conflicts with rebound reserved",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "rebound-reserved.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...defaultKeybindings, "app.interrupt": "ctrl+x" as KeyId };
-			const shortcuts = runner.getShortcuts(keybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
-			expect(shortcuts.has("ctrl+x")).toBe(false);
-
-			warnSpy.mockRestore();
-		});
-
-		it("blocks shortcuts when reserved key is also bound to non-reserved actions", async () => {
-			const extCode = `
-				export const manifest = { id: "shared-reserved", displayName: "shared-reserved" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+p", {
-						description: "Conflicts with shared reserved default",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "shared-reserved.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(defaultKeybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
-			expect(shortcuts.has("ctrl+p")).toBe(false);
-
-			warnSpy.mockRestore();
-		});
-
-		it("blocks shortcuts when reserved action has multiple keys", async () => {
-			const extCode = `
-				export const manifest = { id: "multi-reserved", displayName: "multi-reserved" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+y", {
-						description: "Conflicts with multi-key reserved",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "multi-reserved.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...defaultKeybindings, "app.clear": ["ctrl+x", "ctrl+y"] as KeyId[] };
-			const shortcuts = runner.getShortcuts(keybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("conflicts with built-in"));
-			expect(shortcuts.has("ctrl+y")).toBe(false);
-
-			warnSpy.mockRestore();
-		});
-
-		it("warns but allows when non-reserved action has multiple keys", async () => {
-			const extCode = `
-				export const manifest = { id: "multi-non-reserved", displayName: "multi-non-reserved" };
-				export default function(volt) {
-					volt.registerShortcut("ctrl+y", {
-						description: "Overrides multi-key non-reserved",
-						intent: "noop",
-					});
-				}
-			`;
-			fs.writeFileSync(path.join(extensionsDir, "multi-non-reserved.ts"), extCode);
-
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
-			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
-			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const keybindings = { ...defaultKeybindings, "app.clipboard.pasteImage": ["ctrl+x", "ctrl+y"] as KeyId[] };
-			const shortcuts = runner.getShortcuts(keybindings);
-
-			expect(warnSpy).toHaveBeenCalledWith(
-				expect.stringContaining("built-in shortcut for app.clipboard.pasteImage"),
-			);
-			expect(shortcuts.has("ctrl+y")).toBe(true);
-
-			warnSpy.mockRestore();
-		});
-
-		it("warns when two extensions register same shortcut", async () => {
-			// Use a non-reserved shortcut
+		it("reports a key two extensions bind; the last extension's binding wins", async () => {
 			const extCode1 = `
 				export const manifest = { id: "ext1", displayName: "ext1" };
 				export default function(volt) {
@@ -379,7 +151,7 @@ export default function(volt) {
 			const extCode2 = `
 				export const manifest = { id: "ext2-2", displayName: "ext2-2" };
 				export default function(volt) {
-					volt.registerShortcut("ctrl+shift+x", {
+					volt.registerShortcut("Ctrl+Shift+X", {
 						description: "Second extension",
 						intent: "noop",
 					});
@@ -388,17 +160,17 @@ export default function(volt) {
 			fs.writeFileSync(path.join(extensionsDir, "ext1.ts"), extCode1);
 			fs.writeFileSync(path.join(extensionsDir, "ext2.ts"), extCode2);
 
-			const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-
 			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
 			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
-			const shortcuts = runner.getShortcuts(defaultKeybindings);
 
-			expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("shortcut conflict"));
-			// Last one wins
-			expect(shortcuts.has("ctrl+shift+x")).toBe(true);
-
-			warnSpy.mockRestore();
+			expect(runner.getShortcutDiagnostics()).toEqual([
+				{
+					type: "warning",
+					message:
+						"Extension shortcut conflict: 'Ctrl+Shift+X' registered by both extensions ext1 and ext2-2. Using extension ext2-2.",
+					path: path.join(extensionsDir, "ext2.ts"),
+				},
+			]);
 		});
 	});
 

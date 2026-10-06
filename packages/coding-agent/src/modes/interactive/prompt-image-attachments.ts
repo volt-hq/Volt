@@ -85,6 +85,11 @@ function isPathLikeToken(token: string): boolean {
 	);
 }
 
+/** Whether prompt text names anything an image attachment could load from: a path-like token. */
+export function mayAttachImages(text: string): boolean {
+	return extractPathTokens(text).some(isPathLikeToken);
+}
+
 /**
  * Scan prompt text for existing image files and load them as attachments,
  * resized through the shared image pipeline. Returns null when the model does

@@ -55,6 +55,8 @@ export interface TuiModeFixture {
 	readonly ui: TUI;
 	/** Resume `ref` as `/resume` does. */
 	resume(ref: SessionReference): Promise<{ cancelled: boolean }>;
+	/** Connect the mode's client and show its conversation, when it started without. */
+	connect(): Promise<void>;
 	/** The terminal's visible rows, joined. */
 	screen(): string;
 }
@@ -67,8 +69,17 @@ export interface TuiHarness extends HostHarness {
 	readonly sessionDir: string;
 	/** Connect the TUI's client over loopback, answering every host request kind the TUI answers by default. */
 	connect(options?: TuiConnectOptions): Promise<LoopbackClient>;
-	/** InteractiveMode over the TUI host, its client connected and its conversation shown. */
-	startMode(options?: { tuiMode?: TuiMode; columns?: number; rows?: number }): Promise<TuiModeFixture>;
+	/**
+	 * InteractiveMode over the TUI host, its client connected and its
+	 * conversation shown; with `connect: false`, its UI runs and the fixture's
+	 * `connect` connects it.
+	 */
+	startMode(options?: {
+		tuiMode?: TuiMode;
+		columns?: number;
+		rows?: number;
+		connect?: boolean;
+	}): Promise<TuiModeFixture>;
 	/** Store a session in the startup conversation's session directory, for a resume. */
 	storeSession(name?: string): Promise<SessionReference>;
 }
@@ -147,14 +158,18 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 				access.activateView(access.conversationView, access.editor, false);
 				access.isInitialized = true;
 				access.ui.start();
-				await access.connect();
-				await terminal.waitForRender();
+				const connect = async (): Promise<void> => {
+					await access.connect();
+					await terminal.waitForRender();
+				};
+				if (modeOptions.connect !== false) await connect();
 				return {
 					mode,
 					terminal,
 					store: access.store,
 					ui: access.ui,
 					resume: (ref) => access.handleResumeSession(ref),
+					connect,
 					screen: () => terminal.getViewport().join("\n"),
 				};
 			},
