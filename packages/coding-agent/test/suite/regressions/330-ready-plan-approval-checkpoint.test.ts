@@ -149,7 +149,8 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		terminal.sendInput("\x1b[C");
 		terminal.sendInput("\r");
 		await vi.waitFor(() => expect(session.planningState.plan?.phase).toBe("draft"));
-		expect(control.planDetails).toBeUndefined();
+		// The chooser closes once the change committed.
+		await vi.waitFor(() => expect(control.planDetails).toBeUndefined());
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		expect(control.defaultEditor.getText()).toBe("keep this draft");
 		expect(fixture.executePlan).not.toHaveBeenCalled();
