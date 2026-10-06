@@ -22,20 +22,18 @@ import {
 	clientRestore,
 	clientSnapshot,
 	emptyClientState,
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveFrame,
 	type HostFrame,
+	type LiveFoldState,
 	type LiveItem,
+	liveCommitOf,
 } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../../src/core/host/live-state.ts";
-import {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveFrame,
-	type LiveFoldState,
-	liveCommitOf,
-} from "../../src/core/protocol/live-fold.ts";
 import { localProfile, type Profile } from "../../src/core/protocol/profiles.ts";
 import { projectEntry, sessionProjectionSource } from "../../src/core/protocol/projection/entries.ts";
 import { projectLog, Subscription } from "../../src/core/protocol/server/subscription.ts";

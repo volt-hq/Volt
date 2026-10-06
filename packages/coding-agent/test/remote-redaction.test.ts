@@ -10,6 +10,8 @@
 import { resolve, sep } from "node:path";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import {
+	emptyLiveFold,
+	foldLiveFrame,
 	type HostFrame,
 	type LiveItem,
 	PANEL_MAX_SERIALIZED_BYTES,
@@ -19,7 +21,6 @@ import {
 	UI_NODE_LINE_MAX_CHARS,
 } from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
-import { emptyLiveFold, foldLiveFrame } from "../src/core/protocol/live-fold.ts";
 import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
 import { normalizeUiNode } from "../src/core/ui/normalize.ts";

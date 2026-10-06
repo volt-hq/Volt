@@ -8,7 +8,12 @@
  * conversations by position (subscription.ts), invokes intents, runs queries,
  * and answers host requests. Intents and queries run one at a time in arrival
  * order; input intents (prompts) and dynamic intents answer once admitted
- * without holding later frames. Non-input intents are deduplicated per
+ * without holding later frames. Stopping intents (`abort`, `abort_bash`,
+ * `abort_retry`, `cancel_work`) run on arrival instead of after the frames
+ * before them, so a stop never waits behind a long intent such as `compact`;
+ * a client that needs an earlier intent admitted first waits for its
+ * `accepted`. A stopping intent is checked against the connection's
+ * authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
  * answers `accepted{conversation}`, then ends the subscriptions on the
@@ -57,11 +62,12 @@ import {
 	RpcSafeNonNegativeIntegerSchema,
 	SubscribeFrameSchema,
 	UnsubscribeFrameSchema,
+	type WithdrawnInput,
 } from "@hansjm10/volt-protocol";
 import { type Static, type TObject, type TSchema, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { VERSION } from "../../../config.ts";
-import type { ExtensionError } from "../../extensions/index.ts";
+import type { ExtensionError, InputSource } from "../../extensions/index.ts";
 import { ClientScope } from "../../host/client-scope.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
@@ -70,6 +76,8 @@ import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from 
 import { SessionManager } from "../../session-manager.ts";
 import { linkedSubagentConversation, linkingSubagentWork } from "../../subagents/work.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
+import { EDITOR_TEXT_TIMEOUT_MS } from "../../ui/extension-ui.ts";
+import { withdrawQueuedInput } from "../intents/conversation.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
@@ -89,9 +97,19 @@ const STRUCTURAL_INTENTS: ReadonlySet<string> = new Set([
 	"switch_session",
 	"fork",
 	"clone",
+	"import_session",
 	"review_open_session",
 	"open_work",
 ]);
+
+/**
+ * Intents that stop what runs: they run on arrival, outside the lane, so a
+ * stop never waits behind the long intent it stops.
+ */
+const STOPPING_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_bash", "abort_retry", "cancel_work"]);
+
+/** Intents whose acceptance changes the `sessions` catalog without moving the client. */
+const SESSIONS_INTENTS: ReadonlySet<string> = new Set(["delete_session", "set_session_name"]);
 
 /** Intents whose acceptance changes the `settings` catalog. */
 const SETTINGS_INTENTS: ReadonlySet<string> = new Set([
@@ -175,6 +193,8 @@ export interface ServeConnectionOptions {
 	readonly clientKey?: string;
 	/** An intent of this client that starts a run (a prompt, a dynamic intent) was accepted on `conversation`. */
 	readonly onInputAccepted?: (conversation: HostedConversation) => void;
+	/** The source of the `input` event the client's prompts raise; `rpc` by default. */
+	readonly inputSource?: InputSource;
 }
 
 export interface ProtocolConnection {
@@ -540,6 +560,7 @@ export function serveConnection(
 		const unsubscribeReloads = session.subscribeReloads(() => {
 			write({ type: "changed", catalog: "intents" });
 			write({ type: "changed", catalog: "extensions" });
+			write({ type: "changed", catalog: "resources" });
 		});
 		// A client in the host's trust domain slows the agent loop to its pace. A
 		// remote client never does: its transport bounds what it queues instead.
@@ -615,9 +636,43 @@ export function serveConnection(
 		return home;
 	};
 
+	/**
+	 * An extension's `ctx.abort()` in a command this client invoked: the
+	 * queued input is taken back, the run stops, and the input's text returns
+	 * to this client's editor, before the draft the client reports. Only a
+	 * local client with an editor (it answers `editor_text`) takes the queue
+	 * back; for any other the run stops and the queue stays.
+	 */
+	const abortForCommand = async (): Promise<void> => {
+		const conversation = home;
+		if (!conversation || conversation.closed) return;
+		const session = conversation.session;
+		if (profile.name !== "local" || !accepts.has("editor_text")) {
+			await session.abort();
+			return;
+		}
+		let withdrawn: WithdrawnInput[] = [];
+		try {
+			withdrawn = await withdrawQueuedInput(session);
+		} finally {
+			void session.abort("host_action").catch(() => undefined);
+		}
+		const queued = withdrawn.map((input) => input.text).join("\n\n");
+		if (!queued.trim()) return;
+		const draft = await conversation.liveState.request(
+			{ kind: "editor_text", timeoutMs: EDITOR_TEXT_TIMEOUT_MS },
+			{ client: client.id },
+		);
+		const draftText = draft.status === "answered" && "value" in draft.response ? draft.response.value : "";
+		conversation.liveState.setEditorText([queued, draftText].filter((text) => text.trim()).join("\n\n"), {
+			client: client.id,
+		});
+	};
+
 	const client: HostClient = {
 		id: connectionId,
 		...(anchor ? { anchor: true } : {}),
+		...(profile.name === "remote" ? { remote: true } : {}),
 		recoversInput: true,
 		// Keeps the client asked the host requests it accepts before it subscribes; each subscription shows them.
 		live: { acceptsHostRequest: (kind) => accepts.has(kind), apply: () => {} },
@@ -644,6 +699,7 @@ export function serveConnection(
 					openStoredSession(currentHost(), client, sessionRef, switchOptions),
 				reload: () => currentHome().session.reload(),
 			},
+			abortHandler: () => void abortForCommand().catch(() => undefined),
 			shutdownHandler: () => options.onShutdownRequested?.(),
 			onError: onExtensionError,
 		},
@@ -698,6 +754,7 @@ export function serveConnection(
 		profile: profile.intents,
 		subscriber: profile,
 		...(intentId === undefined ? {} : { intentId }),
+		...(options.inputSource === undefined ? {} : { inputSource: options.inputSource }),
 	});
 
 	/** Re-read the connection's authority; a lost one ends the connection. */
@@ -819,7 +876,9 @@ export function serveConnection(
 			}
 			if (SETTINGS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "settings" });
 			if (HOST_INTENTS.has(frame.type)) write({ type: "changed", catalog: "host" });
-			if (result.conversation !== undefined) write({ type: "changed", catalog: "sessions" });
+			if (result.conversation !== undefined || SESSIONS_INTENTS.has(frame.type)) {
+				write({ type: "changed", catalog: "sessions" });
+			}
 			// Prompts and dynamic intents (prompt templates, skills, extension commands) start runs.
 			if ((input || !isBuiltinIntentName(frame.type)) && conversation) options.onInputAccepted?.(conversation);
 		};
@@ -924,6 +983,29 @@ export function serveConnection(
 				flushMoves();
 			}
 		});
+	};
+
+	/**
+	 * Run a stopping intent at once, beside the lane, once the client is
+	 * attached; it counts toward the pending frames as a lane frame does.
+	 */
+	const runNow = (task: () => Promise<void>): void => {
+		if (pendingFrames >= MAX_PENDING_FRAMES) {
+			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
+			return;
+		}
+		pendingFrames++;
+		void (async () => {
+			try {
+				await attached;
+				if (closing) return;
+				await task();
+			} catch {
+				// Each frame answers its own failure.
+			} finally {
+				pendingFrames--;
+			}
+		})();
 	};
 
 	/** Run a subscription change or an answer in order, once the connection's authority is re-read. */
@@ -1142,7 +1224,8 @@ export function serveConnection(
 				return;
 			default:
 				if (RESERVED.has(type) || !intentEnvelopeValidator(type).Check(value)) break;
-				enqueue(() => runIntent(value as unknown as IntentEnvelope));
+				if (STOPPING_INTENTS.has(type)) runNow(() => runIntent(value as unknown as IntentEnvelope));
+				else enqueue(() => runIntent(value as unknown as IntentEnvelope));
 				return;
 		}
 		void close({ code: "invalid_frame", message: `Invalid ${type} frame` });

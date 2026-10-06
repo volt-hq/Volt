@@ -129,9 +129,19 @@ export const QueryErrorReasonSchema = Type.Object(
 
 /**
  * The catalogs a `changed` frame invalidates. `host` is the host's own status:
- * the `host_status` and `web_search_status` queries.
+ * the `host_status` and `web_search_status` queries; `resources` the
+ * conversation's resources and tools (`resources`, `tools`).
  */
-export const CatalogNameSchema = stringEnum(["models", "intents", "sessions", "mcp", "extensions", "settings", "host"]);
+export const CatalogNameSchema = stringEnum([
+	"models",
+	"intents",
+	"sessions",
+	"mcp",
+	"extensions",
+	"settings",
+	"host",
+	"resources",
+]);
 
 /**
  * Why the host ended a connection.

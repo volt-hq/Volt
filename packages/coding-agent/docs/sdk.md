@@ -1422,7 +1422,6 @@ ProtocolRejectedError
 ProtocolQueryError
 serveConnection
 localProfile
-foldLiveFrame
 createLoopbackRpcTransportPair
 
 // Auth and Models

@@ -126,6 +126,8 @@ export const ClientWorkItemSchema = Type.Object(
 		resume: Type.Boolean(),
 		toolCallId: Type.Optional(LogEntryIdSchema),
 		child: Type.Optional(WorkChildSchema),
+		/** The kind opens the work's conversation (`open_work`). */
+		opens: Type.Optional(Type.Boolean()),
 		/** The latest open state; kept when the work finishes. */
 		state: WorkStateSchema,
 		/** Present once the work finished. */
@@ -139,6 +141,9 @@ export const ClientWorkItemSchema = Type.Object(
 		/** The newest entry that changed the item. */
 		updatedOrdinal: LogEntryOrdinalSchema,
 		finishedOrdinal: Type.Optional(LogEntryOrdinalSchema),
+		/** When the work started and finished: the timestamps of its `work_started` and `work_finished` entries. */
+		startedAt: Type.Optional(LogEntryTimestampSchema),
+		finishedAt: Type.Optional(LogEntryTimestampSchema),
 	},
 	closed,
 );
@@ -392,13 +397,13 @@ class ClientStateBuilder {
 				if (entry.payload) this.forkedFrom = entry.payload;
 				return;
 			case "work_started":
-				if (entry.payload) this.startWork(entry.payload, entry.ordinal);
+				if (entry.payload) this.startWork(entry.payload, entry.ordinal, entry.timestamp);
 				return;
 			case "work_checkpoint":
 				if (entry.payload) this.checkpointWork(entry.payload, entry.ordinal);
 				return;
 			case "work_finished":
-				if (entry.payload) this.finishWork(entry.payload, entry.ordinal);
+				if (entry.payload) this.finishWork(entry.payload, entry.ordinal, entry.timestamp);
 				return;
 			default:
 				return;
@@ -509,7 +514,7 @@ class ClientStateBuilder {
 		this.queue = queue;
 	}
 
-	private startWork(payload: WorkStartedEntryPayload, ordinal: number): void {
+	private startWork(payload: WorkStartedEntryPayload, ordinal: number, timestamp: string): void {
 		if (this.work.has(payload.workId)) return;
 		this.setWork(
 			Object.freeze({
@@ -522,9 +527,11 @@ class ClientStateBuilder {
 				resume: payload.resume,
 				...(payload.toolCallId === undefined ? {} : { toolCallId: payload.toolCallId }),
 				...(payload.child === undefined ? {} : { child: payload.child }),
+				...(payload.opens === true ? { opens: true } : {}),
 				state: payload.state,
 				startedOrdinal: ordinal,
 				updatedOrdinal: ordinal,
+				startedAt: timestamp,
 			}),
 		);
 	}
@@ -544,7 +551,7 @@ class ClientStateBuilder {
 	}
 
 	/** Finish an open item, then drop the oldest finished items beyond {@link CLIENT_WORK_FINISHED_MAX}. */
-	private finishWork(payload: WorkFinishedEntryPayload, ordinal: number): void {
+	private finishWork(payload: WorkFinishedEntryPayload, ordinal: number, timestamp: string): void {
 		const item = this.work.get(payload.workId);
 		if (!item || item.outcome !== undefined) return;
 		const { summary, child, output } = payload.result ?? {};
@@ -561,6 +568,7 @@ class ClientStateBuilder {
 				...(payload.error === undefined ? {} : { error: payload.error }),
 				updatedOrdinal: ordinal,
 				finishedOrdinal: ordinal,
+				finishedAt: timestamp,
 			}),
 		);
 		const work = this.writableMap(this.work);

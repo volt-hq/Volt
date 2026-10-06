@@ -156,6 +156,8 @@ import {
 	ReviewStartedSchema,
 	RpcBashResultSchema,
 	RpcCompactionResultSchema,
+	WithdrawnInputSchema,
+	WithdrawnQueueSchema,
 } from "./intents.ts";
 import {
 	ExtensionPanelPlacementSchema,
@@ -251,11 +253,13 @@ import {
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import {
 	EditorCompletionItemSchema,
+	IntentShortcutSchema,
 	QUERY_FRAME_SCHEMAS,
 	QUERY_NAMES,
 	QUERY_SCHEMAS,
 	QueryFrameSchema,
 	QueryNameSchema,
+	ScopedModelSchema,
 } from "./queries.ts";
 import {
 	RemoteAccessPresetNameSchema,
@@ -282,6 +286,17 @@ import {
 	IrohRemoteWorkspaceManagementTargetSchema,
 	IrohRemoteWorktreeIdSchema,
 } from "./remote-handshake.ts";
+import {
+	ConversationInfoSchema,
+	ExtensionResourceSchema,
+	NamedResourceSchema,
+	ResourceDiagnosticSchema,
+	ResourceNoticeSchema,
+	ResourceSourceSchema,
+	ResourcesSchema,
+	ThemeResourceSchema,
+	ToolSummarySchema,
+} from "./resources.ts";
 import {
 	RpcListReviewDiscussionsSchema,
 	RpcResetReviewDiscussionSchema,
@@ -660,6 +675,8 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	EmptyInput: EmptyInputSchema,
 	IntentCancelled: IntentCancelledSchema,
 	ReviewStarted: ReviewStartedSchema,
+	WithdrawnInput: WithdrawnInputSchema,
+	WithdrawnQueue: WithdrawnQueueSchema,
 	BuiltinIntentName: BuiltinIntentNameSchema,
 	DynamicIntentName: DynamicIntentNameSchema,
 	ExtensionIntentName: ExtensionIntentNameSchema,
@@ -681,6 +698,17 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	// Queries
 	QueryName: QueryNameSchema,
 	EditorCompletionItem: EditorCompletionItemSchema,
+	IntentShortcut: IntentShortcutSchema,
+	ScopedModel: ScopedModelSchema,
+	ConversationInfo: ConversationInfoSchema,
+	ResourceSource: ResourceSourceSchema,
+	NamedResource: NamedResourceSchema,
+	ThemeResource: ThemeResourceSchema,
+	ExtensionResource: ExtensionResourceSchema,
+	ResourceDiagnostic: ResourceDiagnosticSchema,
+	ResourceNotice: ResourceNoticeSchema,
+	Resources: ResourcesSchema,
+	ToolSummary: ToolSummarySchema,
 
 	// Live lane and host requests
 	HostRequestKind: HostRequestKindSchema,

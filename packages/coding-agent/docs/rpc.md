@@ -120,7 +120,7 @@ Long-running work of a conversation is a work item: a background job (`job`), a 
 - `patch{key, ops}` changes the node of a panel (`ext_panel/…`) or the detail of a work item (`work/…`) in place, with the `UiNode` patch operations of the contract (`replace`, `remove`, `insert`, `append_lines`). A reset carries the patched value. A patch that does not apply to the value you hold means your state diverged: resubscribe after your position.
 - `notice{level, message, source?}` (`message` is styled text: a string or styled spans) and `directive{directive: "set_editor_text" | "insert_editor_text", text}` leave no state.
 
-The live fold (`foldLiveFrame`, `foldLiveCommit` in `@hansjm10/volt-coding-agent`) applies these rules; the host's live state is the same fold of the items it published.
+The live fold (`foldLiveFrame`, `foldLiveCommit` in `@hansjm10/volt-protocol`) applies these rules; the host's live state is the same fold of the items it published.
 
 Streaming items:
 
@@ -166,6 +166,7 @@ An intent frame is `{type: <intent name>, intentId, conversation?, expectedOrdin
 - `ordinals` are the log ordinals committed while the intent ran, its own entries included.
 - `conversation` defaults to the conversation the client is on. Intents may name another open conversation of the host, except intents that move the client.
 - Intents and queries run one at a time in arrival order. Input intents (`prompt`, `steer`, `follow_up`) and dynamic intents answer once admitted (once the prompt passed preflight), without holding later frames; their run's outcome is in the log.
+- Stopping intents (`abort`, `abort_bash`, `abort_retry`, `cancel_work`) run as soon as they arrive, beside the intents and queries in progress, so a stop never waits behind a long intent such as `compact`. A client that needs an earlier intent admitted before it stops a run waits for that intent's `accepted` first.
 - **Idempotency.** An input intent's `intentId` is the input's durable client message id: a retry with the same id and input answers again without delivering it twice, and the same id with other input is rejected `conflict`. The host remembers the outcomes of the last 256 other intents of each conversation: a retried `intentId` with the same input answers the same frame; with other input it is rejected `conflict`.
 - **Branch fences.** An intent whose descriptor has `fence: "branch"` carrying `expectedOrdinal` (the client's position) is rejected `stale{ordinal}` when the active branch switched after that position.
 - **Moves.** `new_session`, `switch_session`, `fork`, `clone`, and `review_open_session` open another conversation and move the client there: `accepted.conversation` names it, then the subscriptions on the conversation the client left end `moved` with that `target`. A cancelled move answers `accepted` with `result: {cancelled: true}` and keeps the client where it was. A move is refused while the conversation runs a turn, a bash command, a session mutation, or a detached review, or holds queued durable input. Extension commands that call `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()` move the client the same way.

@@ -6,11 +6,11 @@
  */
 
 import type { HostRequest, HostResponse, LiveItem, UiNode } from "@hansjm10/volt-protocol";
+import { emptyLiveFold, foldLiveItems } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionError, ExtensionUIContext } from "../../src/core/extensions/index.ts";
 import { ClientScope } from "../../src/core/host/client-scope.ts";
 import type { LiveClient, LiveUpdate } from "../../src/core/host/live-state.ts";
-import { emptyLiveFold, foldLiveItems } from "../../src/core/protocol/live-fold.ts";
 import { EXTENSION_PANELS_MAX, EXTENSION_STATUS_MAX } from "../../src/core/ui/extension-ui.ts";
 import { connectTestClient } from "../utilities/host-client.ts";
 import { createLiveRecorder } from "../utilities/live-recorder.ts";

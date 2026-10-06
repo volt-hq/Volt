@@ -8,15 +8,21 @@
  * call, which no entry commits, when it ends). A running call carries its
  * presentation, which changes at most every 100 ms as patches of the one the
  * live state holds (presentation-state.ts).
+ *
+ * The feed also raises the host's own notices (source `host`): a compaction
+ * cancelled or failed, retries that gave up, and an Anthropic subscription
+ * login on a model the conversation changed to (once per conversation). A
+ * `models.json` error names the agent directory, so only the local-only
+ * `resources` query reports it.
  */
 
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
-import type { LiveItem, LiveValue } from "@hansjm10/volt-protocol";
+import { HOST_NOTICE_SOURCE, type LiveItem, type LiveToolPartial, type LiveValue } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
-import type { LiveToolPartial } from "../protocol/live-fold.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { ToolPresentationState } from "../ui/presentation-state.ts";
+import { ANTHROPIC_SUBSCRIPTION_AUTH_WARNING, usesAnthropicSubscription } from "./host-notices.ts";
 
 type SlimAssistantEvent = Extract<LiveItem, { type: "assistant_delta" }>["event"];
 
@@ -108,7 +114,13 @@ function toolResult(value: unknown): ToolResultView | undefined {
 	return { content, ...(value.details === undefined ? {} : { details: value.details }) };
 }
 
-function phaseValue(session: AgentSession): LiveValue {
+/** The retry an `auto_retry_start` scheduled: when its attempt starts, and what failed the one before. */
+interface ScheduledRetry {
+	readonly retryAt: number;
+	readonly error: string;
+}
+
+function phaseValue(session: AgentSession, scheduled: ScheduledRetry | undefined): LiveValue {
 	const run = session.activeAgentRun;
 	const compaction = session.activeCompaction;
 	const attempt = Number.isSafeInteger(session.retryAttempt) && session.retryAttempt > 0 ? session.retryAttempt : 0;
@@ -119,7 +131,7 @@ function phaseValue(session: AgentSession): LiveValue {
 		operation: session.operation,
 		...(run === undefined ? {} : { run }),
 		...(compaction === undefined ? {} : { compaction }),
-		...(attempt > 0 ? { retry: { attempt, maxAttempts } } : {}),
+		...(attempt > 0 ? { retry: { attempt, maxAttempts, ...scheduled } } : {}),
 	};
 }
 
@@ -153,7 +165,8 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			// The live state is presentation; a value that cannot be read now is set by its next change.
 		}
 	};
-	const updatePhase = (): void => update("phase", () => phaseValue(session));
+	let scheduledRetry: ScheduledRetry | undefined;
+	const updatePhase = (): void => update("phase", () => phaseValue(session, scheduledRetry));
 	const updateUsage = (): void => update("usage", () => usageValue(session));
 	const updateIntents = (): void =>
 		update("intents", () => ({ kind: "intents", availability: liveIntentAvailability(session) }));
@@ -174,6 +187,28 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			stream([{ type: "tool", op: "update", toolCallId, toolName, ...change }]);
 		},
 	});
+	const notice = (level: "info" | "warning" | "error", message: string): void => {
+		if (closed) return;
+		try {
+			live.notice(level, message, HOST_NOTICE_SOURCE);
+		} catch {
+			// A notice is presentation; one that cannot be raised now is dropped.
+		}
+	};
+	/** Warned once: an Anthropic subscription login bills the conversation's usage as extra usage. */
+	let subscriptionWarned = false;
+	const warnAboutSubscription = (): void => {
+		if (subscriptionWarned) return;
+		void usesAnthropicSubscription(session, session.model).then(
+			(uses) => {
+				if (!uses || subscriptionWarned) return;
+				subscriptionWarned = true;
+				notice("warning", ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+			},
+			() => undefined,
+		);
+	};
+
 	/** End a call: its end item carries what its final result changed of its presentation. */
 	const endTool = (toolCallId: string, toolName: string, result: ToolResultView, isError: boolean): void => {
 		const held = live.snapshot().tools.get(toolCallId);
@@ -236,16 +271,33 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			case "agent_start":
 			case "agent_end":
 			case "agent_settled":
-			case "auto_retry_start":
-			case "auto_retry_end":
 			case "compaction_start":
 				updatePhase();
 				updateIntents();
+				return;
+			case "auto_retry_start":
+				scheduledRetry = { retryAt: Date.now() + event.delayMs, error: event.errorMessage };
+				updatePhase();
+				updateIntents();
+				return;
+			case "auto_retry_end":
+				scheduledRetry = undefined;
+				updatePhase();
+				updateIntents();
+				if (!event.success) {
+					notice("error", `Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`);
+				}
 				return;
 			case "compaction_end":
 				updatePhase();
 				updateIntents();
 				updateUsage();
+				if (event.aborted) {
+					if (event.reason === "manual") notice("error", "Compaction cancelled");
+					else notice("info", "Auto-compaction cancelled");
+				} else if (!event.result && event.errorMessage) {
+					notice("error", event.errorMessage);
+				}
 				return;
 			case "mcp_call_start": {
 				const toolCallId = mcpCallId(event.call.id);
@@ -311,6 +363,8 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 			updateUsage();
 		} else if (entry.type === "compaction") {
 			updateUsage();
+		} else if (entry.type === "model_change") {
+			warnAboutSubscription();
 		}
 		if (INTENT_STATE_ENTRY_TYPES.has(entry.type)) updateIntents();
 	};
@@ -332,6 +386,13 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 	updateUsage();
 	update("git", () => ({ kind: "git", gitContext: session.gitContextProvider.getSnapshot() }));
 	update("prompt_cache", () => ({ kind: "prompt_cache", promptCache: session.getPromptCacheStatus() ?? null }));
+	// A subscription the conversation opens with is the `resources` query's to tell.
+	void usesAnthropicSubscription(session, session.model).then(
+		(uses) => {
+			if (uses) subscriptionWarned = true;
+		},
+		() => undefined,
+	);
 
 	return {
 		close() {

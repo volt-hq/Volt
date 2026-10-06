@@ -38,7 +38,13 @@ import type {
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	diffUiTree,
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveFrame,
+	foldLiveItems,
 	LIVE_PATCHABLE_KINDS,
+	type LiveFoldState,
+	liveCommitOf,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
 	WORK_CHECKPOINT_MAX_SERIALIZED_BYTES,
 } from "@hansjm10/volt-protocol";
@@ -46,14 +52,6 @@ import { createIrohRemoteProjectionSanitizer, type IrohRemoteSanitizerOptions } 
 import { fitPresentation } from "../ui/presentation.ts";
 import { presentationChange } from "../ui/presentation-state.ts";
 import { redactedWorkPhase } from "../work/phase.ts";
-import {
-	emptyLiveFold,
-	foldLiveCommit,
-	foldLiveFrame,
-	foldLiveItems,
-	type LiveFoldState,
-	liveCommitOf,
-} from "./live-fold.ts";
 import { withoutImages } from "./projection/presentation.ts";
 
 type LiveFrame = Extract<HostFrame, { type: "live" }>;
@@ -657,12 +655,15 @@ export function createRemoteRedactor(options: RemoteRedactionOptions): FrameReda
 				return redactToolItem(view, item);
 			case "set": {
 				if (item.key.startsWith("host_request/") && item.value.kind !== "host_request") return [];
+				// Who else is attached is the host's to tell local clients only.
+				if (item.value.kind === "presence") return [];
 				const value = redactValue(item.value);
 				if (value === undefined) return [];
 				const set: LiveItem = { type: "set", key: redactKey(item.key), value };
 				return [PATCHABLE_KINDS.has(value.kind) ? { item: set, held: hold(view, item.key, value) } : { item: set }];
 			}
 			case "clear": {
+				if (item.key === "presence") return [];
 				if (item.key.startsWith("host_request/")) optionMaps.delete(item.key.slice("host_request/".length));
 				const clear: LiveItem = { type: "clear", key: redactKey(item.key) };
 				return [view.held.has(item.key) ? { item: clear, held: hold(view, item.key, undefined) } : { item: clear }];
