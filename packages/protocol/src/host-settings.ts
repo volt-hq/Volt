@@ -32,6 +32,17 @@ export const HTTP_IDLE_TIMEOUT_MAX_MS = 86_400_000;
 /** A model reference, `provider/modelId`. */
 const modelReference = Type.String({ minLength: 3, maxLength: 512, pattern: "^[^/\\s]+/\\S+$" });
 
+/** Warnings a user can turn off. */
+export const HostWarningSettingsSchema = Type.Object(
+	{
+		/** Whether an Anthropic subscription login billing extra usage raises a notice. */
+		anthropicExtraUsage: Type.Optional(Type.Boolean()),
+		/** Context tokens from which clients show the context as a warning; 0 never warns. */
+		contextTokens: Type.Optional(Type.Integer({ minimum: 0 })),
+	},
+	closed,
+);
+
 /**
  * The settings the host reads that `set_settings` changes, each optional. They
  * save where the host keeps them: globally, in the active settings profile
@@ -52,6 +63,8 @@ export const HostSettingsValuesSchema = Type.Object(
 		/** HTTP header and body idle timeout; 0 disables it. */
 		httpIdleTimeoutMs: Type.Optional(Type.Integer({ minimum: 0, maximum: HTTP_IDLE_TIMEOUT_MAX_MS })),
 		enableInstallTelemetry: Type.Optional(Type.Boolean()),
+		/** Replaces the warnings settings: the host reads whether to warn about extra usage. */
+		warnings: Type.Optional(HostWarningSettingsSchema),
 	},
 	{ ...closed, minProperties: 1 },
 );

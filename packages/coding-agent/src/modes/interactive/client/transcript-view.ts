@@ -29,6 +29,7 @@ import {
 	type TextContent,
 } from "@hansjm10/volt-ai";
 import {
+	type LiveFoldState,
 	type LiveItem,
 	type LiveStreamingTool,
 	type LiveValue,
@@ -56,7 +57,20 @@ import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "../compo
 import { ToolCallRow } from "../components/tool-call-row.ts";
 import { UserMessageComponent } from "../components/user-message.ts";
 import type { ToolCardWork } from "../ui-node/tool-card.ts";
-import type { TuiStore } from "./tui-store.ts";
+
+type PhaseValue = Extract<LiveValue, { kind: "phase" }>;
+
+/**
+ * What a transcript draws: the TUI's store, or a conversation the TUI
+ * observes, such as a review's pass.
+ */
+export interface TranscriptSource {
+	/** The entries the transcript shows, in order. */
+	transcript(): readonly ProjectedEntry[];
+	/** The live state: what streams, and the live values. */
+	readonly live: LiveFoldState;
+	readonly phase: PhaseValue | undefined;
+}
 
 type MessageEntry = Extract<ProjectedEntry, { type: "message" }>;
 type ShellMessage = Extract<NonNullable<MessageEntry["payload"]>["message"], { role: "bashExecution" }>;
@@ -146,7 +160,7 @@ function extendsRendered(rendered: readonly ProjectedEntry[], next: readonly Pro
 }
 
 export class TranscriptView {
-	private readonly store: TuiStore;
+	private readonly store: TranscriptSource;
 	private readonly container: Container;
 	private readonly host: TranscriptViewHost;
 	/** The transcript entries drawn, in order. */
@@ -167,7 +181,7 @@ export class TranscriptView {
 	/** The row of the shell command the live `bash` value shows. */
 	private liveShell: ShellRow | undefined;
 
-	constructor(store: TuiStore, container: Container, host: TranscriptViewHost) {
+	constructor(store: TranscriptSource, container: Container, host: TranscriptViewHost) {
 		this.store = store;
 		this.container = container;
 		this.host = host;

@@ -61,6 +61,13 @@ describe("store CLI", () => {
 		);
 	});
 
+	/** The package a mocked install leaves where the store reviews it: one that asks for no permissions. */
+	function stubInstalledPackage(): void {
+		const root = join(tempDir, "installed");
+		mkdirSync(root, { recursive: true });
+		writeFileSync(join(root, "package.json"), JSON.stringify({ name: "installed", version: "1.0.0" }));
+		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockReturnValue(root);
+	}
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();
@@ -95,6 +102,7 @@ describe("store CLI", () => {
 	it("installs a catalog package at its reviewed pin with --yes", async () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		stubInstalledPackage();
 		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
 
 		await expect(main(["store", "install", "rtk", "--yes"])).resolves.toBeUndefined();
@@ -239,6 +247,7 @@ describe("store CLI", () => {
 		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 		const updateSpy = vi.spyOn(DefaultPackageManager.prototype, "update").mockResolvedValue(undefined);
+		stubInstalledPackage();
 		const installSpy = vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
 
 		await expect(main(["store", "update", "rtk", "--yes"])).resolves.toBeUndefined();

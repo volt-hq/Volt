@@ -1,4 +1,3 @@
-import type { Model } from "@hansjm10/volt-ai";
 import {
 	Container,
 	type Focusable,
@@ -64,14 +63,21 @@ function getSortedIds(enabledIds: EnabledIds, allIds: string[]): string[] {
 	return [...enabledIds, ...allIds.filter((id) => !enabledSet.has(id))];
 }
 
+/** A model the selector lists: its provider, id, and name. */
+export interface ScopedModelChoice {
+	readonly provider: string;
+	readonly id: string;
+	readonly name: string;
+}
+
 interface ModelItem {
 	fullId: string;
-	model: Model<any>;
+	model: ScopedModelChoice;
 	enabled: boolean;
 }
 
 export interface ModelsConfig {
-	allModels: Model<any>[];
+	allModels: readonly ScopedModelChoice[];
 	enabledModelIds: string[] | null;
 }
 
@@ -88,7 +94,7 @@ export interface ModelsCallbacks {
  * Changes are session-only until explicitly persisted with Ctrl+S.
  */
 export class ScopedModelsSelectorComponent extends Container implements Focusable {
-	private modelsById: Map<string, Model<any>> = new Map();
+	private modelsById: Map<string, ScopedModelChoice> = new Map();
 	private allIds: string[] = [];
 	private enabledIds: EnabledIds = null;
 	private filteredItems: ModelItem[] = [];

@@ -11,16 +11,9 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { AssistantMessage, ImageContent, SubscriptionUsageError } from "@hansjm10/volt-ai";
 import {
-	type AssistantMessage,
-	type ImageContent,
-	type Model,
-	modelsAreEqual,
-	type OAuthSelectPrompt,
-	type SubscriptionUsageError,
-} from "@hansjm10/volt-ai";
-import {
+	type AuthProvider,
 	type ClientQueuedInput,
 	type ClientState,
 	type ConversationInfo,
@@ -29,11 +22,16 @@ import {
 	HOST_NOTICE_SOURCE,
 	type HostRequest,
 	type HostResponse,
+	type HostSettingsValues,
+	type IntentOption,
 	type LiveValue,
 	type ProjectedEntry,
+	type QueryResult,
 	type ResourceDiagnostic,
 	type ResourceSource,
 	type Resources,
+	type RpcCatalogModel,
+	type ScopedModel,
 	type UiNodeStyledText,
 	type WithdrawnInput,
 } from "@hansjm10/volt-protocol";
@@ -86,8 +84,8 @@ import {
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
-import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.ts";
-import type { ExtensionUIDialogOptions, ToolInfo } from "../../core/extensions/index.ts";
+import type { AgentSession } from "../../core/agent-session.ts";
+import type { ExtensionUIDialogOptions } from "../../core/extensions/index.ts";
 import {
 	ExtensionPermissionStore,
 	type PackagePermissionOutcome,
@@ -96,37 +94,25 @@ import {
 } from "../../core/extensions/permissions.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { openNewSession } from "../../core/host/session-intents.ts";
 import type { HostClient } from "../../core/host/targets.ts";
-import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
-import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
+import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
-import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
-import { describeFastModeChange } from "../../core/protocol/intents/state.ts";
-import { queryRegistry } from "../../core/protocol/queries/index.ts";
-import { BEDROCK_PROVIDER_ID, isApiKeyLoginProvider } from "../../core/provider-auth.ts";
+import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
 import {
-	listBaseBranches,
-	listRecentCommits,
+	MUTABLE_WORKSPACE_REVIEW_TOOLS,
 	parseReviewCommandArgs,
-	probeCurrentBranchPullRequest,
-	REMOTE_REVIEW_TOOL_NAMES,
 	REVIEW_USAGE,
 	type ReviewRunControls,
 	type ReviewTarget,
-	type ReviewWorkflowHooks,
-	type ReviewWorkflowResult,
-	runReviewWorkflow,
-	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import type { ExtensionClient } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
-import type { SessionUsageProjection } from "../../core/session-usage.ts";
+import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
-import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { stripTerminalControls } from "../../core/ui/ansi-tokens.ts";
@@ -155,7 +141,10 @@ import {
 	chooseStoreRemoveTarget,
 	chooseStoreUpdateTarget,
 	type StoreScopeTarget,
+	storeReviewSource,
+	storeSourcePinsCommit,
 	storeTargetMatchesUpdateSource,
+	storeUpdateTouches,
 } from "../../store/targets.ts";
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
@@ -166,8 +155,9 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
-import { footerViewModel, withTransientUsage } from "./client/footer-model.ts";
+import { footerViewModel, type TransientUsage, withTransientUsage } from "./client/footer-model.ts";
 import { type Delivery, type InputDiagnostic, type Interruptible, TuiInput } from "./client/input.ts";
+import { ReviewView } from "./client/review-view.ts";
 import {
 	entryTree,
 	forkableMessages,
@@ -184,7 +174,6 @@ import { TuiStore, type TuiStoreChange } from "./client/tui-store.ts";
 import { ConversationWork } from "./client/work-view.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
-import { AssistantMessageComponent } from "./components/assistant-message.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { CompactionSummaryMessageComponent } from "./components/compaction-summary-message.ts";
 import { CountdownTimer } from "./components/countdown-timer.ts";
@@ -194,7 +183,7 @@ import { DynamicBorder } from "./components/dynamic-border.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
-import { ExtensionSettingsComponent, extensionDetail } from "./components/extension-settings.ts";
+import { ExtensionSettingsComponent } from "./components/extension-settings.ts";
 import { FooterComponent, type FooterViewModel } from "./components/footer.ts";
 import { HostDialogComponent, HostFormDialogComponent } from "./components/host-request-dialog.ts";
 import { type HotkeySection, HotkeysComponent } from "./components/hotkeys.ts";
@@ -202,7 +191,7 @@ import { PlanInspectorComponent } from "./components/plan-inspector.ts";
 import { type PlanDetailsAction, PlanDetailsComponent, PlanStatusComponent } from "./components/plan-status.ts";
 import { createRemoteControlBackend, RemoteControlCenterComponent } from "./components/remote-control-center.ts";
 import { ResponsivePlanLayoutComponent } from "./components/responsive-plan-layout.ts";
-import { isCoalescableAssistantUpdate, StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
+import { StreamingRenderCoalescer } from "./components/streaming-render-coalescer.ts";
 import { VoltAnnouncementComponent } from "./components/volt-announcement.ts";
 import { withEditorCompletions } from "./editor-completions.ts";
 import { ExtensionShortcutBindings } from "./extension-shortcuts.ts";
@@ -248,9 +237,8 @@ import {
 } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
 import { StartupHeaderComponent } from "./components/logo.ts";
-import { ModelSelectorComponent } from "./components/model-selector.ts";
+import { type ModelSelectorCatalog, ModelSelectorComponent } from "./components/model-selector.ts";
 import { type AuthSelectorProvider, OAuthSelectorComponent } from "./components/oauth-selector.ts";
-import { PresentedToolComponent } from "./components/presented-tool.ts";
 import { type ReviewToolSelectorOption, ReviewToolsSelectorComponent } from "./components/review-tools-selector.ts";
 import { ScopedModelsSelectorComponent } from "./components/scoped-models-selector.ts";
 import { SessionSelectorComponent, type SessionSelectorItem } from "./components/session-selector.ts";
@@ -294,12 +282,6 @@ class ExpandableText extends Text implements Expandable {
 	}
 }
 
-/** Display-only renderer for an isolated child session streamed inline into the transcript. */
-interface InlineSessionRenderer {
-	onSessionEvent: (event: AgentSessionEvent) => void;
-	dispose: () => void;
-}
-
 type PhaseValue = Extract<LiveValue, { kind: "phase" }>;
 
 /** A problem loading resources, as the resources listing shows it. */
@@ -309,7 +291,22 @@ type LoadDiagnostic = Omit<ResourceDiagnostic, "resource">;
 type ExtensionSelectorOutcome = { kind: "selected"; option: string } | { kind: "cancelled" } | { kind: "dismissed" };
 
 /** A TUI dialog's options; a `live` dialog is closed by the live view, not by an extension UI reset. */
-type TuiDialogOptions = ExtensionUIDialogOptions & { live?: boolean };
+type TuiDialogOptions = ExtensionUIDialogOptions & {
+	live?: boolean;
+	/** The input is a secret, such as an API key: masked, and kept out of any history. */
+	secret?: boolean;
+};
+
+/** The sign-in dialog of a provider login: the `provider_auth` requests the host asks show in it. */
+interface SignInView {
+	readonly dialog: LoginDialogComponent;
+	/** The view and focus it replaced. */
+	readonly restore: { view: ActiveViewDescriptor; focus: Component | null };
+	/** How many requests it showed: a request that ended closes it only while it shows the newest. */
+	shown: number;
+	/** Answers the request it shows as cancelled: Escape cancels the sign-in. */
+	cancel?: () => void;
+}
 
 interface ActiveViewDescriptor {
 	regularComponents: readonly Component[];
@@ -371,10 +368,6 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function isUnknownModel(model: Model<any> | undefined): boolean {
-	return !!model && model.provider === "unknown" && model.id === "unknown" && model.api === "unknown";
-}
-
 function quoteIfNeeded(value: string): string {
 	if (value.length > 0 && !/[^a-zA-Z0-9_\-./~:@]/.test(value)) {
 		return value;
@@ -395,8 +388,20 @@ export function formatResumeCommand(info: ConversationInfo): string | undefined 
 	return args.join(" ");
 }
 
-function hasDefaultModelProvider(providerId: string): providerId is keyof typeof defaultModelPerProvider {
-	return providerId in defaultModelPerProvider;
+/**
+ * The models a scope limits the model cycle to, from the `models` catalog:
+ * none when the cycle steps through every selectable model, in order.
+ */
+function scopedModels(models: readonly RpcCatalogModel[], cycleScope: readonly ScopedModel[]): readonly ScopedModel[] {
+	const unscoped =
+		cycleScope.length === models.length &&
+		cycleScope.every(
+			(scoped, index) =>
+				scoped.thinkingLevel === undefined &&
+				scoped.provider === models[index]?.provider &&
+				scoped.modelId === models[index]?.id,
+		);
+	return unscoped ? [] : cycleScope;
 }
 
 /**
@@ -530,7 +535,7 @@ export class InteractiveMode {
 	/** The client fold the status last followed. */
 	private shownFold: ClientState | undefined;
 	/** Usage of another conversation the footer shows in place of the conversation's own, such as a review's. */
-	private transientUsage: SessionUsageProjection | undefined;
+	private transientUsage: TransientUsage | undefined;
 	/** The title an extension set; the TUI's own shows without one. */
 	private extensionTitle: string | undefined;
 	private workStatus: WorkStatus;
@@ -576,7 +581,8 @@ export class InteractiveMode {
 	private lastEscapeTime = 0;
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
-	private activeInteractiveReview = false;
+	/** Whether a review this TUI started runs: its loader shows. */
+	private activeReview = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -603,6 +609,8 @@ export class InteractiveMode {
 	private scratchDirectories = new Set<string>();
 	private clipboardScratchFiles = new Map<string, string>();
 	private lspTraceScratchDirectory: string | undefined;
+	/** Whether `/lsp trace` traces language server traffic. */
+	private lspTracing = false;
 
 	// Track editor modes that affect the border treatment and label.
 	private isBashMode = false;
@@ -662,7 +670,20 @@ export class InteractiveMode {
 		void this.handleRightClickPaste();
 	};
 	private autoTrustOnReloadCwd: string | undefined;
-	private readonly subscriptionUsageService = new SubscriptionUsageService();
+	/** The provider login `/login` runs, by provider id and name. */
+	private signIn: { provider: string; name: string } | undefined;
+	/** The sign-in dialog shown while a provider login waits for the user. */
+	private signInView: SignInView | undefined;
+
+	/**
+	 * The TUI's own settings (D3): the display settings only the TUI reads,
+	 * which it reads and writes itself in the settings files of the
+	 * conversation it shows. The settings the host reads change through the
+	 * host's intents.
+	 */
+	private settingsManager: SettingsManager;
+	/** The cwd and settings profile the TUI's settings were read for. */
+	private settingsScope: { cwd: string; profile: string | undefined };
 
 	// Convenience accessors
 	/** The conversation the TUI's client is on. */
@@ -679,13 +700,12 @@ export class InteractiveMode {
 	private get sessionManager() {
 		return this.session.sessionManager;
 	}
-	private get settingsManager() {
-		return this.session.settingsManager;
-	}
 
 	constructor(tuiHost: TuiHost, options: InteractiveModeOptions = {}) {
 		this.tuiHost = tuiHost;
 		this.host = tuiHost.host;
+		this.settingsScope = { cwd: "", profile: undefined };
+		this.settingsManager = this.createDisplaySettings();
 		this.liveView = this.createLiveView();
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
 		this.options = { ...options, tuiMode };
@@ -1873,7 +1893,9 @@ export class InteractiveMode {
 	private footerViewModel(): FooterViewModel {
 		return withTransientUsage(
 			footerViewModel(this.store, this.catalogs, {
-				contextWarningTokens: this.settingsManager.getContextWarningTokens(),
+				// Warnings are the host's settings: they show as its catalog holds them.
+				contextWarningTokens:
+					this.catalogs.settings?.warnings?.contextTokens ?? this.settingsManager.getContextWarningTokens(),
 				phoneLabel: (count) => (isAsciiOnlyTerminal() ? `[phone ${count}]` : `📱 ${count}`),
 			}),
 			this.transientUsage,
@@ -1904,9 +1926,9 @@ export class InteractiveMode {
 		this.planDetails?.setFullscreenScrollbar(mode);
 	}
 
-	private applyRuntimeSettings(session: AgentSession): void {
-		const settingsManager = session.settingsManager;
-		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
+	/** Apply the TUI's settings to what shows: the scrollbar, thinking blocks, cursor, and editor. */
+	private applyRuntimeSettings(): void {
+		const settingsManager = this.settingsManager;
 		this.applyFullscreenScrollbarSetting(settingsManager.getFullscreenScrollbar());
 		this.hideThinkingBlock = settingsManager.getHideThinkingBlock();
 		this.ui.setShowHardwareCursor(settingsManager.getShowHardwareCursor());
@@ -1915,6 +1937,71 @@ export class InteractiveMode {
 		const autocompleteMaxVisible = settingsManager.getAutocompleteMaxVisible();
 		this.defaultEditor.setPaddingX(editorPaddingX);
 		this.defaultEditor.setAutocompleteMaxVisible(autocompleteMaxVisible);
+	}
+
+	/**
+	 * The TUI's settings for the conversation it shows: read from the settings
+	 * files of its cwd, with the host's project trust and active settings
+	 * profile, which the TUI reads in process until its protocol carries them.
+	 */
+	private createDisplaySettings(): SettingsManager {
+		const session = this.tuiHost.conversation.session;
+		const host = session.settingsManager;
+		const cwd = session.sessionManager.getCwd();
+		const profile = host.getActiveProfile();
+		this.settingsScope = { cwd, profile };
+		return SettingsManager.create(cwd, getAgentDir(), {
+			projectTrusted: host.isProjectTrusted(),
+			...(profile === undefined ? {} : { profile }),
+		});
+	}
+
+	/**
+	 * Read the TUI's settings again when the conversation it shows runs in
+	 * another cwd, project trust, or settings profile; writes still queued
+	 * finish on their own.
+	 */
+	private followSettings(): boolean {
+		const host = this.session.settingsManager;
+		if (
+			this.settingsScope.cwd === this.sessionManager.getCwd() &&
+			this.settingsScope.profile === host.getActiveProfile() &&
+			this.settingsManager.isProjectTrusted() === host.isProjectTrusted()
+		) {
+			return false;
+		}
+		this.settingsManager = this.createDisplaySettings();
+		return true;
+	}
+
+	/** The host's settings changed: in another settings profile, the TUI reads that profile's display settings. */
+	private rereadSettings(): void {
+		if (!this.followSettings()) return;
+		this.applyRuntimeSettings();
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The conversation reloaded (its resources, extensions, and settings, as
+	 * `/reload` or an extension's `ctx.reload()` do): the TUI reads its own
+	 * settings, keybindings, and themes again and applies them.
+	 */
+	private async reloadTuiResources(): Promise<void> {
+		if (!this.followSettings()) await this.settingsManager.reload();
+		this.keybindings.reload();
+		setRegisteredThemes(this.session.resourceLoader.getThemes().themes);
+		const themeName = this.settingsManager.getTheme();
+		if (themeName !== undefined) {
+			const result = setTheme(themeName, true);
+			if (!result.success) {
+				this.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
+			}
+		}
+		this.applyRuntimeSettings();
+		this.setupAutocompleteProvider();
+		this.updateEditorBorderColor();
+		this.ui.invalidate();
+		this.ui.requestRender();
 	}
 
 	/** What the store changed: draw it. */
@@ -1952,8 +2039,14 @@ export class InteractiveMode {
 				this.leaveConversation();
 				return;
 			case "changed":
-				if (change.catalog === "resources") this.refreshExtensionContributions();
-				else if (change.catalog === "intents" && this.connected) void this.refreshInput();
+				if (change.catalog === "resources") {
+					this.refreshExtensionContributions();
+					if (this.connected) void this.reloadTuiResources();
+				} else if (change.catalog === "intents" && this.connected) {
+					void this.refreshInput();
+				} else if (change.catalog === "settings" && this.connected) {
+					this.rereadSettings();
+				}
 				return;
 			case "ended":
 				this.liveView.apply({ reset: true, items: [] });
@@ -1976,7 +2069,8 @@ export class InteractiveMode {
 		this.clearWorkSummaryTimer();
 		this.clearPromptCacheAlertTimer();
 		this.workSummary = undefined;
-		this.applyRuntimeSettings(session);
+		this.followSettings();
+		this.applyRuntimeSettings();
 		this.showSessionExtensions(session);
 		this.followWork();
 		this.closePlanDetails();
@@ -2067,15 +2161,6 @@ export class InteractiveMode {
 		if (!this.connected) return;
 		this.store.resync();
 		this.ui.requestRender();
-	}
-
-	/** Draw the transcript of the conversation the TUI's client is on afresh, once it shows. */
-	private async renderCurrentConversation(): Promise<void> {
-		const id = this.conversation.id;
-		if (this.store.conversation === id) this.transcript.rebuild();
-		else await this.store.showing(id);
-		this.updatePendingMessagesDisplay();
-		this.refreshPlanningUi();
 	}
 
 	private async handleFatalRuntimeError(
@@ -2368,6 +2453,7 @@ export class InteractiveMode {
 	private createLiveView(): TuiLiveView {
 		return new TuiLiveView({
 			showRequest: (request, signal) => this.showLiveRequest(request, signal),
+			showProviderAuth: (request, signal) => this.showProviderAuth(request, signal),
 			answer: (requestId, response) => this.store.client.answer(requestId, response),
 			setPanel: (key, panel) => this.setExtensionPanel(key, panel),
 			setTitle: (title) => {
@@ -2407,7 +2493,24 @@ export class InteractiveMode {
 				return outcome.kind === "selected" ? { confirmed: outcome.option === "Yes" } : { cancelled: true };
 			}
 			case "input": {
-				const value = await this.showExtensionInput(request.title, request.placeholder, options);
+				// What the provider login this TUI runs asks shows in its sign-in dialog, below the page to open.
+				const signIn = this.signIn === undefined ? undefined : this.signInView;
+				if (signIn) {
+					const answer = await Promise.race([
+						signIn.dialog
+							.showPrompt(request.title, request.placeholder, { secret: request.secret === true })
+							.then(
+								(value): HostResponse => ({ value }),
+								(): HostResponse => ({ cancelled: true }),
+							),
+						new Promise<undefined>((resolve) => signal.addEventListener("abort", () => resolve(undefined))),
+					]);
+					return signal.aborted ? undefined : answer;
+				}
+				const value = await this.showExtensionInput(request.title, request.placeholder, {
+					...options,
+					secret: request.secret === true,
+				});
 				if (signal.aborted) return undefined;
 				return value === undefined ? { cancelled: true } : { value };
 			}
@@ -2432,7 +2535,8 @@ export class InteractiveMode {
 			case "dialog":
 				return this.showHostRequestDialog(request, options);
 			default:
-				// MCP authorization is not shown in the TUI; the editor answers `editor_text` at once.
+				// MCP authorization is not shown in the TUI; a provider sign-in shows beside the queue
+				// (showProviderAuth), and the editor answers `editor_text` at once.
 				return undefined;
 		}
 	}
@@ -2734,6 +2838,7 @@ export class InteractiveMode {
 			this.extensionInput = new ExtensionInputComponent(title, placeholder, (value) => settle(value), dismiss, {
 				tui: this.ui,
 				timeout: opts?.timeout,
+				secret: opts?.secret === true,
 			});
 
 			this.activateView(this.createDedicatedView(this.extensionInput), this.extensionInput);
@@ -2908,8 +3013,12 @@ export class InteractiveMode {
 		}
 	}
 
+	/** Stop the language server trace `/lsp trace` started, and remove its scratch file. */
 	private async closeLspTrace(): Promise<void> {
-		await this.session.setLspTraceFile(undefined);
+		if (this.lspTracing) {
+			this.lspTracing = false;
+			await this.store.client.intent("lsp.set_trace", { path: null }).catch(() => undefined);
+		}
 		if (this.lspTraceScratchDirectory) {
 			this.removeScratchDirectory(this.lspTraceScratchDirectory);
 		}
@@ -2961,7 +3070,7 @@ export class InteractiveMode {
 		);
 
 		this.setupGlobalInputRouting();
-		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
+		this.defaultEditor.onAction("app.model.select", () => this.runKeyAction(() => this.handleModelCommand()));
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
 		this.defaultEditor.onAction("app.editor.external", () => this.runKeyAction(() => this.openExternalEditor()));
@@ -3051,25 +3160,6 @@ export class InteractiveMode {
 			this.togglePlanPaneFocus();
 			return { consume: true };
 		});
-	}
-
-	/** This client's intent context: its conversation, and how the TUI aborts and reviews. */
-	private intentContext(): IntentContext {
-		return {
-			target: { session: this.session, conversation: this.conversation, host: this.host, client: this.hostClient },
-			services: {
-				abortRun: (session) => session.abort("host_action"),
-				runReview: (target, reviewOptions) =>
-					this.runInteractiveReviewWorkflow(target, {
-						tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),
-						requireConfirmation: reviewOptions.requireConfirmation,
-						requireProjectTrust: reviewOptions.remote,
-						controls: reviewOptions.controls,
-						...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
-					}),
-			},
-			profile: LOCAL_INTENT_PROFILE,
-		};
 	}
 
 	private async handleRightClickPaste(): Promise<void> {
@@ -3167,9 +3257,9 @@ export class InteractiveMode {
 				this.editor.setText("");
 				const mode = text === "/plan" ? "plan" : "build";
 				try {
-					this.refreshPlanningUi(
-						(await intentRegistry.invoke(this.intentContext(), "set_agent_mode", { mode })).outcome,
-					);
+					await this.clientConnected.promise;
+					// The plan UI follows the mode as the client fold applies it.
+					await this.store.client.intent("set_agent_mode", { mode });
 					this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
 				} catch (error: unknown) {
 					this.showError(error instanceof Error ? error.message : String(error));
@@ -3187,8 +3277,8 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/settings") {
-				this.showSettingsSelector();
 				this.editor.setText("");
+				await this.showSettingsSelector();
 				return;
 			}
 			if (text === "/profile" || text.startsWith("/profile ")) {
@@ -3696,13 +3786,13 @@ export class InteractiveMode {
 	private activity(): string | undefined {
 		const phase = this.store.phase;
 		const working = this.input.workRunning();
-		if (phase?.busy !== true && !working && !this.activeInteractiveReview) return undefined;
+		if (phase?.busy !== true && !working && !this.activeReview) return undefined;
 		return JSON.stringify([
 			phase?.operation ?? null,
 			phase?.run?.startedAt ?? null,
 			phase?.compaction?.startedAt ?? null,
 			working,
-			this.activeInteractiveReview,
+			this.activeReview,
 		]);
 	}
 
@@ -4747,109 +4837,156 @@ export class InteractiveMode {
 		});
 	}
 
-	private showSettingsSelector(): void {
-		const model = this.session.model;
-		const currentModel = model ? `${model.provider}/${model.id}` : undefined;
+	/**
+	 * `/settings`: the settings the host reads change through its intents
+	 * (`set_settings` and the conversation's setting intents) and show as its
+	 * `settings` catalog holds them; the TUI's display settings change in its
+	 * own settings manager.
+	 */
+	private async showSettingsSelector(): Promise<void> {
+		await this.clientConnected.promise;
+		const client = this.store.client;
+		let hostSettings: QueryResult<"settings">;
+		let models: readonly RpcCatalogModel[];
+		try {
+			[hostSettings, { models }] = await Promise.all([client.query("settings"), client.query("models")]);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		const ref = this.store.state.model;
+		const model = ref === null ? undefined : models.find((m) => m.provider === ref.provider && m.id === ref.modelId);
+		const currentModel = ref === null ? undefined : `${ref.provider}/${ref.modelId}`;
 		const settingsManager = this.settingsManager;
-		this.session.modelRegistry.refresh();
-		const availableModels = this.session.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
+		const keepAlive = hostSettings.promptCacheKeepAlive ?? "off";
+		/** Change settings the host reads; a refusal shows. */
+		const setHostSettings = (values: HostSettingsValues, status?: string): void => {
+			void client.intent("set_settings", values).then(
+				() => {
+					if (status !== undefined) this.showStatus(status);
+				},
+				(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+			);
+		};
+		const runIntent = (run: () => Promise<unknown>): void => {
+			void run().catch((error: unknown) => this.showError(error instanceof Error ? error.message : String(error)));
+		};
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(
 				{
-					autoCompact: this.session.autoCompactionEnabled,
+					autoCompact: hostSettings.autoCompaction,
 					currentModel,
-					compactionThresholdTokens: currentModel ? settingsManager.getCompactionThresholdTokens(currentModel) : 0,
-					personality: this.settingsManager.getPersonality(),
-					showImages: this.settingsManager.getShowImages(),
-					imageWidthCells: this.settingsManager.getImageWidthCells(),
-					autoResizeImages: this.settingsManager.getImageAutoResize(),
-					blockImages: this.settingsManager.getBlockImages(),
-					enableSkillCommands: this.settingsManager.getEnableSkillCommands(),
-					steeringMode: this.session.steeringMode,
-					followUpMode: this.session.followUpMode,
-					transport: this.settingsManager.getTransport(),
-					httpIdleTimeoutMs: this.settingsManager.getHttpIdleTimeoutMs(),
-					thinkingLevel: this.session.thinkingLevel,
-					availableThinkingLevels: this.session.getAvailableThinkingLevels(),
-					reviewModel: this.settingsManager.getReviewModel(),
-					availableModels,
-					currentTheme: this.settingsManager.getTheme() || "dark",
+					compactionThresholdTokens: hostSettings.compactionThresholdTokens ?? 0,
+					personality: hostSettings.personality ?? "default",
+					showImages: settingsManager.getShowImages(),
+					imageWidthCells: settingsManager.getImageWidthCells(),
+					autoResizeImages: hostSettings.imageAutoResize ?? true,
+					blockImages: hostSettings.blockImages ?? false,
+					enableSkillCommands: settingsManager.getEnableSkillCommands(),
+					steeringMode: hostSettings.steeringMode,
+					followUpMode: hostSettings.followUpMode,
+					transport: hostSettings.transport ?? "auto",
+					httpIdleTimeoutMs: hostSettings.httpIdleTimeoutMs ?? DEFAULT_HTTP_IDLE_TIMEOUT_MS,
+					thinkingLevel: this.store.state.thinkingLevel,
+					availableThinkingLevels: model?.availableThinkingLevels ?? ["off"],
+					reviewModel: hostSettings.reviewModel ?? undefined,
+					availableModels: models.map((candidate) => `${candidate.provider}/${candidate.id}`),
+					currentTheme: settingsManager.getTheme() || "dark",
 					availableThemes: getAvailableThemes(),
 					hideThinkingBlock: this.hideThinkingBlock,
-					collapseChangelog: this.settingsManager.getCollapseChangelog(),
-					enableInstallTelemetry: this.settingsManager.getEnableInstallTelemetry(),
-					doubleEscapeAction: this.settingsManager.getDoubleEscapeAction(),
-					treeFilterMode: this.settingsManager.getTreeFilterMode(),
-					showHardwareCursor: this.settingsManager.getShowHardwareCursor(),
-					defaultProjectTrust: this.settingsManager.getDefaultProjectTrust(),
-					editorPaddingX: this.settingsManager.getEditorPaddingX(),
-					autocompleteMaxVisible: this.settingsManager.getAutocompleteMaxVisible(),
-					quietStartup: this.settingsManager.getQuietStartup(),
-					clearOnShrink: this.settingsManager.getClearOnShrink(),
-					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
-					turnDoneAlert: this.settingsManager.getTurnDoneAlert(),
-					promptCacheKeepAlive: this.settingsManager.getPromptCacheKeepAlive(),
+					collapseChangelog: settingsManager.getCollapseChangelog(),
+					enableInstallTelemetry: hostSettings.enableInstallTelemetry ?? true,
+					doubleEscapeAction: settingsManager.getDoubleEscapeAction(),
+					treeFilterMode: settingsManager.getTreeFilterMode(),
+					showHardwareCursor: settingsManager.getShowHardwareCursor(),
+					defaultProjectTrust: settingsManager.getDefaultProjectTrust(),
+					editorPaddingX: settingsManager.getEditorPaddingX(),
+					autocompleteMaxVisible: settingsManager.getAutocompleteMaxVisible(),
+					quietStartup: settingsManager.getQuietStartup(),
+					clearOnShrink: settingsManager.getClearOnShrink(),
+					showTerminalProgress: settingsManager.getShowTerminalProgress(),
+					turnDoneAlert: settingsManager.getTurnDoneAlert(),
+					promptCacheKeepAlive: {
+						enabled: keepAlive !== "off",
+						idleWindowMs: keepAlive === "off" ? 0 : keepAlive * 60_000,
+					},
 					tuiMode: this.ui.mode,
-					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
-					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
-					warnings: this.settingsManager.getWarnings(),
+					fullscreenExitOutput: settingsManager.getFullscreenExitOutput(),
+					fullscreenScrollbar: settingsManager.getFullscreenScrollbar(),
+					warnings: hostSettings.warnings ?? settingsManager.getWarnings(),
 				},
 				{
 					onAutoCompactChange: (enabled) => {
-						this.session.setAutoCompactionEnabled(enabled);
-						this.catalogs.refresh("settings");
+						runIntent(() =>
+							client.intent("set_auto_compaction", {
+								enabled,
+								...(ref === null ? {} : { provider: ref.provider, modelId: ref.modelId }),
+								expectedProfile: hostSettings.profile,
+							}),
+						);
 					},
 					onCompactionThresholdChange: (tokens) => {
-						if (currentModel) settingsManager.setCompactionThresholdTokens(currentModel, tokens);
+						if (ref === null) return;
+						runIntent(() =>
+							client.intent("set_compaction_threshold", {
+								tokens,
+								provider: ref.provider,
+								modelId: ref.modelId,
+								expectedProfile: hostSettings.profile,
+							}),
+						);
 					},
 					onPersonalityChange: (personality) => {
-						this.session.setPersonality(personality);
-						this.showStatus(`Personality: ${personality}`);
+						setHostSettings({ personality }, `Personality: ${personality}`);
 					},
 					onShowImagesChange: (enabled) => {
-						this.settingsManager.setShowImages(enabled);
+						settingsManager.setShowImages(enabled);
 						this.transcript.forEachToolRow((row) => row.setShowImages(enabled));
 					},
 					onImageWidthCellsChange: (width) => {
-						this.settingsManager.setImageWidthCells(width);
+						settingsManager.setImageWidthCells(width);
 						this.transcript.forEachToolRow((row) => row.setImageWidthCells(width));
 					},
 					onAutoResizeImagesChange: (enabled) => {
-						this.settingsManager.setImageAutoResize(enabled);
+						setHostSettings({ imageAutoResize: enabled });
 					},
 					onBlockImagesChange: (blocked) => {
-						this.settingsManager.setBlockImages(blocked);
+						setHostSettings({ blockImages: blocked });
 					},
 					onEnableSkillCommandsChange: (enabled) => {
-						this.settingsManager.setEnableSkillCommands(enabled);
+						settingsManager.setEnableSkillCommands(enabled);
 						this.setupAutocompleteProvider();
 					},
 					onSteeringModeChange: (mode) => {
-						this.session.setSteeringMode(mode);
+						runIntent(() => client.intent("set_steering_mode", { mode }));
 					},
 					onFollowUpModeChange: (mode) => {
-						this.session.setFollowUpMode(mode);
+						runIntent(() => client.intent("set_follow_up_mode", { mode }));
 					},
 					onTransportChange: (transport) => {
-						this.settingsManager.setTransport(transport);
-						this.session.setTransport(transport);
+						setHostSettings({ transport });
 					},
 					onHttpIdleTimeoutMsChange: (timeoutMs) => {
-						this.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
-						configureHttpDispatcher(timeoutMs);
-						this.showStatus(`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`);
+						setHostSettings(
+							{ httpIdleTimeoutMs: timeoutMs },
+							`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`,
+						);
 					},
 					onThinkingLevelChange: (level) => {
-						this.session.setThinkingLevel(level);
-						this.updateEditorBorderColor();
+						runIntent(async () => {
+							await this.input.selectThinkingLevel(level);
+							this.updateEditorBorderColor();
+						});
 					},
 					onReviewModelChange: (modelReference) => {
-						this.settingsManager.setReviewModel(modelReference);
-						this.showStatus(`Review model: ${modelReference ?? "session model"}`);
+						setHostSettings(
+							{ reviewModel: modelReference ?? null },
+							`Review model: ${modelReference ?? "session model"}`,
+						);
 					},
 					onThemeChange: (themeName) => {
 						const result = setTheme(themeName, true);
-						this.settingsManager.setTheme(themeName);
+						settingsManager.setTheme(themeName);
 						this.localThemeOverride = true;
 						this.ui.invalidate();
 						if (!result.success) {
@@ -4865,58 +5002,57 @@ export class InteractiveMode {
 					},
 					onHideThinkingBlockChange: (hidden) => {
 						this.hideThinkingBlock = hidden;
-						this.settingsManager.setHideThinkingBlock(hidden);
+						settingsManager.setHideThinkingBlock(hidden);
 						this.transcript.rebuild();
 					},
 					onCollapseChangelogChange: (collapsed) => {
-						this.settingsManager.setCollapseChangelog(collapsed);
+						settingsManager.setCollapseChangelog(collapsed);
 					},
 					onEnableInstallTelemetryChange: (enabled) => {
-						this.settingsManager.setEnableInstallTelemetry(enabled);
+						setHostSettings({ enableInstallTelemetry: enabled });
 					},
 					onQuietStartupChange: (enabled) => {
-						this.settingsManager.setQuietStartup(enabled);
+						settingsManager.setQuietStartup(enabled);
 					},
 					onDefaultProjectTrustChange: (defaultProjectTrust) => {
-						this.settingsManager.setDefaultProjectTrust(defaultProjectTrust);
+						settingsManager.setDefaultProjectTrust(defaultProjectTrust);
 					},
 					onDoubleEscapeActionChange: (action) => {
-						this.settingsManager.setDoubleEscapeAction(action);
+						settingsManager.setDoubleEscapeAction(action);
 					},
 					onTreeFilterModeChange: (mode) => {
-						this.settingsManager.setTreeFilterMode(mode);
+						settingsManager.setTreeFilterMode(mode);
 					},
 					onShowHardwareCursorChange: (enabled) => {
-						this.settingsManager.setShowHardwareCursor(enabled);
+						settingsManager.setShowHardwareCursor(enabled);
 						this.ui.setShowHardwareCursor(enabled);
 					},
 					onEditorPaddingXChange: (padding) => {
-						this.settingsManager.setEditorPaddingX(padding);
+						settingsManager.setEditorPaddingX(padding);
 						this.defaultEditor.setPaddingX(padding);
 						if (this.editor !== this.defaultEditor && this.editor.setPaddingX !== undefined) {
 							this.editor.setPaddingX(padding);
 						}
 					},
 					onAutocompleteMaxVisibleChange: (maxVisible) => {
-						this.settingsManager.setAutocompleteMaxVisible(maxVisible);
+						settingsManager.setAutocompleteMaxVisible(maxVisible);
 						this.defaultEditor.setAutocompleteMaxVisible(maxVisible);
 						if (this.editor !== this.defaultEditor && this.editor.setAutocompleteMaxVisible !== undefined) {
 							this.editor.setAutocompleteMaxVisible(maxVisible);
 						}
 					},
 					onClearOnShrinkChange: (enabled) => {
-						this.settingsManager.setClearOnShrink(enabled);
+						settingsManager.setClearOnShrink(enabled);
 						this.ui.setClearOnShrink(enabled);
 					},
 					onShowTerminalProgressChange: (enabled) => {
-						this.settingsManager.setShowTerminalProgress(enabled);
+						settingsManager.setShowTerminalProgress(enabled);
 					},
 					onTurnDoneAlertChange: (mode) => {
-						this.settingsManager.setTurnDoneAlert(mode);
+						settingsManager.setTurnDoneAlert(mode);
 					},
 					onPromptCacheKeepAliveChange: (mode) => {
-						this.settingsManager.setPromptCacheKeepAlive(mode);
-						this.session.promptCacheSettingsChanged();
+						setHostSettings({ promptCacheKeepAlive: mode });
 					},
 					onTuiModeChange: (mode) => {
 						if (!this.switchTuiMode(mode)) {
@@ -4924,18 +5060,18 @@ export class InteractiveMode {
 							this.showStatus("Close active overlays before changing TUI mode");
 							return;
 						}
-						this.settingsManager.setTuiMode(mode);
+						settingsManager.setTuiMode(mode);
 						this.showStatus(`TUI mode: ${mode}`);
 					},
 					onFullscreenExitOutputChange: (output) => {
-						this.settingsManager.setFullscreenExitOutput(output);
+						settingsManager.setFullscreenExitOutput(output);
 					},
 					onFullscreenScrollbarChange: (mode) => {
-						this.settingsManager.setFullscreenScrollbar(mode);
+						settingsManager.setFullscreenScrollbar(mode);
 						this.applyFullscreenScrollbarSetting(mode);
 					},
 					onWarningsChange: (warnings) => {
-						this.settingsManager.setWarnings(warnings);
+						setHostSettings({ warnings });
 					},
 					onCancel: () => {
 						done();
@@ -4948,10 +5084,15 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * The package manager the TUI installs with (D3): packages are the TUI's to
+	 * install, into the settings files of the conversation's cwd it reads
+	 * itself; the conversation loads them as it reloads.
+	 */
 	private getStorePackageManager(): DefaultPackageManager {
 		const packageManager = new DefaultPackageManager({
-			cwd: this.sessionManager.getCwd(),
-			agentDir: this.conversation.services.agentDir,
+			cwd: this.settingsScope.cwd,
+			agentDir: getAgentDir(),
 			settingsManager: this.settingsManager,
 		});
 		packageManager.setProgressCallback((event) => {
@@ -4964,7 +5105,7 @@ export class InteractiveMode {
 
 	private async loadStoreCatalog(required: boolean): Promise<StoreCatalog | undefined> {
 		try {
-			const result = await loadDefaultStoreCatalog({ agentDir: this.conversation.services.agentDir });
+			const result = await loadDefaultStoreCatalog({ agentDir: getAgentDir() });
 			for (const warning of result.warnings) {
 				this.showWarning(warning);
 			}
@@ -5130,7 +5271,7 @@ export class InteractiveMode {
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: false });
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.settingsScope.cwd,
 				npmCommand: this.settingsManager.getNpmCommand(),
 			});
 			this.showStoreText(renderStoreShow(resolved, inspection));
@@ -5158,7 +5299,7 @@ export class InteractiveMode {
 			const resolved = await resolveStoreSource({ input, catalog: storeCatalog, pinGit: true });
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.settingsScope.cwd,
 				npmCommand: this.settingsManager.getNpmCommand(),
 			});
 			const plan = buildStoreInstallPlan({
@@ -5191,9 +5332,11 @@ export class InteractiveMode {
 			if (
 				!(await this.confirmPackagePermissions(
 					packageManager,
-					plan.source,
+					// A local package is found where it was installed from.
+					storeReviewSource(plan.source, this.settingsScope.cwd),
 					scope,
 					"Declining removes the package.",
+					{ installed: true },
 				))
 			) {
 				await packageManager.removeAndPersist(plan.source, { local: scope === "project" });
@@ -5202,7 +5345,7 @@ export class InteractiveMode {
 				this.showStatus(`Removed ${targetLabel}: its permissions were not acknowledged`);
 				return;
 			}
-			await this.rescanAfterStoreChange(`Installed ${targetLabel}`);
+			await this.offerStoreReload(`Installed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5246,7 +5389,7 @@ export class InteractiveMode {
 			try {
 				await packageManager.update(undefined, { scripts: "never" });
 				await this.reviewUpdatedPackages(packageManager);
-				this.showStatus("Updated packages. Run /reload to load resource changes.");
+				await this.offerStoreReload("Updated packages");
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -5268,7 +5411,7 @@ export class InteractiveMode {
 			try {
 				await packageManager.update(input, { scripts: "never" });
 				await this.reviewUpdatedPackages(packageManager, input);
-				this.showStatus(`Updated ${inputLabel}. Run /reload to load resource changes.`);
+				await this.offerStoreReload(`Updated ${inputLabel}`);
 			} catch (error: unknown) {
 				this.showError(error instanceof Error ? error.message : String(error));
 			}
@@ -5300,13 +5443,13 @@ export class InteractiveMode {
 					scripts: "never",
 				});
 				await this.reviewUpdatedPackages(packageManager, updateSource);
-				this.showStatus(`Updated ${targetLabel}. Run /reload to load resource changes.`);
+				await this.offerStoreReload(`Updated ${targetLabel}`);
 				return;
 			}
 
 			const inspection = await inspectStorePackage({
 				source: resolved.source,
-				cwd: this.sessionManager.getCwd(),
+				cwd: this.settingsScope.cwd,
 				npmCommand: this.settingsManager.getNpmCommand(),
 			});
 			const plan = buildStoreInstallPlan({
@@ -5338,12 +5481,45 @@ export class InteractiveMode {
 					plan.source,
 					selection.target.scope,
 					`Declining keeps ${currentLabel}.`,
+					{ installed: true },
 				))
 			) {
 				// Back to the reviewed pin: the update's new permissions were not acknowledged.
-				await packageManager.installAndPersist(selection.target.source, { local, scripts: "never" });
-				await this.settingsManager.flush();
-				this.reportStoreSettingsErrors(packageManager, selection.target.source, selection.target.scope);
+				const scope = selection.target.scope;
+				const removeDeclined = async (reason: string): Promise<void> => {
+					// The declined revision must not stay installed: without the previous one, the package goes.
+					await packageManager.removeAndPersist(plan.source, { local });
+					await this.settingsManager.flush();
+					if (this.reportStoreSettingsErrors(packageManager, plan.source, scope)) return;
+					this.showWarning(`Removed ${currentLabel}: ${reason}`);
+					await this.offerStoreReload(`Removed ${currentLabel}`);
+				};
+				try {
+					await packageManager.installAndPersist(selection.target.source, { local, scripts: "never" });
+					await this.settingsManager.flush();
+				} catch (error: unknown) {
+					this.showError(
+						`Could not reinstall ${currentLabel}: ${sanitizeText(error instanceof Error ? error.message : String(error))}`,
+					);
+					await removeDeclined("the update's permissions were not acknowledged");
+					return;
+				}
+				if (this.reportStoreSettingsErrors(packageManager, selection.target.source, selection.target.scope)) return;
+				// A source without a commit pin reinstalls at its newest revision, which has its own permissions:
+				// declining them too removes the package.
+				if (
+					!storeSourcePinsCommit(selection.target.source) &&
+					!(await this.confirmPackagePermissions(
+						packageManager,
+						selection.target.source,
+						selection.target.scope,
+						"Declining removes the package.",
+						{ installed: true },
+					))
+				) {
+					await removeDeclined("the reinstalled revision's permissions were not acknowledged");
+					return;
+				}
 				this.showStatus(`Kept ${currentLabel}: the update's permissions were not acknowledged`);
 				return;
 			}
@@ -5370,12 +5546,13 @@ export class InteractiveMode {
 			return;
 		}
 		if (verb !== undefined) {
-			this.showExtensionDetail(args.trim());
+			await this.showExtensionDetail(args.trim());
 			return;
 		}
 		let summaries: ExtensionSummary[];
 		try {
-			summaries = (await queryRegistry.run(this.intentContext(), "extensions", {})).extensions;
+			await this.clientConnected.promise;
+			summaries = (await this.store.client.query("extensions")).extensions;
 		} catch (error) {
 			this.showError(`Could not list extensions: ${error instanceof Error ? error.message : String(error)}`);
 			return;
@@ -5410,7 +5587,7 @@ export class InteractiveMode {
 			"Cancel",
 		]);
 		if (selection === toggle) await this.setExtensionEnabled(summary.id, !summary.enabled);
-		else if (selection === detailLabel) this.showExtensionDetail(summary.id);
+		else if (selection === detailLabel) await this.showExtensionDetail(summary.id);
 	}
 
 	/**
@@ -5421,20 +5598,27 @@ export class InteractiveMode {
 	 */
 	private async setExtensionEnabled(id: string, enabled: boolean): Promise<void> {
 		const settings = this.settingsManager;
+		// The host or another client may have stored the choice since the TUI read its settings.
+		await settings.reload();
 		const scope =
 			settings.isProjectTrusted() && settings.getStoredExtensionEnabled(id, "project") !== undefined
 				? "project"
 				: "global";
+		let state: ExtensionState | undefined;
 		try {
-			await intentRegistry.invoke(this.intentContext(), "set_extension_enabled", { id, enabled, scope });
+			await this.clientConnected.promise;
+			const client = this.store.client;
+			await client.intent("set_extension_enabled", { id, enabled, scope });
+			state = (await client.query("extensions")).extensions.find((extension) => extension.id === id)?.state;
 		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
-		const state = this.session.extensionRegistry.get(id)?.state;
 		if (enabled) {
 			if (state === "active") this.showStatus(`Enabled ${id}`);
 			else this.showWarning(`${id} did not start (${state ?? "unknown"}); see its error in /extensions`);
+		} else if (state === "active") {
+			this.showWarning(`${id} stays enabled: another settings scope enables it`);
 		} else {
 			this.showStatus(
 				state === "deactivating" ? `Disabled ${id}; its tools leave once the current turn ends` : `Disabled ${id}`,
@@ -5443,28 +5627,27 @@ export class InteractiveMode {
 	}
 
 	/** An extension's detail and settings form, reading and saving through the host's query and intent. */
-	private showExtensionDetail(id: string): void {
-		const extension = this.session.extensionRegistry.get(id);
-		if (!extension) {
+	private async showExtensionDetail(id: string): Promise<void> {
+		let detail: ExtensionSummary | undefined;
+		try {
+			await this.clientConnected.promise;
+			detail = (await this.store.client.query("extensions")).extensions.find((extension) => extension.id === id);
+		} catch (error) {
+			this.showError(`Could not list extensions: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+		if (!detail) {
 			this.showWarning(`No extension "${id}" in this conversation`);
 			return;
 		}
-		const detail = extensionDetail(
-			{
-				manifest: extension.manifest,
-				version: extension.version,
-				scope: extension.scope,
-				fingerprint: extension.fingerprint,
-			},
-			new ExtensionPermissionStore(this.conversation.services.agentDir),
-		);
+		const client = this.store.client;
 		this.showSelector((done) => {
 			const component = new ExtensionSettingsComponent(
 				detail,
 				{
-					load: () => queryRegistry.run(this.intentContext(), "extension_settings", { id }),
+					load: () => client.query("extension_settings", { id }),
 					save: async (scope, values) => {
-						await intentRegistry.invoke(this.intentContext(), "set_extension_settings", { id, scope, values });
+						await client.intent("set_extension_settings", { id, scope, values });
 					},
 				},
 				{ onClose: done, requestRender: () => this.ui.requestRender() },
@@ -5477,20 +5660,26 @@ export class InteractiveMode {
 	/**
 	 * Ask the user to acknowledge the permissions of the package just installed
 	 * or updated from `source` in `scope`, unless they already did (an update
-	 * that adds none is recorded without asking). True unless the user declined.
+	 * that adds none is recorded without asking). True unless the user declined,
+	 * or the package was just `installed` and cannot be found.
 	 */
 	private async confirmPackagePermissions(
 		packageManager: DefaultPackageManager,
 		source: string,
 		scope: StoreInstallScope,
 		consequence: string,
+		options: { installed?: boolean } = {},
 	): Promise<boolean> {
 		const root = packageManager.getInstalledPath(source, scope);
-		if (root === undefined) return true;
+		if (root === undefined) {
+			// A package just installed that cannot be found cannot be reviewed: it must not stay to run unreviewed.
+			if (options.installed) this.showWarning("Could not find the installed package to review its permissions");
+			return options.installed !== true;
+		}
 		let outcome: PackagePermissionOutcome;
 		try {
 			outcome = await reviewPackagePermissions({
-				store: new ExtensionPermissionStore(this.conversation.services.agentDir),
+				store: new ExtensionPermissionStore(getAgentDir()),
 				root,
 				source,
 				confirm: (subject, added) =>
@@ -5511,10 +5700,10 @@ export class InteractiveMode {
 		return outcome.status !== "declined";
 	}
 
-	/** After an update, review the permissions of the configured packages it updated (`source`, or all). */
+	/** After an update, review the permissions of the configured packages it updated (`source`, by identity, or all). */
 	private async reviewUpdatedPackages(packageManager: DefaultPackageManager, source?: string): Promise<void> {
 		for (const pkg of packageManager.listConfiguredPackages()) {
-			if (source !== undefined && pkg.source !== source && pkg.actionSource !== source) continue;
+			if (source !== undefined && !storeUpdateTouches(packageManager, pkg, source)) continue;
 			const acknowledged = await this.confirmPackagePermissions(
 				packageManager,
 				pkg.source,
@@ -5614,7 +5803,7 @@ export class InteractiveMode {
 		try {
 			await packageManager.update(pkg.actionSource, { local: pkg.scope === "project", scripts: "never" });
 			await this.reviewUpdatedPackages(packageManager, pkg.actionSource);
-			this.showStatus(`Updated ${sourceLabel}. Run /reload to load resource changes.`);
+			await this.offerStoreReload(`Updated ${sourceLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5650,7 +5839,7 @@ export class InteractiveMode {
 				this.showWarning(`No matching package found for ${targetLabel}`);
 				return;
 			}
-			await this.rescanAfterStoreChange(`Removed ${targetLabel}`);
+			await this.offerStoreReload(`Removed ${targetLabel}`);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
 		}
@@ -5676,55 +5865,53 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * After an install or removal: the conversation picks up the installed or
-	 * removed extension at once, and a reload loads the package's skills,
-	 * prompts, and themes.
+	 * After a package install, update, or removal: the conversation loads the
+	 * change as it reloads (`/reload`), which the user may leave for later.
 	 */
-	private async rescanAfterStoreChange(message: string): Promise<void> {
-		try {
-			await this.session.rescanExtensions();
-		} catch (error) {
-			this.showWarning(
-				`Could not load extension changes: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		await this.offerStoreReload(`${message}; its extension changes apply now`);
-	}
-
 	private async offerStoreReload(message: string): Promise<void> {
-		const action = await this.showExtensionSelector(message, ["Reload now", "Later"]);
+		const action = await this.showExtensionSelector(`${message}. Reload to load the change?`, [
+			"Reload now",
+			"Later",
+		]);
 		if (action === "Reload now") {
 			await this.handleReloadCommand();
 			return;
 		}
-		this.showStatus(`${message}. Run /reload to load resource changes.`);
+		this.showStatus(`${message}. Run /reload to load the change.`);
 	}
 
 	private async handleProfileCommand(profileName?: string): Promise<void> {
-		if (this.session.isStreaming) {
+		await this.clientConnected.promise;
+		const operation = this.store.phase?.operation ?? null;
+		if (operation === "compaction") {
+			this.showWarning("Wait for compaction to finish before switching profiles.");
+			return;
+		}
+		if (operation !== null) {
 			this.showWarning("Wait for the current response to finish before switching profiles.");
 			return;
 		}
-		if (this.session.isCompacting) {
-			this.showWarning("Wait for compaction to finish before switching profiles.");
+		let settings: QueryResult<"settings">;
+		try {
+			settings = await this.store.client.query("settings");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 			return;
 		}
 
 		if (profileName) {
-			if (!this.settingsManager.hasProfile(profileName)) {
+			if (!settings.profiles?.includes(profileName)) {
 				this.showWarning(`Profile "${profileName}" is not defined. Run /profile to create it.`);
 				return;
 			}
-			await this.switchProfile(profileName);
+			await this.switchProfile(profileName, { current: settings.profile });
 			return;
 		}
 
-		await this.showProfileSelector();
+		await this.showProfileSelector(settings.profile, settings.profiles ?? []);
 	}
 
-	private async showProfileSelector(): Promise<void> {
-		const currentProfile = this.settingsManager.getActiveProfile();
-		const profileNames = this.settingsManager.getProfileNames();
+	private async showProfileSelector(currentProfile: string, profileNames: readonly string[]): Promise<void> {
 		const profileByLabel = new Map<string, string>();
 		const options: string[] = [];
 
@@ -5742,20 +5929,19 @@ export class InteractiveMode {
 		}
 		options.push("Create new profile", "Cancel");
 
-		const currentLabel = currentProfile ?? "none";
-		const selection = await this.showExtensionSelector(`Current profile: ${currentLabel}`, options);
+		const selection = await this.showExtensionSelector(`Current profile: ${currentProfile || "none"}`, options);
 		if (!selection || selection === "Cancel") {
 			return;
 		}
 
 		const selectedProfile = profileByLabel.get(selection);
 		if (selectedProfile) {
-			await this.switchProfile(selectedProfile);
+			await this.switchProfile(selectedProfile, { current: currentProfile });
 			return;
 		}
 
 		if (selection === createCurrentLabel && currentProfile) {
-			await this.createAndSwitchProfile(currentProfile, { forceReload: true });
+			await this.switchProfile(currentProfile, { create: true });
 			return;
 		}
 
@@ -5764,208 +5950,85 @@ export class InteractiveMode {
 			this.showStatus("Profile creation cancelled");
 			return;
 		}
-		await this.createAndSwitchProfile(createdProfile);
+		await this.switchProfile(createdProfile, { create: true });
 	}
 
-	private async createAndSwitchProfile(profileName: string, options?: { forceReload?: boolean }): Promise<void> {
-		const normalizedProfile = profileName.trim();
-		if (!normalizedProfile) {
+	/**
+	 * Switch the settings profile through the host's `set_profile`, which
+	 * reloads the conversation and applies the profile's model scope and
+	 * default model; `create` makes the profile first. The TUI reloads its own
+	 * settings, keybindings, and themes as the conversation reloads.
+	 */
+	private async switchProfile(profileName: string, options: { current?: string; create?: boolean }): Promise<void> {
+		const name = profileName.trim();
+		if (!name) {
 			this.showWarning("Profile name cannot be empty");
 			return;
 		}
-
+		if (!options.create && options.current === name) {
+			this.showStatus(`Current profile: ${name}`);
+			return;
+		}
+		this.showStatus(`Switching profile to ${name}...`);
+		let switched: { profile: string; created: boolean; warnings: readonly string[] } | undefined;
 		try {
-			const profileExists = this.settingsManager.hasProfile(normalizedProfile);
-			const createdProfile = profileExists
-				? normalizedProfile
-				: this.settingsManager.ensureGlobalProfile(normalizedProfile);
-			if (!profileExists) {
-				await this.settingsManager.flush();
-			}
-			await this.switchProfile(createdProfile, { created: !profileExists, forceReload: options?.forceReload });
-		} catch (error: unknown) {
+			switched = (
+				await this.store.client.intent("set_profile", { name, ...(options.create ? { create: true } : {}) })
+			).result;
+		} catch (error) {
 			this.showError(error instanceof Error ? error.message : String(error));
-		}
-	}
-
-	private async applyProfileDefaultThinkingLevel(thinkingLevelOverride?: ThinkingLevel): Promise<boolean> {
-		const defaultThinkingLevel = thinkingLevelOverride ?? this.settingsManager.getDefaultThinkingLevel();
-		if (defaultThinkingLevel === undefined) {
-			return false;
-		}
-
-		const previousThinkingLevel = this.session.thinkingLevel;
-		await this.session.setThinkingLevel(defaultThinkingLevel, { persistDefault: false });
-		return this.session.thinkingLevel !== previousThinkingLevel;
-	}
-
-	private async applyProfileDefaultModel(): Promise<void> {
-		const defaultProvider = this.settingsManager.getDefaultProvider();
-		const defaultModel = this.settingsManager.getDefaultModel();
-		if (!defaultProvider && !defaultModel) {
-			const scopedModels = this.session.scopedModels;
-			const selectedScopedModel = this.session.model
-				? (scopedModels.find((scoped) => modelsAreEqual(scoped.model, this.session.model)) ?? scopedModels[0])
-				: scopedModels[0];
-			if (selectedScopedModel && !modelsAreEqual(this.session.model, selectedScopedModel.model)) {
-				if (!this.session.modelRegistry.hasConfiguredAuth(selectedScopedModel.model)) {
-					this.showWarning(
-						`Could not apply profile model ${selectedScopedModel.model.provider}/${selectedScopedModel.model.id}: credentials are not configured`,
-					);
-					return;
-				}
-				try {
-					await this.session.setModel(selectedScopedModel.model, { persistDefault: false });
-					await this.applyProfileDefaultThinkingLevel(selectedScopedModel.thinkingLevel);
-					this.updateEditorBorderColor();
-					this.checkDaxnutsEasterEgg(selectedScopedModel.model);
-				} catch (error: unknown) {
-					this.showWarning(
-						`Could not apply profile model ${selectedScopedModel.model.provider}/${selectedScopedModel.model.id}: ${error instanceof Error ? error.message : String(error)}`,
-					);
-				}
-				return;
-			}
-			if (await this.applyProfileDefaultThinkingLevel(selectedScopedModel?.thinkingLevel)) {
-				this.updateEditorBorderColor();
-			}
 			return;
 		}
-		if (!defaultProvider || !defaultModel) {
-			this.showWarning("Could not apply profile default model: defaultProvider/defaultModel is incomplete");
-			return;
-		}
-
-		const model = this.session.modelRegistry.find(defaultProvider, defaultModel);
-		if (!model) {
-			this.showWarning(`Could not apply profile default model ${defaultProvider}/${defaultModel}: model not found`);
-			return;
-		}
-
-		const scopedModels = this.session.scopedModels;
-		const scopedDefaultModel =
-			scopedModels.length > 0 ? scopedModels.find((scoped) => modelsAreEqual(scoped.model, model)) : undefined;
-		const selectedScopedModel = scopedModels.length > 0 ? (scopedDefaultModel ?? scopedModels[0]) : undefined;
-		const selectedModel = selectedScopedModel?.model ?? model;
-		const selectedThinkingLevel = selectedScopedModel?.thinkingLevel;
-
-		if (modelsAreEqual(this.session.model, selectedModel)) {
-			if (await this.applyProfileDefaultThinkingLevel(selectedThinkingLevel)) {
-				this.updateEditorBorderColor();
-			}
-			return;
-		}
-		if (!this.session.modelRegistry.hasConfiguredAuth(selectedModel)) {
-			this.showWarning(
-				`Could not apply profile model ${selectedModel.provider}/${selectedModel.id}: credentials are not configured`,
-			);
-			return;
-		}
-
-		try {
-			await this.session.setModel(selectedModel, { persistDefault: false });
-			await this.applyProfileDefaultThinkingLevel(selectedThinkingLevel);
-			this.updateEditorBorderColor();
-			this.checkDaxnutsEasterEgg(selectedModel);
-		} catch (error: unknown) {
-			this.showWarning(
-				`Could not apply profile model ${selectedModel.provider}/${selectedModel.id}: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-	}
-
-	private async switchProfile(
-		profileName: string,
-		options?: { created?: boolean; forceReload?: boolean },
-	): Promise<void> {
-		const normalizedProfile = profileName.trim();
-		if (!normalizedProfile) {
-			this.showWarning("Profile name cannot be empty");
-			return;
-		}
-		if (!options?.forceReload && this.settingsManager.getActiveProfile() === normalizedProfile) {
-			this.showStatus(`Current profile: ${normalizedProfile}`);
-			return;
-		}
-
-		this.settingsManager.setActiveProfile(normalizedProfile);
-		const reloaded = await this.reloadRuntimeResources({
-			action: "switching profiles",
-			progressMessage: `Switching profile to ${normalizedProfile}...`,
-			successMessage: (savedImplicitProjectTrust) => {
-				const createdPrefix = options?.created ? `Created profile ${normalizedProfile}. ` : "";
-				const trustSuffix = savedImplicitProjectTrust ? "; saved project trust" : "";
-				return `${createdPrefix}Profile: ${normalizedProfile}. Reloaded keybindings, extensions, skills, prompts, themes${trustSuffix}`;
-			},
-		});
-		if (!reloaded) {
-			return;
-		}
-		try {
-			await this.applyScopedModelsFromSettings();
-		} catch (error: unknown) {
-			this.showWarning(
-				`Could not apply profile model scope: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
-		await this.applyProfileDefaultModel();
-	}
-
-	private async applyScopedModelsFromSettings(): Promise<void> {
-		const patterns = this.options.modelScopePatterns ?? this.settingsManager.getEnabledModels();
-		if (patterns && patterns.length > 0) {
-			const scopedModels = await resolveModelScope(patterns, this.session.modelRegistry);
-			this.session.setScopedModels(
-				scopedModels.map((scopedModel) => ({
-					model: scopedModel.model,
-					thinkingLevel: scopedModel.thinkingLevel,
-				})),
-			);
-		} else {
-			this.session.setScopedModels([]);
-		}
-		this.catalogs.refresh("models");
+		const profile = switched?.profile ?? name;
+		const createdPrefix = switched?.created ? `Created profile ${profile}. ` : "";
+		this.showStatus(`${createdPrefix}Profile: ${profile}. Reloaded keybindings, extensions, skills, prompts, themes`);
+		for (const warning of switched?.warnings ?? []) this.showWarning(warning);
 		this.updateEditorBorderColor();
 	}
 
+	/** The models the model selector offers: the conversation's `models` catalog and its model. */
+	private async modelSelectorCatalog(): Promise<ModelSelectorCatalog> {
+		const { models, cycleScope } = await this.store.client.query("models");
+		return { models, scoped: scopedModels(models, cycleScope), current: this.store.state.model };
+	}
+
 	private async handleModelCommand(searchTerm?: string): Promise<void> {
-		if (!searchTerm) {
-			this.showModelSelector();
-			return;
-		}
-
-		const model = await this.findExactModelMatch(searchTerm);
-		if (model) {
-			try {
-				await this.session.setModel(model);
-				this.updateEditorBorderColor();
-				this.showStatus(`Model: ${model.id}`);
-				this.checkDaxnutsEasterEgg(model);
-			} catch (error) {
-				this.showError(error instanceof Error ? error.message : String(error));
-			}
-			return;
-		}
-
-		this.showModelSelector(searchTerm);
-	}
-
-	private async findExactModelMatch(searchTerm: string): Promise<Model<any> | undefined> {
-		const models = await this.getModelCandidates();
-		return findExactModelReferenceMatch(searchTerm, models);
-	}
-
-	private async getModelCandidates(): Promise<Model<any>[]> {
-		if (this.session.scopedModels.length > 0) {
-			return this.session.scopedModels.map((scoped) => scoped.model);
-		}
-
-		this.session.modelRegistry.refresh();
+		await this.clientConnected.promise;
+		let catalog: ModelSelectorCatalog;
 		try {
-			return await this.session.modelRegistry.getAvailable();
-		} catch {
-			return [];
+			catalog = await this.modelSelectorCatalog();
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
 		}
+		if (searchTerm) {
+			// The models the cycle steps through when a scope limits it, else every selectable one.
+			const candidates =
+				catalog.scoped.length > 0
+					? catalog.models.filter((model) =>
+							catalog.scoped.some((scoped) => scoped.provider === model.provider && scoped.modelId === model.id),
+						)
+					: catalog.models;
+			const model = findExactModelReferenceMatch(searchTerm, candidates);
+			if (model) {
+				await this.selectModel(model);
+				return;
+			}
+		}
+		this.showModelSelector(catalog, searchTerm);
+	}
+
+	/** Switch the conversation to `model`, the default for new conversations too. */
+	private async selectModel(model: RpcCatalogModel): Promise<void> {
+		try {
+			await this.input.selectModel(model);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		this.updateEditorBorderColor();
+		this.showStatus(`Model: ${model.id}`);
+		this.checkDaxnutsEasterEgg(model);
 	}
 
 	private async maybeSaveImplicitProjectTrustAfterReload(): Promise<boolean> {
@@ -6127,25 +6190,14 @@ export class InteractiveMode {
 		});
 	}
 
-	private showModelSelector(initialSearchInput?: string): void {
+	private showModelSelector(catalog: ModelSelectorCatalog, initialSearchInput?: string): void {
 		this.showSelector((done) => {
 			const selector = new ModelSelectorComponent(
 				this.ui,
-				this.session.model,
-				this.settingsManager,
-				this.session.modelRegistry,
-				this.session.scopedModels,
-				async (model) => {
-					try {
-						await this.session.setModel(model);
-						this.updateEditorBorderColor();
-						done();
-						this.showStatus(`Model: ${model.id}`);
-						this.checkDaxnutsEasterEgg(model);
-					} catch (error) {
-						done();
-						this.showError(error instanceof Error ? error.message : String(error));
-					}
+				catalog,
+				(model) => {
+					done();
+					void this.selectModel(model);
 				},
 				() => {
 					done();
@@ -6157,73 +6209,66 @@ export class InteractiveMode {
 		});
 	}
 
+	/**
+	 * `/scoped-models`: the models the model cycle steps through, in order.
+	 * Changes apply to the conversation at once; saving keeps them as the
+	 * settings' `enabledModels`.
+	 */
 	private async showModelsSelector(): Promise<void> {
-		// Get all available models
-		this.session.modelRegistry.refresh();
-		const allModels = this.session.modelRegistry.getAvailable();
-
-		if (allModels.length === 0) {
+		await this.clientConnected.promise;
+		const client = this.store.client;
+		let models: readonly RpcCatalogModel[];
+		let scope: readonly ScopedModel[];
+		try {
+			const catalog = await client.query("models");
+			models = catalog.models;
+			scope = scopedModels(catalog.models, catalog.cycleScope);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (models.length === 0) {
 			this.showStatus("No models available");
 			return;
 		}
 
-		// Check if session has scoped models (from previous session-only changes or CLI --models)
-		const sessionScopedModels = this.session.scopedModels;
-		const hasSessionScope = sessionScopedModels.length > 0;
-
-		// Build enabled model IDs from session state or settings
-		let currentEnabledIds: string[] | null = null;
-
-		if (hasSessionScope) {
-			// Use current session's scoped models
-			currentEnabledIds = sessionScopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
-		} else {
-			// Fall back to settings
-			const patterns = this.settingsManager.getEnabledModels();
-			if (patterns !== undefined && patterns.length > 0) {
-				const scopedModels = await resolveModelScope(patterns, this.session.modelRegistry);
-				currentEnabledIds = scopedModels.map((scoped) => `${scoped.model.provider}/${scoped.model.id}`);
+		// The thinking level the scope gives a model stays with it.
+		const levels = new Map(scope.map((scoped) => [`${scoped.provider}/${scoped.modelId}`, scoped.thinkingLevel]));
+		const scopeOf = (enabledIds: readonly string[] | null): ScopedModel[] => {
+			if (enabledIds === null || enabledIds.length === models.length) return [];
+			return enabledIds.flatMap((id) => {
+				const model = models.find((candidate) => `${candidate.provider}/${candidate.id}` === id);
+				if (!model) return [];
+				const thinkingLevel = levels.get(id);
+				return [
+					{
+						provider: model.provider,
+						modelId: model.id,
+						...(thinkingLevel === undefined ? {} : { thinkingLevel }),
+					},
+				];
+			});
+		};
+		const setScope = async (enabledIds: readonly string[] | null, persist: boolean): Promise<void> => {
+			try {
+				await client.intent("set_model_scope", { models: scopeOf(enabledIds), ...(persist ? { persist } : {}) });
+				if (persist) this.showStatus("Model selection saved to settings");
+			} catch (error) {
+				this.showError(error instanceof Error ? error.message : String(error));
 			}
-		}
-
-		// Helper to update session's scoped models (session-only, no persist)
-		const updateSessionModels = async (enabledIds: string[] | null) => {
-			currentEnabledIds = enabledIds === null ? null : [...enabledIds];
-			if (enabledIds && enabledIds.length > 0 && enabledIds.length < allModels.length) {
-				const newScopedModels = await resolveModelScope(enabledIds, this.session.modelRegistry);
-				this.session.setScopedModels(
-					newScopedModels.map((sm) => ({
-						model: sm.model,
-						thinkingLevel: sm.thinkingLevel,
-					})),
-				);
-			} else {
-				// All enabled or none enabled = no filter
-				this.session.setScopedModels([]);
-			}
-			this.catalogs.refresh("models");
 			this.ui.requestRender();
 		};
 
 		this.showSelector((done) => {
 			const selector = new ScopedModelsSelectorComponent(
 				{
-					allModels,
-					enabledModelIds: currentEnabledIds,
+					allModels: models,
+					enabledModelIds:
+						scope.length === 0 ? null : scope.map((scoped) => `${scoped.provider}/${scoped.modelId}`),
 				},
 				{
-					onChange: async (enabledIds) => {
-						await updateSessionModels(enabledIds);
-					},
-					onPersist: (enabledIds) => {
-						// Persist to settings
-						const newPatterns =
-							enabledIds === null || enabledIds.length === allModels.length
-								? undefined // All enabled = clear filter
-								: enabledIds;
-						this.settingsManager.setEnabledModels(newPatterns ? [...newPatterns] : undefined);
-						this.showStatus("Model selection saved to settings");
-					},
+					onChange: (enabledIds) => setScope(enabledIds, false),
+					onPersist: (enabledIds) => setScope(enabledIds, true),
 					onCancel: () => {
 						done();
 						this.ui.requestRender();
@@ -6507,48 +6552,14 @@ export class InteractiveMode {
 		}
 	}
 
-	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
-		const oauthProviders = this.session.modelRegistry.client.getOAuthProviders();
-		const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
-		const options: AuthSelectorProvider[] = oauthProviders.map((provider) => ({
-			id: provider.id,
-			name: provider.name,
-			authType: "oauth",
-		}));
-
-		const modelProviders = new Set(this.session.modelRegistry.getAll().map((model) => model.provider));
-		for (const providerId of modelProviders) {
-			if (!isApiKeyLoginProvider(providerId, oauthProviderIds)) {
-				continue;
-			}
-			options.push({
-				id: providerId,
-				name: this.session.modelRegistry.getProviderDisplayName(providerId),
-				authType: "api_key",
-			});
-		}
-
-		const filteredOptions = authType ? options.filter((option) => option.authType === authType) : options;
-		return filteredOptions.sort((a, b) => a.name.localeCompare(b.name));
-	}
-
-	private getLogoutProviderOptions(): AuthSelectorProvider[] {
-		const authStorage = this.session.modelRegistry.authStorage;
-		const options: AuthSelectorProvider[] = [];
-
-		for (const providerId of authStorage.list()) {
-			const credential = authStorage.get(providerId);
-			if (!credential) {
-				continue;
-			}
-			options.push({
-				id: providerId,
-				name: this.session.modelRegistry.getProviderDisplayName(providerId),
-				authType: credential.type,
-			});
-		}
-
-		return options.sort((a, b) => a.name.localeCompare(b.name));
+	/** The providers `/login` offers for `authType`, as the host's `auth.providers` query lists them. */
+	private async loginProviderOptions(authType: "oauth" | "api_key"): Promise<AuthSelectorProvider[]> {
+		const { providers } = await this.store.client.query("auth.providers");
+		return providers
+			.filter((provider) =>
+				authType === "oauth" ? provider.oauth : provider.apiKey || provider.id === BEDROCK_PROVIDER_ID,
+			)
+			.map((provider) => ({ ...provider, authType }));
 	}
 
 	private showLoginAuthTypeSelector(): void {
@@ -6561,7 +6572,7 @@ export class InteractiveMode {
 				(option) => {
 					done();
 					const authType = option === subscriptionLabel ? "oauth" : "api_key";
-					this.showLoginProviderSelector(authType);
+					this.runKeyAction(() => this.showLoginProviderSelector(authType));
 				},
 				() => {
 					done();
@@ -6572,8 +6583,9 @@ export class InteractiveMode {
 		});
 	}
 
-	private showLoginProviderSelector(authType: "oauth" | "api_key"): void {
-		const providerOptions = this.getLoginProviderOptions(authType);
+	private async showLoginProviderSelector(authType: "oauth" | "api_key"): Promise<void> {
+		await this.clientConnected.promise;
+		const providerOptions = await this.loginProviderOptions(authType);
 		if (providerOptions.length === 0) {
 			this.showStatus(
 				authType === "oauth" ? "No subscription providers available." : "No API key providers available.",
@@ -6584,29 +6596,21 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new OAuthSelectorComponent(
 				"login",
-				this.session.modelRegistry.authStorage,
 				providerOptions,
-				async (providerId: string) => {
+				(providerId: string) => {
 					done();
-
-					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
-						return;
-					}
-
-					if (providerOption.authType === "oauth") {
-						await this.showLoginDialog(providerOption.id, providerOption.name);
-					} else if (providerOption.id === BEDROCK_PROVIDER_ID) {
-						this.showBedrockSetupDialog(providerOption.id, providerOption.name);
+					const provider = providerOptions.find((candidate) => candidate.id === providerId);
+					if (!provider) return;
+					if (provider.id === BEDROCK_PROVIDER_ID && authType === "api_key") {
+						this.showBedrockSetupDialog(provider.id, provider.name);
 					} else {
-						await this.showApiKeyLoginDialog(providerOption.id, providerOption.name);
+						void this.login(provider.id, provider.name, authType);
 					}
 				},
 				() => {
 					done();
 					this.showLoginAuthTypeSelector();
 				},
-				(providerId) => this.session.modelRegistry.getProviderAuthStatus(providerId),
 			);
 			return { component: selector, focus: selector };
 		});
@@ -6618,7 +6622,11 @@ export class InteractiveMode {
 			return;
 		}
 
-		const providerOptions = this.getLogoutProviderOptions();
+		await this.clientConnected.promise;
+		const client = this.store.client;
+		const providerOptions: AuthSelectorProvider[] = (await client.query("auth.providers")).providers.flatMap(
+			(provider) => (provider.stored === undefined ? [] : [{ ...provider, authType: provider.stored }]),
+		);
 		if (providerOptions.length === 0) {
 			this.showStatus(
 				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
@@ -6629,25 +6637,18 @@ export class InteractiveMode {
 		this.showSelector((done) => {
 			const selector = new OAuthSelectorComponent(
 				mode,
-				this.session.modelRegistry.authStorage,
 				providerOptions,
 				async (providerId: string) => {
 					done();
-
-					const providerOption = providerOptions.find((provider) => provider.id === providerId);
-					if (!providerOption) {
-						return;
-					}
-
+					const provider = providerOptions.find((candidate) => candidate.id === providerId);
+					if (!provider) return;
 					try {
-						this.session.modelRegistry.authStorage.logout(providerOption.id);
-						this.session.modelRegistry.refresh();
-						this.catalogs.refresh("models");
-						const message =
-							providerOption.authType === "oauth"
-								? `Logged out of ${providerOption.name}`
-								: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
-						this.showStatus(message);
+						const removed = (await client.intent("auth.logout", { provider: provider.id })).result?.removed;
+						this.showStatus(
+							removed === "oauth"
+								? `Logged out of ${provider.name}`
+								: `Removed stored API key for ${provider.name}. Environment variables and models.json config are unchanged.`,
+						);
 					} catch (error: unknown) {
 						this.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
 					}
@@ -6661,51 +6662,116 @@ export class InteractiveMode {
 		});
 	}
 
-	private async completeProviderAuthentication(
-		providerId: string,
-		providerName: string,
-		authType: "oauth" | "api_key",
-		previousModel: Model<any> | undefined,
-	): Promise<void> {
-		this.session.modelRegistry.refresh();
-
-		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
-
-		let selectedModel: Model<any> | undefined;
-		let selectionError: string | undefined;
-		if (isUnknownModel(previousModel)) {
-			const availableModels = this.session.modelRegistry.getAvailable();
-			const providerModels = availableModels.filter((model) => model.provider === providerId);
-			if (!hasDefaultModelProvider(providerId)) {
-				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
-			} else if (providerModels.length === 0) {
-				selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
+	/**
+	 * Sign in to `provider` through the host's `auth.login`: the host runs the
+	 * provider's login and asks this client alone, with `provider_auth`
+	 * requests while a sign-in page or device code waits (the sign-in dialog)
+	 * and `input` requests, masked for an API key.
+	 */
+	private async login(provider: string, name: string, method: "oauth" | "api_key"): Promise<void> {
+		this.signIn = { provider, name };
+		const action = method === "oauth" ? `Logged in to ${name}` : `Saved API key for ${name}`;
+		try {
+			const result = (await this.store.client.intent("auth.login", { provider, method })).result;
+			if (result === undefined || "cancelled" in result) return;
+			this.updateEditorBorderColor();
+			if (result.model !== undefined) {
+				this.showStatus(`${action}. Selected ${result.model.modelId}. Credentials saved to ${getAuthPath()}`);
+				this.checkDaxnutsEasterEgg({ provider: result.model.provider, id: result.model.modelId });
 			} else {
-				const defaultModelId = defaultModelPerProvider[providerId];
-				selectedModel = providerModels.find((model) => model.id === defaultModelId);
-				if (!selectedModel) {
-					selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
-				} else {
-					try {
-						await this.session.setModel(selectedModel);
-					} catch (error: unknown) {
-						selectedModel = undefined;
-						const errorMessage = error instanceof Error ? error.message : String(error);
-						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
-					}
-				}
+				this.showStatus(`${action}. Credentials saved to ${getAuthPath()}`);
 			}
+			if (result.warning !== undefined) this.showWarning(result.warning);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.showError(
+				method === "oauth"
+					? `Failed to login to ${name}: ${message}`
+					: `Failed to save API key for ${name}: ${message}`,
+			);
+		} finally {
+			this.signIn = undefined;
+			this.closeSignInView();
 		}
+	}
 
-		this.catalogs.refresh("models");
-		this.updateEditorBorderColor();
-		if (selectedModel) {
-			this.showStatus(`${actionLabel}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`);
-			this.checkDaxnutsEasterEgg(selectedModel);
-		} else {
-			this.showStatus(`${actionLabel}. Credentials saved to ${getAuthPath()}`);
-			if (selectionError) this.showError(selectionError);
-		}
+	/**
+	 * Show a `provider_auth` request in the sign-in dialog until the user
+	 * answers or cancels it, or the host ends it: a sign-in page to open (only
+	 * an http or https address opens), a device code to enter there, or a
+	 * page whose redirect URL or code the user pastes as the answer.
+	 */
+	private showProviderAuth(
+		request: Extract<HostRequest, { kind: "provider_auth" }>,
+		signal: AbortSignal,
+	): Promise<HostResponse | undefined> {
+		return new Promise((resolve) => {
+			if (signal.aborted) {
+				resolve(undefined);
+				return;
+			}
+			const view = this.openSignInView(request.provider);
+			const shown = ++view.shown;
+			// The page opens for a sign-in `/login` started here; any other only shows its link.
+			const open = this.signIn?.provider === request.provider;
+			let settled = false;
+			const settle = (response: HostResponse | undefined): void => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", end);
+				if (view.cancel === cancel) view.cancel = undefined;
+				resolve(response);
+				// A sign-in that goes on (a device code after a page) shows its next request in the same dialog.
+				setImmediate(() => {
+					if (this.signInView === view && view.shown === shown) this.closeSignInView();
+				});
+			};
+			const cancel = (): void => settle({ cancelled: true });
+			const end = (): void => settle(undefined);
+			signal.addEventListener("abort", end, { once: true });
+			view.cancel = cancel;
+			switch (request.flow) {
+				case "device":
+					view.dialog.showDeviceCode({ verificationUri: request.url, userCode: request.userCode ?? "" });
+					view.dialog.showWaiting("Waiting for authentication...");
+					return;
+				case "browser":
+					view.dialog.showAuth(request.url, request.instructions, { open });
+					return;
+				case "manual":
+					view.dialog.showAuth(request.url, request.instructions, { open });
+					view.dialog.showManualInput("Paste redirect URL below, or complete login in browser:").then(
+						(value) => settle({ value }),
+						() => settle({ cancelled: true }),
+					);
+					return;
+			}
+		});
+	}
+
+	/** The sign-in dialog, shown in place of the editor until the sign-in ends. */
+	private openSignInView(provider: string): SignInView {
+		if (this.signInView) return this.signInView;
+		this.dismissWorkInspector?.();
+		const restore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
+		const name = this.signIn?.provider === provider ? this.signIn.name : provider;
+		const view: SignInView = {
+			// Escape cancels the sign-in the dialog shows.
+			dialog: new LoginDialogComponent(this.ui, provider, () => view.cancel?.(), name),
+			restore,
+			shown: 0,
+		};
+		this.signInView = view;
+		this.activateView(this.createDedicatedView(view.dialog), view.dialog);
+		return view;
+	}
+
+	/** Close the sign-in dialog: the sign-in ended, and the host ends what it asked. */
+	private closeSignInView(): void {
+		const view = this.signInView;
+		if (!view) return;
+		this.signInView = undefined;
+		this.activateView(view.restore.view, view.restore.focus ?? this.editor);
 	}
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
@@ -6728,155 +6794,6 @@ export class InteractiveMode {
 		]);
 
 		this.activateView(this.createDedicatedView(dialog), dialog);
-	}
-
-	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
-		const previousModel = this.session.model;
-		const previousView = this.activeView;
-		const previousFocus = this.ui.getFocusedComponent();
-
-		const dialog = new LoginDialogComponent(
-			this.ui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
-
-		this.activateView(this.createDedicatedView(dialog), dialog);
-
-		const restoreEditor = () => this.activateView(previousView, previousFocus ?? this.editor);
-
-		try {
-			const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
-			if (!apiKey) {
-				throw new Error("API key cannot be empty.");
-			}
-
-			this.session.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
-
-			restoreEditor();
-			await this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel);
-		} catch (error: unknown) {
-			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (errorMsg !== "Login cancelled") {
-				this.showError(`Failed to save API key for ${providerName}: ${errorMsg}`);
-			}
-		}
-	}
-
-	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
-		return new Promise((resolve) => {
-			this.dismissWorkInspector?.();
-			const previousView = this.activeView;
-			const previousFocus = this.ui.getFocusedComponent();
-			const restoreDialog = () => this.activateView(previousView, previousFocus ?? dialog);
-			const labels = prompt.options.map((option) => option.label);
-			const selector = new ExtensionSelectorComponent(
-				prompt.message,
-				labels,
-				(optionLabel) => {
-					restoreDialog();
-					resolve(prompt.options.find((option) => option.label === optionLabel)?.id);
-				},
-				() => {
-					restoreDialog();
-					resolve(undefined);
-				},
-			);
-			this.activateView(this.createDedicatedView(selector), selector);
-		});
-	}
-
-	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
-		const previousView = this.activeView;
-		const previousFocus = this.ui.getFocusedComponent();
-		const providerInfo = this.session.modelRegistry.client.getOAuthProvider(providerId);
-		const previousModel = this.session.model;
-
-		// Providers that use callback servers (can paste redirect URL)
-		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
-
-		// Create login dialog component
-		const dialog = new LoginDialogComponent(
-			this.ui,
-			providerId,
-			(_success, _message) => {
-				// Completion handled below
-			},
-			providerName,
-		);
-
-		this.activateView(this.createDedicatedView(dialog), dialog);
-
-		// Promise for manual code input (racing with callback server)
-		let manualCodeResolve: ((code: string) => void) | undefined;
-		let manualCodeReject: ((err: Error) => void) | undefined;
-		const manualCodePromise = new Promise<string>((resolve, reject) => {
-			manualCodeResolve = resolve;
-			manualCodeReject = reject;
-		});
-
-		// Restore the view that opened the login flow.
-		const restoreEditor = () => this.activateView(previousView, previousFocus ?? this.editor);
-
-		try {
-			await this.session.modelRegistry.login(providerId, {
-				onAuth: (info: { url: string; instructions?: string }) => {
-					dialog.showAuth(info.url, info.instructions);
-
-					if (usesCallbackServer) {
-						// Show input for manual paste, racing with callback
-						dialog
-							.showManualInput("Paste redirect URL below, or complete login in browser:")
-							.then((value) => {
-								if (value && manualCodeResolve) {
-									manualCodeResolve(value);
-									manualCodeResolve = undefined;
-								}
-							})
-							.catch(() => {
-								if (manualCodeReject) {
-									manualCodeReject(new Error("Login cancelled"));
-									manualCodeReject = undefined;
-								}
-							});
-					}
-					// For Anthropic: onPrompt is called immediately after
-				},
-
-				onDeviceCode: (info) => {
-					dialog.showDeviceCode(info);
-					dialog.showWaiting("Waiting for authentication...");
-				},
-
-				onPrompt: async (prompt: { message: string; placeholder?: string }) => {
-					return dialog.showPrompt(prompt.message, prompt.placeholder);
-				},
-
-				onProgress: (message: string) => {
-					dialog.showProgress(message);
-				},
-
-				onSelect: (prompt: OAuthSelectPrompt) => this.showOAuthLoginSelect(dialog, prompt),
-
-				onManualCodeInput: () => manualCodePromise,
-
-				signal: dialog.signal,
-			});
-
-			// Success
-			restoreEditor();
-			await this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel);
-		} catch (error: unknown) {
-			restoreEditor();
-			const errorMsg = error instanceof Error ? error.message : String(error);
-			if (errorMsg !== "Login cancelled") {
-				this.showError(`Failed to login to ${providerName}: ${errorMsg}`);
-			}
-		}
 	}
 
 	// =========================================================================
@@ -6937,6 +6854,7 @@ export class InteractiveMode {
 		try {
 			// The host reloads the conversation's resources and settings; the TUI reloads its own.
 			await this.sessions.reload();
+			if (!this.followSettings()) await this.settingsManager.reload();
 			this.keybindings.reload();
 			if (isExpandable(this.builtInHeader)) {
 				this.builtInHeader.setExpanded(this.toolOutputExpanded);
@@ -7223,27 +7141,27 @@ export class InteractiveMode {
 
 	private async handleFastCommand(text: string): Promise<void> {
 		const argument = text.slice("/fast".length).trim();
-		let enabled: boolean;
-		if (argument === "") {
-			enabled = !this.session.fastModeEnabled;
-		} else if (argument === "on") {
-			enabled = true;
-		} else if (argument === "off") {
-			enabled = false;
-		} else {
+		if (argument !== "" && argument !== "on" && argument !== "off") {
 			this.showWarning("Usage: /fast [on|off]");
 			return;
 		}
-
+		await this.clientConnected.promise;
+		const wasEnabled = this.store.state.fastMode;
+		const enabled = argument === "" ? !wasEnabled : argument === "on";
 		try {
-			const { outcome } = await intentRegistry.invoke(this.intentContext(), "set_fast_mode", { enabled });
-			if (enabled) {
-				this.showWarning(describeFastModeChange(outcome));
-			} else {
-				this.showStatus(describeFastModeChange(outcome));
-			}
+			await this.store.client.intent("set_fast_mode", { enabled });
 		} catch (error: unknown) {
 			this.showWarning(error instanceof Error ? error.message : String(error));
+			return;
+		}
+		if (enabled) {
+			this.showWarning(
+				wasEnabled
+					? "Fast mode already enabled. Priority processing may cost more."
+					: "Fast mode enabled. Priority processing may cost more.",
+			);
+		} else {
+			this.showStatus(wasEnabled ? "Fast mode disabled" : "Fast mode already disabled");
 		}
 	}
 
@@ -7320,10 +7238,19 @@ export class InteractiveMode {
 	}
 
 	private async handleUsageCommand(): Promise<void> {
-		const report = await this.subscriptionUsageService.fetch(
-			this.session.modelRegistry,
-			this.session.model?.provider,
-		);
+		await this.clientConnected.promise;
+		const client = this.store.client;
+		let report: QueryResult<"subscription_usage">;
+		let providers: readonly AuthProvider[];
+		try {
+			[report, { providers }] = await Promise.all([
+				client.query("subscription_usage"),
+				client.query("auth.providers"),
+			]);
+		} catch (error: unknown) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 		if (report.status === "no_subscription") {
 			this.showStatus("No subscription login is configured. Use /login to connect a supported provider.");
 			return;
@@ -7335,7 +7262,8 @@ export class InteractiveMode {
 
 		const sections: string[] = [];
 		for (const provider of report.providers) {
-			const providerName = this.session.modelRegistry.getProviderDisplayName(provider.providerId);
+			const providerName =
+				providers.find((candidate) => candidate.id === provider.providerId)?.name ?? provider.providerId;
 			if (provider.result.status === "error") {
 				sections.push(
 					`${theme.bold(providerName)}\n  ${theme.fg("warning", this.formatSubscriptionUsageError(provider.result.error))}`,
@@ -7371,24 +7299,34 @@ export class InteractiveMode {
 			if (seconds < 60) return `${seconds}s`;
 			return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 		};
+		const disabled = "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
 
+		await this.clientConnected.promise;
+		const client = this.store.client;
 		let info: string;
-		const status = this.session.getLspStatus();
+		let status: QueryResult<"lsp.status">;
+		try {
+			status = await client.query("lsp.status");
+		} catch (error) {
+			this.showError(`Could not read LSP status: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
 		if (args === "restart") {
-			const count = this.session.restartLspServers();
-			info = status.enabled
-				? `Stopped ${count} language server${count === 1 ? "" : "s"}. Servers respawn on next use.\nThis includes servers shared with subagents.`
-				: "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
+			if (status.enabled) {
+				const count = (await client.intent("lsp.restart")).result?.stopped ?? 0;
+				info = `Stopped ${count} language server${count === 1 ? "" : "s"}. Servers respawn on next use.\nThis includes servers shared with subagents.`;
+			} else {
+				info = disabled;
+			}
 		} else if (args === "trace" || args?.startsWith("trace ")) {
 			if (!status.enabled) {
-				info = "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
+				info = disabled;
 			} else {
 				const traceArg = args === "trace" ? undefined : args.slice(6).trim();
+				await this.closeLspTrace();
 				if (traceArg === "off") {
-					await this.closeLspTrace();
 					info = "LSP tracing disabled.";
 				} else {
-					await this.closeLspTrace();
 					let tracePath: string;
 					if (traceArg && traceArg.length > 0) {
 						tracePath = traceArg;
@@ -7398,9 +7336,9 @@ export class InteractiveMode {
 						tracePath = path.join(scratchDirectory, "trace.log");
 					}
 					try {
-						await this.session.setLspTraceFile(tracePath);
-						const resolvedTracePath = this.session.getLspStatus().traceFile ?? tracePath;
-						info = `LSP tracing enabled: ${resolvedTracePath}\nUse /lsp trace off to disable.`;
+						const traceFile = (await client.intent("lsp.set_trace", { path: tracePath })).result?.traceFile;
+						this.lspTracing = true;
+						info = `LSP tracing enabled: ${traceFile ?? tracePath}\nUse /lsp trace off to disable.`;
 					} catch (error) {
 						if (this.lspTraceScratchDirectory) {
 							this.removeScratchDirectory(this.lspTraceScratchDirectory);
@@ -7458,59 +7396,60 @@ export class InteractiveMode {
 	}
 
 	private async handleMcpCommand(args?: string): Promise<void> {
-		const manager = this.session.getMcpManager();
-		let info: string;
-		if (!manager) {
-			info = "MCP is not configured. Add servers to ~/.volt/agent/mcp.json, .mcp.json, or .volt/mcp.json.";
-		} else {
-			const [action, server] = (args ?? "").split(/\s+/, 2);
-			try {
-				if ((action === "connect" || action === "refresh") && server) {
-					await manager.connectServer(server);
-					await this.session.reload();
-				} else if (action === "disconnect" && server) {
-					await manager.disconnectServer(server);
-				}
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				info = `${theme.bold("MCP Servers")}\n\n${theme.fg("error", message)}`;
-				this.chatContainer.addChild(new Spacer(1));
-				this.chatContainer.addChild(new Text(info, 1, 0));
-				this.ui.requestRender();
-				return;
+		await this.clientConnected.promise;
+		const client = this.store.client;
+		const showInfo = (info: string): void => {
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(info, 1, 0));
+			this.ui.requestRender();
+		};
+		const [action, server] = (args ?? "").split(/\s+/, 2);
+		let servers: QueryResult<"mcp.servers">["servers"];
+		try {
+			if ((action === "connect" || action === "refresh") && server) {
+				await client.intent(action === "connect" ? "mcp.connect" : "mcp.refresh", { server });
+				// The conversation takes the server's tools as it reloads.
+				await client.intent("reload").catch((error: unknown) => {
+					this.showWarning(
+						`Reload to use the server's tools: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				});
+			} else if (action === "disconnect" && server) {
+				await client.intent("mcp.disconnect", { server });
 			}
-
-			const currentManager = this.session.getMcpManager() ?? manager;
-			const servers = currentManager.listServers();
-			info = `${theme.bold("MCP Servers")}\n`;
-			if (servers.length === 0) {
-				info += "\nNo MCP servers configured.";
-			} else {
-				for (const entry of servers) {
-					const statusColor =
-						entry.status === "ready" || entry.status === "connected"
-							? "success"
-							: entry.status === "error" || entry.status === "needs_auth"
-								? "error"
-								: "muted";
-					info += `\n${theme.bold(entry.displayName)} ${theme.fg("dim", `(${entry.id})`)} ${theme.fg(statusColor, entry.status)}\n`;
-					info += `${theme.fg("dim", "Source:")} ${entry.sourceLabel} (${entry.sourceScope})\n`;
-					info += `${theme.fg("dim", "Transport:")} ${entry.transport} ${theme.fg("dim", "Lifecycle:")} ${entry.lifecycle}\n`;
-					info += `${theme.fg("dim", "Tools:")} ${entry.toolCounts.enabled ?? entry.toolCounts.cached} enabled / ${entry.toolCounts.cached} cached`;
-					if (entry.resourceCount !== undefined || entry.promptCount !== undefined) {
-						info += ` ${theme.fg("dim", "Resources:")} ${entry.resourceCount ?? 0} ${theme.fg("dim", "Prompts:")} ${entry.promptCount ?? 0}`;
-					}
-					if (entry.lastError) {
-						info += `\n${theme.fg("error", entry.lastError)}`;
-					}
-					info += "\n";
-				}
-				info += `\n${theme.fg("dim", "Use /mcp connect <server>, /mcp refresh <server>, or /mcp disconnect <server>.")}`;
-			}
+			servers = (await client.query("mcp.servers")).servers;
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			showInfo(`${theme.bold("MCP Servers")}\n\n${theme.fg("error", message)}`);
+			return;
 		}
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(info, 1, 0));
-		this.ui.requestRender();
+
+		if (servers.length === 0) {
+			showInfo("MCP is not configured. Add servers to ~/.volt/agent/mcp.json, .mcp.json, or .volt/mcp.json.");
+			return;
+		}
+		let info = `${theme.bold("MCP Servers")}\n`;
+		for (const entry of servers) {
+			const statusColor =
+				entry.status === "ready" || entry.status === "connected"
+					? "success"
+					: entry.status === "error" || entry.status === "needs_auth"
+						? "error"
+						: "muted";
+			info += `\n${theme.bold(entry.displayName)} ${theme.fg("dim", `(${entry.id})`)} ${theme.fg(statusColor, entry.status)}\n`;
+			info += `${theme.fg("dim", "Source:")} ${entry.sourceLabel} (${entry.sourceScope})\n`;
+			info += `${theme.fg("dim", "Transport:")} ${entry.transport} ${theme.fg("dim", "Lifecycle:")} ${entry.lifecycle}\n`;
+			info += `${theme.fg("dim", "Tools:")} ${entry.toolCounts.enabled ?? entry.toolCounts.cached} enabled / ${entry.toolCounts.cached} cached`;
+			if (entry.resourceCount !== undefined || entry.promptCount !== undefined) {
+				info += ` ${theme.fg("dim", "Resources:")} ${entry.resourceCount ?? 0} ${theme.fg("dim", "Prompts:")} ${entry.promptCount ?? 0}`;
+			}
+			if (entry.lastError) {
+				info += `\n${theme.fg("error", entry.lastError)}`;
+			}
+			info += "\n";
+		}
+		info += `\n${theme.fg("dim", "Use /mcp connect <server>, /mcp refresh <server>, or /mcp disconnect <server>.")}`;
+		showInfo(info);
 	}
 
 	private handleChangelogCommand(): void {
@@ -7717,10 +7656,11 @@ export class InteractiveMode {
 	private async handleDebugCommand(): Promise<void> {
 		this.quitConfirmation = undefined;
 		this.lastSigintTime = 0;
-		const session = this.session;
-		const canNotify = () => this.isInitialized && !this.isShuttingDown && this.session === session;
+		await this.clientConnected.promise;
+		const conversation = this.store.conversation;
+		const canNotify = () => this.isInitialized && !this.isShuttingDown && this.store.conversation === conversation;
 		try {
-			const debugLogPath = await session.captureToolProgressDiagnostics();
+			const debugLogPath = (await this.store.client.query("debug_report")).path;
 			if (!canNotify()) return;
 			this.chatContainer.addChild(new Spacer(1));
 			this.chatContainer.addChild(
@@ -7758,14 +7698,31 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * The completions the conversation's review intents offer for `field` of
+	 * `intent`: the workspace's base branches, recent commits, and its
+	 * current branch's pull request, as the host reads them.
+	 */
+	private async reviewCompletions(
+		intent: "review_branch" | "review_commit" | "review_pr",
+		field: string,
+	): Promise<readonly IntentOption[]> {
+		try {
+			return (await this.store.client.query("intent_completions", { intent, field, prefix: "" })).completions;
+		} catch {
+			return [];
+		}
+	}
+
 	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
 		const branchLabel = "Against base branch";
 		const uncommittedLabel = "Uncommitted changes";
 		const prLabel = "Pull request";
 		const commitLabel = "Specific commit";
-		const currentPullRequest = await probeCurrentBranchPullRequest(this.sessionManager.getCwd());
+		// The current branch's pull request, pinned by its URL as the picker shows it.
+		const currentPullRequest = (await this.reviewCompletions("review_pr", "url"))[0];
 		const currentPullRequestLabel = currentPullRequest
-			? `Current PR #${currentPullRequest.number} — ${currentPullRequest.title}`
+			? `Current PR ${sanitizeText(currentPullRequest.label ?? currentPullRequest.value)}`
 			: undefined;
 		const choice = await this.showExtensionSelector("Review what?", [
 			...(currentPullRequestLabel ? [currentPullRequestLabel] : []),
@@ -7778,11 +7735,7 @@ export class InteractiveMode {
 			return undefined;
 		}
 		if (choice === currentPullRequestLabel && currentPullRequest) {
-			return {
-				kind: "pr",
-				number: String(currentPullRequest.number),
-				expectedUrl: currentPullRequest.url,
-			};
+			return { kind: "pr", expectedUrl: currentPullRequest.value };
 		}
 		if (choice === branchLabel) {
 			const base = await this.promptForReviewBaseBranch();
@@ -7807,59 +7760,49 @@ export class InteractiveMode {
 
 	/** Show logical local/upstream base branches and return the selected target. */
 	private async promptForReviewBaseBranch(): Promise<string | undefined> {
-		const branches = await listBaseBranches(this.sessionManager.getCwd());
-		if ("error" in branches) {
-			this.showError(branches.error);
-			return undefined;
-		}
+		const branches = await this.reviewCompletions("review_branch", "base");
 		if (branches.length === 0) {
 			this.showError("No branches to review against.");
 			return undefined;
 		}
-		return this.showExtensionSelector("Select base branch", branches);
+		const labels = branches.map((branch) => sanitizeText(branch.value));
+		const choice = await this.showExtensionSelector("Select base branch", labels);
+		return choice === undefined ? undefined : branches[labels.indexOf(choice)]?.value;
 	}
 
 	/** Show a recent-commit picker and return the selected SHA. */
 	private async promptForReviewCommit(): Promise<string | undefined> {
-		const commits = await listRecentCommits(this.sessionManager.getCwd());
-		if ("error" in commits) {
-			this.showError(commits.error);
-			return undefined;
-		}
+		const commits = await this.reviewCompletions("review_commit", "ref");
 		if (commits.length === 0) {
 			this.showError("No commits to review.");
 			return undefined;
 		}
-		const labels = commits.map((commit) => `${commit.sha} ${commit.subject} (${commit.date})`);
+		const labels = commits.map((commit) =>
+			sanitizeText(
+				commit.label === undefined
+					? commit.value
+					: `${commit.value} ${commit.label}${commit.description === undefined ? "" : ` (${commit.description})`}`,
+			),
+		);
 		const choice = await this.showExtensionSelector("Review which commit?", labels);
 		if (choice === undefined) {
 			return undefined;
 		}
-		return commits[labels.indexOf(choice)]?.sha;
+		return commits[labels.indexOf(choice)]?.value;
 	}
 
-	private formatReviewToolSource(tool: ToolInfo): string {
-		const source = tool.sourceInfo.source.trim();
-		if (source === "builtin") {
-			return "builtin";
-		}
-		if (source === "sdk") {
-			return "custom";
-		}
-		const prefix =
-			tool.sourceInfo.scope === "user" ? "user" : tool.sourceInfo.scope === "project" ? "project" : "temporary";
-		return source ? `${prefix}:${source}` : prefix;
-	}
-
-	private getReviewToolsForRun(): string[] {
-		const unavailableInReview = new Set(["read", "grep", "find", "ls", "edit", "write"]);
-		const availableToolNames = new Set(
-			this.session
-				.getAllTools()
-				.map((tool) => tool.name)
-				.filter((name) => !unavailableInReview.has(name)),
-		);
+	/**
+	 * The auxiliary tools the TUI's reviews may use besides their snapshot
+	 * tools (the `reviewTools` setting), of those the conversation offers
+	 * reviews: not its workspace file tools.
+	 */
+	private async getReviewToolsForRun(): Promise<string[]> {
 		const configuredTools = this.settingsManager.getReviewTools() ?? [];
+		if (configuredTools.length === 0) return [];
+		const { tools } = await this.store.client.query("tools");
+		const availableToolNames = new Set(
+			tools.map((tool) => tool.name).filter((name) => !MUTABLE_WORKSPACE_REVIEW_TOOLS.has(name)),
+		);
 		const selectedTools = configuredTools.filter((name) => availableToolNames.has(name));
 		if (selectedTools.length !== configuredTools.length) {
 			this.showWarning("Some configured auxiliary review tools are unavailable and were omitted.");
@@ -7890,21 +7833,26 @@ export class InteractiveMode {
 	}
 
 	private async configureReviewTools(): Promise<void> {
-		const unavailableInReview = new Set(["read", "grep", "find", "ls", "edit", "write"]);
-		const tools = this.session.getAllTools().filter((tool) => !unavailableInReview.has(tool.name));
+		let tools: QueryResult<"tools">["tools"];
+		try {
+			tools = (await this.store.client.query("tools")).tools.filter(
+				(tool) => !MUTABLE_WORKSPACE_REVIEW_TOOLS.has(tool.name),
+			);
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
+			return;
+		}
 		if (tools.length === 0) {
 			this.showError("No auxiliary tools are available to configure for review. Snapshot tools remain enabled.");
 			return;
 		}
 
-		const activeTools = new Set(this.session.getActiveToolNames());
-		const configuredTools = this.settingsManager.getReviewTools();
-		const selectedTools = new Set(configuredTools ?? []);
+		const selectedTools = new Set(this.settingsManager.getReviewTools() ?? []);
 		const options = tools.map((tool) => ({
 			name: tool.name,
 			description: tool.description,
-			source: this.formatReviewToolSource(tool),
-			active: activeTools.has(tool.name),
+			source: tool.source,
+			active: tool.active,
 			selected: selectedTools.has(tool.name),
 		}));
 
@@ -7922,7 +7870,9 @@ export class InteractiveMode {
 	}
 
 	private async handleReviewCommand(argsText: string): Promise<void> {
-		if (this.session.isStreaming || this.session.isCompacting) {
+		await this.clientConnected.promise;
+		const operation = this.store.phase?.operation ?? null;
+		if (operation !== null) {
 			this.showWarning("Wait for the current response to finish before starting a review.");
 			return;
 		}
@@ -7954,21 +7904,65 @@ export class InteractiveMode {
 			target = { kind: "commit", sha };
 		}
 
-		await this.runInteractiveReviewWorkflow(target, {
-			tools: this.getReviewToolsForRun(),
-			requireConfirmation: false,
-			requireProjectTrust: false,
-			controls: parsedArgs.controls,
-		});
+		await this.runReview(target, parsedArgs.controls);
+	}
+
+	/** Start a review of `target` through the conversation's review intent; resolves its work id. */
+	private async startReview(target: ReviewTarget, controls: ReviewRunControls | undefined): Promise<string> {
+		const client = this.store.client;
+		const tools = await this.getReviewToolsForRun();
+		const options = {
+			...(controls?.focus === undefined ? {} : { focus: controls.focus }),
+			...(controls === undefined || controls.scope.length === 0 ? {} : { scope: controls.scope.join(",") }),
+			...(controls === undefined
+				? {}
+				: { effort: controls.effort, includeOptional: controls.includeOptional, scopeMode: controls.scopeMode }),
+			...(tools.length === 0 ? {} : { tools }),
+		};
+		let accepted: { result?: { workId: string } };
+		switch (target.kind) {
+			case "uncommitted":
+				accepted = await client.intent("review_uncommitted", options);
+				break;
+			case "branch":
+				accepted = await client.intent("review_branch", {
+					...options,
+					...(target.base === undefined ? {} : { base: target.base }),
+				});
+				break;
+			case "pr":
+				accepted = await client.intent("review_pr", {
+					...options,
+					...(target.number === undefined ? {} : { number: target.number }),
+					...(target.expectedUrl === undefined ? {} : { url: target.expectedUrl }),
+				});
+				break;
+			case "commit":
+				if (target.sha === undefined) throw new Error("No commit to review");
+				accepted = await client.intent("review_commit", { ...options, ref: target.sha });
+				break;
+		}
+		const workId = accepted.result?.workId;
+		if (workId === undefined) throw new Error("The review did not start");
+		return workId;
 	}
 
 	/**
-	 * The local UI of a review this TUI runs as work `workId`: a loader that
-	 * shows the work's progress and its accounting detail as every client sees
-	 * them (the live `work/<workId>` value), and the review conversation live
-	 * in the transcript.
+	 * Run a review as the conversation's detached `review` work (D2) and show
+	 * it until it ends: a loader shows the work's progress and accounting,
+	 * its passes draw inline in the chat, and the footer shows its usage.
+	 * Escape cancels it (`cancel_work`). A completed review opens its findings
+	 * in a new conversation (`review_open_session`) while the loader shows.
 	 */
-	private createReviewWorkflowHooks(workId: string): ReviewWorkflowHooks {
+	private async runReview(target: ReviewTarget, controls: ReviewRunControls | undefined): Promise<void> {
+		if (this.activeReview) {
+			this.showWarning("A review is already running. Cancel it before starting another.");
+			return;
+		}
+		this.activeReview = true;
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
+		const client = this.store.client;
 		const loader = new BorderedLoader(this.ui, theme, "Preparing review…");
 		const detail = createUiNodeView();
 		this.editorContainer.clear();
@@ -7977,274 +7971,67 @@ export class InteractiveMode {
 		this.ui.setFocus(loader);
 		this.ui.requestRender();
 
-		let baseMessage = "Preparing review…";
-		let reviewRenderer: InlineSessionRenderer | undefined;
-		let cleanedUp = false;
-		const showProgress = (): void => {
-			const view = this.work.items().find((candidate) => candidate.item.workId === workId);
-			const live = view?.live;
-			const text = live?.progress?.text;
-			loader.setMessage(text ? (reviewRenderer ? `${baseMessage} ${text}` : text) : baseMessage);
+		let workId: string | undefined;
+		let view: ReviewView | undefined;
+		const cancel = (): void => {
+			loader.setMessage("Cancelling review…");
+			if (workId !== undefined) void client.intent("cancel_work", { workId }).catch(() => undefined);
+		};
+		loader.signal.addEventListener("abort", cancel, { once: true });
+		const show = (): void => {
+			const progress = view?.progress();
+			if (!loader.signal.aborted) loader.setMessage(progress?.text ?? "Preparing review…");
 			try {
-				detail.update(live?.detail === undefined ? [] : [live.detail]);
+				detail.update(progress?.detail === undefined ? [] : [progress.detail]);
 			} catch {
 				detail.update([]);
 			}
+			this.transientUsage = view?.usage(this.catalogs.models?.models);
 			this.ui.requestRender();
 		};
-		const unsubscribe = this.work.subscribe(showProgress);
-		return {
-			signal: loader.signal,
-			onPrepared: (resolution, model) => {
-				baseMessage = `Reviewing ${resolution.description} with ${model.id}…`;
-				loader.setMessage(baseMessage);
-				this.editorContainer.clear();
-				this.editorContainer.addChild(loader);
-				this.editorContainer.addChild(detail);
-				this.ui.setFocus(loader);
-				// Render the isolated review session live in the transcript so it reads like
-				// a normal conversation. This remains transient and is removed on handoff.
-				reviewRenderer = this.createInlineSessionRenderer({
-					headerText: theme.fg("accent", `Reviewing ${resolution.description} with ${model.id}`),
-					transformAssistantMessage: (message) => ({
-						...message,
-						content: message.content.map((part) =>
-							part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
-						),
-					}),
-				});
-				this.ui.requestRender();
-			},
-			onSessionEvent: (event) => reviewRenderer?.onSessionEvent(event),
-			onUsage: (usage) => {
-				this.transientUsage = usage;
-				this.ui.requestRender();
-			},
-			cleanup: () => {
-				if (cleanedUp) return;
-				cleanedUp = true;
-				unsubscribe();
-				this.transientUsage = undefined;
-				reviewRenderer?.dispose();
-				loader.dispose();
-				detail.dispose();
-				this.editorContainer.clear();
-				this.editorContainer.addChild(this.editor);
-				this.ui.setFocus(this.editor);
-				this.ui.requestRender();
-			},
-		};
-	}
-
-	/**
-	 * Build a scoped, display-only renderer for an isolated child session's event
-	 * stream (review runs and subagent conversations). It reuses the normal
-	 * assistant/tool components but keeps its own streaming/pending-tool state so
-	 * it never collides with the main session's live rendering.
-	 */
-	private createInlineSessionRenderer(options: {
-		headerText: string;
-		transformAssistantMessage?: (message: AssistantMessage) => AssistantMessage;
-	}): InlineSessionRenderer {
-		const group = new Container();
-		const header = new Text(options.headerText, 1, 0);
-		group.addChild(new Spacer(1));
-		group.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-		group.addChild(header);
-		group.addChild(new Spacer(1));
-		this.chatContainer.addChild(group);
-
-		let streaming: AssistantMessageComponent | undefined;
-		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
-		const pending = new Map<string, PresentedToolComponent>();
-
-		const forDisplay = options.transformAssistantMessage ?? ((message: AssistantMessage) => message);
-		// The review's pass sessions run in this process, so their calls present here, with the session's presenters.
-		const session = this.session;
-		const createToolRow = (toolName: string, args: unknown): PresentedToolComponent =>
-			new PresentedToolComponent(toolName, args, () => session.presenters, this.ui, this.sessionManager.getCwd(), {
-				showImages: this.settingsManager.getShowImages(),
-				imageWidthCells: this.settingsManager.getImageWidthCells(),
-				liveProgress: true,
-			});
-
-		const upsertToolCalls = (message: AssistantMessage): void => {
-			for (const part of message.content) {
-				if (part.type !== "toolCall") continue;
-				const existing = pending.get(part.id);
-				if (existing) {
-					existing.updateArgs(part.arguments);
-					continue;
-				}
-				const component = createToolRow(part.name, part.arguments);
-				component.setExpanded(this.toolOutputExpanded);
-				group.addChild(component);
-				pending.set(part.id, component);
-			}
-		};
-
-		const onSessionEvent = (event: AgentSessionEvent): void => {
-			switch (event.type) {
-				case "message_start":
-					if (event.message.role === "assistant") {
-						streamingRenderCoalescer?.dispose();
-						streaming = new AssistantMessageComponent(
-							undefined,
-							this.hideThinkingBlock,
-							this.getMarkdownThemeWithSettings(),
-						);
-						group.addChild(streaming);
-						streamingRenderCoalescer = new StreamingRenderCoalescer((message: AssistantMessage) => {
-							streaming?.updateContent(forDisplay(message));
-							this.ui.requestRender();
-						});
-						streamingRenderCoalescer.commitNow(event.message);
-					}
-					break;
-				case "message_update":
-					if (streaming && event.message.role === "assistant") {
-						if (isCoalescableAssistantUpdate(event.assistantMessageEvent.type)) {
-							streamingRenderCoalescer?.update(event.message);
-						} else {
-							streamingRenderCoalescer?.commitNow(event.message);
-						}
-						if (event.assistantMessageEvent.type.startsWith("toolcall_")) {
-							upsertToolCalls(event.message);
-						}
-					}
-					return;
-				case "message_end":
-					if (streaming && event.message.role === "assistant") {
-						streamingRenderCoalescer?.finish(event.message);
-						streamingRenderCoalescer = undefined;
-						for (const component of pending.values()) {
-							component.setArgsComplete();
-						}
-						streaming = undefined;
-					}
-					return;
-				case "tool_execution_start": {
-					let component = pending.get(event.toolCallId);
-					if (!component) {
-						component = createToolRow(event.toolName, event.args);
-						component.setExpanded(this.toolOutputExpanded);
-						group.addChild(component);
-						pending.set(event.toolCallId, component);
-					}
-					component.markExecutionStarted();
-					break;
-				}
-				case "tool_execution_update": {
-					pending.get(event.toolCallId)?.updateResult({ ...event.partialResult, isError: false }, true);
-					break;
-				}
-				case "tool_execution_end": {
-					const component = pending.get(event.toolCallId);
-					if (component) {
-						component.updateResult({ ...event.result, isError: event.isError });
-						pending.delete(event.toolCallId);
-					}
-					break;
-				}
-				default:
-					return;
-			}
-			this.ui.requestRender();
-		};
-
-		return {
-			onSessionEvent,
-			dispose: () => {
-				streamingRenderCoalescer?.dispose();
-				streamingRenderCoalescer = undefined;
-				for (const component of pending.values()) {
-					component.dispose();
-				}
-				pending.clear();
-				this.chatContainer.removeChild(group);
-				this.ui.requestRender();
-			},
-		};
-	}
-
-	private async runInteractiveReviewWorkflow(
-		target: ReviewTarget,
-		options: {
-			tools: readonly string[];
-			requireConfirmation: boolean;
-			requireProjectTrust: boolean;
-			controls?: Partial<ReviewRunControls>;
-			parentRunId?: string;
-		},
-	): Promise<ReviewWorkflowResult> {
-		if (this.activeInteractiveReview) {
-			this.showWarning("A review is already running. Cancel it before starting another.");
-			return { status: "cancelled" };
-		}
-		this.activeInteractiveReview = true;
-		this.quitConfirmation = undefined;
-		this.lastSigintTime = 0;
-		let diagnosticRetentionWarning: string | undefined;
 		try {
-			const result = await runReviewWorkflow({
-				target,
-				controls: options.controls,
-				...(options.parentRunId ? { parentRunId: options.parentRunId } : {}),
-				cwd: this.sessionManager.getCwd(),
-				agentDir: this.conversation.services.agentDir,
-				session: this.session,
-				newSession: (newSessionOptions) => openNewSession(this.host, this.hostClient, newSessionOptions),
-				authStorage: this.session.modelRegistry.authStorage,
-				settingsManager: this.settingsManager,
-				tools: options.tools,
-				requireConfirmation: options.requireConfirmation,
-				requireProjectTrust: options.requireProjectTrust,
-				confirm: ({ title, message, signal }) =>
-					this.showExtensionConfirm(title, message, signal ? { signal } : undefined),
-				onReviewModelWarning: (message) => this.showWarning(message),
-				onDiagnosticRetentionWarning: (message) => {
-					diagnosticRetentionWarning = message;
+			workId = await this.startReview(target, controls);
+			// Escape while the review prepared cancels it as soon as it runs.
+			if (loader.signal.aborted) cancel();
+			view = new ReviewView({
+				store: this.store,
+				workId,
+				container: this.chatContainer,
+				transcript: {
+					ui: this.ui,
+					markdownTheme: () => this.getMarkdownThemeWithSettings(),
+					hideThinkingBlock: () => this.hideThinkingBlock,
+					toolsExpanded: () => this.toolOutputExpanded,
+					showImages: () => this.settingsManager.getShowImages(),
+					imageWidthCells: () => this.settingsManager.getImageWidthCells(),
 				},
-				createHooks: (workId) => this.createReviewWorkflowHooks(workId),
-				work: this.conversation.work,
+				onChange: show,
 			});
-
-			if (result.status !== "completed") {
-				await this.renderCurrentConversation();
-				this.showStatus("Review cancelled");
-				return result;
+			// How a review that did not complete ended shows as its work's end does (showWorkEnd).
+			if ((await view.finished()).outcome === "completed") {
+				loader.setMessage("Opening the review's findings…");
+				const opened = await client.intent("review_open_session", { runId: workId });
+				if (opened.conversation !== undefined) await this.store.showing(opened.conversation);
+				else this.showStatus("Opening the review's findings was cancelled; open them from /work.");
 			}
-
-			if (result.sessionSwitchCancelled) {
-				this.showStatus("Session switch cancelled; review added to this session.");
-				return result;
-			}
-			await this.renderCurrentConversation();
-			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			await this.renderCurrentConversation();
 			this.showError(
 				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
 			);
-			return { status: "cancelled" };
 		} finally {
-			this.activeInteractiveReview = false;
+			loader.signal.removeEventListener("abort", cancel);
+			view?.dispose();
+			this.transientUsage = undefined;
+			loader.dispose();
+			detail.dispose();
+			this.editorContainer.clear();
+			this.editorContainer.addChild(this.editor);
+			this.ui.setFocus(this.editor);
+			this.activeReview = false;
 			this.quitConfirmation = undefined;
 			this.lastSigintTime = 0;
-			// Handoff and renderCurrentConversation clear transient chat rows. Warn only
-			// after they settle, including cancellation and failure paths, without persistence.
-			if (diagnosticRetentionWarning) {
-				try {
-					this.showWarning(diagnosticRetentionWarning);
-				} catch {
-					try {
-						console.warn(`Warning: ${diagnosticRetentionWarning}`);
-					} catch {
-						// A warning observer cannot turn a completed review into a failure.
-					}
-				}
-			}
+			this.ui.requestRender();
 		}
 	}
 

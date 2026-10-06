@@ -7,7 +7,6 @@
 
 import type { LiveValue, ProjectedEntry, RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
 import { renderStyledText } from "@hansjm10/volt-tui";
-import type { SessionUsageProjection } from "../../../core/session-usage.ts";
 import type { FooterModel, FooterUsage, FooterViewModel } from "../components/footer.ts";
 import { TUI_SEMANTIC_THEME } from "../ui-node/semantic-theme.ts";
 import type { TuiCatalogs } from "./tui-catalogs.ts";
@@ -36,8 +35,8 @@ function liveValue<K extends LiveValue["kind"]>(
 
 const hitRates = new WeakMap<readonly ProjectedEntry[], number | undefined>();
 
-/** The cache hit rate of the newest assistant message the client holds, in percent. */
-function latestCacheHitRate(entries: readonly ProjectedEntry[]): number | undefined {
+/** The cache hit rate of the newest assistant message of `entries`, in percent. */
+export function latestCacheHitRate(entries: readonly ProjectedEntry[]): number | undefined {
 	if (hitRates.has(entries)) return hitRates.get(entries);
 	let rate: number | undefined;
 	for (let index = entries.length - 1; index >= 0; index--) {
@@ -118,35 +117,27 @@ export function footerViewModel(store: TuiStore, catalogs: TuiCatalogs, local: F
 	};
 }
 
+/** The usage of another conversation the footer shows in place of the conversation's own, such as a review's. */
+export interface TransientUsage {
+	readonly model: FooterModel;
+	readonly thinkingLevel: string;
+	readonly fastMode: boolean;
+	readonly usage: FooterUsage;
+}
+
 /**
  * `model` showing the usage of another conversation in place of its own,
  * such as a review's: its model, thinking level, Fast mode, and usage. The
  * conversation's prompt-cache status does not apply to it.
  */
-export function withTransientUsage(
-	model: FooterViewModel,
-	transient: SessionUsageProjection | undefined,
-): FooterViewModel {
+export function withTransientUsage(model: FooterViewModel, transient: TransientUsage | undefined): FooterViewModel {
 	if (transient === undefined) return model;
 	return {
 		...model,
-		model: {
-			provider: transient.model.provider,
-			id: transient.model.id,
-			reasoning: transient.model.reasoning,
-			contextWindow: transient.model.contextWindow,
-		},
+		model: transient.model,
 		thinkingLevel: transient.thinkingLevel,
-		fastMode: transient.fastModeEnabled,
-		usage: {
-			input: transient.totals.input,
-			output: transient.totals.output,
-			cacheRead: transient.totals.cacheRead,
-			cacheWrite: transient.totals.cacheWrite,
-			cost: transient.totals.cost,
-			...(transient.latestCacheHitRate === undefined ? {} : { latestCacheHitRate: transient.latestCacheHitRate }),
-			...(transient.contextUsage === undefined ? {} : { contextUsage: transient.contextUsage }),
-		},
+		fastMode: transient.fastMode,
+		usage: transient.usage,
 		promptCache: undefined,
 	};
 }

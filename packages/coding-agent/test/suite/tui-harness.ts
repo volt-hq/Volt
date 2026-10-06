@@ -57,6 +57,8 @@ export interface TuiModeFixture {
 	resume(ref: SessionReference): Promise<{ cancelled: true } | { cancelled: false; sessionId: string }>;
 	/** Connect the mode's client and show its conversation, when it started without. */
 	connect(): Promise<void>;
+	/** Run `text` as the editor submits it: a command, or text to send. */
+	submit(text: string): Promise<void>;
 	/** The terminal's visible rows, joined. */
 	screen(): string;
 }
@@ -86,6 +88,7 @@ export interface TuiHarness extends HostHarness {
 
 interface ModeAccess {
 	renderer: ReturnType<typeof createInteractiveTui>;
+	defaultEditor: { onSubmit?: (text: string) => Promise<void> | void };
 	ui: TUI;
 	editor: unknown;
 	conversationView: unknown;
@@ -173,6 +176,9 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 						return outcome.moved ? { cancelled: false, sessionId: outcome.conversation } : { cancelled: true };
 					},
 					connect,
+					submit: async (text) => {
+						await access.defaultEditor.onSubmit?.(text);
+					},
 					screen: () => terminal.getViewport().join("\n"),
 				};
 			},
@@ -194,6 +200,38 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 		await harness.cleanup();
 		throw error;
 	}
+}
+
+/** The terminal's visible rows once it rendered what the TUI shows now. */
+export async function renderedScreen(tui: TuiModeFixture): Promise<string> {
+	tui.ui.requestRender();
+	await tui.terminal.waitForRender();
+	return tui.screen();
+}
+
+/** Wait until the terminal shows every text; resolves its visible rows. */
+export async function waitForScreen(tui: TuiModeFixture, ...texts: string[]): Promise<string> {
+	let shown = "";
+	await vi.waitFor(
+		async () => {
+			shown = await renderedScreen(tui);
+			for (const text of texts) expect(shown).toContain(text);
+		},
+		{ timeout: 5_000 },
+	);
+	return shown;
+}
+
+/** Pick `option` in the selector the TUI shows: move its highlight (`→`) there, then press Enter. */
+export async function choose(tui: TuiModeFixture, option: string): Promise<void> {
+	await waitForScreen(tui, option);
+	for (let moves = 0; ; moves++) {
+		const highlighted = (await renderedScreen(tui)).split("\n").find((line) => line.includes("→"));
+		if (highlighted?.includes(option)) break;
+		if (moves > 50) throw new Error(`The selector never highlighted ${option}`);
+		tui.terminal.sendInput("\x1b[B");
+	}
+	tui.terminal.sendInput("\r");
 }
 
 /** A phone's stream as the daemon relays it to the TUI: the TUI's end, and the phone's. */

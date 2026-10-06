@@ -5,9 +5,11 @@
  * the host runs; and the dialogs, forms, and approvals the TUI answers, shown
  * one at a time in the order they were asked. A request another client
  * answered, or that ended, closes without an answer. An `editor_text` request
- * is answered at once with the editor's text. A patched panel shows as the
- * client's live fold holds it. Status items, phase, and work progress are
- * read from the store where they show.
+ * is answered at once with the editor's text. A provider sign-in
+ * (`provider_auth`) shows beside the queue, so the prompts its login asks
+ * show while it waits. A patched panel shows as the client's live fold holds
+ * it. Status items, phase, and work progress are read from the store where
+ * they show.
  */
 
 import type {
@@ -24,6 +26,11 @@ import type { UiPanel } from "./ui-node/panels.ts";
 export interface LiveViewHost {
 	/** Show `request` until the user answers or `signal` aborts: the answer, or undefined when it closed without one. */
 	showRequest(request: HostRequest, signal: AbortSignal): Promise<HostResponse | undefined>;
+	/** Show a provider sign-in until the user answers or cancels it, or `signal` aborts as the host ends it. */
+	showProviderAuth(
+		request: Extract<HostRequest, { kind: "provider_auth" }>,
+		signal: AbortSignal,
+	): Promise<HostResponse | undefined>;
 	/** Answer `requestId` in the conversation the TUI shows. */
 	answer(requestId: string, response: HostResponse): void;
 	/** Show, update, or remove the panel under its live key. */
@@ -52,6 +59,7 @@ export const TUI_HOST_REQUESTS: readonly HostRequestKind[] = [
 	"form",
 	"dialog",
 	"approval",
+	"provider_auth",
 	"editor_text",
 ];
 
@@ -73,6 +81,8 @@ export class TuiLiveView {
 	/** Pending requests in the order they were asked; the first shows. */
 	private readonly requests = new Map<string, HostRequest>();
 	private showing: { readonly requestId: string; readonly controller: AbortController } | undefined;
+	/** Provider sign-ins shown beside the queue, by request id. */
+	private readonly signIns = new Map<string, AbortController>();
 
 	constructor(host: LiveViewHost) {
 		this.host = host;
@@ -131,6 +141,10 @@ export class TuiLiveView {
 					this.host.answer(value.requestId, text === undefined ? { cancelled: true } : { value: text });
 					return;
 				}
+				if (value.request.kind === "provider_auth") {
+					this.showSignIn(value.requestId, value.request);
+					return;
+				}
 				this.requests.set(value.requestId, value.request);
 				return;
 			case "work":
@@ -156,6 +170,8 @@ export class TuiLiveView {
 			case "host_request":
 				this.requests.delete(id);
 				if (this.showing?.requestId === id) this.closeShowing();
+				this.signIns.get(id)?.abort();
+				this.signIns.delete(id);
 				return;
 			case "work":
 				if (this.works.delete(id)) this.host.workDetached(id);
@@ -175,6 +191,21 @@ export class TuiLiveView {
 		}
 		this.requests.clear();
 		this.closeShowing();
+		for (const controller of this.signIns.values()) controller.abort();
+		this.signIns.clear();
+	}
+
+	/** Show a provider sign-in beside the queue until it is answered or ends. */
+	private showSignIn(requestId: string, request: Extract<HostRequest, { kind: "provider_auth" }>): void {
+		if (this.signIns.has(requestId)) return;
+		const controller = new AbortController();
+		this.signIns.set(requestId, controller);
+		const settle = (response: HostResponse | undefined): void => {
+			if (controller.signal.aborted) return;
+			this.signIns.delete(requestId);
+			if (response !== undefined) this.host.answer(requestId, response);
+		};
+		void this.host.showProviderAuth(request, controller.signal).then(settle, () => settle(undefined));
 	}
 
 	private closeShowing(): void {

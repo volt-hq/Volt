@@ -3,6 +3,7 @@ import type { ReviewUsageAccounting, UiNode } from "@hansjm10/volt-protocol";
 import type { ParsedReview, ReviewFinding, ReviewLocation } from "./review-report.ts";
 import type { ReviewRunRecord } from "./review-state.ts";
 import { parseReviewUsage } from "./review-usage.ts";
+import type { SessionUsageTotals } from "./session-usage.ts";
 
 export const STATIC_REVIEW_LIMITATION = "Static review only. This review did not run tests or runtime checks.";
 
@@ -248,6 +249,28 @@ export function reviewUsageDetail(usage: ReviewUsageAccounting): UiNode {
 				value: estimate ? `$${estimate.total.toFixed(6)} USD` : "unavailable",
 			},
 		],
+	};
+}
+
+/**
+ * The cumulative token use and model-priced cost a review's work detail
+ * ({@link reviewUsageDetail}) reports; undefined when it reports no tokens.
+ */
+export function reviewUsageTotals(detail: UiNode | undefined): SessionUsageTotals | undefined {
+	if (detail?.type !== "keyValue" || detail.key !== "review-usage") return undefined;
+	const value = (key: string): string => {
+		const text = detail.items.find((item) => item.key === key)?.value;
+		return typeof text === "string" ? text : "";
+	};
+	const tokens = /^(\d+) input, (\d+) output, (\d+) cache read, (\d+) cache write$/.exec(value("tokens"));
+	if (!tokens) return undefined;
+	const estimate = /^\$(\d+(?:\.\d+)?) USD$/.exec(value("estimate"));
+	return {
+		input: Number(tokens[1]),
+		output: Number(tokens[2]),
+		cacheRead: Number(tokens[3]),
+		cacheWrite: Number(tokens[4]),
+		cost: estimate ? Number(estimate[1]) : 0,
 	};
 }
 

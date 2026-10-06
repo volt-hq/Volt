@@ -3,7 +3,9 @@
  * clears, or that a reset no longer carries, detached; panels follow their
  * values and, patched, show as the client's live fold holds them; notices
  * reach the TUI with their source and detail, the host's own included; an
- * `editor_text` request is answered at once with the editor's text.
+ * `editor_text` request is answered at once with the editor's text; a
+ * provider sign-in shows beside the queue, so the prompts its login asks
+ * show while it waits.
  */
 
 import {
@@ -14,13 +16,14 @@ import {
 	type LiveItem,
 	type LiveValue,
 } from "@hansjm10/volt-protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { type LiveViewHost, TUI_HOST_REQUESTS, TuiLiveView } from "../src/modes/interactive/live-view.ts";
 import type { UiPanel } from "../src/modes/interactive/ui-node/panels.ts";
 
 function createHost(overrides: Partial<LiveViewHost> = {}): LiveViewHost {
 	return {
 		showRequest: async () => undefined,
+		showProviderAuth: async () => undefined,
 		answer: () => {},
 		setPanel: () => {},
 		setTitle: () => {},
@@ -151,5 +154,54 @@ describe("TUI live view", () => {
 		]);
 		expect(shown).toEqual([]);
 		expect(inserted).toEqual(["pasted"]);
+	});
+
+	it("shows a provider sign-in beside the queue until it is answered or ends", async () => {
+		const answers: Array<[string, HostResponse]> = [];
+		const shown: string[] = [];
+		const signIns: Array<{ readonly provider: string; readonly signal: AbortSignal }> = [];
+		const cancelled = Promise.withResolvers<HostResponse>();
+		const view = new TuiLiveView(
+			createHost({
+				showRequest: async (request) => {
+					shown.push(request.kind === "input" ? `input:${request.title}` : request.kind);
+					return { value: "code" };
+				},
+				showProviderAuth: (request, signal) => {
+					signIns.push({ provider: request.provider, signal });
+					return signIns.length === 1 ? new Promise(() => {}) : cancelled.promise;
+				},
+				answer: (requestId, response) => answers.push([requestId, response]),
+			}),
+		);
+		expect(TUI_HOST_REQUESTS).toContain("provider_auth");
+		const ask = (requestId: string, request: Extract<LiveValue, { kind: "host_request" }>["request"]): LiveItem => ({
+			type: "set",
+			key: `host_request/${requestId}`,
+			value: { kind: "host_request", requestId, request },
+		});
+		view.apply({
+			reset: false,
+			items: [
+				ask("auth", { kind: "provider_auth", provider: "acme", flow: "browser", url: "https://acme.test/login" }),
+				ask("code", { kind: "input", title: "Paste the code" }),
+			],
+		});
+		// The login's prompt shows while its sign-in waits.
+		await vi.waitFor(() => expect(answers).toEqual([["code", { value: "code" }]]));
+		expect(shown).toEqual(["input:Paste the code"]);
+		expect(signIns.map((signIn) => signIn.provider)).toEqual(["acme"]);
+
+		// The host ends the sign-in: it closes without an answer.
+		view.apply({ reset: false, items: [{ type: "clear", key: "host_request/auth" }] });
+		expect(signIns[0]?.signal.aborted).toBe(true);
+
+		// Cancelling a sign-in answers it.
+		view.apply({
+			reset: false,
+			items: [ask("device", { kind: "provider_auth", provider: "acme", flow: "device", userCode: "ABCD" })],
+		});
+		cancelled.resolve({ cancelled: true });
+		await vi.waitFor(() => expect(answers).toContainEqual(["device", { cancelled: true }]));
 	});
 });

@@ -333,6 +333,56 @@ describe("store CLI permission review", () => {
 		expect(process.exitCode).toBe(1);
 	});
 
+	it("removes the package when the revision a declined update reinstalls is declined too", async () => {
+		setTerminal(true);
+		const unpinned = "git:https://github.com/volt-hq/Volt";
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json(testCatalog(testCatalogEntry("rtk", {}, NEXT_TEST_STORE_COMMIT)))),
+		);
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [unpinned] }, null, 2));
+		const roots = new Map([
+			[unpinned, writePackage("installed", ["exec"])],
+			[testStoreSource(NEXT_TEST_STORE_COMMIT), writePackage("updated", ["exec", "network"])],
+		]);
+		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockImplementation((source) => roots.get(source));
+		vi.spyOn(DefaultPackageManager.prototype, "installAndPersist").mockResolvedValue(undefined);
+		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
+		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) =>
+			inspection(source, ["exec", "network"]),
+		);
+		vi.mocked(promptConfirm).mockResolvedValue(false);
+
+		await handleStoreCommand(["store", "update", "rtk", "--yes"]);
+
+		expect(promptConfirm).toHaveBeenCalledTimes(2);
+		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(NEXT_TEST_STORE_COMMIT), { local: false });
+		expect(acknowledged()).toEqual({});
+		expect(process.exitCode).toBe(1);
+		const output = logs.join("\n");
+		expect(output).toContain(
+			"Removed git github.com/volt-hq/Volt: the reinstalled revision's permissions were not acknowledged",
+		);
+		expect(output).not.toContain("Kept git github.com/volt-hq/Volt");
+	});
+
+	it("removes a package it installed but cannot find to review", async () => {
+		setTerminal(true);
+		const install = catalogUpdate(TEST_STORE_COMMIT, writePackage("installed", ["exec"]));
+		writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ packages: [] }, null, 2));
+		vi.spyOn(DefaultPackageManager.prototype, "getInstalledPath").mockReturnValue(undefined);
+		const remove = vi.spyOn(DefaultPackageManager.prototype, "removeAndPersist").mockResolvedValue(true);
+		inspectorMock.inspectStorePackage.mockImplementation(async ({ source }) => inspection(source, ["exec"]));
+
+		await handleStoreCommand(["store", "install", "rtk", "--yes"]);
+
+		expect(install).toHaveBeenCalledOnce();
+		expect(remove).toHaveBeenCalledExactlyOnceWith(testStoreSource(), { local: false });
+		expect(promptConfirm).not.toHaveBeenCalled();
+		expect(process.exitCode).toBe(1);
+		expect(logs.join("\n")).toContain("Could not find the installed package to review its permissions");
+	});
+
 	it("removes the package when the declined update cannot go back to the installed pin", async () => {
 		setTerminal(true);
 		const install = catalogUpdate(

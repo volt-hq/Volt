@@ -359,7 +359,7 @@ describe("review passes as observed children", () => {
 		await vi.waitFor(() => expect(conversation.work.get(record.workId)?.outcome).toBe("cancelled"));
 	});
 
-	it("passes the auxiliary tools a local client names, and refuses them to paired devices", async () => {
+	it("passes the auxiliary tools a local client names, and refuses them and a pinned pull request to paired devices", async () => {
 		const { harness, repo, conversation, client } = await setup();
 		await expect(client.intent("review_uncommitted", { tools: ["edit"] })).resolves.toMatchObject({
 			type: "rejected",
@@ -375,6 +375,15 @@ describe("review passes as observed children", () => {
 			type: "rejected",
 			reason: { code: "not_allowed", message: "tools is not available over remote host" },
 		});
+		await expect(
+			phone.intent("review_pr", { url: "https://github.com/contributor/project/pull/42" }),
+		).resolves.toMatchObject({
+			type: "rejected",
+			reason: { code: "not_allowed", message: "url is not available over remote host" },
+		});
+		await expect(
+			phone.query("intent_completions", { intent: "review_pr", field: "url", prefix: "" }),
+		).resolves.toMatchObject({ type: "result", data: { completions: [] } });
 
 		// Completing a review reads the workspace's history for a device that may start reviews, and for no other.
 		const complete = { intent: "review_commit", field: "ref", prefix: "" };

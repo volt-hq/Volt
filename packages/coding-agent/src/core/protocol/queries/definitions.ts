@@ -217,6 +217,7 @@ export const settingsQuery = defineQuery({
 			blockImages: settings.getBlockImages(),
 			...(httpIdleTimeoutMs === undefined ? {} : { httpIdleTimeoutMs }),
 			enableInstallTelemetry: settings.getEnableInstallTelemetry(),
+			warnings: settings.getWarnings(),
 		};
 	},
 });

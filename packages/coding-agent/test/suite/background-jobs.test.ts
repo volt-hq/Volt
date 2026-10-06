@@ -18,6 +18,7 @@ import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { ExtensionAPI, ToolResultEvent } from "../../src/core/extensions/index.ts";
 import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
+import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../src/core/protocol/intents/index.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
 import * as nativeTools from "../../src/core/tools/index.ts";
@@ -842,46 +843,39 @@ describe("AgentSession background jobs", () => {
 		expect(harness.session.work.busy()).toBe(true);
 	});
 
-	it.each(["onSubmit", "Enter"])("handles rejected /plan through %s without stopping jobs", async (entryPoint) => {
+	it("refuses Plan mode while a background job runs, without stopping the job", async () => {
 		const backend = controlledBash();
 		const harness = await setup();
-		const control = setupInteractive(harness);
 		const job = await startJob(harness);
 		const planning = harness.session.planningState;
 		const abort = vi.spyOn(harness.session, "abort");
+		// What `/plan` sends: the conversation's set_agent_mode intent, as a local client.
+		const { conversation } = createFakeConversation(harness.session);
+		const context: IntentContext = {
+			target: {
+				session: harness.session,
+				conversation,
+				host: {} as ConversationHost,
+				client: { id: "tui", move: { kind: "in_place", onMoved: () => {} } },
+			},
+			services: {},
+			profile: LOCAL_INTENT_PROFILE,
+		};
 
-		if (entryPoint === "onSubmit") {
-			await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
-		} else {
-			const terminal = control.renderer.terminal as VirtualTerminal;
-			terminal.sendInput("/plan");
-			terminal.sendInput("\r");
-		}
-
-		await vi.waitFor(() =>
-			expect(control.showError).toHaveBeenCalledExactlyOnceWith(expect.stringMatching(/abort or wait/)),
-		);
-		expect(control.showStatus).not.toHaveBeenCalled();
-		expect(control.shutdown).not.toHaveBeenCalled();
+		await expect(intentRegistry.invoke(context, "set_agent_mode", { mode: "plan" })).rejects.toThrow(/abort or wait/);
 		expect(abort).not.toHaveBeenCalled();
 		expect(harness.session.planningState).toEqual(planning);
 		expect(harness.session.agentMode).toBe("build");
 		expect(harness.session.isBusy).toBe(false);
 		expect(harness.session.work.busy()).toBe(true);
 		expect(backend.signal?.aborted).toBe(false);
-		expect(control.defaultEditor.getText()).toBe("");
 		harness.appendResponses([fauxAssistantMessage("Noticed.")]);
 		backend.finish.resolve();
 		expect((await settled(harness, job.id)).status).toBe("completed");
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(3);
 
-		await expect(control.defaultEditor.onSubmit!("/plan")).resolves.toBeUndefined();
+		await intentRegistry.invoke(context, "set_agent_mode", { mode: "plan" });
 		expect(harness.session.agentMode).toBe("plan");
-		expect(control.showStatus).toHaveBeenLastCalledWith("Plan mode: agent tools are read-only");
-		await expect(control.defaultEditor.onSubmit!("/build")).resolves.toBeUndefined();
-		expect(harness.session.agentMode).toBe("build");
-		expect(control.showStatus).toHaveBeenLastCalledWith("Build mode");
-		expect(control.showError).toHaveBeenCalledTimes(1);
 	});
 });

@@ -8551,6 +8551,19 @@
 				},
 				"enableInstallTelemetry": {
 					"type": "boolean"
+				},
+				"warnings": {
+					"type": "object",
+					"properties": {
+						"anthropicExtraUsage": {
+							"type": "boolean"
+						},
+						"contextTokens": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false,
@@ -9461,6 +9474,12 @@
 			"properties": {
 				"number": {
 					"type": "string"
+				},
+				"url": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 2000,
+					"pattern": "^https://\\S+$"
 				},
 				"focus": {
 					"type": "string"
@@ -16060,6 +16079,19 @@
 				},
 				"enableInstallTelemetry": {
 					"type": "boolean"
+				},
+				"warnings": {
+					"type": "object",
+					"properties": {
+						"anthropicExtraUsage": {
+							"type": "boolean"
+						},
+						"contextTokens": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false

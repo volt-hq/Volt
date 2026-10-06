@@ -1,16 +1,22 @@
+/**
+ * #409: a review that fails or is cancelled in the terminal shows its final
+ * accounting once, after the loader's transient usage left the footer. The
+ * review runs as the conversation's detached `review` work through the TUI's
+ * protocol client: `/review` starts it, Escape in the loader cancels it with
+ * `cancel_work`, and its end shows as its work's end does.
+ */
+
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type Usage } from "@hansjm10/volt-ai";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type Usage } from "@hansjm10/volt-ai";
 import type { Container } from "@hansjm10/volt-tui";
 import { describe, expect, it, vi } from "vitest";
-import type { ReviewWorkflowResult } from "../../../src/core/review.ts";
 import { listReviewRuns } from "../../../src/core/review-state.ts";
-import { BorderedLoader } from "../../../src/modes/interactive/components/bordered-loader.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createTuiHarness } from "../tui-harness.ts";
+import { createTuiHarness, waitForScreen } from "../tui-harness.ts";
 
 const usage: Usage = {
 	availability: "complete",
@@ -69,10 +75,6 @@ describe("#409 interactive terminal review accounting", () => {
 					chatContainer: Container;
 					editorContainer: Container;
 					editor: unknown;
-					runInteractiveReviewWorkflow(
-						target: { kind: "uncommitted" },
-						options: { tools: string[]; requireConfirmation: boolean; requireProjectTrust: boolean },
-					): Promise<ReviewWorkflowResult>;
 				};
 				const { chatContainer, editorContainer, editor } = access;
 				// The review's usage the footer shows in place of the conversation's own, as it changes.
@@ -88,6 +90,8 @@ describe("#409 interactive terminal review accounting", () => {
 				});
 				// A review that opens no session opens nothing on the TUI's host.
 				const open = vi.spyOn(h.host, "open");
+				// The verification pass fails, or waits until Escape cancels the review.
+				const verification = Promise.withResolvers<void>();
 				h.faux.setResponses([
 					fauxAssistantMessage(
 						fauxToolCall("report_review_candidates", {
@@ -97,27 +101,31 @@ describe("#409 interactive terminal review accounting", () => {
 						}),
 						{ stopReason: "toolUse", usage },
 					),
-					() => {
-						if (status === "cancelled") {
-							const loader = editorContainer.children[0];
-							expect(loader).toBeInstanceOf(BorderedLoader);
-							(loader as BorderedLoader).handleInput("\u001b");
+					(_context: unknown, options: { signal?: AbortSignal } | undefined) => {
+						verification.resolve();
+						if (status === "failed") {
+							return fauxAssistantMessage("Provider failure", {
+								stopReason: "error",
+								error: { kind: "unknown", retryable: false, message: "request failed" },
+								usage: { ...usage, availability: "partial" },
+							});
 						}
-						return fauxAssistantMessage("Provider failure", {
-							stopReason: "error",
-							error: { kind: "unknown", retryable: false, message: "request failed" },
-							usage: { ...usage, availability: "partial" },
+						return new Promise<AssistantMessage>((_resolve, reject) => {
+							options?.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
 						});
 					},
 				]);
-				await access.runInteractiveReviewWorkflow(
-					{ kind: "uncommitted" },
-					{
-						tools: [],
-						requireConfirmation: false,
-						requireProjectTrust: false,
-					},
-				);
+				const review = tui.submit("/review uncommitted");
+				await verification.promise;
+				if (status === "cancelled") {
+					await waitForScreen(tui, "Reviewing uncommitted changes");
+					tui.terminal.sendInput("\u001b");
+				}
+				await review;
+				const terminalStatus =
+					status === "failed" ? "Review uncommitted changes failed:" : "Review uncommitted changes cancelled";
+				await waitForScreen(tui, terminalStatus, "Model-priced estimate: $");
+				await vi.waitFor(() => expect(transientUsages.at(-1)).toBeUndefined());
 
 				const record = listReviewRuns(manager).runs[0];
 				const rendered = chatContainer.render(120).lines.map(stripAnsi).join("\n");
@@ -141,7 +149,6 @@ describe("#409 interactive terminal review accounting", () => {
 				expect(rendered.match(/Tokens: \d+ input/g)).toHaveLength(1);
 				expect(rendered).toContain(`Tokens: ${record.usage?.summary.tokens?.input} input`);
 				expect(rendered.match(/Model-priced estimate: \$/g)).toHaveLength(1);
-				const terminalStatus = status === "failed" ? "Review failed:" : "Review cancelled";
 				expect(rendered).toContain(terminalStatus);
 				expect(rendered.indexOf(terminalStatus)).toBeGreaterThan(rendered.indexOf("Tokens:"));
 				expect(
