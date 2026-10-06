@@ -1,21 +1,14 @@
 import type { TSchema } from "typebox";
 import { Type } from "typebox";
-import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import type { McpManager } from "./manager.ts";
-import type { McpDirectToolCandidate, McpGatewayCallResult, McpGatewayExecutionContext } from "./types.ts";
+import type { McpDirectToolCandidate, McpGatewayCallResult } from "./types.ts";
 
 export interface McpDirectToolDetails {
 	server: string;
 	tool: string;
 	metadataHash: string;
 	result: unknown;
-}
-
-function toGatewayContext(ctx: ExtensionContext | undefined): McpGatewayExecutionContext {
-	return {
-		mode: ctx?.mode ?? "unknown",
-		caller: "model",
-	};
 }
 
 function schemaForCandidate(candidate: McpDirectToolCandidate): TSchema {
@@ -39,7 +32,7 @@ export function createMcpDirectToolDefinitions(manager: McpManager): ToolDefinit
 		],
 		parameters: schemaForCandidate(candidate),
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal) {
 			let result: McpGatewayCallResult;
 			try {
 				result = await manager.callTool(
@@ -49,7 +42,7 @@ export function createMcpDirectToolDefinitions(manager: McpManager): ToolDefinit
 						tool: candidate.tool.name,
 						arguments: params as Record<string, unknown>,
 					},
-					toGatewayContext(ctx),
+					{ surface: "model", caller: "model" },
 					signal,
 				);
 			} catch (error) {

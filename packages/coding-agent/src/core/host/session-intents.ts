@@ -9,7 +9,7 @@
  */
 
 import { resolvePath } from "../../utils/paths.ts";
-import type { ProjectTrustContext, ReplacedSessionContext, SessionIntentResult } from "../extensions/index.ts";
+import type { ReplacedSessionContext, SessionIntentResult } from "../extensions/index.ts";
 import { PR_CHECKOUT_CHANGED, readPrReviewBinding } from "../pr-review-binding.ts";
 import {
 	hostReviewSourceWriter,
@@ -36,7 +36,6 @@ export interface SwitchSessionIntentOptions {
 	/** Run in this cwd instead of the stored one ("continue in current cwd"); the store keeps the original. */
 	cwdOverride?: string;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
-	projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
 	/** A caller's own lease on the conversation, revalidated wherever the intent checks it is current. */
 	assertConversationGenerationCurrent?: () => void;
 }
@@ -113,7 +112,6 @@ function intentSource(
 }
 
 interface MoveOptions {
-	projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
 	beforeMove?: (source: HostedConversation) => Promise<void>;
 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	/** The last durable step, with the target's log, after the move and `withSession`. */
@@ -138,7 +136,6 @@ async function moveClient(
 	if (move.kind === "in_place") {
 		const moved = await host.openFor(client, target, {
 			assertCurrent: source.assertCurrent,
-			...(options.projectTrustContextFactory ? { projectTrustContext: options.projectTrustContextFactory } : {}),
 			...(beforeMove === undefined
 				? {}
 				: {
@@ -280,12 +277,7 @@ async function switchFrom(
 				ref: sessionRef,
 				...(options?.cwdOverride === undefined ? {} : { cwdOverride: options.cwdOverride }),
 			},
-			{
-				...(options?.projectTrustContextFactory
-					? { projectTrustContextFactory: options.projectTrustContextFactory }
-					: {}),
-				...(options?.withSession === undefined ? {} : { withSession: options.withSession }),
-			},
+			options?.withSession === undefined ? {} : { withSession: options.withSession },
 		),
 	);
 }

@@ -119,7 +119,13 @@ const SETTINGS_INTENTS: ReadonlySet<string> = new Set([
 	"set_auto_retry",
 	"set_compaction_threshold",
 	"set_extension_settings",
+	"set_settings",
+	"set_profile",
+	"set_model_scope",
 ]);
+
+/** Intents whose acceptance changes the `models` catalog: which models are selectable, and the cycle scope. */
+const MODELS_INTENTS: ReadonlySet<string> = new Set(["set_model_scope", "set_profile", "auth.login", "auth.logout"]);
 
 /** Intents whose acceptance changes the `host` catalog. */
 const HOST_INTENTS: ReadonlySet<string> = new Set(["set_keep_awake", "set_web_search_key"]);
@@ -887,6 +893,7 @@ export function serveConnection(
 				return;
 			}
 			if (SETTINGS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "settings" });
+			if (MODELS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "models" });
 			if (HOST_INTENTS.has(frame.type)) write({ type: "changed", catalog: "host" });
 			if (result.conversation !== undefined || SESSIONS_INTENTS.has(frame.type)) {
 				write({ type: "changed", catalog: "sessions" });

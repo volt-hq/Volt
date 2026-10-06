@@ -67,7 +67,7 @@ function createTestConfig(tempDir: string, serverOverrides: Record<string, unkno
 
 function createGatewayContext(): McpGatewayExecutionContext {
 	return {
-		mode: "rpc",
+		surface: "local",
 	};
 }
 
@@ -441,7 +441,7 @@ describe("MCP support", () => {
 
 	it("limits restricted metadata refreshes to authorized categories", async () => {
 		const restrictedContext: McpGatewayExecutionContext = {
-			mode: "rpc",
+			surface: "local",
 			restrictedTrustedRead: true,
 		};
 
@@ -621,7 +621,7 @@ describe("MCP support", () => {
 			metadataCache,
 			outputStore: new McpOutputStore({ agentDir: tempDir }),
 		});
-		const restrictedContext: McpGatewayExecutionContext = { mode: "rpc", restrictedTrustedRead: true };
+		const restrictedContext: McpGatewayExecutionContext = { surface: "local", restrictedTrustedRead: true };
 
 		const resourceRefresh = manager.handleGatewayInput({ action: "connect", server: "fake" }, restrictedContext);
 		const toolRefresh = manager.listTools("fake");

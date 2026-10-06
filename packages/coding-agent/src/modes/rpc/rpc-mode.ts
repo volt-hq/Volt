@@ -32,6 +32,8 @@ export interface RpcModeOptions {
 	exitProcess?: boolean;
 	/** Called once the client said hello and the conversation's extensions are bound. */
 	onReady?: () => void;
+	/** The `--models` patterns the process started with: a profile switch scopes models by them. */
+	modelScopePatterns?: readonly string[];
 }
 
 function createStdioTransport(): RpcTransport {
@@ -73,9 +75,11 @@ export async function runRpcMode(
 	let exitCode = 0;
 	let lost: { error: Error } | undefined;
 	let shuttingDown: Promise<void> | undefined;
+	const modelScopePatterns = options.modelScopePatterns;
 	const connection = serveConnection(transport, localProfile, {
 		host,
 		conversation,
+		...(modelScopePatterns === undefined ? {} : { services: () => ({ modelScopePatterns }) }),
 		onShutdownRequested: () => void shutdown(0),
 		onLost: (lostConversation, error) => {
 			console.error(

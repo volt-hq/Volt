@@ -1,6 +1,6 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Static, Type } from "typebox";
-import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import type { ToolDefinition } from "../extensions/types.ts";
 import { presentMcp } from "../tools/query-presenters.ts";
 import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import type { McpManager } from "./manager.ts";
@@ -79,12 +79,9 @@ function isFailedGatewayCall(result: unknown): boolean {
 	);
 }
 
-function createExecutionContext(
-	ctx: ExtensionContext | undefined,
-	isRestrictedTrustedRead: (() => boolean) | undefined,
-): McpGatewayExecutionContext {
+function createExecutionContext(isRestrictedTrustedRead: (() => boolean) | undefined): McpGatewayExecutionContext {
 	return {
-		mode: ctx?.mode ?? "unknown",
+		surface: "model",
 		caller: "model",
 		...(isRestrictedTrustedRead?.() === true ? { restrictedTrustedRead: true } : {}),
 	};
@@ -110,7 +107,7 @@ export function createMcpToolDefinition(
 		parameters: mcpGatewaySchema,
 		present: presentMcp,
 		executionMode: "sequential",
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+		async execute(_toolCallId, params, signal) {
 			if (signal?.aborted) {
 				throw new Error("Operation aborted");
 			}
@@ -118,7 +115,7 @@ export function createMcpToolDefinition(
 			try {
 				result = await options.manager.handleGatewayInput(
 					params as McpGatewayInput,
-					createExecutionContext(ctx, options.isRestrictedTrustedRead),
+					createExecutionContext(options.isRestrictedTrustedRead),
 					signal,
 				);
 			} catch (error) {

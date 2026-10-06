@@ -375,11 +375,9 @@ export class SessionToolRuntime {
 
 	private isToolAvailableToCurrentModel(name: string): boolean {
 		if (name === "request_user_input" && this.toolDefinitions.get(name)?.sourceInfo.source === "builtin") {
-			const extensions = this.host.extensions();
+			// Offered while a client that asks its questions is attached, whatever mode the session was bound in.
 			return (
-				extensions.mode === "tui" &&
-				extensions.uiContext !== undefined &&
-				this.subagentToolManager?.isSubagentRuntime?.() !== true
+				this.host.extensions().uiContext !== undefined && this.subagentToolManager?.isSubagentRuntime?.() !== true
 			);
 		}
 		return name !== "image_gen" || isCodexImageGenerationModel(this.host.model());
