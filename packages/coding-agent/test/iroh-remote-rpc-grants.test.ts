@@ -284,11 +284,14 @@ describe("Iroh remote RPC grants", () => {
 	});
 
 	it("parses preset and explicit control requests and rejects mixed access", () => {
-		expect(admitControlRequest({ type: "pair_request", id: "1", access: "coding" })).toBe(true);
+		expect(admitControlRequest({ type: "pair_request", id: "1", workspaceName: "volt", access: "coding" })).toBe(
+			true,
+		);
 		expect(
 			admitControlRequest({
 				type: "pair_request",
 				id: "2",
+				workspaceName: "volt",
 				allowedTools: [],
 				rpcCapabilities: [],
 			}),
@@ -306,6 +309,7 @@ describe("Iroh remote RPC grants", () => {
 			admitControlRequest({
 				type: "pair_request",
 				id: "4",
+				workspaceName: "volt",
 				access: "coding",
 				allowedTools: [],
 				rpcCapabilities: [],
