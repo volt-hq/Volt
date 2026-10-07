@@ -150,6 +150,75 @@ describe("viewport layout", () => {
 		assert.strictEqual(renderCount, 3);
 	});
 
+	it("renders flexible scroll content once per layout pass beneath nested stacks", () => {
+		const renderedWidths: number[] = [];
+		const transcript = new ScrollView(
+			{
+				render: (width) => {
+					renderedWidths.push(width);
+					return createRenderFrame(["one", "two", "three", "four", "five"]);
+				},
+				invalidate: () => {},
+			},
+			{ follow: "end", primary: true },
+		);
+		const slot = new VStack([{ component: transcript, grow: 1, shrink: 1, minSize: 0 }]);
+		const body = new HStack([{ component: slot, basis: 0, grow: 1, shrink: 1, minSize: 0 }], { gap: 1 });
+		const root = new VStack([
+			{ component: body, basis: 0, grow: 1, shrink: 1, minSize: 0 },
+			{ component: new Text("dock", 0, 0), shrink: 1, minSize: 0 },
+		]);
+		renderLayoutFrame(root, 10, 3, () => {});
+
+		renderedWidths.length = 0;
+		const frame = renderLayoutFrame(root, 10, 3, () => {});
+
+		assert.deepStrictEqual(renderedWidths, [10]);
+		assert.deepStrictEqual(visibleLines(frame.lines), ["four", "five", "dock"]);
+	});
+
+	it("renders flexible scroll content once at the width its scrollbar leaves", () => {
+		const renderedWidths: number[] = [];
+		const transcript = new ScrollView(
+			{
+				render: (width) => {
+					renderedWidths.push(width);
+					return createRenderFrame(["one", "two", "three", "four", "five"]);
+				},
+				invalidate: () => {},
+			},
+			{ scrollbar: "always" },
+		);
+		const root = new VStack([{ component: transcript, grow: 1, shrink: 1, minSize: 0 }]);
+		renderLayoutFrame(root, 10, 3, () => {});
+
+		renderedWidths.length = 0;
+		renderLayoutFrame(root, 10, 3, () => {});
+
+		assert.deepStrictEqual(renderedWidths, [9]);
+	});
+
+	it("aligns unstretched HStack children by their natural height", () => {
+		const root = new HStack(
+			[
+				{ component: new Text("A\nB\nC", 0, 0), basis: 5 },
+				{ component: new Text("X", 0, 0), basis: 5 },
+			],
+			{ align: "end" },
+		);
+
+		const frame = renderLayoutFrame(root, 10, 4, () => {});
+
+		assert.deepStrictEqual(visibleLines(frame.lines), ["", "A", "B", "C    X"]);
+	});
+
+	it("sizes an unconstrained HStack by its tallest child", () => {
+		const row = new HStack([new Text("a\nb\nc", 0, 0), new Text("x", 0, 0)]);
+		const frame = renderLayoutFrame(new ScrollView(row), 10, 5, () => {});
+
+		assert.strictEqual(frame.root.children[0]?.rect.height, 3);
+	});
+
 	it("settles current scroll geometry before returning a frame", () => {
 		let metadataRenderCount = 0;
 		let requestedRenders = 0;
