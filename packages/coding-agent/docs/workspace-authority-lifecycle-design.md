@@ -1,6 +1,8 @@
 # RFC Amendment: Workspace Authority Generations and Retirement
 
 > **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the agent-core in-memory queue this proposal extends (queue-entry identities, selective removal) with the durable client-input queue folded from the conversation log, where a queued input taken back is settled `withdrawn`.
+>
+> **Amended by the [daemon-hosted conversations design](daemon-hosted-conversations-design.md)**, implemented in the rewrite's Phase 7 ([#585](https://github.com/volt-hq/Volt/issues/585)): retirement targets conversation workers, not daemon runtimes or TUI leases. The registry key is `(workspaceName, workspaceGeneration, sessionId)`; a workspace replace or unregister fences the old generation, closes its relays through their workers, retires its workers, and waits for their exit before reporting success. Lease takeover is worker attach. §4.3, §4.4, §4.5, and §10.3 describe the lease-era mechanism; the model of record is `docs/tla/WorkerRegistry.tla`.
 
 - Status: Proposed
 - Date: 2026-07-31
@@ -194,6 +196,8 @@ The gate is checked before and after the asynchronous persisted-state check.
 
 ### 4.3 Conversation lease
 
+> **Superseded.** There are no leases or coordinators (§4.3, §4.4): the worker registry keys workers and conversations by generation and fences them on retirement (`src/daemon/worker-registry.ts`).
+
 ```ts
 interface LeaseRecord {
   workspaceName: string;
@@ -214,6 +218,8 @@ Every `IntegratedRuntimeEntry` and `ConversationCoordinator` captures the worksp
 Workspace authority retirement calls the coordinator's existing monotonic runtime-retirement path. Low-level registry deletion or stream closure is not a substitute for its terminal barrier.
 
 ### 4.5 Relay
+
+> **Amended.** Relays reach conversation workers, never a TUI, and carry no `tuiAuthorityId`. Offers are minted only to the live worker hosting the conversation under the current generation; a retiring workspace's relays get `fatal{workspace_unregistered}` through their worker.
 
 Every `RelayLifecycleOwner`, relay offer, and relay preamble carries `workspaceGeneration` and `tuiAuthorityId`.
 
@@ -483,6 +489,8 @@ Expected primary changes:
 - An attach paused at every publication await cannot publish after the retirement cut.
 
 ### 10.3 TUI-owned authority
+
+> **Superseded.** No TUI owns a conversation: a TUI attached to a conversation in a retired generation loses its stream when the worker exits, and does not reopen it once the workspace is unregistered.
 
 - Replacing workspace `ws` from path A to B closes offered and active relays, retires the generation-A TUI lease, and aborts active generation-A remote work before success.
 - An unrelated local TUI turn continues when no generation-A remote input has entered its active segment.

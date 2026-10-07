@@ -8,7 +8,7 @@ Volt runs the agent and its tools on your computer. Use it in the terminal, then
 
 ## What Volt includes
 
-- **Terminal and phone sessions:** a background daemon connects the iOS app to registered workspaces over encrypted Iroh connections, with live transcripts and desktop/phone handoff.
+- **Terminal and phone sessions:** interactive conversations run in a background daemon, which connects the iOS app to registered workspaces over encrypted Iroh connections, so the terminal and the phone share one live conversation.
 - **Planning and code review:** native Plan mode for research and approved execution, plus snapshot-based reviews with independent verification.
 - **Subagents and background jobs:** delegate bounded tasks to isolated agents and inspect or cancel session-owned work.
 - **Code intelligence and tools:** file editing, shell execution, web search, LSP navigation/refactoring, and native MCP integration.
@@ -29,7 +29,7 @@ Run `/login` to configure a supported subscription or API-key provider, then `/m
 
 `--ignore-scripts` disables dependency lifecycle scripts; Volt does not need them for normal npm installs. Keep optional dependencies enabled for phone transport.
 
-Standalone executables are available on the [releases page](https://github.com/volt-hq/Volt/releases), but provide **local CLI/TUI only**, not the daemon or iOS connection. Use the npm installation for phone access. Intel macOS also lacks the native phone-transport binding. See [Standalone Binary Capabilities](packages/coding-agent/BINARY-CAPABILITIES.md).
+Standalone executables are available on the [releases page](https://github.com/volt-hq/Volt/releases), but provide **local CLI/TUI only**: their daemon runs your terminal's conversations but cannot connect the iOS app. Use the npm installation for phone access. Intel macOS also lacks the native phone-transport binding. See [Standalone Binary Capabilities](packages/coding-agent/BINARY-CAPABILITIES.md).
 
 <p align="center"><img src="packages/coding-agent/docs/images/interactive-mode.png" alt="Volt terminal session in a sample project. Below the startup header, the user asks Volt to make a failing slugify test pass. Volt reads src/slugify.js, runs npm test and sees the failure, edits the file with an inline diff, reruns npm test successfully, and summarizes the fix. The editor and footer show the project path, git branch, session name, model, and context usage." width="720"></p>
 <p align="center"><em>Volt 0.2.1 fixing a failing test in a sample project. See <a href="packages/coding-agent/docs/usage.md">Using Volt</a> for the interface and <a href="packages/coding-agent/docs/sessions.md">Sessions</a> for branching with <code>/tree</code>.</em></p>
@@ -47,7 +47,7 @@ volt remote pair --workspace my-project
 Scan the one-time pairing QR in the app. You can also manage pairing, registered workspaces, and device revocation through `/remote` in the terminal.
 
 - The app connects to the host runtime; it does not run the coding agent on the phone. Provider credentials and tool execution stay on your computer. Conversation content is transmitted to the app, and model requests go to your selected provider.
-- Reconnect to the saved computer without scanning another QR. Supported terminal sessions attach to the running daemon so the phone can join the same conversation.
+- Reconnect to the saved computer without scanning another QR. Terminal conversations run in the daemon, so the phone can join a conversation that is open in the terminal.
 - Disconnecting or backgrounding the app does not cancel active work. Your computer must remain running and reachable; shutting down the host stops in-memory work.
 - Direct and self-hosted connections are separate from Volt Pro's managed relay and completion-notification services. See the [privacy policy](https://volt-cli.dev/privacy) and [terms](https://volt-cli.dev/terms) for service details.
 
@@ -63,7 +63,7 @@ See the [phone quickstart](packages/coding-agent/docs/quickstart.md#continue-fro
 
 Volt runs with the permissions of the account that launches it. Project trust, tool allowlists, Plan mode, and remote grants control specific capabilities; they are **not an operating-system sandbox**. Local tools and trusted extensions can modify files, run processes, and access credentials available to that account.
 
-Pair only devices you control. A phone driving a desktop-owned conversation uses that terminal session's local tool set. Use a container or VM when you need filesystem, process, or network isolation.
+Pair only devices you control. A phone driving a conversation opened in the terminal uses that conversation's local tool set. Use a container or VM when you need filesystem, process, or network isolation.
 
 See [Security](packages/coding-agent/docs/security.md) and [Containerization](packages/coding-agent/docs/containerization.md). Report vulnerabilities privately using [SECURITY.md](SECURITY.md).
 

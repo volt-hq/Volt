@@ -5,9 +5,11 @@
  * Every durable fact about a conversation is one entry in one ordered,
  * append-only log. An entry is `{ ordinal, id, parentId, type, timestamp,
  * visibility, payload }`: the ordinal is its only position, `parentId` forms
- * the branch tree, and `visibility` says whether clients may see it (`public`)
- * or only the host (`host`). A message entry also carries the submitting
- * client's `clientMessageId` beside its payload.
+ * the branch tree, and `visibility` says whether every client may see it
+ * (`public`) or it is host state (`host`): protocol profiles project the core
+ * host types (client input, `leaf`, `forked_from`, work), redacted per
+ * profile, and never a host's product entry types. A message entry also
+ * carries the submitting client's `clientMessageId` beside its payload.
  *
  * Hosts define their own product entry types (review state, PR review
  * bindings) with {@link defineLogEntryType}; the kernel folds only the core
@@ -60,7 +62,11 @@ const closed = { additionalProperties: false } as const;
 /** Longest entry or log-record identifier, in characters. */
 export const LOG_ENTRY_ID_MAX_CHARS = 512;
 
-/** `public` entries are projected to clients; `host` entries never leave the host. */
+/**
+ * `public` entries are projected to every client and exported in snapshots;
+ * `host` entries are host state: profiles project only the core host types
+ * (redacted per profile), and snapshots carry none but their final `leaf`.
+ */
 export const LogEntryVisibilitySchema = stringEnum(["public", "host"]);
 export type LogEntryVisibility = Static<typeof LogEntryVisibilitySchema>;
 

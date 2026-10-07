@@ -126,7 +126,7 @@ $env:VOLT_CODEX_REQUEST_DIAGNOSTICS = "1"
 volt --session <session-id>
 ```
 
-Use the updated runtime, including the daemon if it owns the session. Setting the variable in a bash tool invocation does not enable it in the already-running parent process. Only the exact value `1` enables capture; a provider-scoped environment override takes precedence. Unset it or set it to `0` when finished.
+Use the updated runtime. Interactive sessions run in the daemon's conversation workers, which read the variable from their own environment: a worker the TUI starts gets the TUI's environment, but a session already open in a worker keeps that worker's, and sessions phones open use the daemon's environment, so run `volt daemon restart` with the variable set to cover them. Setting the variable in a bash tool invocation does not enable it in the already-running parent process. Only the exact value `1` enables capture; a provider-scoped environment override takes precedence. Unset it or set it to `0` when finished.
 
 Normal responses save `codex_request` records in `message.diagnostics`. Successful built-in compactions copy them into `details.requests[].diagnostics`, alongside each summarization request's usage. Records contain:
 
@@ -186,8 +186,8 @@ Defined in [`session-manager.ts`](../src/core/session-manager.ts):
 interface CompactionEntry {
   type: "compaction";
   id: string;
-  parentId: string;
-  timestamp: number;
+  parentId: string | null;
+  timestamp: string;   // ISO-8601 UTC, e.g. "2026-10-06T12:00:04.000Z"
   summary: string;
   firstKeptEntryId: string;
   tokensBefore: number;
@@ -233,9 +233,9 @@ Entries to summarize: B, C, D
 
 After navigation with summary:
 
-         ┌─ B ─ C ─ D ─ [summary of B,C,D]
+         ┌─ B ─ C ─ D
     A ───┤
-         └─ E ─ F (new leaf)
+         └─ E ─ F ─ [summary of B,C,D] (new leaf)
 ```
 
 ### Cumulative File Tracking
@@ -254,10 +254,10 @@ Defined in [`session-manager.ts`](../src/core/session-manager.ts):
 interface BranchSummaryEntry {
   type: "branch_summary";
   id: string;
-  parentId: string;
-  timestamp: number;
+  parentId: string | null;
+  timestamp: string;   // ISO-8601 UTC
   summary: string;
-  fromId: string;      // Entry we navigated from
+  fromId: string;      // The entry the summary attaches to (its parentId), or "root"
   fromHook?: boolean;  // true if provided by extension (legacy field name)
   details?: JsonValue; // implementation-specific JSON data
 }

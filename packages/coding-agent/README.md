@@ -191,7 +191,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/extensions` | Show extensions, enable or disable them, and edit their settings |
 | `/store` | Search, inspect, install, remove, and update store packages |
 | `/hotkeys` | Show all keyboard shortcuts |
-| `/remote` | Manage daemon status, phone pairing, devices, workspaces, leases, and policy |
+| `/remote` | Manage daemon status, phone pairing, devices, workspaces, conversation workers, and policy |
 | `/changelog` | Display version history |
 | `/quit` | Quit volt |
 
@@ -584,7 +584,7 @@ volt config                    # Enable/disable package resources
 
 ### Remote Access over Iroh (Preview)
 
-Remote access is served by a background daemon (`voltd`). It is opt-in: nothing listens until you start the daemon. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine, and the daemon's persistent Iroh identity means phones stay paired across restarts. In interactive Volt, `/remote` is the control center for daemon health, current-directory workspace registration, current lease ownership, attached phones, QR pairing and revocation, registered workspaces, and effective headless tool/retention policy. Its management connection is separate from the conversation lease.
+Remote access is served by the background daemon (`voltd`), which interactive Volt starts on demand to run its conversations; only devices you pair can connect. The host keeps provider credentials, files, tools, settings, sessions, state, and audit logs on the host machine, and the daemon's persistent Iroh identity means phones stay paired across restarts. In interactive Volt, `/remote` is the control center for daemon health, current-directory workspace registration, the worker hosting the current conversation, attached phones, QR pairing and revocation, registered workspaces, conversation workers, the tool policy of conversations phones open, and how long detached conversations stay open.
 
 Copy-pastable happy path:
 
@@ -601,7 +601,7 @@ volt remote pair --workspace volt
 
 See [Continue from your iPhone](docs/quickstart.md#continue-from-your-iphone) for requirements, pairing, and connection troubleshooting.
 
-Supported interactive Volt sessions connect to an already-running daemon, allowing a paired phone to join the same live conversation. Set `remote.background: true` to also start the daemon automatically. The daemon can keep the conversation when you quit the TUI and hand it back at the next turn boundary when you reopen it.
+Interactive Volt runs every conversation in one of the daemon's conversation workers, starting the daemon when none runs, so a paired phone can join a conversation that is open in the terminal. Quitting the TUI leaves its conversations in their worker: idle ones stay open for 30 minutes by default, and quitting while a turn runs asks whether to stop the turn or leave it running in the background. `volt -c` or `volt -r` attaches to them again. See [Conversation workers](docs/daemon.md#conversation-workers).
 
 <p align="center">
 <img src="docs/images/shared-session-phone.png" alt="Volt iOS app showing the conversation Discuss a Small Todo App in the volt workspace on branch fix/511-stale-default-models. The prompt Tell me about a small todo app, sent from the phone, is followed by the model's reply. The composer shows Build mode and the gpt-6-luna model." width="240">
@@ -622,13 +622,13 @@ volt remote workspace remove volt
 
 Security defaults and limitations:
 
-- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
+- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts the conversations phones open; a phone that joins a conversation opened in the terminal uses that conversation's full local tool set.
 - Granting `bash`, `edit`, `write`, or `image_gen` can modify the host; `image_gen` can read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same. Pair only devices you control.
 - Pairing tickets are short-lived, one-time credentials. `volt remote pair` talks to the running daemon; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise project resources run untrusted.
-- Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
-- The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) plus managed `relayCredential` access, and exits nonzero unless transport is ready and relay access is not expired, suspended, or pending reset, or the build has no phone transport (`native_binding_missing`); `volt remote status` exits nonzero even then. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon runs for local clients and workers, with phone transport unavailable.
+- Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`, and conversation worker logs in `workers/`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
+- Phone transport requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) plus managed `relayCredential` access, and exits nonzero unless transport is ready and relay access is not expired, suspended, or pending reset, or the build has no phone transport (`native_binding_missing`); `volt remote status` exits nonzero even then. Standalone Node SEA builds intentionally do not bundle Iroh: their daemon runs for local clients and workers, with phone transport unavailable.
 
 See [Background daemon](docs/daemon.md), [Iroh remote protocol v1](docs/iroh-remote-protocol.md), and [Security](docs/security.md#remote-access-over-iroh-preview).
 

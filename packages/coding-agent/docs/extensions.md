@@ -424,15 +424,20 @@ user sends prompt ────────────────────�
                                                            │
 user sends another prompt ◄────────────────────────────────┘
 
-/clear (new session) or /resume (switch session)
+/clear (new session) or /resume (switch session) in the TUI
   ├─► session_before_switch (can cancel)            old session
-  ├─► session_start { reason: "new" | "resume", previousSessionRef? }   new session
-  ├─► resources_discover { reason: "startup" }      new session
-  └─► session_shutdown { targetSessionRef }         old session
+  ├─► session_start { reason: "startup" }           new session, in its worker, as the TUI attaches
+  └─► resources_discover { reason: "startup" }      new session
+      (the old session stays open in its worker: session_shutdown { reason: "quit" } when the worker closes it)
 
-/fork or /clone
+/fork or /clone in the TUI
   ├─► session_before_fork (can cancel)              old session
-  ├─► session_start { reason: "fork", previousSessionRef? }   new session
+  ├─► session_start { reason: "startup" }           new session, in its worker, as the TUI attaches
+  └─► resources_discover { reason: "startup" }      new session
+
+new_session, switch_session, fork, or clone from an RPC client (or an SDK client that moves in place)
+  ├─► session_before_switch / session_before_fork (can cancel)          old session
+  ├─► session_start { reason: "new" | "resume" | "fork", previousSessionRef? }   new session
   ├─► resources_discover { reason: "startup" }      new session
   └─► session_shutdown { targetSessionRef }         old session
 
@@ -451,8 +456,11 @@ user sends another prompt ◄─────────────────
 thinking level changes (settings, keybinding, volt.setThinkingLevel())
   └─► thinking_level_select
 
-exit (Ctrl+C, Ctrl+D, SIGHUP, SIGTERM)
+print or RPC mode exits (it finished, stdin closed, SIGHUP, SIGTERM)
   └─► session_shutdown
+
+quitting the TUI (Ctrl+C, Ctrl+D)
+  └─► nothing yet: the session stays open in its worker; session_shutdown { reason: "quit" } when the worker closes it
 
 extension enabled while the session runs (this extension only)
   ├─► activate { reason: "enable" }
@@ -471,11 +479,13 @@ extension disabled while the session runs (this extension only)
 
 When a session starts, each extension hears `activate` (`reason: "startup"`) before `session_start`.
 
+An interactive TUI's sessions run in the [daemon's conversation workers](daemon.md#conversation-workers), and the TUI is one of their clients. A session the TUI moves to opens in a worker when the TUI attaches to it, like any session a client opens there, so its `session_start` has `reason: "startup"`; the session the TUI left stays open for its other clients and closes when its worker closes it ([Retention](daemon.md#retention-and-background)). A print, JSON, or RPC run hosts its session in its own process, and an RPC client's session changes move it in place, as the RPC diagram above shows.
+
 ### Startup Events
 
 #### project_trust
 
-Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when a session change (for example `/new` or `/resume`) enters a cwd whose trust has not been resolved in the current session. An interactive session's conversations run in the [daemon](daemon.md)'s conversation workers, so the handler runs there, and its dialogs show in the TUI that opened the conversation. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
+Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when a session change (for example `/clear` or `/resume`) enters a cwd whose trust has not been resolved in the current session. An interactive session's conversations run in the [daemon](daemon.md)'s conversation workers, so the handler runs there, and its dialogs show in the TUI that opened the conversation. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
 
 ```typescript
 volt.on("project_trust", async (event, ctx) => {
@@ -526,7 +536,7 @@ Obtain references from `ctx.sessionManager.getSessionRef()` or indexed `SessionM
 
 #### session_start
 
-Fired when a session is started, loaded, or reloaded. It fires once per session, when the first client attaches to it: further clients of the same session (a second RPC client, phones on a daemon-hosted conversation, a phone relayed through the desktop TUI) attach without another `session_start`. See [Clients](#clients).
+Fired when a session is started, loaded, or reloaded. It fires once per session, when the first client attaches to it: further clients of the same session (another terminal or a phone on a session a daemon worker hosts, a second RPC client) attach without another `session_start`. See [Clients](#clients).
 
 ```typescript
 volt.on("session_start", async (event, ctx) => {
@@ -553,10 +563,11 @@ volt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
-A switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
-Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`. The two instances briefly coexist: keep state per instance rather than in module-level variables shared between them.
+In a host that moves its client in place (RPC mode, the SDK), a switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
 
-A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). A TUI takes the daemon's lease before it opens a session the daemon may be hosting, so the two never have the same session open at once. Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
+In the interactive TUI, `/clear` writes the new session (`/resume` names a stored one), and the TUI reconnects to it through the [daemon](daemon.md#conversation-workers): it opens in a worker with `session_start` `reason: "startup"`, and the old session stays open in its own worker for its other clients until that worker closes it (`session_shutdown` with `reason: "quit"`). A session runs in one worker at a time and never moves to another process while it runs: another terminal or a phone attaching to it joins the instance already running there, without a new `session_start`.
+
+Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`. Instances of several sessions coexist in one worker, and the old and new instances of a move briefly coexist: keep state per instance rather than in module-level variables shared between them.
 
 #### session_before_fork
 
@@ -572,7 +583,7 @@ volt.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-A fork or clone opens the new session before it closes the old one: the new extension instance receives `session_start` with `reason: "fork"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. A failed open leaves the current session open.
+In a host that moves its client in place, a fork or clone opens the new session before it closes the old one: the new extension instance receives `session_start` with `reason: "fork"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. A failed open leaves the current session open. In the interactive TUI, the fork is written and opens in a worker as the TUI reconnects, as `/clear` does (see [session_before_switch](#session_before_switch)).
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact
@@ -642,6 +653,8 @@ volt.on("deactivate", (event) => {
 #### session_shutdown
 
 Fired before a started session closes. Use this to clean up resources opened from `session_start` or other session-scoped hooks. When a client moves to another session (`reason` `"new"`, `"resume"`, or `"fork"`), the new session's `session_start` has already run and the client has left this one: UI calls from this handler reach no client that moved, so they cannot disturb the new session's UI. See [Session changes: lifecycle and footguns](#session-changes-lifecycle-and-footguns).
+
+A session in a daemon worker (every session of the interactive TUI, and every session a phone opens) does not close when a client moves away or quits: it closes when its worker closes it, with `reason: "quit"`. That happens once no client has been attached and nothing has run for the retention period (30 minutes by default), when a session without a session file (`--no-session`) has had no client for about 10 seconds, when a paired device that used it is revoked, its managed worktree is removed, or its workspace is unregistered or replaced, when the worker stops (`volt daemon stop`, `volt update`), or when the session loses its log. See [Retention and background](daemon.md#retention-and-background). A worker that crashes runs no `session_shutdown`.
 
 Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) commit like any other: the session is disposed only after the handlers finish. They throw once the session has lost its log because a write could not be confirmed as saved; nothing can be saved after that. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
 
@@ -1076,7 +1089,7 @@ All handlers receive `ctx: ExtensionContext`.
 
 ### ctx.mode
 
-Current run mode: `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"rpc"` wherever clients drive the host (the interactive TUI, which is a protocol client of its host, phones relayed through it, stdio RPC, daemon-hosted conversations, and subagents), and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Extension UI is data every client renders, so UI calls need no mode check. To tell whether a user at the host invoked a command, read [`ctx.invokedBy`](#ctxinvokedby) instead.
+Current run mode: `"rpc"`, `"json"`, or `"print"`. It is the mode of the host the session runs in: `"rpc"` wherever clients drive the host (the daemon's conversation workers, which run every interactive TUI session and every session a phone opens, stdio RPC, and subagents), and `"print"` or `"json"` for print runs. It does not change while clients attach and leave. Extension UI is data every client renders, so UI calls need no mode check. To tell whether a user at the host invoked a command, read [`ctx.invokedBy`](#ctxinvokedby) instead.
 
 ### ctx.hasUI
 
@@ -1154,13 +1167,14 @@ Control flow helpers. `ctx.abort()` stops the run. Called from a command that a 
 
 ### ctx.shutdown()
 
-Request a graceful shutdown of the client the call runs for: the client whose command, prompt, or turn is running, or the session's first client for calls outside any client's request (see [Clients](#clients)). For a phone or another RPC client sharing the session, that ends its connection. A call for a client that has already left does nothing.
+Request a graceful shutdown of the client the call runs for: the client whose command, prompt, or turn is running, or the session's first client for calls outside any client's request (see [Clients](#clients)). For the TUI or an RPC client, the host ends its connection (`fatal{host_shutdown}`). A call for a client that has already left does nothing.
 
-- **Interactive mode:** Deferred until the agent becomes idle (after processing all queued steering and follow-up messages).
-- **RPC mode:** Deferred until the next idle state (after completing the current command response, when waiting for the next command).
+- **Interactive mode:** The TUI the call runs for quits. Its session stays open in its daemon worker for its other clients and follows the worker's [retention](daemon.md#retention-and-background), so no `session_shutdown` fires then.
+- **RPC mode:** The connection ends and the process exits; the session closes, and its extensions receive `session_shutdown`.
+- **Phones:** No-op.
 - **Print mode:** No-op. The process exits automatically when all prompts are processed.
 
-Emits `session_shutdown` event to all extensions before exiting. Available in all contexts (event handlers, tools, commands, shortcuts).
+Available in all contexts (event handlers, tools, commands, shortcuts).
 
 ```typescript
 volt.on("tool_call", (event, ctx) => {
@@ -1232,7 +1246,7 @@ if (!ctx.hasUI || !(await ctx.ui.confirm("Allow commands?", "Verifiers will run 
 
 ### ctx.signal (commands)
 
-In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session ends because a write could not be confirmed as saved; Volt then stops waiting for the handler. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
+In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed: for example when it closes after `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()` moved its last client away in an RPC or SDK host (a daemon worker keeps it open), or when a reload replaces it. It is also aborted when the session ends because a write could not be confirmed as saved; Volt then stops waiting for the handler. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
 
 After the session loses its log, volt stops waiting for the command, cancels the session's other work, and ends the session (`session_shutdown` with reason `"quit"`); the user reopens it with `/resume`. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
 
@@ -1315,7 +1329,7 @@ Options:
 
 Result (`SessionIntentResult`), the same for `fork()` and `switchSession()`:
 - `{ cancelled: true }`: the session did not change, because an extension cancelled it or no client handles session changes. No `withSession` callback ran.
-- `{ cancelled: false, sessionId, seeded }`: `sessionId` is the session the invoking client is on now; for `switchSession()` to the current session it is the current one. `seeded` is `true` only when a requested `withSession` callback ran to completion. `seeded: false` after passing `withSession` means the callback did not run: the switch was a no-op targeting the current session (`switchSession` only), the callback was skipped because recovered durable client input failed to replay, or the invoking client reconnects to the new session elsewhere: a phone relayed through the desktop TUI, or one whose new session closed before it reconnected (see [Clients](#clients)). Check `seeded` before assuming your seed landed. Anything `setup` wrote is in the new session either way.
+- `{ cancelled: false, sessionId, seeded }`: `sessionId` is the session the invoking client is on now; for `switchSession()` to the current session it is the current one. `seeded` is `true` only when a requested `withSession` callback ran to completion. `seeded: false` after passing `withSession` means the callback did not run: the switch was a no-op targeting the current session (`switchSession` only), the callback was skipped because recovered durable client input failed to replay, the new session closed before the invoking client reconnected to it, or the invoking client was sent to a session that was already open (a `switchSession()` to a session a daemon worker already hosts; see [Clients](#clients)). Check `seeded` before assuming your seed landed. Anything `setup` wrote is in the new session either way.
 
 `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` reject inside a subagent's conversation: a subagent stays in the conversation its parent opened for it.
 
@@ -1428,12 +1442,14 @@ The order of events:
 4. `session_shutdown` (same `reason`, with `targetSessionRef`) in the old session's extensions, which no longer reach the client that moved. The old session then closes and releases its lock.
 5. `withSession`, against the new session.
 
-A session refuses to be left while it runs a turn, a bash command, a session mutation, or a detached review, or holds queued durable input; wait for it (`ctx.waitForIdle()`) before changing sessions.
+In a daemon worker (the interactive TUI, phones) the new session opens in the same worker, and the client follows by reconnecting: step 3 runs when the client attaches to the new session, and the old session stays open in its worker instead of step 4, for its other clients and its [retention](daemon.md#retention-and-background); `withSession` runs once the client attached and the new session's queued input was recovered.
+
+A session refuses to be left while it runs a turn, a bash command, a session mutation, or a detached review, or holds queued durable input; wait for it (`ctx.waitForIdle()`) before changing sessions. In a daemon worker, a client may leave a busy session while other clients stay on it.
 
 `withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the new session.
 
 Lifecycle and footguns:
-- `withSession` runs only after the new extension instance has received `session_start` and the old session has emitted `session_shutdown` and closed.
+- `withSession` runs only after the new extension instance has received `session_start` and, in an RPC or SDK host, the old session has emitted `session_shutdown` and closed.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `volt` / old command `ctx` session-bound objects are stale once the session changed and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
 - Previously extracted raw objects are still your responsibility. For example, if you capture `const sm = ctx.sessionManager` before the change, `sm` is still the old `SessionManager` object. Do not reuse it afterwards.
@@ -1892,6 +1908,8 @@ if (volt.getFlag("focus-mode")) {
   // Focus mode enabled
 }
 ```
+
+An interactive TUI passes its flag values to the daemon worker that runs its session, with its other startup options; a TUI that attaches to a session already running in a worker keeps that worker's values and is told which options it did not apply. A session a phone opens sees the defaults.
 
 ### volt.exec(command, args, options?)
 
@@ -2578,13 +2596,13 @@ Extension UI is data: [styled text](#styled-text) and [`UiNode`](ui-nodes.md) tr
 
 ### Clients
 
-A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
+A session's extensions are bound once, when the first client attaches: the stdio RPC client, print mode, or the first TUI or phone of a session a daemon worker hosts. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
-- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` lists the host's themes; `setTheme()` asks every attached local client to show one, and a TUI whose user picked a theme keeps it.
+- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`, `dialog`, `form`), `notify`, `setStatus`, `setPanel`, `setTitle`, `setEditorText`, and `pasteToEditor` belong to the conversation and reach every attached client that shows UI. Status items and panels are the extension's own, keyed by its manifest id. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, panels, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), also in a session a TUI is attached to; notifications, status, panels, and title reach every phone. `getEditorText()` asks only the client whose request is running (outside any client's request, the first attached client). `getAllThemes()` lists the host's themes; `setTheme()` asks every attached local client to show one, and a TUI whose user picked a theme keeps it.
 - **The `request_user_input` tool** is offered to the model only while an attached client answers its questions (`user_input` host requests): the TUI, an RPC client that accepts them, or a phone that accepts them and is granted conversation control. Its questions go to every such client, and the first answer wins. Subagents and print runs never offer it.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
-- A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, its extensions start when the phone reconnects, and `withSession` runs then; the call resolves once it ran, or with `seeded: false` when the new session closed before the phone came back. For a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects; `withSession` does not run there, so the result reports `seeded: false`.
+- In a daemon worker, each client (a TUI or a phone) changes sessions alone, and other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until its worker closes it. `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for a client open the new session in the same worker (`setup` runs), the client reconnects to it, its extensions start then, and `withSession` runs; the call resolves once it ran, or with `seeded: false` when the new session closed before the client came back, or when `switchSession()` sent the client to a session a worker already hosts. A client's own session changes (`/clear`, `/resume`, `/fork`, ...) write the new session or name a stored one, which opens wherever the client reconnects through the daemon, with `session_start` `reason: "startup"` (a `--no-session` TUI's open in its own worker, since they are kept only in its memory).
 
 How each client renders the data:
 
@@ -2867,7 +2885,7 @@ volt.registerWorkKind("scan", {
 
 | Mode | `ctx.mode` | `ctx.hasUI` | Notes |
 |------|------------|-------------|-------|
-| Interactive | `"rpc"` | `true` | The TUI is a local protocol client of its host and renders extension UI with terminal components |
+| Interactive | `"rpc"` | `true` | The session runs in a [daemon worker](daemon.md#conversation-workers); the TUI is a local protocol client of it and renders extension UI with terminal components. Phones on the same session are clients too |
 | RPC (`--mode rpc`) | `"rpc"` | `true` | Dialogs as host requests; notifications, status items, panels, and title on the protocol's live lane. See [rpc.md](rpc.md#extensions-in-rpc-mode) |
 | JSON (`--mode json`) | `"json"` | `false` | Protocol frames to stdout, extension status and notices included; dialogs resolve to their defaults |
 | Print (`-p`) | `"print"` | `false` | Extensions run but can't prompt |

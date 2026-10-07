@@ -39,7 +39,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Security](security.md) - project trust, sandbox boundaries, remote access warnings, and vulnerability reporting.
 - [Containerization](containerization.md) - sandbox volt with OpenShell, Gondolin, or Docker.
 - [Settings](settings.md) - global and project settings.
-- [Background daemon](daemon.md) - the voltd daemon: remote access, conversation leases, and live shared sessions.
+- [Background daemon](daemon.md) - the voltd daemon: the conversation workers interactive sessions run in, remote access, and live shared sessions.
 - [Native MCP support](mcp.md) - built-in token-efficient MCP gateway support and roadmap.
 - [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
 - [Sessions](sessions.md) - session management, branching, and tree navigation.

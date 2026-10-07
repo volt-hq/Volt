@@ -73,7 +73,7 @@ The verifier extracts the `.tar.gz` archives with `tar` and the Windows zips wit
 
 CI only runs `volt --version` on each native runner. Test what this host can run and report the rest as not smoke-tested.
 
-- **Host platform:** extract its archive, then `--version` (the new version), `--help`, `--list-models`, `-p "Say exactly: ok"`, one tmux prompt, and `volt daemon status`, which the standalone binary must reject.
+- **Host platform:** extract its archive, then `--version` (the new version), `--help`, `--list-models`, `-p "Say exactly: ok"`, one tmux prompt, and `volt daemon status`, which must report phone transport `unavailable` (the standalone binary bundles no Iroh) and exit 0. The tmux prompt starts a daemon from the extracted binary: stop the installed daemon first, or isolate the agent dir (see AGENTS.md, Releasing).
 - **Linux in containers:** use `debian:bookworm-slim` (glibc 2.36; the minimum is 2.28). Do not mount credentials, since OAuth refresh-token rotation can sign out the host; `FIREWORKS_API_KEY=x volt --provider fireworks --model <default> -p hi` must reach the API and return 401.
   - On macOS, use Colima. It shares only `$HOME`, so copy the extracted `volt/` directory under `$HOME` before bind-mounting it; `/tmp` mounts come up empty. Apple silicon runs `linux/arm64` natively and `linux/amd64` under emulation. Run `colima stop` afterwards if it was stopped before.
   - On a Linux host, the host archive is the native test; the other architecture needs Docker or Podman with QEMU binfmt. Without a container runtime, only the host target can be smoke-tested.

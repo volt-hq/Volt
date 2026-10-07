@@ -898,7 +898,7 @@ Each server can override within safe bounds.
   2. send SIGTERM
   3. send SIGKILL after grace period
 - On session shutdown, disconnect session-owned MCP clients.
-- On daemon/TUI handoff, reconnect as needed and emit status changes.
+- A conversation's MCP clients stay in the process that hosts it (for interactive and phone conversations, its daemon conversation worker) until the conversation closes; clients that attach to the conversation later query their current state.
 
 ## Output truncation and sidecar
 

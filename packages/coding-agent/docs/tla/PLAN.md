@@ -39,8 +39,8 @@ space; consumes close reasons as an abstract input alphabet), then
 
 ## 2. Invariant & property catalogs — planned modules
 
-Unless noted, assume **weak fairness (WF)** on the daemon's internal steps (drain
-runner, disposal, ack handlers) and on "the environment eventually satisfies the
+Unless noted, assume **weak fairness (WF)** on the daemon's internal steps
+(disposal, ack handlers) and on "the environment eventually satisfies the
 network / eventually idles"; revocation and user-disconnect are adversarial (no
 fairness — they are choices, not obligations).
 

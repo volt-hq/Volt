@@ -197,8 +197,12 @@ cd /tmp
 ```
 
 Run both bare interactive commands in tmux, submit a prompt, and wait for the
-model reply. Verify startup, account/model listing, and one real prompt with the
-intended default provider for both install forms.
+model reply. Interactive Volt starts a daemon from the installation it runs, so
+stop the installed daemon first (`volt daemon stop`) or isolate the agent dir
+(for example `VOLT_CODING_AGENT_DIR=$(mktemp -d)`); otherwise the release build
+meets the installed daemon of another version. Verify startup, account/model
+listing, and one real prompt with the intended default provider for both install
+forms.
 
 1. Ask whether `/cl` was run against the latest `main`, then complete the local
    unpublished smoke test from `BETA-READINESS.md`. Do not continue past a
