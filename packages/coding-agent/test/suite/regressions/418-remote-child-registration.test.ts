@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ControlRequest, ControlResponse } from "../../../src/daemon/control-protocol.ts";
 import { type ControlServer, startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
+import { ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../../src/daemon/spawn.ts";
 import {
 	createRemoteControlBackend,
 	type RemoteControlBackend,
@@ -20,7 +21,7 @@ describe("#418 explicit current-directory registration", () => {
 	let parent: Status["workspaces"][number];
 	let child: string;
 	let status: Status;
-	let initialLeases: Status["leases"];
+	let initialWorkers: Status["workers"];
 	let requests: ControlRequest[];
 	let override: ((request: ControlRequest) => ControlResponse | undefined) | undefined;
 
@@ -30,13 +31,15 @@ describe("#418 explicit current-directory registration", () => {
 		parent = { name: "parent", path: join(root, "parent"), allowedTools: ["read"] };
 		child = join(parent.path, "child");
 		await mkdir(child, { recursive: true });
-		initialLeases = [
+		initialWorkers = [
 			{
+				workerId: "w-1",
+				pid: process.pid,
+				state: "live",
+				origin: "tui",
 				workspaceName: "parent",
-				sessionId: harness.session.sessionId,
-				state: "tui-owned",
-				streamCount: 1,
-				relayCount: 1,
+				sessionIds: [harness.session.sessionId],
+				clients: { local: 1, remote: 1 },
 			},
 		];
 		status = {
@@ -47,13 +50,12 @@ describe("#418 explicit current-directory registration", () => {
 			pid: process.pid,
 			startedAtMs: 0,
 			environment: { source: "inherited", reason: "not resolved" },
-			leases: structuredClone(initialLeases),
 			phoneConnections: 1,
 			remoteTransport: { state: "ready" },
 			workspaces: [structuredClone(parent)],
 			clients: [],
 			keepAwake: { enabled: false, state: "disabled" },
-			workers: [],
+			workers: structuredClone(initialWorkers),
 		};
 		requests = [];
 		override = undefined;
@@ -92,7 +94,10 @@ describe("#418 explicit current-directory registration", () => {
 				},
 			},
 		});
-		backend = createRemoteControlBackend(root);
+		backend = createRemoteControlBackend(
+			{ ensure: ensureDaemonRunning, probe: (agentDir) => probeDaemon(agentDir), waitForExit: waitForDaemonExit },
+			root,
+		);
 	});
 
 	afterEach(async () => {
@@ -100,7 +105,7 @@ describe("#418 explicit current-directory registration", () => {
 		await server?.close();
 		await harness?.cleanupAsync();
 		expect(status.workspaces.find((workspace) => workspace.name === parent.name)).toEqual(parent);
-		expect(status.leases).toEqual(initialLeases);
+		expect(status.workers).toEqual(initialWorkers);
 		expect(
 			requests.every((request) => ["status", "worktree_resolve", "workspace_register"].includes(request.type)),
 		).toBe(true);

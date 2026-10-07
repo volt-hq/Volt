@@ -55,7 +55,6 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 				pid: 42,
 				startedAtMs: Date.now(),
 				environment: { source: "inherited", reason: "not resolved" },
-				leases: [],
 				phoneConnections: 0,
 				workspaces: [],
 				clients: [],
@@ -64,9 +63,6 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 				keepAwake: { enabled: false, state: "disabled" },
 				workers: [],
 			};
-		},
-		async waitForResponse() {
-			throw new Error("not used");
 		},
 		async openRelay() {
 			throw new Error("not used");

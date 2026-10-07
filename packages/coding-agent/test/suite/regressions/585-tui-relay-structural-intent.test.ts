@@ -8,13 +8,7 @@ import type { HostClient } from "../../../src/core/host/targets.ts";
 import { PLAN_EXECUTION_CUSTOM_TYPE } from "../../../src/core/planning.ts";
 import { findSessionInfoById, SessionManager } from "../../../src/core/session-manager.ts";
 import type { RemotePhone } from "../../utilities/remote-phone.ts";
-import {
-	connectRelayedPhone,
-	createScriptedDaemonLink,
-	createTuiHarness,
-	relayPreamble,
-	type TuiHarness,
-} from "../tui-harness.ts";
+import { connectRelayedPhone, createTuiHarness, relayPhone, relayPreamble, type TuiHarness } from "../tui-harness.ts";
 
 /** The new log is stored and unlocked, for the daemon to open when the phone reconnects. */
 async function expectStoredAndUnlocked(sessionDir: string, sessionId: string): Promise<void> {
@@ -24,7 +18,7 @@ async function expectStoredAndUnlocked(sessionDir: string, sessionId: string): P
 	if (probe.status === "acquired") probe.lock.close();
 }
 
-describe("regression #585: a phone relayed through a TUI changes sessions alone", () => {
+describe("regression #585: a phone beside a TUI in one host changes sessions alone", () => {
 	const harnesses: TuiHarness[] = [];
 	let cancelSwitch = false;
 
@@ -33,25 +27,22 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		cancelSwitch = false;
 	});
 
-	/** The TUI host with its client connected, binding extensions in TUI mode; its extensions may cancel a switch. */
+	/** The host with the TUI's client connected; its extensions may cancel a switch. */
 	async function createTui() {
-		const link = createScriptedDaemonLink();
 		const harness = await createTuiHarness({
-			link,
 			extension: (volt) => {
 				volt.on("session_before_switch", () => (cancelSwitch ? { cancel: true } : undefined));
 			},
 		});
 		harnesses.push(harness);
 		const client = await harness.connect();
-		return { harness, link, client };
+		return { harness, client };
 	}
 
-	/** A phone the daemon relays into the conversation the TUI shows, served by the TUI host. */
-	async function relayPhone(harness: TuiHarness, link: ReturnType<typeof createScriptedDaemonLink>) {
+	/** A phone the daemon relays into the conversation the TUI shows, served as a worker serves it. */
+	async function attachRelayedPhone(harness: TuiHarness) {
 		const sessionId = harness.connector.conversation.id;
-		const relayed = await link.offerRelay({ sessionId }, relayPreamble(sessionId, harness.tempDir));
-		if (!relayed) throw new Error("The TUI did not serve the phone");
+		const relayed = relayPhone(harness, relayPreamble(sessionId, harness.tempDir));
 		const phone: RemotePhone = await connectRelayedPhone(relayed, sessionId);
 		return { phone, relayed };
 	}
@@ -71,11 +62,10 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 	}
 
 	it("answers new_session, then redirects the phone to the new log while the TUI stays", async () => {
-		const { harness, link, client } = await createTui();
+		const { harness, client } = await createTui();
 		const sourceId = harness.startup.id;
-		const { phone, relayed } = await relayPhone(harness, link);
+		const { phone, relayed } = await attachRelayedPhone(harness);
 		harness.events.splice(0);
-		link.steps.splice(0);
 
 		const outcome = await phone.intent("new_session", {});
 		expect(outcome).toMatchObject({ type: "accepted", conversation: expect.any(String) });
@@ -91,20 +81,19 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		]);
 		expect(phone.frames.at(-1)).toEqual({ type: "ended", subscriptionId: "s1", reason: "moved", target: targetId });
 
-		// The TUI stays on its session and keeps its lease; the new conversation never opened here.
+		// The TUI stays on its session; the new conversation never opened here.
 		expect(harness.connector.conversation.id).toBe(sourceId);
 		expect(harness.events.map((event) => [event.type, event.sessionId])).toEqual([
 			["session_before_switch", sourceId],
 		]);
-		expect(link.steps).toEqual([]);
 		await expectStoredAndUnlocked(harness.sessionDir, targetId);
 		await client.promptAndWait("still here");
 		expect(harness.connector.conversation.id).toBe(sourceId);
 	});
 
 	it("keeps the phone on the session when the TUI's extensions cancel the switch", async () => {
-		const { harness, link, client } = await createTui();
-		const { phone } = await relayPhone(harness, link);
+		const { harness, client } = await createTui();
+		const { phone } = await attachRelayedPhone(harness);
 		cancelSwitch = true;
 
 		const outcome = await phone.intent("new_session", {});
@@ -213,20 +202,17 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 	});
 
 	it("serves only the session the daemon authorized, with the daemon's identity", async () => {
-		const { harness, link } = await createTui();
+		const { harness } = await createTui();
 		const sessionId = harness.startup.id;
-		// The preamble names another session than the offer: the TUI closes the relay unanswered.
-		const mismatched = await link.offerRelay({ sessionId }, relayPreamble("s-other", harness.tempDir));
-		if (!mismatched) throw new Error("The TUI did not take the offer");
+		// The preamble names another session than the relay reached: the host closes it unanswered.
+		const written: unknown[] = [];
+		const mismatched = relayPhone(harness, relayPreamble("s-other", harness.tempDir), { relayed: written });
 		await mismatched.finished;
-		const preamble = relayPreamble(sessionId, harness.tempDir);
 		// Without the daemon's node id, the phone could not verify the host: refused too.
-		const anonymous = await link.offerRelay({ sessionId }, { ...preamble, hostNodeId: undefined });
-		if (!anonymous) throw new Error("The TUI did not take the offer");
+		const anonymous = relayPhone(harness, { ...relayPreamble(sessionId, harness.tempDir), hostNodeId: undefined });
 		await anonymous.finished;
-		expect(harness.relayCount()).toBe(0);
-		// A TUI that quits serves no more phones: the offer expires.
-		harness.connector.stopServing();
-		expect(await link.offerRelay({ sessionId }, preamble)).toBeUndefined();
+		expect(written).toEqual([]);
+		// Neither relay got a connection of the host: the conversation shows no phone.
+		expect(harness.startup.liveState.get("presence")).toBeUndefined();
 	});
 });

@@ -104,13 +104,13 @@ describe("remote CLI (daemon control client)", () => {
 		const status = JSON.parse(loggedLines(logSpy)) as {
 			workspaces: Array<{ name: string }>;
 			clients: unknown[];
-			leases: unknown[];
+			workers: unknown[];
 			remotePolicy: { allowTools: string[] | null; detachedRuntimeTtlMs: number };
 			remoteTransport: { state: string; reasonCode?: string };
 		};
 		expect(status.workspaces.some((workspace) => workspace.name === "status-ws")).toBe(true);
 		expect(Array.isArray(status.clients)).toBe(true);
-		expect(Array.isArray(status.leases)).toBe(true);
+		expect(status.workers).toEqual([]);
 		expect(status.remotePolicy).toEqual({ allowTools: null, detachedRuntimeTtlMs: 30 * 60 * 1000 });
 		expect(status.remoteTransport).toMatchObject({ state: "unavailable", reasonCode: "extension_missing" });
 		expect(process.exitCode).toBe(1);

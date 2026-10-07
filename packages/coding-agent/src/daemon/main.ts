@@ -34,7 +34,6 @@ import { ChangeAssociationService } from "./change-association.ts";
 import { ChangeStore } from "./changes-store.ts";
 import type {
 	ControlClientStatus,
-	ControlLeaseStatus,
 	ControlRelayCredentialStatus,
 	ControlRequest,
 	ControlRevokedClientStatus,
@@ -45,7 +44,6 @@ import type {
 } from "./control-protocol.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
-	CONTROL_RPC_GRANTS_CAPABILITY,
 	createControlClientStatus,
 	PROTOCOL_VERSION,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
@@ -181,7 +179,7 @@ async function sleep(ms: number): Promise<void> {
 	await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Facilities later milestones build on (lease broker, Iroh host, theme service). */
+/** What the daemon's service extensions (the Iroh host) build on. */
 export interface VoltdRuntimeServices {
 	agentDir: string;
 	paths: DaemonPaths;
@@ -221,7 +219,6 @@ export interface VoltdServiceExtensionInstance {
 	/** Keep-awake status changed (control toggle, phone RPC toggle, or degradation). */
 	onKeepAwakeChanged?(): void;
 	statusExtras?(): {
-		leases?: ControlLeaseStatus[];
 		phoneConnections?: number;
 		relayCount?: number;
 		remoteTransport?: RemoteTransportHealth;
@@ -758,7 +755,6 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 									.filter((tool) => tool.length > 0),
 							}),
 				}));
-				let leases: ControlLeaseStatus[] = [];
 				let phoneConnections = 0;
 				let relayCredential: ControlRelayCredentialStatus | undefined;
 				let remoteTransport: RemoteTransportHealth = {
@@ -768,9 +764,6 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				};
 				for (const extension of extensionInstances) {
 					const extras = extension.statusExtras?.();
-					if (extras?.leases) {
-						leases = leases.concat(extras.leases);
-					}
 					phoneConnections += extras?.phoneConnections ?? 0;
 					relayCredential = extras?.relayCredential ?? relayCredential;
 					if (extras?.remoteTransport) {
@@ -785,8 +778,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					pid: process.pid,
 					startedAtMs,
 					environment: environmentStatus,
-					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
-					leases,
+					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
 					phoneConnections,
 					remoteTransport,
 					...(relayCredential === undefined ? {} : { relayCredential }),

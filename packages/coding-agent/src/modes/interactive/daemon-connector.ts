@@ -31,12 +31,13 @@
  * meanwhile. When the daemon announced its shutdown (`daemon_shutdown`,
  * D16), the connector waits 10 s for a restart before it starts the daemon
  * itself. Quitting the TUI detaches it; its conversations keep running in
- * their workers (`background`, D6).
+ * their workers (`runsInBackground`, D6).
  */
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
+	type ConnectorDaemon,
 	type ConnectorOpenOptions,
 	type ConnectorTarget,
 	type ConversationConnector,
@@ -65,14 +66,7 @@ import {
 } from "../../daemon/control-protocol.ts";
 import { getDaemonPaths } from "../../daemon/paths.ts";
 import { isDaemonServiceProcess } from "../../daemon/service-install.ts";
-import {
-	type DaemonProbeResult,
-	type EnsureDaemonResult,
-	ensureDaemonRunning,
-	probeDaemon,
-	type WaitForDaemonExitOptions,
-	waitForDaemonExit,
-} from "../../daemon/spawn.ts";
+import { type DaemonProbeResult, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../daemon/spawn.ts";
 import { isPathUnderWorktreesRoot } from "../../daemon/worktree-manager.ts";
 
 /** How long after the daemon announced its shutdown the TUI waits for a restart before starting the daemon itself (D16). */
@@ -96,10 +90,7 @@ const FINAL_OPEN_REFUSALS = new Set([
 ]);
 
 /** How the connector reaches the daemon; the daemon's own spawn module by default. */
-export interface DaemonConnectorDaemon {
-	ensure(agentDir: string): Promise<EnsureDaemonResult>;
-	probe(agentDir: string): Promise<DaemonProbeResult>;
-	waitForExit(options: WaitForDaemonExitOptions): Promise<"exited" | "timeout">;
+export interface DaemonConnectorDaemon extends ConnectorDaemon {
 	/** Whether the login service runs the daemon with this pid. */
 	isServiceProcess(pid: number): Promise<boolean>;
 }
@@ -142,13 +133,13 @@ async function delay(ms: number): Promise<void> {
 }
 
 export class DaemonConnector implements ConversationConnector {
-	readonly background = true;
+	readonly runsInBackground = true;
 	readonly reconnects = true;
 	private readonly agentDir: string;
 	private readonly startup: { readonly target: ConversationOpenTarget; readonly cwd: string };
 	private readonly spawn: WorkerSpawnOptions;
 	private readonly sessionDir: string | undefined;
-	private readonly daemon: DaemonConnectorDaemon;
+	readonly daemon: DaemonConnectorDaemon;
 	/** Who the TUI process is across its connections: its retried intents answer as they did. */
 	private readonly clientKey = randomUUID();
 	private control: DaemonClient | undefined;
@@ -473,7 +464,7 @@ export class DaemonConnector implements ConversationConnector {
 	/**
 	 * The daemon runs another Volt version (D7): workers always run the
 	 * daemon's installation, so the TUI never attaches across versions. An
-	 * idle daemon (no workers, no phones, no leases) that a terminal started
+	 * idle daemon (no workers, no phones) that a terminal started
 	 * is restarted in place from this installation, once, at startup. A busy
 	 * one is left running, and one the login service runs is never replaced
 	 * behind the service's back: the TUI refuses with what to run.
@@ -491,7 +482,7 @@ export class DaemonConnector implements ConversationConnector {
 		};
 		if (status?.type !== "status_result") return refuse(versionSkewMessage(daemonVersion, 0));
 		const workers = status.workers.length;
-		const idle = workers === 0 && status.phoneConnections === 0 && status.leases.length === 0;
+		const idle = workers === 0 && status.phoneConnections === 0;
 		if (!idle || this.connectedOnce || this.restartedForVersion)
 			return refuse(versionSkewMessage(daemonVersion, workers));
 		if (await this.daemon.isServiceProcess(status.pid)) {

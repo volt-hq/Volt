@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
-import { join, relative, resolve, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
 import { isStandaloneBinary } from "../config.ts";
 import { AuthStorage } from "../core/auth-storage.ts";
@@ -86,14 +86,11 @@ import {
 	isIrohRemoteClientAllowedForWorkspace,
 } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
-import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import {
-	CONTROL_RPC_GRANTS_CAPABILITY,
-	CONTROL_WORKTREES_CAPABILITY,
-	type ControlLeaseStatus,
 	type ControlRelayCredentialStatus,
 	type ControlRequest,
 	createControlClientStatus,
@@ -107,11 +104,9 @@ import {
 	STANDALONE_REMOTE_TRANSPORT_MESSAGE,
 } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
-import { ConversationCoordinatorRegistry } from "./conversation-coordinator.ts";
 import {
 	type ConversationOpenServices,
 	createConversationOpenError,
-	getResolvedTargetSessionId,
 	type ResolvedConversationOpen,
 	resolveConversationOpen,
 } from "./conversation-open.ts";
@@ -136,7 +131,6 @@ import {
 	isIrohStreamLifecycleClosedError,
 	runLifecycleFencedPhysicalOperation,
 } from "./iroh-stream-lifecycle.ts";
-import { LeaseBroker, type LeaseRecord, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
 import {
 	PrReviewCheckoutError,
@@ -173,20 +167,11 @@ import {
 	remoteStreamAllows,
 	toRemoteKeepAwakeStatus,
 } from "./remote-intents.ts";
-import {
-	createSessionManagerTargetStore,
-	type IrohRemoteSessionTarget,
-	type ResolvedSessionTargetWithManager,
-	resolveIrohRemoteSessionTarget,
-} from "./session-target.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
-import { ViewerFeedRegistry } from "./viewer-feed.ts";
 import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import {
-	evaluateWorktreeRelayGate,
-	getRegisteredWorkingDirectoryForWorktree,
 	getWorkspaceWorktreesDir,
 	getWorktreesRoot,
 	handleWorktreeControlRequest,
@@ -223,15 +208,6 @@ type ManagedRelayRefreshOutcome =
 	| { status: "superseded" }
 	| { status: "failed"; message: string };
 
-export function isExactTuiChangeObservationLeaseHolder(
-	connection: Pick<ControlConnection, "client" | "connectionId">,
-	lease: Pick<LeaseRecord, "state" | "tuiConnectionId"> | undefined,
-): boolean {
-	return (
-		connection.client === "tui" && lease?.state === "tui-owned" && lease.tuiConnectionId === connection.connectionId
-	);
-}
-
 /** A hosted conversation, by workspace and session: what the per-conversation maps are keyed by. */
 function conversationKey(workspaceName: string, sessionId: string): string {
 	return `${workspaceName}\0${sessionId}`;
@@ -245,8 +221,7 @@ function parseConversationKey(key: string): { readonly workspaceName: string; re
 function normalizeRelayCloseReason(reason: string): RelayCloseReason {
 	switch (reason) {
 		case "phone_disconnected":
-		case "tui_disconnected":
-		case "lease_transferred":
+		case "worker_disconnected":
 		case "workspace_unregistered":
 		case "host_shutdown":
 		case "worker_exited":
@@ -261,16 +236,6 @@ function relayPendingMessageForReason(reason: string): string {
 	if (reason === "host_shutdown") return "daemon shutting down";
 	if (reason === "workspace_unregistered") return "workspace unregistered";
 	return "relay offer cancelled; retry";
-}
-
-function getRelativeWorkingDirectoryForRoot(rootPath: string, cwd: string): string | null | undefined {
-	const root = resolve(rootPath);
-	const child = resolve(cwd);
-	if (!isPathInside(root, child)) {
-		return null;
-	}
-	const relativePath = relative(root, child);
-	return relativePath.length === 0 || relativePath === "." ? undefined : relativePath.split(sep).join("/");
 }
 
 /**
@@ -333,7 +298,7 @@ export interface IrohDaemonServiceDependencies {
 		kind: "conversation" | "workspace_discovery" | "workspace_management" | "worktree_management" | "relay",
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): void | Promise<void>;
-	/** Pause a TUI change receipt after its daemon revision is claimed and before validation (test-only race injection). */
+	/** Pause a worker's change receipt after its daemon revision is claimed and before validation (test-only race injection). */
 	beforeTuiChangeObservationValidation?(
 		request: Readonly<Extract<ControlRequest, { type: "change_observe" }>>,
 	): void | Promise<void>;
@@ -963,7 +928,6 @@ class IrohDaemonService {
 	private readonly pushRelayClient: IrohRemotePushRelayHttpClient;
 	private readonly pushNotificationDeduper = new IrohRemoteInMemoryPushNotificationDeduper();
 	private readonly trustStore: ProjectTrustStore;
-	private readonly conversationCoordinators = new ConversationCoordinatorRegistry();
 	/** The conversation workers the daemon supervises: phones' conversations run in them. */
 	private readonly workers: WorkerRegistry;
 	/** Relays to workers, by relay id: the client's authorization and the worker serving it. */
@@ -983,14 +947,14 @@ class IrohDaemonService {
 		string,
 		{ readonly connectionId: string; readonly release: () => void }
 	>();
+	/** Sessions of worktrees being removed or reclaimed, by `conversationKey`: no phone opens them meanwhile. */
+	private readonly worktreeRemovalReservations = new Set<string>();
 	private readonly tuiChangeAuthorities = new Map<string, TuiChangeAuthorityClaim>();
 	private readonly tuiChangeRetirementTasks = new Set<Promise<void>>();
 	private tuiChangeReceiptRevision = 0n;
 	private readonly worktrees: WorktreeManager;
 	private readonly prReviewCheckouts: PrReviewCheckoutManager;
 	private readonly worktreeRetention: WorktreeRetentionSweeper;
-	private readonly leaseBroker: LeaseBroker;
-	private readonly viewerFeeds: ViewerFeedRegistry;
 	private readonly relays = new RelayRegistry();
 	private endpoint: IrohEndpointLike | undefined;
 	private engine: IrohRemoteHostEngine | undefined;
@@ -1142,9 +1106,15 @@ class IrohDaemonService {
 			}
 		});
 		this.workers.onHostsChanged((workspaceName, sessionId, hosted) => {
-			// The lease broker sees a session a worker hosts as daemon-owned, until slice 9 deletes it.
-			this.syncWorkerLease(workspaceName, sessionId);
 			if (hosted) return;
+			// Its observations no longer come from a worker hosting it: the claim retires, as the worker's exit retires it.
+			const changeKey = this.tuiChangeKey(workspaceName, sessionId);
+			const changeClaim = this.tuiChangeAuthorities.get(changeKey);
+			if (changeClaim !== undefined) {
+				this.trackTuiChangeRetirement(
+					this.retireTuiChangeAuthorityClaim(changeKey, workspaceName, sessionId, changeClaim),
+				);
+			}
 			// A conversation closed (or its worker exited): who opened it no longer matters, and its worktree's retention runs.
 			const key = conversationKey(workspaceName, sessionId);
 			this.conversationOpeners.delete(key);
@@ -1159,25 +1129,16 @@ class IrohDaemonService {
 			agentDir: services.agentDir,
 			stateManager: this.stateManager,
 			auditLogger: services.auditLogger,
-			hasActiveRuntimeForSession: (workspaceName, sessionId) => {
-				const lease = this.leaseBroker.lookup(workspaceName, sessionId);
-				return this.workers.hosts(workspaceName, sessionId) || (lease !== undefined && lease.state !== "unowned");
-			},
+			hasActiveRuntimeForSession: (workspaceName, sessionId) => this.workers.hosts(workspaceName, sessionId),
 			reserveSessionsForRemoval: (workspaceName, sessionIds) =>
-				this.leaseBroker.reserveSessionsForWorktreeRemoval(workspaceName, sessionIds),
+				this.reserveSessionsForWorktreeRemoval(workspaceName, sessionIds),
 			flushState: () => services.state.flush(),
 		});
 		this.prReviewCheckouts = new PrReviewCheckoutManager({
 			agentDir: services.agentDir,
 			stateManager: this.stateManager,
 			worktrees: this.worktrees,
-			hasActiveSession: (workspaceName, sessionId) => {
-				const lease = this.leaseBroker.lookup(workspaceName, sessionId);
-				return (
-					this.workers.hosts(workspaceName, sessionId) ||
-					(lease !== undefined && (lease.state !== "unowned" || lease.pendingDaemonAttaches > 0))
-				);
-			},
+			hasActiveSession: (workspaceName, sessionId) => this.workers.hosts(workspaceName, sessionId),
 		});
 		this.worktreeRetention = new WorktreeRetentionSweeper({
 			manager: this.worktrees,
@@ -1185,72 +1146,6 @@ class IrohDaemonService {
 			auditLogger: services.auditLogger,
 			getRetentionPolicy: () => resolveWorktreeCleanupPolicy(services.state.state.settings).retention,
 		});
-		this.viewerFeeds = new ViewerFeedRegistry({
-			sendTo: (connectionId, event) => services.controlServer.sendTo(connectionId, event),
-		});
-		// The broker's daemon-owned states are a session a worker hosts (Phase 7 slice 4, until slice 9).
-		this.leaseBroker = new LeaseBroker({
-			isRuntimeStreaming: (workspaceName, sessionId) => this.workers.isHostActive(workspaceName, sessionId),
-			waitForRuntimeIdle: (workspaceName, sessionId) => this.workers.whenHostIdle(workspaceName, sessionId),
-			// A TUI taking the session's lease closes the conversation in the worker hosting it.
-			disposeRuntime: (workspaceName, sessionId) =>
-				this.workers.closeConversation(workspaceName, sessionId, "lease_transferred"),
-			closePhoneStreams: async (workspaceName, sessionId) => {
-				await this.closeWorkerRelays(
-					(entry) => entry.relay.workspaceName === workspaceName && entry.relay.sessionId === sessionId,
-					"lease_transferred",
-				);
-			},
-			closeRelays: (record, reason) => {
-				for (const relayId of Array.from(record.relayIds)) {
-					void this.conversationCoordinators
-						.get(record.workspaceName, record.sessionId)
-						?.closeTransport(relayId, reason);
-				}
-			},
-			beginTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
-				this.conversationCoordinators.getOrCreate(workspaceName, sessionId).beginTuiLeaseHandoff(connectionId);
-			},
-			commitTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
-				const coordinator = this.conversationCoordinators.get(workspaceName, sessionId);
-				if (!coordinator) {
-					throw new Error(`TUI handoff lost its conversation coordinator for ${workspaceName}/${sessionId}`);
-				}
-				coordinator.commitTuiLeaseHandoff(connectionId);
-			},
-			cancelTuiLeaseHandoff: (workspaceName, sessionId, connectionId) => {
-				this.conversationCoordinators.get(workspaceName, sessionId)?.cancelTuiLeaseHandoff(connectionId);
-			},
-			releaseTuiLease: (workspaceName, sessionId, connectionId) => {
-				this.conversationCoordinators.get(workspaceName, sessionId)?.releaseTuiLease(connectionId);
-			},
-			// The drained turn runs in the worker hosting the session; the TUI waiting for it may stop it.
-			onDrainStarted: (record, viewerFeedId) => {
-				const host = this.workers.host(record.workspaceName, record.sessionId);
-				const connectionId = host === undefined ? undefined : this.workers.connectionOf(host.workerId);
-				if (connectionId === undefined || !record.tuiConnectionId) return;
-				this.viewerFeeds.start(viewerFeedId, record.tuiConnectionId, {
-					abort: () => {
-						this.services.controlServer.sendTo(connectionId, {
-							type: "worker_abort",
-							sessionId: record.sessionId,
-						});
-					},
-				});
-			},
-			onDrainEnded: (_record, viewerFeedId, reason) => {
-				this.viewerFeeds.end(viewerFeedId, reason);
-			},
-			audit: (event) => {
-				void this.logAudit({
-					type: event.type,
-					workspace: event.workspaceName,
-					success: true,
-					details: { sessionId: event.sessionId, ...event.details },
-				});
-			},
-		});
-		this.conversationCoordinators.bindLeaseBroker(this.leaseBroker);
 		let readyResolve: () => void = () => {};
 		let readyReject: (error: unknown) => void = () => {};
 		const readyPromise = new Promise<void>((resolve, reject) => {
@@ -1259,6 +1154,26 @@ class IrohDaemonService {
 		});
 		readyPromise.catch(() => {});
 		this.ready = { promise: readyPromise, resolve: readyResolve, reject: readyReject };
+	}
+
+	/**
+	 * Reserve the sessions of a worktree being removed or reclaimed: refused
+	 * while a worker hosts one of them (or another removal reserved it), and
+	 * until the release runs no phone's open of one is admitted. A conversation
+	 * that opens there anyway cannot take the checkout's lock the removal holds.
+	 */
+	private reserveSessionsForWorktreeRemoval(workspaceName: string, sessionIds: string[]): (() => void) | undefined {
+		const keys = sessionIds.map((sessionId) => conversationKey(workspaceName, sessionId));
+		if (
+			keys.some((key) => this.worktreeRemovalReservations.has(key)) ||
+			sessionIds.some((sessionId) => this.workers.hosts(workspaceName, sessionId))
+		) {
+			return undefined;
+		}
+		for (const key of keys) this.worktreeRemovalReservations.add(key);
+		return () => {
+			for (const key of keys) this.worktreeRemovalReservations.delete(key);
+		};
 	}
 
 	private tuiChangeKey(workspaceName: string, sessionId: string): string {
@@ -1298,13 +1213,6 @@ class IrohDaemonService {
 			: this.services.changes.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
 	}
 
-	private retireTuiChangeAuthority(workspaceName: string, sessionId: string, connectionId?: string): Promise<void> {
-		const key = this.tuiChangeKey(workspaceName, sessionId);
-		const claim = this.tuiChangeAuthorities.get(key);
-		if (!claim || (connectionId !== undefined && claim.connectionId !== connectionId)) return Promise.resolve();
-		return this.retireTuiChangeAuthorityClaim(key, workspaceName, sessionId, claim);
-	}
-
 	private retireCurrentTuiChangeObservation(
 		key: string,
 		workspaceName: string,
@@ -1328,7 +1236,7 @@ class IrohDaemonService {
 
 	private trackTuiChangeRetirement(task: Promise<void>): void {
 		const tracked = task.catch((error: unknown) => {
-			this.log("warn", "failed to retire TUI change observation after control disconnect", {
+			this.log("warn", "failed to retire a worker's change observation after its connection closed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});
@@ -1338,7 +1246,8 @@ class IrohDaemonService {
 
 	/**
 	 * A conversation's Git state for change association, from the process
-	 * that writes it: the worker hosting it, or the TUI holding its lease.
+	 * that writes it: the worker hosting it, under its workspace's current
+	 * authority. Only worker connections send it.
 	 */
 	private async handleChangeObservation(
 		connection: ControlConnection,
@@ -1357,15 +1266,17 @@ class IrohDaemonService {
 					key.workspaceGeneration
 			);
 		};
-		const assertLease = (): boolean =>
-			workerId !== undefined
-				? this.workers.workerHosts(workerId, request.sessionId) && workerKeyCurrent()
-				: isExactTuiChangeObservationLeaseHolder(
-						connection,
-						this.leaseBroker.lookup(request.workspaceName, request.sessionId),
-					);
-		if (!assertLease()) {
-			connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
+		const assertHosted = (): boolean =>
+			workerId !== undefined && this.workers.workerHosts(workerId, request.sessionId) && workerKeyCurrent();
+		const notHosted = (): void =>
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "not_hosted",
+				message: "the worker does not host that conversation",
+			});
+		if (!assertHosted()) {
+			notHosted();
 			return;
 		}
 		const key = this.tuiChangeKey(request.workspaceName, request.sessionId);
@@ -1396,9 +1307,9 @@ class IrohDaemonService {
 		}
 		claim.workspaceGeneration = workspaceGeneration;
 		if (request.gitContext === null) {
-			if (!assertLease()) {
+			if (!assertHosted()) {
 				await this.retireTuiChangeAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
-				connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
+				notHosted();
 				return;
 			}
 			await Promise.all([
@@ -1469,7 +1380,7 @@ class IrohDaemonService {
 		const currentGeneration = (currentState.workspaceGenerations ?? []).find(
 			(candidate) => candidate.workspaceName === request.workspaceName,
 		)?.generation;
-		if (!assertLease() || !currentWorkspace || currentGeneration !== workspaceGeneration) {
+		if (!assertHosted() || !currentWorkspace || currentGeneration !== workspaceGeneration) {
 			await this.retireTuiChangeAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
 			connection.send({ type: "error", id: request.id, code: "authority_changed", message: "authority changed" });
 			return;
@@ -1606,15 +1517,7 @@ class IrohDaemonService {
 			sessionContexts: (authorization) => this.createSessionContextsRpcBackend(authorization),
 			prReviews: (authorization, signal) =>
 				this.createPrReviewRpcBackend(authorization, signal ?? new AbortController().signal),
-			listRuntimeStates: (workspaceName) => {
-				const states = new Map<string, Exclude<LeaseState, "unowned">>();
-				for (const record of this.leaseBroker.list()) {
-					if (record.workspaceName === workspaceName && record.state !== "unowned") {
-						states.set(record.sessionId, record.state);
-					}
-				}
-				return states;
-			},
+			listRuntimeStates: (workspaceName) => this.workers.runtimeStates(workspaceName),
 			getChangeContext: (workspaceName, workspaceGeneration, sessionId) =>
 				this.services.changes.getChangeContext(workspaceName, workspaceGeneration, sessionId),
 			unregisterWorkspace: (workspaceName, keep) => this.unregisterWorkspaceForRemote(workspaceName, keep),
@@ -3693,7 +3596,7 @@ class IrohDaemonService {
 
 	private async sendHandshakeError(stream: IrohBiStreamLike, error: unknown): Promise<void> {
 		const record = (error ?? {}) as Record<string, unknown>;
-		// Plain {message, ...} records (relay closure, lease re-check) must not
+		// Plain {message, ...} records (relay closure, a worktree being removed) must not
 		// stringify to "[object Object]".
 		const message =
 			error instanceof Error ? error.message : typeof record.message === "string" ? record.message : String(error);
@@ -3744,332 +3647,6 @@ class IrohDaemonService {
 		);
 	}
 
-	/**
-	 * Relay a phone conversation stream to the owning TUI (§5.6): the daemon
-	 * has already authenticated the phone; the TUI serves the framed RPC from
-	 * its in-process runtime over a dedicated relay unix connection.
-	 */
-	private async relayConversationToTui(
-		stream: IrohBiStreamLike,
-		physicalOwner: IrohPhysicalStreamOwner,
-		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connectionId: string,
-		streamId: string,
-		targetSessionId: string,
-		tuiConnectionId: string,
-		admission: IrohDaemonAdmissionLease,
-	): Promise<void> {
-		const authorization = handshake.authorization;
-		const workspaceName = authorization.workspace.name;
-		if (!admission.isCurrent()) {
-			return;
-		}
-
-		// Duplicate handling per clientNodeId + key: duplicates already on this
-		// Iroh connection are real duplicates; entries on older connections are
-		// stale for this conversation and may be replaced independently of any
-		// sibling subagent streams that opened first on the new connection.
-		const liveRelays = this.relays.forConversation(
-			authorization.client.nodeId,
-			workspaceName,
-			targetSessionId,
-			"active",
-		);
-		const pendingRelays = this.relays.forConversation(
-			authorization.client.nodeId,
-			workspaceName,
-			targetSessionId,
-			"offered",
-		);
-		if (
-			liveRelays.some((relay) => relay.connectionId === connectionId) ||
-			pendingRelays.some((pending) => pending.connectionId === connectionId)
-		) {
-			await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId, "relay_registry");
-			return;
-		}
-		for (const relay of liveRelays) {
-			void this.conversationCoordinators.get(workspaceName, targetSessionId)?.closeTransport(relay.relayId, "error");
-		}
-		// Unredeemed offers for the same conversation on older connections are
-		// superseded by this one: fail their deferred handshakes and settle them
-		// (relay_closed to the TUI, lease bookkeeping) instead of leaking tasks.
-		for (const pending of pendingRelays) {
-			void this.conversationCoordinators
-				.get(workspaceName, targetSessionId)
-				?.closeTransport(pending.relayId, "error");
-		}
-
-		// Resolve the concrete session target for the preamble (§3.7).
-		const sessionTarget: IrohRemoteSessionTarget =
-			handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
-				? { kind: "session", sessionId: targetSessionId }
-				: { kind: "last", resumeSessionId: targetSessionId };
-		// A worktree-bound session opens with its stored cwd while retaining the
-		// parent workspace's session store. resolveSessionWorktree also heals
-		// stranded bindings (moved-to/subagent session ids) from that stored cwd, so
-		// relays fail with the designed worktree gates instead of
-		// session_unavailable (#83).
-		const boundWorktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
-		const relayOwnerCapabilities = this.services.controlServer
-			.connections()
-			.find((controlConnection) => controlConnection.connectionId === tuiConnectionId)?.capabilities;
-		if (!relayOwnerCapabilities?.has(CONTROL_RPC_GRANTS_CAPABILITY)) {
-			await this.sendHandshakeError(stream, {
-				message: "conversation owner is not grant-aware; retry",
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-			});
-			return;
-		}
-		// Worktree-bound conversations are only relayed to TUIs that advertised the
-		// worktrees control capability (an old TUI would sanitize with the parent
-		// root and leak host paths), and never when the checkout has vanished.
-		const relayGate = evaluateWorktreeRelayGate(boundWorktree, relayOwnerCapabilities, CONTROL_WORKTREES_CAPABILITY);
-		if (!relayGate.ok) {
-			if (relayGate.reason === "checkout_missing") {
-				await this.sendHandshakeError(stream, {
-					message: "worktree checkout is unavailable",
-					outcome: "session_unavailable",
-					workspace: workspaceName,
-					sessionId: targetSessionId,
-				});
-				return;
-			}
-			await this.sendHandshakeError(stream, {
-				message: "conversation owner cannot serve worktree sessions; retry",
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-			});
-			return;
-		}
-		let resolvedTarget: ResolvedSessionTargetWithManager<SessionManager>;
-		let resolvedSessionCwd: string;
-		try {
-			resolvedTarget = await resolveIrohRemoteSessionTarget(
-				sessionTarget,
-				{ name: workspaceName, path: authorization.workspace.path },
-				createSessionManagerTargetStore(
-					boundWorktree?.path ?? authorization.workspace.path,
-					getDefaultSessionDir(authorization.workspace.path, this.services.agentDir),
-					// The owning TUI holds the session's lock; resolving the target only reads it.
-					{ listAll: true, preserveSessionCwd: true, readOnly: true },
-				),
-			);
-			try {
-				resolvedSessionCwd = resolvedTarget.sessionManager.getCwd();
-			} finally {
-				await resolvedTarget.sessionManager.closePersistence();
-			}
-		} catch (error) {
-			await this.sendHandshakeError(stream, error);
-			return;
-		}
-		const relayWorkingDirectoryRelativeToRoot = getRelativeWorkingDirectoryForRoot(
-			boundWorktree?.path ?? authorization.workspace.path,
-			resolvedSessionCwd,
-		);
-		if (relayWorkingDirectoryRelativeToRoot === null) {
-			await this.sendHandshakeError(stream, {
-				message: "stored session working directory is outside the authorized workspace",
-				outcome: "session_unavailable",
-				workspace: workspaceName,
-				sessionId: targetSessionId,
-			});
-			return;
-		}
-		const relayWorkingDirectory =
-			boundWorktree === undefined
-				? relayWorkingDirectoryRelativeToRoot
-				: getRegisteredWorkingDirectoryForWorktree(boundWorktree, relayWorkingDirectoryRelativeToRoot);
-
-		// Session-target resolution awaited; the lease can have moved (release,
-		// connection loss) in the meantime. Re-check before minting so the offer
-		// cannot go to a stale or dead owner.
-		const lease = this.leaseBroker.lookup(workspaceName, targetSessionId);
-		if (lease?.state !== "tui-owned" || lease.tuiConnectionId !== tuiConnectionId) {
-			await this.sendHandshakeError(stream, {
-				message: "conversation lease owner changed; retry",
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-			});
-			return;
-		}
-		// The target-resolution awaits above can race an access update or revoke.
-		// Recheck immediately before the synchronous mint so stale authorization
-		// cannot create a new pending offer after control-plane invalidation acks.
-		await this.dependencies.beforeAuthorizedStreamPublication?.("relay", authorization);
-		if (!(await this.isAuthorizationCurrent(authorization))) {
-			await this.sendHandshakeError(stream, { message: "client access changed; reconnect" });
-			return;
-		}
-		if (!admission.isCurrent()) {
-			return;
-		}
-
-		// A sibling stream can resolve/redeem while this stream awaits target
-		// resolution. Re-check immediately before minting the offer.
-		const currentLiveRelays = this.relays.forConversation(
-			authorization.client.nodeId,
-			workspaceName,
-			targetSessionId,
-			"active",
-		);
-		const currentPendingRelays = this.relays.forConversation(
-			authorization.client.nodeId,
-			workspaceName,
-			targetSessionId,
-			"offered",
-		);
-		if (
-			currentLiveRelays.some((relay) => relay.connectionId === connectionId) ||
-			currentPendingRelays.some((pending) => pending.connectionId === connectionId)
-		) {
-			await this.rejectDuplicateActiveConnection(stream, authorization, targetSessionId, "relay_registry");
-			return;
-		}
-		for (const relay of currentLiveRelays) {
-			void this.conversationCoordinators.get(workspaceName, targetSessionId)?.closeTransport(relay.relayId, "error");
-		}
-		for (const pending of currentPendingRelays) {
-			void this.conversationCoordinators
-				.get(workspaceName, targetSessionId)
-				?.closeTransport(pending.relayId, "error");
-		}
-
-		if (!admission.isCurrent()) {
-			return;
-		}
-		const coordinator = this.conversationCoordinators.getOrCreate(workspaceName, targetSessionId);
-		let releaseRelayTransport = () => {};
-		const relayPhysicalStream = physicalOwner.physicalStream ?? stream;
-		const relay = this.relays.mint({
-			workspaceName,
-			sessionId: targetSessionId,
-			clientNodeId: authorization.client.nodeId,
-			connectionId,
-			ownerControlConnectionId: tuiConnectionId,
-			streamId,
-			stream: relayPhysicalStream,
-			observePhysicalTask: (task) => this.trackNativeLifecycleTask(task),
-			preamble: this.phonePreamble(handshake, connectionId, streamId, {
-				sessionId: resolvedTarget.sessionId,
-				selection: resolvedTarget.selection,
-				...(resolvedTarget.requestedSessionId === undefined
-					? {}
-					: { requestedSessionId: resolvedTarget.requestedSessionId }),
-				worktree: boundWorktree,
-				workingDirectory: relayWorkingDirectory,
-			}),
-			rejectPending: ({ message, retryAfterMs }) =>
-				this.sendHandshakeError(relayPhysicalStream, {
-					message,
-					...(retryAfterMs === undefined ? {} : { retryAfterMs }),
-				}),
-			onSettled: async (outcome) => {
-				coordinator.unregisterRelayLease(relay.relayId);
-				this.services.controlServer.sendTo(tuiConnectionId, {
-					type: "relay_closed",
-					relayId: relay.relayId,
-					reason: outcome.reason,
-				});
-				await this.logAudit({
-					type: "relay_closed",
-					clientNodeId: authorization.client.nodeId,
-					workspace: workspaceName,
-					success: outcome.error === undefined,
-					error: outcome.error,
-					details: {
-						relayId: relay.relayId,
-						reason: outcome.reason,
-						bytesUp: outcome.bytesUp,
-						bytesDown: outcome.bytesDown,
-						durationMs: outcome.durationMs,
-					},
-				});
-			},
-		});
-		if (
-			!physicalOwner.installCloseAction((reason) =>
-				relay
-					.close(normalizeRelayCloseReason(reason), {
-						pendingMessage: relayPendingMessageForReason(reason),
-						...(reason === "workspace_unregistered" || reason === "host_shutdown"
-							? {}
-							: { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }),
-					})
-					.then(() => undefined),
-			)
-		) {
-			await relay.close("host_shutdown", { pendingMessage: relayPendingMessageForReason("host_shutdown") });
-			this.conversationCoordinators.releaseIfVacant(coordinator);
-			return;
-		}
-
-		try {
-			releaseRelayTransport = coordinator.registerTransport({
-				id: relay.relayId,
-				kind: "relay",
-				clientNodeId: authorization.client.nodeId,
-				connectionId,
-				close: (reason) => physicalOwner.close(reason),
-			});
-		} catch (error) {
-			// Surface the underlying registration failure in the relay_closed audit
-			// record; the client only ever sees the retryable pendingMessage.
-			await relay.close("error", {
-				pendingMessage: "conversation owner changed; retry",
-				retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			this.conversationCoordinators.releaseIfVacant(coordinator);
-			return;
-		}
-		void relay.settled.finally(releaseRelayTransport);
-		if (this.physicalStreamOwners.get(streamId) === physicalOwner) {
-			this.physicalStreamOwners.delete(streamId);
-		}
-		if (!admission.isCurrent()) {
-			await coordinator.closeTransport(relay.relayId, "host_shutdown");
-			return;
-		}
-
-		if (!coordinator.registerRelayLease(relay.relayId)) {
-			await coordinator.closeTransport(relay.relayId, "error");
-			return;
-		}
-		// Coordinator, relay, and exact lease ownership are synchronously published;
-		// the long-lived relay no longer holds attach-operation admission.
-		admission.release();
-		void this.logAudit({
-			type: "relay_opened",
-			clientNodeId: authorization.client.nodeId,
-			workspace: workspaceName,
-			success: true,
-			details: {
-				relayId: relay.relayId,
-				workspaceName,
-				sessionId: targetSessionId,
-				connectionId,
-				streamId,
-			},
-		});
-		const delivered = this.services.controlServer.sendTo(tuiConnectionId, {
-			type: "relay_offer",
-			clientKind: "phone",
-			relayId: relay.relayId,
-			relayToken: relay.relayToken,
-			workspaceName,
-			sessionId: targetSessionId,
-			clientNodeId: authorization.client.nodeId,
-			connectionId,
-			streamId,
-		});
-		if (!delivered) {
-			// The TUI vanished between lease publication and offer delivery. The
-			// coordinator closes the same offered owner the expiry path would close.
-			void coordinator.closeTransport(relay.relayId, "error");
-		}
-		await relay.settled;
-	}
-
 	private async runIntegratedConversation(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
@@ -4082,14 +3659,7 @@ class IrohDaemonService {
 			await owner.close("host_shutdown").catch(() => {});
 			return;
 		}
-		const admittedTask = this.runAdmittedIntegratedConversation(
-			stream,
-			handshake,
-			connectionId,
-			streamId,
-			owner,
-			admission,
-		);
+		const admittedTask = this.relayToWorker(stream, owner, handshake, connectionId, streamId, admission);
 		try {
 			await waitUntilAdmissionCancelled(admittedTask, admission.signal);
 		} finally {
@@ -4097,57 +3667,8 @@ class IrohDaemonService {
 		}
 	}
 
-	private async runAdmittedIntegratedConversation(
-		stream: IrohBiStreamLike,
-		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connectionId: string,
-		streamId: string,
-		owner: IrohPhysicalStreamOwner,
-		admission: IrohDaemonAdmissionLease,
-	): Promise<void> {
-		const authorization = handshake.authorization;
-		const targetSessionId = getResolvedTargetSessionId(handshake.hello, authorization);
-		if (!admission.isCurrent()) {
-			return;
-		}
-		// A session a TUI holds the lease of is served by that TUI until the TUI attaches to workers (slice 8).
-		const daemonAttach = this.leaseBroker.beginDaemonAttach(authorization.workspace.name, targetSessionId);
-		if (daemonAttach.kind === "relay") {
-			if (!targetSessionId) {
-				await this.sendHandshakeError(stream, {
-					message: "conversation lease owner changed; retry",
-					retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-				});
-				return;
-			}
-			await this.relayConversationToTui(
-				stream,
-				owner,
-				handshake,
-				connectionId,
-				streamId,
-				targetSessionId,
-				daemonAttach.tuiConnectionId,
-				admission,
-			);
-			return;
-		}
-		if (daemonAttach.kind === "retry") {
-			await this.sendHandshakeError(stream, {
-				message: "conversation lease is draining; retry",
-				retryAfterMs: daemonAttach.retryAfterMs,
-			});
-			return;
-		}
-		try {
-			await this.relayToWorker(stream, owner, handshake, connectionId, streamId, admission);
-		} finally {
-			this.leaseBroker.abortDaemonAttach(daemonAttach.claim);
-		}
-	}
-
 	/**
-	 * What the host serving a relayed phone needs (`relay_preamble`): the
+	 * What the worker serving a relayed phone needs (`relay_preamble`): the
 	 * phone's handshake, the daemon's authorization of it, the daemon's
 	 * identity and relays, and the conversation target it resolved.
 	 */
@@ -4253,6 +3774,7 @@ class IrohDaemonService {
 		streamId: string,
 		admission: IrohDaemonAdmissionLease,
 	): Promise<void> {
+		if (!admission.isCurrent()) return;
 		const authorization = handshake.authorization;
 		const workspaceName = authorization.workspace.name;
 		const workspaceGeneration = authorization.workspaceGeneration;
@@ -4288,6 +3810,22 @@ class IrohDaemonService {
 			return;
 		}
 		const sessionId = resolved.sessionId;
+		// A conversation of a worktree being removed opens once the removal is done: checked now, and again
+		// when the registry prepares its open, by when the session counts as hosted and no removal reserves it.
+		const assertNotBeingRemoved = (): void => {
+			if (!this.worktreeRemovalReservations.has(conversationKey(workspaceName, sessionId))) return;
+			throw createConversationOpenError(
+				"duplicate_conversation_connection",
+				"the conversation's worktree is being removed; retry",
+				{ workspace: workspaceName, sessionId, retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS },
+			);
+		};
+		try {
+			assertNotBeingRemoved();
+		} catch (error) {
+			await this.sendHandshakeError(stream, error);
+			return;
+		}
 		// One relay per phone and conversation on a connection; one on an older connection is replaced.
 		const relaysOf = () => [
 			...this.relays.forConversation(authorization.client.nodeId, workspaceName, sessionId, "active"),
@@ -4324,24 +3862,15 @@ class IrohDaemonService {
 				{
 					compatibility: resolved.compatibility,
 					signal: admission.signal,
-					prepare: () => resolved.prepare(workspaceGeneration, admission.signal),
+					prepare: async () => {
+						assertNotBeingRemoved();
+						return resolved.prepare(workspaceGeneration, admission.signal);
+					},
 					attach: (worker, outcome) => {
 						// Everything the awaits above could have changed is checked again in this turn.
 						if (!admission.isCurrent()) throw new Error("daemon admission closed");
 						if (getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), authorization) !== undefined) {
 							throw new Error("client or workspace authority changed during conversation attach; reconnect");
-						}
-						const lease = this.leaseBroker.lookup(workspaceName, sessionId);
-						if (lease?.state === "tui-owned" || lease?.state === "daemon-draining") {
-							throw createConversationOpenError(
-								"duplicate_conversation_connection",
-								"conversation owner changed; retry",
-								{
-									workspace: workspaceName,
-									sessionId,
-									retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS,
-								},
-							);
 						}
 						// A TUI-opened worker keeps its own tools for every client (#50).
 						if (
@@ -4455,7 +3984,6 @@ class IrohDaemonService {
 				sessionId: resolved.sessionId,
 				clientNodeId: authorization.client.nodeId,
 				connectionId,
-				ownerControlConnectionId: worker.connectionId,
 				streamId,
 				stream: relayPhysicalStream,
 				observePhysicalTask: (task) => this.trackNativeLifecycleTask(task),
@@ -4476,7 +4004,6 @@ class IrohDaemonService {
 				onSettled: async (outcome) => {
 					release();
 					this.workerRelays.delete(relay.relayId);
-					this.syncWorkerLease(workspaceName, resolved.sessionId);
 					this.services.controlServer.sendTo(worker.connectionId, {
 						type: "relay_closed",
 						relayId: relay.relayId,
@@ -4508,7 +4035,6 @@ class IrohDaemonService {
 		const clients = this.conversationClients.get(key) ?? new Set<string>();
 		clients.add(authorization.client.nodeId);
 		this.conversationClients.set(key, clients);
-		this.syncWorkerLease(workspaceName, resolved.sessionId);
 		const delivered = this.services.controlServer.sendTo(worker.connectionId, {
 			type: "relay_offer",
 			clientKind: "phone",
@@ -4523,38 +4049,6 @@ class IrohDaemonService {
 		// The worker's connection closed meanwhile: the offer closes as an expired one does.
 		if (!delivered) void relay.close("error", { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS });
 		return relay;
-	}
-
-	/** Keep the lease broker's view of a session a worker hosts current: hosted, and with how many relays (offered or open). */
-	private syncWorkerLease(workspaceName: string, sessionId: string): void {
-		const streams = [...this.workerRelays.values()].filter(
-			(entry) =>
-				entry.relay.workspaceName === workspaceName &&
-				entry.relay.sessionId === sessionId &&
-				entry.relay.phase !== "closed",
-		).length;
-		this.leaseBroker.syncWorkerHosting(
-			workspaceName,
-			sessionId,
-			this.workers.hosts(workspaceName, sessionId),
-			streams,
-		);
-	}
-
-	/** Close the relays to workers `select` picks with `reason`; resolves how many closed. */
-	private async closeWorkerRelays(select: (entry: WorkerRelay) => boolean, reason: RelayCloseReason): Promise<number> {
-		const selected = [...this.workerRelays.values()].filter(select);
-		await Promise.allSettled(
-			selected.map((entry) =>
-				entry.relay.close(reason, {
-					pendingMessage: relayPendingMessageForReason(reason),
-					...(reason === "workspace_unregistered" || reason === "host_shutdown"
-						? {}
-						: { retryAfterMs: RELAY_OFFER_RETRY_AFTER_MS }),
-				}),
-			),
-		);
-		return selected.length;
 	}
 
 	/**
@@ -4665,16 +4159,6 @@ class IrohDaemonService {
 		});
 	}
 
-	/** Make every TUI relay of `nodeId`, active or offered, unusable now. */
-	private closeClientRelays(nodeId: string): void {
-		for (const relay of [...this.relays.all("active"), ...this.relays.all("offered")]) {
-			if (relay.clientNodeId !== nodeId) continue;
-			void this.conversationCoordinators
-				.get(relay.workspaceName, relay.sessionId)
-				?.closeTransport(relay.relayId, "error");
-		}
-	}
-
 	private closeClientConnectionsForClient(nodeId: string, reason: string): number {
 		const records = Array.from(this.clientConnections.get(nodeId) ?? []);
 		if (records.length === 0) {
@@ -4727,25 +4211,14 @@ class IrohDaemonService {
 		return entries.length;
 	}
 
-	/** Close the relays to TUIs of a workspace, except the requesting ones. */
-	private closeRelaysForWorkspace(workspaceName: string, excludeRelayIds?: ReadonlySet<string>): void {
-		for (const relay of this.relays.all()) {
-			if (relay.workspaceName === workspaceName && !excludeRelayIds?.has(relay.relayId)) {
-				void this.conversationCoordinators
-					.get(relay.workspaceName, relay.sessionId)
-					?.closeTransport(relay.relayId, "workspace_unregistered");
-			}
-		}
-	}
-
 	/**
 	 * Post-unregister host cleanup shared by the control, workspace-management,
 	 * and conversation unregister paths: phone streams close, the relays to
-	 * workers end with `fatal{workspace_unregistered}`, the workspace's workers
-	 * retire, and the relays to TUIs close. The requesting stream or relays
-	 * stay until the unregister is answered: a requesting relay's worker
-	 * retires once that relay ended (at most the final-frame timeout later).
-	 * Resolves once the workers exited.
+	 * workers end with `fatal{workspace_unregistered}`, and the workspace's
+	 * workers retire. The requesting stream or relays stay until the
+	 * unregister is answered: a requesting relay's worker retires once that
+	 * relay ended (at most the final-frame timeout later). Resolves once the
+	 * workers exited.
 	 */
 	private async cleanupUnregisteredWorkspace(
 		workspaceName: string,
@@ -4772,7 +4245,6 @@ class IrohDaemonService {
 			this.endWorkerRelay(relayId, "workspace_unregistered");
 		}
 		const workerIds = this.workers.workersOf(workspaceName);
-		this.closeRelaysForWorkspace(workspaceName, exclusions.relayIds);
 		if (kept.length === 0) {
 			await this.workers.fenceWorkspace(workspaceName, { all: true, reason: "authority" });
 		} else {
@@ -4825,11 +4297,6 @@ class IrohDaemonService {
 		// below are best-effort and must never keep old commands or buffered prompts
 		// alive behind backpressure.
 		this.closeClientConnectionsForClient(nodeId, "access_updated");
-		for (const relay of this.relays.all().filter((candidate) => candidate.clientNodeId === nodeId)) {
-			void this.conversationCoordinators
-				.get(relay.workspaceName, relay.sessionId)
-				?.closeTransport(relay.relayId, "error");
-		}
 		for (const [relayId, entry] of this.workerRelays) {
 			if (entry.relay.clientNodeId === nodeId) this.endWorkerRelay(relayId, "revoked");
 		}
@@ -4839,25 +4306,12 @@ class IrohDaemonService {
 
 	private async closeWorkspaceAuthorizationRemovedStreams(nodeId: string, workspaceName: string): Promise<void> {
 		const reason = "workspace_authorization_removed";
-		const relayClosures = this.relays
-			.all()
-			.filter((relay) => relay.clientNodeId === nodeId && relay.workspaceName === workspaceName)
-			.map(
-				(relay) =>
-					this.conversationCoordinators
-						.get(relay.workspaceName, relay.sessionId)
-						?.closeTransport(relay.relayId, reason) ?? Promise.resolve(false),
-			);
 		let closedStreamCount = 0;
 		for (const [relayId, entry] of this.workerRelays) {
 			if (entry.relay.clientNodeId !== nodeId || entry.relay.workspaceName !== workspaceName) continue;
 			this.endWorkerRelay(relayId, "revoked");
 			closedStreamCount++;
 		}
-		const relayResults = await Promise.allSettled(relayClosures);
-		closedStreamCount += relayResults.filter(
-			(result): result is PromiseFulfilledResult<true> => result.status === "fulfilled" && result.value,
-		).length;
 		closedStreamCount += await this.closeActiveStreamsForClientWorkspace(nodeId, workspaceName, reason);
 		const stoppedRuntimeCount = await this.closeClientConversations(nodeId, workspaceName);
 		await this.logAudit({
@@ -4888,15 +4342,7 @@ class IrohDaemonService {
 		// unusable before any terminal write, worker retirement, or control ack.
 		const activeRelays = this.relays.all("active").filter((relay) => relay.clientNodeId === nodeId);
 		const pendingRelays = this.relays.all("offered").filter((relay) => relay.clientNodeId === nodeId);
-		for (const relay of [...activeRelays, ...pendingRelays]) {
-			if (this.workerRelays.has(relay.relayId)) {
-				this.endWorkerRelay(relay.relayId, "revoked");
-				continue;
-			}
-			void this.conversationCoordinators
-				.get(relay.workspaceName, relay.sessionId)
-				?.closeTransport(relay.relayId, "error");
-		}
+		for (const relay of [...activeRelays, ...pendingRelays]) this.endWorkerRelay(relay.relayId, "revoked");
 
 		const closedConnectionCount = this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
 		await this.initiateActiveStreamRetirement(entries, ACTIVE_REVOKE_CLOSE_REASON);
@@ -5164,72 +4610,6 @@ class IrohDaemonService {
 			case "worker_worktree_release":
 				await this.handleWorkerRequest(connection, request);
 				return true;
-			case "lease_acquire": {
-				const outcome = await this.leaseBroker.acquireForTui({
-					connectionId: connection.connectionId,
-					workspaceName: request.workspaceName,
-					sessionId: request.sessionId,
-					force: request.force,
-				});
-				if (outcome.kind === "granted") {
-					connection.send({
-						type: "lease_granted",
-						id: request.id,
-						workspaceName: request.workspaceName,
-						sessionId: request.sessionId,
-						handoff: outcome.handoff,
-					});
-					return true;
-				}
-				if (outcome.kind === "denied") {
-					connection.send({ type: "lease_denied", id: request.id, reason: outcome.reason });
-					return true;
-				}
-				connection.send({ type: "lease_pending", id: request.id, viewerFeedId: outcome.viewerFeedId });
-				outcome.granted.then(
-					(granted) => {
-						connection.send({
-							type: "lease_granted",
-							id: request.id,
-							workspaceName: request.workspaceName,
-							sessionId: request.sessionId,
-							handoff: granted.handoff,
-						});
-					},
-					(error: unknown) => {
-						connection.send({
-							type: "error",
-							id: request.id,
-							code: "drain_failed",
-							message: error instanceof Error ? error.message : String(error),
-						});
-					},
-				);
-				return true;
-			}
-			case "lease_release": {
-				const result = this.leaseBroker.releaseFromTui(
-					connection.connectionId,
-					request.workspaceName,
-					request.sessionId,
-					request.reason,
-				);
-				if (!result.ok) {
-					connection.send({ type: "error", id: request.id, code: result.code, message: "lease not held" });
-					return true;
-				}
-				await this.retireTuiChangeAuthority(request.workspaceName, request.sessionId, connection.connectionId);
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
-			case "viewer_abort": {
-				if (!(await this.viewerFeeds.abort(request.viewerFeedId, connection.connectionId))) {
-					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
-					return true;
-				}
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
 			case "pair_request":
 				await this.handlePairRequest(connection, request);
 				return true;
@@ -5255,24 +4635,6 @@ class IrohDaemonService {
 						message: error instanceof Error ? error.message : String(error),
 					});
 				}
-				return true;
-			}
-			case "relay_rpc": {
-				const result = await this.handleRelayRpc(connection, request);
-				if (!result.ok) {
-					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
-					return true;
-				}
-				connection.send({ type: "relay_rpc_result", id: request.id, frame: result.frame });
-				return true;
-			}
-			case "relay_notification_delivery": {
-				const result = await this.handleRelayNotificationDelivery(connection, request);
-				if (!result.ok) {
-					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
-					return true;
-				}
-				connection.send({ type: "relay_push_delivery_result", id: request.id, status: result.status });
 				return true;
 			}
 			case "relay_credential_revoke": {
@@ -5310,8 +4672,6 @@ class IrohDaemonService {
 				return true;
 			}
 			case "client_access_update": {
-				// A TUI serves a relayed device on the grant it was relayed with: end those relays before the change.
-				this.closeClientRelays(request.clientNodeId);
 				const access =
 					request.access !== undefined
 						? createIrohRemotePresetAccess(request.access)
@@ -5375,8 +4735,6 @@ class IrohDaemonService {
 					connection.send({ type: "error", id: request.id, code: "not_found", message: "client not found" });
 					return true;
 				}
-				// A TUI serves a relayed device on the grant it was relayed with: end those relays before the change.
-				this.closeClientRelays(request.clientNodeId);
 				const relayAppEndpoint = await this.stageManagedRelayAppEndpointRevocation(request.clientNodeId);
 				const revocation =
 					result === undefined
@@ -5458,32 +4816,6 @@ class IrohDaemonService {
 					await handleWorktreeControlRequest(connection, request, {
 						manager: this.worktrees,
 						stateManager: this.stateManager,
-						bindWorktreeSession: async (workspaceName, worktreeId, sessionId, acquireLease) => {
-							let acquired = !acquireLease;
-							const leaseDenied = new Error("worktree lease acquisition denied");
-							try {
-								await this.worktrees.bindSession(
-									workspaceName,
-									worktreeId,
-									sessionId,
-									acquireLease
-										? async () => {
-												const outcome = await this.leaseBroker.acquireForTui({
-													connectionId: connection.connectionId,
-													workspaceName,
-													sessionId,
-												});
-												if (outcome.kind === "denied") throw leaseDenied;
-												acquired = true;
-											}
-										: undefined,
-								);
-							} catch (error) {
-								if (error === leaseDenied) return false;
-								throw error;
-							}
-							return acquired;
-						},
 						removeWorktree: (workspace, worktreeId, force) =>
 							this.removeWorkspaceWorktree(workspace, worktreeId, force),
 					});
@@ -5567,28 +4899,14 @@ class IrohDaemonService {
 		}
 	}
 
-	private async handleRelayNotificationDelivery(
-		connection: ControlConnection,
-		request: Extract<ControlRequest, { type: "relay_notification_delivery" }>,
-	): Promise<RelayPushDeliveryResult> {
-		const lease = this.leaseBroker.lookup(request.workspaceName, request.sessionId);
-		if (!lease || lease.state !== "tui-owned" || lease.tuiConnectionId !== connection.connectionId) {
-			return {
-				ok: false,
-				code: "not_held",
-				message: "relay lease is not held by this control connection",
-			};
-		}
-		return this.deliverRelayNotification(request, request.notification);
-	}
-
 	/**
 	 * Run a relayed phone's intent or query that the daemon's state backs
 	 * (§5.6): push targets, workspace registration and worktrees, keep-awake,
-	 * the web search key, and the session list. The host serving the phone
-	 * forwards the frame; the daemon admits it on the phone's remote profile
-	 * with the grant it holds now and answers with the outcome frame. An
-	 * unregister keeps the relays in `keep`, so their host can still answer.
+	 * the web search key, and the session list. The worker serving the phone
+	 * forwards the frame (`worker_forward`); the daemon admits it on the
+	 * phone's remote profile with the grant it holds now and answers with the
+	 * outcome frame. An unregister keeps the relays in `keep`, so their worker
+	 * can still answer.
 	 */
 	private async runRelayFrame(
 		relay: RelayLifecycleOwner,
@@ -5642,23 +4960,6 @@ class IrohDaemonService {
 		} catch (error) {
 			return { ok: true, frame: { type: "rejected", intentId: frame.intentId, reason: rejectionReason(error) } };
 		}
-	}
-
-	private async handleRelayRpc(
-		connection: ControlConnection,
-		request: Extract<ControlRequest, { type: "relay_rpc" }>,
-	): Promise<{ ok: true; frame: ControlRelayOutcome } | { ok: false; code: string; message: string }> {
-		const relayAuthorization = this.relays.authorizeRpc(request.relayId, connection.connectionId, request);
-		if (!relayAuthorization.ok) {
-			return relayAuthorization;
-		}
-		// An unregister keeps the requesting conversation's relays, so the TUI can still answer the phone.
-		const relayIds = new Set(
-			this.relays
-				.forConversation(request.clientNodeId, request.workspaceName, request.sessionId, "active")
-				.map((relay) => relay.relayId),
-		);
-		return this.runRelayFrame(relayAuthorization.relay, request.frame, relayIds);
 	}
 
 	/**
@@ -5900,7 +5201,6 @@ class IrohDaemonService {
 	}
 
 	onControlConnectionClosed(connection: ControlConnection): void {
-		this.leaseBroker.releaseAllForConnection(connection.connectionId);
 		for (const [pinId, pin] of this.workerWorktreePins) {
 			if (pin.connectionId !== connection.connectionId) continue;
 			this.workerWorktreePins.delete(pinId);
@@ -5949,21 +5249,12 @@ class IrohDaemonService {
 	}
 
 	statusExtras(): {
-		leases: ControlLeaseStatus[];
 		phoneConnections: number;
 		relayCount: number;
 		remoteTransport: RemoteTransportHealth;
 		relayCredential?: ControlRelayCredentialStatus;
 	} {
-		const leases: ControlLeaseStatus[] = this.leaseBroker.list().map((record) => ({
-			workspaceName: record.workspaceName,
-			sessionId: record.sessionId,
-			state: record.state,
-			relayCount: record.relayIds.size,
-			streamCount: record.streamCount,
-		}));
 		return {
-			leases,
 			phoneConnections: this.clientConnections.size,
 			relayCount: this.relays.activeCount(),
 			remoteTransport: { ...this.remoteTransport },
@@ -6012,17 +5303,13 @@ class IrohDaemonService {
 		for (const pending of this.pendingPairRequests.values()) {
 			clearTimeout(pending.timer);
 		}
-		// 1. Stop accepting, then close every relay to a TUI through its
-		//    coordinator. Offered and redeemed relays share this same terminal
-		//    path and therefore preserve the host_shutdown reason. Offers to
-		//    workers not yet redeemed close the same way; their open relays end
-		//    with their workers (step 2).
+		// 1. Stop accepting. Offers to workers not yet redeemed close with the
+		//    host_shutdown reason; their open relays end with their workers
+		//    (step 2).
 		for (const entry of this.workerRelays.values()) {
 			if (entry.relay.phase === "offered") void entry.relay.close("host_shutdown");
 		}
-		const streamClosures: Promise<void>[] = this.conversationCoordinators
-			.values()
-			.map((coordinator) => coordinator.closeTransports("host_shutdown").then(() => undefined));
+		const streamClosures: Promise<void>[] = [];
 		// Retire every accepted physical stream, including handshakes and attach
 		// operations that have not reached the active-stream registry yet.
 		const activeEntries = this.activeStreams.allEntries();
@@ -6030,12 +5317,9 @@ class IrohDaemonService {
 			this.activeStreams.unregister(entry);
 		}
 		for (const entry of activeEntries) {
-			const coordinator = this.conversationCoordinators.get(entry.workspaceName, entry.sessionId);
-			if (!coordinator) {
-				try {
-					streamClosures.push(Promise.resolve(entry.close("host_shutdown")));
-				} catch {}
-			}
+			try {
+				streamClosures.push(Promise.resolve(entry.close("host_shutdown")));
+			} catch {}
 		}
 		const ownedStreams = Array.from(this.physicalStreamOwners.entries());
 		for (const [, owner] of ownedStreams) {

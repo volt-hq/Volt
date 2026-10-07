@@ -1,7 +1,7 @@
 /**
  * A daemon whose Iroh binding does not load (an `--omit=optional` install,
- * darwin x64, or a standalone binary): it serves its control plane, the
- * TUI's leases, and conversation workers as a daemon with phone transport
+ * darwin x64, or a standalone binary): it serves its control plane, its
+ * TUIs, and conversation workers as a daemon with phone transport
  * does, reports that transport unavailable, refuses pairing with the
  * guidance its status shows, and still revokes paired devices.
  */
@@ -56,7 +56,7 @@ describe("a daemon without the Iroh binding", () => {
 		}
 	});
 
-	it("runs conversation workers and serves the TUI's leases", async () => {
+	it("runs conversation workers and serves TUIs", async () => {
 		const harness = await startHarness();
 		const hosted = await harness.createSession();
 		const { release } = await harness.openWorker(hosted, { attach: "local" });
@@ -64,18 +64,10 @@ describe("a daemon without the Iroh binding", () => {
 		release();
 
 		const tui = await harness.connect("tui");
-		const shown = await harness.createSession();
-		expect(
-			await tui.request({ type: "lease_acquire", workspaceName: harness.workspaceName, sessionId: shown.sessionId }),
-		).toMatchObject({ type: "lease_granted", sessionId: shown.sessionId });
-		expect(
-			await tui.request({
-				type: "lease_release",
-				workspaceName: harness.workspaceName,
-				sessionId: shown.sessionId,
-				reason: "quit",
-			}),
-		).toMatchObject({ type: "ok" });
+		expect(await tui.request({ type: "worktree_list", workspaceName: harness.workspaceName })).toMatchObject({
+			type: "worktrees_result",
+			worktrees: [],
+		});
 	});
 
 	it("retires a workspace's workers when the workspace is unregistered", async () => {

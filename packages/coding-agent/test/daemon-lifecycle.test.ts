@@ -287,7 +287,7 @@ describe("voltd lifecycle", () => {
 		const [statusResponse, clientsResponse, unsupported] = await Promise.all([
 			client.request({ type: "status" }),
 			client.request({ type: "clients_list" }),
-			client.request({ type: "viewer_abort", viewerFeedId: "vf-nope" }),
+			client.request({ type: "relay_credential_check" }),
 		]);
 		expect(statusResponse.type).toBe("status_result");
 		if (statusResponse.type === "status_result") {
@@ -597,7 +597,6 @@ describe("voltd lifecycle", () => {
 					workspaceName: "ws",
 					sessionId: "s-relay-tail",
 					clientNodeId: "n-phone",
-					ownerControlConnectionId: "control-test",
 					connectionId: "conn-test",
 					streamId: "stream-test",
 					stream: phone,

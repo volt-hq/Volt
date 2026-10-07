@@ -247,18 +247,12 @@ describe("#426 disposable checkout lifecycle", () => {
 		},
 	);
 
-	it("rejects TUI lease publication if archival wins after lookup", async () => {
+	it("refuses to bind a session if archival wins after lookup", async () => {
 		const f = await fixture();
 		const record = await f.create("binding");
 		expect(await f.manager.findWorktree(f.workspace.name, record.id)).toBeDefined();
 		await f.manager.archiveDisposable(f.workspace.name, record.id);
-		let leasePublished = false;
-		await expect(
-			f.manager.bindSession(f.workspace.name, record.id, "tui", async () => {
-				leasePublished = true;
-			}),
-		).rejects.toThrow("unavailable");
-		expect(leasePublished).toBe(false);
+		await expect(f.manager.bindSession(f.workspace.name, record.id, "tui")).rejects.toThrow("unavailable");
 		expect((await f.state.listWorktrees())[0].sessionIds).not.toContain("tui");
 	});
 

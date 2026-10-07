@@ -46,7 +46,6 @@ import { getDefaultSessionDir, SessionManager } from "../src/core/session-manage
 import type { KeepAwakeStatus } from "../src/daemon/keep-awake.ts";
 import {
 	admitRemoteIntent,
-	LEASE_DRAINING_RETRY_AFTER_MS,
 	listRemoteWorkspaceSessions,
 	type RemoteIntentHost,
 	type RemoteIntentServicesOptions,
@@ -320,11 +319,10 @@ describe("listRemoteWorkspaceSessions", () => {
 
 	it("joins the daemon's runtime state and its work association for the stream's workspace generation", async () => {
 		const runtimeStates = new Map<string, RemoteSessionRuntimeState>([
-			["s-root", "tui-owned"],
-			["s-sub", "daemon-active"],
-			["s-outside", "daemon-detached"],
-			["s-subagent", "daemon-draining"],
-			["s-gone", "daemon-active"],
+			["s-root", "attached"],
+			["s-sub", "detached"],
+			["s-subagent", "attached"],
+			["s-gone", "attached"],
 		]);
 		const listRuntimeStates = vi.fn(() => runtimeStates);
 		const getChangeContext = vi.fn((_workspaceName: string, _generation: number, sessionId: string) =>
@@ -356,10 +354,11 @@ describe("listRemoteWorkspaceSessions", () => {
 		const sessionsById = byId(sessions);
 
 		expect(listRuntimeStates).toHaveBeenCalledWith("ws");
-		expect(sessionsById.get("s-root")?.runtimeState).toBe("tui-owned");
-		expect(sessionsById.get("s-sub")?.runtimeState).toBe("daemon-active");
-		expect(sessionsById.get("s-outside")?.runtimeState).toBe("daemon-detached");
-		expect(sessionsById.get("s-subagent")?.runtimeState).toBe("daemon-draining");
+		expect(sessionsById.get("s-root")?.runtimeState).toBe("attached");
+		expect(sessionsById.get("s-sub")?.runtimeState).toBe("detached");
+		expect(sessionsById.get("s-subagent")?.runtimeState).toBe("attached");
+		// No worker hosts them: no runtime state.
+		expect(sessionsById.get("s-outside")).not.toHaveProperty("runtimeState");
 		expect(sessionsById.get("s-long")).not.toHaveProperty("runtimeState");
 		expect(sessionsById.has("s-gone")).toBe(false);
 
@@ -427,7 +426,7 @@ describe("listRemoteWorkspaceSessions", () => {
 				agentDir,
 				stateManager,
 				listRuntimeStates: () => {
-					throw new Error("lease broker unavailable");
+					throw new Error("worker registry unavailable");
 				},
 			},
 			authorizationFor(workspacePath),
@@ -480,7 +479,6 @@ describe("remote intent services over protocol frames", () => {
 
 	interface Admission {
 		shuttingDown: boolean;
-		draining: boolean;
 		subagent: boolean;
 	}
 
@@ -517,7 +515,7 @@ describe("remote intent services over protocol frames", () => {
 	): Promise<RemotePhone> {
 		const { harness, conversation } = setup;
 		const authorization = options.authorization ?? authorizationFor(setup.workspacePath);
-		const admission = options.admission ?? { shuttingDown: false, draining: false, subagent: false };
+		const admission = options.admission ?? { shuttingDown: false, subagent: false };
 		const pair = createIrohStreamPair();
 		const connection = serveIrohRemoteConnection({
 			host: harness.host,
@@ -796,25 +794,18 @@ describe("remote intent services over protocol frames", () => {
 		]);
 	});
 
-	it("admits work on the host's terms, relayed intents too: draining is busy, shutdown refuses work, subagents only stop", async () => {
+	it("admits work on the host's terms, relayed intents too: shutdown refuses work, subagents only stop", async () => {
 		const setup = await hostedConversation();
 		const keepAwake: IntentKeepAwakeService = {
 			status: () => ({ enabled: false, state: "disabled" }),
 			setEnabled: (enabled) => ({ enabled, state: enabled ? "active" : "disabled" }),
 		};
-		const admission: Admission = { shuttingDown: false, draining: true, subagent: false };
+		const admission: Admission = { shuttingDown: true, subagent: false };
 		const phone = await conversationStream(setup, fakeHost(setup.agentDir, { keepAwake }), { admission });
 		await phone.subscribe(setup.conversation.id);
 
-		expect(await phone.intent("prompt", { message: "while draining" })).toMatchObject({
-			type: "rejected",
-			reason: { code: "busy", retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS },
-		});
-		// Settings and observation are not work: they run while the conversation hands off.
+		// Settings and observation are not work: they run while the host shuts down.
 		expect(await phone.intent("set_keep_awake", { enabled: true })).toMatchObject({ type: "accepted" });
-
-		admission.draining = false;
-		admission.shuttingDown = true;
 		for (const [type, input] of [
 			["prompt", { message: "during shutdown" }],
 			["skill.review", { arguments: "" }],
@@ -1167,7 +1158,7 @@ describe("remote intent services over protocol frames", () => {
 });
 
 describe("remoteStreamAllows", () => {
-	it("leaves streams a TUI relays unrestricted", () => {
+	it("leaves streams a worker relays unrestricted", () => {
 		expect(remoteStreamAllows({ kind: "relay", sessionId: "s-1" })).toBeUndefined();
 	});
 
@@ -1207,7 +1198,7 @@ describe("remoteStreamAllows", () => {
 });
 
 describe("admitRemoteIntent", () => {
-	const open = { shuttingDown: false, draining: false, subagent: false };
+	const open = { shuttingDown: false, subagent: false };
 	const WORK = [
 		"prompt",
 		"steer",
@@ -1241,23 +1232,9 @@ describe("admitRemoteIntent", () => {
 		}
 	});
 
-	it("answers work busy with a retry hint while the conversation hands off to a desktop TUI", () => {
+	it("refuses new work once the host is shutting down", () => {
 		for (const intent of WORK) {
-			expect(admitRemoteIntent(intent, { ...open, draining: true })).toEqual({
-				code: "busy",
-				message: "Handing off to the desktop TUI; retry shortly.",
-				retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS,
-			});
-		}
-		expect(LEASE_DRAINING_RETRY_AFTER_MS).toBe(1000);
-		for (const intent of ["abort", "set_model", "set_session_name", "set_keep_awake"]) {
-			expect(admitRemoteIntent(intent, { ...open, draining: true })).toBeUndefined();
-		}
-	});
-
-	it("refuses new work once the host is shutting down, before a draining hint", () => {
-		for (const intent of WORK) {
-			expect(admitRemoteIntent(intent, { ...open, shuttingDown: true, draining: true })).toMatchObject({
+			expect(admitRemoteIntent(intent, { ...open, shuttingDown: true })).toMatchObject({
 				code: "host_shutdown",
 			});
 		}
@@ -1268,7 +1245,7 @@ describe("admitRemoteIntent", () => {
 	});
 
 	it("leaves subagent conversations observe-only: only stopping them is admitted", () => {
-		const subagent = { ...open, subagent: true, shuttingDown: true, draining: true };
+		const subagent = { ...open, subagent: true, shuttingDown: true };
 		for (const intent of [...WORK, "set_model", "set_session_name", "set_keep_awake"]) {
 			expect(admitRemoteIntent(intent, subagent)).toEqual({
 				code: "read_only",

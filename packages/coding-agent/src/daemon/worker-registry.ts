@@ -33,7 +33,7 @@
  * the worker is asked to close the group and may refuse because it turned
  * active. A worker that hosts nothing after a release retires (`worker_stop`).
  * One conversation can be closed without the option to refuse (a revoked
- * client, a removed worktree, a TUI taking its lease), leaving the worker's
+ * client, a removed worktree, a phone's fresh pairing), leaving the worker's
  * other groups serving. A worker a TUI spawned for a conversation without a
  * session file (`--no-session`, D15) is exclusive to that TUI's client key:
  * it is never shared, no other client's open reaches what it hosts, it alone
@@ -247,8 +247,6 @@ interface WorkerRecord {
 	stop: StopRequest | undefined;
 	openFailure: WorkerOpenError | undefined;
 	readonly exited: PromiseWithResolvers<WorkerExit>;
-	/** Run at each activity report and at the exit. */
-	readonly idle: Set<() => void>;
 	/** Settles at the worker's next state change (a refused close or stop, a release, its exit); replaced after each. */
 	changed: PromiseWithResolvers<void>;
 	/** Claims refused once, audited once. */
@@ -486,7 +484,6 @@ export class WorkerRegistry {
 			stop: undefined,
 			openFailure: undefined,
 			exited: Promise.withResolvers<WorkerExit>(),
-			idle: new Set(),
 			changed: Promise.withResolvers<void>(),
 			refusedClaims: new Set(),
 			readyTimer: undefined,
@@ -890,7 +887,6 @@ export class WorkerRegistry {
 			}
 			case "worker_activity": {
 				record.active = new Set(request.activeSessionIds.filter((sessionId) => record.hosts.has(sessionId)));
-				for (const check of [...record.idle]) check();
 				this.updateRetention(record);
 				return ok;
 			}
@@ -1337,7 +1333,7 @@ export class WorkerRegistry {
 	/**
 	 * Close the conversation hosting `sessionId` of `workspaceName` without the
 	 * option to refuse (its client lost its authority, its worktree is being
-	 * removed, a TUI took its lease): its group closes in its worker, and the
+	 * removed, a phone's fresh pairing replaces it): its group closes in its worker, and the
 	 * worker's other groups keep serving. A worker that is starting, or not
 	 * live, retires instead. Resolves once the group was released or the
 	 * worker exited; at once when no worker hosts it.
@@ -1353,38 +1349,29 @@ export class WorkerRegistry {
 		await this.closeTop(record, top.id, top.conversation, reason);
 	}
 
-	/** Whether the group of the conversation hosting `sessionId` of `workspaceName` was last reported active. */
-	isHostActive(workspaceName: string, sessionId: string): boolean {
-		const host = this.hostOf(sessionId);
-		const top = host === undefined ? undefined : this.topOf(host, sessionId);
-		return (
-			host !== undefined &&
-			top !== undefined &&
-			host.workspaceName === workspaceName &&
-			this.groupActive(host, top.id)
-		);
-	}
-
-	/** Resolves once the group of the conversation hosting `sessionId` reports itself idle, or is gone. */
-	whenHostIdle(workspaceName: string, sessionId: string): Promise<void> {
-		const host = this.hostOf(sessionId);
-		if (!host || host.workspaceName !== workspaceName || !this.isHostActive(workspaceName, sessionId)) {
-			return Promise.resolve();
-		}
-		return new Promise<void>((resolve) => {
-			const check = (): void => {
-				if (this.hostOf(sessionId) === host && this.isHostActive(workspaceName, sessionId)) return;
-				host.idle.delete(check);
-				resolve();
-			};
-			host.idle.add(check);
-			void host.exited.promise.then(check);
-		});
-	}
-
 	/** The workspace of the registered worker hosting `sessionId`, whichever it is. */
 	workspaceHosting(sessionId: string): string | undefined {
 		return this.hostOf(sessionId)?.workspaceName;
+	}
+
+	/**
+	 * Every session a registered worker of `workspaceName` hosts, and whether
+	 * a client is on it (`sessions[].runtimeState`, D18): `attached` while a
+	 * relayed stream of it is offered or open, or its worker or top-level
+	 * conversation is still starting; `detached` otherwise.
+	 */
+	runtimeStates(workspaceName: string): Map<string, "attached" | "detached"> {
+		const states = new Map<string, "attached" | "detached">();
+		for (const record of this.workers.values()) {
+			if (record.workspaceName !== workspaceName) continue;
+			const streamed = new Set([...record.attachments.values()].map((attachment) => attachment.sessionId));
+			for (const sessionId of record.hosts.keys()) {
+				const starting =
+					record.state === "starting" || this.topOf(record, sessionId)?.conversation.state === "opening";
+				states.set(sessionId, starting || streamed.has(sessionId) ? "attached" : "detached");
+			}
+		}
+		return states;
 	}
 
 	/** Whether a registered worker hosts `sessionId` of `workspaceName`. */
@@ -1514,7 +1501,6 @@ export class WorkerRegistry {
 		record.active.clear();
 		for (const sessionId of hosted) this.hostsChanged(record.workspaceName, sessionId, false);
 		record.exited.resolve(exit);
-		for (const check of [...record.idle]) check();
 		this.notifyChanged(record);
 		for (const listener of [...this.exitListeners]) listener(record.workerId, exit);
 	}

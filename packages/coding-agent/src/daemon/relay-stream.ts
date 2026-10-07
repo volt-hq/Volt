@@ -53,16 +53,11 @@ export interface RelayCloseOptions {
 	error?: string;
 }
 
-export type RelayRpcAuthorizationResult =
-	| { ok: true; relay: RelayLifecycleOwner }
-	| { ok: false; code: "not_found" | "not_held" | "session_mismatch"; message: string };
-
 export interface MintRelayOptions {
 	workspaceName: string;
 	sessionId: string;
 	clientNodeId: string;
 	connectionId: string;
-	ownerControlConnectionId: string;
 	streamId: string;
 	stream: IrohBiStreamLike;
 	preamble: DistributiveOmit<RelayPreamble, "type" | "relayId">;
@@ -90,7 +85,6 @@ export class RelayLifecycleOwner {
 	readonly sessionId: string;
 	readonly clientNodeId: string;
 	readonly connectionId: string;
-	readonly ownerControlConnectionId: string;
 	readonly streamId: string;
 	readonly preamble: RelayPreamble;
 	readonly expiresAt: number;
@@ -126,7 +120,6 @@ export class RelayLifecycleOwner {
 		this.sessionId = options.sessionId;
 		this.clientNodeId = options.clientNodeId;
 		this.connectionId = options.connectionId;
-		this.ownerControlConnectionId = options.ownerControlConnectionId;
 		this.streamId = options.streamId;
 		this.physicalStream = options.stream;
 		this.observePhysicalTask = (task) => {
@@ -210,12 +203,12 @@ export class RelayLifecycleOwner {
 		}
 		socket.on("data", (chunk: Buffer) => this.enqueueWrite(chunk, true));
 		socket.on("error", (error: Error) => this.beginActiveClose("error", "abortive", error.message));
-		// A close without a daemon-initiated reason or a socket error is the TUI
-		// going away (process exit, socket destroy).
-		socket.on("close", () => this.beginActiveClose(this.closeReason ?? "tui_disconnected", "abortive"));
+		// A close without a daemon-initiated reason or a socket error is the worker
+		// going away (it ended the stream, or exited).
+		socket.on("close", () => this.beginActiveClose(this.closeReason ?? "worker_disconnected", "abortive"));
 		socket.on("end", () => {
-			// TUI half-closed: preserve every admitted byte before sending FIN.
-			this.beginActiveClose(this.closeReason ?? "tui_disconnected", "graceful");
+			// The worker half-closed: preserve every admitted byte before sending FIN.
+			this.beginActiveClose(this.closeReason ?? "worker_disconnected", "graceful");
 		});
 
 		this.phoneToTuiPump = this.pumpPhoneToTui();
@@ -330,7 +323,7 @@ export class RelayLifecycleOwner {
 				return;
 			}
 			if (error instanceof StreamClosedError) {
-				this.beginActiveClose(this.closeReason ?? "tui_disconnected", "abortive");
+				this.beginActiveClose(this.closeReason ?? "worker_disconnected", "abortive");
 				return;
 			}
 			this.beginActiveClose("error", "abortive", this.toErrorMessage(error));
@@ -536,28 +529,6 @@ export class RelayRegistry {
 
 	activeCount(): number {
 		return this.all("active").length;
-	}
-
-	authorizeRpc(
-		relayId: string,
-		ownerControlConnectionId: string,
-		scope: { clientNodeId: string; workspaceName: string; sessionId: string },
-	): RelayRpcAuthorizationResult {
-		const relay = this.owners.get(relayId);
-		if (!relay || relay.phase !== "active") {
-			return { ok: false, code: "not_found", message: "active relay not found" };
-		}
-		if (relay.ownerControlConnectionId !== ownerControlConnectionId) {
-			return { ok: false, code: "not_held", message: "relay is not owned by this control connection" };
-		}
-		if (
-			relay.clientNodeId !== scope.clientNodeId ||
-			relay.workspaceName !== scope.workspaceName ||
-			relay.sessionId !== scope.sessionId
-		) {
-			return { ok: false, code: "session_mismatch", message: "relay RPC scope does not match active relay" };
-		}
-		return { ok: true, relay };
 	}
 
 	/** Offer lookup only; the stable owner checks the hello's proof and performs the actual promotion. */

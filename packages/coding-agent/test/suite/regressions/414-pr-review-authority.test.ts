@@ -371,7 +371,7 @@ async function fixture(grant = capabilities) {
 				expect(runGit.mock.calls.some(([args]) => args[0] === "fetch")).toBe(false);
 			}
 			expect(await SessionManager.list(source, getDefaultSessionDirPath(source, agentDir))).toEqual([]);
-			expect(service.statusExtras?.().leases).toEqual([]);
+			expect(services.workers.size).toBe(0);
 		},
 	};
 }

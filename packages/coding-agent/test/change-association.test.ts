@@ -20,7 +20,6 @@ import {
 	ChangeStore,
 	parseChangesFile,
 } from "../src/daemon/changes-store.ts";
-import { isExactTuiChangeObservationLeaseHolder } from "../src/daemon/iroh-service.ts";
 
 const OID_A = "0123456789abcdef0123456789abcdef01234567";
 const OID_B = "abcdef0123456789abcdef0123456789abcdef01";
@@ -628,25 +627,6 @@ describe("ChangeStore", () => {
 			pullRequest: { status: "draft", stale: true },
 		});
 		await store.close();
-	});
-});
-
-describe("TUI change observation authority", () => {
-	it("accepts only the exact TUI connection holding the session lease", () => {
-		const lease = { state: "tui-owned" as const, tuiConnectionId: "connection-a" };
-		expect(isExactTuiChangeObservationLeaseHolder({ client: "tui", connectionId: "connection-a" }, lease)).toBe(true);
-		expect(isExactTuiChangeObservationLeaseHolder({ client: "tui", connectionId: "connection-b" }, lease)).toBe(
-			false,
-		);
-		expect(isExactTuiChangeObservationLeaseHolder({ client: "cli", connectionId: "connection-a" }, lease)).toBe(
-			false,
-		);
-		expect(
-			isExactTuiChangeObservationLeaseHolder(
-				{ client: "tui", connectionId: "connection-a" },
-				{ state: "daemon-active", tuiConnectionId: "connection-a" },
-			),
-		).toBe(false);
 	});
 });
 

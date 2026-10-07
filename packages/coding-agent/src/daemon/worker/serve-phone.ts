@@ -6,8 +6,7 @@
  * stream on the remote profile with the daemon's authorization subset, its
  * sanitizer roots, and its notification routing; intents and queries the
  * daemon's state backs, completion pushes, and the relay's authority go to
- * the daemon. A worker serves its relays this way, and until the TUI attaches
- * to workers, so does a TUI holding a conversation's lease.
+ * the daemon. A conversation worker serves its relays this way.
  */
 
 import type { Duplex } from "node:stream";

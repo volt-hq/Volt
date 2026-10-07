@@ -88,14 +88,6 @@ const SPAWN_OPTIONS = {
 const REQUESTS: ByType<ControlRequest> = {
 	status: { type: "status", id: "1" },
 	shutdown: { type: "shutdown", id: "2" },
-	lease_acquire: { type: "lease_acquire", id: "3", workspaceName: "volt", sessionId: "s-1", force: true },
-	lease_release: {
-		type: "lease_release",
-		id: "4",
-		workspaceName: "volt",
-		sessionId: "s-1",
-		reason: "workspace_unregistered",
-	},
 	change_observe: {
 		type: "change_observe",
 		id: "5",
@@ -144,37 +136,9 @@ const REQUESTS: ByType<ControlRequest> = {
 		workspaceName: "volt",
 		worktreeId: "x",
 		sessionId: "s-1",
-		acquireLease: true,
 	},
 	theme_set: { type: "theme_set", id: "24", theme: "dark" },
 	keep_awake_set: { type: "keep_awake_set", id: "25", enabled: false },
-	viewer_abort: { type: "viewer_abort", id: "26", viewerFeedId: "vf-1" },
-	relay_rpc: {
-		type: "relay_rpc",
-		id: "27",
-		relayId: "rl-1",
-		clientNodeId: "n-1",
-		workspaceName: "volt",
-		sessionId: "s-1",
-		frame: { type: "register_push_target", intentId: "i-1", input: PUSH_TARGET },
-	},
-	relay_notification_delivery: {
-		type: "relay_notification_delivery",
-		id: "28",
-		clientNodeId: "n-1",
-		workspaceName: "volt",
-		sessionId: "s-1",
-		notification: {
-			eventId: "plan:s-1:run-1:ready",
-			hostNodeId: HOST_NODE_ID,
-			kind: "plan_ready",
-			title: "Your plan is ready",
-			body: "Open Volt to review and approve it.",
-			sessionId: "s-1",
-			workspaceName: "volt",
-			planId: "plan-1",
-		},
-	},
 	conversation_open: {
 		type: "conversation_open",
 		id: "42",
@@ -243,8 +207,6 @@ const REVIEW_NOTIFICATION = {
 
 // Type-specific rejections; every closed message also rejects an unknown field and a missing or wrong type.
 const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, unknown>> } = {
-	lease_acquire: [{ sessionId: undefined }, { force: "yes" }],
-	lease_release: [{ reason: undefined }, { reason: "rekey" }, { reason: "workspace_removed" }],
 	change_observe: [
 		{ gitContext: { repository: "repo", branch: "feature/work", headOid: "not-an-oid" } },
 		{ gitContext: { repository: "repo", branch: "feature/work\npoison", headOid: HEAD_OID } },
@@ -285,11 +247,11 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ sessionRef: undefined },
 		{ sessionRef: { sessionDirectory: "/sessions", storeId: "store", sessionId: "", sessionGeneration: "gen" } },
 	],
-	worktree_bind: [{ sessionId: undefined }, { acquireLease: "yes" }],
+	worktree_bind: [{ sessionId: undefined }, { acquireLease: true }],
 	theme_set: [{ theme: undefined }],
 	keep_awake_set: [{ enabled: "yes" }, { enabled: undefined }],
-	viewer_abort: [{ viewerFeedId: undefined }, { viewerFeedId: 42 }],
-	relay_rpc: [
+	worker_forward: [
+		{ relayId: 1 },
 		{ frame: undefined },
 		{ frame: { intentId: "i-1", input: PUSH_TARGET } },
 		{ frame: "register_push_target" },
@@ -300,7 +262,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ frame: { type: "register_push_target", intentId: "i-1", input: { ...PUSH_TARGET, provider: "apns" } } },
 		{ frame: { type: "register_push_target", intentId: "i-1", input: PUSH_TARGET, unexpected: true } },
 	],
-	relay_notification_delivery: [
+	worker_notification_delivery: [
 		{ notification: { eventId: "e-1", kind: "conversation_completed", title: "Volt finished" } },
 		{ notification: { ...REVIEW_NOTIFICATION, planId: "plan-1" } },
 		{ notification: { ...REVIEW_NOTIFICATION, workId: undefined } },
@@ -345,8 +307,6 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_close_result: [{ outcome: "stopped" }, { closeId: undefined }],
 	worker_worktree_restore: [{ path: "" }, { path: "p".repeat(4097) }, { sessionRef: undefined }],
 	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
-	worker_forward: [{ frame: undefined }, { relayId: 1 }],
-	worker_notification_delivery: [{ notification: { ...REVIEW_NOTIFICATION, title: "r".repeat(129) } }],
 	worker_moved: [{ to: undefined }],
 	worker_last_session: [{ sessionId: undefined }],
 	worker_authority: [{ relayId: undefined }],
@@ -361,7 +321,6 @@ const STATUS_RESULT: Extract<ControlResponse, { type: "status_result" }> = {
 	startedAtMs: 1000,
 	environment: { source: "inherited", reason: "not resolved" },
 	capabilities: ["pair_cancel"],
-	leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
 	phoneConnections: 1,
 	remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
 	relayCredential: { state: "subscription_inactive", expiresAt: 2_000, nextRefreshAt: 3_000 },
@@ -409,10 +368,7 @@ const WORKTREE = {
 
 const RESPONSES: ByType<ControlResponse> = {
 	ok: { type: "ok", id: "1" },
-	error: { type: "error", id: "2", code: "not_held", message: "lease not held" },
-	lease_granted: { type: "lease_granted", id: "3", workspaceName: "volt", sessionId: "s-1", handoff: "warm" },
-	lease_pending: { type: "lease_pending", id: "4", viewerFeedId: "vf-1" },
-	lease_denied: { type: "lease_denied", id: "5", reason: "held_by_tui" },
+	error: { type: "error", id: "2", code: "not_hosted", message: "the worker does not host that conversation" },
 	status_result: STATUS_RESULT,
 	keep_awake_result: {
 		type: "keep_awake_result",
@@ -441,11 +397,6 @@ const RESPONSES: ByType<ControlResponse> = {
 		results: [{ workspaceName: "volt", removedRecords: ["x"], orphanCheckouts: [], purgedRecoveryCheckouts: [] }],
 	},
 	pair_started: { type: "pair_started", id: "14", requestId: "pr-1" },
-	relay_rpc_result: {
-		type: "relay_rpc_result",
-		id: "15",
-		frame: { type: "accepted", intentId: "i-1", ordinals: [], result: { registered: true } },
-	},
 	relay_push_delivery_result: { type: "relay_push_delivery_result", id: "16", status: "sent" },
 	workspace_confirmation_required: {
 		type: "workspace_confirmation_required",
@@ -477,16 +428,13 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	conversation_opened: [{ ignoredOptions: ["env"] }, { selection: "created_after_missing" }, { spawned: undefined }],
 	workspace_confirmation_required: [{ reason: "sensitive" }, { directory: undefined }],
 	error: [{ code: undefined }],
-	lease_granted: [{ handoff: "hot" }],
-	lease_pending: [{ viewerFeedId: undefined }],
-	lease_denied: [{ reason: "other" }],
 	status_result: [
 		{ remoteTransport: undefined },
 		{ remoteTransport: { state: "healthy" } },
 		{ remoteTransport: { state: "unavailable", reasonCode: "secret" } },
 		{ keepAwake: undefined },
 		{ environment: { source: "magic" } },
-		{ leases: [{ workspaceName: "volt", sessionId: "s-1", state: "rekeying", relayCount: 0, streamCount: 0 }] },
+		{ leases: [] },
 		{ relayCredential: { state: "unknown" } },
 		{ relayCredential: { state: ["active"] } },
 		...[0, -1, 1.5, "15", null, Number.MAX_SAFE_INTEGER + 1].map((nextRefreshAt) => ({
@@ -503,7 +451,7 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	worktree_resolve_result: [{ worktreePath: undefined }],
 	worktree_prune_result: [{ results: {} }],
 	pair_started: [{ requestId: undefined }],
-	relay_rpc_result: [
+	worker_forward_result: [
 		{ frame: undefined },
 		{ frame: "accepted" },
 		// The legacy RPC response envelope.
@@ -516,7 +464,6 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 		{ frame: { type: "fatal", code: "revoked" } },
 	],
 	relay_push_delivery_result: [{ status: "maybe" }],
-	worker_forward_result: [{ frame: undefined }, { frame: { type: "changed", catalog: "host" } }],
 	worker_authority_result: [{ authority: "lost" }],
 	worker_worktree_pinned: [{ pinId: undefined }],
 };
@@ -533,8 +480,7 @@ const EVENTS: ByType<ControlEvent> = {
 		connectionId: "ic-1",
 		streamId: "st-1",
 	},
-	relay_closed: { type: "relay_closed", relayId: "rl-1", reason: "phone_disconnected" },
-	viewer_end: { type: "viewer_end", viewerFeedId: "vf-1", reason: "granted" },
+	relay_closed: { type: "relay_closed", relayId: "rl-1", reason: "worker_disconnected" },
 	theme_snapshot: { type: "theme_snapshot", themeName: "dark", tokens: { accent: "#ff0000" } },
 	keep_awake_changed: {
 		type: "keep_awake_changed",
@@ -559,13 +505,11 @@ const EVENTS: ByType<ControlEvent> = {
 	worker_stop: { type: "worker_stop", stopId: "stop-1", reason: "retention", force: false },
 	worker_close: { type: "worker_close", closeId: "close-1", sessionId: "s-1", reason: "retention", force: false },
 	relay_authority: { type: "relay_authority", relayId: "rl-1", loss: "revoked" },
-	worker_abort: { type: "worker_abort", sessionId: "s-1" },
 };
 
 const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unknown>> } = {
 	relay_offer: [{ relayToken: undefined }, { clientKind: "tui" }],
 	relay_closed: [{ reason: "other" }],
-	viewer_end: [{ reason: "drained" }],
 	theme_snapshot: [{ tokens: { accent: 1 } }],
 	keep_awake_changed: [{ keepAwake: undefined }],
 	pairing_progress: [{ phase: "scanning" }, { qrLines: "line" }],
@@ -573,7 +517,6 @@ const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unkno
 	worker_stop: [{ reason: "bored" }, { force: undefined }],
 	worker_close: [{ sessionId: undefined }, { force: undefined }, { reason: "bored" }],
 	relay_authority: [{ loss: "current" }],
-	worker_abort: [{ sessionId: undefined }],
 };
 
 /** Apply a patch and decode it as the wire would: `undefined` removes a field at any depth. */
@@ -673,10 +616,13 @@ describe("daemon control contract", () => {
 		}
 	});
 
-	it("lets only a TUI open a conversation", () => {
+	it("lets only a TUI open a conversation, and only a worker observe one's Git state", () => {
 		expect(isRequestAllowedFor("tui", "conversation_open")).toBe(true);
 		expect(isRequestAllowedFor("cli", "conversation_open")).toBe(false);
 		expect(isRequestAllowedFor("worker", "conversation_open")).toBe(false);
+		expect(isRequestAllowedFor("worker", "change_observe")).toBe(true);
+		expect(isRequestAllowedFor("tui", "change_observe")).toBe(false);
+		expect(isRequestAllowedFor("cli", "change_observe")).toBe(false);
 	});
 
 	it("admits the default, preset, and explicit pairing access selections", () => {
@@ -714,19 +660,13 @@ describe("daemon control contract", () => {
 	});
 
 	it("admits a canonical notification at its UTF-8 budget and rejects one byte over", () => {
-		const request = REQUESTS.relay_notification_delivery;
+		const request = REQUESTS.worker_notification_delivery;
 		const title = "é".repeat(64);
 		expect(Buffer.byteLength(title)).toBe(128);
 		expect(admitControlRequest({ ...request, notification: { ...request.notification, title } })).toBe(true);
 		expect(admitControlRequest({ ...request, notification: { ...request.notification, title: `${title}a` } })).toBe(
 			false,
 		);
-		// A worker's relayed push is held to the same budgets.
-		const forwarded = REQUESTS.worker_notification_delivery;
-		expect(admitControlRequest({ ...forwarded, notification: { ...forwarded.notification, title } })).toBe(true);
-		expect(
-			admitControlRequest({ ...forwarded, notification: { ...forwarded.notification, title: `${title}a` } }),
-		).toBe(false);
 		expect(
 			admitControlRequest(
 				mutate(request, {
@@ -759,22 +699,8 @@ describe("daemon control contract", () => {
 		);
 	});
 
-	it("rejects the removed viewer feed subscription messages", () => {
-		for (const type of ["viewer_subscribe", "viewer_unsubscribe"]) {
-			expect(admitControlRequest({ type, id: "5", viewerFeedId: "vf-1" }), type).toBe(false);
-		}
-		expect(
-			ControlValidators.event.Check({
-				type: "viewer_event",
-				viewerFeedId: "vf-1",
-				seq: 0,
-				event: { type: "agent_end" },
-			}),
-		).toBe(false);
-	});
-
 	it("relays exactly the daemon-executed intents and queries, as the phone sent them", () => {
-		const relay = (frame: object) => ({ ...REQUESTS.relay_rpc, frame });
+		const relay = (frame: object) => ({ ...REQUESTS.worker_forward, frame });
 		const relayed: object[] = [
 			{ type: "register_push_target", intentId: "i-1", input: PUSH_TARGET },
 			{ type: "unregister_workspace", intentId: "i-2", input: { workspaceName: "volt" } },
@@ -792,7 +718,7 @@ describe("daemon control contract", () => {
 			expect(admitControlRequest(roundTrip(relay(frame))), JSON.stringify(frame)).toBe(true);
 		}
 		const local: object[] = [
-			// Conversation intents and management-stream intents stay with the TUI or the daemon's stream.
+			// Conversation intents and management-stream intents stay with the worker or the daemon's stream.
 			{ type: "prompt", intentId: "i-1", expectedOrdinal: 0, input: { message: "hi" } },
 			{ type: "remove_worktree", intentId: "i-2", input: { worktreeId: "x" } },
 			{
@@ -834,7 +760,7 @@ describe("daemon control contract", () => {
 		];
 		for (const frame of outcomes) {
 			expect(
-				ControlValidators.response.Check(roundTrip({ type: "relay_rpc_result", id: "1", frame })),
+				ControlValidators.response.Check(roundTrip({ type: "worker_forward_result", id: "1", frame })),
 				JSON.stringify(frame),
 			).toBe(true);
 		}

@@ -54,7 +54,7 @@ export type DaemonClientOptions = DaemonClientCommonOptions &
 	(
 		| {
 				client: ControlClientKind;
-				/** Capabilities advertised in the control hello (e.g. "worktrees"). */
+				/** Capabilities advertised in the control hello. */
 				capabilities?: string[];
 		  }
 		| {
@@ -91,11 +91,6 @@ export interface DaemonClient {
 	/** Connect (or await the in-flight connect). Rejects when reconnect is off and the dial fails. */
 	connect(): Promise<void>;
 	request(req: DistributiveOmit<ControlRequest, "id">): Promise<ControlResponse>;
-	/**
-	 * Await the next response for a request id (used after a provisional
-	 * lease_pending). Rejects with DaemonClientClosedError on disconnect.
-	 */
-	waitForResponse(id: string): Promise<ControlResponse>;
 	/** Dial a fresh control endpoint with role:"relay"; returns the raw duplex after the preamble. */
 	openRelay(offer: RelayOfferInfo): Promise<{ preamble: RelayPreamble; stream: Duplex }>;
 	/**
@@ -111,11 +106,6 @@ export type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T,
 interface PendingRequest {
 	resolve(response: ControlResponse): void;
 	reject(error: Error): void;
-}
-
-/** Responses that announce a later terminal response for the same id. */
-function isProvisionalControlResponse(response: ControlResponse): boolean {
-	return response.type === "lease_pending";
 }
 
 const DEFAULT_MIN_BACKOFF_MS = 250;
@@ -146,15 +136,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let connectPromise: Promise<void> | undefined;
 	const pending = new Map<string, PendingRequest>();
-	/**
-	 * Terminal-response promises armed when a provisional response resolves the
-	 * original request. Armed synchronously inside the data handler: the
-	 * provisional and terminal frames can arrive in one socket read, while the
-	 * caller's waitForResponse only runs after the resolve's microtask — without
-	 * this, the terminal response would resolve the already-resolved original
-	 * promise and be lost.
-	 */
-	const followUps = new Map<string, Promise<ControlResponse>>();
 
 	const setState = (next: DaemonClientConnectionState) => {
 		if (state === next) {
@@ -167,7 +148,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 	const failPending = () => {
 		const entries = Array.from(pending.values());
 		pending.clear();
-		followUps.clear();
 		for (const entry of entries) {
 			entry.reject(new DaemonClientClosedError());
 		}
@@ -384,17 +364,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					if (ControlValidators.response.Check(message)) {
 						const entry = pending.get(message.id);
 						if (entry) {
-							if (isProvisionalControlResponse(message)) {
-								const followUp = registerPending(message.id);
-								// Unclaimed on disconnect is fine; waitForResponse consumers
-								// still observe the rejection through the same promise.
-								followUp.catch(() => {});
-								followUps.set(message.id, followUp);
-							} else {
-								// Keep any armed followUps entry: the terminal response may
-								// resolve it before waitForResponse claims it.
-								pending.delete(message.id);
-							}
+							pending.delete(message.id);
 							entry.resolve(message);
 						}
 						continue;
@@ -496,7 +466,7 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 				reject(error);
 			};
 
-			const handOver = (preamble: RelayPreamble | undefined) => {
+			const takeOver = (preamble: RelayPreamble | undefined) => {
 				settled = true;
 				clearTimeout(handshakeTimer);
 				relaySocket.removeListener("data", onData);
@@ -554,14 +524,14 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 							}
 							acked = true;
 							if (withPreamble) return "continue";
-							handOver(undefined);
+							takeOver(undefined);
 							return "stop";
 						}
 						if (!ControlValidators.relayPreamble.Check(message)) {
 							fail(new Error("expected relay preamble"));
 							return "stop";
 						}
-						handOver(message);
+						takeOver(message);
 						return "stop";
 					});
 				} catch (error) {
@@ -607,14 +577,6 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 			const responsePromise = registerPending(id);
 			send(line);
 			return responsePromise;
-		},
-		waitForResponse(id: string) {
-			const followUp = followUps.get(id);
-			if (followUp) {
-				followUps.delete(id);
-				return followUp;
-			}
-			return registerPending(id);
 		},
 		async openRelay(offer: RelayOfferInfo) {
 			const opened = await dialRelay(offer, true);

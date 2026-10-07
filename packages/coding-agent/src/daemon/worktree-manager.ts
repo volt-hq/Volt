@@ -164,30 +164,6 @@ export function resolveWorktreeParentCheckout(agentDir: string, path: string): s
 	return dirname(dotGitDir);
 }
 
-export type WorktreeRelayGate = { ok: true } | { ok: false; reason: "checkout_missing" | "tui_not_capable" };
-
-/**
- * Gate a worktree-bound conversation relay: the checkout must exist and the
- * owning TUI must have advertised the worktrees control capability. Old TUIs
- * (no capability) are never offered worktree-session relays (design §5.2.3).
- */
-export function evaluateWorktreeRelayGate(
-	worktree: { path: string } | undefined,
-	tuiCapabilities: ReadonlySet<string> | undefined,
-	worktreesCapability: string,
-): WorktreeRelayGate {
-	if (worktree === undefined) {
-		return { ok: true };
-	}
-	if (!existsSync(worktree.path)) {
-		return { ok: false, reason: "checkout_missing" };
-	}
-	if (tuiCapabilities === undefined || !tuiCapabilities.has(worktreesCapability)) {
-		return { ok: false, reason: "tui_not_capable" };
-	}
-	return { ok: true };
-}
-
 export type WorktreeError =
 	| "not_a_git_repository"
 	| "worktree_exists"
@@ -226,8 +202,9 @@ export interface WorktreeManagerOptions {
 	runGit?: WorktreeGitRunner;
 	/** Max worktrees per workspace (default 16). */
 	maxWorktreesPerWorkspace?: number;
-	/** Seam for "is a runtime using this worktree" (wired to IntegratedRuntimeRegistry). */
+	/** Whether a conversation worker hosts the session (wired to the daemon's worker registry). */
 	hasActiveRuntimeForSession?: (workspaceName: string, sessionId: string) => boolean;
+	/** Keep the sessions from opening while their worktree is removed; undefined when one is in use. */
 	reserveSessionsForRemoval?: (workspaceName: string, sessionIds: string[]) => (() => void) | undefined;
 	/** Durable-write seam (VoltdStateStore.flush); records must survive a crash the moment they exist. */
 	flushState?: () => Promise<void>;
@@ -1526,18 +1503,12 @@ export class WorktreeManager {
 		};
 	}
 
-	async bindSession(
-		workspaceName: string,
-		worktreeId: string,
-		sessionId: string,
-		afterPersistWhileLocked?: () => Promise<void>,
-	): Promise<void> {
+	async bindSession(workspaceName: string, worktreeId: string, sessionId: string): Promise<void> {
 		await this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async (current) => {
 			const record = current.worktrees.find((entry) => entry.id === worktreeId);
 			if (
 				record === undefined ||
 				record.checkoutArchive !== undefined ||
-				(afterPersistWhileLocked !== undefined && !existsSync(record.path)) ||
 				record.prReviewLaunches?.some(
 					(launch) => launch.sessionGeneration === undefined && launch.sessionId !== sessionId,
 				)
@@ -1546,19 +1517,9 @@ export class WorktreeManager {
 			}
 			const bound = structuredClone(record);
 			if (!bound.sessionIds.includes(sessionId)) bound.sessionIds.push(sessionId);
-			return {
-				result: undefined,
-				worktree: bound,
-				afterPersistWhileLocked:
-					afterPersistWhileLocked === undefined
-						? undefined
-						: async () => {
-								await this.flushState?.();
-								await afterPersistWhileLocked();
-							},
-			};
+			return { result: undefined, worktree: bound };
 		});
-		if (afterPersistWhileLocked === undefined) await this.flushState?.();
+		await this.flushState?.();
 	}
 
 	async findWorktree(workspaceName: string, worktreeId: string): Promise<IrohRemoteWorkspaceWorktree | undefined> {
@@ -1823,7 +1784,7 @@ export class WorktreeRetentionSweeper {
 		}
 	}
 
-	/** Hooked to IntegratedRuntimeRegistry.onRuntimeDisposed for worktree-bound entries. */
+	/** A conversation a phone opened in the worktree closed in its worker. */
 	onRuntimeDisposed(workspaceName: string, worktreeId: string): void {
 		if (this.disposed) {
 			return;
@@ -1910,12 +1871,6 @@ export type WorktreeControlRequest = Extract<
 export interface WorktreeControlRequestHooks {
 	manager: WorktreeManager;
 	stateManager: IrohRemoteHostStateManager;
-	bindWorktreeSession?: (
-		workspaceName: string,
-		worktreeId: string,
-		sessionId: string,
-		acquireLease: boolean,
-	) => Promise<boolean>;
 	/** Force-remove hook that stops bound runtimes first (wired by the iroh service). */
 	removeWorktree?: (
 		workspace: IrohRemoteWorkspace,
@@ -2093,26 +2048,7 @@ export async function handleWorktreeControlRequest(
 			});
 			return;
 		}
-		let bound = true;
-		if (hooks.bindWorktreeSession) {
-			bound = await hooks.bindWorktreeSession(
-				request.workspaceName,
-				request.worktreeId,
-				request.sessionId,
-				request.acquireLease === true,
-			);
-		} else {
-			await hooks.manager.bindSession(request.workspaceName, request.worktreeId, request.sessionId);
-		}
-		if (!bound) {
-			connection.send({
-				type: "error",
-				id: request.id,
-				code: "worktree_busy",
-				message: `Worktree ${request.worktreeId} is unavailable for lease acquisition`,
-			});
-			return;
-		}
+		await hooks.manager.bindSession(request.workspaceName, request.worktreeId, request.sessionId);
 		connection.send({ type: "ok", id: request.id });
 		return;
 	}

@@ -12,7 +12,6 @@ import {
 	type IrohRemoteWorkspaceWorktree,
 	parseIrohRemoteHostState,
 } from "../core/remote/iroh/state.ts";
-import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../remote/integrated-runtime-retention.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import {
 	type IrohManagedRelayAppEndpoint,
@@ -22,6 +21,9 @@ import {
 	parseIrohManagedRelayCredential,
 	parseIrohManagedRelayCredentialClaim,
 } from "./relay-credential.ts";
+
+/** How long a detached idle conversation stays open in its worker by default (`remote.detachedRuntimeTtlMs`). */
+export const DEFAULT_DETACHED_RUNTIME_TTL_MS = 30 * 60 * 1000;
 
 /**
  * Persistent daemon state. The pairing/client sections reuse the remote host
@@ -146,7 +148,7 @@ export function createEmptyVoltdState(): VoltdStateFileV1 {
 		pendingPairingTickets: [],
 		pairingSecretTombstones: [],
 		settings: {
-			detachedRuntimeTtlMs: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
+			detachedRuntimeTtlMs: DEFAULT_DETACHED_RUNTIME_TTL_MS,
 			allowTools: null,
 		},
 	};
@@ -204,7 +206,7 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		Number.isInteger(settingsRecord.detachedRuntimeTtlMs) &&
 		settingsRecord.detachedRuntimeTtlMs > 0
 			? settingsRecord.detachedRuntimeTtlMs
-			: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS;
+			: DEFAULT_DETACHED_RUNTIME_TTL_MS;
 	const allowTools = Array.isArray(settingsRecord.allowTools)
 		? settingsRecord.allowTools.filter((tool): tool is string => typeof tool === "string")
 		: null;

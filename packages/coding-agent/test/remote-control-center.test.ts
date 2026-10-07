@@ -22,7 +22,6 @@ import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
-	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
 	type ControlRelayCredentialStatus,
 	type ControlResponse,
@@ -78,16 +77,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 		pid: 42,
 		startedAtMs: Date.now() - 5 * 60 * 1000,
 		environment: { source: "inherited", reason: "not resolved" },
-		capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
-		leases: [
-			{
-				workspaceName: "volt",
-				sessionId: "session-current",
-				state: "tui-owned",
-				relayCount: 1,
-				streamCount: 1,
-			},
-		],
+		capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY],
 		phoneConnections: 1,
 		workers: [
 			{

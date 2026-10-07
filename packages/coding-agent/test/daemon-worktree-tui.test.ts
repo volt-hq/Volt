@@ -1,10 +1,9 @@
 /**
  * Phase 2 (TUI) worktree integration — worktrees-design.md §5.2 / §9 Phase 2:
- * worktree_resolve/worktree_bind control handling, the auto-registration fix in
- * the TUI's workspace resolution, the /worktree control-plane helper, relay
- * sanitization root switching, capability gating, takeover refusal on a
- * missing checkout, trust-path pinning helpers, and new-session cwd/sessionDir
- * overrides.
+ * worktree_resolve/worktree_bind control handling, the TUI's workspace
+ * resolution, the /worktree control-plane helper, relay sanitization root
+ * switching, the managed-checkout path predicate, trust-path pinning helpers,
+ * and new-session cwd/sessionDir overrides.
  */
 
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -21,13 +20,7 @@ import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
-import { createDaemonClient } from "../src/daemon/control-client.ts";
-import {
-	CONTROL_WORKTREES_CAPABILITY,
-	type ControlRequest,
-	type ControlResponse,
-	type PhoneRelayPreamble,
-} from "../src/daemon/control-protocol.ts";
+import type { ControlRequest, ControlResponse, PhoneRelayPreamble } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
 import { releaseLocalSessionWorktree } from "../src/daemon/session-worktree.ts";
@@ -35,7 +28,6 @@ import type { EnsureDaemonResult } from "../src/daemon/spawn.ts";
 import * as daemonSpawn from "../src/daemon/spawn.ts";
 import { getRelaySanitizerOptions } from "../src/daemon/worker/serve-phone.ts";
 import {
-	evaluateWorktreeRelayGate,
 	getWorktreeCheckoutPath,
 	getWorktreesRoot,
 	handleWorktreeControlRequest,
@@ -43,7 +35,6 @@ import {
 	resolveWorktreeParentCheckout,
 	WorktreeManager,
 } from "../src/daemon/worktree-manager.ts";
-import { createDaemonLink } from "../src/modes/interactive/host/daemon-link.ts";
 import { openDaemonWorktreeControl, resolveDaemonWorkspaceForCwd } from "../src/modes/interactive/worktree-control.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHostHarness } from "./suite/host-harness.ts";
@@ -80,7 +71,7 @@ function createStubConnection(): { connection: ControlConnection; sent: ControlR
 		client: "tui",
 		pid: 1,
 		version: "0.0.0-test",
-		capabilities: new Set([CONTROL_WORKTREES_CAPABILITY]),
+		capabilities: new Set(),
 		send(message) {
 			sent.push(message as ControlResponse);
 		},
@@ -198,7 +189,6 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2)", () => {
 					pid: 1,
 					startedAtMs: 0,
 					environment: { source: "inherited", reason: "not resolved" },
-					leases: [],
 					phoneConnections: 0,
 					remoteTransport: { state: "ready" },
 					workspaces: handlers.workspaces,
@@ -306,7 +296,6 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 		pid: 1,
 		startedAtMs: 0,
 		environment: { source: "inherited", reason: "not resolved" },
-		leases: [],
 		phoneConnections: 0,
 		remoteTransport: { state: "ready" },
 		workspaces,
@@ -315,116 +304,6 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 		workers: [],
 	};
 }
-
-describe("createDaemonLink + control server integration", () => {
-	it("advertises the worktrees capability and lease-acquires under the parent workspace on a worktree_resolve hit", async () => {
-		const harness = await startControlHarness((connection, request) => {
-			if (request.type === "status") {
-				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
-				return;
-			}
-			if (request.type === "worktree_resolve") {
-				connection.send({
-					type: "worktree_resolve_result",
-					id: request.id,
-					workspaceName: "repo",
-					workspacePath: HOST_PARENT_PATH,
-					worktreeId: "fix-login",
-					worktreePath: request.path,
-				});
-				return;
-			}
-			if (request.type === "lease_acquire") {
-				connection.send({
-					type: "lease_granted",
-					id: request.id,
-					workspaceName: request.workspaceName,
-					sessionId: request.sessionId,
-					handoff: "none",
-				});
-				return;
-			}
-			connection.send({ type: "ok", id: request.id });
-		});
-
-		// The TUI's cwd is INSIDE a daemon-managed worktree, not the parent repo.
-		const worktreeCwd = join(getWorktreesRoot(harness.agentDir), "--parent-repo--", "fix-login");
-		mkdirSync(worktreeCwd, { recursive: true });
-		const attach = createDaemonLink({ cwd: worktreeCwd, agentDir: harness.agentDir });
-		cleanups.push(() => attach.dispose());
-		await attach.start();
-		const outcome = await attach.acquire("s-worktree");
-
-		expect(outcome).toEqual({ kind: "granted", handoff: "none" });
-		expect(attach.workspaceName()).toBe("repo");
-		const bindIndex = harness.requests.findIndex((request) => request.type === "worktree_bind");
-		const leaseIndex = harness.requests.findIndex((request) => request.type === "lease_acquire");
-		expect(harness.requests[bindIndex]).toMatchObject({
-			workspaceName: "repo",
-			worktreeId: "fix-login",
-			sessionId: "s-worktree",
-		});
-		expect(bindIndex).toBeLessThan(leaseIndex);
-		expect(harness.requests[leaseIndex]).toMatchObject({ workspaceName: "repo", sessionId: "s-worktree" });
-		// §5.2.2: no bogus workspace was auto-registered for the worktree path.
-		expect(harness.requests.some((request) => request.type === "workspace_register")).toBe(false);
-		// §5.2.3: the daemon can gate relay offers on the TUI's capability. The
-		// lease-holding connection (not the initial probe) must advertise it.
-		const leasePair = harness.requestConnections.find((pair) => pair.request.type === "lease_acquire");
-		expect(leasePair?.connection.capabilities.has(CONTROL_WORKTREES_CAPABILITY)).toBe(true);
-	});
-
-	it("forwards relayed notification delivery through the resolved workspace", async () => {
-		const harness = await startControlHarness((connection, request) => {
-			if (request.type === "status") {
-				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
-				return;
-			}
-			if (request.type === "relay_notification_delivery") {
-				connection.send({ type: "relay_push_delivery_result", id: request.id, status: "sent" });
-				return;
-			}
-			connection.send({ type: "ok", id: request.id });
-		});
-		const attach = createDaemonLink({ cwd: join(HOST_PARENT_PATH, "sub"), agentDir: harness.agentDir });
-		cleanups.push(() => attach.dispose());
-		await attach.start();
-
-		await expect(
-			attach.relayNotificationDelivery.deliverNotification("n-1", "s-relay", {
-				eventId: "conversation:s-relay:run-1:completed",
-				hostNodeId: "a".repeat(64),
-				kind: "conversation_completed",
-				title: "Volt finished",
-				body: "Your conversation is ready.",
-				sessionId: "s-relay",
-				workspaceName: "repo",
-			}),
-		).resolves.toBe("sent");
-		const notificationRequest = harness.requests.find((request) => request.type === "relay_notification_delivery");
-		expect(notificationRequest).toMatchObject({
-			clientNodeId: "n-1",
-			workspaceName: "repo",
-			sessionId: "s-relay",
-		});
-	});
-
-	it("exposes an empty capability set for clients that do not advertise one", async () => {
-		const harness = await startControlHarness((connection, request) => {
-			connection.send(statusResult(request.id, []));
-		});
-		const client = createDaemonClient({
-			socketPath: harness.socketPath,
-			client: "tui",
-			version: "0.0.0-test",
-			reconnect: false,
-		});
-		cleanups.push(() => client.close());
-		await client.connect();
-		await client.request({ type: "status" });
-		expect(harness.connections[0]?.capabilities.size).toBe(0);
-	});
-});
 
 describe("openDaemonWorktreeControl (§5.2.1)", () => {
 	it("creates a worktree in the resolved workspace and binds the session", async () => {
@@ -464,7 +343,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 		const opened = await openDaemonWorktreeControl({
 			cwd: join(HOST_PARENT_PATH, "sub"),
 			agentDir: harness.agentDir,
-			ensureDaemon,
+			daemon: { ensure: ensureDaemon },
 		});
 		expect(opened.ok).toBe(true);
 		if (!opened.ok) {
@@ -500,7 +379,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 			cwd: elsewhere,
 			agentDir: harness.agentDir,
 			workspaceName: "repo",
-			ensureDaemon,
+			daemon: { ensure: ensureDaemon },
 		});
 		expect(named).toMatchObject({ ok: true, control: { workspaceName: "repo", workspacePath: HOST_PARENT_PATH } });
 		if (named.ok) await named.control.close();
@@ -508,7 +387,7 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 		const unregistered = await openDaemonWorktreeControl({
 			cwd: elsewhere,
 			agentDir: harness.agentDir,
-			ensureDaemon,
+			daemon: { ensure: ensureDaemon },
 		});
 		expect(unregistered).toMatchObject({ ok: false, error: expect.stringContaining("no registered workspace") });
 		expect(harness.requests.some((request) => request.type === "workspace_register")).toBe(false);
@@ -519,17 +398,28 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 		const opened = await openDaemonWorktreeControl({
 			cwd: join(HOST_FIXTURE_ROOT, "anywhere"),
 			agentDir,
-			ensureDaemon: async () => ({
-				healthy: false,
-				state: "not-running",
-				socketPath: getDaemonPaths(agentDir).socketPath,
-				spawned: true,
-			}),
+			daemon: {
+				ensure: async () => ({
+					healthy: false,
+					state: "not-running",
+					socketPath: getDaemonPaths(agentDir).socketPath,
+					spawned: true,
+				}),
+			},
 		});
 		expect(opened.ok).toBe(false);
 		if (!opened.ok) {
 			expect(opened.error).toContain("not-running");
 		}
+	});
+
+	it("needs the daemon of a TUI whose conversations run in its workers", async () => {
+		const opened = await openDaemonWorktreeControl({
+			cwd: join(HOST_FIXTURE_ROOT, "anywhere"),
+			agentDir: makeTempDir("volt-wt-inprocess-"),
+			daemon: undefined,
+		});
+		expect(opened).toEqual({ ok: false, error: "this terminal's conversations do not run in the daemon" });
 	});
 });
 
@@ -619,40 +509,8 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 	});
 });
 
-describe("worktree relay gating and takeover refusal (§5.2.3)", () => {
-	it("evaluateWorktreeRelayGate: non-worktree conversations always pass", () => {
-		expect(evaluateWorktreeRelayGate(undefined, undefined, CONTROL_WORKTREES_CAPABILITY)).toEqual({ ok: true });
-	});
-
-	it("evaluateWorktreeRelayGate: missing checkout refuses regardless of capability", () => {
-		const gate = evaluateWorktreeRelayGate(
-			{ path: join(tmpdir(), `volt-nope-${Date.now()}`) },
-			new Set([CONTROL_WORKTREES_CAPABILITY]),
-			CONTROL_WORKTREES_CAPABILITY,
-		);
-		expect(gate).toEqual({ ok: false, reason: "checkout_missing" });
-	});
-
-	it("evaluateWorktreeRelayGate: old TUIs (no capability) are never offered worktree relays", () => {
-		const checkout = makeTempDir("volt-wt-gate-");
-		expect(evaluateWorktreeRelayGate({ path: checkout }, new Set(), CONTROL_WORKTREES_CAPABILITY)).toEqual({
-			ok: false,
-			reason: "tui_not_capable",
-		});
-		expect(evaluateWorktreeRelayGate({ path: checkout }, undefined, CONTROL_WORKTREES_CAPABILITY)).toEqual({
-			ok: false,
-			reason: "tui_not_capable",
-		});
-		expect(
-			evaluateWorktreeRelayGate(
-				{ path: checkout },
-				new Set([CONTROL_WORKTREES_CAPABILITY]),
-				CONTROL_WORKTREES_CAPABILITY,
-			),
-		).toEqual({ ok: true });
-	});
-
-	it("isPathUnderWorktreesRoot identifies daemon-managed checkout paths (takeover refusal predicate)", () => {
+describe("managed checkout paths (§5.2.3)", () => {
+	it("isPathUnderWorktreesRoot identifies daemon-managed checkout paths", () => {
 		const agentDir = makeTempDir("volt-wt-root-");
 		const root = getWorktreesRoot(agentDir);
 		expect(isPathUnderWorktreesRoot(agentDir, join(root, "--repo--", "fix-login"))).toBe(true);

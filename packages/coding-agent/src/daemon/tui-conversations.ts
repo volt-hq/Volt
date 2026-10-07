@@ -358,7 +358,6 @@ export class TuiConversations {
 				sessionId: ticket.sessionId,
 				clientNodeId: "tui",
 				connectionId: ticket.connectionId,
-				ownerControlConnectionId: worker.connectionId,
 				streamId: relayId,
 				stream,
 				preamble: ticket.preamble,

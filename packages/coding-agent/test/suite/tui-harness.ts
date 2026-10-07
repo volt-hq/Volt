@@ -1,10 +1,9 @@
 /**
- * TUI harness for suite tests: the TUI's connector (`InProcessConnector`, or
- * with a daemon link the CLI's `LeasedConnector`) over a conversation host on
- * the faux provider (host-harness.ts), with daemon leases over a link the test
- * scripts or a real one, the TUI's client connected through it (following its
- * moves by reconnecting), and InteractiveMode rendering into a virtual
- * terminal as that client, its store following it.
+ * TUI harness for suite tests: the TUI's connector (`InProcessConnector`) over
+ * a conversation host on the faux provider (host-harness.ts), the TUI's client
+ * connected through it (following its moves by reconnecting), InteractiveMode
+ * rendering into a virtual terminal as that client, its store following it,
+ * and phones the daemon relays into the host, served as a worker serves them.
  */
 
 import { duplexPair } from "node:stream";
@@ -13,7 +12,7 @@ import { setKeybindings, type TUI, type TuiMode } from "@hansjm10/volt-tui";
 import { expect, vi } from "vitest";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import { type ConnectThroughOptions, connectThrough } from "../../src/client/conversation-connector.ts";
-import { InProcessConnector, LeasedConnector } from "../../src/client/in-process-connector.ts";
+import { InProcessConnector } from "../../src/client/in-process-connector.ts";
 import type { ProtocolClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
@@ -27,23 +26,14 @@ import type { LogWriter } from "../../src/core/session-writer.ts";
 import { stopThemeWatcher } from "../../src/core/theme/runtime.ts";
 import type { PhoneRelayPreamble } from "../../src/daemon/control-protocol.ts";
 import { adaptRelaySocketToIrohStream } from "../../src/daemon/relay-stream.ts";
+import { servePhoneRelay } from "../../src/daemon/worker/serve-phone.ts";
 import type { TuiStore } from "../../src/modes/interactive/client/tui-store.ts";
-import {
-	type AcquireOutcome,
-	createDisabledDaemonLink,
-	DaemonLeases,
-	type DaemonLink,
-	type DaemonRelayOffer,
-	type OpenedRelay,
-} from "../../src/modes/interactive/host/daemon-link.ts";
 import { createInteractiveTui, InteractiveMode } from "../../src/modes/interactive/interactive-mode.ts";
 import { TUI_HOST_REQUESTS } from "../../src/modes/interactive/live-view.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./host-harness.ts";
 
-export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "openGate" | "extensionMode"> {
-	/** The link the TUI host's daemon leases serve through; without one, the TUI runs without the daemon. */
-	link?: DaemonLink;
+export interface TuiHarnessOptions extends Omit<HostHarnessOptions, "extensionMode"> {
 	/**
 	 * The startup conversation's id and cwd (a new id in the harness's temp dir
 	 * by default), and what its log holds before it opens.
@@ -71,19 +61,17 @@ export interface TuiModeFixture {
 }
 
 export interface TuiHarness extends HostHarness {
-	/** The TUI's connector: the CLI's leased one with a daemon link. */
+	/** The TUI's connector. */
 	readonly connector: InProcessConnector;
 	/** The conversation the TUI opens on. */
 	readonly startup: HostedConversation;
 	/** The session directory the startup conversation is stored in. */
 	readonly sessionDir: string;
-	/** Phones relayed into the conversation the TUI shows and served now; none without a daemon link. */
-	relayCount(): number;
 	/**
 	 * Connect a client through the TUI's connector, as the TUI does, answering
 	 * every host request kind the TUI answers by default. Resolves once the
-	 * host serves the client: after the conversation's daemon lease and its
-	 * recovered input, which come before the client's first query.
+	 * host serves the client: after the conversation's recovered input, which
+	 * comes before the client's first query.
 	 */
 	connect(options?: ConnectThroughOptions): Promise<ProtocolClient>;
 	/**
@@ -121,13 +109,8 @@ interface ModeAccess {
 }
 
 export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise<TuiHarness> {
-	const { link, startup: startupOptions, modelScopePatterns, ...hostOptions } = options;
-	const leases = link === undefined ? undefined : new DaemonLeases({ link, createLink: () => link });
-	const harness = await createHostHarness({
-		...hostOptions,
-		extensionMode: "rpc",
-		...(leases === undefined ? {} : { openGate: leases.openGate }),
-	});
+	const { startup: startupOptions, modelScopePatterns, ...hostOptions } = options;
+	const harness = await createHostHarness({ ...hostOptions, extensionMode: "rpc" });
 	const cleanups: Array<() => Promise<void> | void> = [];
 	try {
 		const sessionDir = `${harness.tempDir}/sessions`;
@@ -143,14 +126,12 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 			conversation: startup,
 			...(modelScopePatterns === undefined ? {} : { modelScopePatterns }),
 		};
-		const leased = leases === undefined ? undefined : new LeasedConnector({ ...connectorOptions, daemon: leases });
-		const connector = leased ?? InProcessConnector.start(connectorOptions);
+		const connector = InProcessConnector.start(connectorOptions);
 		return {
 			...harness,
 			connector,
 			startup,
 			sessionDir,
-			relayCount: () => leased?.relayCount() ?? 0,
 			async connect(connectOptions = {}) {
 				const client = await connectThrough(connector, { hostRequests: TUI_HOST_REQUESTS, ...connectOptions });
 				cleanups.push(() => client.stop());
@@ -266,125 +247,45 @@ export async function choose(tui: TuiModeFixture, option: string): Promise<void>
 	tui.terminal.sendInput("\r");
 }
 
-/** A phone's stream as the daemon relays it to the TUI: the TUI's end, and the phone's. */
+/** A phone's stream as the daemon relays it into the host. */
 export interface RelayedStream {
-	readonly opened: OpenedRelay;
 	/** The phone's end of the relay, after the daemon's handshake. */
 	readonly phoneEnd: ReturnType<typeof adaptRelaySocketToIrohStream>;
-	/** Settles once the TUI marked the relay finished. */
+	/** Settles once the host finished serving the relay. */
 	readonly finished: Promise<void>;
 }
 
 /**
- * A daemon link a test scripts: lease calls are recorded into `steps`
- * (`acquire:<session>`, `release:<session>:<reason>`, `abort:<viewer feed>`),
- * each session's lease outcome is `outcomes`' (granted by default), relay
- * offers reach the TUI through `offerRelay`, and relayed intents the daemon
- * backs answer from `relayed`.
+ * Serve a phone the daemon relays into the harness host's `conversation` (the
+ * one the TUI shows by default) as a conversation worker serves it: on the
+ * remote profile with the daemon's preamble, following its structural intents
+ * by redirect. Its daemon-backed intents and queries land in `relayed`.
  */
-export interface ScriptedDaemonLink extends DaemonLink {
-	readonly steps: string[];
-	readonly outcomes: Map<string, () => AcquireOutcome>;
-	/** The relayed frames the daemon answered, in order. */
-	readonly relayed: unknown[];
-	/** Offer the TUI a phone's relay with `preamble`; resolves once the TUI took it, or undefined when it let it expire. */
-	offerRelay(
-		offer: Partial<DaemonRelayOffer> & { sessionId: string },
-		preamble: PhoneRelayPreamble,
-	): Promise<RelayedStream | undefined>;
-	/** Reconnect: the daemon reacquires the session leased last with `outcome`. */
-	reacquire(sessionId: string, outcome: AcquireOutcome): void;
-}
-
-export function createScriptedDaemonLink(): ScriptedDaemonLink {
-	const steps: string[] = [];
-	const outcomes = new Map<string, () => AcquireOutcome>();
-	const relayed: unknown[] = [];
-	let relays = 0;
-	let offerHandler: ((offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>) => void) | undefined;
-	let reacquiredHandler: ((sessionId: string, outcome: AcquireOutcome) => void) | undefined;
-	const setRelays = (count: number): void => {
-		relays = count;
-	};
-	return {
-		...createDisabledDaemonLink(),
-		steps,
-		outcomes,
-		relayed,
-		connectionState: () => "connected",
-		workspaceName: () => "ws",
-		acquire: vi.fn(async (sessionId: string): Promise<AcquireOutcome> => {
-			steps.push(`acquire:${sessionId}`);
-			return outcomes.get(sessionId)?.() ?? { kind: "granted", handoff: "none" };
-		}),
-		release: vi.fn(async (sessionId: string, reason?: string) => {
-			steps.push(`release:${sessionId}:${reason}`);
-		}),
-		viewerAbort: vi.fn(async (viewerFeedId: string) => {
-			steps.push(`abort:${viewerFeedId}`);
-		}),
-		async forwardRelayRpc(_clientNodeId, _sessionId, frame) {
-			relayed.push(frame);
-			return frame.type === "query"
-				? { type: "query_error", queryId: frame.queryId, reason: { code: "unavailable", message: "scripted" } }
-				: { type: "accepted", intentId: frame.intentId, ordinals: [] };
+export function relayPhone(
+	harness: TuiHarness,
+	preamble: PhoneRelayPreamble,
+	options: { conversation?: HostedConversation; relayed?: unknown[] } = {},
+): RelayedStream {
+	const [hostEnd, phoneEnd] = duplexPair();
+	const finished = Promise.withResolvers<void>();
+	void servePhoneRelay({
+		host: harness.host,
+		conversation: options.conversation ?? harness.connector.conversation,
+		relay: { preamble, stream: hostEnd, finished: () => finished.resolve() },
+		agentDir: harness.tempDir,
+		daemon: {
+			async forward(frame) {
+				options.relayed?.push(frame);
+				return frame.type === "query"
+					? { type: "query_error", queryId: frame.queryId, reason: { code: "unavailable", message: "scripted" } }
+					: { type: "accepted", intentId: frame.intentId, ordinals: [] };
+			},
+			async deliverNotification() {
+				return "sent";
+			},
 		},
-		onRelayOffer(handler) {
-			offerHandler = handler;
-		},
-		onReacquired(handler) {
-			reacquiredHandler = handler;
-		},
-		relayCount: () => relays,
-		async offerRelay(offer, preamble) {
-			const handler = offerHandler;
-			if (!handler) throw new Error("The TUI serves no relays");
-			const taken = Promise.withResolvers<RelayedStream | undefined>();
-			const finished = Promise.withResolvers<void>();
-			let opened = false;
-			handler(
-				{
-					relayId: "rl-1",
-					relayToken: "token-1",
-					workspaceName: "ws",
-					clientNodeId: preamble.authorization.clientNodeId,
-					connectionId: preamble.connectionId,
-					streamId: preamble.streamId,
-					...offer,
-				},
-				async () => {
-					opened = true;
-					const [tuiEnd, phoneEnd] = duplexPair();
-					setRelays(relays + 1);
-					let done = false;
-					const relay: OpenedRelay = {
-						preamble,
-						stream: tuiEnd,
-						finished: () => {
-							if (done) return;
-							done = true;
-							setRelays(Math.max(0, relays - 1));
-							finished.resolve();
-						},
-					};
-					taken.resolve({
-						opened: relay,
-						phoneEnd: adaptRelaySocketToIrohStream(phoneEnd),
-						finished: finished.promise,
-					});
-					return relay;
-				},
-			);
-			// An offer the TUI lets expire is never redeemed.
-			setTimeout(() => {
-				if (!opened) taken.resolve(undefined);
-			}, 1000).unref();
-			return taken.promise;
-		},
-		reacquire(sessionId, outcome) {
-			reacquiredHandler?.(sessionId, outcome);
-		},
-	};
+	}).catch(() => finished.resolve());
+	return { phoneEnd: adaptRelaySocketToIrohStream(phoneEnd), finished: finished.promise };
 }
 
 /** A relay preamble for a phone paired with full access, reaching `sessionId` in workspace `ws` at `workspacePath`. */

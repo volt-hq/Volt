@@ -45,7 +45,6 @@ export type {
 	ControlFatal,
 	ControlHelloChallenge,
 	ControlKeepAwakeStatus,
-	ControlLeaseStatus,
 	ControlRelayCredentialStatus,
 	ControlRequest,
 	ControlResponse,
@@ -60,8 +59,6 @@ export type {
 	HelloAck,
 	HelloMessage,
 	HelloProof,
-	LeaseReleaseReason,
-	LeaseState,
 	LocalRelayPreamble,
 	PhoneRelayPreamble,
 	RelayCloseReason,
@@ -81,21 +78,13 @@ export type {
 	WorkspaceRegistration,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
-/**
- * Control-hello capability advertised by TUIs that can serve worktree-bound
- * conversations over the byte relay (worktree-cwd sanitization). The daemon
- * never offers worktree-session relays to control clients without it.
- */
-export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
 /** Status capability for cancellable, immediately-invalidated pairing tickets. */
 export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
-/** TUI/CLI understands per-device tool + RPC grant control messages and relay preambles. */
-export const CONTROL_RPC_GRANTS_CAPABILITY = "rpc_grants";
 
 /** Single mapping from a persisted client record to its control-socket status. */
 export function createControlClientStatus(client: IrohRemoteClient): ControlClientStatus {
@@ -306,15 +295,15 @@ export function isWorkerRequestType(type: string): type is WorkerRequestType {
  */
 export function isRequestAllowedFor(client: "tui" | "cli" | "worker", type: string): boolean {
 	if (type === "conversation_open") return client === "tui";
-	return type === "change_observe" || (client === "worker") === isWorkerRequestType(type);
+	if (type === "change_observe") return client === "worker";
+	return (client === "worker") === isWorkerRequestType(type);
 }
 
 /** A request the contract schema accepts, with a relayed notification inside its UTF-8 budgets. */
 export function admitControlRequest(value: unknown): value is ControlRequest {
 	return (
 		requestValidator().Check(value) &&
-		((value.type !== "relay_notification_delivery" && value.type !== "worker_notification_delivery") ||
-			isWithinNotificationBudgets(value.notification))
+		(value.type !== "worker_notification_delivery" || isWithinNotificationBudgets(value.notification))
 	);
 }
 

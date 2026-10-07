@@ -360,7 +360,6 @@ describe("managed relay credential recovery", () => {
 			pid: 1,
 			startedAtMs: 1,
 			environment: { source: "inherited" },
-			leases: [],
 			phoneConnections: 0,
 			workspaces: [],
 			clients: [],
@@ -505,9 +504,6 @@ describe("managed relay credential recovery", () => {
 			expect(
 				await fixture.control.request({ type: "workspace_register", name: "repo", path: fixture.agentDir }),
 			).toMatchObject({ type: "ok" });
-			expect(
-				await fixture.control.request({ type: "lease_acquire", workspaceName: "repo", sessionId: "local-session" }),
-			).toMatchObject({ type: "lease_granted" });
 			const sessionDir = getDefaultSessionDir(fixture.agentDir, fixture.agentDir);
 			const localSession = await SessionManager.create(fixture.agentDir, sessionDir, { id: "local-session" });
 			await localSession.logWriter.appendSessionInfo("Preserved local session");
@@ -535,7 +531,7 @@ describe("managed relay credential recovery", () => {
 			expect(fixture.readState().clients).toEqual(oldClients);
 			const after = await status(fixture.control);
 			expect(after.workspaces).toEqual(before.workspaces);
-			expect(after.leases).toEqual(before.leases);
+			expect(after.workers).toEqual(before.workers);
 			expect(fixture.readState().irohSecretKey).toEqual(state.irohSecretKey);
 			expect(fixture.readState().worktrees).toEqual(beforeWorktrees);
 			const savedSession = await SessionManager.findForResume(sessionDir, "local-session");

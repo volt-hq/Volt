@@ -50,9 +50,6 @@ import {
 	ControlHelloChallengeSchema,
 	ControlHelloSchema,
 	ControlKeepAwakeStatusSchema,
-	ControlLeaseReleaseReasonSchema,
-	ControlLeaseStateSchema,
-	ControlLeaseStatusSchema,
 	ControlRelayCloseReasonSchema,
 	ControlRelayCredentialStatusSchema,
 	ControlRelayFrameSchema,
@@ -661,12 +658,9 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	"RemoteHandshake.Response": IrohRemoteHandshakeResponseSchema,
 
 	// Daemon control plane: shared vocabulary and envelopes
-	"Control.LeaseState": ControlLeaseStateSchema,
-	"Control.LeaseReleaseReason": ControlLeaseReleaseReasonSchema,
 	"Control.ClientKind": ControlClientKindSchema,
 	"Control.RelayCloseReason": ControlRelayCloseReasonSchema,
 	"Control.KeepAwakeStatus": ControlKeepAwakeStatusSchema,
-	"Control.LeaseStatus": ControlLeaseStatusSchema,
 	"Control.WorkspaceStatus": ControlWorkspaceStatusSchema,
 	"Control.WorktreeStatus": ControlWorktreeStatusSchema,
 	"Control.ClientStatus": ControlClientStatusSchema,

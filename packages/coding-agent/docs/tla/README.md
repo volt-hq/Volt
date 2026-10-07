@@ -14,16 +14,15 @@ executable description of the rules; a checker (TLC) then explores **every**
 reachable interleaving and reports the first one that breaks a rule. It's a way
 to test the *design* exhaustively before trusting it in code.
 
-Six modules are written and model-checked with TLC; each is checkable on its own
+Four modules are written and model-checked with TLC; each is checkable on its own
 via `./check.sh <Module>`. **`WorkerRegistry` is the model of record for the
 host/worker protocol** (architecture rewrite Phase 7, daemon-hosted
-conversations). `LeaseBroker` and `RelayViewer` model the ownership-transfer
-design it replaces; they stay until that code is deleted (Phase 7 slice 9), then
-go with it.
+conversations). The two models of the ownership-transfer design it replaced
+were deleted with that code (Phase 7 slice 9).
 
 > Keep these files beside their RFCs (`docs/daemon-hosted-conversations-design.md`
 > for `WorkerRegistry`, `docs/live-shared-session-daemon-design.md` for the
-> superseded modules). When the design changes, change the model first, watch
+> phone-side modules). When the design changes, change the model first, watch
 > the check break, then change the code. If they drift, the model stops meaning
 > anything.
 
@@ -34,8 +33,6 @@ go with it.
 | Module | What it covers (plain) | State |
 |--------|------------------------|-------|
 | **`WorkerRegistry`** | Which worker process hosts each conversation: spawning, sharing a worker among compatible conversations, attaching, relay offers, the per-log lock, per-conversation retention, retirement, crashes, workspace fences, and daemon loss. | **Model of record. Verified green** with shared workers and the restart wait (1,102,474 distinct states with liveness; safety variants 7,539,110 and 9,667,010). `WorkerRegistry.tla` / `.cfg`, safety variants `WorkerRegistrySafety.cfg` and `WorkerRegistrySharing.cfg`, variant `WorkerRegistryOrphans.cfg` (the finding below, without the restart wait) |
-| **`LeaseBroker`** | Who held a conversation (daemon vs terminal) and how it handed off. | **Superseded by `WorkerRegistry`**; deleted with the lease code in Phase 7 slice 9. Last verified green (40,804 states). `LeaseBroker.tla` / `.cfg` |
-| **`RelayViewer`** | The relay token + the "watch the turn finish" viewer feed during a hand-off. | **Superseded by `WorkerRegistry`** (relay offers) and the deletion of the viewer feed; deleted in Phase 7 slice 9. Last verified green (207,025 states). `RelayViewer.tla` / `.cfg` |
 | **`SessionTarget`** | Picking the right session on connect, so a phone never pins the wrong one. | **Verified green** (28 states) before its rekey overlay was removed; not re-run since (24 states by construction). `SessionTarget.tla` / `.cfg` |
 | **`ClientAuth`** | Pairing, revoking, and re-pairing a phone. | **Verified green** (9,678 states). `ClientAuth.tla` / `.cfg` |
 | **`ClientConn`** | The phone's own connect / reconnect / detach / abort behavior. | **Verified green** (176 states). `ClientConn.tla` / `.cfg` |
@@ -69,34 +66,6 @@ worker gate for its whole run (`src/daemon/worker-gate.ts`), and a starting daem
 takes the gate exclusively, and releases it, before it serves anything. The
 baseline `.cfg` sets `RestartWaitsForOrphans = TRUE` with both predicates on;
 `WorkerRegistryOrphans.cfg` keeps the trace of the design without the wait.
-
-**`LeaseBroker` (superseded), two issues in `lease-broker.ts`**, each reproduced
-by TLC as a concrete trace (both invariants ship in `LeaseBroker.tla`, off by
-default so the baseline stays green; add either to the `.cfg` to see it):
-
-**1 — `streamCount` leak (fixed).**
-In `runDrain`'s disposal-error recovery (~L388–408), the cancelled branch dropped
-the lease to `unowned` but **never zeroed `record.streamCount`** — unlike the
-success path (L409). Since `dropIfUnowned` requires `streamCount === 0`, the
-record could never be dropped: a leaked `unowned` ghost that handed a phantom
-stream count to the next acquirer. TLC trace: `CommitDaemonAttach →
-PhoneStreamAttach → RuntimeStartTurn → AcquireDrainStart → DrainRuntimeIdle →
-DrainCancelDisposing → DrainDisposeError`, ending in `unowned` with
-`streamCount = 1`. **Fixed** in `lease-broker.ts` (zero `streamCount` in that catch
-branch) with a regression test; `NoStreamLeak` is now in the baseline `.cfg` so it
-stays fixed.
-
-**2 — turn killed on TUI open after the phone walks away (resolved: intended).**
-`acquireForTui` only *drains* when the state is `daemon-active` (L296). A turn
-keeps running after the last phone detaches (RFC: "the prompt continues on the
-host"), leaving a `daemon-detached` runtime that is still mid-turn; opening the TUI
-then disposes it, killing that turn instead of draining it. The model surfaced this
-(`IdleAcquireOnlyWhenIdle`, TLC trace `RuntimeStartTurn → PhoneStreamDetach →
-AcquireIdleFlip`), and the decision came back: **this is intended** — once no
-device is receiving the turn there is nothing to watch, so it is abandonable (the
-same as closing a TUI mid-turn). Documented in the RFC §4.2 and the
-`lease-broker.ts` comment; `IdleAcquireOnlyWhenIdle` stays off in the baseline as a
-marker of that deliberate choice.
 
 ---
 
@@ -267,75 +236,6 @@ orphan trace above in seven states.
 
 ---
 
-## The `LeaseBroker` module (superseded)
-
-> Superseded by `WorkerRegistry`. It models the lease broker that Phase 7 deletes
-> (slice 9); the file and this section go with that code.
-
-### The five states (who holds the conversation)
-
-`unowned` · `daemon-active` · `daemon-detached` · `daemon-draining` · `tui-owned`,
-keyed on `(workspaceName, sessionId)` — `clientNodeId` is deliberately dropped, so
-two phones are the *same* conversation, not two. See the header comment in
-`LeaseBroker.tla` for the plain-English description of each.
-
-### The one design decision that makes the check meaningful
-
-The RFC's headline invariant is "one live runtime per conversation, and a daemon
-runtime exists **iff** the state is `daemon-*`." The tempting way to model that —
-define "runtime alive" as "state is `daemon-*`" — makes the invariant `X ⇔ X`: it
-passes while proving nothing. (The first draft did exactly this; the review
-caught it.)
-
-The real code flips the lease to `tui-owned` **before** it finishes disposing the
-daemon runtime, so there's a genuine window where the lease says `tui-owned`
-while the daemon runtime is still alive. That window *is* the split-brain the
-invariant is meant to rule out. So the model tracks `runtimeEntry` as an
-**independent** variable (set on attach, cleared only when disposal *completes*)
-and splits the idle-acquire into `flip → disposeDone / disposeFail`. Now the
-window is a reachable state and the invariants can actually fail — which is the
-whole point.
-
-### Invariants checked (safety)
-
-Each maps to a real prose invariant or a §4.8 race row. Names match
-`LeaseBroker.tla` exactly.
-
-| Invariant | Plain meaning |
-|-----------|---------------|
-| `OwnershipUnique` (I1) | The daemon runtime and a serving terminal never both exist for one conversation — no split-brain. |
-| `RuntimeIffDaemon` (I2) | A daemon runtime exists exactly in the daemon states, plus the brief disposal window. |
-| `TuiOwnerWellFormed` (I3a) | A terminal connection is recorded exactly when a terminal holds or is acquiring the lease. |
-| `DisposePendingOnlyTui` | The disposal window only exists under `tui-owned`. |
-| `RelaysOnlyWhenTui` (I3b) | Relays exist only while a terminal holds the lease. |
-| `DrainHasAcquirer` (I4) | A draining conversation always has a waiting acquirer and a live pump. |
-| `StreamingCoherent` | A turn only runs while the daemon owns a live runtime. |
-| `DrainNoNewTurn` (I6) | Once a hand-off is disposing, no new turn can start (the `lease_draining` rejection). |
-| `NoStreamLeak` | a stream count implies a live runtime — guards the finding-1 fix (in the baseline). |
-| `IdleAcquireOnlyWhenIdle` | *(off by default)* an idle-acquire never disposes a mid-turn runtime — intentionally does **not** hold; detached turns are abandonable (RFC §4.2). |
-
-### Properties checked (liveness, needs fairness)
-
-| Property | Plain meaning |
-|----------|---------------|
-| `DrainConverges` (I5) | A hand-off never wedges: a draining conversation always leaves that state. |
-| `EventualSettle` (I4) | The acquirer's grant is always settled (granted, cancelled, or errored) — nobody waits forever. |
-
-Both rely on weak fairness on the drain pump, applied **per key** so one
-conversation's hand-off can't starve another's. The adversarial branches
-(cancel, disposal error) get *no* fairness, so they can't manufacture a fake
-liveness violation.
-
-### What the model deliberately simplifies
-
-A turn is a boolean (`runtimeStreaming`) with a nondeterministic end, not
-token-by-token streaming. The byte relay is a count, not a pump. Time/TTL is a
-fireable event, not a clock. Counts are bounded (`MaxStreams`, `MaxRelays=2`,
-`MaxPending=1`) so the state space is finite. These are the standard
-abstractions; the ownership logic itself is kept exact.
-
----
-
 ## How to run
 
 ```bash
@@ -343,7 +243,7 @@ abstractions; the ownership logic itself is kept exact.
 ./check.sh WorkerRegistry WorkerRegistrySharing.cfg       # safety: differing keys and a binding cap
 ./check.sh WorkerRegistry WorkerRegistrySafety.cfg        # safety: a third worker id
 ./check.sh WorkerRegistry WorkerRegistryOrphans.cfg       # the orphan finding without the restart wait (a trace)
-./check.sh LeaseBroker                                    # a superseded module
+./check.sh ClientConn                                     # another module
 ```
 
 `check.sh` needs a JDK 17+ (via `JAVA_HOME` or `java` on PATH). Equivalently, by hand:
@@ -377,8 +277,8 @@ It does **not** prove:
 
 - **That the code matches the model.** The TS/Swift isn't generated from the
   spec; a correct model over a buggy implementation still checks green. The spec
-  is a design artifact — it found the `streamCount` leak because we modeled the
-  code's *intent* and asserted more than the code guarantees, not automatically.
+  is a design artifact — it found the orphan trace because we modeled the
+  design's *intent* and asserted more than the design guaranteed, not automatically.
 - **Correctness beyond the bounds.** Two or three sessions, two or three worker
   ids, one or two clients, a cap of two, and one fault are strong evidence via
   small-model reasoning, not a proof for all N (the implementation's cap is six).
@@ -393,9 +293,7 @@ It does **not** prove:
 
 ## Build order
 
-The original build order was `LeaseBroker` → `RelayViewer` → `SessionTarget` →
-`ClientAuth` → `ClientConn`, with `LeaseBroker` as the spine. With daemon-hosted
-conversations `WorkerRegistry` replaces the first two as the spine; the others
+`WorkerRegistry` is the spine; `SessionTarget`, `ClientAuth`, and `ClientConn`
 are independent of it.
 
 Full module scope, per-module invariant/property catalogs, and the shared

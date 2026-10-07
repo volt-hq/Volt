@@ -41,7 +41,6 @@ function healthyProbe(pid = child.pid): ControlSocketProbe {
 			protocolVersion: 1,
 			startedAtMs: 0,
 			environment: { source: "inherited", reason: "not resolved" },
-			leases: [],
 			phoneConnections: 0,
 			workspaces: [],
 			clients: [],

@@ -14,6 +14,7 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@hansjm10/volt-tui";
+import type { ConnectorDaemon } from "../../../client/conversation-connector.ts";
 import { getAgentDir, VERSION } from "../../../config.ts";
 import {
 	IROH_REMOTE_ACCESS_PRESET_NAMES,
@@ -34,21 +35,20 @@ import { theme } from "../../../core/theme/runtime.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
-	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
 	type ControlRelayCredentialStatus,
 	type ControlResponse,
 	type DaemonRemotePolicyStatus,
 	isRemoteTransportPairingAvailable,
 } from "../../../daemon/control-protocol.ts";
-import { type DaemonProbeState, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../../daemon/spawn.ts";
+import type { DaemonProbeState } from "../../../daemon/spawn.ts";
 import {
+	DEFAULT_DETACHED_RUNTIME_TTL_MS,
 	findRecoverableVoltdStateBackup,
 	inspectVoltdStateFiles,
 	recoverVoltdStateFromBackup,
 	regenerateInvalidVoltdState,
 } from "../../../daemon/state.ts";
-import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../../../remote/integrated-runtime-retention.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
@@ -122,11 +122,14 @@ export interface RemoteControlBackend {
 }
 
 /**
- * A management-only daemon client. It never acquires or releases a conversation
- * lease, so opening and closing /remote cannot transfer ownership of the active
- * session.
+ * A management-only client of the daemon the TUI's connector reaches its
+ * conversations through: opening and closing /remote changes nothing about
+ * the conversations its workers host.
  */
-export function createRemoteControlBackend(agentDir: string = getAgentDir()): RemoteControlBackend {
+export function createRemoteControlBackend(
+	daemon: ConnectorDaemon,
+	agentDir: string = getAgentDir(),
+): RemoteControlBackend {
 	let client: DaemonClient | undefined;
 	const eventHandlers = new Set<(event: ControlEvent) => void>();
 	const pendingPairingRequestIds = new Set<string>();
@@ -168,7 +171,7 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 	const connect = async (): Promise<DaemonClient> => {
 		if (client?.connectionState === "connected") return client;
 		await closeClient();
-		const probe = await probeDaemon(agentDir);
+		const probe = await daemon.probe(agentDir);
 		if (!probe.healthy) throw new Error(`voltd is ${probe.state}`);
 		const connected = createDaemonClient({
 			socketPath: probe.socketPath,
@@ -192,7 +195,7 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 
 	return {
 		async load() {
-			const probe = await probeDaemon(agentDir);
+			const probe = await daemon.probe(agentDir);
 			if (!probe.healthy) {
 				const invalidState = inspectVoltdStateFiles(agentDir);
 				return {
@@ -216,12 +219,12 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			}
 		},
 		async startDaemon() {
-			const result = await ensureDaemonRunning(agentDir);
+			const result = await daemon.ensure(agentDir);
 			if (!result.healthy) throw new Error(result.error ?? `voltd did not start (${result.state})`);
 			await closeClient();
 		},
 		async regenerateState() {
-			const probe = await probeDaemon(agentDir);
+			const probe = await daemon.probe(agentDir);
 			if (probe.healthy || probe.state !== "not-running") {
 				throw new Error(`voltd must be fully stopped before regenerating state (currently ${probe.state})`);
 			}
@@ -231,12 +234,12 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			return findRecoverableVoltdStateBackup(agentDir);
 		},
 		async recoverStateBackup(path) {
-			const probe = await probeDaemon(agentDir);
+			const probe = await daemon.probe(agentDir);
 			if (probe.healthy) {
 				const response = await (await connect()).request({ type: "shutdown" });
 				if (response.type === "error") throw new Error(response.message);
 				await closeClient();
-				const exit = await waitForDaemonExit({
+				const exit = await daemon.waitForExit({
 					agentDir,
 					pid: probe.pid,
 					socketPath: probe.socketPath,
@@ -246,7 +249,7 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 				throw new Error(`voltd must be stopped before state recovery (currently ${probe.state})`);
 			}
 			const recovered = await recoverVoltdStateFromBackup(agentDir, path);
-			const restarted = await ensureDaemonRunning(agentDir);
+			const restarted = await daemon.ensure(agentDir);
 			if (!restarted.healthy) {
 				throw new Error(restarted.error ?? `voltd did not restart (${restarted.state})`);
 			}
@@ -465,8 +468,7 @@ function supportsSafePairing(status: RemoteStatus): boolean {
 		status.relayCredential?.state !== "revocation_pending" &&
 		status.relayCredential?.state !== "pairing" &&
 		isRemoteTransportPairingAvailable(status.remoteTransport) &&
-		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true &&
-		status.capabilities.includes(CONTROL_RPC_GRANTS_CAPABILITY)
+		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true
 	);
 }
 
@@ -1379,7 +1381,7 @@ export class RemoteControlCenterComponent implements Component {
 		const status = this.view.status;
 		const remotePolicy = status.remotePolicy ?? {
 			allowTools: null,
-			detachedRuntimeTtlMs: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
+			detachedRuntimeTtlMs: DEFAULT_DETACHED_RUNTIME_TTL_MS,
 		};
 		const relayCredential = status.relayCredential;
 		const relayDetails = relayCredential === undefined ? undefined : RELAY_CREDENTIAL_DETAILS[relayCredential.state];
