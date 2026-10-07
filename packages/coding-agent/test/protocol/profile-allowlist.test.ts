@@ -729,23 +729,34 @@ describe("the remote profile decides exactly as the legacy filters", () => {
 				resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
 			},
 		} as unknown as IntentTarget;
+		const grants = everyGrant();
+		// The four review actions share one intent, so its decision is asked once per grant, not once per action.
+		const decided = new Map<string, "allowed" | RemoteCapability | "unsafe">();
+		const completionDecision = async (intent: BuiltinIntentName, index: number) => {
+			const key = `${intent}\0${index}`;
+			const known = decided.get(key);
+			if (known !== undefined) return known;
+			let decision: "allowed" | RemoteCapability | "unsafe" = "allowed";
+			try {
+				await queryRegistry.run(
+					{ target, services: {}, profile: { name: "remote", grant: grants[index]! } },
+					"intent_completions",
+					{
+						intent,
+						field: "base",
+					},
+				);
+			} catch (error) {
+				if (!(error instanceof IntentRejectedError || error instanceof QueryRejectedError)) throw error;
+				decision = error.requiredCapability ?? "unsafe";
+			}
+			decided.set(key, decision);
+			return decision;
+		};
 		for (const action of BUILTIN_UI_ACTIONS) {
 			const intent = BUILTIN_UI_ACTION_INTENTS[action]!;
-			for (const grant of everyGrant()) {
-				let decision: "allowed" | RemoteCapability | "unsafe" = "allowed";
-				try {
-					await queryRegistry.run(
-						{ target, services: {}, profile: { name: "remote", grant } },
-						"intent_completions",
-						{
-							intent,
-							field: "base",
-						},
-					);
-				} catch (error) {
-					if (!(error instanceof IntentRejectedError || error instanceof QueryRejectedError)) throw error;
-					decision = error.requiredCapability ?? "unsafe";
-				}
+			for (const [index, grant] of grants.entries()) {
+				const decision = await completionDecision(intent, index);
 				const legacy = legacyDecision({ type: "get_ui_action_completions", action, argument: "base" }, grant);
 				// The completion query's own capability is checked before the intent's remote safety.
 				if (legacy === "unsafe") expect(decision, `${action} ${grant.capabilities}`).not.toBe("allowed");
