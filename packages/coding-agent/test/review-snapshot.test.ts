@@ -932,6 +932,83 @@ if (!args.includes("--numstat")) {
 		expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("feature\n");
 	});
 
+	it("reviews the branch's commits together with the workspace's uncommitted changes", async () => {
+		const repository = createRepository();
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "committed.txt"), "committed\n");
+		git(repository, "add", "committed.txt");
+		git(repository, "commit", "-m", "feature");
+		const expectedHead = git(repository, "rev-parse", "HEAD");
+		const expectedMergeBase = git(repository, "merge-base", "main", "HEAD");
+		writeFileSync(join(repository, "tracked.txt"), "edited\n");
+		writeFileSync(join(repository, "untracked.txt"), "untracked\n");
+		const statusBefore = git(repository, "status", "--porcelain");
+
+		const snapshot = await resolve({ kind: "branch_uncommitted", base: "main" }, repository);
+
+		expect(snapshot.description).toBe("branch and uncommitted changes vs main");
+		expect(snapshot.identity).toMatchObject({
+			kind: "branch_uncommitted",
+			headCommit: expectedHead,
+			mergeBaseCommit: expectedMergeBase,
+			baseTree: git(repository, "rev-parse", `${expectedMergeBase}^{tree}`),
+		});
+		// The head side is the workspace, not the HEAD commit.
+		expect(snapshot.identity.headTree).not.toBe(git(repository, "rev-parse", "HEAD^{tree}"));
+		expect(snapshot.changedFiles.map((file) => file.path).sort()).toEqual([
+			"committed.txt",
+			"tracked.txt",
+			"untracked.txt",
+		]);
+		expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("edited\n");
+		expect((await readAvailableFile(snapshot, "base", "tracked.txt")).content.toString()).toBe("before\n");
+		// Capturing the workspace leaves the user's index and files as they were.
+		expect(git(repository, "status", "--porcelain")).toBe(statusBefore);
+	});
+
+	it("reviews only the branch's commits when the workspace has no uncommitted changes", async () => {
+		const repository = createRepository();
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "tracked.txt"), "feature\n");
+		git(repository, "add", "tracked.txt");
+		git(repository, "commit", "-m", "feature");
+
+		const snapshot = await resolve({ kind: "branch_uncommitted", base: "main" }, repository);
+
+		expect(snapshot.identity.headTree).toBe(git(repository, "rev-parse", "HEAD^{tree}"));
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["tracked.txt"]);
+	});
+
+	it("refuses a branch and uncommitted review with nothing changed against its base", async () => {
+		const repository = createRepository();
+		git(repository, "checkout", "-b", "feature");
+
+		await expect(
+			resolveReviewSnapshot({ kind: "branch_uncommitted", base: "main" }, repository, OPTIONS),
+		).resolves.toEqual({ error: "No changes between main and the working tree." });
+	});
+
+	it("reviews a refreshed remote base with the uncommitted changes, and recaptures it from its locator", async () => {
+		const { repository, authoritativeBase, headCommit } = createRemoteOnlyBranchFixture();
+		writeFileSync(join(repository, "untracked.txt"), "untracked\n");
+
+		const snapshot = await resolve({ kind: "branch_uncommitted", base: "main" }, repository);
+
+		expect(snapshot.description).toBe("branch and uncommitted changes vs origin/main");
+		expect(snapshot.branchBase).toEqual({ kind: "remote", remote: "origin", remoteRef: "refs/heads/main" });
+		expect(snapshot.identity).toMatchObject({
+			kind: "branch_uncommitted",
+			baseCommit: authoritativeBase,
+			headCommit,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path).sort()).toEqual(["feature.txt", "untracked.txt"]);
+		expect((await readAvailableFile(snapshot, "head", "untracked.txt")).content.toString()).toBe("untracked\n");
+		if (!snapshot.branchBase) throw new Error("Expected a durable branch base locator");
+
+		const rerun = await resolve({ kind: "branch_uncommitted", branchBase: snapshot.branchBase }, repository);
+		expect(rerun.identity).toMatchObject({ kind: "branch_uncommitted", baseCommit: authoritativeBase, headCommit });
+	});
+
 	it("refreshes short branch bases without changing stale workspace refs", async () => {
 		const { repository, staleBase, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
 		for (const target of [

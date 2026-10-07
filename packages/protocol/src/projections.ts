@@ -169,7 +169,7 @@ export const RpcReviewOptionsSchema = Type.Object(
 
 export const RpcReviewTargetIdentitySchema = Type.Object(
 	{
-		kind: stringEnum(["uncommitted", "branch", "pr", "commit"]),
+		kind: stringEnum(["uncommitted", "branch", "branch_uncommitted", "pr", "commit"]),
 		baseTree: Type.String(),
 		headTree: Type.String(),
 		baseCommit: Type.Optional(Type.String()),

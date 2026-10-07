@@ -3,7 +3,7 @@ import type { ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess } from "../utils/child-process.ts";
 import { terminateProcessTree } from "../utils/shell.ts";
 import {
@@ -22,6 +22,8 @@ export type ReviewTarget =
 	| { kind: "uncommitted" }
 	| { kind: "branch"; base?: string; branchBase?: never }
 	| { kind: "branch"; branchBase: ReviewBranchBase; base?: never }
+	| { kind: "branch_uncommitted"; base?: string; branchBase?: never }
+	| { kind: "branch_uncommitted"; branchBase: ReviewBranchBase; base?: never }
 	| { kind: "pr"; number?: string; expectedUrl?: string }
 	| { kind: "commit"; sha?: string };
 
@@ -2969,6 +2971,137 @@ export function pathWithinRoot(root: string, candidate: string): boolean {
 	);
 }
 
+/** `source`, also seeing the objects in `directories`: Git alternates, so a tree of another repository resolves here. */
+function withAlternateObjects(source: GitSource, directories: readonly string[]): GitSource {
+	const extra = directories.filter((directory) => !source.objectDirectories.includes(directory));
+	if (extra.length === 0) return source;
+	const alternates = [source.env?.GIT_ALTERNATE_OBJECT_DIRECTORIES, ...extra].filter(Boolean).join(delimiter);
+	return {
+		...source,
+		env: { ...source.env, GIT_ALTERNATE_OBJECT_DIRECTORIES: alternates },
+		objectDirectories: [...source.objectDirectories, ...extra],
+	};
+}
+
+/** A branch compared with its base: what a `branch` and a `branch_uncommitted` review share. */
+interface BranchComparison {
+	/** Sees the base, the HEAD commit, and their merge base. */
+	source: GitSource;
+	resolvedBase: ResolvedBranchBase;
+	/** How a rerun finds the same base again. */
+	branchBase: ReviewBranchBase;
+	baseCommit: string;
+	mergeBaseCommit: string;
+	headCommit: string;
+	/** The merge base's tree. */
+	baseTree: string;
+	/** The HEAD commit's tree. */
+	headCommitTree: string;
+	/** The temporary directories `source` holds: the snapshot keeps them until it is disposed. */
+	temporaryDirectories: string[];
+	/** Remove those directories, for a review that fails before its snapshot exists. */
+	release(): Promise<void>;
+}
+
+/** Resolve the branch's base and merge base, refreshing a remote base into an isolated repository. */
+async function resolveBranchComparison(
+	target: Extract<ReviewTarget, { kind: "branch" | "branch_uncommitted" }>,
+	root: string,
+	limits: ReviewSnapshotLimits,
+	options: ResolveReviewSnapshotOptions,
+	pendingTemporaryDirectories: Set<string>,
+): Promise<BranchComparison | ReviewSnapshotResolutionError> {
+	const localSource = await createLocalSource(root, limits, options.signal);
+	const headCommit = await requireCanonicalCommit(localSource, "HEAD");
+	if (!headCommit) return { error: "Could not resolve the branch head." };
+	let resolvedBase: ResolvedBranchBase | undefined;
+	if ("branchBase" in target) {
+		resolvedBase = target.branchBase
+			? await resolveStoredBranchBase(target.branchBase, root, limits, options.signal)
+			: undefined;
+		if (!resolvedBase) return { error: "Stored branch review base is no longer valid." };
+	} else {
+		const requestedBase = target.base ?? (await detectBaseBranch(root, limits, options.signal));
+		if (!requestedBase) return { error: "Could not detect a base branch. Use /review branch <base>." };
+		resolvedBase = await resolveBranchBase(requestedBase, root, limits, options.signal);
+		if (!resolvedBase) return { error: `Base branch "${requestedBase}" not found.` };
+	}
+
+	let source = localSource;
+	let baseCommit: string | undefined;
+	let remoteSourceIsShallow = false;
+	const temporaryDirectories: string[] = [];
+	if (resolvedBase.kind === "remote") {
+		options.onProgress?.(`Refreshing ${resolvedBase.displayRef}…`);
+		const fetched = await createRemoteBranchSource(
+			root,
+			resolvedBase.remote,
+			resolvedBase.remoteRef,
+			headCommit,
+			limits,
+			options.signal,
+		);
+		if (!fetched.source || !fetched.baseCommit || !fetched.temporaryDirectory) {
+			return fetched.error ?? { error: "Could not refresh the review base branch." };
+		}
+		source = fetched.source;
+		baseCommit = fetched.baseCommit;
+		remoteSourceIsShallow = fetched.shallow === true;
+		temporaryDirectories.push(fetched.temporaryDirectory);
+		pendingTemporaryDirectories.add(fetched.temporaryDirectory);
+	} else {
+		baseCommit = await requireCanonicalCommit(source, resolvedBase.ref);
+	}
+	if (!baseCommit) return { error: "Could not resolve the branch base." };
+	const release = async (): Promise<void> => {
+		for (const directory of temporaryDirectories) {
+			pendingTemporaryDirectories.delete(directory);
+			await rm(directory, { recursive: true, force: true }).catch(() => {});
+		}
+	};
+	const mergeBaseResult = await git(source, ["merge-base", baseCommit, headCommit]);
+	const mergeBaseCommit = text(mergeBaseResult).trim();
+	if (!mergeBaseResult.ok || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(mergeBaseCommit)) {
+		await release();
+		if (
+			remoteSourceIsShallow &&
+			mergeBaseResult.exitCode === 1 &&
+			mergeBaseResult.failure === undefined &&
+			mergeBaseResult.stdout.length === 0 &&
+			!mergeBaseResult.stderr.trim()
+		) {
+			const error =
+				"Could not resolve the branch merge base from the available shallow history. Deepen or unshallow the repository and retry.";
+			return { error, remoteError: error };
+		}
+		return {
+			error: `git merge-base failed: ${commandError(mergeBaseResult)}`,
+			remoteError: "Could not resolve the branch merge base.",
+		};
+	}
+	const baseTree = await requireCanonicalTree(source, mergeBaseCommit);
+	const headCommitTree = await requireCanonicalTree(source, headCommit);
+	if (!baseTree || !headCommitTree) {
+		await release();
+		return { error: "Could not resolve the branch trees." };
+	}
+	return {
+		source,
+		resolvedBase,
+		branchBase:
+			resolvedBase.kind === "local"
+				? { kind: "local", ref: resolvedBase.ref }
+				: { kind: "remote", remote: resolvedBase.remote, remoteRef: resolvedBase.remoteRef },
+		baseCommit,
+		mergeBaseCommit,
+		headCommit,
+		baseTree,
+		headCommitTree,
+		temporaryDirectories,
+		release,
+	};
+}
+
 export async function resolveReviewSnapshot(
 	target: ReviewTarget,
 	cwd: string,
@@ -3029,82 +3162,18 @@ export async function resolveReviewSnapshot(
 			}
 			case "branch": {
 				options.onProgress?.("Resolving branch history…");
-				const localSource = await createLocalSource(root, limits, options.signal);
-				const headCommit = await requireCanonicalCommit(localSource, "HEAD");
-				if (!headCommit) return { error: "Could not resolve the branch head." };
-				let resolvedBase: ResolvedBranchBase | undefined;
-				if ("branchBase" in target) {
-					resolvedBase = target.branchBase
-						? await resolveStoredBranchBase(target.branchBase, root, limits, options.signal)
-						: undefined;
-					if (!resolvedBase) return { error: "Stored branch review base is no longer valid." };
-				} else {
-					const requestedBase = target.base ?? (await detectBaseBranch(root, limits, options.signal));
-					if (!requestedBase) return { error: "Could not detect a base branch. Use /review branch <base>." };
-					resolvedBase = await resolveBranchBase(requestedBase, root, limits, options.signal);
-					if (!resolvedBase) return { error: `Base branch "${requestedBase}" not found.` };
-				}
-
-				let source = localSource;
-				let baseCommit: string | undefined;
-				let remoteSourceIsShallow = false;
-				const temporaryDirectories: string[] = [];
-				if (resolvedBase.kind === "remote") {
-					options.onProgress?.(`Refreshing ${resolvedBase.displayRef}…`);
-					const fetched = await createRemoteBranchSource(
-						root,
-						resolvedBase.remote,
-						resolvedBase.remoteRef,
-						headCommit,
-						limits,
-						options.signal,
-					);
-					if (!fetched.source || !fetched.baseCommit || !fetched.temporaryDirectory) {
-						return fetched.error ?? { error: "Could not refresh the review base branch." };
-					}
-					source = fetched.source;
-					baseCommit = fetched.baseCommit;
-					remoteSourceIsShallow = fetched.shallow === true;
-					temporaryDirectories.push(fetched.temporaryDirectory);
-					pendingTemporaryDirectories.add(fetched.temporaryDirectory);
-				} else {
-					baseCommit = await requireCanonicalCommit(source, resolvedBase.ref);
-				}
-				if (!baseCommit) return { error: "Could not resolve the branch base." };
-				const cleanupTemporaryDirectories = async (): Promise<void> => {
-					for (const directory of temporaryDirectories) {
-						pendingTemporaryDirectories.delete(directory);
-						await rm(directory, { recursive: true, force: true }).catch(() => {});
-					}
-				};
-				const mergeBaseResult = await git(source, ["merge-base", baseCommit, headCommit]);
-				const mergeBaseCommit = text(mergeBaseResult).trim();
-				if (!mergeBaseResult.ok || !CANONICAL_GIT_OBJECT_ID_PATTERN.test(mergeBaseCommit)) {
-					await cleanupTemporaryDirectories();
-					if (
-						remoteSourceIsShallow &&
-						mergeBaseResult.exitCode === 1 &&
-						mergeBaseResult.failure === undefined &&
-						mergeBaseResult.stdout.length === 0 &&
-						!mergeBaseResult.stderr.trim()
-					) {
-						const error =
-							"Could not resolve the branch merge base from the available shallow history. Deepen or unshallow the repository and retry.";
-						return { error, remoteError: error };
-					}
-					return {
-						error: `git merge-base failed: ${commandError(mergeBaseResult)}`,
-						remoteError: "Could not resolve the branch merge base.",
-					};
-				}
-				const baseTree = await requireCanonicalTree(source, mergeBaseCommit);
-				const headTree = await requireCanonicalTree(source, headCommit);
-				if (!baseTree || !headTree) {
-					await cleanupTemporaryDirectories();
-					return { error: "Could not resolve the branch trees." };
-				}
+				const comparison = await resolveBranchComparison(
+					target,
+					root,
+					limits,
+					options,
+					pendingTemporaryDirectories,
+				);
+				if ("error" in comparison) return comparison;
+				const { source, resolvedBase, branchBase, baseCommit, mergeBaseCommit, headCommit, baseTree } = comparison;
+				const headTree = comparison.headCommitTree;
 				if (baseTree === headTree) {
-					await cleanupTemporaryDirectories();
+					await comparison.release();
 					return { error: `No changes between ${resolvedBase.displayRef} and HEAD.` };
 				}
 				const logResult = await git(source, ["log", "--oneline", `${mergeBaseCommit}..${headCommit}`]);
@@ -3113,13 +3182,72 @@ export async function resolveReviewSnapshot(
 					diffCommand: `git diff --no-textconv --no-ext-diff ${resolvedBase.displayRef}...HEAD`,
 					extraContext: logResult.ok && text(logResult).trim() ? `Commits:\n${text(logResult).trim()}` : undefined,
 					identity: { kind: target.kind, baseCommit, mergeBaseCommit, headCommit, baseTree, headTree },
-					branchBase:
-						resolvedBase.kind === "local"
-							? { kind: "local", ref: resolvedBase.ref }
-							: { kind: "remote", remote: resolvedBase.remote, remoteRef: resolvedBase.remoteRef },
+					branchBase,
 					root,
 					source,
-					temporaryDirectories,
+					temporaryDirectories: comparison.temporaryDirectories,
+					limits,
+				};
+				break;
+			}
+			case "branch_uncommitted": {
+				options.onProgress?.("Resolving branch history…");
+				const comparison = await resolveBranchComparison(
+					target,
+					root,
+					limits,
+					options,
+					pendingTemporaryDirectories,
+				);
+				if ("error" in comparison) return comparison;
+				const { resolvedBase, branchBase, baseCommit, mergeBaseCommit, headCommit, baseTree } = comparison;
+				options.onProgress?.("Capturing uncommitted changes…");
+				const worktree = await createUncommittedSource(root, limits, options.signal);
+				pendingTemporaryDirectories.add(worktree.temporaryDirectory);
+				const release = async (): Promise<void> => {
+					await comparison.release();
+					pendingTemporaryDirectories.delete(worktree.temporaryDirectory);
+					await rm(worktree.temporaryDirectory, { recursive: true, force: true }).catch(() => {});
+				};
+				// The copied index is seeded from the HEAD commit's tree, as for uncommitted changes, not from the merge base's.
+				const captured = await captureWorktreeTree(
+					worktree.source,
+					worktree.originalIndex,
+					comparison.headCommitTree,
+				);
+				if (!captured.tree) {
+					await release();
+					return {
+						...captured.error,
+						remoteError: "Could not capture the uncommitted changes snapshot.",
+					} as ReviewSnapshotResolutionError;
+				}
+				if ((await requireCanonicalCommit(worktree.source, "HEAD")) !== headCommit) {
+					await release();
+					return { error: "HEAD changed while the review was captured. Retry the review." };
+				}
+				if (captured.tree === baseTree) {
+					await release();
+					return { error: `No changes between ${resolvedBase.displayRef} and the working tree.` };
+				}
+				const logResult = await git(comparison.source, ["log", "--oneline", `${mergeBaseCommit}..${headCommit}`]);
+				init = {
+					description: `branch and uncommitted changes vs ${resolvedBase.displayRef}`,
+					diffCommand: `git diff --no-textconv --no-ext-diff $(git merge-base ${resolvedBase.displayRef} HEAD)`,
+					extraContext: logResult.ok && text(logResult).trim() ? `Commits:\n${text(logResult).trim()}` : undefined,
+					identity: {
+						kind: target.kind,
+						baseCommit,
+						mergeBaseCommit,
+						headCommit,
+						baseTree,
+						headTree: captured.tree,
+					},
+					branchBase,
+					root,
+					// A refreshed remote base lives in its own repository: the merge base's tree resolves here through it.
+					source: withAlternateObjects(worktree.source, comparison.source.objectDirectories),
+					temporaryDirectories: [worktree.temporaryDirectory, ...comparison.temporaryDirectories],
 					limits,
 				};
 				break;

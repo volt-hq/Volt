@@ -982,7 +982,7 @@ export class InteractiveMode {
 		const reviewCommand = slashCommands.find((command) => command.name === "review");
 		if (reviewCommand) {
 			reviewCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const options = ["tools", "uncommitted", "branch", "pr", "commit"];
+				const options = ["tools", "uncommitted", "branch", "branch-uncommitted", "pr", "commit"];
 				const normalized = prefix.trim().toLowerCase();
 				const filtered = options.filter((option) => option.startsWith(normalized));
 				if (filtered.length === 0) return null;
@@ -8026,6 +8026,7 @@ export class InteractiveMode {
 
 	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
 		const branchLabel = "Against base branch";
+		const branchUncommittedLabel = "Against base branch, with uncommitted changes";
 		const uncommittedLabel = "Uncommitted changes";
 		const prLabel = "Pull request";
 		const commitLabel = "Specific commit";
@@ -8037,6 +8038,7 @@ export class InteractiveMode {
 		const choice = await this.showExtensionSelector("Review what?", [
 			...(currentPullRequestLabel ? [currentPullRequestLabel] : []),
 			branchLabel,
+			branchUncommittedLabel,
 			uncommittedLabel,
 			prLabel,
 			commitLabel,
@@ -8047,12 +8049,12 @@ export class InteractiveMode {
 		if (choice === currentPullRequestLabel && currentPullRequest) {
 			return { kind: "pr", expectedUrl: currentPullRequest.value };
 		}
-		if (choice === branchLabel) {
+		if (choice === branchLabel || choice === branchUncommittedLabel) {
 			const base = await this.promptForReviewBaseBranch();
 			if (!base) {
 				return undefined;
 			}
-			return { kind: "branch", base };
+			return choice === branchLabel ? { kind: "branch", base } : { kind: "branch_uncommitted", base };
 		}
 		if (choice === uncommittedLabel) {
 			return { kind: "uncommitted" };
@@ -8238,6 +8240,13 @@ export class InteractiveMode {
 				accepted = await client.intent("review", {
 					...options,
 					target: "branch",
+					...(target.base === undefined ? {} : { base: target.base }),
+				});
+				break;
+			case "branch_uncommitted":
+				accepted = await client.intent("review", {
+					...options,
+					target: "branch_uncommitted",
 					...(target.base === undefined ? {} : { base: target.base }),
 				});
 				break;

@@ -43,11 +43,15 @@ function reviewHeading(record: ReviewRunRecord): string {
 			? `PR #${identity.pullRequest.number}`
 			: identity.kind === "uncommitted"
 				? "Uncommitted changes"
-				: identity.kind === "commit"
-					? "Commit"
-					: reviewText(record.target.description);
+				: identity.kind === "branch_uncommitted"
+					? "Branch and uncommitted changes"
+					: identity.kind === "commit"
+						? "Commit"
+						: reviewText(record.target.description);
 	const revision =
-		identity.kind === "uncommitted" ? `tree ${identity.headTree.slice(0, 12)}` : identity.headCommit?.slice(0, 12);
+		identity.kind === "uncommitted" || identity.kind === "branch_uncommitted"
+			? `tree ${identity.headTree.slice(0, 12)}`
+			: identity.headCommit?.slice(0, 12);
 	return `Review${record.result?.completionStatus === "incomplete" ? " incomplete" : ""} · ${target}${revision ? ` · ${revision}` : ""}`;
 }
 

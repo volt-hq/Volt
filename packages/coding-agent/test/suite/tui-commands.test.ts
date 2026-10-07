@@ -655,6 +655,26 @@ describe("TUI reviews", () => {
 		await waitForScreen(tui, "Review cancelled");
 	});
 
+	it("reviews the branch together with its uncommitted changes", async () => {
+		const { harness, tui } = await start();
+		// A committed file on main, edited in the workspace: the branch has no commits of its own.
+		reviewRepository(harness.tempDir);
+		git(harness.tempDir, "checkout", "-q", "-b", "topic");
+		const discovery = heldTurn("never");
+		harness.faux.setResponses([discovery.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const review = tui.submit("/review branch-uncommitted main");
+		await discovery.started;
+		await waitForScreen(tui, "Reviewing branch and uncommitted changes vs main");
+		expect(intent).toHaveBeenCalledWith(
+			"review",
+			expect.objectContaining({ target: "branch_uncommitted", base: "main" }),
+		);
+		tui.terminal.sendInput(ESC);
+		await review;
+	});
+
 	it("refuses a second review while one runs, and reviews with the configured auxiliary tools", async () => {
 		const { harness, tui } = await start({ globalSettings: { reviewTools: ["bash", "missing-tool"] } });
 		reviewRepository(harness.tempDir);

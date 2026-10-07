@@ -251,6 +251,13 @@ describe("protocol client of an in-process host", () => {
 		await expect(client.intent("review", { target: "branch", ref: "abc" })).rejects.toMatchObject({
 			reason: { code: "invalid_input", message: "ref does not apply to a branch review" },
 		});
+		// A branch review with the uncommitted changes takes a base like a branch review.
+		await expect(client.intent("review", { target: "branch_uncommitted", base: "main" })).rejects.toMatchObject({
+			reason: { code: "failed", message: "Not inside a git repository." },
+		});
+		await expect(client.intent("review", { target: "branch_uncommitted", ref: "abc" })).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "ref does not apply to a branch_uncommitted review" },
+		});
 
 		await client.intent("abort", {});
 		await client.waitForIdle(10_000);
