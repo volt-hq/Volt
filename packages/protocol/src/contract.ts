@@ -186,6 +186,7 @@ import {
 import {
 	ExtensionPanelPlacementSchema,
 	HostDialogActionSchema,
+	HostPromptRequestSchema,
 	HostRequestKindSchema,
 	HostRequestSchema,
 	HostResponseSchema,
@@ -766,6 +767,7 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	UserInputQuestion: UserInputQuestionSchema,
 	UserInputAnswer: UserInputAnswerSchema,
 	HostRequest: HostRequestSchema,
+	HostPromptRequest: HostPromptRequestSchema,
 	HostResponse: HostResponseSchema,
 	LiveKey: LiveKeySchema,
 	LivePatchKey: LivePatchKeySchema,

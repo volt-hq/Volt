@@ -475,7 +475,7 @@ When a session starts, each extension hears `activate` (`reason: "startup"`) bef
 
 #### project_trust
 
-Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when a session change (for example `/resume`) enters a cwd whose trust has not been resolved in the current process. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
+Fired before volt decides whether to trust a project with dynamic configs (`.volt` or `.agents/skills`). It runs during startup and when a session change (for example `/new` or `/resume`) enters a cwd whose trust has not been resolved in the current session. An interactive session's conversations run in the [daemon](daemon.md)'s conversation workers, so the handler runs there, and its dialogs show in the TUI that opened the conversation. Only user/global extensions and CLI `-e` extensions participate; project-local extensions are not loaded until after trust is resolved.
 
 ```typescript
 volt.on("project_trust", async (event, ctx) => {
@@ -488,7 +488,7 @@ volt.on("project_trust", async (event, ctx) => {
 });
 ```
 
-A `project_trust` handler must return `{ trusted: "yes" | "no" | "undecided" }`. A user/global or CLI extension that returns `"yes"` or `"no"` owns the decision; the first yes/no decision wins and suppresses the built-in trust prompt. Use `remember: true` to persist a yes/no decision; otherwise it applies only to the current process. Return `"undecided"` to let later handlers or the built-in trust flow decide. Check `ctx.hasUI` before prompting. If no handler returns yes/no, normal trust resolution continues: saved `trust.json` decisions apply first, then `defaultProjectTrust` controls whether volt asks, trusts, or declines by default.
+A `project_trust` handler must return `{ trusted: "yes" | "no" | "undecided" }`. A user/global or CLI extension that returns `"yes"` or `"no"` owns the decision; the first yes/no decision wins and suppresses the built-in trust prompt. Use `remember: true` to persist a yes/no decision; otherwise it applies only to the current session: a print or RPC run's process, or an interactive TUI's conversations of that project in the same worker (never another TUI's). Return `"undecided"` to let later handlers or the built-in trust flow decide. Check `ctx.hasUI` before prompting. If no handler returns yes/no, normal trust resolution continues: saved `trust.json` decisions apply first, then `defaultProjectTrust` controls whether volt asks, trusts, or declines by default. `--approve` and `--no-approve` decide the startup project's trust without running the handler.
 
 ### Resource Events
 

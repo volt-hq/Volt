@@ -130,6 +130,39 @@ export const UserInputAnswerSchema = Type.Object(
 	closed,
 );
 
+const HostSelectRequestSchema = Type.Object(
+	{
+		kind: Type.Literal("select"),
+		title: Type.String(),
+		options: Type.Array(Type.String(), { minItems: 1 }),
+		timeoutMs,
+	},
+	closed,
+);
+const HostConfirmRequestSchema = Type.Object(
+	{ kind: Type.Literal("confirm"), title: Type.String(), message: Type.String(), timeoutMs },
+	closed,
+);
+/** With `secret`, the client masks what the user types and keeps it out of any history; the host asks only one client. */
+const HostInputRequestSchema = Type.Object(
+	{
+		kind: Type.Literal("input"),
+		title: Type.String(),
+		placeholder: Type.Optional(Type.String()),
+		secret: Type.Optional(Type.Boolean()),
+		timeoutMs,
+	},
+	closed,
+);
+
+/** A host request that asks the user a question in words: `select`, `confirm`, or `input`. */
+export const HostPromptRequestSchema = Type.Union([
+	HostSelectRequestSchema,
+	HostConfirmRequestSchema,
+	HostInputRequestSchema,
+]);
+export type HostPromptRequest = Static<typeof HostPromptRequestSchema>;
+
 /**
  * A question the host asks a client. Answers: `select`, `input`, and `editor`
  * take `{value}`; `confirm` takes `{confirmed}`; `form` takes `{values}`;
@@ -141,27 +174,9 @@ export const UserInputAnswerSchema = Type.Object(
  * `{cancelled}`.
  */
 export const HostRequestSchema = Type.Union([
-	Type.Object(
-		{
-			kind: Type.Literal("select"),
-			title: Type.String(),
-			options: Type.Array(Type.String(), { minItems: 1 }),
-			timeoutMs,
-		},
-		closed,
-	),
-	Type.Object({ kind: Type.Literal("confirm"), title: Type.String(), message: Type.String(), timeoutMs }, closed),
-	/** With `secret`, the client masks what the user types and keeps it out of any history; the host asks only one client. */
-	Type.Object(
-		{
-			kind: Type.Literal("input"),
-			title: Type.String(),
-			placeholder: Type.Optional(Type.String()),
-			secret: Type.Optional(Type.Boolean()),
-			timeoutMs,
-		},
-		closed,
-	),
+	HostSelectRequestSchema,
+	HostConfirmRequestSchema,
+	HostInputRequestSchema,
 	Type.Object({ kind: Type.Literal("editor"), title: Type.String(), prefill: Type.Optional(Type.String()) }, closed),
 	Type.Object(
 		{

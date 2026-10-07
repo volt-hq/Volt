@@ -19,7 +19,7 @@ import { ExtensionPermissionStore, extensionFingerprint } from "../../src/core/e
 import type { IrohRemoteAuditEvent } from "../../src/core/remote/iroh/audit.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../../src/daemon/control-client.ts";
-import type { ControlResponse, WorkerSpawnSpec } from "../../src/daemon/control-protocol.ts";
+import type { ControlEvent, ControlResponse, WorkerSpawnSpec } from "../../src/daemon/control-protocol.ts";
 import { runVoltDaemon, type VoltdRuntimeServices, type VoltdServiceExtension } from "../../src/daemon/main.ts";
 import { getDaemonPaths } from "../../src/daemon/paths.ts";
 import { probeDaemon } from "../../src/daemon/spawn.ts";
@@ -78,8 +78,8 @@ export interface DaemonHarness {
 		options?: { spawn?: HarnessSpawn; attach?: WorkerClientKind },
 	): Promise<{ worker: LiveWorker; outcome: WorkerOpenOutcome; release: () => void }>;
 	status(): Promise<Extract<ControlResponse, { type: "status_result" }>>;
-	/** Another control connection of `client` kind, closed with the harness. */
-	connect(client: "tui" | "cli"): Promise<DaemonClient>;
+	/** Another control connection of `client` kind, closed with the harness; `onEvent` hears its events. */
+	connect(client: "tui" | "cli", options?: { onEvent?: (event: ControlEvent) => void }): Promise<DaemonClient>;
 	/** The daemon's audit log so far. */
 	audit(): IrohRemoteAuditEvent[];
 	/** Shut the daemon down; resolves with its exit code. */
@@ -216,13 +216,14 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 			if (status.type !== "status_result") throw new Error(`Unexpected ${status.type}`);
 			return status;
 		},
-		async connect(client) {
+		async connect(client, connectOptions = {}) {
 			const connection = createDaemonClient({
 				socketPath: probe.socketPath,
 				client,
 				version: "test",
 				...(probe.authToken === undefined ? {} : { authToken: probe.authToken }),
 				reconnect: false,
+				...(connectOptions.onEvent === undefined ? {} : { onEvent: connectOptions.onEvent }),
 			});
 			clients.push(connection);
 			await connection.connect();

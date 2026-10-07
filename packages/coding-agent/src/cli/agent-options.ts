@@ -142,15 +142,14 @@ export function resolveCliPaths(cwd: string, paths: string[] | undefined): strin
 /**
  * The closed spawn options of a TUI started with `args` in `cwd`: its
  * environment (strings only), its spawn-only options with local paths made
- * absolute, its session-level options, and its model scope. `trust` is the
- * project trust the TUI decided before it opens (Phase 6 D4).
+ * absolute (`--approve`/`--no-approve` as its trust override), its
+ * session-level options, and its model scope.
  */
 export function createWorkerSpawnOptions(
 	args: Args,
 	context: {
 		readonly cwd: string;
 		readonly env: NodeJS.ProcessEnv;
-		readonly trust?: boolean;
 		readonly profile?: string;
 	},
 ): WorkerSpawnOptions {
@@ -160,7 +159,7 @@ export function createWorkerSpawnOptions(
 		if (value !== undefined && ENVIRONMENT_NAME.test(name) && !value.includes("\0")) env[name] = value;
 	}
 	const config: WorkerAgentConfig = {
-		...(context.trust === undefined ? {} : { trust: context.trust }),
+		...(args.projectTrustOverride === undefined ? {} : { trust: args.projectTrustOverride }),
 		...(context.profile === undefined ? {} : { profile: context.profile }),
 		...(args.extensions === undefined ? {} : { extensions: resolveCliPaths(context.cwd, args.extensions) }),
 		...(args.noExtensions ? { noExtensions: true } : {}),

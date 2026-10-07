@@ -13,6 +13,12 @@ export interface ExtensionSelectorOptions {
 	tui?: TUI;
 	timeout?: number;
 	onToggleToolsExpanded?: () => void;
+	/**
+	 * Guard against typing meant for something else, for a question that can
+	 * show while the user types: `j`/`k` do not move the selection, and only
+	 * cancelling counts for the first `ignoreInputMs` after it shows.
+	 */
+	typingGuard?: { readonly ignoreInputMs: number };
 }
 
 export class ExtensionSelectorComponent extends Container {
@@ -26,6 +32,8 @@ export class ExtensionSelectorComponent extends Container {
 	private baseTitle: string;
 	private countdown: CountdownTimer | undefined;
 	private onToggleToolsExpanded: (() => void) | undefined;
+	/** With a typing guard: when input starts to count. */
+	private readonly acceptsInputAt: number | undefined;
 
 	constructor(
 		title: string,
@@ -40,6 +48,7 @@ export class ExtensionSelectorComponent extends Container {
 		this.onSelectCallback = onSelect;
 		this.onCancelCallback = onCancel;
 		this.onToggleToolsExpanded = opts?.onToggleToolsExpanded;
+		this.acceptsInputAt = opts?.typingGuard === undefined ? undefined : Date.now() + opts.typingGuard.ignoreInputMs;
 		this.baseTitle = title;
 
 		// Cap the visible window so long lists (e.g. many branches) don't fill the
@@ -112,12 +121,15 @@ export class ExtensionSelectorComponent extends Container {
 
 	handleInput(keyData: string): void {
 		const kb = getKeybindings();
+		const acceptsInputAt = this.acceptsInputAt;
+		const guarded = acceptsInputAt !== undefined;
+		if (guarded && Date.now() < acceptsInputAt && !kb.matches(keyData, "tui.select.cancel")) return;
 		if (kb.matches(keyData, "app.tools.expand")) {
 			this.onToggleToolsExpanded?.();
-		} else if (kb.matches(keyData, "tui.select.up") || keyData === "k") {
+		} else if (kb.matches(keyData, "tui.select.up") || (!guarded && keyData === "k")) {
 			this.selectedIndex = Math.max(0, this.selectedIndex - 1);
 			this.updateList();
-		} else if (kb.matches(keyData, "tui.select.down") || keyData === "j") {
+		} else if (kb.matches(keyData, "tui.select.down") || (!guarded && keyData === "j")) {
 			this.selectedIndex = Math.min(this.options.length - 1, this.selectedIndex + 1);
 			this.updateList();
 		} else if (kb.matches(keyData, "tui.select.confirm") || keyData === "\n") {

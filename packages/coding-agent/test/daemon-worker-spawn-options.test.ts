@@ -10,7 +10,7 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createWorkerSpawnOptions } from "../src/cli/agent-options.ts";
 import { parseArgs } from "../src/cli/args.ts";
-import { resolveConversationProjectTrust } from "../src/core/project-trust.ts";
+import { projectTrustPath, resolveConversationProjectTrust } from "../src/core/project-trust.ts";
 import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
 import { sensitiveDirectoryReason } from "../src/daemon/sensitive-directory.ts";
@@ -51,6 +51,7 @@ function tuiSpec(
 		projectCwd: "/work/volt",
 		config: { extensions: ["/ext/a.ts"], tools: ["read"] },
 		sessionOptions: {},
+		clientKey: "tui-1",
 		...overrides,
 	};
 }
@@ -73,12 +74,12 @@ describe("TUI spawn options", () => {
 			"--lsp",
 			"--my-flag",
 			"value",
+			"--no-approve",
 		]);
 		const cwd = resolve("/work/project");
 		const options = createWorkerSpawnOptions(args, {
 			cwd,
 			env: { PATH: "/bin", UNSET: undefined },
-			trust: false,
 		});
 		expect(options).toEqual({
 			env: { PATH: "/bin" },
@@ -164,7 +165,8 @@ describe("TUI spawn options", () => {
 				undefined,
 			),
 		).toBe(workerCompatibilityKey(phone, undefined));
-		// Opens with differing trust decisions never share a worker (D11): unset (the saved decision), no, and yes.
+		// A worker that decides trust itself (no override) never shares with one of `--no-approve` or `--approve`,
+		// nor those two with each other; the opener's client key (a conversation's) is no part of the key.
 		const env = { PATH: "/bin", HOME: "/home/user" };
 		const trustKeys = [undefined, false, true].map((trust) =>
 			workerCompatibilityKey(
@@ -175,6 +177,7 @@ describe("TUI spawn options", () => {
 			),
 		);
 		expect(new Set(trustKeys).size).toBe(3);
+		expect(workerCompatibilityKey(tuiSpec({ clientKey: "tui-2" }), env)).toBe(workerCompatibilityKey(tuiSpec(), env));
 		expect(workerCompatibilityKey({ ...phone, projectTrusted: true }, undefined)).not.toBe(
 			workerCompatibilityKey(phone, undefined),
 		);
@@ -190,7 +193,7 @@ describe("TUI spawn options", () => {
 			"tools",
 		]);
 		expect(normalizeWorkerAgentConfig({ lsp: false, flags: {}, profile: "work" })).toEqual({ profile: "work" });
-		// `--no-approve` is a decision, not a default: the worker keeps it, and a live trusted worker names it.
+		// `--no-approve` is an override, not a default: the worker keeps it, and a live trusted worker names it.
 		expect(normalizeWorkerAgentConfig({ trust: false, lsp: false })).toEqual({ trust: false });
 		expect(differingSpawnOnlyOptions({ trust: false }, tuiSpec({ config: { trust: true } }))).toEqual(["trust"]);
 		expect(differingSpawnOnlyOptions({}, tuiSpec({ config: { trust: false } }))).toEqual(["trust"]);
@@ -207,7 +210,7 @@ describe("TUI spawn options", () => {
 		).toEqual({ PATH: "/bin", VOLT_CODING_AGENT_DIR: "/agent" });
 	});
 
-	it("applies a TUI's trust decision to the project it opened in only; elsewhere the saved decision", () => {
+	it("reads a conversation's trust as decided for its project only; elsewhere the saved decision", () => {
 		const root = realpathSync.native(mkdtempSync(join(tmpdir(), "volt-worker-trust-")));
 		cleanups.push(() => rmSync(root, { recursive: true, force: true }));
 		const agentDir = join(root, "agent");
@@ -218,16 +221,21 @@ describe("TUI spawn options", () => {
 		const plain = join(root, "plain");
 		mkdirSync(plain);
 		new ProjectTrustStore(agentDir).set(saved, true);
-		const decided = { cwd: opened, trusted: true };
+		const decided = new Map([[projectTrustPath(agentDir, opened) ?? "", true]]);
 		expect(resolveConversationProjectTrust(agentDir, opened, decided)).toBe(true);
 		expect(resolveConversationProjectTrust(agentDir, elsewhere, decided)).toBe(false);
 		expect(resolveConversationProjectTrust(agentDir, saved, decided)).toBe(true);
 		// Nothing there needs trust; a later `.volt` does.
-		expect(resolveConversationProjectTrust(agentDir, plain, undefined)).toBe(true);
+		expect(resolveConversationProjectTrust(agentDir, plain, new Map())).toBe(true);
 		projectNeedingTrust(root, "plain");
-		expect(resolveConversationProjectTrust(agentDir, plain, undefined)).toBe(false);
-		// An explicit refusal holds even where nothing needs trust.
-		expect(resolveConversationProjectTrust(agentDir, plain, { cwd: plain, trusted: false })).toBe(false);
+		expect(resolveConversationProjectTrust(agentDir, plain, new Map())).toBe(false);
+		// A refusal holds even where nothing needs trust, and over a saved trust.
+		expect(
+			resolveConversationProjectTrust(agentDir, plain, new Map([[projectTrustPath(agentDir, plain) ?? "", false]])),
+		).toBe(false);
+		expect(
+			resolveConversationProjectTrust(agentDir, saved, new Map([[projectTrustPath(agentDir, saved) ?? "", false]])),
+		).toBe(false);
 	});
 
 	it("finds the directories never registered without asking: a root, a home, the agent directory's ancestors and insides", () => {

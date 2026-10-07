@@ -17,8 +17,13 @@
  * compatibility key), and each conversation's session-level options, which
  * it and every conversation it creates are built from
  * (`conversation-factory.ts`); for `--no-session` around an in-memory
- * conversation (D15), in a worker that is never shared. Every hosted
- * conversation's settings and credentials are watched (D12).
+ * conversation (D15), in a worker that is never shared. A TUI-opened
+ * conversation decides its project trust as it opens (P7-8b): its trust
+ * prompts ask the TUI whose open it is, through the daemon
+ * (`worker_host_request`), and what it decides for a project applies to
+ * that TUI's later conversations here (its client key), never to another
+ * TUI's. Every hosted conversation's settings and credentials are watched
+ * (D12).
  *
  * The daemon relays clients to it: a relay offer names a conversation it
  * hosts and the client's kind, and the worker redeems it and serves the
@@ -60,9 +65,8 @@
 
 import { realpath } from "node:fs/promises";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
-import type { ConversationHost } from "../../core/host/conversation-host.ts";
-import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { resolveConversationProjectTrust } from "../../core/project-trust.ts";
+import type { ProjectTrustContext } from "../../core/extensions/index.ts";
+import { hostRequestTrustContext } from "../../core/host/trust-prompts.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../core/protocol/server/connection.ts";
 import {
 	type IrohRemoteHostHandshakeFailureOutcome,
@@ -79,6 +83,7 @@ import type { WorkerExit, WorkerExitReason, WorkerLaunchRequest } from "../worke
 import { isPathInside } from "../workspace-directory.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
+	type IrohRemoteAgentRuntime,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "./conversation-factory.ts";
 import {
@@ -173,6 +178,39 @@ async function openRetryingLock(
 	}
 }
 
+/**
+ * The trust prompts of the TUI-opened conversation `sessionId` as it opens:
+ * asked of the TUI whose open it is, through the daemon, each closing
+ * without an answer once its timeout passes or its signal aborts. Once the
+ * daemon cannot ask the TUI (it left), nothing more is asked.
+ */
+function openerTrustContext(client: WorkerDaemonClient, sessionId: string, cwd: string): ProjectTrustContext {
+	let reachable = true;
+	return hostRequestTrustContext({
+		cwd,
+		mode: "rpc",
+		hasUI: () => reachable,
+		ask: async (request, signal) => {
+			if (!reachable || signal?.aborted) return undefined;
+			const closed = AbortSignal.any([
+				...(signal === undefined ? [] : [signal]),
+				...(request.timeoutMs === undefined ? [] : [AbortSignal.timeout(request.timeoutMs)]),
+			]);
+			const answer = await Promise.race([
+				client.hostRequest(sessionId, request),
+				new Promise<"closed">((resolve) =>
+					closed.addEventListener("abort", () => resolve("closed"), { once: true }),
+				),
+			]);
+			if (answer === "closed") return undefined;
+			if (answer === undefined) reachable = false;
+			return answer?.response;
+		},
+		// Nothing shows a notice before the conversation is open, as nothing did at the CLI's interactive startup.
+		notify: () => {},
+	});
+}
+
 /** Open a top-level conversation in a host of its own: a stored log, or for a TUI's `--no-session` one in memory. */
 async function openConversation(
 	spec: WorkerSpawnSpec,
@@ -182,7 +220,9 @@ async function openConversation(
 	onSubagentRuntimeCreated: (
 		event: IrohRemoteSubagentRuntimeCreatedEvent,
 	) => ReturnType<WorkerConversations["registerChild"]>,
-): Promise<{ host: ConversationHost; conversation: HostedConversation }> {
+	/** The project trust decided for each TUI's conversations here, by client key, then project. */
+	trustSessions: Map<string, Map<string, boolean>>,
+): Promise<IrohRemoteAgentRuntime> {
 	const workspace = { name: spec.workspace.name, path: spec.workspace.path };
 	const primary = spec.session;
 	const target: ResolvedSessionTargetWithManager<SessionManager> =
@@ -219,6 +259,10 @@ async function openConversation(
 						config: spec.config,
 						sessionOptions: spec.sessionOptions,
 						...(spec.modelScopePatterns === undefined ? {} : { modelScopePatterns: spec.modelScopePatterns }),
+						trust: {
+							opener: (cwd) => openerTrustContext(client, primary.sessionId, cwd),
+							session: trustSession(trustSessions, spec.clientKey),
+						},
 					},
 					...(spec.config.profile === undefined ? {} : { profile: spec.config.profile }),
 				}),
@@ -229,6 +273,16 @@ async function openConversation(
 		worktreeDaemon: { restore: (sessionRef, cwd) => client.restoreWorktree(sessionRef, cwd) },
 	});
 	return runtime;
+}
+
+/** The project trust decided for the conversations of the TUI `clientKey` (its session), kept for the worker's lifetime. */
+function trustSession(sessions: Map<string, Map<string, boolean>>, clientKey: string): Map<string, boolean> {
+	let session = sessions.get(clientKey);
+	if (session === undefined) {
+		session = new Map();
+		sessions.set(clientKey, session);
+	}
+	return session;
 }
 
 /**
@@ -294,6 +348,8 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 	const losses = new Map<string, AuthorityLoss>();
 	const serving = new Set<Promise<void>>();
 	const lockRetryMs = options.lockRetryMs ?? WORKER_LOCK_RETRY_MS;
+	/** What the worker decided for each TUI's conversations, by client key: never another TUI's. */
+	const trustSessions = new Map<string, Map<string, boolean>>();
 
 	const active = (): boolean => conversations?.active() ?? false;
 
@@ -429,7 +485,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					.catch(() => undefined);
 				return;
 			}
-			let opened: { host: ConversationHost; conversation: HostedConversation };
+			let opened: IrohRemoteAgentRuntime;
 			try {
 				opened = await openConversation(
 					spec,
@@ -437,6 +493,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					client,
 					{ retryMs: lockRetryMs, signal: AbortSignal.any([halted.signal, abort.signal]) },
 					(event) => hosted.registerChild(event),
+					trustSessions,
 				);
 			} catch (error) {
 				if (!stopping) {
@@ -449,7 +506,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				await opened.host.dispose().catch(() => undefined);
 				return;
 			}
-			hosted.adoptTop(spec, opened.host, opened.conversation);
+			hosted.adoptTop(spec, opened);
 			await client.ready(sessionId).catch(() => undefined);
 		})();
 		opening.set(sessionId, task);
@@ -594,15 +651,6 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				if (connection.conversation === conversation) connection.changed(catalog);
 			}
 		},
-		// As the conversation's factory decides it: a TUI's decision for the project its conversation opened in, else the saved one.
-		projectTrusted: (cwd, spec) =>
-			resolveConversationProjectTrust(
-				request.agentDir,
-				cwd,
-				spec.origin === "tui" && spec.config.trust !== undefined
-					? { cwd: spec.cwd, trusted: spec.config.trust }
-					: undefined,
-			),
 	});
 	// The first conversation's failure ends the worker: the daemon spawned it for that one.
 	const hosted = conversations;
@@ -615,12 +663,13 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				client,
 				{ retryMs: lockRetryMs, signal: halted.signal },
 				(event) => hosted.registerChild(event),
+				trustSessions,
 			);
 			if (stopping) {
 				await result.host.dispose().catch(() => undefined);
 				return false;
 			}
-			hosted.adoptTop(first, result.host, result.conversation);
+			hosted.adoptTop(first, result);
 			return true;
 		} catch (error) {
 			failure = error;

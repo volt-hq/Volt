@@ -7,10 +7,14 @@
  * workspace and generation must have the worker's key. It hashes what a
  * worker runs every conversation with, and nothing of one conversation (its
  * working directory, session, `--no-session`, session-level options) or one
- * client (its model scope). For a TUI-opened worker that is the opener's kind, its
- * environment as the worker runs with it (without the daemon-only
- * credentials), and its spawn-only options; for a phone-opened one, the
- * opener's kind, its tool policy, its project trust, and its profile.
+ * client (its model scope, its client key). For a TUI-opened worker that is
+ * the opener's kind, its environment as the worker runs with it (without the
+ * daemon-only credentials), and its spawn-only options, `--approve` and
+ * `--no-approve` among them (a worker with that override decides no trust
+ * itself for its project); for a phone-opened one, the opener's kind, its
+ * tool policy, its project trust, and its profile. A TUI-opened worker
+ * without an override decides each conversation's project trust on its own
+ * (P7-8b), never from another TUI's conversations.
  * Identical means identical: no variable of the environment is left out
  * (`PWD`, `SHLVL`, a terminal's session variables), so two terminals rarely
  * share a worker while one terminal's own opens do. The environment enters
@@ -60,8 +64,9 @@ function canonicalJson(value: unknown): string {
 
 /**
  * `config` in canonical form: options left at their defaults (false, unset,
- * no flags) are absent. `trust: false` is a decision (`--no-approve`, or a
- * prompt answered no), not a default: unset means the saved decision.
+ * no flags) are absent. `trust: false` is an override (`--no-approve`), not a
+ * default: unset means the worker decides trust itself. A worker with an
+ * override never shares with one without, or with another override.
  */
 export function normalizeWorkerAgentConfig(config: WorkerAgentConfig): WorkerAgentConfig {
 	const normalized: Record<string, unknown> = {};

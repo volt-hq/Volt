@@ -16,7 +16,7 @@ import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
 import { shouldRunFirstTimeSetup, showFirstTimeSetup } from "./cli/startup-ui.ts";
-import { decideTuiProjectTrust, resolveTuiStartupTarget } from "./cli/tui-startup.ts";
+import { resolveTuiStartupTarget } from "./cli/tui-startup.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionDiagnostic,
@@ -35,7 +35,7 @@ import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dis
 import { LspServerPool } from "./core/lsp/server-pool.ts";
 import { resolveModelScope } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { type AppMode, resolveConversationProjectTrust, resolveProjectTrusted } from "./core/project-trust.ts";
+import { type AppMode, projectTrustPath, resolveProjectTrusted } from "./core/project-trust.ts";
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "./core/session-cwd.ts";
 import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "./core/session-lookup.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
@@ -435,10 +435,10 @@ interface InteractiveStartupContext {
 
 /**
  * Run the interactive TUI as a client of a daemon worker (Phase 7 plan §9
- * row 8): resolve the conversation it opens and decide its project trust
- * read-only, then attach through the daemon connector, which starts the
- * daemon when none runs. The TUI renders and takes typing before its worker
- * is ready.
+ * row 8): resolve the conversation it opens read-only, then attach through
+ * the daemon connector, which starts the daemon when none runs. The worker
+ * decides the conversation's project trust, asking the TUI its trust prompt
+ * (P7-8b). The TUI renders and takes typing before its worker is ready.
  */
 async function runInteractive(parsed: Args, context: InteractiveStartupContext): Promise<void> {
 	const { cwd, agentDir, sessionDir, startupSettingsManager, requestedProfile } = context;
@@ -464,9 +464,11 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 		return;
 	}
 	time("resolveStartupTarget");
-	const decided = await decideTuiProjectTrust(parsed, startup.cwd, agentDir, startupSettingsManager);
-	const projectTrusted = resolveConversationProjectTrust(agentDir, startup.cwd, decided);
-	time("decideProjectTrust");
+	// Until the worker decides, the TUI reads a project's settings only when nothing in it needs trust, or
+	// `--approve` trusts it: the worker's `project_trust` hooks may decide otherwise than the saved decision.
+	const projectTrusted =
+		!hasTrustRequiringProjectResources(startup.cwd) ||
+		(parsed.projectTrustOverride === true && projectTrustPath(agentDir, startup.cwd) !== undefined);
 	const displaySettings = SettingsManager.create(startup.cwd, agentDir, { projectTrusted, profile: requestedProfile });
 	reportDiagnostics(collectSettingsDiagnostics(displaySettings, "interactive startup"));
 	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, displaySettings.getImageAutoResize());
@@ -477,21 +479,18 @@ async function runInteractive(parsed: Args, context: InteractiveStartupContext):
 		spawn: createWorkerSpawnOptions(parsed, {
 			cwd,
 			env: process.env,
-			...(decided === undefined ? {} : { trust: decided.trusted }),
 			...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
 		}),
 		...(sessionDir === undefined ? {} : { sessionDir }),
 	});
 	const interactiveMode = new InteractiveMode(connector, {
 		migratedProviders: context.migratedProviders,
-		// The TUI reads its own settings where its conversation starts, with the trust it decided.
+		// The TUI reads its own settings where its conversation starts, then with the trust its worker decided.
 		settingsScope: {
 			cwd: startup.cwd,
 			projectTrusted,
 			...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
 		},
-		// Its host runs in a worker: the TUI keeps to its own decision for its display settings.
-		projectTrust: decided ?? { cwd: startup.cwd, trusted: projectTrusted },
 		autoTrustOnReloadCwd:
 			parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(startup.cwd)
 				? startup.cwd
@@ -793,6 +792,7 @@ export async function main(args: string[], options?: MainOptions) {
 							resolveProjectTrust: async ({ extensionsResult }) => {
 								const trusted = await resolveProjectTrusted({
 									cwd: trustPath,
+									resourcesCwd: cwd,
 									trustStore,
 									trustOverride: parsed.projectTrustOverride,
 									defaultProjectTrust: startupSettingsManager.getDefaultProjectTrust(),

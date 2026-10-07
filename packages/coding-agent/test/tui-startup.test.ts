@@ -1,22 +1,21 @@
 /**
  * Where the interactive TUI starts (Phase 7 slice 8): the conversation it
- * opens in a daemon worker, resolved read-only from its arguments, and the
- * project trust it decides before it opens. The TUI never opens a stored log
- * for writing; a JSONL file it starts from is imported into the store first.
+ * opens in a daemon worker, resolved read-only from its arguments. The TUI
+ * never opens a stored log for writing; a JSONL file it starts from is
+ * imported into the store first.
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseArgs } from "../src/cli/args.ts";
 import * as startupUi from "../src/cli/startup-ui.ts";
-import { decideTuiProjectTrust, resolveTuiStartupTarget, type TuiStartupContext } from "../src/cli/tui-startup.ts";
+import { resolveTuiStartupTarget, type TuiStartupContext } from "../src/cli/tui-startup.ts";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { exportSessionToJsonl } from "../src/core/session/session-info.ts";
 import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 
 let root: string;
 let agentDir: string;
@@ -149,25 +148,5 @@ describe("the TUI's startup conversation", () => {
 			target: { kind: "session", sessionId: ref.sessionId, sessionDir: ref.sessionDirectory, cwdOverride: project },
 			cwd: project,
 		});
-	});
-});
-
-describe("the TUI's project trust decision", () => {
-	it("follows --approve/--no-approve, else decides only for a project holding what needs trust", async () => {
-		const settings = SettingsManager.inMemory();
-		expect(await decideTuiProjectTrust({ projectTrustOverride: false }, project, agentDir, settings)).toEqual({
-			cwd: project,
-			trusted: false,
-		});
-		// Nothing needs trust: the worker trusts the project until it gains something that does.
-		expect(await decideTuiProjectTrust({}, project, agentDir, settings)).toBeUndefined();
-
-		mkdirSync(join(project, ".volt"));
-		writeFileSync(join(project, ".volt", "settings.json"), "{}\n");
-		new ProjectTrustStore(agentDir).set(project, true);
-		expect(await decideTuiProjectTrust({}, project, agentDir, settings)).toEqual({ cwd: project, trusted: true });
-		const never = SettingsManager.inMemory({ defaultProjectTrust: "never" });
-		new ProjectTrustStore(agentDir).set(project, null);
-		expect(await decideTuiProjectTrust({}, project, agentDir, never)).toEqual({ cwd: project, trusted: false });
 	});
 });

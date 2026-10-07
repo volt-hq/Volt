@@ -21,6 +21,12 @@
  * was open already applies the open's session-level options once the TUI
  * attached, and names the spawn-only ones its worker does not share.
  *
+ * While a worker opens a conversation for a TUI's open, it may ask that TUI
+ * its project trust prompts (P7-8b): the question goes to the control
+ * connection of that open only, as `conversation_host_request`, and only
+ * that connection's `conversation_host_response` answers it. A TUI that left,
+ * the conversation's end, and the daemon's shutdown leave it unanswered.
+ *
  * The answer carries a single-use relay id and token for the TUI's end of
  * its stream, valid for 10 s, during which the worker counts as attached.
  * When the TUI dials it, the daemon mints the worker's end: a local relay
@@ -31,13 +37,14 @@
  * spec or preamble, and never leaves the local socket.
  */
 
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { uuidv7 } from "@hansjm10/volt-agent-core";
+import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { IrohRemoteAuditEventInput } from "../core/remote/iroh/audit.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
@@ -83,6 +90,15 @@ import {
 import { isPathInside } from "./workspace-directory.ts";
 
 type ConversationOpenRequest = Extract<ControlRequest, { type: "conversation_open" }>;
+type ConversationHostResponse = Extract<ControlRequest, { type: "conversation_host_response" }>;
+
+/** A question a worker asks the TUI whose open it opens, until answered. */
+interface Question {
+	/** The control connection asked: the only one that answers. */
+	readonly connectionId: string;
+	/** Settles the question: with what the TUI answered, or undefined when it was not. */
+	readonly settle: (answer: { readonly response?: HostResponse } | undefined) => void;
+}
 
 export interface TuiConversationsOptions {
 	readonly agentDir: string;
@@ -205,6 +221,10 @@ export class TuiConversations {
 	private readonly relayWorkers = new Map<RelayLifecycleOwner, string>();
 	/** Registrations run one at a time: two opens of a new directory register it once. */
 	private registering: Promise<unknown> = Promise.resolve();
+	/** The questions workers asked TUIs, by request id, until answered. */
+	private readonly questions = new Map<string, Question>();
+	/** The daemon stops: nobody is asked anything more. */
+	private questionsEnded = false;
 	private closed = false;
 
 	constructor(options: TuiConversationsOptions) {
@@ -238,6 +258,7 @@ export class TuiConversations {
 					env: request.spawn.env,
 					prepare: () => resolved.prepare(generation),
 					attach: (worker, outcome) => this.issueTicket(connection, request, resolved, worker, outcome),
+					ask: (question, signal) => this.ask(connection.connectionId, resolved.sessionId, question, signal),
 				},
 			);
 			return {
@@ -266,6 +287,59 @@ export class TuiConversations {
 			if (error instanceof WorkerOpenError) return refuse(error.outcome ?? "open_failed", error.message);
 			return refuse("open_failed", errorMessage(error));
 		}
+	}
+
+	/**
+	 * Ask the TUI on `connectionId` what a worker opening its conversation
+	 * `sessionId` asks, until it answers, it left, `signal` aborts, or the
+	 * daemon stops: what it answered, or undefined when it was not asked or
+	 * gave no answer before.
+	 */
+	private ask(
+		connectionId: string,
+		sessionId: string,
+		request: HostPromptRequest,
+		signal: AbortSignal,
+	): Promise<{ readonly response?: HostResponse } | undefined> {
+		if (this.questionsEnded || signal.aborted) return Promise.resolve(undefined);
+		const requestId = `hq-${randomUUID()}`;
+		const asked = Promise.withResolvers<{ readonly response?: HostResponse } | undefined>();
+		const onAbort = () => settle(undefined);
+		const settle = (answer: { readonly response?: HostResponse } | undefined): void => {
+			if (this.questions.get(requestId)?.settle !== settle) return;
+			this.questions.delete(requestId);
+			signal.removeEventListener("abort", onAbort);
+			asked.resolve(answer);
+		};
+		this.questions.set(requestId, { connectionId, settle });
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (!this.options.sendTo(connectionId, { type: "conversation_host_request", requestId, sessionId, request })) {
+			settle(undefined);
+		}
+		return asked.promise;
+	}
+
+	/** A TUI's `conversation_host_response`: it answers only a question its own connection was asked. */
+	answer(connection: ControlConnection, request: ConversationHostResponse): ControlResponse {
+		const question = this.questions.get(request.requestId);
+		if (connection.client !== "tui" || question === undefined || question.connectionId !== connection.connectionId) {
+			return { type: "error", id: request.id, code: "not_found", message: "No such question" };
+		}
+		question.settle(request.response === undefined ? {} : { response: request.response });
+		return { type: "ok", id: request.id };
+	}
+
+	/** A control connection closed: the questions it was asked are left unanswered. */
+	connectionClosed(connectionId: string): void {
+		for (const question of [...this.questions.values()]) {
+			if (question.connectionId === connectionId) question.settle(undefined);
+		}
+	}
+
+	/** The daemon stops: every question is left unanswered, and nobody is asked again. */
+	endQuestions(): void {
+		this.questionsEnded = true;
+		for (const question of [...this.questions.values()]) question.settle(undefined);
 	}
 
 	/**
@@ -442,6 +516,7 @@ export class TuiConversations {
 	/** The daemon stopped its workers: nothing more opens, and the streams left close. */
 	close(): void {
 		this.closed = true;
+		this.endQuestions();
 		for (const [relayId, ticket] of this.tickets) {
 			this.tickets.delete(relayId);
 			clearTimeout(ticket.timer);
@@ -597,6 +672,7 @@ export class TuiConversations {
 			config: normalizeWorkerAgentConfig(spawn.config),
 			sessionOptions: spawn.session,
 			...(spawn.modelScopePatterns === undefined ? {} : { modelScopePatterns: [...spawn.modelScopePatterns] }),
+			clientKey: request.clientKey,
 		};
 	}
 

@@ -78,7 +78,7 @@ export type {
 	WorkspaceRegistration,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -291,10 +291,11 @@ export function isWorkerRequestType(type: string): type is WorkerRequestType {
  * sends worker requests and its conversations' Git observations
  * (`change_observe`, which the daemon authorizes per session), and nothing
  * else; a control client sends no worker request, and only a TUI opens
- * conversations (`conversation_open`).
+ * conversations (`conversation_open`) and answers what their workers ask
+ * while they open (`conversation_host_response`).
  */
 export function isRequestAllowedFor(client: "tui" | "cli" | "worker", type: string): boolean {
-	if (type === "conversation_open") return client === "tui";
+	if (type === "conversation_open" || type === "conversation_host_response") return client === "tui";
 	if (type === "change_observe") return client === "worker";
 	return (client === "worker") === isWorkerRequestType(type);
 }

@@ -1,3 +1,4 @@
+import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import { describe, expect, it, vi } from "vitest";
 import { type ControlEvent, type ControlResponse, createHelloProof } from "../src/daemon/control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
@@ -578,6 +579,7 @@ describe("worker registry", () => {
 						projectCwd: "/ws",
 						config: {},
 						sessionOptions: {},
+						clientKey: client ?? "tui-0",
 					}),
 					attach: (worker: LiveWorker, outcome: WorkerOpenOutcome) => ({ worker, spawned: outcome === "spawned" }),
 				},
@@ -807,6 +809,112 @@ describe("worker registry", () => {
 			await vi.advanceTimersByTimeAsync(1);
 			// Its neighbours get the 60 s turn cap, not the close's immediate abort.
 			expect(stops(worker)).toMatchObject([{ reason: "retention", force: true }]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+	it("asks only the open that opens a conversation, pausing its ready wait until the answer", async () => {
+		const { registry, open, start, send, opensOf, closes, spawnInput } = setup();
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		await first;
+		// Nobody waits for an open conversation to open: nobody is asked.
+		expect(
+			await send(worker, {
+				type: "worker_host_request",
+				sessionId: "s1",
+				request: { kind: "confirm", title: "t", message: "m" },
+			}),
+		).toMatchObject({ type: "error", code: "unavailable" });
+
+		vi.useFakeTimers();
+		try {
+			const questions: Array<{
+				readonly request: HostPromptRequest;
+				readonly signal: AbortSignal;
+				readonly answer: PromiseWithResolvers<{ readonly response?: HostResponse } | undefined>;
+			}> = [];
+			const input = spawnInput("s2", 1, "ws", "shared");
+			const key = { workspaceName: "ws", workspaceGeneration: 1, sessionId: "s2" };
+			const opening = registry.open(key, {
+				compatibility: input,
+				prepare: async () => input,
+				attach: (live: LiveWorker) => live,
+				ask: (request, signal) => {
+					const answer = Promise.withResolvers<{ readonly response?: HostResponse } | undefined>();
+					questions.push({ request, signal, answer });
+					return answer.promise;
+				},
+			});
+			// A concurrent open of the same conversation waits for it, and is never asked.
+			const waiting = registry.open(key, {
+				compatibility: input,
+				prepare: async () => input,
+				attach: (live: LiveWorker) => live,
+				ask: () => Promise.reject(new Error("Only the open that opens the conversation is asked")),
+			});
+			await vi.waitFor(() => expect(opensOf(worker)).toHaveLength(2));
+			const asked = send(worker, {
+				type: "worker_host_request",
+				sessionId: "s2",
+				request: { kind: "select", title: "Trust?", options: ["No", "Yes"] },
+			});
+			await vi.waitFor(() => expect(questions).toHaveLength(1));
+			expect(questions[0]?.request).toEqual({ kind: "select", title: "Trust?", options: ["No", "Yes"] });
+			await vi.advanceTimersByTimeAsync(WORKER_READY_TIMEOUT_MS * 2);
+			expect(closes(worker)).toEqual([]);
+			questions[0]?.answer.resolve({ response: { value: "Yes" } });
+			expect(await asked).toMatchObject({ type: "worker_host_response", response: { value: "Yes" } });
+
+			// The wait starts over at the answer.
+			const failed = opening.catch((error: unknown) => error);
+			void waiting.catch(() => undefined);
+			await vi.advanceTimersByTimeAsync(WORKER_READY_TIMEOUT_MS - 1);
+			expect(closes(worker)).toEqual([]);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(await failed).toBeInstanceOf(WorkerOpenError);
+			expect(closes(worker)).toMatchObject([{ sessionId: "s2", force: true }]);
+			expect(questions[0]?.signal.aborted).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("keeps a starting worker while it asks its opener, and ends the question when the worker exits", async () => {
+		const { registry, launched, hello, send, spawnInput } = setup();
+		vi.useFakeTimers();
+		try {
+			const signals: AbortSignal[] = [];
+			const input = spawnInput("s1");
+			const opening = registry.open(
+				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "s1" },
+				{
+					compatibility: input,
+					prepare: async () => input,
+					attach: (live: LiveWorker) => live,
+					ask: (_request, signal) => {
+						signals.push(signal);
+						return new Promise(() => {});
+					},
+				},
+			);
+			const failed = opening.catch((error: unknown) => error);
+			await vi.waitFor(() => expect(launched).toHaveLength(1));
+			const worker = launched[0];
+			if (worker === undefined) throw new Error("No worker launched");
+			expect(hello(worker)).toBe(true);
+			void send(worker, {
+				type: "worker_host_request",
+				sessionId: "s1",
+				request: { kind: "input", title: "Name?" },
+			});
+			await vi.waitFor(() => expect(signals).toHaveLength(1));
+			await vi.advanceTimersByTimeAsync(WORKER_READY_TIMEOUT_MS * 2);
+			expect(registry.list()).toMatchObject([{ state: "starting" }]);
+
+			worker.exit({ reason: "crashed", error: "gone" });
+			expect(await failed).toBeInstanceOf(WorkerOpenError);
+			expect(signals[0]?.aborted).toBe(true);
 		} finally {
 			vi.useRealTimers();
 		}

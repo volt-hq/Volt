@@ -232,9 +232,8 @@ async function fixture() {
 		workspaceName: "ws",
 		log: () => {},
 		onCatalogChanged: () => {},
-		projectTrusted: () => false,
 	});
-	hosted.adoptTop(worker.spec, source.host, source.conversation);
+	hosted.adoptTop(worker.spec, { host: source.host, conversation: source.conversation, projectTrusted: () => false });
 
 	const record: ReviewRunRecord = {
 		schemaVersion: 1,

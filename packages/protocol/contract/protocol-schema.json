@@ -888,6 +888,9 @@
 					"$ref": "#/$defs/Control.Event.daemon_shutdown"
 				},
 				{
+					"$ref": "#/$defs/Control.Event.conversation_host_request"
+				},
+				{
 					"$ref": "#/$defs/Control.Event.worker_open"
 				},
 				{
@@ -900,6 +903,33 @@
 					"$ref": "#/$defs/Control.Event.relay_authority"
 				}
 			]
+		},
+		"Control.Event.conversation_host_request": {
+			"type": "object",
+			"required": [
+				"type",
+				"requestId",
+				"sessionId",
+				"request"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "conversation_host_request"
+				},
+				"requestId": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"request": {
+					"$ref": "#/$defs/HostPromptRequest"
+				}
+			},
+			"additionalProperties": false
 		},
 		"Control.Event.daemon_shutdown": {
 			"type": "object",
@@ -1903,6 +1933,12 @@
 					"$ref": "#/$defs/Control.Request.conversation_open"
 				},
 				{
+					"$ref": "#/$defs/Control.Request.conversation_host_response"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_host_request"
+				},
+				{
 					"$ref": "#/$defs/Control.Request.worker_ready"
 				},
 				{
@@ -2150,6 +2186,31 @@
 				},
 				"id": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.conversation_host_response": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"requestId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "conversation_host_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"requestId": {
+					"type": "string",
+					"maxLength": 64
+				},
+				"response": {
+					"$ref": "#/$defs/HostResponse"
 				}
 			},
 			"additionalProperties": false
@@ -2484,6 +2545,33 @@
 				},
 				"frame": {
 					"$ref": "#/$defs/Control.RelayFrame"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_host_request": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"sessionId",
+				"request"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_host_request"
+				},
+				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"request": {
+					"$ref": "#/$defs/HostPromptRequest"
 				}
 			},
 			"additionalProperties": false
@@ -3076,6 +3164,9 @@
 					"$ref": "#/$defs/Control.Response.workspace_confirmation_required"
 				},
 				{
+					"$ref": "#/$defs/Control.Response.worker_host_response"
+				},
+				{
 					"$ref": "#/$defs/Control.Response.worker_forward_result"
 				},
 				{
@@ -3425,6 +3516,26 @@
 				},
 				"frame": {
 					"$ref": "#/$defs/Control.RelayOutcome"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Response.worker_host_response": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_host_response"
+				},
+				"id": {
+					"type": "string"
+				},
+				"response": {
+					"$ref": "#/$defs/HostResponse"
 				}
 			},
 			"additionalProperties": false
@@ -3996,7 +4107,8 @@
 						"origin",
 						"session",
 						"config",
-						"sessionOptions"
+						"sessionOptions",
+						"clientKey"
 					],
 					"properties": {
 						"workerId": {
@@ -4077,6 +4189,11 @@
 							"items": {
 								"type": "string"
 							}
+						},
+						"clientKey": {
+							"type": "string",
+							"maxLength": 128,
+							"pattern": "^[^\\u0000\\r\\n]{1,128}$"
 						}
 					},
 					"additionalProperties": false
@@ -9289,6 +9406,91 @@
 				},
 				{
 					"$ref": "#/$defs/Frame.fatal"
+				}
+			]
+		},
+		"HostPromptRequest": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title",
+						"options"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "select"
+						},
+						"title": {
+							"type": "string"
+						},
+						"options": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							},
+							"minItems": 1
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title",
+						"message"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "confirm"
+						},
+						"title": {
+							"type": "string"
+						},
+						"message": {
+							"type": "string"
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "input"
+						},
+						"title": {
+							"type": "string"
+						},
+						"placeholder": {
+							"type": "string"
+						},
+						"secret": {
+							"type": "boolean"
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},

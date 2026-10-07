@@ -6,7 +6,7 @@
  */
 
 import type { Duplex } from "node:stream";
-import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
+import type { ControlRelayFrame, ControlRelayOutcome, HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import { VERSION } from "../../config.ts";
 import type { IrohRemoteHostHandshakeFailureOutcome } from "../../core/remote/iroh/protocol.ts";
 import type {
@@ -201,6 +201,24 @@ export class WorkerDaemonClient {
 
 	closeResult(closeId: string, outcome: "closed" | "refused_active"): Promise<ControlResponse> {
 		return this.request({ type: "worker_close_result", closeId, outcome });
+	}
+
+	/**
+	 * Ask the TUI whose open of `sessionId` this worker serves: what it
+	 * answered (no `response` when it closed the question without one), or
+	 * undefined when it cannot be asked (it left; the daemon stops).
+	 */
+	async hostRequest(
+		sessionId: string,
+		request: HostPromptRequest,
+	): Promise<{ readonly response?: HostResponse } | undefined> {
+		try {
+			const answer = await this.request({ type: "worker_host_request", sessionId, request });
+			if (answer.type !== "worker_host_response") return undefined;
+			return answer.response === undefined ? {} : { response: answer.response };
+		} catch {
+			return undefined;
+		}
 	}
 
 	/** Redeem a relay offer: its preamble, and the client's stream after it. */

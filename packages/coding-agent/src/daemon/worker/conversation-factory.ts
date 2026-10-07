@@ -1,9 +1,27 @@
 /**
  * The conversations a worker hosts, created as the CLI creates its own: a
- * phone-opened worker's with the phone's tool policy (D9), a TUI-opened
- * worker's from the TUI's spawn-only and session-level options (Phase 7 plan
- * §1, "Spawn"), which the in-process modes' factory in `main.ts` builds from
- * the same CLI arguments (`cli/agent-options.ts`).
+ * phone-opened worker's with the phone's tool policy (D9) and the project
+ * trust the daemon read for it, a TUI-opened worker's from the TUI's
+ * spawn-only and session-level options (Phase 7 plan §1, "Spawn"), which the
+ * in-process modes' factory in `main.ts` builds from the same CLI arguments
+ * (`cli/agent-options.ts`).
+ *
+ * A TUI-opened conversation decides its project trust here, as the CLI's
+ * in-process host decided it (P7-8b): the TUI's `--approve`/`--no-approve`
+ * for the project its conversation opened in; else a decision made for the
+ * project before (in the conversation's group, or for the group's top-level
+ * conversation in its opener's earlier conversations in this worker, the
+ * TUI's session); else trusted when nothing in the project needs trust,
+ * untrusted in a managed worktree whose parent checkout is unknown; else
+ * resolved as its resources load: the user/global and `-e` extensions'
+ * `project_trust` hooks first, then the saved decision, then
+ * `defaultProjectTrust`, then the trust prompt. The top-level conversation's
+ * dialogs ask the TUI whose open it is, through the daemon; a conversation a
+ * client's move opens here asks that client, if local, and its decision
+ * stays that conversation's; others ask nobody. A prompt closed without an
+ * answer decides nothing: the conversation runs untrusted, and the next one
+ * asks again. A top-level conversation whose TUI left before it answered
+ * does not open.
  */
 
 import { join } from "node:path";
@@ -16,13 +34,14 @@ import {
 } from "../../core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
+import type { ProjectTrustContext } from "../../core/extensions/index.ts";
 import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
 import { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import { resolveModelScope } from "../../core/model-resolver.ts";
-import { resolveConversationProjectTrust } from "../../core/project-trust.ts";
+import { decideProjectTrust, projectTrustPath, resolveConversationProjectTrust } from "../../core/project-trust.ts";
 import {
 	type IrohRemoteRuntimeToolPolicy,
 	parseIrohRemoteAllowTools,
@@ -35,6 +54,7 @@ import {
 	type SubagentRuntimeCreatedEvent,
 	type SubagentRuntimeRegistration,
 } from "../../core/subagents/index.ts";
+import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { runMigrations } from "../../migrations.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { WorkerAgentConfig, WorkerSessionOptions } from "../control-protocol.ts";
@@ -51,6 +71,16 @@ export interface WorkerCliOptions {
 	readonly config: WorkerAgentConfig;
 	readonly sessionOptions: WorkerSessionOptions;
 	readonly modelScopePatterns?: readonly string[];
+	/** How the conversations decide project trust where no override applies. */
+	readonly trust: WorkerTrustOptions;
+}
+
+/** Where a TUI-opened conversation's project trust prompts go, and what its opener decided before. */
+export interface WorkerTrustOptions {
+	/** The top-level conversation's prompts in `cwd`: asked of the TUI whose open it is. */
+	readonly opener: (cwd: string) => ProjectTrustContext;
+	/** The project trust decided for the opener's earlier conversations in this worker, by project; written here. */
+	readonly session: Map<string, boolean>;
 }
 
 export interface IrohRemoteAgentRuntimeOptions {
@@ -134,6 +164,8 @@ export type IrohRemoteAgentRuntimeSessionSelection =
 export interface IrohRemoteAgentRuntime {
 	readonly host: ConversationHost;
 	readonly conversation: HostedConversation;
+	/** Whether the project in `cwd` is trusted now for the host's conversations: as decided for it, else as it holds nothing that needs trust or its saved decision. */
+	readonly projectTrusted: (cwd: string) => boolean;
 }
 
 export interface IrohRemoteAgentRuntimeResult {
@@ -181,19 +213,37 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 	const lspServerPool = new LspServerPool();
 	const gitContextProviderPool = new GitContextProviderPool();
 	const cli = options.cli;
-	// The TUI's decision is for the project its first conversation opened in.
-	const decidedTrust = cli?.config.trust === undefined ? undefined : { cwd: options.cwd, trusted: cli.config.trust };
+	/**
+	 * The project trust decided for this host's conversations, by project: the TUI's override for the
+	 * project its conversation opened in, never elsewhere, and each decision made here.
+	 */
+	const decisions = new Map<string, boolean>();
+	const overrideProject = cli?.config.trust === undefined ? undefined : projectTrustPath(agentDir, options.cwd);
+	if (overrideProject !== undefined && cli?.config.trust !== undefined)
+		decisions.set(overrideProject, cli.config.trust);
+	/** Whether the host opened its top-level conversation: the first conversation this factory creates. */
+	let topOpened = false;
 	const createRuntime: ConversationFactory = async (runtimeOptions) => {
+		const top = !topOpened;
+		topOpened = true;
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
 		// A TUI's conversation reads its settings and resources where it runs, as the CLI's do.
 		const settingsCwd = cli === undefined ? projectCwd : runtimeOptions.cwd;
+		const trust: ConversationTrust =
+			cli === undefined
+				? { trusted: projectTrusted }
+				: conversationTrust(
+						runtimeOptions.agentDir,
+						runtimeOptions.cwd,
+						decisions,
+						top ? cli.trust.session : undefined,
+					);
 		const settingsManager = SettingsManager.create(settingsCwd, runtimeOptions.agentDir, {
 			profile,
-			projectTrusted:
-				cli === undefined
-					? projectTrusted
-					: resolveConversationProjectTrust(runtimeOptions.agentDir, runtimeOptions.cwd, decidedTrust),
+			projectTrusted: trust.trusted,
 		});
+		const projectTrustDiagnostics: AgentSessionDiagnostic[] = [];
+		const trustPath = trust.resolve;
 		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 		const services = await createAgentSessionServices({
@@ -205,6 +255,40 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			workspaceName: runtimeOptions.workspaceName ?? options.workspaceName,
 			baseRef: runtimeOptions.baseRef ?? options.baseRef,
 			gitContextProviderPool,
+			...(cli === undefined || trustPath === undefined
+				? {}
+				: {
+						resourceLoaderReloadOptions: {
+							resolveProjectTrust: async ({ extensionsResult }) => {
+								const opener = top && runtimeOptions.projectTrustContext === undefined;
+								const projectTrustContext =
+									runtimeOptions.projectTrustContext ??
+									(opener ? cli.trust.opener(trustPath) : trustContextWithoutUI(trustPath));
+								const decided = await decideProjectTrust({
+									cwd: trustPath,
+									resourcesCwd: runtimeOptions.cwd,
+									trustStore: new ProjectTrustStore(runtimeOptions.agentDir),
+									defaultProjectTrust: settingsManager.getDefaultProjectTrust(),
+									extensionsResult,
+									projectTrustContext,
+									onExtensionError: (message) => projectTrustDiagnostics.push({ type: "warning", message }),
+								});
+								// The TUI whose open this is left before it answered: nothing opens, and its next open asks again.
+								if (decided === undefined && opener && !projectTrustContext.hasUI) {
+									throw new Error(
+										"The terminal that opened the conversation left before it answered the trust prompt",
+									);
+								}
+								// What a client asked as its move opened a conversation decided answers for that conversation
+								// only: the group's other clients (another TUI, a phone) inherit no answer they did not give.
+								if (decided !== undefined && (top || runtimeOptions.projectTrustContext === undefined)) {
+									decisions.set(trustPath, decided);
+									if (top) cli.trust.session.set(trustPath, decided);
+								}
+								return decided ?? false;
+							},
+						},
+					}),
 			...(cli === undefined
 				? {}
 				: {
@@ -248,7 +332,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 				: undefined,
 		});
 		try {
-			const diagnostics: AgentSessionDiagnostic[] = [...services.diagnostics];
+			const diagnostics: AgentSessionDiagnostic[] = [...projectTrustDiagnostics, ...services.diagnostics];
 			let created: Awaited<ReturnType<typeof createAgentSessionFromServices>>;
 			if (cli === undefined) {
 				created = await createAgentSessionFromServices({
@@ -363,7 +447,11 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			{ profile: options.profile },
 		);
 		if (opened.cancelled) throw new Error("Remote conversation open was cancelled");
-		runtime = { host, conversation: opened.conversation };
+		runtime = {
+			host,
+			conversation: opened.conversation,
+			projectTrusted: (cwd) => resolveConversationProjectTrust(agentDir, cwd, decisions),
+		};
 		const errors = opened.conversation.diagnostics.filter((diagnostic) => diagnostic.type === "error");
 		if (errors.length > 0) {
 			throw new Error(errors.map((diagnostic) => diagnostic.message).join("\n"));
@@ -380,6 +468,50 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			managerTransferred ? undefined : sessionTarget.sessionManager,
 		);
 	}
+}
+
+/** The project trust a conversation opens with; with `resolve`, untrusted until its resources load and decide it for that project. */
+interface ConversationTrust {
+	readonly trusted: boolean;
+	readonly resolve?: string;
+}
+
+/**
+ * The project trust a TUI-opened conversation in `cwd` opens with: a
+ * decision made for its project (`decisions`, else the opener's `session`
+ * for a top-level conversation, which joins `decisions`), trusted when
+ * nothing in it needs trust, untrusted in a managed worktree whose parent
+ * checkout is unknown; else resolved as its resources load.
+ */
+function conversationTrust(
+	agentDir: string,
+	cwd: string,
+	decisions: Map<string, boolean>,
+	session: ReadonlyMap<string, boolean> | undefined,
+): ConversationTrust {
+	const trustPath = projectTrustPath(agentDir, cwd);
+	const known = trustPath === undefined ? undefined : (decisions.get(trustPath) ?? session?.get(trustPath));
+	if (trustPath !== undefined && known !== undefined) {
+		decisions.set(trustPath, known);
+		return { trusted: known };
+	}
+	if (!hasTrustRequiringProjectResources(cwd)) return { trusted: true };
+	return trustPath === undefined ? { trusted: false } : { trusted: false, resolve: trustPath };
+}
+
+/** The trust prompts of a conversation no client asked for (a subagent's, a remote client's move): nobody answers. */
+function trustContextWithoutUI(cwd: string): ProjectTrustContext {
+	return {
+		cwd,
+		mode: "rpc",
+		hasUI: false,
+		ui: {
+			select: async () => undefined,
+			confirm: async () => false,
+			input: async () => undefined,
+			notify: () => {},
+		},
+	};
 }
 
 async function cleanupFailedIrohRemoteAgentRuntime(
