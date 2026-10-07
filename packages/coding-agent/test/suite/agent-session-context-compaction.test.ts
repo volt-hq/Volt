@@ -1,7 +1,13 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import { type Context, fauxAssistantMessage, fauxToolCall, type SimpleStreamOptions } from "@hansjm10/volt-ai";
+import {
+	type Context,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Message,
+	type SimpleStreamOptions,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { type CompactionDetails, prepareCompaction } from "../../src/core/compaction/compaction.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
@@ -18,6 +24,23 @@ function seededMessage(harness: Harness, entryId: string): AgentMessage {
 	const entry = harness.sessionManager.getEntry(entryId);
 	if (entry?.type !== "message") throw new Error(`Expected message entry ${entryId}`);
 	return entry.message;
+}
+
+/** The ids of tool calls that the messages right after their assistant message leave without a result. */
+function unansweredToolCallIds(messages: readonly Message[]): string[] {
+	const unanswered: string[] = [];
+	messages.forEach((message, index) => {
+		if (message.role !== "assistant") return;
+		const answered = new Set<string>();
+		for (const next of messages.slice(index + 1)) {
+			if (next.role !== "toolResult") break;
+			answered.add(next.toolCallId);
+		}
+		for (const block of message.content) {
+			if (block.type === "toolCall" && !answered.has(block.id)) unanswered.push(block.id);
+		}
+	});
+	return unanswered;
 }
 
 describe("AgentSession cache-preserving compaction", () => {
@@ -541,5 +564,53 @@ describe("AgentSession cache-preserving compaction", () => {
 		expect(calls).toBe(1);
 		expect(result.firstKeptEntryId).toBe(retainedEntryId);
 		expect(harness.session.messages.slice(1)).toEqual(originalHistory.slice(-1));
+	});
+
+	it("replays the history as a turn does, leaving no unmatched tool call in the native request", async () => {
+		const rejected = fauxToolCall("write", { path: "rejected.ts" });
+		const unanswered = fauxToolCall("read", { path: "unanswered.ts" });
+		const answered = fauxToolCall("read", { path: "answered.ts" });
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) =>
+				seed
+					.user("Update the files", { timestamp: 1 })
+					// The provider rejected its arguments: the turn has a tool call and no result.
+					.assistant("", {
+						toolCalls: [rejected],
+						stopReason: "error",
+						error: {
+							kind: "invalid_tool_call",
+							retryable: false,
+							message: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+						},
+					})
+					.user("Try again", { timestamp: 2 })
+					// A completed turn whose result was never saved.
+					.assistant("", { toolCalls: [unanswered] })
+					.user("Continue", { timestamp: 3 })
+					.assistant("", { toolCalls: [answered] })
+					.toolResult(answered.id, "Saved read result")
+					.assistant("Recent answer"),
+		});
+		harnesses.push(harness);
+		let request: Context | undefined;
+		harness.setResponses([
+			(context) => {
+				request = context;
+				return fauxAssistantMessage("replayed checkpoint");
+			},
+		]);
+		const result = await harness.session.compact();
+		expect(result.summary).toContain("replayed checkpoint");
+		const history = request!.messages.slice(0, -1);
+		expect(unansweredToolCallIds(history)).toEqual([]);
+		expect(JSON.stringify(history)).not.toContain(rejected.id);
+		expect(history).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: unanswered.id, isError: true }),
+		);
+		expect(history).toContainEqual(
+			expect.objectContaining({ role: "toolResult", toolCallId: answered.id, isError: false }),
+		);
 	});
 });
