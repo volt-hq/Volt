@@ -56,7 +56,12 @@ import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
 import type { SessionManager } from "../session-manager.ts";
-import { type ExtensionSessionWriter, extensionSessionWriter, type SessionWriter } from "../session-writer.ts";
+import {
+	assertExtensionEntryType,
+	type ExtensionSessionWriter,
+	extensionSessionWriter,
+	type SessionWriter,
+} from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import { getAvailableThemesWithPaths } from "../theme/discovery.ts";
@@ -625,7 +630,7 @@ export class SessionExtensionBinding {
 		return {
 			waitForIdle: () => actions()?.waitForIdle() ?? Promise.resolve(),
 			newSession: (options) => {
-				// An extension seeds the new session without review records, which only the host writes.
+				// An extension seeds the new session without the host's review records, which only the host writes.
 				const setup = options?.setup;
 				const seeded =
 					setup === undefined
@@ -940,6 +945,7 @@ export class SessionExtensionBinding {
 					});
 				},
 				appendEntry: async (customType, data) => {
+					assertExtensionEntryType(customType);
 					await this.host.sessionWriter().appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => session.setSessionName(name),

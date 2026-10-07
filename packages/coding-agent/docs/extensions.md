@@ -1657,7 +1657,7 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 
 ### volt.appendEntry(customType, data?)
 
-Persist extension state (does NOT participate in LLM context). Resolves after the entry commits.
+Persist extension state (does NOT participate in LLM context). Resolves after the entry commits. The host keeps the `volt.review.` types for its own review records (`volt.review.run` and its siblings): `appendEntry` rejects them, and so does the writer `ctx.newSession({ setup })` gives you. Use a type of your own.
 
 ```typescript
 await volt.appendEntry("my-state", { count: 42 }); // Plain JSON data; omit absent properties

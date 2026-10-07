@@ -244,15 +244,31 @@ export function admitReviewRecord(record: ReviewRecord): SessionEntry {
 	return admitEntry({ ...record, ...pendingEnvelope() } as SessionEntry);
 }
 
-/** The writes code outside the host may make: every write but review records, which only the host writes. */
+/**
+ * The writes code outside the host may make: every write but the host's review records, which only the host
+ * writes (`recordReviewState`, and the `custom` entries whose type starts with {@link HOST_REVIEW_ENTRY_TYPE_PREFIX}).
+ */
 export type ExtensionSessionWriter = Omit<SessionWriter, "recordReviewState">;
+
+/** The `custom` entry types of the host's review records start with this prefix: `volt.review.run` and its siblings. */
+export const HOST_REVIEW_ENTRY_TYPE_PREFIX = "volt.review.";
+
+/** Throws for a `custom` entry type the host keeps for itself: extensions may not write it. */
+export function assertExtensionEntryType(customType: string): void {
+	if (customType.startsWith(HOST_REVIEW_ENTRY_TYPE_PREFIX)) {
+		throw new Error(`Custom entries of type ${customType} are the host's`);
+	}
+}
 
 /** `writer` as code outside the host gets it: its writes, without `recordReviewState` or any other method. */
 export function extensionSessionWriter(writer: ExtensionSessionWriter): ExtensionSessionWriter {
 	return Object.freeze({
 		sessionManager: writer.sessionManager,
 		appendMessage: writer.appendMessage.bind(writer),
-		appendCustomEntry: writer.appendCustomEntry.bind(writer),
+		appendCustomEntry: async <T = JsonValue>(customType: string, data?: JsonCompatibleInput<T>): Promise<string> => {
+			assertExtensionEntryType(customType);
+			return await writer.appendCustomEntry(customType, data);
+		},
 		appendCustomMessageEntry: writer.appendCustomMessageEntry.bind(writer),
 		appendModelChange: writer.appendModelChange.bind(writer),
 		appendThinkingLevelChange: writer.appendThinkingLevelChange.bind(writer),

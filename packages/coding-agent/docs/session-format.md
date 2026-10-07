@@ -404,7 +404,7 @@ Extensions and the host keep their own data in two core entry types, identified 
 {"type":"custom_message","id":"a3b4c5d6","parentId":"f2a3b4c5","timestamp":"2026-10-06T12:25:00.000Z","ordinal":13,"customType":"my-extension","content":"Injected context...","display":true}
 ```
 
-Both are public entries, so forks, clones, and snapshots copy them. The custom message types the host presents as its own are reserved: extensions cannot send `work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution` messages. Volt itself writes `custom` entries of these types: `volt.review.run`, `volt.review.acknowledgment`, `volt.review.finding-transition`, and `volt.review.publication` (see [Review Runs](#review-runs)), and `prompt_cache_refresh`.
+Both are public entries, so forks, clones, and snapshots copy them. The custom message types the host presents as its own are reserved: extensions cannot send `work_notice`, `review`, `subagent_recovery`, `volt-plan-checkpoint`, or `volt-plan-execution` messages. Volt itself writes `custom` entries of these types: `volt.review.run`, `volt.review.acknowledgment`, `volt.review.finding-transition`, and `volt.review.publication` (see [Review Runs](#review-runs)), and `prompt_cache_refresh`. The `volt.review.` entry types are reserved too: `volt.appendEntry()` and the writer a `ctx.newSession({ setup })` callback gets reject them, since later reviews, publishing, and the findings handoff trust those records. Forks, clones, and imports still copy them.
 
 ## Product Entries
 
