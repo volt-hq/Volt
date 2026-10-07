@@ -559,6 +559,9 @@ export function serveConnection(
 	let home = options.conversation;
 	let accepts: ReadonlySet<HostRequestKind> = new Set();
 	let helloReceived = false;
+	let welcomeWritten = false;
+	let flushingCatalogs = false;
+	const pendingCatalogChanges: CatalogName[] = [];
 	let closing: Promise<void> | undefined;
 	/** A fatal frame was written: nothing follows it. */
 	let fatalWritten = false;
@@ -587,7 +590,7 @@ export function serveConnection(
 	let stopObservingClose: () => void = () => {};
 	const pendingWrites = new Set<Promise<void>>();
 
-	const write = (frame: HostFrame): void => {
+	const write = (frame: HostFrame, fromCatalogQueue = false): void => {
 		if (fatalWritten) return;
 		if (closing && frame.type !== "fatal" && frame.type !== "ended") return;
 		if (frame.type !== "fatal") {
@@ -596,6 +599,16 @@ export function serveConnection(
 				void close({ code: loss });
 				return;
 			}
+		}
+		// Watchers and synchronous attachment callbacks can invalidate catalogs
+		// before welcome. Keep their order, including repeats, until it is written.
+		if (frame.type === "changed" && !fromCatalogQueue && (!welcomeWritten || flushingCatalogs)) {
+			if (pendingCatalogChanges.length >= MAX_PENDING_FRAMES) {
+				void close({ code: "invalid_frame", message: "Too many catalog changes pending welcome" });
+				return;
+			}
+			pendingCatalogChanges.push(frame.catalog);
+			return;
 		}
 		let redacted: HostFrame | undefined;
 		try {
@@ -610,16 +623,30 @@ export function serveConnection(
 			const result = transport.write(redacted);
 			if (result) {
 				const tracked = Promise.resolve(result).then(
-					() => undefined,
+					() => {
+						if (redacted.type === "welcome") flushCatalogChanges();
+					},
 					(error: unknown) => void fail(error),
 				);
 				pendingWrites.add(tracked);
 				void tracked.finally(() => pendingWrites.delete(tracked));
+			} else if (redacted.type === "welcome") {
+				flushCatalogChanges();
 			}
 		} catch (error) {
 			void fail(error);
 		}
 	};
+	function flushCatalogChanges(): void {
+		if (closing || fatalWritten) return;
+		welcomeWritten = true;
+		flushingCatalogs = true;
+		while (pendingCatalogChanges.length > 0 && !closing && !fatalWritten) {
+			const catalog = pendingCatalogChanges.shift()!;
+			write({ type: "changed", catalog }, true);
+		}
+		flushingCatalogs = false;
+	}
 	const sink = { send: write };
 
 	/** Wait until what was written drained: a slow client slows the agent loop instead of growing a buffer. */
@@ -1628,6 +1655,7 @@ export function serveConnection(
 	};
 
 	const finish = async (failure?: { error: unknown }): Promise<void> => {
+		pendingCatalogChanges.length = 0;
 		detachInput();
 		detachClose();
 		for (const subscription of subscriptions.values()) subscription.dispose();
