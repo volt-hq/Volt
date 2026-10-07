@@ -32,7 +32,8 @@
  * queries, its completion pushes, and its authority go to the daemon over
  * the worker's connection, scoped to that relay; a lost authority ends the
  * stream with its fatal code. A client's own structural intents redirect it,
- * the target's log written here and opened wherever it reconnects; the moves
+ * the target's log written here and opened wherever it reconnects (for a
+ * TUI, with the change's `session_start` reason its open carries); the moves
  * an extension command starts for it open here (D1), and so do all of an
  * in-memory conversation's (D15), whose logs exist nowhere else.
  *
@@ -255,6 +256,10 @@ async function openConversation(
 					...(spec.profile === undefined ? {} : { profile: spec.profile }),
 				}
 			: {
+					// A conversation the TUI's own session change led to starts as the in-process host started it.
+					...(spec.sessionStart === undefined
+						? {}
+						: { sessionStartEvent: { type: "session_start" as const, ...spec.sessionStart } }),
 					cli: {
 						config: spec.config,
 						sessionOptions: spec.sessionOptions,

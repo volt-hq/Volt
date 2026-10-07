@@ -9,14 +9,17 @@
  * intent answers `accepted{conversation}`, ends the client's subscription
  * `moved`, and ends its connection; the client opens the target through the
  * connector and connects again, subscribing to it from a snapshot
- * (`connectThrough`). The intents and queries the client sent around the move
- * go out again on the new connection; the host knows the client across its
- * connections (its client key) and answers a retried intent as it answered
- * it. The answer to an intent whose run moved its client before it ended (an
- * extension command's `ctx.newSession()`) is never written on the connection
- * the move ended: the command may wait for the client on the target (its
- * `withSession`), so the move cannot wait for the answer; the intent goes out
- * again on the new connection, and the host answers it from that window.
+ * (`connectThrough`). The connector hears why it opens the target (the
+ * session change's `session_start` reason, and the conversation left), for a
+ * host that starts the target only then. The intents and queries the client
+ * sent around the move go out again on the new connection; the host knows
+ * the client across its connections (its client key) and answers a retried
+ * intent as it answered it. The answer to an intent whose run moved its
+ * client before it ended (an extension command's `ctx.newSession()`) is
+ * never written on the connection the move ended: the command may wait for
+ * the client on the target (its `withSession`), so the move cannot wait for
+ * the answer; the intent goes out again on the new connection, and the host
+ * answers it from that window.
  *
  * A connector whose host runs elsewhere (`reconnects`, the daemon's workers)
  * resumes its client after a connection that ended unannounced: a worker
@@ -26,21 +29,52 @@
  * what was not answered.
  */
 
-import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
+import type { BuiltinIntentName, HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { RpcTransport } from "../core/protocol/transport/transport.ts";
 import type { WorkspaceRegistration } from "../daemon/control-protocol.ts";
 import type { DaemonProbeResult, EnsureDaemonResult, WaitForDaemonExitOptions } from "../daemon/spawn.ts";
 import { ProtocolClient, type ProtocolClientDisconnected, type ProtocolClientOptions } from "./protocol-client.ts";
+
+/**
+ * A session change of the client's own: the `session_start` reason of the
+ * conversation it leads to, and the conversation it left.
+ */
+export interface SessionChangeCause {
+	readonly reason: "new" | "resume" | "fork";
+	readonly previousSessionId: string;
+}
 
 /** What a connector opens for its client. */
 export type ConnectorTarget =
 	/** The conversation the connector serves first. */
 	| { readonly kind: "startup" }
 	/**
-	 * A conversation by id, such as the one a move led the client to; with
-	 * `resume`, the one the client lost its connection to.
+	 * A conversation by id, such as the one a move led the client to (with
+	 * `cause` when a session change of its own did); with `resume`, the one
+	 * the client lost its connection to.
 	 */
-	| { readonly kind: "session"; readonly sessionId: string; readonly resume?: true };
+	| {
+			readonly kind: "session";
+			readonly sessionId: string;
+			readonly resume?: true;
+			readonly cause?: SessionChangeCause;
+	  };
+
+/**
+ * The `session_start` reason of the conversation each structural intent
+ * moves its client to, as a host that opens the target itself reports it: a
+ * new session (seeded with review findings, for the review intents), a
+ * stored or imported one, a fork or clone.
+ */
+const SESSION_CHANGE_REASONS = new Map<string, SessionChangeCause["reason"]>([
+	["new_session", "new"],
+	["review_open_session", "new"],
+	["open_work", "new"],
+	["switch_session", "resume"],
+	["import_session", "resume"],
+	["fork", "fork"],
+	["clone", "fork"],
+] satisfies ReadonlyArray<readonly [BuiltinIntentName, SessionChangeCause["reason"]]>);
 
 /** What the client hears from the host of the conversations it opens beside the protocol, and what the host asks it. */
 export interface ConnectorOpenOptions {
@@ -228,8 +262,15 @@ export async function connectThrough(
 	let shown: string | undefined;
 	const follow = async (target: string): Promise<void> => {
 		const source = shown;
+		const moved = client.moveCause;
+		const reason = moved === undefined ? undefined : SESSION_CHANGE_REASONS.get(moved.intent);
+		const cause: SessionChangeCause | undefined =
+			moved === undefined || reason === undefined ? undefined : { reason, previousSessionId: moved.from };
 		try {
-			await reach({ kind: "session", sessionId: target }, () => client.moving === target);
+			await reach(
+				{ kind: "session", sessionId: target, ...(cause === undefined ? {} : { cause }) },
+				() => client.moving === target,
+			);
 		} catch (error) {
 			// A lost connection to the target resumes there.
 			if (client.disconnected || client.moving !== target) return;

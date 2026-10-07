@@ -735,6 +735,42 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.ConversationOpenCause": {
+			"type": "object",
+			"required": [
+				"reason"
+			],
+			"properties": {
+				"reason": {
+					"type": "string",
+					"enum": [
+						"new",
+						"resume",
+						"fork"
+					]
+				},
+				"previous": {
+					"type": "object",
+					"required": [
+						"sessionId"
+					],
+					"properties": {
+						"sessionId": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						},
+						"sessionDir": {
+							"type": "string",
+							"maxLength": 4096,
+							"pattern": "^[^\\u0000\\r\\n]{1,4096}$"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.ConversationOpenTarget": {
 			"anyOf": [
 				{
@@ -2245,6 +2281,9 @@
 				},
 				"workspaceRegistration": {
 					"$ref": "#/$defs/Control.WorkspaceRegistration"
+				},
+				"cause": {
+					"$ref": "#/$defs/Control.ConversationOpenCause"
 				}
 			},
 			"additionalProperties": false
@@ -4194,6 +4233,26 @@
 							"type": "string",
 							"maxLength": 128,
 							"pattern": "^[^\\u0000\\r\\n]{1,128}$"
+						},
+						"sessionStart": {
+							"type": "object",
+							"required": [
+								"reason"
+							],
+							"properties": {
+								"reason": {
+									"type": "string",
+									"enum": [
+										"new",
+										"resume",
+										"fork"
+									]
+								},
+								"previousSessionRef": {
+									"$ref": "#/$defs/SessionReference"
+								}
+							},
+							"additionalProperties": false
 						}
 					},
 					"additionalProperties": false

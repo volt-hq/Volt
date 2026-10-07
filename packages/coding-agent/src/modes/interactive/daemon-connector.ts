@@ -21,13 +21,15 @@
  * trust (P7-8b): what it asks meanwhile (its trust prompt, a `project_trust`
  * hook's dialog) reaches the TUI as `conversation_host_request` on this
  * control connection, which the open's client answers; `--approve` and
- * `--no-approve` go only to the startup conversation's project. A move leads the client to a conversation by id: the
- * connector finds where it is stored (read-only; a conversation only a
- * worker holds, such as a `--no-session` one, has no store) and opens it
- * there, in the working directory the client was in when its own is gone
- * (the user confirmed that before the move). A stored conversation whose
- * managed worktree checkout was archived is restored first, pinned for as
- * long as the control connection lasts.
+ * `--no-approve` go only to the startup conversation's project. A move
+ * leads the client to a conversation by id: the connector finds where it is
+ * stored (read-only; a conversation only a worker holds, such as a
+ * `--no-session` one, has no store) and opens it there, in the working
+ * directory the client was in when its own is gone (the user confirmed that
+ * before the move), saying why when a session change of the client's own
+ * led there (its `session_start` reason, and the conversation it left). A
+ * stored conversation whose managed worktree checkout was archived is
+ * restored first, pinned for as long as the control connection lasts.
  *
  * Connections can end unannounced (a worker exited, the daemon restarted):
  * the client resumes on a connection the connector opens again
@@ -48,6 +50,7 @@ import {
 	type ConversationConnector,
 	ConversationUnavailableError,
 	type OpenedConversation,
+	type SessionChangeCause,
 } from "../../client/conversation-connector.ts";
 import {
 	DaemonConversationOpenError,
@@ -64,6 +67,7 @@ import { time } from "../../core/timings.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {
 	type ControlEvent,
+	type ConversationOpenCause,
 	type ConversationOpenTarget,
 	PROTOCOL_VERSION,
 	type WorkerSpawnOptions,
@@ -190,6 +194,8 @@ export class DaemonConnector implements ConversationConnector {
 			if (this.stopped) throw new ConversationUnavailableError("The TUI stopped");
 			const located = target.kind === "startup" ? this.startup : await this.locate(target.sessionId);
 			const openTarget = located.target;
+			const cause =
+				target.kind === "session" && target.cause !== undefined ? this.openCause(target.cause) : undefined;
 			let workspaceRegistration: WorkspaceRegistration | undefined;
 			for (;;) {
 				const control = await this.connect(options);
@@ -202,6 +208,7 @@ export class DaemonConnector implements ConversationConnector {
 						spawn: this.spawnFor(located.cwd),
 						clientKey: this.clientKey,
 						...(workspaceRegistration === undefined ? {} : { workspaceRegistration }),
+						...(cause === undefined ? {} : { cause }),
 					});
 					time(opened.spawned ? "daemon.conversationOpen(spawned)" : "daemon.conversationOpen(attached)");
 					if (this.stopped) {
@@ -296,6 +303,21 @@ export class DaemonConnector implements ConversationConnector {
 		const decided = projectTrustPath(this.agentDir, this.startup.cwd);
 		if (decided !== undefined && projectTrustPath(this.agentDir, cwd) === decided) return this.spawn;
 		return { ...this.spawn, config };
+	}
+
+	/**
+	 * Why the client opens a conversation a session change of its own led it
+	 * to: the change's reason, and the conversation it left with the session
+	 * directory that holds it as far as the connector knows (in no store for
+	 * a `--no-session` TUI), which the daemon checks.
+	 */
+	private openCause(cause: SessionChangeCause): ConversationOpenCause {
+		if (!this.spawn.persist) return { reason: cause.reason };
+		const sessionDir = (this.targets.get(cause.previousSessionId) ?? this.current).target.sessionDir;
+		return {
+			reason: cause.reason,
+			previous: { sessionId: cause.previousSessionId, ...(sessionDir === undefined ? {} : { sessionDir }) },
+		};
 	}
 
 	/** Track the conversation the client is on now: where it runs, and the target that opens it again. */

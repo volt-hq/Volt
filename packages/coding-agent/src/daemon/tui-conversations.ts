@@ -21,6 +21,14 @@
  * was open already applies the open's session-level options once the TUI
  * attached, and names the spawn-only ones its worker does not share.
  *
+ * An open the TUI's own session change led to (`/clear`, `/resume`, `/fork`,
+ * ...) says so (`cause`): a worker that starts the conversation for it
+ * reports that `session_start` reason, naming the conversation the TUI left
+ * only when the daemon finds that one stored where the TUI says and running
+ * in the same workspace, so a conversation's extensions are never pointed at
+ * another workspace's conversation. An open that attaches to a running
+ * conversation starts nothing.
+ *
  * While a worker opens a conversation for a TUI's open, it may ask that TUI
  * its project trust prompts (P7-8b): the question goes to the control
  * connection of that open only, as `conversation_host_request`, and only
@@ -49,7 +57,12 @@ import type { IrohRemoteAuditEventInput } from "../core/remote/iroh/audit.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import { getIrohRemoteWorkspaceNameAlias } from "../core/remote/iroh/workspace.ts";
-import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import {
+	findSessionInfoById,
+	getDefaultSessionDirPath,
+	SessionManager,
+	type SessionReference,
+} from "../core/session-manager.ts";
 import { SESSION_STORE_DATABASE_FILENAME } from "../core/session-store/index.ts";
 import type {
 	ControlEvent,
@@ -256,7 +269,7 @@ export class TuiConversations {
 					client: request.clientKey,
 					exclusive: resolved.inMemory,
 					env: request.spawn.env,
-					prepare: () => resolved.prepare(generation),
+					prepare: async () => this.withSessionStart(await resolved.prepare(generation), request, resolved),
 					attach: (worker, outcome) => this.issueTicket(connection, request, resolved, worker, outcome),
 					ask: (question, signal) => this.ask(connection.connectionId, resolved.sessionId, question, signal),
 				},
@@ -677,11 +690,73 @@ export class TuiConversations {
 	}
 
 	/**
+	 * The spawn of a conversation the TUI's own session change led it to:
+	 * its `session_start` has the change's reason, and names the conversation
+	 * the TUI left when that one runs in the same workspace.
+	 */
+	private async withSessionStart(
+		input: WorkerSpawnInput,
+		request: ConversationOpenRequest,
+		resolved: ResolvedOpen,
+	): Promise<WorkerSpawnInput> {
+		const cause = request.cause;
+		if (cause === undefined || input.origin !== "tui") return input;
+		const previous =
+			cause.previous === undefined ? undefined : await this.previousSession(cause.previous, request, resolved);
+		return {
+			...input,
+			sessionStart: { reason: cause.reason, ...(previous === undefined ? {} : { previousSessionRef: previous }) },
+		};
+	}
+
+	/**
+	 * The stored conversation a TUI says it left: found in the session
+	 * directory it names (else the TUI's default for its cwd, where a new
+	 * conversation of its was created or a stored one found), and only when
+	 * its working directory is in the workspace `resolved` runs in. Anything
+	 * else is dropped, so the open tells the TUI nothing about it.
+	 */
+	private async previousSession(
+		previous: { readonly sessionId: string; readonly sessionDir?: string },
+		request: ConversationOpenRequest,
+		resolved: ResolvedOpen,
+	): Promise<SessionReference | undefined> {
+		if (previous.sessionId === resolved.sessionId) return undefined;
+		if (previous.sessionDir !== undefined && !isAbsolute(previous.sessionDir)) return undefined;
+		try {
+			const cwd = request.spawn.cwd;
+			const directories =
+				previous.sessionDir !== undefined
+					? [previous.sessionDir]
+					: [...new Set([(await realPathOrUndefined(cwd)) ?? cwd, cwd])].map((path) =>
+							getDefaultSessionDirPath(path, this.options.agentDir),
+						);
+			for (const directory of directories) {
+				// Read from an existing store only: none is created where the TUI points.
+				if (!hasSessionStore(directory)) continue;
+				const info = await findSessionInfoById(directory, previous.sessionId);
+				if (info === undefined) continue;
+				const storedCwd = info.cwd ? await realPathOrUndefined(info.cwd) : undefined;
+				const placement = storedCwd === undefined ? undefined : await this.registeredPlacement(storedCwd);
+				return placement?.workspace.name === resolved.placement.workspace.name ? info.ref : undefined;
+			}
+			return undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
 	 * Where a conversation in the real directory `cwd` runs: the managed
 	 * worktree containing it, else the innermost registered workspace
 	 * containing it, else a workspace registered for it (D17).
 	 */
 	private async placement(cwd: string, request: ConversationOpenRequest): Promise<Placement> {
+		return (await this.registeredPlacement(cwd)) ?? this.register(cwd, request);
+	}
+
+	/** Where the real directory `cwd` runs among what is registered: `placement` without registering anything. */
+	private async registeredPlacement(cwd: string): Promise<Placement | undefined> {
 		const workspaces = this.options.workspaces();
 		let worktreeMatch: { worktree: IrohRemoteWorkspaceWorktree; root: string } | undefined;
 		for (const worktree of await this.options.worktrees()) {
@@ -693,9 +768,7 @@ export class TuiConversations {
 			const workspace = workspaces.find((candidate) => candidate.name === worktreeMatch.worktree.workspaceName);
 			if (workspace !== undefined) return { workspace, root: worktreeMatch.root, worktree: worktreeMatch.worktree };
 		}
-		const containing = await this.containingWorkspace(workspaces, cwd);
-		if (containing !== undefined) return containing;
-		return this.register(cwd, request);
+		return this.containingWorkspace(workspaces, cwd);
 	}
 
 	/** The real paths a directory's sensitivity is decided by: the user's home directories, and the agent directory. */

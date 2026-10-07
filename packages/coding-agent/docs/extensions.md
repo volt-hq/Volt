@@ -426,13 +426,13 @@ user sends another prompt ◄─────────────────
 
 /clear (new session) or /resume (switch session) in the TUI
   ├─► session_before_switch (can cancel)            old session
-  ├─► session_start { reason: "startup" }           new session, in its worker, as the TUI attaches
+  ├─► session_start { reason: "new" | "resume", previousSessionRef? }   new session, in its worker, as the TUI attaches
   └─► resources_discover { reason: "startup" }      new session
       (the old session stays open in its worker: session_shutdown { reason: "quit" } when the worker closes it)
 
 /fork or /clone in the TUI
   ├─► session_before_fork (can cancel)              old session
-  ├─► session_start { reason: "startup" }           new session, in its worker, as the TUI attaches
+  ├─► session_start { reason: "fork", previousSessionRef? }   new session, in its worker, as the TUI attaches
   └─► resources_discover { reason: "startup" }      new session
 
 new_session, switch_session, fork, or clone from an RPC client (or an SDK client that moves in place)
@@ -479,7 +479,7 @@ extension disabled while the session runs (this extension only)
 
 When a session starts, each extension hears `activate` (`reason: "startup"`) before `session_start`.
 
-An interactive TUI's sessions run in the [daemon's conversation workers](daemon.md#conversation-workers), and the TUI is one of their clients. A session the TUI moves to opens in a worker when the TUI attaches to it, like any session a client opens there, so its `session_start` has `reason: "startup"`; the session the TUI left stays open for its other clients and closes when its worker closes it ([Retention](daemon.md#retention-and-background)). A print, JSON, or RPC run hosts its session in its own process, and an RPC client's session changes move it in place, as the RPC diagram above shows.
+An interactive TUI's sessions run in the [daemon's conversation workers](daemon.md#conversation-workers), and the TUI is one of their clients. A session the TUI's own session change (`/clear`, `/resume`, `/fork`, `/clone`, `/import`) leads it to opens in a worker when the TUI attaches to it, with that change's `session_start` reason and a `previousSessionRef` naming the session the TUI left when that one is stored in the same workspace; a session already running in a worker (another terminal or a phone has it open) starts nothing as the TUI attaches. The session the TUI left stays open for its other clients and closes when its worker closes it ([Retention](daemon.md#retention-and-background)). A phone's own session changes open their session with `reason: "startup"`. A print, JSON, or RPC run hosts its session in its own process, and an RPC client's session changes move it in place, as the RPC diagram above shows.
 
 ### Startup Events
 
@@ -541,7 +541,7 @@ Fired when a session is started, loaded, or reloaded. It fires once per session,
 ```typescript
 volt.on("session_start", async (event, ctx) => {
   // event.reason - "startup" | "reload" | "new" | "resume" | "fork"
-  // event.previousSessionRef - previous persisted session, when one exists
+  // event.previousSessionRef - previous persisted session, when one exists (in the interactive TUI, of the same workspace)
   const ref = ctx.sessionManager.getSessionRef();
   ctx.ui.notify(ref ? `Session: ${ref.sessionId}` : "Ephemeral session", "info");
 });
@@ -565,7 +565,7 @@ volt.on("session_before_switch", async (event, ctx) => {
 
 In a host that moves its client in place (RPC mode, the SDK), a switch or new-session action opens the new session before it closes the old one. The new session's extension instance receives `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. If the new session fails to open (its cwd is missing, another process has it open), the current session stays open and receives no `session_shutdown`.
 
-In the interactive TUI, `/clear` writes the new session (`/resume` names a stored one), and the TUI reconnects to it through the [daemon](daemon.md#conversation-workers): it opens in a worker with `session_start` `reason: "startup"`, and the old session stays open in its own worker for its other clients until that worker closes it (`session_shutdown` with `reason: "quit"`). A session runs in one worker at a time and never moves to another process while it runs: another terminal or a phone attaching to it joins the instance already running there, without a new `session_start`.
+In the interactive TUI, `/clear` writes the new session (`/resume` names a stored one), and the TUI reconnects to it through the [daemon](daemon.md#conversation-workers): it opens in a worker with `session_start` `reason: "new"` (`"resume"` for `/resume`) and `previousSessionRef`, and the old session stays open in its own worker for its other clients until that worker closes it (`session_shutdown` with `reason: "quit"`). A session runs in one worker at a time and never moves to another process while it runs: another terminal or a phone attaching to it joins the instance already running there, without a new `session_start`.
 
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`. Instances of several sessions coexist in one worker, and the old and new instances of a move briefly coexist: keep state per instance rather than in module-level variables shared between them.
 
@@ -583,7 +583,7 @@ volt.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-In a host that moves its client in place, a fork or clone opens the new session before it closes the old one: the new extension instance receives `session_start` with `reason: "fork"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. A failed open leaves the current session open. In the interactive TUI, the fork is written and opens in a worker as the TUI reconnects, as `/clear` does (see [session_before_switch](#session_before_switch)).
+In a host that moves its client in place, a fork or clone opens the new session before it closes the old one: the new extension instance receives `session_start` with `reason: "fork"` and optional `previousSessionRef`, then the old instance receives `session_shutdown`. A failed open leaves the current session open. In the interactive TUI, the fork is written and opens in a worker as the TUI reconnects, with `reason: "fork"`, as `/clear` does (see [session_before_switch](#session_before_switch)).
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact
@@ -2602,7 +2602,7 @@ A session's extensions are bound once, when the first client attaches: the stdio
 - **The `request_user_input` tool** is offered to the model only while an attached client answers its questions (`user_input` host requests): the TUI, an RPC client that accepts them, or a phone that accepts them and is granted conversation control. Its questions go to every such client, and the first answer wins. Subagents and print runs never offer it.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
-- In a daemon worker, each client (a TUI or a phone) changes sessions alone, and other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until its worker closes it. `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for a client open the new session in the same worker (`setup` runs), the client reconnects to it, its extensions start then, and `withSession` runs; the call resolves once it ran, or with `seeded: false` when the new session closed before the client came back, or when `switchSession()` sent the client to a session a worker already hosts. A client's own session changes (`/clear`, `/resume`, `/fork`, ...) write the new session or name a stored one, which opens wherever the client reconnects through the daemon, with `session_start` `reason: "startup"` (a `--no-session` TUI's open in its own worker, since they are kept only in its memory).
+- In a daemon worker, each client (a TUI or a phone) changes sessions alone, and other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until its worker closes it. `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for a client open the new session in the same worker (`setup` runs), the client reconnects to it, its extensions start then, and `withSession` runs; the call resolves once it ran, or with `seeded: false` when the new session closed before the client came back, or when `switchSession()` sent the client to a session a worker already hosts. A client's own session changes (`/clear`, `/resume`, `/fork`, ...) write the new session or name a stored one, which opens wherever the client reconnects through the daemon (a `--no-session` TUI's open in its own worker, since they are kept only in its memory), with the change's `session_start` reason for a TUI and `reason: "startup"` for a phone.
 
 How each client renders the data:
 
