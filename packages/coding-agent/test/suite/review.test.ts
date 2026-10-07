@@ -26,6 +26,7 @@ import {
 	REMOTE_REVIEW_FAILURE_MESSAGE,
 	type ReviewUsageSnapshot,
 	resolveReviewModel,
+	reviewTargetForRerun,
 	reviewWorkExecution,
 	runReview,
 	runReviewWorkflow,
@@ -263,6 +264,25 @@ describe("review command controls", () => {
 		expect(parseReviewCommandArgs('commit HEAD --focus "unterminated').error).toMatch(/Unterminated/);
 		expect(parseReviewCommandArgs("pr 1 --effort extreme").error).toMatch(/low, standard, or high/);
 		expect(parseReviewCommandArgs("tools now").error).toMatch(/Unexpected arguments/);
+	});
+
+	it("parses the branch and uncommitted target, and reruns it from its base locator", () => {
+		expect(parseReviewCommandArgs("branch-uncommitted main --focus tests")).toEqual({
+			target: { kind: "branch_uncommitted", base: "main" },
+			controls: { focus: "tests", scope: [], effort: "standard", includeOptional: false, scopeMode: "incremental" },
+		});
+		expect(parseReviewCommandArgs("branch_uncommitted").target).toEqual({ kind: "branch_uncommitted" });
+		const branchBase = { kind: "remote", remote: "origin", remoteRef: "refs/heads/main" } as const;
+		const record = { target: { identity: { kind: "branch_uncommitted" }, branchBase } };
+		expect(reviewTargetForRerun(record as unknown as Parameters<typeof reviewTargetForRerun>[0])).toEqual({
+			kind: "branch_uncommitted",
+			branchBase,
+		});
+		expect(() =>
+			reviewTargetForRerun({ target: { identity: { kind: "branch_uncommitted" } } } as unknown as Parameters<
+				typeof reviewTargetForRerun
+			>[0]),
+		).toThrow("does not retain a base locator");
 	});
 
 	it("normalizes bounded canonical pull request numbers", () => {

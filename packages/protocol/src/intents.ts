@@ -412,13 +412,14 @@ export const INTENT_SCHEMAS = {
 
 	// Review
 	/**
-	 * Start a review of `target`. `base` applies to a branch review, `number` and `url` to a pull request review,
-	 * and `ref` (required) to a commit review; a field of another target is rejected `invalid_input`.
+	 * Start a review of `target`. `base` applies to a branch review (`branch`, or `branch_uncommitted`, which also
+	 * reviews the uncommitted changes), `number` and `url` to a pull request review, and `ref` (required) to a
+	 * commit review; a field of another target is rejected `invalid_input`.
 	 */
 	review: {
 		input: Type.Object(
 			{
-				target: stringEnum(["uncommitted", "branch", "pr", "commit"]),
+				target: stringEnum(["uncommitted", "branch", "branch_uncommitted", "pr", "commit"]),
 				base: Type.Optional(Type.String()),
 				number: Type.Optional(Type.String()),
 				/**

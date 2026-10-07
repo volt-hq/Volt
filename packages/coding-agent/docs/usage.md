@@ -54,7 +54,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
 | `/compact [prompt]` | Manually compact context, optionally with custom instructions |
-| `/review [target] [options]` | Snapshot and independently verify uncommitted, branch, PR, or commit changes |
+| `/review [target] [options]` | Snapshot and independently verify uncommitted, branch (with or without uncommitted changes), PR, or commit changes |
 | `/copy` | Copy last assistant message to clipboard |
 | `/export [file]` | Export session to HTML |
 | `/share` | Upload as private GitHub gist with shareable HTML link |
@@ -165,6 +165,7 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 /review                                      # open a target selector
 /review uncommitted                          # staged, unstaged, deleted, and nonignored untracked files
 /review branch [base]                        # captured HEAD vs a refreshed upstream merge base
+/review branch-uncommitted [base]            # the same, plus staged, unstaged, and untracked changes
 /review pr [number]                          # fetched GitHub base/head OIDs (requires gh)
 /review commit [sha]                         # commit vs first parent, or empty tree for a root commit
 /review branch main --focus "authorization" # add a focused question
@@ -173,7 +174,7 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 /review uncommitted --include-optional       # opt in to P3 suggestions
 ```
 
-For branch targets, Volt captures local `HEAD` first. A plain branch such as `main` resolves through its configured upstream, then a matching `origin/main` or sole matching remote branch, and fetches that remote source ref into an isolated snapshot using the host's Git credentials and network. Short remote targets such as `origin/main` are refreshed the same way. The fetch does not move the working tree, local branches, remote-tracking refs, or the workspace's `FETCH_HEAD`; a failed refresh stops the review instead of falling back to stale state. Use an explicit full ref such as `refs/heads/main` or `refs/remotes/origin/main` to intentionally review against local or cached state. Durable branch reruns recapture that resolved source: remote-backed targets refresh the same remote branch again, while explicit full refs remain local or cached.
+For branch targets, Volt captures local `HEAD` first. `branch-uncommitted` compares the same merge base with the workspace itself, so a branch with uncommitted edits is reviewed as one change; it captures the workspace the way `uncommitted` does and leaves your index and files untouched. A plain branch such as `main` resolves through its configured upstream, then a matching `origin/main` or sole matching remote branch, and fetches that remote source ref into an isolated snapshot using the host's Git credentials and network. Short remote targets such as `origin/main` are refreshed the same way. The fetch does not move the working tree, local branches, remote-tracking refs, or the workspace's `FETCH_HEAD`; a failed refresh stops the review instead of falling back to stale state. Use an explicit full ref such as `refs/heads/main` or `refs/remotes/origin/main` to intentionally review against local or cached state. Durable branch reruns recapture that resolved source: remote-backed targets refresh the same remote branch again, while explicit full refs remain local or cached.
 
 With `/review pr` or an empty PR number in the app, Volt resolves the current branch's configured remote tracking branch, including when its name differs from the local branch. It searches that remote's GitHub repository explicitly, prefers one open PR over historical matches, and otherwise accepts only one historical match. Missing tracking, unsupported or ambiguous remotes, no matching PR, and multiple matching PRs stop with recovery guidance rather than guessing. Configure the intended upstream on the host or supply a PR number. Explicitly numbered reviews use the current branch's configured remote; without a remote tracking configuration (including detached HEAD), they use `origin`, or the sole remote if there is no `origin`. Unsupported, missing, or ambiguous repository URLs stop the review rather than falling back to GitHub CLI's fork-parent/default selection. Numbered reviews do not require the PR to match the current branch. Metadata and subsequent context reads stay pinned to the selected PR and GitHub host. Volt queries authoritative PR metadata through `gh api graphql`, so it does not require `baseRefOid` support in `gh pr view --json`. Failed or invalid metadata stops the review rather than substituting local branch tips. Snapshot fetching uses that same selected remote and its validated fetch URL, preserving the host's Git transport settings rather than assuming `origin`.
 

@@ -91,11 +91,12 @@ export type ResolvedReview = ReviewSnapshot;
 export function reviewTargetForRerun(record: Pick<ReviewRunRecord, "target">): ReviewTarget {
 	const identity = record.target.identity;
 	if (identity.kind === "uncommitted") return { kind: "uncommitted" };
-	if (identity.kind === "branch") {
+	if (identity.kind === "branch" || identity.kind === "branch_uncommitted") {
 		if (!record.target.branchBase) {
 			throw new Error("Durable branch review run does not retain a base locator.");
 		}
-		return { kind: "branch", branchBase: structuredClone(record.target.branchBase) };
+		const branchBase = structuredClone(record.target.branchBase);
+		return identity.kind === "branch" ? { kind: "branch", branchBase } : { kind: "branch_uncommitted", branchBase };
 	}
 	if (identity.kind === "pr") {
 		if (!identity.pullRequest?.url) {
@@ -125,7 +126,7 @@ export const DEFAULT_REVIEW_RUN_CONTROLS: ReviewRunControls = {
 };
 
 export const REVIEW_USAGE =
-	'Usage: /review [tools | uncommitted | branch [base] | pr [number] | commit [ref]] [--focus "text"] [--scope glob[,glob...]] [--effort low|standard|high] [--include-optional] [--incremental|--full]';
+	'Usage: /review [tools | uncommitted | branch [base] | branch-uncommitted [base] | pr [number] | commit [ref]] [--focus "text"] [--scope glob[,glob...]] [--effort low|standard|high] [--include-optional] [--incremental|--full]';
 
 export const REMOTE_REVIEW_TOOL_NAMES = REVIEW_SNAPSHOT_TOOL_NAMES;
 export const REMOTE_REVIEW_FAILURE_MESSAGE = "The review could not be completed.";
@@ -241,6 +242,13 @@ export function parseReviewCommandArgs(argsText: string): {
 		case "branch":
 			target = {
 				kind: "branch",
+				...(!tokens[index]?.startsWith("--") && tokens[index] ? { base: tokens[index++] } : {}),
+			};
+			break;
+		case "branch-uncommitted":
+		case "branch_uncommitted":
+			target = {
+				kind: "branch_uncommitted",
 				...(!tokens[index]?.startsWith("--") && tokens[index] ? { base: tokens[index++] } : {}),
 			};
 			break;
@@ -991,6 +999,8 @@ function provisionalReviewTarget(target: ReviewTarget): string {
 			return "uncommitted changes";
 		case "branch":
 			return "branch changes";
+		case "branch_uncommitted":
+			return "branch and uncommitted changes";
 		case "pr":
 			return "pull request";
 		case "commit":
