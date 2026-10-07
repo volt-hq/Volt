@@ -1,5 +1,6 @@
 import { lstatSync, realpathSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { isBundledCli, isStandaloneBinary } from "../../config.ts";
@@ -12,6 +13,7 @@ import {
 	type SessionStoreWorkerResponseEnvelope,
 } from "./protocol.ts";
 import {
+	SESSION_STORE_BUSY_TIMEOUT_MS,
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreCommitReconciliation,
 	type SessionStoreCreateSessionInput,
@@ -54,6 +56,13 @@ const sharedStores = new Map<string, SharedStoreEntry>();
 const SQLITE_WARNING_FLAG = "--disable-warning=ExperimentalWarning";
 const DAEMON_ONLY_V8_FLAG = "--optimize-for-size";
 const SOURCE_CONDITION = "volt-source";
+/**
+ * How long opening keeps retrying a store that is busy. Concurrent openers
+ * serialize on the store's write lock while one of them initializes or
+ * upgrades it, and SQLite may refuse a lock at once instead of waiting
+ * when waiting could deadlock.
+ */
+const OPEN_BUSY_RETRY_WINDOW_MS = 2 * SESSION_STORE_BUSY_TIMEOUT_MS;
 
 function workerModuleUrl(): URL {
 	const moduleUrl: string | undefined = import.meta.url;
@@ -114,8 +123,18 @@ export class SQLiteSessionStoreClient {
 		});
 		const client = new SQLiteSessionStoreClient(resolvedDirectory, worker);
 		try {
-			client.storeInfo = (await client.call({ kind: "initialize" })) as SessionStoreInfo;
-			return client;
+			const deadline = Date.now() + OPEN_BUSY_RETRY_WINDOW_MS;
+			for (let attempt = 0; ; attempt++) {
+				try {
+					client.storeInfo = (await client.call({ kind: "initialize" })) as SessionStoreInfo;
+					return client;
+				} catch (error) {
+					if (!(error instanceof SessionStoreError && error.code === "store_busy") || Date.now() >= deadline) {
+						throw error;
+					}
+					await delay(Math.min(25 * 2 ** attempt, 500));
+				}
+			}
 		} catch (error) {
 			client.closed = true;
 			client.expectedExit = true;
