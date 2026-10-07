@@ -8,7 +8,9 @@
  * subscription ends `moved` and it subscribes to the target from a snapshot,
  * on the same connection or, following moves by reconnecting, on the next
  * one. On a gap in the live lane it resubscribes after its position.
- * `connect` again on a new transport resumes after its position. Beside it,
+ * `connect` again on a new transport resumes after its position; a client
+ * that resumes after a lost connection (`resumeAfterLoss`) waits for that
+ * instead of failing when its connection ends unannounced. Beside it,
  * `observe` subscribes to a conversation the client may read but not act on,
  * such as a child its conversation's work links, open or closed.
  *
@@ -33,6 +35,7 @@ import {
 	type HostFrame,
 	type HostRequestKind,
 	type HostResponse,
+	INPUT_INTENT_NAMES,
 	type IntentInput,
 	type IntentOutput,
 	type LiveFoldState,
@@ -68,6 +71,20 @@ export class ProtocolRejectedError extends Error {
 		super(reason.message || `${intent} was rejected: ${reason.code}`);
 		this.name = "ProtocolRejectedError";
 		this.reason = reason;
+	}
+}
+
+/**
+ * The connection to the host was lost before an intent answered: it may or
+ * may not have run, and the client does not send it again.
+ */
+export class ProtocolConnectionLostError extends Error {
+	readonly intent: string;
+
+	constructor(intent: string, cause: Error) {
+		super(`The connection to the host was lost before ${intent} answered; it may have run`, { cause });
+		this.name = "ProtocolConnectionLostError";
+		this.intent = intent;
 	}
 }
 
@@ -111,14 +128,38 @@ export interface ProtocolClientOptions {
 	 * (`clientKey`) answers a retried intent as it answered it.
 	 */
 	readonly followMoves?: "subscribe" | "reconnect";
+	/**
+	 * Whether a connection that ends without its host ending the client's
+	 * subscription for good (the transport closed, or the host shut down:
+	 * `ended{shutdown}`, `fatal{host_shutdown}`) lets go of the connection
+	 * without failing, as a move does: the client keeps what it holds of the
+	 * conversation, reports `disconnected`, and holds what it asks; the next
+	 * `connect` resumes after its position and sends again, in order, the
+	 * queries not answered yet, the input intents (which the log dedupes by
+	 * their id), and what it held. An intent that went out and was not
+	 * answered fails with `ProtocolConnectionLostError`: it may have run on a
+	 * host the client no longer reaches.
+	 */
+	readonly resumeAfterLoss?: boolean;
+}
+
+/**
+ * The client lost its connection and waits for the next one (see
+ * `resumeAfterLoss`): `shutdown` when its host ended it shutting down, else
+ * `lost`.
+ */
+export interface ProtocolClientDisconnected {
+	readonly type: "disconnected";
+	readonly reason: "lost" | "shutdown";
+	readonly error: Error;
 }
 
 /**
  * What changed the client: the frame it applied (a snapshot, entry, head, or
- * live frame, an `ended` subscription, or a `changed` catalog), or nothing
- * when the client failed.
+ * live frame, an `ended` subscription, or a `changed` catalog), its lost
+ * connection, or nothing when the client failed.
  */
-export type ProtocolClientChange = HostFrame | undefined;
+export type ProtocolClientChange = HostFrame | ProtocolClientDisconnected | undefined;
 
 export interface ProtocolIntentOptions {
 	/** The intent id; minted when absent. Input intents use it as their durable `clientMessageId`. */
@@ -269,6 +310,8 @@ interface Pending<T> {
 	readonly name: string;
 	/** The frame that asked, sent again on the next connection when the client moves before its answer. */
 	readonly frame: Record<string, unknown>;
+	/** Whether the frame went out on a connection (else the client held it while it moved or was disconnected). */
+	sent: boolean;
 	/** The order the client asked in, across intents and queries. */
 	readonly order: number;
 	readonly resolve: (value: T) => void;
@@ -277,6 +320,8 @@ interface Pending<T> {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+/** Intents the conversation's log dedupes by their id: safe to send again after a lost connection. */
+const INPUT_INTENTS: ReadonlySet<string> = new Set(INPUT_INTENT_NAMES);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -308,6 +353,8 @@ export class ProtocolClient {
 	private failure: Error | undefined;
 	/** The conversation a move redirected the client to, until the next `connect` subscribes to it. */
 	private movingTo: string | undefined;
+	/** The connection the client lost, until the next `connect` resumes (`resumeAfterLoss`). */
+	private lostConnection: ProtocolClientDisconnected | undefined;
 	private requestOrder = 0;
 
 	constructor(options: ProtocolClientOptions = {}) {
@@ -337,6 +384,21 @@ export class ProtocolClient {
 	 */
 	get moving(): string | undefined {
 		return this.movingTo;
+	}
+
+	/**
+	 * While the client moves and has no connection to its target yet, move it
+	 * to `conversation` instead (such as back to the one it left, when its
+	 * target cannot be reached): the next `connect` subscribes there.
+	 */
+	retarget(conversation: string): void {
+		if (this.movingTo === undefined) throw new Error("The client is not moving");
+		this.movingTo = conversation;
+	}
+
+	/** Whether the client lost its connection and waits for the next one (`resumeAfterLoss`). */
+	get disconnected(): boolean {
+		return this.lostConnection !== undefined;
 	}
 
 	get connectionId(): string | undefined {
@@ -369,6 +431,8 @@ export class ProtocolClient {
 	async connect(transport: RpcTransport): Promise<void> {
 		if (this.transport) throw new Error("The client is connected");
 		this.failure = undefined;
+		const resuming = this.lostConnection !== undefined;
+		this.lostConnection = undefined;
 		this.transport = transport;
 		this.detachTransport = [
 			transport.onValue
@@ -383,7 +447,7 @@ export class ProtocolClient {
 						}
 						this.receive(value);
 					}),
-			transport.onClose?.((error) => this.fail(error ?? new Error(this.withContext("The connection closed")))) ??
+			transport.onClose?.((error) => this.dropped(error ?? new Error(this.withContext("The connection closed")))) ??
 				(() => {}),
 		];
 		const welcome = await this.withTimeout(
@@ -404,12 +468,15 @@ export class ProtocolClient {
 		if (conversation === undefined) throw new Error("The host attached the client to no conversation");
 		this.movingTo = undefined;
 		this.subscribe(conversation, resume ? this.clientState.ordinal : "snapshot");
-		if (moving !== undefined) {
-			// What the client asked before its move or while it moved, in the order it asked.
+		if (moving !== undefined || resuming) {
+			// What the client asked before its move or its lost connection, or since, in the order it asked.
 			const waiting = [...this.intents.values(), ...this.queries.values()].sort(
 				(left, right) => left.order - right.order,
 			);
-			for (const pending of waiting) this.send(pending.frame);
+			for (const pending of waiting) {
+				pending.sent = true;
+				this.send(pending.frame);
+			}
 		}
 		await this.withTimeout("the subscription", this.caughtUp());
 	}
@@ -419,7 +486,7 @@ export class ProtocolClient {
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				const error = new Error(this.withContext(`Timeout waiting for ${what}`));
-				this.fail(error);
+				this.dropped(error);
 				reject(error);
 			}, this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 			timer.unref?.();
@@ -490,9 +557,13 @@ export class ProtocolClient {
 		);
 	}
 
-	/** Answer a host request the client was asked; a client that moved away from the request's conversation answers nothing. */
+	/**
+	 * Answer a host request the client was asked; a client that moved away
+	 * from the request's conversation, or lost its connection, answers nothing
+	 * (a request still pending reaches it again once it resumes).
+	 */
 	answer(requestId: string, response: HostResponse): void {
-		if (this.movingTo !== undefined) return;
+		if (this.movingTo !== undefined || this.lostConnection !== undefined) return;
 		this.send({ type: "host_response", requestId, response });
 	}
 
@@ -610,8 +681,8 @@ export class ProtocolClient {
 		frame: Record<string, unknown>,
 	): Promise<T> {
 		if (this.failure) return Promise.reject(this.failure);
-		// A client that moves holds what it asks until it connected to the target.
-		const held = this.movingTo !== undefined;
+		// A client that moves, or lost its connection, holds what it asks until it connected again.
+		const held = this.movingTo !== undefined || this.lostConnection !== undefined;
 		if (!this.transport && !held) return Promise.reject(new Error("The client is not connected"));
 		return new Promise<T>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -619,7 +690,7 @@ export class ProtocolClient {
 				reject(new Error(this.withContext(`Timeout waiting for ${name}`)));
 			}, this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 			timer.unref?.();
-			pending.set(id, { name, frame, order: this.requestOrder++, resolve, reject, timer });
+			pending.set(id, { name, frame, sent: !held, order: this.requestOrder++, resolve, reject, timer });
 			if (!held) this.send(frame);
 		});
 	}
@@ -629,9 +700,9 @@ export class ProtocolClient {
 		if (!transport) throw new Error("The client is not connected");
 		try {
 			const written = transport.write(frame);
-			if (written) void Promise.resolve(written).catch((error: unknown) => this.fail(error));
+			if (written) void Promise.resolve(written).catch((error: unknown) => this.dropped(error));
 		} catch (error) {
-			this.fail(error);
+			this.dropped(error);
 		}
 	}
 
@@ -728,6 +799,10 @@ export class ProtocolClient {
 					this.phaseBasedOn = -1;
 					if (this.options.followMoves === "reconnect") this.redirected(frame.target);
 					else this.subscribe(frame.target, "snapshot");
+				} else if (frame.reason === "shutdown" && this.options.resumeAfterLoss === true) {
+					// The host shuts down: the client resumes on the host it reconnects to.
+					this.lose(new Error(this.withContext("The host shut down")), "shutdown");
+					return;
 				} else if (frame.reason !== "unsubscribed") {
 					this.fail(new Error(this.withContext(`The subscription ended: ${frame.reason}`)));
 				}
@@ -757,6 +832,10 @@ export class ProtocolClient {
 				this.changed(frame);
 				return;
 			case "fatal":
+				if (frame.code === "host_shutdown" && this.options.resumeAfterLoss === true) {
+					this.lose(new Error(this.withContext("The host shut down")), "shutdown");
+					return;
+				}
 				this.fail(
 					new Error(
 						this.withContext(
@@ -788,6 +867,52 @@ export class ProtocolClient {
 		if (transport) void (async () => transport.close())().catch(() => undefined);
 	}
 
+	/**
+	 * The connection ended without the host ending the client's subscription
+	 * for good: a client that resumes after a lost connection waits for the
+	 * next one, any other fails.
+	 */
+	private dropped(error: unknown): void {
+		const cause = error instanceof Error ? error : new Error(String(error));
+		if (this.options.resumeAfterLoss === true) this.lose(cause, "lost");
+		else this.fail(cause);
+	}
+
+	/**
+	 * Let go of the connection without failing: the client keeps what it
+	 * holds of the conversation and what waits for an answer, and the next
+	 * `connect` resumes after its position. What it observed beside its
+	 * conversation ends.
+	 */
+	private lose(error: Error, reason: ProtocolClientDisconnected["reason"]): void {
+		if (this.failure || this.lostConnection) return;
+		const transport = this.transport;
+		for (const detach of this.detachTransport.splice(0)) detach();
+		this.transport = undefined;
+		if (this.subscription) this.subscription.caughtUp = false;
+		// A `connect` in flight fails; the next one resumes.
+		this.welcomeWaiter?.reject(error);
+		this.welcomeWaiter = undefined;
+		for (const waiter of this.caughtUpWaiters) waiter.reject(error);
+		this.caughtUpWaiters.clear();
+		const observations = [...this.observations.values()];
+		this.observations.clear();
+		for (const observation of observations) observation.end("stopped");
+		// An intent that went out and was not answered may have run on a host the next connection may not reach
+		// (a worker that exited takes its outcomes with it): it is not sent again, except input, which the
+		// conversation's log dedupes by its id. Queries are sent again; what was held goes out for the first time.
+		for (const [intentId, pending] of [...this.intents]) {
+			if (!pending.sent || INPUT_INTENTS.has(pending.name)) continue;
+			this.intents.delete(intentId);
+			clearTimeout(pending.timer);
+			pending.reject(new ProtocolConnectionLostError(pending.name, error));
+		}
+		const lost: ProtocolClientDisconnected = { type: "disconnected", reason, error };
+		this.lostConnection = lost;
+		if (transport) void (async () => transport.close())().catch(() => undefined);
+		this.changed(lost);
+	}
+
 	private resubscribeFromSnapshot(): void {
 		const subscription = this.subscription;
 		if (!subscription) return;
@@ -797,7 +922,7 @@ export class ProtocolClient {
 		this.subscribe(subscription.conversation, "snapshot");
 	}
 
-	private changed(change?: HostFrame): void {
+	private changed(change?: HostFrame | ProtocolClientDisconnected): void {
 		for (const listener of [...this.changeListeners]) {
 			try {
 				listener(change);
@@ -811,6 +936,7 @@ export class ProtocolClient {
 		const failure = error instanceof Error ? error : new Error(String(error));
 		if (this.failure) return;
 		this.failure = failure;
+		this.lostConnection = undefined;
 		for (const detach of this.detachTransport.splice(0)) detach();
 		this.failedTransport = this.transport ?? this.failedTransport;
 		this.transport = undefined;

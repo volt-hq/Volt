@@ -22,6 +22,7 @@ import type { ConversationFactory, HostedConversation } from "../../core/host/ho
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import { resolveModelScope } from "../../core/model-resolver.ts";
+import { resolveConversationProjectTrust } from "../../core/project-trust.ts";
 import {
 	type IrohRemoteRuntimeToolPolicy,
 	parseIrohRemoteAllowTools,
@@ -34,9 +35,8 @@ import {
 	type SubagentRuntimeCreatedEvent,
 	type SubagentRuntimeRegistration,
 } from "../../core/subagents/index.ts";
-import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
 import { runMigrations } from "../../migrations.ts";
-import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
+import { resolvePath } from "../../utils/paths.ts";
 import type { WorkerAgentConfig, WorkerSessionOptions } from "../control-protocol.ts";
 import {
 	createSessionManagerTargetStore,
@@ -45,45 +45,12 @@ import {
 	resolveIrohRemoteSessionTarget,
 } from "../session-target.ts";
 import type { SessionWorktreeDaemon } from "../session-worktree.ts";
-import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../worktree-manager.ts";
 
 /** What a TUI opened its worker with: every conversation the worker creates is built from it. */
 export interface WorkerCliOptions {
 	readonly config: WorkerAgentConfig;
 	readonly sessionOptions: WorkerSessionOptions;
 	readonly modelScopePatterns?: readonly string[];
-}
-
-/**
- * Where a conversation in `cwd` takes its project trust from: the parent
- * checkout of a managed worktree, and none for one whose parent is unknown
- * (worktrees-design §5.2.1).
- */
-function projectTrustPath(agentDir: string, cwd: string): string | undefined {
-	const path =
-		resolveWorktreeParentCheckout(agentDir, cwd) ?? (isPathUnderWorktreesRoot(agentDir, cwd) ? undefined : cwd);
-	return path === undefined ? undefined : canonicalizePath(resolvePath(path));
-}
-
-/**
- * The project trust of a conversation in `cwd`: the decision its opener (a
- * TUI) made for the project it opened in, `decided`, applies to that project
- * only; elsewhere, and without one, a project without resources that need
- * trust is trusted, and one with them is trusted only by its saved decision.
- * Read again whenever it matters: a project that had nothing to trust may
- * gain it.
- */
-export function resolveWorkerProjectTrust(
-	agentDir: string,
-	cwd: string,
-	decided: { readonly cwd: string; readonly trusted: boolean } | undefined,
-): boolean {
-	const trustPath = projectTrustPath(agentDir, cwd);
-	if (decided !== undefined && trustPath !== undefined && trustPath === projectTrustPath(agentDir, decided.cwd)) {
-		return decided.trusted;
-	}
-	if (!hasTrustRequiringProjectResources(cwd)) return true;
-	return trustPath !== undefined && new ProjectTrustStore(agentDir).get(trustPath) === true;
 }
 
 export interface IrohRemoteAgentRuntimeOptions {
@@ -225,7 +192,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			projectTrusted:
 				cli === undefined
 					? projectTrusted
-					: resolveWorkerProjectTrust(runtimeOptions.agentDir, runtimeOptions.cwd, decidedTrust),
+					: resolveConversationProjectTrust(runtimeOptions.agentDir, runtimeOptions.cwd, decidedTrust),
 		});
 		applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 		configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());

@@ -56,11 +56,15 @@ function canonicalJson(value: unknown): string {
 	});
 }
 
-/** `config` in canonical form: options left at their defaults (false, unset, no flags) are absent. */
+/**
+ * `config` in canonical form: options left at their defaults (false, unset,
+ * no flags) are absent. `trust: false` is a decision (`--no-approve`, or a
+ * prompt answered no), not a default: unset means the saved decision.
+ */
 export function normalizeWorkerAgentConfig(config: WorkerAgentConfig): WorkerAgentConfig {
 	const normalized: Record<string, unknown> = {};
 	for (const [name, value] of Object.entries(config)) {
-		if (value === undefined || value === false) continue;
+		if (value === undefined || (value === false && name !== "trust")) continue;
 		if (name === "flags" && typeof value === "object" && Object.keys(value).length === 0) continue;
 		normalized[name] = value;
 	}

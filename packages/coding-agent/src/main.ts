@@ -5,23 +5,19 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { ImageContent } from "@hansjm10/volt-ai";
-import { ProcessTerminal, setKeybindings } from "@hansjm10/volt-tui";
 import chalk from "chalk";
-import { buildSessionOptions, resolveCliPaths } from "./cli/agent-options.ts";
+import { buildSessionOptions, createWorkerSpawnOptions, resolveCliPaths } from "./cli/agent-options.ts";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import { selectSession } from "./cli/session-picker.ts";
-import { shouldRunFirstTimeSetup, showFirstTimeSetup, showStartupSelector } from "./cli/startup-ui.ts";
-import { InProcessConnector, LeasedConnector } from "./client/in-process-connector.ts";
-import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, getSessionsDir, VERSION } from "./config.ts";
+import { shouldRunFirstTimeSetup, showFirstTimeSetup } from "./cli/startup-ui.ts";
+import { decideTuiProjectTrust, resolveTuiStartupTarget } from "./cli/tui-startup.ts";
+import { ENV_SESSION_DIR, expandTildePath, getAgentDir, getPackageDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionDiagnostic,
 	createAgentSessionFromServices,
@@ -36,26 +32,13 @@ import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
 import { ConversationHost } from "./core/host/conversation-host.ts";
 import type { ConversationFactory } from "./core/host/hosted-conversation.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
-import { KeybindingsManager } from "./core/keybindings.ts";
 import { LspServerPool } from "./core/lsp/server-pool.ts";
 import { resolveModelScope } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
-import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
-import {
-	formatMissingSessionCwdPrompt,
-	getMissingSessionCwdIssue,
-	MissingSessionCwdError,
-	type SessionCwdIssue,
-} from "./core/session-cwd.ts";
-import {
-	assertValidSessionId,
-	findSessionInfoById,
-	getDefaultSessionDirPath,
-	type SessionInfo,
-	SessionManager,
-	type SessionReference,
-} from "./core/session-manager.ts";
-import { SESSION_STORE_DATABASE_FILENAME } from "./core/session-store/index.ts";
+import { type AppMode, resolveConversationProjectTrust, resolveProjectTrusted } from "./core/project-trust.ts";
+import { getMissingSessionCwdIssue, MissingSessionCwdError } from "./core/session-cwd.ts";
+import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "./core/session-lookup.ts";
+import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { SubagentManager } from "./core/subagents/index.ts";
 import { initTheme, stopThemeWatcher } from "./core/theme/runtime.ts";
@@ -68,18 +51,10 @@ import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemo
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
-import { keyDisplayText } from "./modes/interactive/components/keybinding-hints.ts";
-import {
-	createDaemonLink,
-	DaemonLeases,
-	DaemonLeaseUnavailableError,
-	type DaemonLink,
-	type LeaseWait,
-	openSessionWithDaemonLease,
-} from "./modes/interactive/host/daemon-link.ts";
+import { DaemonConnector } from "./modes/interactive/daemon-connector.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
-import { canonicalizePath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { normalizePath } from "./utils/paths.ts";
 import { cleanupSelfUpdateQuarantine } from "./utils/self-update-native-quarantine.ts";
 
 /**
@@ -199,125 +174,6 @@ async function prepareInitialMessage(
 	});
 }
 
-/** Result from resolving a session argument. Paths are explicit JSONL import sources only. */
-type ResolvedSession =
-	| { type: "path"; path: string }
-	| { type: "local"; ref: SessionReference }
-	| { type: "global"; ref: SessionReference; cwd: string }
-	| { type: "not_found"; arg: string };
-
-function sameFilesystemLocation(left: string, right: string): boolean {
-	return canonicalizePath(resolvePath(left)) === canonicalizePath(resolvePath(right));
-}
-
-function canBeExactSessionId(value: string): boolean {
-	try {
-		assertValidSessionId(value);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function hasSessionStore(sessionDirectory: string): boolean {
-	return existsSync(join(resolvePath(sessionDirectory), SESSION_STORE_DATABASE_FILENAME));
-}
-
-async function findExactSessionInfoInStore(
-	sessionDirectory: string,
-	sessionId: string,
-): Promise<SessionInfo | undefined> {
-	const directory = resolvePath(sessionDirectory);
-	if (!hasSessionStore(directory)) return undefined;
-	return findSessionInfoById(directory, sessionId);
-}
-
-async function findSessionByExactId(
-	sessionId: string,
-	cwd: string,
-	sessionDir?: string,
-): Promise<{ ref: SessionReference; cwd: string } | undefined> {
-	if (sessionDir) {
-		const info = await findExactSessionInfoInStore(sessionDir, sessionId);
-		return info ? { ref: info.ref, cwd: info.cwd } : undefined;
-	}
-
-	const storeErrors: unknown[] = [];
-	let readableStores = 0;
-	const findInReadableStore = async (directory: string): Promise<SessionInfo | undefined> => {
-		if (!hasSessionStore(directory)) return undefined;
-		try {
-			const info = await findSessionInfoById(directory, sessionId);
-			readableStores++;
-			return info;
-		} catch (error) {
-			storeErrors.push(error);
-			return undefined;
-		}
-	};
-
-	const localSessionDir = getDefaultSessionDirPath(cwd);
-	const localInfo = await findInReadableStore(localSessionDir);
-	if (localInfo) return { ref: localInfo.ref, cwd: localInfo.cwd };
-
-	const sessionsRoot = getSessionsDir();
-	if (existsSync(sessionsRoot)) {
-		const localStorePath = canonicalizePath(resolvePath(localSessionDir));
-		const directories = (await readdir(sessionsRoot, { withFileTypes: true }))
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => join(sessionsRoot, entry.name))
-			.filter((directory) => canonicalizePath(resolvePath(directory)) !== localStorePath)
-			.sort();
-		for (const directory of directories) {
-			const info = await findInReadableStore(directory);
-			if (info) return { ref: info.ref, cwd: info.cwd };
-		}
-	}
-	if (readableStores === 0 && storeErrors.length > 0) {
-		throw new AggregateError(storeErrors, "Could not look up an exact session ID in any project store");
-	}
-	return undefined;
-}
-
-async function findLocalSessionByExactId(
-	sessionId: string,
-	cwd: string,
-	sessionDir?: string,
-): Promise<{ type: "local"; ref: SessionReference } | undefined> {
-	const directory = sessionDir ?? getDefaultSessionDirPath(cwd);
-	const info = await findExactSessionInfoInStore(directory, sessionId);
-	if (!info || (info.cwd && !sameFilesystemLocation(info.cwd, cwd))) return undefined;
-	return { type: "local", ref: info.ref };
-}
-
-async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: string): Promise<ResolvedSession> {
-	// If it looks like a file path, resolve it before handing it to the session manager.
-	if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
-		return { type: "path", path: resolvePath(sessionArg, cwd) };
-	}
-
-	// Exact IDs use indexed summary lookup; only the final owner opens the selected transcript.
-	const exactMatch = canBeExactSessionId(sessionArg)
-		? await findSessionByExactId(sessionArg, cwd, sessionDir)
-		: undefined;
-	if (exactMatch) {
-		return !exactMatch.cwd || sameFilesystemLocation(exactMatch.cwd, cwd)
-			? { type: "local", ref: exactMatch.ref }
-			: { type: "global", ref: exactMatch.ref, cwd: exactMatch.cwd };
-	}
-
-	// Prefix matching intentionally remains visible-session enumeration.
-	const localSessions = await SessionManager.list(cwd, sessionDir);
-	const localPrefixMatch = localSessions.find((session) => session.id.startsWith(sessionArg));
-	if (localPrefixMatch) return { type: "local", ref: localPrefixMatch.ref };
-
-	const allSessions = await SessionManager.listAll(sessionDir);
-	const globalMatch = allSessions.find((session) => session.id.startsWith(sessionArg));
-	if (globalMatch) return { type: "global", ref: globalMatch.ref, cwd: globalMatch.cwd };
-
-	return { type: "not_found", arg: sessionArg };
-}
-
 /** Prompt user for yes/no confirmation */
 async function promptConfirm(message: string): Promise<boolean> {
 	return new Promise((resolve) => {
@@ -389,102 +245,11 @@ async function forkSessionOrExit(
 	}
 }
 
-/**
- * Print the waiting line for a pending startup lease and read keys until the
- * wait ends: the interrupt binding stops the daemon's turn, and the clear or
- * exit binding cancels the open. Returns the function that stops reading keys.
- */
-function watchDaemonLeaseWait(sessionId: string, wait: LeaseWait): () => void {
-	const keybindings = KeybindingsManager.create();
-	setKeybindings(keybindings);
-	console.log(
-		chalk.dim(
-			`Waiting for the remote turn in session ${sessionId} to finish before opening it here. ${keyDisplayText("app.interrupt")} stops that turn; ${keyDisplayText("app.clear")} cancels.`,
-		),
-	);
-	// Piped input is read later as the prompt; only a terminal is read for keys.
-	if (!process.stdin.isTTY) return () => {};
-	const terminal = new ProcessTerminal();
-	let stopping = false;
-	terminal.start(
-		(data) => {
-			if (keybindings.matches(data, "app.interrupt")) {
-				if (stopping) return;
-				stopping = true;
-				// Raw mode turns off newline translation.
-				process.stdout.write(`${chalk.dim("Stopping the remote turn...")}\r\n`);
-				wait.abortRemoteTurn();
-			} else if (keybindings.matches(data, "app.clear") || keybindings.matches(data, "app.exit")) {
-				wait.cancel();
-			}
-		},
-		() => {},
-	);
-	return () => terminal.stop();
-}
-
-/**
- * The interactive TUI takes its daemon conversation lease before it opens an
- * existing session for writing (see openSessionWithDaemonLease). The leased
- * link is handed to the TUI host's leases, or released when the session is
- * not served interactively after all.
- */
-class StartupDaemonLease {
-	private readonly agentDir: string;
-	private readonly autoStart: boolean;
-	private link: DaemonLink | undefined;
-
-	constructor(agentDir: string, autoStart: boolean) {
-		this.agentDir = agentDir;
-		this.autoStart = autoStart;
-	}
-
-	async open(ref: SessionReference): Promise<SessionManager> {
-		const cwd = (await findSessionInfoById(ref.sessionDirectory, ref.sessionId))?.cwd;
-		// A session whose cwd is gone has no daemon workspace to lease it in.
-		if (cwd === undefined || !existsSync(cwd)) return SessionManager.open(ref);
-		const opened = await openSessionWithDaemonLease(ref, {
-			createLink: () => createDaemonLink({ cwd, agentDir: this.agentDir, autoStart: this.autoStart }),
-			onWaiting: (wait) => watchDaemonLeaseWait(ref.sessionId, wait),
-		});
-		this.link = opened.link;
-		return opened.manager;
-	}
-
-	/**
-	 * The TUI host's daemon leases: over the leased link, or a link created
-	 * for the conversation the TUI shows once the TUI serves it. Supported TUIs
-	 * keep a reconnecting link even when auto-start is off, so a daemon started
-	 * by another process can discover every already-running agent.
-	 */
-	leases(): DaemonLeases {
-		const link = this.link;
-		this.link = undefined;
-		return new DaemonLeases({
-			...(link === undefined ? {} : { link }),
-			createLink: (conversation) =>
-				createDaemonLink({
-					cwd: conversation.cwd,
-					agentDir: this.agentDir,
-					autoStart: conversation.session.settingsManager.getRemoteSettings().background === true,
-				}),
-		});
-	}
-
-	/** Release the lease when the session is not served interactively after all. */
-	async dispose(): Promise<void> {
-		const link = this.link;
-		this.link = undefined;
-		await link?.dispose();
-	}
-}
-
 async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
-	openSession: (ref: SessionReference) => Promise<SessionManager>,
 ): Promise<SessionManager> {
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd);
@@ -499,7 +264,7 @@ async function createSessionManager(
 			}
 		}
 
-		const resolved = await resolveSessionPath(parsed.fork, cwd, sessionDir);
+		const resolved = await resolveSessionArgument(parsed.fork, cwd, sessionDir);
 
 		switch (resolved.type) {
 			case "path":
@@ -514,14 +279,14 @@ async function createSessionManager(
 	}
 
 	if (parsed.session) {
-		const resolved = await resolveSessionPath(parsed.session, cwd, sessionDir);
+		const resolved = await resolveSessionArgument(parsed.session, cwd, sessionDir);
 
 		switch (resolved.type) {
 			case "path":
 				return SessionManager.importFromJsonl(resolved.path, undefined, sessionDir);
 
 			case "local":
-				return openSession(resolved.ref);
+				return SessionManager.open(resolved.ref);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -552,7 +317,7 @@ async function createSessionManager(
 				console.log(chalk.dim("No session selected"));
 				process.exit(0);
 			}
-			return openSession(selectedRef);
+			return SessionManager.open(selectedRef);
 		} finally {
 			stopThemeWatcher();
 		}
@@ -560,27 +325,17 @@ async function createSessionManager(
 
 	if (parsed.continue) {
 		const latest = await SessionManager.findContinuation(cwd, sessionDir);
-		return latest ? openSession(latest) : SessionManager.create(cwd, sessionDir);
+		return latest ? SessionManager.open(latest) : SessionManager.create(cwd, sessionDir);
 	}
 
 	if (parsed.sessionId) {
 		const existingSession = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
 		if (existingSession) {
-			return openSession(existingSession.ref);
+			return SessionManager.open(existingSession.ref);
 		}
 	}
 
 	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
-}
-
-async function promptForMissingSessionCwd(
-	issue: SessionCwdIssue,
-	settingsManager: SettingsManager,
-): Promise<string | undefined> {
-	return showStartupSelector(settingsManager, formatMissingSessionCwdPrompt(issue), [
-		{ label: "Continue", value: issue.fallbackCwd },
-		{ label: "Cancel", value: undefined },
-	]);
 }
 
 async function throwAfterClosingSessionManager(
@@ -625,17 +380,6 @@ class CliSessionManagerOwner {
 		return throwAfterClosingSessionManager(manager, error, message);
 	}
 
-	/**
-	 * Close the current manager, releasing its session lock, then adopt the
-	 * manager `open` returns, which may reopen the same session.
-	 */
-	async replace(open: () => Promise<SessionManager>): Promise<void> {
-		const previous = this.release();
-		if (!previous) throw new Error("Cannot replace a CLI session manager after ownership transferred");
-		await closeLocalSessionManager(previous);
-		this.manager = await open();
-	}
-
 	transfer(): SessionManager {
 		const manager = this.release();
 		if (!manager) throw new Error("CLI session manager ownership has already transferred");
@@ -675,6 +419,108 @@ async function runWithOwnedConversationHost(
 	}
 	if (operationFailed) throw operationError;
 	if (cleanupFailed) throw cleanupError;
+}
+
+interface InteractiveStartupContext {
+	readonly cwd: string;
+	readonly agentDir: string;
+	readonly sessionDir: string | undefined;
+	readonly startupSettingsManager: SettingsManager;
+	readonly requestedProfile: string | undefined;
+	readonly requestedSessionName: string | undefined;
+	readonly migratedProviders: string[];
+	readonly deprecationWarnings: string[];
+	readonly extensionFactories: ExtensionDefinition[] | undefined;
+}
+
+/**
+ * Run the interactive TUI as a client of a daemon worker (Phase 7 plan §9
+ * row 8): resolve the conversation it opens and decide its project trust
+ * read-only, then attach through the daemon connector, which starts the
+ * daemon when none runs. The TUI renders and takes typing before its worker
+ * is ready.
+ */
+async function runInteractive(parsed: Args, context: InteractiveStartupContext): Promise<void> {
+	const { cwd, agentDir, sessionDir, startupSettingsManager, requestedProfile } = context;
+	if (context.extensionFactories !== undefined && context.extensionFactories.length > 0) {
+		console.error(
+			chalk.red(
+				"Error: extension factories run in this process; an interactive TUI runs its conversations in daemon workers. Build InteractiveMode over an InProcessConnector instead.",
+			),
+		);
+		process.exitCode = 1;
+		return;
+	}
+	const startup = await resolveTuiStartupTarget(parsed, {
+		cwd,
+		sessionDir,
+		agentDir,
+		settingsManager: startupSettingsManager,
+		confirm: promptConfirm,
+	});
+	if ("exit" in startup) {
+		if (startup.message !== undefined) console.error(chalk.red(`Error: ${startup.message}`));
+		process.exitCode = startup.exit;
+		return;
+	}
+	time("resolveStartupTarget");
+	const decided = await decideTuiProjectTrust(parsed, startup.cwd, agentDir, startupSettingsManager);
+	const projectTrusted = resolveConversationProjectTrust(agentDir, startup.cwd, decided);
+	time("decideProjectTrust");
+	const displaySettings = SettingsManager.create(startup.cwd, agentDir, { projectTrusted, profile: requestedProfile });
+	reportDiagnostics(collectSettingsDiagnostics(displaySettings, "interactive startup"));
+	const { initialMessage, initialImages } = await prepareInitialMessage(parsed, displaySettings.getImageAutoResize());
+	if (context.deprecationWarnings.length > 0) await showDeprecationWarnings(context.deprecationWarnings);
+	const connector = new DaemonConnector({
+		agentDir,
+		startup,
+		spawn: createWorkerSpawnOptions(parsed, {
+			cwd,
+			env: process.env,
+			...(decided === undefined ? {} : { trust: decided.trusted }),
+			...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
+		}),
+		...(sessionDir === undefined ? {} : { sessionDir }),
+	});
+	const interactiveMode = new InteractiveMode(connector, {
+		migratedProviders: context.migratedProviders,
+		// The TUI reads its own settings where its conversation starts, with the trust it decided.
+		settingsScope: {
+			cwd: startup.cwd,
+			projectTrusted,
+			...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
+		},
+		// Its host runs in a worker: the TUI keeps to its own decision for its display settings.
+		projectTrust: decided ?? { cwd: startup.cwd, trusted: projectTrusted },
+		autoTrustOnReloadCwd:
+			parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(startup.cwd)
+				? startup.cwd
+				: undefined,
+		initialMessage,
+		initialImages,
+		initialMessages: parsed.messages,
+		...(context.requestedSessionName === undefined ? {} : { sessionName: context.requestedSessionName }),
+		verbose: parsed.verbose,
+		...(parsed.tuiMode !== undefined ? { tuiMode: parsed.tuiMode } : {}),
+	});
+	if (isTruthyEnvFlag(process.env.VOLT_STARTUP_BENCHMARK)) {
+		// Startup ends once the TUI shows its conversation: attached to its worker, caught up with its log.
+		await interactiveMode.init();
+		time("interactiveMode.init");
+		printTimings();
+		interactiveMode.stop();
+		await connector.dispose();
+		stopThemeWatcher();
+		if (process.stdout.writableLength > 0) {
+			await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
+		}
+		if (process.stderr.writableLength > 0) {
+			await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
+		}
+		return;
+	}
+	printTimings();
+	await interactiveMode.run();
 }
 
 export interface MainOptions {
@@ -822,30 +668,34 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
-	const startupDaemonLease =
-		appMode === "interactive"
-			? new StartupDaemonLease(agentDir, startupSettingsManager.getRemoteSettings().background === true)
-			: undefined;
-	let initialSessionManager: SessionManager;
-	try {
-		initialSessionManager = await createSessionManager(
-			parsed,
+	// The interactive TUI is a client of a daemon worker: it opens no session itself.
+	if (appMode === "interactive" && !parsed.help && parsed.listModels === undefined) {
+		await runInteractive(parsed, {
 			cwd,
+			agentDir,
 			sessionDir,
 			startupSettingsManager,
-			(ref) => startupDaemonLease?.open(ref) ?? SessionManager.open(ref),
-		);
+			requestedProfile,
+			requestedSessionName,
+			migratedProviders,
+			deprecationWarnings,
+			extensionFactories: options?.extensionFactories,
+		});
+		return;
+	}
+	let initialSessionManager: SessionManager;
+	try {
+		initialSessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager);
 	} catch (error) {
-		// Another process has the session open for writing, or another TUI holds its lease.
-		if (!(error instanceof ConversationLockedError) && !(error instanceof DaemonLeaseUnavailableError)) throw error;
+		// Another process has the session open for writing.
+		if (!(error instanceof ConversationLockedError)) throw error;
 		console.error(chalk.red(`Error: ${error.message}`));
 		process.exit(1);
 	}
 	// From this point until the host opens the startup conversation, this is the sole
-	// owner/finalizer for the acquired manager. Replacement closes the old manager
-	// before adopting the new one; transfer relinquishes it to the host's open.
+	// owner/finalizer for the acquired manager; transfer relinquishes it to the host's open.
 	const sessionManagerOwner = new CliSessionManagerOwner(initialSessionManager);
-	let missingSessionCwdIssue: SessionCwdIssue | undefined;
+	let missingSessionCwdIssue: ReturnType<typeof getMissingSessionCwdIssue>;
 	try {
 		await restoreLocalSessionWorktree(sessionManagerOwner.current, agentDir);
 		missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManagerOwner.current, cwd);
@@ -853,36 +703,15 @@ export async function main(args: string[], options?: MainOptions) {
 		return await sessionManagerOwner.fail(error, "Session cwd validation failed and its manager could not be closed");
 	}
 	if (missingSessionCwdIssue) {
-		if (appMode === "interactive") {
-			let selectedCwd: string | undefined;
-			try {
-				selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
-			} catch (error) {
-				return await sessionManagerOwner.fail(
-					error,
-					"Session cwd selection failed and its manager could not be closed",
-				);
-			}
-			if (!selectedCwd) {
-				await sessionManagerOwner.close();
-				await startupDaemonLease?.dispose();
-				process.exitCode = 0;
-				return;
-			}
-			// The session is reopened with the selected cwd once the first copy released its lock.
-			const sessionRef = missingSessionCwdIssue.sessionRef!;
-			await sessionManagerOwner.replace(() => SessionManager.open(sessionRef, selectedCwd));
-		} else {
-			const error = new MissingSessionCwdError(missingSessionCwdIssue);
-			try {
-				await sessionManagerOwner.close();
-			} catch (closeError) {
-				throw new AggregateError([error, closeError], "Invalid session cwd and manager close both failed");
-			}
-			console.error(chalk.red(error.message));
-			process.exitCode = 1;
-			return;
+		const error = new MissingSessionCwdError(missingSessionCwdIssue);
+		try {
+			await sessionManagerOwner.close();
+		} catch (closeError) {
+			throw new AggregateError([error, closeError], "Invalid session cwd and manager close both failed");
 		}
+		console.error(chalk.red(error.message));
+		process.exitCode = 1;
+		return;
 	}
 	if (requestedSessionName) {
 		try {
@@ -895,7 +724,6 @@ export async function main(args: string[], options?: MainOptions) {
 
 	let trustStore: ProjectTrustStore;
 	let sessionCwd: string;
-	let autoTrustOnReloadCwd: string | undefined;
 	let trustPromptMode: AppMode;
 	let resolvedExtensionPaths: string[] | undefined;
 	let resolvedSkillPaths: string[] | undefined;
@@ -905,10 +733,6 @@ export async function main(args: string[], options?: MainOptions) {
 	try {
 		trustStore = new ProjectTrustStore(agentDir);
 		sessionCwd = sessionManagerOwner.current.getCwd();
-		autoTrustOnReloadCwd =
-			parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(sessionCwd)
-				? sessionCwd
-				: undefined;
 		trustPromptMode = parsed.help || parsed.listModels !== undefined ? "print" : appMode;
 		resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 		resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
@@ -922,8 +746,6 @@ export async function main(args: string[], options?: MainOptions) {
 		);
 	}
 	const projectTrustByCwd = new Map<string, boolean>();
-	/** The project trust decided for the startup conversation: the TUI reads its own settings with it. */
-	let startupProjectTrusted: boolean | undefined;
 	// Every session this factory creates (root, subagents, replacements) shares language servers
 	// and, per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
@@ -1005,12 +827,6 @@ export async function main(args: string[], options?: MainOptions) {
 				extensionFactories: options?.extensionFactories,
 			},
 		});
-		if (isInitialRuntime) {
-			startupProjectTrusted =
-				shouldResolveProjectTrust && trustPath !== undefined
-					? (projectTrustByCwd.get(trustPath) ?? false)
-					: projectTrusted;
-		}
 		let subagentManager: SubagentManager | undefined;
 		try {
 			const { settingsManager, modelRegistry, resourceLoader } = services;
@@ -1107,14 +923,7 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 	};
 	time("createRuntime");
-	// The leases' open gate takes a resumed session's lease before the session opens.
-	const daemonLeases = startupDaemonLease?.leases();
-	const host = new ConversationHost({
-		factory: createRuntime,
-		agentDir,
-		extensionMode: toExtensionMode(appMode),
-		...(daemonLeases === undefined ? {} : { openGate: daemonLeases.openGate }),
-	});
+	const host = new ConversationHost({ factory: createRuntime, agentDir, extensionMode: toExtensionMode(appMode) });
 	const opened = await host.open({ kind: "adopt", sessionManager: sessionManagerOwner.transfer(), cwd: sessionCwd });
 	if (opened.cancelled) throw new Error("Startup session open was cancelled");
 	const conversation = opened.conversation;
@@ -1140,7 +949,6 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 
 		// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC.
-		// Interactive mode starts only with a terminal on stdin, so it reads nothing here.
 		const stdinContent = appMode !== "rpc" ? await readPipedStdin() : undefined;
 		time("readPipedStdin");
 
@@ -1150,15 +958,9 @@ export async function main(args: string[], options?: MainOptions) {
 			stdinContent,
 		);
 		time("prepareInitialMessage");
-		initTheme(settingsManager.getTheme(), appMode === "interactive");
+		initTheme(settingsManager.getTheme(), false);
 		time("initTheme");
 
-		// Show deprecation warnings in interactive mode
-		if (appMode === "interactive" && deprecationWarnings.length > 0) {
-			await showDeprecationWarnings(deprecationWarnings);
-		}
-
-		time("resolveModelScope");
 		reportDiagnostics(conversation.diagnostics);
 		if (conversation.diagnostics.some((diagnostic) => diagnostic.type === "error")) {
 			process.exitCode = 1;
@@ -1166,90 +968,39 @@ export async function main(args: string[], options?: MainOptions) {
 		}
 		time("createAgentSession");
 
-		if (appMode !== "interactive" && !session.model) {
+		if (!session.model) {
 			console.error(chalk.red(formatNoModelsAvailableMessage()));
 			process.exitCode = 1;
 			return;
 		}
 
-		const startupBenchmark = isTruthyEnvFlag(process.env.VOLT_STARTUP_BENCHMARK);
-		if (startupBenchmark && appMode !== "interactive") {
+		if (isTruthyEnvFlag(process.env.VOLT_STARTUP_BENCHMARK)) {
 			console.error(chalk.red("Error: VOLT_STARTUP_BENCHMARK only supports interactive mode"));
 			process.exitCode = 1;
 			return;
 		}
 
-		if (appMode !== "interactive") {
-			// Piped stdin turned an interactive start into a print run; the daemon gets the session back.
-			await daemonLeases?.dispose();
-		}
+		printTimings();
+		transferRuntime();
 		if (appMode === "rpc") {
-			printTimings();
-			transferRuntime();
 			await runRpcMode(host, conversation, {
 				onReady: () => {
 					void conversation.startRecoveredClientInputs().catch(() => undefined);
 				},
 				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
 			});
-		} else if (appMode === "interactive") {
-			const connectorOptions = {
-				host,
-				conversation,
-				...(parsed.models === undefined ? {} : { modelScopePatterns: parsed.models }),
-			};
-			const connector =
-				daemonLeases === undefined
-					? InProcessConnector.start(connectorOptions)
-					: new LeasedConnector({ ...connectorOptions, daemon: daemonLeases });
-			const interactiveMode = new InteractiveMode(connector, {
-				migratedProviders,
-				// The TUI reads its own settings where it decided to start, with the trust it decided, until its client tells.
-				settingsScope: {
-					cwd: sessionCwd,
-					projectTrusted: startupProjectTrusted ?? false,
-					...(requestedProfile === undefined ? {} : { profile: requestedProfile }),
-				},
-				autoTrustOnReloadCwd,
-				initialMessage,
-				initialImages,
-				initialMessages: parsed.messages,
-				verbose: parsed.verbose,
-				...(parsed.tuiMode !== undefined ? { tuiMode: parsed.tuiMode } : {}),
-			});
-			if (startupBenchmark) {
-				await interactiveMode.init();
-				time("interactiveMode.init");
-				printTimings();
-				interactiveMode.stop();
-				stopThemeWatcher();
-				if (process.stdout.writableLength > 0) {
-					await new Promise<void>((resolve) => process.stdout.once("drain", resolve));
-				}
-				if (process.stderr.writableLength > 0) {
-					await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
-				}
-				return;
-			}
-
-			printTimings();
-			transferRuntime();
-			await interactiveMode.run();
-		} else {
-			printTimings();
-			transferRuntime();
-			const exitCode = await runPrintMode(host, conversation, {
-				mode: toPrintOutputMode(appMode),
-				messages: parsed.messages,
-				initialMessage,
-				initialImages,
-			});
-			stopThemeWatcher();
-			restoreStdout();
-			if (exitCode !== 0) {
-				process.exitCode = exitCode;
-			}
 			return;
 		}
-	}).finally(() => daemonLeases?.dispose());
+		const exitCode = await runPrintMode(host, conversation, {
+			mode: toPrintOutputMode(appMode),
+			messages: parsed.messages,
+			initialMessage,
+			initialImages,
+		});
+		stopThemeWatcher();
+		restoreStdout();
+		if (exitCode !== 0) {
+			process.exitCode = exitCode;
+		}
+	});
 }

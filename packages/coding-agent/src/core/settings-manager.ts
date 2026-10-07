@@ -197,8 +197,6 @@ export interface ExtensionEntrySettings {
 }
 
 export interface RemoteSettings {
-	/** Auto-spawn the voltd daemon at startup. Supported TUIs join any running daemon. Default: false. */
-	background?: boolean;
 	/** Detached headless runtime retention TTL in milliseconds (daemon-side). */
 	detachedRuntimeTtlMs?: number;
 	/** Tool allowlist for daemon-owned headless runtimes only. */

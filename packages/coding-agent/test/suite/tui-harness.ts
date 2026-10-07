@@ -17,6 +17,7 @@ import { InProcessConnector, LeasedConnector } from "../../src/client/in-process
 import type { ProtocolClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { KeybindingsManager } from "../../src/core/keybindings.ts";
+import type { DecidedProjectTrust } from "../../src/core/project-trust.ts";
 import { readIrohJsonlLine } from "../../src/core/protocol/transport/iroh-transport.ts";
 import { createIrohRemotePresetAccess } from "../../src/core/remote/iroh/access-grant.ts";
 import { createIrohRemoteHandshakeSuccess } from "../../src/core/remote/iroh/handshake.ts";
@@ -95,6 +96,8 @@ export interface TuiHarness extends HostHarness {
 		columns?: number;
 		rows?: number;
 		connect?: boolean;
+		/** The project trust the TUI decided at startup, as the volt CLI passes it (its host runs elsewhere). */
+		projectTrust?: DecidedProjectTrust;
 	}): Promise<TuiModeFixture>;
 	/** Store a session in the startup conversation's session directory, for a resume. */
 	storeSession(name?: string): Promise<SessionReference>;
@@ -167,6 +170,7 @@ export async function createTuiHarness(options: TuiHarnessOptions = {}): Promise
 						projectTrusted: settings.isProjectTrusted(),
 						...(profile === undefined ? {} : { profile }),
 					},
+					...(modeOptions.projectTrust === undefined ? {} : { projectTrust: modeOptions.projectTrust }),
 				});
 				const access = mode as unknown as ModeAccess;
 				const terminal = new VirtualTerminal(modeOptions.columns ?? 100, modeOptions.rows ?? 30);

@@ -56,6 +56,11 @@ import { keyHint } from "./keybinding-hints.ts";
 type RemoteStatus = Extract<ControlResponse, { type: "status_result" }>;
 type PairingProgress = Extract<ControlEvent, { type: "pairing_progress" }>;
 
+/** A worker's attached clients, as `/remote` shows them. */
+function formatWorkerClients(clients: { readonly local: number; readonly remote: number }): string {
+	return `${clients.local} terminal${clients.local === 1 ? "" : "s"}, ${clients.remote} phone${clients.remote === 1 ? "" : "s"} attached`;
+}
+
 export class RemoteControlRequestError extends Error {
 	readonly code: string;
 
@@ -1382,7 +1387,7 @@ export class RemoteControlCenterComponent implements Component {
 			relayCredential?.state === "subscription_inactive" ||
 			relayCredential?.state === "revocation_pending" ||
 			relayCredential?.state === "pairing";
-		const currentLease = status.leases.find((lease) => lease.sessionId === this.options.currentSessionId);
+		const currentWorker = status.workers.find((worker) => worker.sessionIds.includes(this.options.currentSessionId));
 		const currentWorkspace =
 			status.workspaces.find((workspace) => workspace.name === this.options.getCurrentWorkspaceName()) ??
 			workspaceForPath(status, this.options.getCurrentWorkspacePath());
@@ -1431,10 +1436,10 @@ export class RemoteControlCenterComponent implements Component {
 				tone: status.phoneConnections > 0 ? "success" : "muted",
 			},
 			{
-				text: currentLease
-					? `Current lease: ${currentLease.state} · ${currentLease.streamCount} stream${currentLease.streamCount === 1 ? "" : "s"} · ${currentLease.relayCount} relay${currentLease.relayCount === 1 ? "" : "s"}`
-					: "Current lease: not reported by daemon",
-				tone: currentLease ? "text" : "muted",
+				text: currentWorker
+					? `This conversation: worker pid ${currentWorker.pid} · ${currentWorker.state} · ${formatWorkerClients(currentWorker.clients)}`
+					: "This conversation: no worker reported by the daemon",
+				tone: currentWorker ? "text" : "muted",
 			},
 			{ text: "ACTIONS", tone: "accent" },
 			{ key: "refresh", text: "Refresh status", tone: "text" },
@@ -1527,12 +1532,13 @@ export class RemoteControlCenterComponent implements Component {
 			if (workspace.allowedTools)
 				rows.push({ text: `  Tools: ${workspace.allowedTools.join(", ") || "none"}`, tone: "dim" });
 		}
-		rows.push({ text: "LEASES", tone: "accent" });
-		if (status.leases.length === 0) rows.push({ text: "No active conversation leases.", tone: "muted" });
-		for (const lease of status.leases) {
-			const current = lease.sessionId === this.options.currentSessionId;
+		rows.push({ text: "WORKERS", tone: "accent" });
+		if (status.workers.length === 0) rows.push({ text: "No conversation workers.", tone: "muted" });
+		for (const worker of status.workers) {
+			const current = worker === currentWorker;
+			const sessions = worker.sessionIds.map((id) => abbreviatedId(id, width < 60 ? 10 : 18)).join(", ");
 			rows.push({
-				text: `${current ? "Current · " : ""}${lease.workspaceName}/${abbreviatedId(lease.sessionId, width < 60 ? 10 : 18)} · ${lease.state} · ${lease.streamCount} streams · ${lease.relayCount} relays`,
+				text: `${current ? "Current · " : ""}${worker.workspaceName}/${sessions} · pid ${worker.pid} · ${worker.state} · opened by ${worker.origin} · ${formatWorkerClients(worker.clients)}`,
 				tone: current ? "accent" : "text",
 			});
 		}

@@ -180,7 +180,7 @@ describe("worktree_resolve / worktree_bind control requests (§5.2.2)", () => {
 	});
 });
 
-describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
+describe("resolveDaemonWorkspaceForCwd (§5.2.2)", () => {
 	function createFakeClient(handlers: {
 		workspaces: Array<{ name: string; path: string }>;
 		resolve?: (path: string) => ControlResponse;
@@ -242,18 +242,10 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
 		expect(client.requests.some((req) => req.type === "workspace_register")).toBe(false);
 	});
 
-	it("keeps the auto-register fallback on a miss", async () => {
+	it("registers nothing when no workspace contains the directory, sensitive or not (D17)", async () => {
 		const client = createFakeClient({ workspaces: [{ name: "repo", path: HOST_PARENT_PATH }] });
 		const projectPath = join(HOST_FIXTURE_ROOT, "elsewhere", "project");
-		const resolved = await resolveDaemonWorkspaceForCwd(client, projectPath);
-		expect(resolved).toEqual({ name: "project", path: projectPath });
-		const register = client.requests.find((req) => req.type === "workspace_register");
-		expect(register).toMatchObject({ name: "project", path: projectPath });
-	});
-
-	it("never auto-registers a sensitive directory: the home directory, or the agent directory and what contains it (D17)", async () => {
-		const client = createFakeClient({ workspaces: [{ name: "repo", path: HOST_PARENT_PATH }] });
-		for (const path of [homedir(), getAgentDir(), join(getAgentDir(), "daemon"), dirname(getAgentDir())]) {
+		for (const path of [projectPath, homedir(), getAgentDir(), dirname(getAgentDir())]) {
 			expect(await resolveDaemonWorkspaceForCwd(client, path)).toBeUndefined();
 		}
 		expect(client.requests.some((req) => req.type === "workspace_register")).toBe(false);
@@ -487,6 +479,39 @@ describe("openDaemonWorktreeControl (§5.2.1)", () => {
 		expect(await opened.control.bindSession("fix-login", "s-new")).toBe(true);
 		const bind = harness.requests.find((request) => request.type === "worktree_bind");
 		expect(bind).toMatchObject({ workspaceName: "repo", worktreeId: "fix-login", sessionId: "s-new" });
+	});
+
+	it("takes the conversation's workspace when the TUI knows it, and registers none it does not", async () => {
+		const harness = await startControlHarness((connection, request) => {
+			if (request.type === "status") {
+				connection.send(statusResult(request.id, [{ name: "repo", path: HOST_PARENT_PATH }]));
+				return;
+			}
+			connection.send({ type: "error", id: request.id, code: "not_found", message: "no" });
+		});
+		const ensureDaemon = async (agentDir: string): Promise<EnsureDaemonResult> => ({
+			healthy: true,
+			state: "healthy",
+			socketPath: getDaemonPaths(agentDir).socketPath,
+			spawned: false,
+		});
+		const elsewhere = join(HOST_FIXTURE_ROOT, "elsewhere");
+		const named = await openDaemonWorktreeControl({
+			cwd: elsewhere,
+			agentDir: harness.agentDir,
+			workspaceName: "repo",
+			ensureDaemon,
+		});
+		expect(named).toMatchObject({ ok: true, control: { workspaceName: "repo", workspacePath: HOST_PARENT_PATH } });
+		if (named.ok) await named.control.close();
+
+		const unregistered = await openDaemonWorktreeControl({
+			cwd: elsewhere,
+			agentDir: harness.agentDir,
+			ensureDaemon,
+		});
+		expect(unregistered).toMatchObject({ ok: false, error: expect.stringContaining("no registered workspace") });
+		expect(harness.requests.some((request) => request.type === "workspace_register")).toBe(false);
 	});
 
 	it("fails fast when the daemon is unavailable", async () => {
