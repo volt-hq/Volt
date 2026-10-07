@@ -82,6 +82,13 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 }
 
 function measureHeight(context: LayoutContext, component: Component, width: number): number {
+	const node = getLayoutNode(component);
+	if (node?.type === "scroll") {
+		// A scroll view is as tall as its content. Measuring the content through the pass cache lets layout reuse
+		// that render; rendering the scroll view itself would render its content a second time.
+		const contentWidth = node.state.getContentWidth(Math.max(1, Math.floor(width)));
+		return renderCached(context, node.component, contentWidth).lines.length;
+	}
 	return renderCached(context, component, width).lines.length;
 }
 
@@ -208,12 +215,13 @@ function layoutComponent(
 		typeof entry.basis === "number" ? entry.basis : measureWidth(context, entry.component, safeWidth),
 	);
 	const widths = allocateStackSizes(entries, intrinsicWidths, safeWidth, node.gap);
-	const intrinsicHeights = entries.map((entry, index) =>
-		measureHeight(context, entry.component, Math.max(1, widths[index]!)),
-	);
+	// Child heights size the row only when its height is open or its children are not stretched across it, so a
+	// stretched row of a known height never renders its children just to measure them.
+	const intrinsicHeight = (index: number): number =>
+		measureHeight(context, entries[index]!.component, Math.max(1, widths[index]!));
 	const allocatedHeight =
 		height === undefined
-			? intrinsicHeights.reduce((max, childHeight) => Math.max(max, childHeight), 0)
+			? entries.reduce((max, _entry, index) => Math.max(max, intrinsicHeight(index)), 0)
 			: Math.max(0, height);
 	const rect = { x, y, width: safeWidth, height: allocatedHeight };
 	const box: LayoutBox = {
@@ -225,8 +233,8 @@ function layoutComponent(
 	};
 	let childX = x;
 	for (let index = 0; index < entries.length; index++) {
-		const naturalChildHeight = intrinsicHeights[index]!;
-		const childHeight = node.align === "stretch" ? allocatedHeight : Math.min(allocatedHeight, naturalChildHeight);
+		const childHeight =
+			node.align === "stretch" ? allocatedHeight : Math.min(allocatedHeight, intrinsicHeight(index));
 		let childY = y;
 		if (node.align === "center") childY += Math.floor((allocatedHeight - childHeight) / 2);
 		else if (node.align === "end") childY += allocatedHeight - childHeight;

@@ -37,7 +37,7 @@ import { theme } from "../../../core/theme/runtime.ts";
 import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { stripTerminalControls } from "../../../core/ui/ansi-tokens.ts";
 import { keyHint } from "../components/keybinding-hints.ts";
-import { createUiNodeView, type UiNodeViewOptions } from "./registry.ts";
+import { createUiNodeView, isRenderVolatile, type UiNodeViewOptions } from "./registry.ts";
 import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
 export type ToolCardState = "pending" | "running" | "done";
@@ -178,12 +178,21 @@ function boundWorkIds(presentation: ToolPresentation): Set<string> {
 	return ids;
 }
 
-/** One tool call: its presentation in the client's chrome. */
+/**
+ * One tool call: its presentation in the client's chrome.
+ *
+ * A transcript renders every card on every frame, and a card's output changes only when its props do. So the card
+ * keeps the frame it last rendered and returns it for the same width until `setProps` or `invalidate`, except
+ * while its nodes can render differently on their own (`isRenderVolatile`).
+ */
 export class ToolCard implements Component {
 	private props: ToolCardProps;
 	private readonly content: ViewReconciler<UiNode>;
 	/** The actions, images, and work below the content. */
 	private readonly extras: ViewReconciler<UiNode>;
+	private cache: { width: number; frame: RenderFrame } | undefined;
+	/** The nodes shown can render differently from one render to the next, so no frame is kept. */
+	private volatile = false;
 
 	constructor(props: ToolCardProps, options: UiNodeViewOptions = {}) {
 		this.props = props;
@@ -198,16 +207,25 @@ export class ToolCard implements Component {
 	}
 
 	invalidate(): void {
+		this.cache = undefined;
 		this.content.invalidate();
 		this.extras.invalidate();
 	}
 
 	dispose(): void {
+		this.cache = undefined;
 		this.content.dispose();
 		this.extras.dispose();
 	}
 
 	render(width: number): RenderFrame {
+		if (this.cache?.width === width) return this.cache.frame;
+		const frame = this.renderFrame(width);
+		if (!this.volatile) this.cache = { width, frame };
+		return frame;
+	}
+
+	private renderFrame(width: number): RenderFrame {
 		const { presentation, expanded } = this.props;
 		if (presentation.hidden) return createRenderFrame([]);
 		const inner = Math.max(1, width - 2);
@@ -220,6 +238,7 @@ export class ToolCard implements Component {
 	}
 
 	private sync(): void {
+		this.cache = undefined;
 		const { presentation, expanded, images = [], work = [] } = this.props;
 		const shown = expanded && presentation.body !== undefined ? presentation.body : (presentation.summary ?? []);
 		this.content.update(shown);
@@ -233,6 +252,7 @@ export class ToolCard implements Component {
 		const presented = boundWorkIds(presentation);
 		for (const item of work) if (!presented.has(item.workId)) extras.push(...workNodes(item, expanded === true));
 		this.extras.update(extras);
+		this.volatile = isRenderVolatile([...shown, ...extras]);
 	}
 
 	/** The title, then the state badge, activity, and elapsed time; the title gives way first. */

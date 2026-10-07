@@ -238,6 +238,28 @@ function isRunningTimedStep(step: ProgressStep): boolean {
 	return step.status === "active" && step.startedAt !== undefined && step.endedAt === undefined;
 }
 
+/**
+ * Whether views of `nodes` can render differently from one render to the next while the nodes stay the same: a
+ * running timed step advances with the clock, and an image follows the terminal's image support and cell size.
+ * A frame rendered from such nodes is only good for the render that produced it.
+ */
+export function isRenderVolatile(nodes: readonly UiNode[]): boolean {
+	return nodes.some((node) => {
+		switch (node.type) {
+			case "progress":
+				return node.kind === "steps" && node.steps.some(isRunningTimedStep);
+			case "image":
+				return true;
+			case "list":
+				return isRenderVolatile(node.items);
+			case "card":
+				return (node.sections ?? []).some((section) => isRenderVolatile(section.children));
+			default:
+				return false;
+		}
+	});
+}
+
 /** How long a step ran, or runs so far while active; undefined for an untimed step. */
 function stepDuration(step: ProgressStep, now: number): string | undefined {
 	if (step.startedAt === undefined) return undefined;

@@ -474,4 +474,74 @@ describe("tool card", () => {
 		expect(rendered).toContain("[ Open ]");
 		expect(rendered).toContain("[Image: [image/png] 1x1]");
 	});
+
+	it("returns the same frame for repeated renders at one width", () => {
+		const toolCard = card({ ...base, state: "done" });
+		const wide = toolCard.render(60);
+
+		expect(toolCard.render(60)).toBe(wide);
+
+		const narrow = toolCard.render(32);
+		expect(narrow).not.toBe(wide);
+		expect(narrow.lines).toEqual(card({ ...base, state: "done" }).render(32).lines);
+		expect(toolCard.render(60).lines).toEqual(wide.lines);
+	});
+
+	it("renders again after its props change or it is invalidated", () => {
+		const toolCard = card({ ...base, state: "done" });
+		const before = toolCard.render(60);
+
+		toolCard.setProps({ ...base, state: "done", isError: true });
+		const afterProps = toolCard.render(60);
+		expect(afterProps).not.toBe(before);
+		expect(stripAnsi(afterProps.lines[1] ?? "")).toContain("[failure]");
+
+		// A theme change recolors the card, and the app invalidates the transcript when the theme changes.
+		initTheme("light");
+		toolCard.invalidate();
+		const afterTheme = toolCard.render(60);
+		expect(afterTheme).not.toBe(afterProps);
+		expect(afterTheme.lines).not.toEqual(afterProps.lines);
+		expect(afterTheme.lines.map((line) => stripAnsi(line))).toEqual(afterProps.lines.map((line) => stripAnsi(line)));
+	});
+
+	it("keeps a running timed step advancing with the clock", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		try {
+			const startedAt = Date.now();
+			const toolCard = card({
+				...base,
+				presentation: {
+					title: "build",
+					summary: [
+						{
+							type: "progress",
+							key: "steps",
+							kind: "steps",
+							steps: [{ label: "Compile", status: "active", startedAt }],
+						},
+					],
+				},
+			});
+			const first = text(toolCard);
+			expect(first).toContain("Compile");
+
+			vi.setSystemTime(startedAt + 5000);
+			const later = text(toolCard);
+
+			expect(later).toContain("5.0s");
+			expect(later).not.toBe(first);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("shows a result image as the terminal's image support changes", () => {
+		const toolCard = card({ ...base, state: "done", images: [{ mimeType: "image/png", data: PNG_1X1 }] });
+		expect(text(toolCard)).toContain("[Image: [image/png] 1x1]");
+
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: false });
+
+		expect(text(toolCard)).not.toContain("[Image: [image/png] 1x1]");
+	});
 });
