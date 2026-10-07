@@ -197,8 +197,6 @@ export interface ExtensionEntrySettings {
 }
 
 export interface RemoteSettings {
-	/** Detached headless runtime retention TTL in milliseconds (daemon-side). */
-	detachedRuntimeTtlMs?: number;
 	/** Tool allowlist for daemon-owned headless runtimes only. */
 	allowTools?: string[];
 	/** Discover exact pull-request associations for trusted Work sessions. Default: true. */

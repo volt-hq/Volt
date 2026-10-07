@@ -22,7 +22,7 @@ import {
 	parseIrohManagedRelayCredentialClaim,
 } from "./relay-credential.ts";
 
-/** How long a detached idle conversation stays open in its worker by default (`remote.detachedRuntimeTtlMs`). */
+/** How long a detached idle conversation stays open in its worker by default (the state's `detachedRuntimeTtlMs`). */
 export const DEFAULT_DETACHED_RUNTIME_TTL_MS = 30 * 60 * 1000;
 
 /**

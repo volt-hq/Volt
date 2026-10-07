@@ -4456,13 +4456,9 @@ class IrohDaemonService {
 			});
 			return;
 		}
-		const workspaceName =
-			typeof (request as Record<string, unknown>).workspaceName === "string"
-				? ((request as Record<string, unknown>).workspaceName as string)
-				: undefined;
+		const { workspaceName } = request;
 		// A device's new grant does not reach a workspace local to this host (D17): no ticket pairs into one.
 		if (
-			workspaceName !== undefined &&
 			!isIrohRemoteClientAllowedForWorkspace(
 				{ allowedWorkspaces: [] },
 				workspaceName,
@@ -4522,7 +4518,7 @@ class IrohDaemonService {
 				this.relayAuthToken !== undefined
 					? { relayAuthToken: this.relayAuthToken }
 					: {}),
-				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
+				workspace: workspaceName,
 			});
 			if (this.relayCredentialIsRevoking || expectedEpoch !== this.relayCredentialEpoch) {
 				await engine.cancelPairingSecretByHash(hashIrohRemotePairingSecret(pairing.secret));

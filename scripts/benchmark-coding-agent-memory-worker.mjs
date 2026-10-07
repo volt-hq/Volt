@@ -145,7 +145,7 @@ async function createBenchmarkRuntime(options) {
 	};
 	const sessionManager =
 		options.sessionManager ??
-		SessionManager.create(options.workspace, options.sessionDir, { id: options.sessionId ?? randomUUID() });
+		(await SessionManager.create(options.workspace, options.sessionDir, { id: options.sessionId ?? randomUUID() }));
 	const host = new ConversationHost({
 		factory: createRuntime,
 		agentDir: options.agentDir,

@@ -47,7 +47,10 @@ describe("a daemon without the Iroh binding", () => {
 	it("reports phone transport unavailable and refuses pairing with the same guidance", async () => {
 		const harness = await startHarness();
 		expect((await harness.status()).remoteTransport).toEqual(UNAVAILABLE);
-		for (const request of [{ type: "pair_request", access: "coding" }, { type: "relay_credential_check" }] as const) {
+		for (const request of [
+			{ type: "pair_request", workspaceName: "ws", access: "coding" },
+			{ type: "relay_credential_check" },
+		] as const) {
 			expect(await harness.control.request(request)).toMatchObject({
 				type: "error",
 				code: "iroh_unavailable",

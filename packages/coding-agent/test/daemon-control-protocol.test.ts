@@ -95,7 +95,7 @@ const REQUESTS: ByType<ControlRequest> = {
 		sessionId: "s-1",
 		gitContext: { repository: "Volt", branch: "feature/work", headOid: HEAD_OID, baseRef: "main" },
 	},
-	pair_request: { type: "pair_request", id: "6", access: "coding" },
+	pair_request: { type: "pair_request", id: "6", workspaceName: "volt", access: "coding" },
 	pair_cancel: { type: "pair_cancel", id: "7", requestId: "pair-1" },
 	clients_list: { type: "clients_list", id: "8" },
 	relay_credential_revoke: { type: "relay_credential_revoke", id: "9" },
@@ -231,6 +231,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	],
 	pair_request: [
 		{ workspaceName: 42 },
+		{ workspaceName: undefined },
 		{ access: "admin" },
 		{ access: "coding", allowedTools: [], rpcCapabilities: [] },
 		{ access: undefined, allowedTools: ["read"] },
@@ -664,12 +665,12 @@ describe("daemon control contract", () => {
 	});
 
 	it("admits the default, preset, and explicit pairing access selections", () => {
-		expect(admitControlRequest({ type: "pair_request", id: "1" })).toBe(true);
 		expect(admitControlRequest({ type: "pair_request", id: "1", workspaceName: "volt" })).toBe(true);
 		expect(
 			admitControlRequest({
 				type: "pair_request",
 				id: "1",
+				workspaceName: "volt",
 				allowedTools: ["read"],
 				rpcCapabilities: ["conversation.observe.v1"],
 			}),

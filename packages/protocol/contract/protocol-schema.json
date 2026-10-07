@@ -2336,7 +2336,8 @@
 					"type": "object",
 					"required": [
 						"type",
-						"id"
+						"id",
+						"workspaceName"
 					],
 					"properties": {
 						"type": {
@@ -2366,6 +2367,7 @@
 					"required": [
 						"type",
 						"id",
+						"workspaceName",
 						"allowedTools",
 						"rpcCapabilities"
 					],

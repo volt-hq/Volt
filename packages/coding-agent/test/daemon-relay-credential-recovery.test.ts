@@ -298,6 +298,13 @@ async function status(control: DaemonClient): Promise<Extract<ControlResponse, {
 	return result;
 }
 
+/** Registers the fixture's agent directory as the shared workspace that pairing requests name. */
+async function registerPairingWorkspace(fixture: { agentDir: string; control: DaemonClient }): Promise<void> {
+	expect(
+		await fixture.control.request({ type: "workspace_register", name: "repo", path: fixture.agentDir }),
+	).toMatchObject({ type: "ok" });
+}
+
 /** Paired clients without presence metadata (label, last seen) that a reconnect may refresh. */
 async function pairedClientGrants(control: DaemonClient) {
 	const result = await control.request({ type: "clients_list" });
@@ -517,7 +524,7 @@ describe("managed relay credential recovery", () => {
 				type: "error",
 				message: expect.stringContaining("already in progress"),
 			});
-			expect(await fixture.control.request({ type: "pair_request" })).toMatchObject({
+			expect(await fixture.control.request({ type: "pair_request", workspaceName: "repo" })).toMatchObject({
 				type: "error",
 				code: "relay_credential_revocation_pending",
 			});
@@ -594,13 +601,16 @@ describe("managed relay credential recovery", () => {
 			await expect.poll(async () => (await status(fixture.control)).remoteTransport.state).toBe("ready");
 			expect((await status(fixture.control)).relayCredential?.state).toBe("revocation_pending");
 			expect(fixture.native.boundTokens).toEqual([]);
-			expect(await fixture.control.request({ type: "pair_request" })).toMatchObject({
+			expect(await fixture.control.request({ type: "pair_request", workspaceName: "repo" })).toMatchObject({
 				type: "error",
 				code: "relay_credential_revocation_pending",
 			});
 			available = true;
 			expect(await fixture.control.request({ type: "relay_credential_revoke" })).toMatchObject({ type: "ok" });
-			expect(await fixture.control.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
+			await registerPairingWorkspace(fixture);
+			expect(await fixture.control.request({ type: "pair_request", workspaceName: "repo" })).toMatchObject({
+				type: "pair_started",
+			});
 			expect(fixture.native.binds).toBe(1);
 		} finally {
 			exchange.resolve(new Response(null, { status: 410 }));
@@ -628,7 +638,10 @@ describe("managed relay credential recovery", () => {
 		const fixture = await startFixture({ state });
 		try {
 			await expect.poll(() => refreshStarted).toBe(true);
-			expect(await fixture.control.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
+			await registerPairingWorkspace(fixture);
+			expect(await fixture.control.request({ type: "pair_request", workspaceName: "repo" })).toMatchObject({
+				type: "pair_started",
+			});
 			expect(fixture.readState().pendingPairingTickets).toHaveLength(1);
 			const reset = await fixture.control.request({ type: "relay_credential_revoke" });
 			expect(reset, JSON.stringify(reset)).toMatchObject({ type: "ok" });
@@ -743,7 +756,8 @@ describe("managed relay credential recovery", () => {
 		});
 		const fixture = await startFixture();
 		try {
-			const pair = fixture.control.request({ type: "pair_request" });
+			await registerPairingWorkspace(fixture);
+			const pair = fixture.control.request({ type: "pair_request", workspaceName: "repo" });
 			await expect.poll(() => creationStarted).toBe(true);
 			expect(await fixture.control.request({ type: "relay_credential_revoke" })).toMatchObject({ type: "ok" });
 			creation.resolve(

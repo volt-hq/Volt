@@ -756,7 +756,8 @@ async function runWorkerScenario(scenario, options, setActiveCleanup) {
 		running = spawnLongRunning(
 			process.execPath,
 			[
-				"--expose-gc",
+				// No --expose-gc in argv: the session store's worker threads inherit argv and refuse it. The
+				// process has it from NODE_OPTIONS.
 				"--experimental-strip-types",
 				"--conditions",
 				"volt-source",

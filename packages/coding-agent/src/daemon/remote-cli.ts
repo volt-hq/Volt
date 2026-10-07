@@ -286,7 +286,7 @@ async function handlePairCommand(args: string[]): Promise<void> {
 		const response = await session.client.request({
 			type: "pair_request",
 			access,
-			...(workspaceName === undefined ? {} : { workspaceName }),
+			workspaceName,
 		});
 		if (reportControlError(response, "pair")) {
 			return;
