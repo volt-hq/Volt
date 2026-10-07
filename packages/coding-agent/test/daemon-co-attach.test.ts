@@ -181,18 +181,20 @@ describe.runIf(nativeIrohAvailable)("phones co-attached to a conversation worker
 		expect(terminal(b.phone)).toEqual([]);
 		expect(lastSessionOf(harness, pairedB)).toBe(ref.sessionId);
 
-		// A client's own move opens nothing in the source's worker: phone A's reconnect spawns a worker for the target.
+		// A client's own move opens nothing in the source's worker until phone A reconnects to the target.
 		expect((await harness.status()).workers).toEqual([
 			expect.objectContaining({ workerId: source?.workerId, sessionIds: [ref.sessionId] }),
 		]);
+		// The target opens beside the source in its worker: the phone's open has its compatibility key (D11).
 		const moved = await attach(pairedA, targetId);
 		expect(moved.stream.handshake).toMatchObject({ sessionId: targetId });
-		const workers = (await harness.status()).workers;
-		expect(workers).toHaveLength(2);
-		expect(workers.find((worker) => worker.workerId !== source?.workerId)).toMatchObject({
-			sessionIds: [targetId],
-			clients: { local: 0, remote: 1 },
-		});
+		expect((await harness.status()).workers).toEqual([
+			expect.objectContaining({
+				workerId: source?.workerId,
+				sessionIds: [ref.sessionId, targetId],
+				clients: { local: 0, remote: 2 },
+			}),
+		]);
 	}, 60_000);
 
 	it("records a switch to a stored session as the phone's last session without opening it", async () => {
@@ -236,19 +238,27 @@ describe.runIf(nativeIrohAvailable)("phones co-attached to a conversation worker
 			expect.objectContaining({ state: "live", sessionIds: [ref.sessionId], clients: { local: 0, remote: 0 } }),
 		]);
 
-		// The turn ends: the worker retires once the TTL passed, and exits.
+		// The turn ends: the conversation closes once the TTL passed, and its worker, hosting nothing, exits.
 		turn.resolve();
 		await vi.waitFor(async () => expect((await harness.status()).workers).toEqual([]), { timeout: 10_000 });
 		// The audit log is appended after the registry dropped the worker.
-		await vi.waitFor(() =>
-			expect(harness.audit()).toContainEqual(
+		await vi.waitFor(() => {
+			const audit = harness.audit();
+			expect(audit).toContainEqual(
+				expect.objectContaining({
+					type: "worker_close",
+					success: true,
+					details: expect.objectContaining({ sessionId: ref.sessionId, reason: "retention" }),
+				}),
+			);
+			expect(audit).toContainEqual(
 				expect.objectContaining({
 					type: "worker_exited",
 					success: true,
-					details: expect.objectContaining({ reason: "stopped", sessionIds: [ref.sessionId] }),
+					details: expect.objectContaining({ reason: "stopped", sessionIds: [] }),
 				}),
-			),
-		);
+			);
+		});
 	}, 60_000);
 
 	it("ends every stream of a revoked phone and retires the worker it opened, with its co-attached phone's stream", async () => {

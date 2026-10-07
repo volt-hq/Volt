@@ -40,6 +40,14 @@ export interface WorkerStopEvent {
 	readonly force: boolean;
 }
 
+/** A `worker_close` the daemon sent for a top-level conversation's group: answer it once with `closeResult`. */
+export interface WorkerCloseEvent {
+	readonly closeId: string;
+	readonly sessionId: string;
+	readonly reason: WorkerStopReason;
+	readonly force: boolean;
+}
+
 /** A relay the daemon offered the worker for a client of a conversation it hosts. */
 export type WorkerRelayOffer = Extract<ControlEvent, { type: "relay_offer" }>;
 
@@ -48,6 +56,9 @@ export interface WorkerDaemonClientOptions {
 	readonly workerId: string;
 	readonly workerToken: string;
 	onStop(stop: WorkerStopEvent): void;
+	/** Another top-level conversation the daemon routed to the worker, after the first. */
+	onOpen(spec: WorkerSpawnSpec): void;
+	onClose(close: WorkerCloseEvent): void;
 	onRelayOffer(offer: WorkerRelayOffer): void;
 	/** A relayed client lost its authority: its stream ends with that fatal code. */
 	onRelayAuthority(relayId: string, loss: WorkerAuthorityLoss): void;
@@ -71,6 +82,8 @@ export class WorkerDaemonClient {
 	private readonly client: DaemonClient;
 	private readonly spawn = Promise.withResolvers<WorkerSpawnSpec>();
 	private readonly workerId: string;
+	/** The first conversation arrived: later ones are routed opens. */
+	private spawned = false;
 	private connected = false;
 	private lost = false;
 
@@ -83,11 +96,24 @@ export class WorkerDaemonClient {
 			worker: { workerId: options.workerId, workerToken: options.workerToken },
 			reconnect: false,
 			onEvent: (event: ControlEvent) => {
-				if (event.type === "worker_spawn") {
-					if (event.spec.workerId === this.workerId) this.spawn.resolve(event.spec);
-					else this.spawn.reject(new Error("The daemon sent another worker's conversation"));
+				if (event.type === "worker_open") {
+					if (event.spec.workerId !== this.workerId) {
+						this.spawn.reject(new Error("The daemon sent another worker's conversation"));
+					} else if (!this.spawned) {
+						this.spawned = true;
+						this.spawn.resolve(event.spec);
+					} else {
+						options.onOpen(event.spec);
+					}
 				} else if (event.type === "worker_stop") {
 					options.onStop({ stopId: event.stopId, reason: event.reason, force: event.force });
+				} else if (event.type === "worker_close") {
+					options.onClose({
+						closeId: event.closeId,
+						sessionId: event.sessionId,
+						reason: event.reason,
+						force: event.force,
+					});
 				} else if (event.type === "relay_offer") {
 					options.onRelayOffer(event);
 				} else if (event.type === "relay_authority") {
@@ -111,7 +137,7 @@ export class WorkerDaemonClient {
 		this.connected = true;
 	}
 
-	/** The conversation the daemon spawned the worker for; rejects after `timeoutMs`. */
+	/** The first conversation the daemon sent, the one it spawned the worker for; rejects after `timeoutMs`. */
 	async spawnSpec(timeoutMs: number): Promise<WorkerSpawnSpec> {
 		let timer: ReturnType<typeof setTimeout> | undefined;
 		try {
@@ -132,20 +158,27 @@ export class WorkerDaemonClient {
 		return response;
 	}
 
-	ready(sessionIds: readonly string[]): Promise<ControlResponse> {
-		return this.request({ type: "worker_ready", sessionIds: [...sessionIds] });
+	/** A conversation the daemon sent is open. */
+	ready(sessionId: string): Promise<ControlResponse> {
+		return this.request({ type: "worker_ready", sessionId });
 	}
 
-	openFailed(message: string, outcome?: IrohRemoteHostHandshakeFailureOutcome): Promise<ControlResponse> {
+	openFailed(
+		sessionId: string,
+		message: string,
+		outcome?: IrohRemoteHostHandshakeFailureOutcome,
+	): Promise<ControlResponse> {
 		return this.request({
 			type: "worker_open_failed",
+			sessionId,
 			message: Array.from(message).slice(0, 1024).join(""),
 			...(outcome === undefined ? {} : { outcome }),
 		});
 	}
 
-	activity(active: boolean): Promise<ControlResponse> {
-		return this.request({ type: "worker_activity", active });
+	/** The hosted conversations that are active now. */
+	activity(activeSessionIds: readonly string[]): Promise<ControlResponse> {
+		return this.request({ type: "worker_activity", activeSessionIds: [...activeSessionIds] });
 	}
 
 	/**
@@ -168,6 +201,10 @@ export class WorkerDaemonClient {
 
 	stopResult(stopId: string, outcome: "stopped" | "refused_active"): Promise<ControlResponse> {
 		return this.request({ type: "worker_stop_result", stopId, outcome });
+	}
+
+	closeResult(closeId: string, outcome: "closed" | "refused_active"): Promise<ControlResponse> {
+		return this.request({ type: "worker_close_result", closeId, outcome });
 	}
 
 	/** Redeem a relay offer: its preamble, and the client's stream after it. */

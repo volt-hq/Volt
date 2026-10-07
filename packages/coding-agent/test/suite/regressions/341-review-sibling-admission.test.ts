@@ -42,6 +42,13 @@ vi.mock("../../../src/daemon/worker/settings-watcher.ts", () => ({ watchConversa
  */
 
 const cleanups: Array<() => Promise<void>> = [];
+
+/** A phone's open of a conversation a worker hosts: what a spawn would run with does not matter. */
+const PHONE_COMPATIBILITY = {
+	origin: "phone",
+	toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+	projectTrusted: false,
+} as const;
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	vi.restoreAllMocks();
@@ -100,6 +107,8 @@ async function fixture() {
 	const generations = new Map<string, number>([["ws", 1]]);
 	const launches: FakeLaunch[] = [];
 	const exits: Array<(exit: WorkerExit) => void> = [];
+	/** What the registry sent its workers, by control connection. */
+	const events: Array<{ readonly connectionId: string; readonly event: ControlEvent }> = [];
 	const registryOptions: WorkerRegistryOptions & {
 		sessionInWorkspace(workspaceName: string, sessionId: string): Promise<boolean>;
 	} = {
@@ -113,7 +122,10 @@ async function fixture() {
 		},
 		agentDir: root,
 		socketPath: () => join(root, "voltd.sock"),
-		sendTo: (_connectionId: string, _event: ControlEvent) => true,
+		sendTo: (connectionId: string, event: ControlEvent) => {
+			events.push({ connectionId, event });
+			return true;
+		},
 		currentGeneration: (workspaceName: string) => generations.get(workspaceName),
 		detachedRuntimeTtlMs: () => 60_000,
 		// Every claim here names a session of the workspace's store.
@@ -129,7 +141,8 @@ async function fixture() {
 
 	/**
 	 * Spawn a worker for `ref`, as a phone's open does: launched, admitted, and
-	 * ready; with `attached`, the phone stays attached to it.
+	 * ready; with `attached`, the phone stays attached to it. Each spawn has a
+	 * profile of its own, so no open shares another's worker.
 	 */
 	const spawn = async (
 		ref: SessionReference,
@@ -137,20 +150,22 @@ async function fixture() {
 	): Promise<{ launch: FakeLaunch; worker: LiveWorker; exit: (exit: WorkerExit) => void }> => {
 		const index = launches.length;
 		const generation = generations.get("ws") ?? 0;
+		const input = {
+			origin: "phone" as const,
+			workspace: { name: "ws", path: root, generation },
+			session: ref,
+			cwd: root,
+			root,
+			projectCwd: root,
+			toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+			projectTrusted: false,
+			profile: `spawn-${index}`,
+		};
 		const opening = registry.open(
 			{ workspaceName: "ws", workspaceGeneration: generation, sessionId: ref.sessionId },
 			{
-				origin: "phone",
-				prepare: async () => ({
-					origin: "phone",
-					workspace: { name: "ws", path: root, generation },
-					session: ref,
-					cwd: root,
-					root,
-					projectCwd: root,
-					toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
-					projectTrusted: false,
-				}),
+				compatibility: input,
+				prepare: async () => input,
 				attach: (worker) => {
 					if (options.attached) worker.attach("remote");
 					return worker;
@@ -174,7 +189,7 @@ async function fixture() {
 			launch.connectionId,
 		);
 		if (!admitted) throw new Error("The worker was not admitted");
-		expect(await send(launch.connectionId, { type: "worker_ready", sessionIds: [ref.sessionId] })).toMatchObject({
+		expect(await send(launch.connectionId, { type: "worker_ready", sessionId: ref.sessionId })).toMatchObject({
 			type: "ok",
 		});
 		return { launch, worker: await opening, exit: exits[index]! };
@@ -219,7 +234,7 @@ async function fixture() {
 		onCatalogChanged: () => {},
 		projectTrusted: () => false,
 	});
-	hosted.adoptPrimary(source.host, source.conversation);
+	hosted.adoptTop(worker.spec, source.host, source.conversation);
 
 	const record: ReviewRunRecord = {
 		schemaVersion: 1,
@@ -290,6 +305,8 @@ async function fixture() {
 		hosted,
 		client,
 		claim,
+		send,
+		events,
 		/** The source's review discussion service, as the worker serves it. */
 		reviews: hosted.reviewDiscussions(source.conversation),
 		harness,
@@ -322,7 +339,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 			expect(session.getActiveToolNames()).toEqual(["read"]);
 			expect(child.conversation.summary().reviewDiscussion).not.toHaveProperty("readOnly");
 		}
-		expect(f.hosted.primary.conversation).toBe(f.source.conversation);
+		expect(f.hosted.top(f.source.conversation.id)?.conversation).toBe(f.source.conversation);
 		expect(f.launches).toHaveLength(1);
 	});
 
@@ -340,7 +357,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(f.registry.host("ws", ref.sessionId)).toEqual({
 			workerId: other.worker.workerId,
 			origin: "phone",
-			kind: "primary",
+			kind: "conversation",
 		});
 		const foreign = await openTestHost(f.factory, {
 			sessionManager: await SessionManager.open(ref),
@@ -432,7 +449,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 			expect(f.registry.host("ws", id)).toEqual({
 				workerId: other.worker.workerId,
 				origin: "phone",
-				kind: "primary",
+				kind: "conversation",
 			});
 		} finally {
 			await otherManager.closePersistence();
@@ -516,7 +533,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		const routed = await f.registry.open(
 			{ workspaceName: "ws", workspaceGeneration: 1, sessionId: originalId },
 			{
-				origin: "phone",
+				compatibility: PHONE_COMPATIBILITY,
 				prepare: () => Promise.reject(new Error("unexpected spawn")),
 				attach: (worker) => worker.workerId,
 			},
@@ -538,7 +555,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(f.registry.host("ws", originalId)).toEqual({
 			workerId: other.worker.workerId,
 			origin: "phone",
-			kind: "primary",
+			kind: "conversation",
 		});
 		expect(
 			(await getCanonicalReviewRun(f.source.conversation.session.sessionManager, "cold-run"))?.result?.findings[0]
@@ -547,7 +564,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		expect(f.launches).toHaveLength(2);
 	});
 
-	it("retires a detached, idle worker that keeps the canonical source, then writes the outcome", async () => {
+	it("closes a detached, idle conversation of the canonical source in another worker, then writes the outcome", async () => {
 		const f = await fixture();
 		const canonical = await SessionManager.create(f.root, f.sessionDir);
 		const canonicalRef = canonical.getSessionRef()!;
@@ -562,11 +579,19 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		const other = await f.spawn(canonicalRef);
 
 		const recorded = f.reviews.recordOutcome({ runId: "cold-run", findingId: "f1", status: "fixed" });
-		// The claim retires that worker as its TTL would, and waits for its exit.
-		await waitUntil(() =>
-			f.registry.list().some((worker) => worker.workerId === other.worker.workerId && worker.state === "retiring"),
-		);
-		other.exit({ reason: "stopped" });
+		// The claim closes that conversation as its TTL would, and waits for its release.
+		const closeOf = () =>
+			f.events.flatMap(({ connectionId, event }) =>
+				connectionId === other.launch.connectionId && event.type === "worker_close" ? [event] : [],
+			)[0];
+		await waitUntil(() => closeOf() !== undefined);
+		expect(closeOf()).toMatchObject({ sessionId: originalId, reason: "retention", force: false });
+		await f.send(other.launch.connectionId, {
+			type: "worker_close_result",
+			closeId: closeOf()!.closeId,
+			outcome: "closed",
+		});
+		await f.send(other.launch.connectionId, { type: "worker_released", sessionId: originalId });
 		await recorded;
 		expect(f.client.released).toHaveBeenCalledWith(originalId);
 		expect(f.registry.host("ws", originalId)).toBeUndefined();
@@ -615,7 +640,7 @@ describe("Regression #341 review siblings claimed in the source's worker", () =>
 		const routed = await f.registry.open(
 			{ workspaceName: "ws", workspaceGeneration: 1, sessionId: id },
 			{
-				origin: "phone",
+				compatibility: PHONE_COMPATIBILITY,
 				prepare: () => Promise.reject(new Error("unexpected spawn")),
 				attach: (worker) => worker.workerId,
 			},

@@ -24,7 +24,12 @@ import { runVoltDaemon, type VoltdRuntimeServices, type VoltdServiceExtension } 
 import { getDaemonPaths } from "../../src/daemon/paths.ts";
 import { probeDaemon } from "../../src/daemon/spawn.ts";
 import type { WorkerLauncher } from "../../src/daemon/worker-launcher.ts";
-import type { LiveWorker, WorkerClientKind, WorkerRegistry } from "../../src/daemon/worker-registry.ts";
+import type {
+	LiveWorker,
+	WorkerClientKind,
+	WorkerOpenOutcome,
+	WorkerRegistry,
+} from "../../src/daemon/worker-registry.ts";
 import { manifest as fauxManifest, offerFauxProvider, serveFauxProvider } from "../fixtures/faux-provider-extension.ts";
 import { InProcessWorkerLauncher } from "./in-process-worker-launcher.ts";
 
@@ -63,14 +68,15 @@ export interface DaemonHarness {
 	createSession(): Promise<SessionReference>;
 	/**
 	 * Open `ref` in a worker as a phone's open does: resolves with the live
-	 * worker hosting it, through a spawn when none does. With `attach`, a
-	 * client of that kind attaches with the lookup until `release`; without,
-	 * the worker is left detached.
+	 * worker hosting it, through a spawn or a route into a compatible worker
+	 * (the same `spawn` options) when none does. With `attach`, a client of
+	 * that kind attaches with the lookup until `release`; without, the
+	 * conversation is left detached.
 	 */
 	openWorker(
 		ref: SessionReference,
 		options?: { spawn?: HarnessSpawn; attach?: WorkerClientKind },
-	): Promise<{ worker: LiveWorker; release: () => void }>;
+	): Promise<{ worker: LiveWorker; outcome: WorkerOpenOutcome; release: () => void }>;
 	status(): Promise<Extract<ControlResponse, { type: "status_result" }>>;
 	/** Another control connection of `client` kind, closed with the harness. */
 	connect(client: "tui" | "cli"): Promise<DaemonClient>;
@@ -181,22 +187,27 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 		openWorker(ref, openOptions = {}) {
 			const kind = openOptions.attach;
 			const current = generation();
+			const spawn = {
+				origin: "phone" as const,
+				workspace: { name: workspaceName, path: workspaceDir, generation: current },
+				session: ref,
+				cwd: workspaceDir,
+				root: workspaceDir,
+				projectCwd: workspaceDir,
+				toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+				projectTrusted: false,
+				...openOptions.spawn,
+			};
 			return runtime.workers.open(
 				{ workspaceName, workspaceGeneration: current, sessionId: ref.sessionId },
 				{
-					origin: "phone",
-					prepare: async () => ({
-						origin: "phone",
-						workspace: { name: workspaceName, path: workspaceDir, generation: current },
-						session: ref,
-						cwd: workspaceDir,
-						root: workspaceDir,
-						projectCwd: workspaceDir,
-						toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
-						projectTrusted: false,
-						...openOptions.spawn,
+					compatibility: spawn,
+					prepare: async () => spawn,
+					attach: (worker, outcome) => ({
+						worker,
+						outcome,
+						release: kind === undefined ? () => {} : worker.attach(kind),
 					}),
-					attach: (worker) => ({ worker, release: kind === undefined ? () => {} : worker.attach(kind) }),
 				},
 			);
 		},

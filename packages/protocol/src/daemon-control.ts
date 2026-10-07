@@ -247,7 +247,7 @@ export const ControlWorkerStatusSchema = Type.Object(
 		state: ControlWorkerStateSchema,
 		origin: ControlWorkerOriginSchema,
 		workspaceName: Type.String(),
-		/** Every conversation the worker hosts: its primary, then what it claimed. */
+		/** Every conversation the worker hosts: its top-level conversations (up to six), and what they claimed. */
 		sessionIds: Type.Array(LogSessionIdSchema),
 		/** Relayed streams, offered or open, by client kind. */
 		clients: Type.Object({ local: NonNegativeIntegerSchema, remote: NonNegativeIntegerSchema }, closed),
@@ -258,7 +258,7 @@ export const ControlWorkerStatusSchema = Type.Object(
 );
 export type ControlWorkerStatus = Static<typeof ControlWorkerStatusSchema>;
 
-/** Why a worker hosts a conversation beside the one it was spawned for. */
+/** Why a worker hosts a conversation as part of a top-level conversation's group. */
 export const WorkerHostKindSchema = stringEnum(["child", "sibling", "moved"]);
 export type WorkerHostKind = Static<typeof WorkerHostKindSchema>;
 
@@ -469,19 +469,23 @@ const workerSpawnSpecCommon = {
 };
 
 /**
- * What a worker opens when it starts, sent over its control connection after
- * the hello: the daemon resolved the conversation, its placement, and its
+ * A top-level conversation a worker opens (`worker_open`): the one it was
+ * spawned for, after its hello, and each compatible open the daemon routes
+ * to it. The daemon resolved the conversation, its placement, and its
  * policy; the worker only opens the log (stored, or for a TUI's `--no-session`
  * in memory) and holds its lock. A phone's open fixes the worker's tool
  * policy; a TUI's carries its spawn-only and session-level options (its
- * environment is the worker process's own).
+ * environment is the worker process's own). Every top-level conversation of
+ * one worker has the same compatibility key: the same opener kind and tool
+ * policy, trust, and profile (a phone's), or environment and spawn-only
+ * options (a TUI's).
  */
 export const WorkerSpawnSpecSchema = Type.Union([
 	Type.Object(
 		{
 			...workerSpawnSpecCommon,
 			origin: Type.Literal("phone"),
-			/** The stored log the worker opens first, its primary. */
+			/** The stored log the worker opens. */
 			session: SessionReferenceSchema,
 			/** Fixed for the worker's lifetime (D9). */
 			toolPolicy: Type.Object(
@@ -497,7 +501,7 @@ export const WorkerSpawnSpecSchema = Type.Union([
 		{
 			...workerSpawnSpecCommon,
 			origin: Type.Literal("tui"),
-			/** The stored log the worker opens first (in `cwd`), or the id of the in-memory one it creates (D15). */
+			/** The stored log the worker opens (in `cwd`), or the id of the in-memory one it creates (D15). */
 			session: Type.Union([
 				SessionReferenceSchema,
 				Type.Object({ sessionId: LogSessionIdSchema, inMemory: Type.Literal(true) }, closed),
@@ -919,16 +923,25 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		 */
 		workspaceRegistration: Type.Optional(WorkspaceRegistrationSchema),
 	}),
-	/** Worker: its primary conversation is open and its log locked; offers may follow. */
-	worker_ready: withId("worker_ready", { sessionIds: Type.Array(LogSessionIdSchema, { maxItems: 1 }) }),
-	/** Worker: its primary could not open; the waiting opens fail with this outcome. */
+	/**
+	 * Worker: a conversation `worker_open` sent is open and its log locked;
+	 * offers may follow. The first makes the worker live.
+	 */
+	worker_ready: withId("worker_ready", { sessionId: LogSessionIdSchema }),
+	/**
+	 * Worker: a conversation `worker_open` sent could not open; the opens
+	 * waiting for it fail with this outcome. A worker whose first one failed exits.
+	 */
 	worker_open_failed: withId("worker_open_failed", {
+		sessionId: LogSessionIdSchema,
 		/** A phone handshake outcome, such as conversation_locked or session_unavailable. */
 		outcome: Type.Optional(stringEnum(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)),
 		message: codePoints(0, 1024),
 	}),
-	/** Worker: whether any conversation it hosts is active (a turn, running work, or a hold). */
-	worker_activity: withId("worker_activity", { active: Type.Boolean() }),
+	/** Worker: the conversations it hosts that are active now (a turn, running work, or a hold). */
+	worker_activity: withId("worker_activity", {
+		activeSessionIds: Type.Array(LogSessionIdSchema, { maxItems: 256 }),
+	}),
 	/** Worker: claim a conversation before opening it. Refused (`claimed`) when another worker hosts it. */
 	worker_hosts: withId("worker_hosts", {
 		sessionId: LogSessionIdSchema,
@@ -938,7 +951,10 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		/** The conversation lives in the worker's memory, in no store: only a `--no-session` worker hosts one. */
 		inMemory: Type.Optional(Type.Literal(true)),
 	}),
-	/** Worker: it closed a conversation it claimed, and released its log. */
+	/**
+	 * Worker: it closed a conversation it hosts, and released its log. A
+	 * top-level conversation goes last of its group (what it claimed closes first).
+	 */
 	worker_released: withId("worker_released", { sessionId: LogSessionIdSchema }),
 	/**
 	 * Worker: a relayed phone's daemon-backed intent or query, run with that
@@ -960,6 +976,15 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	worker_stop_result: withId("worker_stop_result", {
 		stopId: Type.String(),
 		outcome: stringEnum(["stopped", "refused_active"]),
+	}),
+	/**
+	 * Worker: its answer to `worker_close`, from the group's idle check when
+	 * the close arrived; once `closed`, it closes the group and releases each
+	 * of its conversations.
+	 */
+	worker_close_result: withId("worker_close_result", {
+		closeId: Type.String(),
+		outcome: stringEnum(["closed", "refused_active"]),
 	}),
 	/**
 	 * Worker: restore the managed checkout `path` of a session of its
@@ -987,6 +1012,7 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_last_session",
 	"worker_authority",
 	"worker_stop_result",
+	"worker_close_result",
 	"worker_worktree_restore",
 	"worker_worktree_release",
 ] as const satisfies readonly (keyof typeof CONTROL_REQUEST_SCHEMAS)[];
@@ -1033,6 +1059,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_last_session,
 	CONTROL_REQUEST_SCHEMAS.worker_authority,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
+	CONTROL_REQUEST_SCHEMAS.worker_close_result,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_restore,
 	CONTROL_REQUEST_SCHEMAS.worker_worktree_release,
 ]);
@@ -1120,9 +1147,13 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		workspaceName: Type.String(),
 		/** The workspace is local to this host: no paired device reaches it unless its grant names it (D17). */
 		localOnly: Type.Optional(Type.Literal(true)),
-		/** Whether this open spawned the worker; otherwise it attached to a live one, which keeps its spawn-only options. */
+		/**
+		 * Whether this open spawned the worker. Otherwise the conversation runs
+		 * in a live worker: one it was routed into (with the same spawn-only
+		 * options), or the one it was open in already, which keeps its own.
+		 */
 		spawned: Type.Boolean(),
-		/** The open's spawn-only options that differ from the live worker's, which kept its own. */
+		/** The open's spawn-only options that differ from those of the worker it was open in already, which kept its own. */
 		ignoredOptions: Type.Array(WorkerSpawnOnlyOptionSchema),
 	}),
 	/**
@@ -1220,14 +1251,33 @@ export const CONTROL_EVENT_SCHEMAS = {
 		error: Type.Optional(Type.String()),
 	}),
 	daemon_shutdown: event("daemon_shutdown", {}),
-	/** To a worker after its hello: the conversation it opens. */
-	worker_spawn: event("worker_spawn", { spec: WorkerSpawnSpecSchema }),
+	/**
+	 * To a worker: a top-level conversation it opens, in a host of its own:
+	 * the one it was spawned for after its hello, then each compatible open
+	 * the daemon routes to it (D11). Answered by `worker_ready` or
+	 * `worker_open_failed`.
+	 */
+	worker_open: event("worker_open", { spec: WorkerSpawnSpecSchema }),
 	/**
 	 * To a worker: stop. Answered by `worker_stop_result`. A worker that is
 	 * active may refuse a stop that is not forced; a forced stop cannot be
 	 * refused and aborts a turn still running after 60 s.
 	 */
 	worker_stop: event("worker_stop", { stopId: Type.String(), reason: WorkerStopReasonSchema, force: Type.Boolean() }),
+	/**
+	 * To a worker: close the top-level conversation `sessionId` and the
+	 * conversations it claimed (its group), leaving its others serving.
+	 * Answered by `worker_close_result`. A group that is active may refuse a
+	 * close that is not forced (retention); a forced close cannot be refused,
+	 * ends the group's streams, and aborts a turn still running after 60 s (at
+	 * once for lost authority).
+	 */
+	worker_close: event("worker_close", {
+		closeId: Type.String(),
+		sessionId: LogSessionIdSchema,
+		reason: WorkerStopReasonSchema,
+		force: Type.Boolean(),
+	}),
 	/**
 	 * To a worker: the relayed client lost its authority. The worker ends the
 	 * stream with `fatal{loss}` as its last frame; the daemon closes the relay
@@ -1246,8 +1296,9 @@ export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.keep_awake_changed,
 	CONTROL_EVENT_SCHEMAS.pairing_progress,
 	CONTROL_EVENT_SCHEMAS.daemon_shutdown,
-	CONTROL_EVENT_SCHEMAS.worker_spawn,
+	CONTROL_EVENT_SCHEMAS.worker_open,
 	CONTROL_EVENT_SCHEMAS.worker_stop,
+	CONTROL_EVENT_SCHEMAS.worker_close,
 	CONTROL_EVENT_SCHEMAS.relay_authority,
 	CONTROL_EVENT_SCHEMAS.worker_abort,
 ]);

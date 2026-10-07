@@ -129,7 +129,7 @@ describe("daemon conversation workers", () => {
 			await impostor.close();
 		}
 		// A control client sends no worker request.
-		expect(await harness.control.request({ type: "worker_activity", active: true })).toMatchObject({
+		expect(await harness.control.request({ type: "worker_activity", activeSessionIds: [] })).toMatchObject({
 			type: "error",
 			code: "forbidden",
 		});

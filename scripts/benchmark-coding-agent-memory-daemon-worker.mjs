@@ -160,26 +160,23 @@ async function main() {
 		assert(session, "the benchmark session has no reference");
 
 		// As a phone's open does, with the phones' default tool policy.
+		const spawn = {
+			origin: "phone",
+			workspace: { name: WORKSPACE_NAME, path: workspace, generation },
+			session,
+			cwd: workspace,
+			root: workspace,
+			projectCwd: workspace,
+			toolPolicy: {
+				tools: parseIrohRemoteAllowTools(undefined),
+				allowUnlistedExtensionTools: usesDefaultIrohRemoteAllowTools(undefined),
+			},
+			projectTrusted: false,
+		};
 		const startedAt = performance.now();
 		await services.workers.open(
 			{ workspaceName: WORKSPACE_NAME, workspaceGeneration: generation, sessionId: session.sessionId },
-			{
-				origin: "phone",
-				prepare: async () => ({
-					origin: "phone",
-					workspace: { name: WORKSPACE_NAME, path: workspace, generation },
-					session,
-					cwd: workspace,
-					root: workspace,
-					projectCwd: workspace,
-					toolPolicy: {
-						tools: parseIrohRemoteAllowTools(undefined),
-						allowUnlistedExtensionTools: usesDefaultIrohRemoteAllowTools(undefined),
-					},
-					projectTrusted: false,
-				}),
-				attach: () => undefined,
-			},
+			{ compatibility: spawn, prepare: async () => spawn, attach: () => undefined },
 		);
 		const spawnLatencyMs = performance.now() - startedAt;
 		const [worker] = services.workers.list();

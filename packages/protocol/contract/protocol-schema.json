@@ -891,10 +891,13 @@
 					"$ref": "#/$defs/Control.Event.daemon_shutdown"
 				},
 				{
-					"$ref": "#/$defs/Control.Event.worker_spawn"
+					"$ref": "#/$defs/Control.Event.worker_open"
 				},
 				{
 					"$ref": "#/$defs/Control.Event.worker_stop"
+				},
+				{
+					"$ref": "#/$defs/Control.Event.worker_close"
 				},
 				{
 					"$ref": "#/$defs/Control.Event.relay_authority"
@@ -1176,7 +1179,38 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Event.worker_spawn": {
+		"Control.Event.worker_close": {
+			"type": "object",
+			"required": [
+				"type",
+				"closeId",
+				"sessionId",
+				"reason",
+				"force"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_close"
+				},
+				"closeId": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"reason": {
+					"$ref": "#/$defs/Control.WorkerStopReason"
+				},
+				"force": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Event.worker_open": {
 			"type": "object",
 			"required": [
 				"type",
@@ -1185,7 +1219,7 @@
 			"properties": {
 				"type": {
 					"type": "string",
-					"const": "worker_spawn"
+					"const": "worker_open"
 				},
 				"spec": {
 					"$ref": "#/$defs/Control.WorkerSpawnSpec"
@@ -2022,6 +2056,9 @@
 					"$ref": "#/$defs/Control.Request.worker_stop_result"
 				},
 				{
+					"$ref": "#/$defs/Control.Request.worker_close_result"
+				},
+				{
 					"$ref": "#/$defs/Control.Request.worker_worktree_restore"
 				},
 				{
@@ -2622,7 +2659,7 @@
 			"required": [
 				"type",
 				"id",
-				"active"
+				"activeSessionIds"
 			],
 			"properties": {
 				"type": {
@@ -2632,8 +2669,14 @@
 				"id": {
 					"type": "string"
 				},
-				"active": {
-					"type": "boolean"
+				"activeSessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"maxLength": 512,
+						"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+					},
+					"maxItems": 256
 				}
 			},
 			"additionalProperties": false
@@ -2655,6 +2698,35 @@
 				},
 				"relayId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_close_result": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"closeId",
+				"outcome"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_close_result"
+				},
+				"id": {
+					"type": "string"
+				},
+				"closeId": {
+					"type": "string"
+				},
+				"outcome": {
+					"type": "string",
+					"enum": [
+						"closed",
+						"refused_active"
+					]
 				}
 			},
 			"additionalProperties": false
@@ -2807,6 +2879,7 @@
 			"required": [
 				"type",
 				"id",
+				"sessionId",
 				"message"
 			],
 			"properties": {
@@ -2816,6 +2889,11 @@
 				},
 				"id": {
 					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				},
 				"outcome": {
 					"type": "string",
@@ -2852,7 +2930,7 @@
 			"required": [
 				"type",
 				"id",
-				"sessionIds"
+				"sessionId"
 			],
 			"properties": {
 				"type": {
@@ -2862,14 +2940,10 @@
 				"id": {
 					"type": "string"
 				},
-				"sessionIds": {
-					"type": "array",
-					"items": {
-						"type": "string",
-						"maxLength": 512,
-						"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-					},
-					"maxItems": 1
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false

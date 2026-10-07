@@ -260,7 +260,7 @@ async function fixture(nested = false, workspaceName = "project") {
 				onCatalogChanged: () => {},
 				projectTrusted: () => false,
 			});
-			hosted.adoptPrimary(opened.host, opened.conversation);
+			hosted.adoptTop({ ...spec, workerId: "w-test" }, opened.host, opened.conversation);
 			const worker = { spec, ...opened, hosted };
 			workers.add(worker);
 			started.push(worker);

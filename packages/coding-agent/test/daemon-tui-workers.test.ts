@@ -45,6 +45,13 @@ const SPAWN_FLAG_EXTENSION_PATH = realpathSync.native(
 
 const cleanups: Array<() => Promise<unknown>> = [];
 
+/** A phone's open of a conversation a worker hosts: what a spawn would run with does not matter. */
+const PHONE_COMPATIBILITY = {
+	origin: "phone",
+	toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
+	projectTrusted: false,
+} as const;
+
 afterEach(async () => {
 	vi.unstubAllEnvs();
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup().catch(() => undefined);
@@ -307,7 +314,7 @@ describe("conversations TUIs open in workers", () => {
 		).toEqual([expect.objectContaining({ workspace: basename(outside), success: true })]);
 	}, 60_000);
 
-	it("follows a structural move by reconnecting through the daemon: the target runs in a worker of its own (D1)", async () => {
+	it("follows a structural move by reconnecting through the daemon: the target opens in the TUI's worker (D1, D11)", async () => {
 		const harness = await startHarness();
 		harness.faux.setResponses([fauxAssistantMessage("first reply")]);
 		const tui = await harness.connect("tui");
@@ -320,35 +327,141 @@ describe("conversations TUIs open in workers", () => {
 
 		const target = (await client.intent("new_session", {})).conversation;
 		await shows(client, target);
+		// The same TUI's options give the same compatibility key: the target opens beside its source.
 		expect(connector.opened.map((opened) => [opened.sessionId, opened.spawned])).toEqual([
 			[source, true],
-			[target, true],
+			[target, false],
 		]);
-		const workers = (await harness.status()).workers;
-		expect(workers.map((worker) => [worker.sessionIds, worker.clients.local]).sort()).toEqual(
-			[
-				[[source], 0],
-				[[target], 1],
-			].sort(),
-		);
-
-		// Workers TUIs opened with the same options share a compatibility key; a phone's differs.
-		const keys = await Promise.all(
-			[source, target].map((sessionId) =>
-				harness.workers.open(
-					{ workspaceName: "ws", workspaceGeneration: harness.generation(), sessionId: sessionId ?? "" },
-					{
-						origin: "tui",
-						client: "tui-1",
-						prepare: () => Promise.reject(new Error("The worker is live")),
-						attach: (worker) => worker.compatibilityKey,
-					},
-				),
+		const [worker, ...others] = (await harness.status()).workers;
+		expect(others).toEqual([]);
+		expect(worker).toMatchObject({ sessionIds: [source, target], clients: { local: 1, remote: 0 } });
+		await vi.waitFor(() =>
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_open",
+					success: true,
+					details: expect.objectContaining({ workerId: worker?.workerId, sessionId: target }),
+				}),
 			),
 		);
-		expect(keys[0]).toBe(keys[1]);
+
+		// A phone's open never joins a TUI's worker: its compatibility key differs.
 		const phone = await harness.openWorker(await harness.createSession());
-		expect(phone.worker.compatibilityKey).not.toBe(keys[0]);
+		expect(phone.outcome).toBe("spawned");
+		expect(phone.worker.workerId).not.toBe(worker?.workerId);
+	}, 60_000);
+
+	it("shares one worker among a TUI's conversations up to six, and keeps differing environments and options apart (D11)", async () => {
+		const harness = await startHarness();
+		const tui = await harness.connect("tui");
+		const spawn = spawnOptions(harness.workspacePath, { env: { VOLT_TEST_TERMINAL: "a" } });
+		const opened: ConversationOpened[] = [];
+		for (let index = 0; index < 7; index++) {
+			opened.push((await openTui(tui, { target: { kind: "new" }, spawn, clientKey: "tui-1" })).opened);
+		}
+		// Six top-level conversations fill a worker; the seventh spawns beside it.
+		expect(opened.map((open) => [open.spawned, open.ignoredOptions])).toEqual([
+			[true, []],
+			[false, []],
+			[false, []],
+			[false, []],
+			[false, []],
+			[false, []],
+			[true, []],
+		]);
+		expect((await harness.status()).workers.map((worker) => worker.sessionIds)).toEqual([
+			opened.slice(0, 6).map((open) => open.sessionId),
+			[opened[6]?.sessionId],
+		]);
+
+		// Another terminal's environment, or other spawn-only options, never share a worker.
+		const terminal = await openTui(tui, {
+			target: { kind: "new" },
+			spawn: spawnOptions(harness.workspacePath, { env: { VOLT_TEST_TERMINAL: "b" } }),
+			clientKey: "tui-2",
+		});
+		const tools = await openTui(tui, {
+			target: { kind: "new" },
+			spawn: { ...spawn, config: { tools: ["read"] } },
+			clientKey: "tui-1",
+		});
+		expect([terminal.opened.spawned, tools.opened.spawned]).toEqual([true, true]);
+		expect((await harness.status()).workers).toHaveLength(4);
+	}, 90_000);
+
+	it("closes a detached idle conversation after the TTL while its neighbour serves on, and retires the worker once it hosts nothing (D11)", async () => {
+		const harness = await createDaemonHarness({ detachedRuntimeTtlMs: 300 });
+		cleanups.push(() => harness.dispose());
+		harness.faux.setResponses([fauxAssistantMessage("still here")]);
+		const tui = await harness.connect("tui");
+		const spawn = spawnOptions(harness.workspacePath);
+		const first = await openTui(tui, { target: { kind: "new" }, spawn, clientKey: "tui-1" });
+		const second = await openTui(tui, { target: { kind: "new" }, spawn, clientKey: "tui-1" });
+		expect(second.opened.spawned).toBe(false);
+		const [worker] = (await harness.status()).workers;
+		expect(worker?.sessionIds).toEqual([first.opened.sessionId, second.opened.sessionId]);
+
+		// The second conversation's client left: it closes after the TTL, and the first serves on.
+		await second.client.stop();
+		await expect
+			.poll(async () => (await harness.status()).workers.map((candidate) => candidate.sessionIds), {
+				timeout: 15_000,
+			})
+			.toEqual([[first.opened.sessionId]]);
+		// The audit log is appended after the registry dropped the conversation.
+		await vi.waitFor(() =>
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_close",
+					success: true,
+					details: expect.objectContaining({ sessionId: second.opened.sessionId, reason: "retention" }),
+				}),
+			),
+		);
+		await first.client.promptAndWait("hi");
+		expect(assistantTexts(first.client)).toEqual(["still here"]);
+
+		// Its log is free again: reopening it opens it beside the first once more.
+		const reopened = await openTui(tui, {
+			target: { kind: "session", sessionId: second.opened.sessionId },
+			spawn,
+			clientKey: "tui-1",
+		});
+		expect(reopened.opened).toMatchObject({ selection: "resumed", spawned: false });
+		expect((await harness.status()).workers.map((candidate) => candidate.workerId)).toEqual([worker?.workerId]);
+
+		// Every client left: the worker hosts nothing after the TTL, and retires.
+		await first.client.stop();
+		await reopened.client.stop();
+		await expect.poll(async () => (await harness.status()).workers, { timeout: 15_000 }).toEqual([]);
+		await vi.waitFor(() =>
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_stop",
+					details: expect.objectContaining({ workerId: worker?.workerId, reason: "retention", force: false }),
+				}),
+			),
+		);
+	}, 60_000);
+
+	it("closes one conversation without the option to refuse and leaves its neighbour attached (D11)", async () => {
+		const harness = await startHarness();
+		harness.faux.setResponses([fauxAssistantMessage("unaffected")]);
+		const tui = await harness.connect("tui");
+		const spawn = spawnOptions(harness.workspacePath);
+		const first = await openTui(tui, { target: { kind: "new" }, spawn, clientKey: "tui-1" });
+		const second = await openTui(tui, { target: { kind: "new" }, spawn, clientKey: "tui-1" });
+		const ended = Promise.withResolvers<void>();
+		second.client.onChange((change) => {
+			if (change === undefined || change.type === "ended") ended.resolve();
+		});
+		await harness.workers.closeConversation("ws", second.opened.sessionId, "authority");
+		await ended.promise;
+		expect((await harness.status()).workers).toEqual([
+			expect.objectContaining({ sessionIds: [first.opened.sessionId], clients: { local: 1, remote: 0 } }),
+		]);
+		await first.client.promptAndWait("still there?");
+		expect(assistantTexts(first.client)).toEqual(["unaffected"]);
 	}, 60_000);
 
 	it("keeps a --no-session conversation in its worker's memory, for its opener only, and retires the worker once it left (D15)", async () => {
@@ -381,7 +494,11 @@ describe("conversations TUIs open in workers", () => {
 		await expect(
 			harness.workers.open(
 				{ workspaceName: "ws", workspaceGeneration: harness.generation(), sessionId: startup },
-				{ origin: "phone", prepare: () => Promise.reject(new Error("unused")), attach: () => undefined },
+				{
+					compatibility: PHONE_COMPATIBILITY,
+					prepare: () => Promise.reject(new Error("unused")),
+					attach: () => undefined,
+				},
 			),
 		).rejects.toBeInstanceOf(WorkerOpenError);
 
