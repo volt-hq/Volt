@@ -12,7 +12,7 @@ import {
 	printLoginShellEnvironment,
 	resolveDaemonEnvironment,
 } from "./login-environment.ts";
-import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
+import { DAEMON_IDLE_EXIT_MS, type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { formatRelayAccessStatus, isPhoneTransportAbsent, isRemoteAccessReady } from "./relay-access-status.ts";
@@ -631,12 +631,15 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				process.exitCode = 1;
 				return true;
 			}
+			const serviceStart = rest.includes("--service");
 			const code = await runVoltDaemon(
 				{
 					agentDir,
 					foreground: true,
-					prepareEnvironment: () => resolveDaemonEnvironment({ serviceStart: rest.includes("--service") }),
+					prepareEnvironment: () => resolveDaemonEnvironment({ serviceStart }),
 					workerLauncher: new ProcessWorkerLauncher(),
+					// The login service keeps its daemon; one started on demand exits once nothing needs it (D8).
+					...(serviceStart ? {} : { idleExitMs: DAEMON_IDLE_EXIT_MS }),
 				},
 				[createIrohDaemonService()],
 			);

@@ -263,7 +263,7 @@ export async function openSessionWithDaemonLease(
 export interface CreateDaemonLinkOptions {
 	cwd: string;
 	agentDir: string;
-	/** Auto-spawn the daemon when unreachable (remote.background). */
+	/** Auto-spawn the daemon when unreachable. */
 	autoStart?: boolean;
 	log?: (message: string) => void;
 }
@@ -392,7 +392,7 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 				return;
 			}
 			const cwd = resolvedContextCwd;
-			const workspace = await resolveDaemonWorkspaceForCwd(activeClient, cwd, log);
+			const workspace = await resolveDaemonWorkspaceForCwd(activeClient, cwd);
 			// A session in another directory may have moved the context meanwhile.
 			if (workspace && cwd === resolvedContextCwd) {
 				resolvedWorkspaceName = workspace.name;
@@ -416,7 +416,7 @@ export function createDaemonLink(options: CreateDaemonLinkOptions): DaemonLink {
 		const activeClient = client;
 		if (tentative) {
 			if (!activeClient || state !== "connected") return false;
-			const workspace = await resolveDaemonWorkspaceForCwd(activeClient, cwd, log, { register: false });
+			const workspace = await resolveDaemonWorkspaceForCwd(activeClient, cwd);
 			if (!workspace) return false;
 			resolvedContextCwd = cwd;
 			resolvedWorkspaceName = workspace.name;

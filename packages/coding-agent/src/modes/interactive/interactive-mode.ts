@@ -1,7 +1,9 @@
 /**
  * Interactive mode for the coding agent: the TUI as a protocol client of the
  * host it reaches through its connector (client/conversation-connector.ts;
- * `InProcessConnector` in process), following its moves by reconnecting.
+ * the volt CLI's `DaemonConnector` reaches daemon workers, `InProcessConnector`
+ * a host in process), following its moves by reconnecting, and resuming after
+ * a connection its host lost.
  * Its transcript and status (footer, indicators, alerts, plan, work,
  * extension UI) draw the store that follows the client, and their actions go
  * out as intents; its input (the editor, its keys, and the slash menu) and
@@ -100,6 +102,7 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
+import { type DecidedProjectTrust, resolveConversationProjectTrust } from "../../core/project-trust.ts";
 import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
 import {
 	MUTABLE_WORKSPACE_REVIEW_TOOLS,
@@ -332,6 +335,8 @@ const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
 /** Idle time after settlement before the transcript records when work finished. */
 const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
+/** How long "Stop turn and quit" waits for the stopped turn to settle before the TUI quits anyway. */
+const STOP_TURN_WAIT_MS = 60_000;
 /**
  * How long the TUI's client waits for an intent's or query's answer: as long
  * as a timer lasts. Its host runs in this process, and an intent answers when
@@ -422,6 +427,17 @@ export interface InteractiveModeOptions {
 	 * cwd, untrusted, without a profile.
 	 */
 	settingsScope?: TuiSettingsScope;
+	/**
+	 * The project trust the TUI decided before it opened its conversation
+	 * (Phase 6 D4), for that conversation's project, when its host runs
+	 * elsewhere: the TUI reads its own settings with it there, and with the
+	 * saved decision elsewhere, never with its host's answer (a worker another
+	 * client may have opened). Without it, the TUI takes the trust its host
+	 * reports for the conversation it shows.
+	 */
+	projectTrust?: DecidedProjectTrust;
+	/** A name for the conversation the TUI opens (`--name`). */
+	sessionName?: string;
 	/** Cwd to trust after reload if it gained a .volt directory during this implicitly trusted session. */
 	autoTrustOnReloadCwd?: string;
 	/** Initial message to send on startup (can include @file content) */
@@ -701,10 +717,22 @@ export class InteractiveMode {
 	private settingsScope: TuiSettingsScope;
 	/** Whether the chat shows the project trust warning of the conversation it shows. */
 	private trustWarningShown = false;
+	/** The project trust the TUI decided at startup, when its display settings follow it (and saved decisions elsewhere). */
+	private readonly projectTrust: DecidedProjectTrust | undefined;
+	/**
+	 * What the TUI waits for from its host, shown in the status area: an
+	 * open's progress (the daemon starting, a worker starting), and a lost
+	 * connection it resumes.
+	 */
+	private hostWait: { open?: string; reconnect?: string } = {};
+	private hostWaitLoader: { loader: Loader; startedAt: number; timer: ReturnType<typeof setInterval> } | undefined;
+	/** The user left the running turn to run on after the TUI quits (D6). */
+	private leftRunning = false;
 
 	constructor(connector: ConversationConnector, options: InteractiveModeOptions = {}) {
 		this.connector = connector;
 		this.settingsScope = options.settingsScope ?? { cwd: process.cwd(), projectTrusted: false };
+		this.projectTrust = options.projectTrust;
 		this.settingsManager = this.createDisplaySettings();
 		this.liveView = this.createLiveView();
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
@@ -1149,21 +1177,53 @@ export class InteractiveMode {
 	 * models its cycle steps through, when scoped.
 	 */
 	private async connect(): Promise<void> {
-		await connectThrough(this.connector, {
-			name: "volt-tui",
-			hostRequests: TUI_HOST_REQUESTS,
-			requestTimeoutMs: TUI_REQUEST_TIMEOUT_MS,
-			onClient: (client) => this.store.attach(client),
-			// What the connector says about a conversation it opened, such as options its host did not apply.
-			onOpened: (opened) => {
-				for (const notice of opened.notices) this.showWarning(notice);
-			},
-			onShutdownRequested: () => this.onShutdownRequested(),
-			onLost: (error) => {
-				this.lostCause = error;
-			},
-		});
+		try {
+			await connectThrough(this.connector, {
+				name: "volt-tui",
+				hostRequests: TUI_HOST_REQUESTS,
+				requestTimeoutMs: TUI_REQUEST_TIMEOUT_MS,
+				onClient: (client) => this.store.attach(client),
+				// What the connector says about a conversation it opened, such as options its host did not apply.
+				onOpened: (opened) => {
+					for (const notice of opened.notices) this.showWarning(notice);
+				},
+				onShutdownRequested: () => this.onShutdownRequested(),
+				onLost: (error) => {
+					this.lostCause = error;
+				},
+				onStatus: (status) => this.showHostWait({ open: status }),
+				askWorkspaceRegistration: (directory) => this.askWorkspaceRegistration(directory),
+				onReconnecting: (attempt) => {
+					this.showHostWait({
+						reconnect:
+							attempt.reason === "shutdown"
+								? "Host restarting"
+								: `Reconnecting${attempt.error === undefined ? "" : ` (${attempt.error.message})`}`,
+					});
+				},
+				onReconnected: () => this.showHostWait({ reconnect: undefined }),
+				onMoveFailed: (error) => this.showError(`Could not open the conversation: ${error.message}`),
+				onStopped: (error) => {
+					this.showHostWait({ reconnect: undefined });
+					// A TUI that stopped (it quits, or its startup benchmark ended) let go of its conversation itself.
+					if (this.isShuttingDown || this.endingLostSession || !this.isInitialized) return;
+					void this.handleFatalRuntimeError("Volt lost its conversation", error, {
+						unsentDraft: this.editor.getText(),
+					});
+				},
+			});
+		} catch (error) {
+			if (this.isShuttingDown) return;
+			await this.handleFatalRuntimeError("Volt could not open its conversation", error, {
+				unsentDraft: this.editor.getText(),
+			});
+		}
 		const client = this.store.client;
+		if (this.options.sessionName !== undefined) {
+			await client
+				.intent("set_session_name", { name: this.options.sessionName })
+				.catch((error: unknown) => this.showWarning(`Could not name the session: ${errorText(error)}`));
+		}
 		const [, resources, scope, models] = await Promise.all([
 			this.input.load().catch((error: unknown) => {
 				this.showWarning(
@@ -1847,6 +1907,63 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Show what the TUI waits for from its host in the status area, with how
+	 * long it has waited: what an open waits for (the daemon starting, which
+	 * can take minutes while a previous daemon's conversations stop; a worker
+	 * starting), else the lost connection it resumes. Nothing once it waits
+	 * for neither.
+	 */
+	private showHostWait(change: { open?: string | undefined; reconnect?: string | undefined }): void {
+		this.hostWait = { ...this.hostWait, ...change };
+		const shown = this.hostWaitLoader;
+		const text = (): string | undefined => {
+			const label = this.hostWait.open ?? this.hostWait.reconnect;
+			if (label === undefined) return undefined;
+			const waited = Date.now() - (this.hostWaitLoader?.startedAt ?? Date.now());
+			return `${label}...${waited >= 2_000 ? ` (${formatElapsedDuration(waited)})` : ""}`;
+		};
+		if (text() === undefined) {
+			if (!shown) return;
+			this.hostWaitLoader = undefined;
+			clearInterval(shown.timer);
+			shown.loader.stop();
+			this.statusContainer.removeChild(shown.loader);
+			this.ui.requestRender();
+			return;
+		}
+		if (!shown) {
+			const loader = new Loader(
+				this.ui,
+				(spinner) => theme.fg("warning", spinner),
+				(message) => theme.fg("muted", message),
+				"",
+			);
+			const timer = setInterval(() => loader.setMessage(text() ?? ""), 1_000);
+			timer.unref?.();
+			this.hostWaitLoader = { loader, startedAt: Date.now(), timer };
+			this.statusContainer.addChild(loader);
+		}
+		this.hostWaitLoader?.loader.setMessage(text() ?? "");
+		this.ui.requestRender();
+	}
+
+	/**
+	 * The conversation's directory is sensitive and no workspace holds it
+	 * (D17): yes registers it shared with paired devices, no registers it
+	 * local to this host; dismissing it opens nothing.
+	 */
+	private async askWorkspaceRegistration(directory: string): Promise<"shared" | "local" | undefined> {
+		const local = "No, register it for this computer only";
+		const shared = "Yes, register it for paired devices too";
+		// The safe answer comes first, so a keystroke meant for the editor cannot share the directory.
+		const answer = await this.showExtensionSelector(
+			`Register ${directory} as a Volt workspace? Paired devices with access to all workspaces could read files there`,
+			[local, shared],
+		);
+		return answer === shared ? "shared" : answer === local ? "local" : undefined;
+	}
+
 	/** An extension asked to shut down: at once when the conversation is idle, else once it settles. */
 	private onShutdownRequested(): void {
 		this.shutdownRequested = true;
@@ -1986,8 +2103,9 @@ export class InteractiveMode {
 
 	/**
 	 * Where the conversation the store shows runs, as its client tells: its
-	 * cwd and project trust (`conversation_info`), and the settings profile
-	 * (`settings`); undefined when the client could not tell.
+	 * cwd and project trust (`conversation_info`, the trust as the TUI decided
+	 * it when it decided), and the settings profile (`settings`); undefined
+	 * when the client could not tell.
 	 */
 	private async readSettingsScope(): Promise<TuiSettingsScope | undefined> {
 		const client = this.store.client;
@@ -1995,7 +2113,11 @@ export class InteractiveMode {
 			const [info, settings] = await Promise.all([client.query("conversation_info"), client.query("settings")]);
 			return {
 				cwd: info.cwd,
-				projectTrusted: info.projectTrusted,
+				// The TUI's own decision, when its host runs elsewhere (Phase 6 D4): another client may have opened it.
+				projectTrusted:
+					this.projectTrust === undefined
+						? info.projectTrusted
+						: resolveConversationProjectTrust(getAgentDir(), info.cwd, this.projectTrust),
 				...(settings.profile === "" ? {} : { profile: settings.profile }),
 			};
 		} catch {
@@ -3577,6 +3699,8 @@ export class InteractiveMode {
 			}
 
 			this.editor.addToHistory?.(text);
+			// Typed while the conversation starts (its worker spawning): it goes out once the TUI is connected.
+			if (!this.connected) this.showStatus(`Queued until the conversation is ready: ${text}`);
 			await this.sendText(text, { followUp: false });
 		};
 		this.defaultEditor.onSubmit = async (text: string) => {
@@ -3893,9 +4017,25 @@ export class InteractiveMode {
 
 	/**
 	 * Every interactive quit path must confirm before disposing active work.
-	 * Phone attachment does not change local runtime ownership or this protection.
+	 * Phone attachment does not change local runtime ownership or this
+	 * protection. A conversation that keeps running after the TUI quits (a
+	 * daemon worker, D6) asks only while a turn runs: stop it and quit (the
+	 * default), or leave it running in the background; running work alone
+	 * keeps running there.
 	 */
 	private async requestQuit(): Promise<void> {
+		if (this.connector.background === true) {
+			if (this.connected && this.store.phase?.operation === "turn") {
+				const stop = "Stop turn and quit";
+				const leave = "Leave running in background";
+				const choice = await this.showExtensionSelector("A turn is running", [stop, leave]);
+				if (choice === undefined) return;
+				if (choice === stop) await this.stopTurnBeforeQuit();
+				else this.leftRunning = true;
+			}
+			await this.shutdown();
+			return;
+		}
 		const now = Date.now();
 		const activity = this.activity();
 		if (activity !== undefined && !this.hasQuitConfirmation(now)) {
@@ -3909,6 +4049,29 @@ export class InteractiveMode {
 		await this.shutdown();
 	}
 
+	/** Stop the running turn before quitting: `abort`, then wait (at most a minute) for the conversation to settle. */
+	private async stopTurnBeforeQuit(): Promise<void> {
+		this.showStatus("Stopping the turn...");
+		try {
+			await this.store.client.intent("abort");
+		} catch (error) {
+			this.showWarning(`Could not stop the turn: ${errorText(error)}`);
+			return;
+		}
+		await new Promise<void>((resolve) => {
+			const settle = (): void => {
+				clearTimeout(timer);
+				unsubscribe();
+				resolve();
+			};
+			const timer = setTimeout(settle, STOP_TURN_WAIT_MS);
+			const unsubscribe = this.store.subscribe(() => {
+				if (this.store.phase?.busy !== true) settle();
+			});
+			if (this.store.phase?.busy !== true) settle();
+		});
+	}
+
 	/**
 	 * Gracefully shutdown the agent.
 	 * Stops the TUI before emitting shutdown events so extension UI cleanup cannot
@@ -3917,12 +4080,12 @@ export class InteractiveMode {
 	private isShuttingDown = false;
 
 	/**
-	 * Close the TUI's conversation and host; the host hands the session back to
-	 * the daemon only after the runtime finished writing the session, so the
-	 * daemon's lazy resume sees final state.
+	 * Let go of the TUI's conversation through its connector: a daemon
+	 * worker's keeps running after the TUI detached; an in-process host's
+	 * closes, with the TUI still attached.
 	 */
 	private disposeRuntimeHost(): Promise<void> {
-		// The TUI's conversation closes with its UI still attached; extension UI is released before disposal.
+		// Extension UI is released before the conversation closes or the TUI detaches.
 		return this.connector.dispose({ beforeDispose: () => this.leaveConversation() });
 	}
 
@@ -3992,6 +4155,7 @@ export class InteractiveMode {
 		await rememberActiveProfile();
 
 		const resumeCommand = info === undefined ? undefined : formatResumeCommand(info);
+		if (this.leftRunning) process.stdout.write(`${chalk.dim("The turn keeps running in the background.")}\n`);
 		if (resumeCommand) {
 			process.stdout.write(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
 		}
@@ -6165,8 +6329,9 @@ export class InteractiveMode {
 
 	/**
 	 * /worktree — open a new session inside a daemon-managed git worktree
-	 * (§5.2.1): ensures the daemon is running, creates (or picks) a worktree via
-	 * the control socket, then starts a new session in the worktree checkout
+	 * (§5.2.1): ensures the daemon is running, creates (or picks) a worktree of
+	 * the conversation's workspace via the control socket, then starts a new
+	 * session in the worktree checkout
 	 * (`new_session{cwd}`), stored where the conversation it leaves is, and
 	 * binds it to the worktree once the client moved there.
 	 */
@@ -6191,7 +6356,12 @@ export class InteractiveMode {
 
 		this.showStatus("Contacting voltd…");
 		const cwd = (await this.sessions.info()).cwd;
-		const opened = await openDaemonWorktreeControl({ cwd, agentDir: getAgentDir() });
+		const workspaceName = this.connector.daemonWorkspaceName();
+		const opened = await openDaemonWorktreeControl({
+			cwd,
+			agentDir: getAgentDir(),
+			...(workspaceName === undefined ? {} : { workspaceName }),
+		});
 		if (!opened.ok) {
 			this.showError(`Worktrees need the volt daemon: ${opened.error}`);
 			return;

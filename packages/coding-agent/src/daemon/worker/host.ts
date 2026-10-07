@@ -62,6 +62,7 @@ import { realpath } from "node:fs/promises";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
+import { resolveConversationProjectTrust } from "../../core/project-trust.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../core/protocol/server/connection.ts";
 import {
 	type IrohRemoteHostHandshakeFailureOutcome,
@@ -79,7 +80,6 @@ import { isPathInside } from "../workspace-directory.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
-	resolveWorkerProjectTrust,
 } from "./conversation-factory.ts";
 import {
 	type WorkerCloseEvent,
@@ -603,7 +603,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		},
 		// As the conversation's factory decides it: a TUI's decision for the project its conversation opened in, else the saved one.
 		projectTrusted: (cwd, spec) =>
-			resolveWorkerProjectTrust(
+			resolveConversationProjectTrust(
 				request.agentDir,
 				cwd,
 				spec.origin === "tui" && spec.config.trust !== undefined

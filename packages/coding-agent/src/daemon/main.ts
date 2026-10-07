@@ -105,6 +105,12 @@ export interface VoltdConfig {
 	prepareEnvironment?: () => Promise<DaemonEnvironmentResolution>;
 	/** How conversation workers start. Without one, the daemon refuses to spawn any (tests of the control plane). */
 	workerLauncher?: WorkerLauncher;
+	/**
+	 * Exit once nothing has needed the daemon for this long (D8): no
+	 * conversation workers, no control clients, and no paired devices. Never
+	 * for a daemon the login service runs, nor without it (tests).
+	 */
+	idleExitMs?: number;
 }
 
 export interface VoltdProcessLifecycle {
@@ -151,6 +157,10 @@ export const VOLTD_EXIT_WORKERS_RUNNING = 7;
 const ORPHANED_WORKER_WAIT_MS = 75_000;
 const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
 const DAEMON_BIND_WAIT_POLL_MS = 200;
+/** How long nothing needs a daemon the TUI started before it exits (D8; daemon RFC Q3). */
+export const DAEMON_IDLE_EXIT_MS = 5 * 60_000;
+/** How often an idle-exiting daemon checks whether anything needs it. */
+const DAEMON_IDLE_SAMPLE_MS = 15_000;
 export const VOLTD_EXTENSION_DISPOSE_TIMEOUT_MS = 5_000;
 
 const defaultProcessLifecycle: VoltdProcessLifecycle = {
@@ -186,11 +196,14 @@ export interface VoltdRuntimeServices {
 	keepAwake: KeepAwakeController;
 	/** Stored Brave Search API key for the web_search tool, persisted in auth.json. */
 	webSearchKey: { set(apiKey: string | null): void; readonly configured: boolean };
-	requestShutdown(reason: "cli" | "signal"): void;
+	requestShutdown(reason: VoltdShutdownReason): void;
 }
 
+/** Why the daemon stops: `volt daemon stop`, a signal, or nothing needs it (D8). */
+export type VoltdShutdownReason = "cli" | "signal" | "idle";
+
 export interface VoltdExtensionQuiesceContext {
-	reason: "cli" | "signal";
+	reason: VoltdShutdownReason;
 }
 
 export interface VoltdExtensionDisposeContext extends VoltdExtensionQuiesceContext {
@@ -588,7 +601,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		},
 	};
 
-	const shutdown = async (reason: "cli" | "signal") => {
+	const shutdown = async (reason: VoltdShutdownReason) => {
 		if (shutdownPhase !== "running") {
 			return;
 		}
@@ -674,7 +687,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		resolveExit?.(0);
 	};
 
-	const requestShutdown = (reason: "cli" | "signal") => {
+	const requestShutdown = (reason: VoltdShutdownReason) => {
 		void shutdown(reason);
 	};
 
@@ -1261,7 +1274,33 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		.catch(() => {});
 	log("info", `voltd ${VERSION} listening`, { socketPath: paths.socketPath, pid: process.pid });
 
+	// D8: a daemon nothing needs (no workers, no control clients, no paired devices) exits after the grace period.
+	let idleTimer: ReturnType<typeof setInterval> | undefined;
+	const idleExitMs = config.idleExitMs;
+	if (idleExitMs !== undefined) {
+		let idleSince: number | undefined;
+		const sampleIdle = (): void => {
+			const needed =
+				shutdownPhase !== "running" ||
+				workers.list().length > 0 ||
+				state.state.clients.length > 0 ||
+				(controlServer?.connections().length ?? 0) > 0;
+			if (needed) {
+				idleSince = undefined;
+				return;
+			}
+			idleSince ??= clock.now();
+			if (clock.now() - idleSince < idleExitMs) return;
+			log("info", `nothing has needed the daemon for ${Math.round(idleExitMs / 1000)}s; exiting`);
+			requestShutdown("idle");
+		};
+		idleTimer = setInterval(sampleIdle, Math.min(DAEMON_IDLE_SAMPLE_MS, Math.max(1, Math.floor(idleExitMs / 4))));
+		idleTimer.unref?.();
+		sampleIdle();
+	}
+
 	const code = await exitPromise;
+	clearInterval(idleTimer);
 	processLifecycle.removeShutdownSignalHandler(onSignal);
 	return code;
 }
