@@ -246,10 +246,10 @@ plan's properties.
 `WorkerRegistry.cfg`: `Sessions = {s1, s2}`, `Workers = {w1, w2}`,
 `Clients = {c1, c2}`, `Senders = {c1}`, `Keys = {k1}`, `Cap = 2`,
 `MaxFaults = 1`, `MaxGen = 1`, `RestartWaitsForOrphans = TRUE`, symmetry off
-(liveness). TLC 2.19 on JDK 17, 16 workers: **1,102,474 distinct states**
+(liveness). TLC 2.19 on JDK 17, 6 workers (`-workers auto`, 10 cores): **1,102,474 distinct states**
 (7,629,297 generated), depth 35; all fifteen invariants, the six action
 properties, and the seven liveness properties hold; about 18 minutes on a
-shared 16-core machine. Shared workers multiply the reachable configurations
+shared machine. Shared workers multiply the reachable configurations
 (the pre-sharing model had 495,727 distinct states with three worker ids), so
 the liveness run keeps two worker ids and the larger bounds are checked for
 safety:
