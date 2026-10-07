@@ -7,6 +7,7 @@ import {
 	pageUtf8,
 	type ReviewChangedFile,
 	type ReviewSnapshot,
+	type ReviewSnapshotHunk,
 	type ReviewSnapshotRevision,
 	type ReviewSnapshotTreeEntry,
 } from "./review-snapshot.ts";
@@ -101,6 +102,14 @@ export class ReviewCoverageTracker {
 		}
 	}
 
+	/**
+	 * Credit hunks whose whole patch text reached the pass by another route than `review_diff` paging: see
+	 * {@link deliverReviewDiff}. It leaves the paging state, and so `diffFilesFullyRead`, as it is.
+	 */
+	recordHunksDelivered(hunkIds: readonly string[]): void {
+		for (const hunkId of hunkIds) this.hunksInspectedValue.add(hunkId);
+	}
+
 	recordSearch(): void {
 		this.searchesRunValue++;
 	}
@@ -131,6 +140,47 @@ export class ReviewCoverageTracker {
 				.map(([path]) => path)
 				.sort(),
 		};
+	}
+}
+
+/**
+ * The coverage of a run whose passes may each have seen only part of the change: what the passes observed together.
+ * Flags hold if any pass has them, counters add up, and a hunk, file, or whole diff counts once any pass saw it.
+ */
+export function mergeObservedCoverage(parts: readonly ReviewObservedCoverage[]): ReviewObservedCoverage {
+	const union = (select: (part: ReviewObservedCoverage) => readonly string[]): string[] =>
+		[...new Set(parts.flatMap(select))].sort();
+	const sum = (select: (part: ReviewObservedCoverage) => number): number =>
+		parts.reduce((total, part) => total + select(part), 0);
+	return {
+		changedFileInventoryComplete: parts.some((part) => part.changedFileInventoryComplete),
+		contextInspectionComplete: parts.some((part) => part.contextInspectionComplete),
+		contextPagesRead: sum((part) => part.contextPagesRead),
+		filesRead: union((part) => part.filesRead),
+		hunksInspected: union((part) => part.hunksInspected),
+		searchesRun: sum((part) => part.searchesRun),
+		treePagesRead: sum((part) => part.treePagesRead),
+		diffFilesFullyRead: union((part) => part.diffFilesFullyRead),
+	};
+}
+
+/**
+ * The coverage of a run with several passes: each pass reads through a tracker of its own, and the run's coverage is
+ * what any of them observed ({@link mergeObservedCoverage}). A hunk counts once some pass saw it whole; how many
+ * passes did is not counted.
+ */
+export class ReviewRunCoverage {
+	private readonly passes: ReviewCoverageTracker[] = [];
+
+	/** The tracker for one more pass. */
+	newPass(): ReviewCoverageTracker {
+		const tracker = new ReviewCoverageTracker();
+		this.passes.push(tracker);
+		return tracker;
+	}
+
+	snapshot(): ReviewObservedCoverage {
+		return mergeObservedCoverage(this.passes.map((pass) => pass.snapshot()));
 	}
 }
 
@@ -254,10 +304,15 @@ function revisionValue(value: string | undefined): ReviewSnapshotRevision {
 	throw new Error('Revision must be "base" or "head".');
 }
 
-function changedFileText(file: ReviewChangedFile): string {
+/** The first line of a changed file's text: where it is and how it changed. */
+function changedFileHeader(file: ReviewChangedFile): string {
 	const location = file.previousPath ? `${file.previousPath} -> ${file.path}` : file.path;
+	return `${location} [${file.status}]`;
+}
+
+function changedFileText(file: ReviewChangedFile): string {
 	const metadata = [
-		`${location} [${file.status}]`,
+		changedFileHeader(file),
 		`  base: ${file.base ? `${file.base.mode} ${file.base.oid}` : "absent"}`,
 		`  head: ${file.head ? `${file.head.mode} ${file.head.oid}` : "absent"}`,
 		`  reviewable: ${file.reviewable ? "yes" : "no"}`,
@@ -269,10 +324,83 @@ function changedFileText(file: ReviewChangedFile): string {
 	return metadata.join("\n");
 }
 
+/** A hunk's lines in a diff text: its marker, then its patch. */
+function hunkDiffLines(hunk: ReviewSnapshotHunk): string[] {
+	return [`--- hunk ${hunk.id} ---`, hunk.patch];
+}
+
 function pathDiffText(file: ReviewChangedFile): string {
-	return [changedFileText(file), ...file.hunks.flatMap((hunk) => ["", `--- hunk ${hunk.id} ---`, hunk.patch])].join(
-		"\n",
-	);
+	return [changedFileText(file), ...file.hunks.flatMap((hunk) => ["", ...hunkDiffLines(hunk)])].join("\n");
+}
+
+/** One hunk as delivered: its file's first line, then the hunk's marker and patch, as `review_diff` shows them. */
+export interface ReviewDeliveredHunk {
+	hunkId: string;
+	path: string;
+	text: string;
+}
+
+export interface ReviewDiffDelivery {
+	/** The hunks delivered, whole, in the order requested. */
+	sections: ReviewDeliveredHunk[];
+	/** The sections, a blank line between them: at most the budget. */
+	text: string;
+	delivered: string[];
+	/**
+	 * Requested hunks left out because their text did not fit what remained of the budget; none is cut. A hunk
+	 * larger than the whole budget stays omitted until the budget grows.
+	 */
+	omitted: string[];
+}
+
+const DELIVERED_HUNK_SEPARATOR = "\n\n";
+const DELIVERED_HUNK_SEPARATOR_BYTES = Buffer.byteLength(DELIVERED_HUNK_SEPARATOR, "utf8");
+
+/**
+ * Give a pass the diff text of `hunkIds` outside the `review_diff` tool, for a pass whose prompt carries the diff,
+ * and credit `tracker` with the hunks delivered. Only a hunk whose whole text is within `maxBytes` (UTF-8, the
+ * sections and the blank lines between them together) is delivered and credited, so what coverage says was seen is
+ * exactly the text returned. A hunk id the snapshot does not have throws, and nothing is credited.
+ */
+export function deliverReviewDiff(
+	snapshot: Pick<ReviewSnapshot, "changedFiles">,
+	tracker: ReviewCoverageTracker,
+	hunkIds: readonly string[],
+	maxBytes: number,
+): ReviewDiffDelivery {
+	if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error("Diff budget must be a positive integer.");
+	const hunks = new Map<string, { file: ReviewChangedFile; hunk: ReviewSnapshotHunk }>();
+	for (const file of snapshot.changedFiles) for (const hunk of file.hunks) hunks.set(hunk.id, { file, hunk });
+	const requested: Array<{ hunkId: string; file: ReviewChangedFile; hunk: ReviewSnapshotHunk }> = [];
+	const unknown: string[] = [];
+	for (const hunkId of new Set(hunkIds)) {
+		const entry = hunks.get(hunkId);
+		if (entry) requested.push({ hunkId, ...entry });
+		else unknown.push(hunkId);
+	}
+	if (unknown.length > 0) throw new Error(`Hunks are not in this review snapshot: ${unknown.join(", ")}`);
+
+	const sections: ReviewDeliveredHunk[] = [];
+	const omitted: string[] = [];
+	let used = 0;
+	for (const { hunkId, file, hunk } of requested) {
+		const text = [changedFileHeader(file), ...hunkDiffLines(hunk)].join("\n");
+		const cost = Buffer.byteLength(text, "utf8") + (sections.length > 0 ? DELIVERED_HUNK_SEPARATOR_BYTES : 0);
+		if (used + cost > maxBytes) {
+			omitted.push(hunkId);
+			continue;
+		}
+		used += cost;
+		sections.push({ hunkId, path: file.path, text });
+	}
+	const delivered = sections.map((section) => section.hunkId);
+	tracker.recordHunksDelivered(delivered);
+	return {
+		sections,
+		text: sections.map((section) => section.text).join(DELIVERED_HUNK_SEPARATOR),
+		delivered,
+		omitted,
+	};
 }
 
 function numberedLines(
