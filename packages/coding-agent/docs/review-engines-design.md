@@ -4,13 +4,13 @@
 - Date: 2026-10-07
 - Audience: Volt maintainers and extension API implementers.
 - Scope: How `/review` and review engines that extensions provide (today the project-local `/swarm-review`) share targets, coverage, launching, running, and results.
-- Decision: `/review` becomes the one entry point, with an engine choice. The built-in pipeline is the `standard` engine; extensions register engines on the same primitives and submit results to the host's review records. Commands declare typed parameters that drive flag parsing, the launcher form, and completion. Delivery is five independent steps, each its own pull request.
+- Decision: `/review` becomes the one entry point, with an engine choice. The built-in pipeline is the `standard` engine; extensions register engines on the same primitives and submit results to the host's review records. Typed parameters, declared once, drive flag parsing, the launcher form, and completion. Delivery is a hardening step plus five independent steps, each its own pull request. Eight design choices still need a decision (section 7).
 
 ## 1. Objective
 
 `/swarm-review` is a second review engine built beside `/review`. It resolves and freezes its own targets, ships its own repository tools, clusters and verifies on its own, keeps its own dismissal memory, and produces a markdown report outside the host's review records. It takes about fifteen flags and offers no guided launch. The host's review machinery (`review*.ts`, roughly 10,000 lines) already provides what the report lacks: finding ids and statuses, acknowledgment, fix-selected-findings, per-finding discussions, PR publishing, and a handoff into a new conversation.
 
-The extension API has started to grow review-shaped pieces one at a time (an `open` hook that seeds a conversation, a TUI watch for work that opens a conversation). Continued, that reinvents `review_open_session` piecemeal. The aim here is the reverse: extensions use the primitives `/review` uses, and `/review` itself improves where the extension showed its gaps.
+Growing the extension API one review-shaped piece at a time (for example an `open` hook that seeds a conversation for finished work) would reinvent `review_open_session` piecemeal. The aim here is the reverse: extensions use the primitives `/review` uses, and `/review` itself improves where the extension showed its gaps.
 
 ### Non-goals
 
@@ -21,82 +21,110 @@ The extension API has started to grow review-shaped pieces one at a time (an `op
 
 ## 2. Current state
 
-Everything in this section was read in the code.
+Checked against the code at `403cffa2c`, once by the author and once by an independent read-only review.
 
 | Surface | `/review` | `/swarm-review` (extension) |
 | --- | --- | --- |
 | Targets | `uncommitted` (HEAD to worktree), `branch [base]` (merge base to the HEAD commit's tree), `pr`, `commit` | worktree (optionally since a base, including uncommitted and untracked changes), `commit`, `pr` |
 | Target resolution | `resolveReviewSnapshot` captures an exact Git snapshot with an identity (`baseTree`, `headTree`, commits) | `git.ts` freezes its own checkout (`baseRev`, `headTree`) |
-| Repository tools | Host paged snapshot tools, observed by `ReviewCoverageTracker` | `tools.ts`: read, grep, find, ls, `read_base`, confined to the checkout |
-| Passes | Discovery and independent verification in separate contexts; PR runs add a context-blind presentation pass | Many discovery workers in waves, clustering, two verifiers per cluster |
-| Result | `ReviewRunRecord` with `ParsedReview`; host-assigned finding ids | Markdown report in the work's output |
+| Repository tools | Host paged snapshot tools, observed by `ReviewCoverageTracker` | `tools.ts`: read, grep, find, ls, `read_base`, confined to the checkout and the original repository root |
+| Passes | Discovery and independent verification in separate contexts, with one follow-up round; a context-blind presentation pass for PR runs and for unresolved verifier challenges | Many discovery workers in waves, clustering, two verifiers per cluster |
+| Result | `ReviewRunRecord` with `ParsedReview`; host-assigned finding ids | Markdown report in the work's output and as its notice |
 | Findings handoff | `review_open_session` seeds a new conversation with the run, the selected findings, and an acknowledgment | None |
 | Publishing | `review_publish`: confirmed, complete PR runs only, head verified | None |
-| Launch | No arguments: selectors for the target only (TUI-only code). Controls are flags | About fifteen flags, hand-parsed; defaults are constants |
-| Live view | Loader replaces the editor, passes draw inline (`ReviewView`), findings open at the end | Work item in the job list |
+| Launch | TUI with no arguments: selectors for the target only. Controls are flags (`--focus`, `--scope`, `--effort`, `--include-optional`, `--incremental` or `--full`). Remote clients start reviews through typed `review_*` intents | About fifteen flags, hand-parsed; defaults are constants |
+| Live view | `review` work, which also appears in `/work`. The TUI adds a loader that replaces the editor and draws the passes inline (`ReviewView`), then opens the findings | Work item in the job list only |
 
-Facts the design rests on:
+### Work and records
 
 - **Work and run identity.** A review is `review` work whose work id is the run id of the `volt.review.run` record it ends with (`review-work.ts`). Finished review work opens by calling `openReviewFindings`.
-- **Host-only records.** Review records are written only by the host. The writer an extension gets (`extensionSessionWriter`) has no `recordReviewState`.
-- **Anchor validation.** `validateReviewCandidates` requires a finding's `changeLocation` to name an existing, non-binary file on its side, span at most 10 lines, overlap a changed line, and lie in the effective scope. Priority 3 needs `includeOptional`. The fingerprint is derived from the snapshot identity, path, side, category, root-cause key, blob id, and hunk ids.
-- **Publishing depends on that validation.** `publishReviewRun` posts a finding inline only if its file appears in `run.target.files` with the matching blob id and its range is at most 10 lines; the confirmation on `review_publish` is the user's gate. It posts the finding text as written.
-- **Coverage is observed.** A run is `complete` only if the verifier's assessment is complete, every reviewable hunk is in the verifier's observed hunk set, the changed-file inventory was paged to completion, and PR context was paged. `--effort` sets the pass's thinking level and is passed to the model as a control. I found no use of it that changes the number of passes.
-- **Protected PR context.** When a snapshot carries code-host context, `buildParsedReview` throws unless a context-blind presentation report exists for any finding.
-- **Extension building blocks that exist.** Work kinds with `delivery`, `detail`, progress, and checkpoints; `ctx.ui.form` (string, boolean, enum, integer fields, rendered by every client); typed manifest `settings` with global and project scopes. `registerCommand` takes a raw argument string.
+- **Review records and who can write them.** Run, acknowledgment, finding-transition, and publication records are `custom` log entries typed `volt.review.run`, `volt.review.acknowledgment`, `volt.review.finding-transition`, and `volt.review.publication`, and the host reads them back by `customType` (`hydrateRuns`, last record per run id wins). Only the discussion and alias records are host-only entry types. Two extension paths write arbitrary custom entries with no permission and no type check: `volt.appendEntry`, and the writer given to `newSession` setup (`extensionSessionWriter`, which also exposes `appendCustomMessageEntry` without the host message-type check, and `recordPrReviewBinding`). Nothing reserves the `volt.review.` prefix, so an extension can write, or overwrite, a run record today. Later host reviews read prior runs (`planIncrementalReview` uses coverage, open findings, and dismissed fingerprints from the newest run), and publishing and `review_open_session` read them too. The only reserved-type precedent covers message types (`reservedCustomType` against `HOST_CUSTOM_MESSAGE_TYPES`), not entry types.
+- **`/review` is built in.** It is not a registered command: the TUI dispatches it itself (`handleReviewCommand`, `parseReviewCommandArgs`), and remote clients use four typed intents (`review_uncommitted`, `review_branch`, `review_pr`, `review_commit`) that repeat the same options.
+- **Run channel today.** A host executor gets `WorkContext`: `progress(p, detail?)`, `checkpoint`, `child`, `output`, `signal`. An executor-reported detail replaces a presented one. An extension executor gets a narrower `WorkRunContext` (progress without detail, checkpoint, output), its `child` is dropped, and its detail comes from a presenter normalized under the extension's action policy, where `open_work` and `cancel_work` are allowed only for work of that extension's own `ext:<id>/` kinds (`ExtensionKinds.owns`). The review usage shown in the TUI footer is read from a root `keyValue` detail node with key `review-usage` (`reviewUsageTotals`). Detail above 8 KiB is dropped first, then steps. `child` is single-valued, and each call is a durable checkpoint, capped at 256 per item.
+- **Concurrency.** `WorkRegistry.reserve` counts open items of one kind against `maxActive`. The `review` kind allows 3 (`REVIEW_WORK_MAX_ACTIVE`), extension kinds default to 1. The TUI's `activeReview` flag is client-local. Review work survives an abort of the conversation's run (`cancelOnAbort: false`); swarm's kind does not set that, so aborting a run cancels it.
+- **Delivery.** `delivery` is fixed per kind and copied into `work_started`. Only `message` and `wake` kinds queue a notice. `delivery: "none"` keeps the work's `result.output` regardless; `reviewWorkExecution` currently returns only a summary and data.
+
+### Findings and validation
+
+- **Anchor validation.** `validateReviewCandidates` requires a finding's `changeLocation` to name an existing, non-binary file on its side, span at most 10 lines, overlap a changed line, and lie in the effective scope. Priority 3 needs `includeOptional`. `category` and `rootCauseKey` must be kebab-case (at most 80 and 160 characters), and duplicate root-cause anchors and duplicate fingerprints are rejected. The fingerprint hashes the snapshot identity's kind and base tree, the path, the side, the category, the root-cause key, the side's blob id, and the hunk ids.
+- **One result path.** `buildParsedReview` takes a candidate report, a verification report, and the snapshot. `validateReviewCandidates` and `declassifyReviewFindings` (which assigns finding ids) run first, then a presentation report (rendered from the private analysis, or by the context-blind pass for protected PR context). The host repairs a pass by re-prompting it, at most twice.
+- **Publishing.** `publishReviewRun` posts a finding inline only if its file appears in `run.target.files` with a blob id for the finding's side and its range is at most 10 lines. It does not compare blob ids itself, so the anchor validation above is what keeps inline comments on changed lines. The confirmation on `review_publish` is the user's gate, and the finding text is posted as written. Publishing requires `completionStatus === "complete"` and a `pr` identity.
+- **Caps.** A candidate report holds at most 50 candidates. Persisted results are truncated in UTF-8 bytes (`boundPublicReviewResult`): body 2,000, trigger and impact 500, verification method 500 and rationale 1,000, at most 4 evidence locations, and coverage lists 500 items (10 when the record exceeds 512 KB and is rebuilt without evidence). `target.files` has its own 5,000-file and 64 KB cap and is emptied when exceeded.
+
+### Coverage and PR context
+
+- **Coverage is observed.** `hunksInspected` is credited only when a file's whole diff has been paged through the `review_diff` tool (`recordDiffPage`); `review_file` and `review_search` credit nothing toward hunks. A run is `complete` only if the verifier's assessment is complete and there are no unchecked areas: every reviewable hunk must be in the verifier's observed set, and unsupported changed files outside the exclusions, an unpaged changed-file inventory, and unpaged PR context all count against it.
+- **What persists.** Each round creates its own discovery and verification trackers. After a successful round they replace the previous ones; they are not merged. Only the verifier's coverage persists (`coverage.hunksInspected`); discovery coverage feeds only the context-paging flag. Incremental planning requires every hunk of an unchanged file to be in the previous run's `hunksInspected` and falls back to a full review beyond the cap.
+- **Per-finding hunk check.** `validateReviewPresentations` with coverage runs only inside the PR and challenge presentation passes. `buildParsedReview` calls it without coverage, and per-finding verification is persisted nowhere.
+- **Effort and rounds.** `--effort` sets the pass's thinking level and is passed to the model as a control. Nothing that depends on it changes the number of passes. The round loop is a fixed two.
+- **Protected PR context.** The `pr` case always captures code-host context together with the PR identity, and there is no option to skip it. When a snapshot carries context, `buildParsedReview` throws unless a context-blind presentation report exists for any retained finding (zero-finding runs never need it), the review tools gain `review_context`, discovery and verification are hosted `localOnly`, and `complete` additionally requires both passes to have paged the context.
+- **Snapshot lifetime.** A snapshot of the worktree writes its objects to a temporary object directory that `dispose()` deletes. Afterwards `readFile`, `search`, and `materializeHead` throw, so a snapshot is usable only until its run ends.
+
+### Extension building blocks and the launcher
+
+- **Intents.** The host exposes typed intents with descriptors carrying `input` (JSON Schema), `remote`, `requires`, `confirm`, `presentation`, `slash`, and `completions`. `registerIntent` gives an extension `label`, `description`, `input` (a TypeBox object), `remote`, `requires`, and a handler; extension intents have no `slash`, completion, or `confirm`. Extension commands are exposed as intents `extension.command.<id>.<name>` whose input is `{arguments?, streamingBehavior?}`: the handler receives a raw string. `localOnlyInput` on built-in intents refuses a field at invocation; it does not hide the field from descriptors.
+- **Forms.** `ctx.ui.form` takes one-shot fields of four kinds: string (placeholder, `required`, length bounds, `pattern`, `multiline`), boolean, enum (options with labels and descriptions), and integer (`min`, `max`). There is no group, conditional field, optional or default keyword, list, or secret field. Every attached client that accepts the request kind is asked and the first valid answer wins. `settingsFormFields` converts a manifest's flat settings schema into form fields. Typed manifest `settings` have global and project scopes.
+- **Flag grammars.** `/review` takes a leading target keyword (`uncommitted`, `unstaged`, `working`, `branch [base]`, `pr [number]`, `commit [ref]`, or `tools`), then flags with space-separated values; `--scope` repeats and splits on commas; `--incremental` and `--full` are a pair; a bare `commit` opens a picker. Swarm takes `--name value` or `--name=value` flags (`--exec=1` is rejected), joins every stray word into the focus text, allows at most one of `--base`, `--commit`, and `--pr`, and clamps and defaults across fields (`wave-size` to `workers`, `concurrency` to the wave size).
+- **Defaults.** `/review` sends constant defaults explicitly (`DEFAULT_REVIEW_RUN_CONTROLS`). Swarm resolves a model from its flag, then a hard-coded default, then the host's `reviewModel` or `reviewVerifierModel`; it never falls back to the conversation's model, which a null host setting would mean.
+- **Aliases.** There is no command alias mechanism. An extension command named `review` is skipped in the TUI menu on conflict, and because `/review` is not registered, `/swarm-review` cannot delegate to it.
 
 ## 3. Decisions
 
 1. **Extensions use the primitives `/review` uses.** They submit results to the host's review machinery. They do not rebuild it, and the host does not grow a parallel result path for them.
 2. **One `/review`, with an engine choice.** The built-in pipeline is the `standard` engine and the default. Extensions register further engines. Whether `/swarm-review` stays as shorthand for `/review --engine swarm` is a convenience question, not compatibility.
 3. **One run experience.** Every engine's run is `review` work shown in the job list with its detail data. `/review` stops replacing the editor with a loader.
-4. **Typed command parameters.** A command declares its parameters once; the host parses flags, renders the launcher form, and offers completion from that declaration.
+4. **Typed parameters, declared once.** The declaration drives flag parsing, the launcher form, and completion. Where it is declared is open (D1).
 5. **The trust model of section 5.**
 
 ## 4. Design
 
 The API shapes below are sketches. Names and signatures are not final.
 
+### 4.0 Prerequisite: reserve host-owned log types
+
+Before any provenance claim holds, extensions must not be able to write the host's review records. Refuse a `customType` starting with `volt.review.` at the two extension write paths (`volt.appendEntry` and the `newSession` setup writer), as `reservedCustomType` does for message types. The check must not sit in log admission or import: forks and imports legitimately copy these entries. Whether the setup writer should also stop exposing `recordPrReviewBinding` and an unchecked `appendCustomMessageEntry` is open (section 7.2). This step is small and independent of everything else.
+
 ### 4.1 Targets
 
-`resolveReviewSnapshot` mixes two jobs: resolve a selector into an identity (trees, commits, PR identity), and build a snapshot from it. Split them. After the split:
+`resolveReviewSnapshot` mixes two jobs: resolve a selector into an identity (trees, commits, PR identity), and build a snapshot from it. Split them. The identity step has to return the resources behind it (the Git source, its temporary directories, and a dispose handle), not just trees, because a worktree head tree exists only as objects in a temporary directory.
 
-- **A combined target.** `/review` has no target for the common state of a feature branch with some uncommitted edits. `branch` compares the merge base with the HEAD commit's tree, and `uncommitted` compares HEAD with the worktree. A target that compares the merge base with the worktree tree (including untracked files) is the composition of the two existing cases. Whether it is a new kind or an option on `branch` is open (section 7).
-- **Tree pairs.** Every kind reduces to a base tree, a head tree, and metadata. A tree-pair identity lets an engine review a state the host kinds cannot express, and is not publishable unless it carries a PR identity.
+- **A combined target.** `/review` has no target for the common state of a feature branch with some uncommitted edits. A target that compares the merge base with the worktree tree (including untracked files) needs a single Git source that sees the base tree, the worktree tree, and both trees' blobs. With a local base this is easy: the uncommitted source already sees all local objects, so run `merge-base` there. A remote base lives only in an isolated bare repo, so its objects directory must be added to the alternates and the source's object directories, and its temporary directory to the dispose list. The `baseTree` argument of `captureWorktreeTree` stays the HEAD tree (it only seeds the index when none exists); the empty-diff check compares the captured tree with the merge-base tree. HEAD should be re-checked after the capture, as `branch` pins it.
+- **Identity and rerun.** `reviewHeading` shows `tree <headTree>` only for kind `uncommitted`, so a worktree identity must not set `headCommit`. `reviewTargetForRerun` falls through to `commit` for any kind it does not name, which would review the wrong thing or fail, so a new kind needs an explicit branch there. Whether the combined target is a new kind or an option on `branch` is D2.
+- **Tree pairs.** Every kind reduces to a base tree, a head tree, and metadata. A tree-pair identity lets the host review a state its kinds cannot express. It is not publishable: `publishReviewRun` requires a `pr` identity.
 
 ### 4.2 Coverage
 
-Today `complete` means the final verifier read every hunk. That assumes one verifier over the whole diff, and it makes any multi-pass engine incomplete by construction (swarm's verifiers see cluster-scoped diffs).
+Today `complete` requires the final verifier to have paged every reviewable hunk. That assumes one verifier over the whole diff, and it makes any multi-pass engine incomplete by construction (swarm's verifiers see cluster-scoped diffs). Today's coverage is also thin: only the last successful round's verifier coverage persists, and discovery coverage is unused.
 
-Make coverage a property of the run, with multiplicity:
+Make completeness a policy of the engine, over observed coverage:
 
-- Each pass has its own observed coverage. The host merges them into a per-hunk count of independent discovery passes that inspected the hunk.
-- Each accepted finding must still be verified over its own hunks (the presentation check already enforces this).
-- `complete` means every reviewable hunk was inspected by at least k discovery passes and every accepted finding was verified. k follows effort and is 1 for `standard` today.
+- **`standard` keeps today's rule.** The verifier's assessment is complete and its observed coverage leaves no unchecked areas. The publish gate (`completionStatus === "complete"`) is unchanged.
+- **A multi-pass engine declares a policy.** `complete` means its verification stage reported no unresolved challenge, there are no other unchecked areas, every reviewable hunk was inspected by at least k independent discovery passes, and every accepted finding was verified over its own hunks. k follows effort.
+- **Multiplicity is recorded in a bounded shape.** A histogram (hunks by number of passes that inspected them) plus a bounded list of hunks below k is cheap. Full per-hunk counts hit the 500-item cap, and counts packed into `target.files` risk that list's own cap. The shape also needs the closed coverage schema in `packages/protocol/src/projections.ts` and the contract JSON updated. The UI can then say "covered once" or "covered by 30 passes" and show uneven coverage.
+- **Observed means through host calls.** Coverage is credited only through the host's paged tools. An engine that inlines diffs into its prompts, as swarm does, gets credit through a host call that returns the diff text for a set of hunks and records them as delivered to that pass. That proves the host delivered the bytes, not that a model read them or that passes were independent; the existing paging has the same limits but at least needs a model-issued tool call. For this to mean anything the snapshot context must not expose patch text directly, since direct reads are unobserved.
 
-The run record gains the counts, so the UI can say "covered once" or "covered by 30 passes" and show uneven coverage.
+### 4.3 Typed parameters
 
-### 4.3 Typed command parameters
+The declaration is a flat schema in the vocabulary typed manifest settings already use (`type`, `enum`, `default`, `title`, `minimum`, `maximum`, `pattern`), mapped onto the wire form fields (`kind`, `value`, `label`, `min`, `max`, `required`):
 
 ```typescript
-volt.registerCommand("example", {
-  description: "...",
-  parameters: {
-    target: { type: "string", enum: ["current-pr", "branch", "uncommitted", "commit"], default: "branch" },
-    focus: { type: "string", title: "Focus", optional: true },
-    effort: { type: "string", enum: ["low", "standard", "high"], default: "standard" },
-    workers: { type: "integer", minimum: 1, maximum: 32, default: 30, group: "swarm", when: { engine: "swarm" } },
-  },
-  handler: async (params, ctx) => {},
-});
+parameters: {
+  target: { type: "string", enum: ["uncommitted", "branch", "pr", "commit"], default: "branch" },
+  engine: { type: "string", enum: ["standard", "swarm"], default: "standard" },
+  focus: { type: "string", title: "Focus" },
+  effort: { type: "string", enum: ["low", "standard", "high"], default: "standard" },
+  workers: { type: "integer", minimum: 1, maximum: 32, default: 30, group: "swarm", when: { engine: "swarm" } },
+}
 ```
 
-- The field types are the form field types clients already render and validate. Integer bounds and enums come from the declaration.
-- The host parses `--name value`, `--flag`, and positional text against the declaration, rejecting unknown or inapplicable flags (a `when` field outside its condition) with a clear error.
-- The same declaration renders the launcher form in the TUI and on remote clients, and feeds completion.
-- Parameters marked `localOnly` are omitted from remote descriptors and refused on remote invocation. That replaces hand-rolled gates such as swarm's `--exec` check.
-- Commands without `parameters` keep the raw argument string.
-- Defaults come from settings first (host settings for `/review`, typed manifest settings for an extension), then the declaration. A flag overrides both for one run.
+`group`, `when`, and a per-field `localOnly` are new keywords; the rest exists. Where the declaration lives (the intent's input schema, `registerCommand`, or a new concept) is D1.
+
+- A client parses `--name value`, `--flag`, and positional text against the declaration and rejects unknown or inapplicable flags (a `when` field outside its condition) with a clear error. `engine` is resolved first (flag, then setting, then default), and the other parameters are then parsed against that engine's declaration.
+- The same declaration renders the launcher form and feeds completion.
+- `localOnly` fields are omitted from remote descriptors and refused on remote invocation. Descriptor omission is new behaviour (today `localOnlyInput` only refuses at invocation), and extensions have no per-field gate at all. It replaces the `invokedBy` check in swarm's `--exec` gate; the interactive confirmation stays in the extension, and `remoteSafe` still decides whether a command runs remotely at all.
+- The existing grammars must stay expressible: a leading keyword with a conditional positional (`branch main`), aliases (`unstaged`, `working`), a `tools` subcommand, repeatable comma-split lists (`--scope`), a boolean pair that maps to one enum (`--incremental` or `--full`), trailing free text, `--name value` and `--name=value`, cross-field defaults and clamps, mutual exclusion (`--base`, `--commit`, `--pr`), dynamic enums (models), and kebab-case flags for camelCase keys. A declaration alone may not cover all of them; whether a custom parse hook is allowed is open (section 7.2).
+- Defaults come from settings where a setting exists (host settings for `/review`, typed manifest settings for an extension), then the declaration. A flag overrides both for one run. Making settings win for swarm's models would change its behaviour (see section 2).
+- Commands without parameters keep the raw argument string.
 
 This was first proposed in section 4.3 of the superseded [remote-friendly extensions](extension-remote-ux-design.md) design.
 
@@ -110,36 +138,47 @@ volt.registerReviewEngine({
   cost: "Much slower and costlier than standard.",
   parameters: { /* grouped, shown only when this engine is selected */ },
   targets: ["uncommitted", "branch", "commit"],
+  rerun: false,      // whether rerun and incremental runs may replay this engine
+  maxActive: 1,
   run: async (ctx) => {
-    // ctx.params, ctx.signal, ctx.progress(...)
-    // ctx.snapshot: identity, changed files, hunks (read-only)
-    // ctx.tools(options): host snapshot tools for one pass, with coverage()
-    // ctx.submit(report)
+    // ctx.params, ctx.signal
+    // ctx.progress(progress, detail?), ctx.checkpoint(progress, detail?), ctx.output(text)
+    // ctx.snapshot: identity and changed-file metadata, no patch text
+    // ctx.pass(): { tools(), diff(hunkIds), coverage() }, one per independent pass
+    // ctx.validate(candidates): dry run of the host's anchor validation
+    // ctx.submit({ candidates, verification })  // called inside run
   },
 });
 ```
 
-- **The host owns the work.** Starting a review of any engine starts `review` work. The work id is the run id, delivery is none, and the work is cancellable. The engine supplies the executor. Opening finished work is the existing `openReviewFindings` path, whatever the engine. There is no per-kind `open` callback and no seed.
-- **`standard` is the first engine.** It is registered on the same contract, initially as a thin adapter over the existing `runReview` rather than a rewrite.
-- **Observed tools.** `ctx.tools()` returns the host's read-only snapshot tools for one pass and a `coverage()` that the host merges (section 4.2). Coverage is observed, not claimed.
-- **Validated submission.** `ctx.submit(report)` takes a summary and findings (`title`, `body`, `trigger`, `impact`, `priority`, `confidence`, `rootCauseKey`, `category`, anchors, and the verification method and rationale). The host re-derives `target.files` from git, validates anchors as in section 2, assigns ids and fingerprints, bounds sizes (the existing 512 KB record limit, plus a new finding-count cap and stripped control characters), and returns accepted findings plus a per-finding rejection reason. It writes the run record.
-- **Provenance.** The record carries `source: ext:<extension id>/<engine id>`. The UI, the publish confirmation, and the published body show it, and no run can claim to be the `standard` engine.
-- **Rerun and incremental runs.** `reviewTargetForRerun` replays the host engine, so rerun and incremental scope are unavailable for an engine that does not declare support.
+- **The host owns the work.** Starting a review of any engine starts `review` work: work id is the run id, `cancelOnAbort: false`, delivery none, cancellable. The engine supplies the executor. Opening finished work is the existing `openReviewFindings` path, whatever the engine; there is no per-kind `open` callback and no seed. This needs a host start path for engine runs, because `ExtensionKinds.start` starts only `ext:<id>/` kinds with a random id and `prepareReviewWorkflow` is specific to the standard pipeline (it throws when no model is available for review).
+- **`standard` is the first engine.** It is registered on the same contract, initially as a thin adapter over the existing `runReview`, which needs a no-dispose option so the host can own the snapshot's lifetime.
+- **The run channel.** The engine's context is an adapter over the host `WorkContext`. Needed changes: expose `detail` and `checkpoint` on it; make `ownsWork` accept review work started for that extension's engine, so its detail actions can target `cancel_work` and `open_work` on its own run; compose the engine's detail with the `review-usage` root node the footer reads, within the 8 KiB budget. `child` is single-valued and capped, and swarm's parallel sessions are not hosted conversations, so engines cannot link one conversation per pass (the standard engine keeps that).
+- **One result path.** `ctx.submit` takes the host's own report shapes: a candidate report (title, body, trigger, impact, category, root-cause key, priority, confidence, anchors) and a verification report (a decision per candidate, the verifier assessment and challenge, limitations). The host runs `validateReviewCandidates`, `declassifyReviewFindings`, and `buildParsedReview`, so decision 1 holds. The engine supplies what only it knows: verification method and rationale, assessment and challenge, limitations, commands run and failed attempts, and the summary. The host derives ids, fingerprints, scope and exclusion handling, `completionStatus`, `overallCorrectness`, caps, `target.files` from git, and writes the record, including failed and cancelled records and the accounting message for runs without a result.
+- **Repair.** The host repairs a pass by re-prompting it. A submit after the fact cannot, so rejected candidates would be dropped. `ctx.validate` exposes the same anchor validation as a dry run, so an engine's own report tools can repair in the loop, as swarm's `report_verdict` already does.
+- **Usage accounting.** The host's `ReviewUsageCollector` is fed through `createAgentSession`'s inference accounting, with a phase limited to discovery, verification, and presentation and at most 1,024 attempts. Swarm passes none and sums messages itself, and its clustering pass fits no phase. How engine usage reaches `ReviewRunRecord.usage` is open (section 7.2).
+- **Validated, bounded, attributed.** The host bounds sizes (the existing 512 KB record limit, the 50-candidate cap, and the persisted-field truncations, which cut a long body, plus stripped control characters). The record carries `source: ext:<extension id>/<engine id>`, shown in the UI, the publish confirmation, and the published body. With the step 0 reservation, no run can claim to be the `standard` engine.
+- **Rerun and incremental runs.** `reviewTargetForRerun` replays the host engine, so rerun and incremental scope are unavailable for an engine that declares `rerun: false`. `planIncrementalReview` takes the newest run of any source, so it and `review_rerun` filter runs by engine. The run record gains `engine` and bounded `engineParams` (today `options` holds `ReviewRunControls` only), so a rerun can reproduce an engine run.
+- **Delivery and what is lost.** The engine's report text stays as the work's `output`. Gone is the notice that rode the next turn in the invoking conversation, and Escape cancelling from the editor (cancel remains in the job list). The disputed, uncertain, rejected, and cost sections of swarm's report have no home in `ParsedReview`; they live only in the output. Gained: finding ids and statuses, acknowledgment, `review_open_session`, and discussions. Whether the findings conversation also carries engine-supplied extra sections is D5.
+- **Concurrency.** One `review` kind with a cap of 3 cannot express per-engine limits. A per-engine limit needs a limit key checked inside `reserve` (D7).
+- **Lifetime.** `submit` and `validate` need a live snapshot, so they happen inside `run`; the host disposes the snapshot after `run` returns.
 
 #### Mapping swarm's results
+
+A swarm finding maps onto a host candidate plus a verification decision:
 
 | Host field | From swarm |
 | --- | --- |
 | `id`, `fingerprint` | assigned by the host |
-| `changeLocation` | the verifier's `file`, `line`, `endLine`; always the head side |
-| `rootCauseKey` | the cluster (a root-cause group by construction) |
+| `changeLocation` | the verifier's `file`, `line`, `endLine`; always the head side. Must overlap a changed line and span at most 10 lines |
+| `rootCauseKey` | a kebab-case slug of the cluster title, since cluster ids such as `K1` are neither kebab-case nor stable across runs. One cluster can yield several findings, so the slug takes a suffix to stay distinct |
 | `trigger`, `impact`, `confidence` | the best worker claim in the cluster; these live on the claim, not on the verified finding |
-| `body` | the verifier's explanation, plus the fix |
-| `verification.method`, `rationale` | "2 verifiers confirmed (N of M workers found it)" plus the verdict reasons |
-| `category` | a constant such as `swarm` |
+| `body` | the verifier's explanation, plus the fix; the host truncates the persisted body to 2,000 bytes |
+| `verification.method`, `rationale` | "N verifiers confirmed" (two, or one for a single-verifier cluster) plus the verdict reasons |
+| `category` | a kebab-case constant such as `swarm` |
 | `priority` | 0 to 2 as reported; P3 needs `includeOptional` |
 
-Swarm anchors "overlapping a changed line where possible". The host rejects those that do not overlap. The engine keeps rejected findings in its own markdown output, and its worker prompt changes to require overlap.
+Swarm anchors "overlapping a changed line where possible". The host rejects those that do not overlap. The engine keeps rejected findings in its own output, and its worker prompt changes to require overlap. More than 50 candidates in one report is also a rejection.
 
 ### 4.5 The run experience
 
@@ -149,11 +188,11 @@ Every engine's run is `review` work, so one flow serves all of them:
 2. The user can close the list and keep working. The footer's work line stays.
 3. When the work completes and the list still shows it, the TUI opens the findings conversation (`openReviewFindings`) and moves there, as `/review` does today. If the list was closed, a status line says how it ended and Open stays available in `/work`.
 
-The generic start-and-follow watch this needs already exists as a prototype for extension work. `ReviewView` (passes drawn inline) and the review usage in the footer need a home in this flow (section 7).
+The TUI needs a start-and-follow watch for command-started work. The host does not say which client started work, so the TUI can only watch around the commands it sent itself, unless the command's result carries the started work ids. `/review` already links each pass as the work's `child`, and `ReviewView` and the review usage in the footer need a home in this flow (section 7.2).
 
 ### 4.6 The launcher
 
-`/review` with no arguments opens one form, rendered from the parameter declaration, instead of a chain of selectors:
+`/review` with no arguments opens a form rendered from the parameter declaration, instead of a chain of selectors:
 
 ```
 Review
@@ -163,49 +202,73 @@ Review
   Scope     [                    ]
   Effort    standard
   Advanced  (engine-specific: models, workers, wave size, ...)
-  [ Start ]   /review branch main --include-uncommitted
+  [ Start ]   /review branch main --include-uncommitted   (illustrative: the flag is undecided)
 ```
 
 - The line under Start echoes the equivalent command, so flags stay learnable and scriptable.
 - `standard` is the default engine; a setting changes it. A non-default engine shows its cost note before it starts.
-- The form is data, so remote clients render it too.
+- A form today is one-shot with no conditional fields, so the Engine row cannot swap the Advanced fields live. The default is a two-step launcher: engine first (`ctx.ui.select` takes plain strings, so the cost note goes in the labels or the form title; `ctx.ui.dialog`, which takes a body and action buttons, is an alternative), then that engine's form. That needs no protocol change and works in the TUI and, for `remoteSafe` commands, on a phone. When a TUI and a phone are both attached, their dialogs race and the first valid answer wins. A live dependent form needs a new client frame or intent (client frames today are only hello, subscribe, unsubscribe, and host response), a patchable host request, and changes in the TUI form, the protocol contract, and volt-app (D6).
 
 ### 4.7 Swarm as an engine
 
-Stays in the extension: prompts, workers, waves, clustering, verification, and the report text. Goes: target freezing (`git.ts`) and the confined repository tools (`tools.ts`), replaced by the host snapshot and observed tools. Its defaults (workers, wave size, models, thinking) become typed manifest settings. Its hand-written flag parser goes. Dismissal memory (`memory.ts`) stays for now (section 7).
+Stays in the extension: workers, waves, clustering, verification, and the report text. Changes: the prompts (they name read, grep, find, ls, `read_base`, and a frozen checkout), and the code that consumes `git.ts`'s `ReviewTarget`: `workers.ts` (shards, partial files, submodules, checkout), `verify.ts` (complete flag, per-file diffs, `createCheckout`, checkout), `prompts.ts` and `report.ts` (description, scope, stat), `session.ts` and `tools.ts` (checkout, repository root, base revision), and `memory.ts` (common directory and checkout). Its defaults (workers, wave size, models, thinking) become typed manifest settings, and its hand-written flag parser goes.
+
+What the host snapshot gives today (`changedFiles` with hunk patches, `readFile` on either side up to 8 MiB, `listFiles`, a literal-substring `search`, `materializeHead`, `root`, `identity`) leaves real gaps:
+
+1. `materializeHead` creates a fresh checkout but does not link `node_modules`, which swarm's `--exec` verifiers need. An engine can link them itself if it gets `root` and a checkout.
+2. There is no diff-text API (`pathDiffText` is private). Concatenating hunk patches loses file headers, and the engine would redo its own sharding. Section 4.2 adds a host diff call that also credits coverage.
+3. The six review tools have no regex or glob search, and live-workspace `read`, `grep`, `find`, and `ls` are excluded from reviews (`MUTABLE_WORKSPACE_REVIEW_TOOLS`), so the prompts change.
+4. The review context files loader is private to the host.
+5. The repository's common directory (swarm's memory key) is not in the snapshot; the engine can ask git.
+6. Anchors must overlap changed lines (section 4.4).
+7. `--pr` is outside the first version (D3), and `--base` needs the combined target.
 
 ## 5. Trust model
 
 Matches `/review`, because the user chose to run the extension.
 
-- The extension is trusted code. Project-local extensions are gated by project trust, and the manifest permissions (`exec`, `network`, `fs-write`, `secrets`, `providers`) are unchanged. No review permission is added: an extension with `exec` can already post to GitHub as the user, so accepting review results grants no capability.
-- Its findings get the same downstream treatment as the host engine's: model output over untrusted code, gated by the `review_publish` confirmation, head verification, and the complete-only rule, and seeded as ordinary context in a fix session.
-- The host still validates for integrity and attribution, not defense: schema, bounds, anchors derived from git, and provenance on every run. Review records stay host-written.
+- The extension is trusted code. Project-local extensions are gated by project trust, and the manifest permissions (`exec`, `network`, `fs-write`, `secrets`, `providers`) are unchanged. No review permission is added. An extension with `exec` can already post to GitHub as the user, so accepting review results grants it nothing. An extension with no permissions can already write `volt.review.*` custom entries (section 2); step 0 closes that, so a run record means "written by the host".
+- Its findings get the same downstream treatment as the host engine's: model output over untrusted code, gated by the `review_publish` confirmation, head verification, and the complete-only rule, and seeded as ordinary context in a fix session. A forged "complete" prior run could make later host reviews skip files (incremental planning trusts it), which is another reason for step 0.
+- The host still validates for integrity and attribution, not defense: schema, bounds, anchors validated against git, and provenance on every run. Run records are written by the host on submission.
 
 ## 6. Delivery
 
 Each step is its own pull request, with an issue first.
 
-1. **Targets.** Split resolution from snapshot construction. Add the combined target. Valuable by itself.
-2. **Coverage.** Per-pass observed coverage merged with multiplicity; the new completion rule; counts in the record.
-3. **Typed command parameters.** The declaration, host parsing, the launcher form, and completion; `/review` adopts it first. Swarm follows with typed settings. Independent of steps 1, 2, and 4. The form picks up the combined target once step 1 lands.
-4. **The engine contract.** Snapshot, observed tools, validated submission, provenance, and work ownership. `standard` as the first engine; swarm migrates and shrinks.
+0. **Reserve host-owned log types.** Section 4.0. Independent and small.
+1. **Targets.** Split resolution from snapshot construction and unify the Git source. Add the combined target. Valuable by itself.
+2. **Coverage.** Per-pass observed coverage merged with multiplicity, the host diff call, per-engine completeness policy, and the bounded record shape.
+3. **Typed parameters.** The declaration (D1), host or client parsing, the launcher form, and completion; `/review` adopts it first, which means giving today's hard-coded TUI dispatch (`handleReviewCommand`) and four typed intents a declaration (D8). Swarm follows with typed settings. Independent of steps 1, 2, and 4; the form picks up the combined target once step 1 lands.
+4. **The engine contract.** The host start path, run channel, snapshot context, `ctx.validate` and `ctx.submit`, provenance, rerun filtering, and per-engine limits. `standard` as the first engine; swarm migrates and shrinks.
 5. **One run experience and one entry point.** `/review` moves to the job-list flow, the Engine row appears in the form, and the default-engine setting and cost note ship.
 
-## 7. Open questions
+## 7. Decisions and open questions
 
-- **PR targets for other engines.** The host requires a context-blind presentation report when a snapshot carries code-host context. Can context capture be skipped for an engine that does not read PR text, or must the host run the presentation pass for it? Until answered, other engines support `uncommitted`, `branch`, and `commit`.
-- **Kind or option.** Is the combined target a new target kind or an option on `branch`? What do incremental scope and rerun mean for a worktree target?
-- **Coverage thresholds.** The mapping from effort to k, and whether multiplicity changes `complete` for `standard`, which today runs one discovery pass.
-- **Merging coverage.** How per-pass trackers merge (set union with counts) and how verification coverage of individual findings is recorded.
-- **`--exec` verifiers.** They need a real checkout with a shell. `/review`'s disposable checkout for auxiliary tools may fit; unchecked.
-- **Fate of `ReviewView`.** Whether Enter on a running review in the job list shows its current pass conversation (as subagent child conversations open from the inspector), and where the review usage in the footer goes.
-- **Dismissal memory.** Swarm remembers rejected clusters in `memory.ts`; the host records finding outcomes (`review_record_finding_outcome`). Whether they merge.
-- **Tree-pair snapshots.** Whether the first step adds the tree-pair identity or leaves it for engines that need it.
-- **Parameter naming.** Flags valid for one engine only (`--workers`) and collisions between engines' parameters.
-- **Shorthand and defaults.** Whether `/swarm-review` stays, and what cost guard a non-default engine needs.
-- **Remote presentation.** How phone clients present a run from a non-standard engine (the job list data is the same; the findings views come from the host record).
-- **Snapshot lifetime.** The tree objects a worktree capture writes are unreferenced until used; how long the host must keep them for a late submission.
+### 7.1 Decisions needed
+
+Each lists the options the code permits and a lean.
+
+- **D1. Where parameters are declared.** (a) On the intent's input schema, adding `slash`, completion hooks, and field-level local-only to extension intents, with a client-side parser and form renderer; remote clients already send typed input and never parse text. (b) On `registerCommand`, parsed by the host before the handler; this also serves prompt-text clients but changes the prompt path and handler signature. (c) A separate concept beside both; it duplicates the intent schema. Lean (a), the cheapest and the one that matches the architecture's typed-input mechanism. Either way a generic flag parser and a schema-to-form renderer for intent inputs are new; the only existing schema-to-form path is for manifest settings.
+- **D2. The combined target.** (a) A new target kind: clean identity, fingerprints, and incremental chains, but it touches the closed protocol enum (`projections.ts`) and the contract JSON, `provisionalReviewTarget` (an exhaustive switch), `reviewTargetForRerun`, `reviewHeading`, a new or extended intent, the TUI picker, docs, and a volt-app issue. (b) An option on `branch`: smaller, but `identity.kind` stays `branch`, so a persisted marker is needed or rerun reviews the committed HEAD only, and worktree runs share fingerprints and incremental compatibility with committed branch runs (equal kind and base tree). Lean (a).
+- **D3. PR targets for other engines.** Nothing skips context capture today, and an engine that never reads context cannot reach `complete` on a PR because completion requires context paging. Options: (a) unsupported in the first version; (b) an include-context flag with optional context; (c) derive `protectedContext` from "a pass was given context" instead of "context captured"; (d) a host-run presentation pass inside `submit`, which needs models and conflicts with synchronous accept and reject. Lean (a); (b) and (c) are medium cost.
+- **D4. The completeness policy.** Section 4.2 proposes engine-declared policies with `standard` unchanged. Needs agreement on k and effort, whether zero-finding runs are complete, and whether the follow-up round should merge coverage with the first round instead of replacing it.
+- **D5. Engine report extras.** Disputed, uncertain, and rejected clusters and cost have no home in `ParsedReview`. (a) Output only. (b) A bounded extra-report field the findings conversation also carries. Lean (a) first.
+- **D6. The launcher.** Two-step (no protocol change) or a live dependent form (a new frame, a patchable request, TUI and volt-app changes). Lean two-step.
+- **D7. Concurrency.** Keep the shared `review` cap of 3, or add a limit key to `reserve` for per-engine limits. A launcher-side count only holds if it runs in the same tick as `start()`.
+- **D8. `/review`'s declaration.** Keep the four typed intents and add a declaration the TUI parses, or collapse them into one intent with a `target` union (a slash name shared by several built-in intents is treated as a TUI command today). Collapsing removes the repeated options and makes `/review` an ordinary declared command.
+
+### 7.2 Smaller open questions
+
+- **Setup writer exposure.** Should the `newSession` setup writer still expose `recordPrReviewBinding` and an unchecked `appendCustomMessageEntry`?
+- **Parse hook.** Whether a declaration may carry a custom parse function for grammar it cannot express, and how collisions between engines' flags are reported (`--model`, `--verifier`, positional focus versus `--focus`, `--scope` and `--effort` versus `--thinking`).
+- **`--exec` verifiers.** Link `node_modules` in `materializeHead`, or leave it to the engine.
+- **Dismissal memory.** Swarm's per-repository file with a 90-day TTL keyed by snippet hash, versus the host's finding outcomes (`review_record_finding_outcome`) in the session log, used only through the previous run's incremental plan. Whether they merge.
+- **Engine usage accounting.** A new accounting phase for clustering or engine passes, and the 1,024-attempt bound.
+- **`ReviewView`.** Passes of the standard engine stay linked as `child`; whether Enter on a running review in the job list shows the current pass (finished review work opens its findings today), and where the review usage in the footer goes.
+- **Remote presentation.** Non-standard runs on the phone use the same work value and host record; whether the app needs changes.
+- **Context files.** Whether the host's review context files are exposed to engines.
+- **Incremental effects.** How multiplicity and a worktree target interact with incremental planning, which today requires equal kind and base tree and falls back to a full review beyond the persisted caps.
+- **Shorthand.** Whether `/swarm-review` stays, and the cost guard wording for a non-default engine.
 
 ## 8. References
 
@@ -213,4 +276,4 @@ Each step is its own pull request, with an issue first.
 - [Session format](session-format.md#review-state-entries-host-only): review state entries.
 - [Review finding discussions](review-discussions-design.md) (partly superseded).
 - [Remote-friendly extensions](extension-remote-ux-design.md) (superseded): the original typed-parameters proposal.
-- Code: `core/review.ts`, `core/review-snapshot.ts`, `core/review-report.ts`, `core/review-work.ts`, `core/review-publish.ts`, `core/host/review-handoff.ts`, `core/work/extension-kinds.ts`, `modes/interactive/interactive-mode.ts` (`runReview`, `promptForReviewTarget`), and `.volt/extensions/swarm-review/`.
+- Code: `core/review.ts`, `core/review-snapshot.ts`, `core/review-report.ts`, `core/review-state.ts`, `core/review-tools.ts`, `core/review-work.ts`, `core/review-publish.ts`, `core/host/review-handoff.ts`, `core/work/registry.ts`, `core/work/extension-kinds.ts`, `core/session/extension-binding.ts`, `core/session-writer.ts`, `core/protocol/intents/`, `modes/interactive/interactive-mode.ts` (`runReview`, `promptForReviewTarget`, `handleReviewCommand`), and `.volt/extensions/swarm-review/`.
