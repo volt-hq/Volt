@@ -27,6 +27,7 @@ import type { SessionWriter } from "../core/session-writer.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
 import { resolveIrohRemoteSessionTarget, type SessionTargetSessionHandle } from "./session-target.ts";
 import type { WorkerSpawnInput } from "./worker-registry.ts";
+import type { WorkerCompatibility } from "./worker-spawn-options.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import { getRegisteredWorkingDirectoryForWorktree, type WorktreeRuntimePreparation } from "./worktree-manager.ts";
 
@@ -115,6 +116,8 @@ export interface ResolvedConversationOpen {
 	readonly workingDirectory?: string;
 	/** The phone's tool policy, which a worker it spawns runs with (D9). */
 	readonly toolPolicy: IrohRemoteRuntimeToolPolicy;
+	/** What a worker for the conversation runs every conversation with: its compatibility key's inputs (D11 revised). */
+	readonly compatibility: Extract<WorkerCompatibility, { origin: "phone" }>;
 	/**
 	 * Build the spawn of a worker for the conversation: a new session's log is
 	 * created (with its id), bound to its worktree, given its pull request
@@ -227,6 +230,12 @@ export async function resolveConversationOpen(
 			? undefined
 			: remoteWorkingDirectory;
 	const toolPolicy = services.toolPolicy(authorization);
+	const compatibility = {
+		origin: "phone" as const,
+		toolPolicy: { tools: [...toolPolicy.tools], allowUnlistedExtensionTools: toolPolicy.allowUnlistedExtensionTools },
+		projectTrusted: services.projectTrusted(workspace),
+		...(services.profile === undefined ? {} : { profile: services.profile }),
+	};
 
 	return {
 		sessionId,
@@ -234,6 +243,7 @@ export async function resolveConversationOpen(
 		...(worktree === undefined ? {} : { worktree }),
 		...(echoedWorkingDirectory === undefined ? {} : { workingDirectory: echoedWorkingDirectory }),
 		toolPolicy,
+		compatibility,
 		prepare: async (workspaceGeneration, prepareSignal) => {
 			const bindPrReview = await services.preparePrReviewSession(authorization, hello, prepareSignal);
 			const preparation =
@@ -270,12 +280,9 @@ export async function resolveConversationOpen(
 					root: rootPath,
 					projectCwd: rootPath,
 					...(worktree?.baseRef === undefined ? {} : { baseRef: worktree.baseRef }),
-					toolPolicy: {
-						tools: [...toolPolicy.tools],
-						allowUnlistedExtensionTools: toolPolicy.allowUnlistedExtensionTools,
-					},
-					projectTrusted: services.projectTrusted(workspace),
-					...(services.profile === undefined ? {} : { profile: services.profile }),
+					toolPolicy: { ...compatibility.toolPolicy, tools: [...compatibility.toolPolicy.tools] },
+					projectTrusted: compatibility.projectTrusted,
+					...(compatibility.profile === undefined ? {} : { profile: compatibility.profile }),
 				};
 			} catch (error) {
 				await preparation?.release().catch(() => undefined);

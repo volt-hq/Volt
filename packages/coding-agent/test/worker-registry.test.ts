@@ -3,8 +3,12 @@ import { type ControlEvent, type ControlResponse, createHelloProof } from "../sr
 import type { LaunchedWorker, WorkerExit, WorkerLaunchRequest } from "../src/daemon/worker-launcher.ts";
 import {
 	type LiveWorker,
+	MAX_WORKER_CONVERSATIONS,
+	WORKER_FORCED_CLOSE_TIMEOUT_MS,
 	WORKER_FORCED_STOP_TIMEOUT_MS,
+	WORKER_READY_TIMEOUT_MS,
 	WorkerOpenError,
+	type WorkerOpenOutcome,
 	WorkerRegistry,
 	type WorkerRegistryAuditEvent,
 	type WorkerSpawnInput,
@@ -61,7 +65,8 @@ function setup(options: { ttlMs?: number } = {}) {
 		sessionId: string,
 		generation = generations.get("ws") ?? 0,
 		workspaceName = "ws",
-	): WorkerSpawnInput => ({
+		profile = `profile-${sessionId}`,
+	): Extract<WorkerSpawnInput, { origin: "phone" }> => ({
 		origin: "phone",
 		workspace: { name: workspaceName, path: "/ws", generation },
 		session: ref(sessionId),
@@ -70,17 +75,25 @@ function setup(options: { ttlMs?: number } = {}) {
 		projectCwd: "/ws",
 		toolPolicy: { tools: ["read"], allowUnlistedExtensionTools: false },
 		projectTrusted: false,
+		profile,
 	});
 
-	const open = (sessionId: string, attach?: "remote" | "local", workspaceName = "ws") => {
+	/**
+	 * A phone's open of `sessionId`. Its compatibility key comes from
+	 * `profile`: a profile of the session's own by default, so opens share a
+	 * worker only when they name one profile.
+	 */
+	const open = (sessionId: string, attach?: "remote" | "local", workspaceName = "ws", profile?: string) => {
 		const generation = generations.get(workspaceName) ?? 0;
+		const input = spawnInput(sessionId, generation, workspaceName, profile);
 		return registry.open(
 			{ workspaceName, workspaceGeneration: generation, sessionId },
 			{
-				origin: "phone",
-				prepare: async () => spawnInput(sessionId, generation, workspaceName),
-				attach: (worker: LiveWorker) => ({
+				compatibility: input,
+				prepare: async () => input,
+				attach: (worker: LiveWorker, outcome: WorkerOpenOutcome) => ({
 					worker,
+					outcome,
 					release: attach === undefined ? () => {} : worker.attach(attach),
 				}),
 			},
@@ -116,15 +129,25 @@ function setup(options: { ttlMs?: number } = {}) {
 		const worker = launched[index]!;
 		expect(hello(worker)).toBe(true);
 		const sessionId = (await spawnOf(worker)).session.sessionId;
-		expect(await send(worker, { type: "worker_ready", sessionIds: [sessionId] })).toMatchObject({ type: "ok" });
+		expect(await send(worker, { type: "worker_ready", sessionId })).toMatchObject({ type: "ok" });
 		return worker;
 	};
 
+	/** The conversations the daemon sent `worker` to open (`worker_open`), its first one first. */
+	const opensOf = (worker: FakeWorker) =>
+		(events.get(worker.connectionId) ?? []).flatMap((event) => (event.type === "worker_open" ? [event.spec] : []));
+
 	const spawnOf = async (worker: FakeWorker) => {
 		await Promise.resolve();
-		const spawn = (events.get(worker.connectionId) ?? []).find((event) => event.type === "worker_spawn");
-		if (spawn?.type !== "worker_spawn") throw new Error("no worker_spawn sent");
-		return spawn.spec;
+		const spec = opensOf(worker)[0];
+		if (!spec) throw new Error("no worker_open sent");
+		return spec;
+	};
+
+	/** The worker opens the routed conversation `sessionId` once it was sent, and reports it ready. */
+	const ready = async (worker: FakeWorker, sessionId: string): Promise<void> => {
+		await waitUntil(() => opensOf(worker).some((spec) => spec.session.sessionId === sessionId));
+		expect(await send(worker, { type: "worker_ready", sessionId })).toMatchObject({ type: "ok" });
 	};
 
 	const stops = (worker: FakeWorker) =>
@@ -132,7 +155,29 @@ function setup(options: { ttlMs?: number } = {}) {
 			(event): event is Extract<ControlEvent, { type: "worker_stop" }> => event.type === "worker_stop",
 		);
 
-	return { registry, generations, events, audits, launched, killed, open, hello, send, start, spawnOf, stops };
+	const closes = (worker: FakeWorker) =>
+		(events.get(worker.connectionId) ?? []).filter(
+			(event): event is Extract<ControlEvent, { type: "worker_close" }> => event.type === "worker_close",
+		);
+
+	return {
+		registry,
+		spawnInput,
+		generations,
+		events,
+		audits,
+		launched,
+		killed,
+		open,
+		hello,
+		send,
+		start,
+		spawnOf,
+		opensOf,
+		ready,
+		stops,
+		closes,
+	};
 }
 
 async function waitUntil(condition: () => boolean, timeoutMs = 2_000): Promise<void> {
@@ -181,19 +226,24 @@ describe("worker registry", () => {
 		expect(hello(worker)).toBe(false);
 	});
 
-	it("refuses a readiness report for conversations the worker was not spawned for", async () => {
+	it("refuses a readiness report for conversations the worker was not sent", async () => {
 		const { open, launched, hello, send } = setup();
 		void open("s1").catch(() => undefined);
 		await waitUntil(() => launched.length === 1);
 		const worker = launched[0]!;
-		expect(await send(worker, { type: "worker_ready", sessionIds: ["s1"] })).toMatchObject({
+		expect(await send(worker, { type: "worker_ready", sessionId: "s1" })).toMatchObject({
 			code: "not_registered",
 		});
 		hello(worker);
-		expect(await send(worker, { type: "worker_ready", sessionIds: ["s2"] })).toMatchObject({
+		expect(await send(worker, { type: "worker_ready", sessionId: "s2" })).toMatchObject({
 			code: "invalid_sessions",
 		});
-		expect(await send(worker, { type: "worker_ready", sessionIds: ["s1", "s2"] })).toMatchObject({
+		expect(await send(worker, { type: "worker_ready", sessionId: "s1" })).toMatchObject({ type: "ok" });
+		// Reported once; a live worker reports only the conversations routed to it.
+		expect(await send(worker, { type: "worker_ready", sessionId: "s1" })).toMatchObject({
+			code: "invalid_sessions",
+		});
+		expect(await send(worker, { type: "worker_ready", sessionId: "s2" })).toMatchObject({
 			code: "invalid_sessions",
 		});
 	});
@@ -226,7 +276,14 @@ describe("worker registry", () => {
 		expect(
 			await send(a, { type: "worker_hosts", sessionId: "other-workspace", kind: "moved", parentSessionId: "s1" }),
 		).toMatchObject({ code: "not_found" });
-		expect(await send(a, { type: "worker_released", sessionId: "s1" })).toMatchObject({ code: "primary" });
+		// What the worker hosts already is never claimed again, into its group or another's.
+		for (const sessionId of ["s1", "s2"]) {
+			expect(
+				await send(a, { type: "worker_hosts", sessionId, kind: "sibling", parentSessionId: "s1" }),
+			).toMatchObject({ code: "claimed" });
+		}
+		// A group's head is released last.
+		expect(await send(a, { type: "worker_released", sessionId: "s1" })).toMatchObject({ code: "group_open" });
 		expect(await send(a, { type: "worker_released", sessionId: "s2" })).toMatchObject({ type: "ok" });
 		expect(
 			await send(b, { type: "worker_hosts", sessionId: "s2", kind: "moved", parentSessionId: "s9" }),
@@ -239,8 +296,8 @@ describe("worker registry", () => {
 		expect(launched).toHaveLength(2);
 	});
 
-	it("retires a detached idle worker for a sibling claim of a conversation it hosts; the claim waits for its exit", async () => {
-		const { registry, open, start, send, stops } = setup();
+	it("closes a detached idle conversation for a sibling claim of it; the claim waits for its release", async () => {
+		const { registry, open, start, send, stops, closes } = setup();
 		const opened = open("s1", "remote");
 		const source = await start(0);
 		const { release } = await opened;
@@ -252,32 +309,33 @@ describe("worker registry", () => {
 
 		// A client is attached: the source stays where it is.
 		expect(await claimSource()).toMatchObject({ code: "claimed" });
-		expect(stops(source)).toEqual([]);
-		// Active: the worker would refuse the stop, so it is not asked.
+		expect(closes(source)).toEqual([]);
+		// Active: the worker would refuse the close, so it is not asked.
 		release();
-		await send(source, { type: "worker_activity", active: true });
+		await send(source, { type: "worker_activity", activeSessionIds: ["s1"] });
 		expect(await claimSource()).toMatchObject({ code: "claimed" });
-		expect(stops(source)).toEqual([]);
+		expect(closes(source)).toEqual([]);
 
-		// Detached and idle: retired as its TTL would, and the claim is retried until it exited.
-		await send(source, { type: "worker_activity", active: false });
+		// Detached and idle: closed as its TTL would, and the claim is retried until it was released.
+		await send(source, { type: "worker_activity", activeSessionIds: [] });
 		expect(await claimSource()).toMatchObject({ code: "retiring" });
-		expect(stops(source)).toMatchObject([{ reason: "retention", force: false }]);
+		expect(closes(source)).toMatchObject([{ sessionId: "s1", reason: "retention", force: false }]);
 		expect(await claimSource()).toMatchObject({ code: "retiring" });
-		expect(stops(source)).toHaveLength(1);
-		// Only sibling claims retire the host.
+		expect(closes(source)).toHaveLength(1);
+		// Only sibling claims close the conversation.
 		expect(
 			await send(claimant, { type: "worker_hosts", sessionId: "s1", kind: "moved", parentSessionId: "s9" }),
 		).toMatchObject({ code: "claimed" });
-		await send(source, { type: "worker_stop_result", stopId: stops(source)[0]!.stopId, outcome: "stopped" });
-		source.exit({ reason: "stopped" });
-		await waitUntil(() => registry.size === 1);
+		await send(source, { type: "worker_close_result", closeId: closes(source)[0]!.closeId, outcome: "closed" });
+		expect(await send(source, { type: "worker_released", sessionId: "s1" })).toMatchObject({ type: "ok" });
+		// Released: the claim is granted, and the worker that hosts nothing now retires.
 		expect(await claimSource()).toMatchObject({ type: "ok" });
-		expect(registry.hosts("ws", "s1")).toBe(true);
+		expect(registry.host("ws", "s1")).toMatchObject({ workerId: claimant.request.workerId, kind: "sibling" });
+		expect(stops(source)).toMatchObject([{ reason: "retention", force: false }]);
 	});
 
-	it("leaves a detached idle worker of another workspace alone for a sibling claim", async () => {
-		const { open, start, send, stops, generations } = setup();
+	it("leaves a detached idle conversation of another workspace alone for a sibling claim", async () => {
+		const { open, start, send, closes, generations } = setup();
 		generations.set("ws2", 1);
 		const opened = open("s1", undefined, "ws2");
 		const owner = await start(0);
@@ -288,58 +346,74 @@ describe("worker registry", () => {
 		expect(
 			await send(claimant, { type: "worker_hosts", sessionId: "s1", kind: "sibling", parentSessionId: "s9" }),
 		).toMatchObject({ code: "claimed" });
-		expect(stops(owner)).toEqual([]);
+		expect(closes(owner)).toEqual([]);
 	});
 
-	it("retires a detached idle worker after its TTL, unless it refuses the stop because it turned active", async () => {
-		const { registry, open, start, send, stops, audits } = setup({ ttlMs: 5 });
+	it("closes a detached idle conversation after its TTL, unless it refuses because it turned active, then retires the empty worker", async () => {
+		const { registry, open, start, send, stops, closes, audits } = setup({ ttlMs: 5 });
 		const opened = open("s1", "remote");
 		const worker = await start(0);
 		const { release } = await opened;
 		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(stops(worker)).toEqual([]);
-		await send(worker, { type: "worker_activity", active: true });
+		expect(closes(worker)).toEqual([]);
+		await send(worker, { type: "worker_activity", activeSessionIds: ["s1"] });
 		release();
 		await new Promise((resolve) => setTimeout(resolve, 20));
-		expect(stops(worker)).toEqual([]);
-		await send(worker, { type: "worker_activity", active: false });
-		await waitUntil(() => stops(worker).length === 1);
-		expect(stops(worker)[0]).toMatchObject({ reason: "retention", force: false });
-		expect(registry.list()[0]?.state).toBe("retiring");
-		// A job's wake made it active before it answered.
-		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
+		expect(closes(worker)).toEqual([]);
+		await send(worker, { type: "worker_activity", activeSessionIds: [] });
+		await waitUntil(() => closes(worker).length === 1);
+		expect(closes(worker)[0]).toMatchObject({ sessionId: "s1", reason: "retention", force: false });
 		expect(registry.list()[0]?.state).toBe("live");
-		await send(worker, { type: "worker_activity", active: false });
-		await waitUntil(() => stops(worker).length === 2);
-		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[1]!.stopId, outcome: "stopped" });
+		// A job's wake made it active before it answered: it stays, until reported idle again.
+		await send(worker, {
+			type: "worker_close_result",
+			closeId: closes(worker)[0]!.closeId,
+			outcome: "refused_active",
+		});
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(closes(worker)).toHaveLength(1);
+		await send(worker, { type: "worker_activity", activeSessionIds: [] });
+		await waitUntil(() => closes(worker).length === 2);
+		await send(worker, { type: "worker_close_result", closeId: closes(worker)[1]!.closeId, outcome: "closed" });
+		expect(stops(worker)).toEqual([]);
+		await send(worker, { type: "worker_released", sessionId: "s1" });
+		// It hosts nothing: it retires.
+		expect(stops(worker)).toMatchObject([{ reason: "retention", force: false }]);
+		expect(registry.list()[0]?.state).toBe("retiring");
+		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "stopped" });
 		worker.exit({ reason: "stopped" });
 		await waitUntil(() => registry.size === 0);
-		expect(audits.map((event) => event.type)).toEqual([
-			"worker_spawned",
-			"worker_ready",
-			"worker_stop",
-			"worker_stop",
-			"worker_stop",
-			"worker_exited",
+		expect(audits.map((event) => [event.type, event.success])).toEqual([
+			["worker_spawned", true],
+			["worker_ready", true],
+			["worker_close", true],
+			["worker_close", false],
+			["worker_close", true],
+			["worker_close", true],
+			["worker_stop", true],
+			["worker_exited", true],
 		]);
 	});
 
-	it("waits for a retiring worker's exit before spawning its replacement", async () => {
-		const { registry, open, start, send, stops, launched } = setup({ ttlMs: 1 });
+	it("waits for a closing conversation's release, and a retiring worker's exit, before opening it again", async () => {
+		const { registry, open, start, send, stops, closes, launched } = setup({ ttlMs: 1 });
 		const opened = open("s1");
 		const first = await start(0);
 		await opened;
-		await waitUntil(() => stops(first).length === 1);
-		await send(first, { type: "worker_stop_result", stopId: stops(first)[0]!.stopId, outcome: "stopped" });
+		await waitUntil(() => closes(first).length === 1);
+		await send(first, { type: "worker_close_result", closeId: closes(first)[0]!.closeId, outcome: "closed" });
 		const reopened = open("s1", "remote");
 		await new Promise((resolve) => setTimeout(resolve, 10));
-		// The previous worker still holds the log: nothing spawns yet.
+		// The worker still holds the log: nothing spawns yet.
 		expect(launched).toHaveLength(1);
-		first.exit();
+		await send(first, { type: "worker_released", sessionId: "s1" });
+		// Released: the empty worker retires, so the conversation opens in a replacement.
+		expect(stops(first)).toHaveLength(1);
 		const second = await start(1);
-		const { worker } = await reopened;
-		expect(worker.workerId).toBe(second.request.workerId);
-		expect(registry.list()).toHaveLength(1);
+		const { worker, outcome } = await reopened;
+		expect([worker.workerId, outcome]).toEqual([second.request.workerId, "spawned"]);
+		first.exit();
+		await waitUntil(() => registry.list().length === 1);
 	});
 
 	it("fails the opens waiting for a spawn whose worker could not open its conversation", async () => {
@@ -349,7 +423,12 @@ describe("worker registry", () => {
 		await waitUntil(() => launched.length === 1);
 		const worker = launched[0]!;
 		hello(worker);
-		await send(worker, { type: "worker_open_failed", outcome: "conversation_locked", message: "locked elsewhere" });
+		await send(worker, {
+			type: "worker_open_failed",
+			sessionId: "s1",
+			outcome: "conversation_locked",
+			message: "locked elsewhere",
+		});
 		worker.exit({ reason: "failed", error: "locked elsewhere" });
 		for (const pending of [first, second]) {
 			const error = await pending.catch((caught: unknown) => caught);
@@ -360,7 +439,7 @@ describe("worker registry", () => {
 	});
 
 	it("fences a workspace: its stale workers retire without refusal, and admission waits for their exit", async () => {
-		const { registry, open, start, send, stops, generations, launched } = setup();
+		const { registry, open, start, send, stops, generations, launched, spawnInput } = setup();
 		const retired: string[] = [];
 		registry.onWorkerRetiring((workerId) => retired.push(workerId));
 		const opened = open("s1", "remote");
@@ -391,7 +470,7 @@ describe("worker registry", () => {
 			registry.open(
 				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "s5" },
 				{
-					origin: "phone",
+					compatibility: spawnInput("s5"),
 					prepare: () => Promise.reject(new Error("not reached")),
 					attach: () => undefined,
 				},
@@ -450,17 +529,21 @@ describe("worker registry", () => {
 		expect(registry.size).toBe(0);
 	});
 
-	it("serves an open that waited on a retiring worker once the worker refuses the stop", async () => {
-		const { registry, open, start, send, stops, launched } = setup({ ttlMs: 1 });
+	it("serves an open that waited on a closing conversation once the worker refuses the close", async () => {
+		const { registry, open, start, send, closes, launched } = setup({ ttlMs: 1 });
 		const opened = open("s1");
 		const worker = await start(0);
 		await opened;
-		await waitUntil(() => stops(worker).length === 1);
+		await waitUntil(() => closes(worker).length === 1);
 		const reopened = open("s1", "remote");
 		await new Promise((resolve) => setTimeout(resolve, 10));
-		await send(worker, { type: "worker_stop_result", stopId: stops(worker)[0]!.stopId, outcome: "refused_active" });
-		const { worker: live } = await reopened;
-		expect(live.workerId).toBe(worker.request.workerId);
+		await send(worker, {
+			type: "worker_close_result",
+			closeId: closes(worker)[0]!.closeId,
+			outcome: "refused_active",
+		});
+		const { worker: live, outcome } = await reopened;
+		expect([live.workerId, outcome]).toEqual([worker.request.workerId, "attached"]);
 		expect(launched).toHaveLength(1);
 		expect(registry.list()[0]?.state).toBe("live");
 	});
@@ -476,13 +559,13 @@ describe("worker registry", () => {
 	});
 
 	it("keeps a --no-session worker for its opener: other clients are refused, and it alone claims conversations in its memory", async () => {
-		const { registry, open, launched, start, send } = setup();
+		const { registry, open, launched, start, send, spawnInput } = setup();
 		const env = { PATH: "/bin" };
 		const tuiOpen = (client: string | undefined, exclusive: boolean) =>
 			registry.open(
 				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "m1" },
 				{
-					origin: "tui",
+					compatibility: { origin: "tui", config: {} },
 					...(client === undefined ? {} : { client }),
 					exclusive,
 					env,
@@ -496,7 +579,7 @@ describe("worker registry", () => {
 						config: {},
 						sessionOptions: {},
 					}),
-					attach: (worker: LiveWorker, spawned: boolean) => ({ worker, spawned }),
+					attach: (worker: LiveWorker, outcome: WorkerOpenOutcome) => ({ worker, spawned: outcome === "spawned" }),
 				},
 			);
 		const opening = tuiOpen("tui-1", true);
@@ -528,8 +611,204 @@ describe("worker registry", () => {
 		await expect(
 			registry.open(
 				{ workspaceName: "ws", workspaceGeneration: 1, sessionId: "m2" },
-				{ origin: "phone", prepare: async () => Promise.reject(new Error("unused")), attach: () => undefined },
+				{
+					compatibility: spawnInput("m2"),
+					prepare: async () => Promise.reject(new Error("unused")),
+					attach: () => undefined,
+				},
 			),
 		).rejects.toMatchObject({ outcome: "conversation_in_use" });
+	});
+	it("routes an open nobody hosts into a live worker of its compatibility key, up to the cap, then spawns beside it", async () => {
+		const { registry, open, start, ready, opensOf, launched, audits } = setup();
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		const outcomes = [(await first).outcome];
+		for (let index = 2; index <= MAX_WORKER_CONVERSATIONS; index++) {
+			const sessionId = `s${index}`;
+			const opening = open(sessionId, "remote", "ws", "shared");
+			await ready(worker, sessionId);
+			const opened = await opening;
+			expect(opened.worker.workerId).toBe(worker.request.workerId);
+			outcomes.push(opened.outcome);
+		}
+		expect(outcomes).toEqual(["spawned", ...Array.from({ length: MAX_WORKER_CONVERSATIONS - 1 }, () => "routed")]);
+		// Each routed conversation is opened from its own spec, in the worker the first one spawned.
+		expect(opensOf(worker).map((spec) => [spec.workerId, spec.session.sessionId])).toEqual(
+			Array.from({ length: MAX_WORKER_CONVERSATIONS }, (_, index) => [worker.request.workerId, `s${index + 1}`]),
+		);
+		expect(launched).toHaveLength(1);
+		expect(audits.filter((event) => event.type === "worker_open")).toHaveLength(MAX_WORKER_CONVERSATIONS - 1);
+
+		// Full: the next open spawns a worker of its own.
+		const overflow = open("s7", "remote", "ws", "shared");
+		const second = await start(1);
+		expect(await overflow).toMatchObject({ outcome: "spawned", worker: { workerId: second.request.workerId } });
+		expect(registry.list().map((entry) => [entry.workerId, entry.sessionIds.length])).toEqual([
+			[worker.request.workerId, MAX_WORKER_CONVERSATIONS],
+			[second.request.workerId, 1],
+		]);
+	});
+
+	it("never routes across compatibility keys, workspaces, or generations", async () => {
+		const { registry, open, start, launched, generations } = setup();
+		generations.set("ws2", 1);
+		const first = open("s1", "remote", "ws", "a");
+		await start(0);
+		await first;
+		const otherKey = open("s2", "remote", "ws", "b");
+		await start(1);
+		expect(await otherKey).toMatchObject({ outcome: "spawned" });
+		const otherWorkspace = open("s3", "remote", "ws2", "a");
+		await start(2);
+		expect(await otherWorkspace).toMatchObject({ outcome: "spawned" });
+		// The fenced workers retire; a new generation's open spawns once they exited.
+		generations.set("ws", 2);
+		const fence = registry.fenceWorkspace("ws");
+		for (const worker of launched.slice(0, 2)) worker.exit();
+		await fence;
+		const otherGeneration = open("s4", "remote", "ws", "a");
+		await start(3);
+		expect(await otherGeneration).toMatchObject({ outcome: "spawned" });
+		expect(launched).toHaveLength(4);
+	});
+
+	it("closes one group per conversation: its claims go first, its neighbour stays, and the worker retires once it hosts nothing", async () => {
+		const { registry, open, start, ready, send, stops, closes } = setup({ ttlMs: 5 });
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		const { release: leaveFirst } = await first;
+		const second = open("s2", undefined, "ws", "shared");
+		await ready(worker, "s2");
+		await second;
+		// s3 is a subagent child of s2: in s2's group, and attached keeps the group.
+		expect(
+			await send(worker, { type: "worker_hosts", sessionId: "s3", kind: "child", parentSessionId: "s2" }),
+		).toMatchObject({ type: "ok" });
+		const child = open("s3", "remote", "ws", "shared");
+		const { release: leaveChild } = await child;
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(closes(worker)).toEqual([]);
+		leaveChild();
+		await waitUntil(() => closes(worker).length === 1);
+		expect(closes(worker)[0]).toMatchObject({ sessionId: "s2", reason: "retention", force: false });
+		// No open reaches a closing group, nor does a claim join it; the open waits for the release.
+		const reopen = open("s3", "remote", "ws", "shared");
+		expect(
+			await send(worker, { type: "worker_hosts", sessionId: "s4", kind: "moved", parentSessionId: "s3" }),
+		).toMatchObject({ code: "closing" });
+		await send(worker, { type: "worker_close_result", closeId: closes(worker)[0]!.closeId, outcome: "closed" });
+		expect(await send(worker, { type: "worker_released", sessionId: "s2" })).toMatchObject({ code: "group_open" });
+		expect(await send(worker, { type: "worker_released", sessionId: "s3" })).toMatchObject({ type: "ok" });
+		expect(await send(worker, { type: "worker_released", sessionId: "s2" })).toMatchObject({ type: "ok" });
+		// s1 serves on, attached; the reopened s3 is routed back into the worker as a conversation of its own.
+		await ready(worker, "s3");
+		const reopened = await reopen;
+		expect(reopened).toMatchObject({ outcome: "routed", worker: { workerId: worker.request.workerId } });
+		expect(registry.list()).toMatchObject([{ state: "live", sessionIds: ["s1", "s3"], clients: { remote: 2 } }]);
+		expect(stops(worker)).toEqual([]);
+		// Every client left: each group closes, and the empty worker retires.
+		leaveFirst();
+		await waitUntil(() => closes(worker).length === 2);
+		await send(worker, { type: "worker_released", sessionId: "s1" });
+		expect(stops(worker)).toEqual([]);
+		reopened.release();
+		await waitUntil(() => closes(worker).length === 3);
+		expect(closes(worker).map((close) => close.sessionId)).toEqual(["s2", "s1", "s3"]);
+		await send(worker, { type: "worker_released", sessionId: "s3" });
+		expect(stops(worker)).toMatchObject([{ reason: "retention", force: false }]);
+		expect(registry.list()).toMatchObject([{ state: "retiring", sessionIds: [] }]);
+	});
+
+	it("closes one conversation without the option to refuse, leaving the worker's others serving", async () => {
+		const { registry, open, start, ready, send, stops, closes } = setup();
+		const retiring: Array<readonly string[]> = [];
+		registry.onWorkerRetiring((_workerId, _reason, sessionIds) => retiring.push(sessionIds));
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		await first;
+		const second = open("s2", "remote", "ws", "shared");
+		await ready(worker, "s2");
+		const { release: relaySettled } = await second;
+		await send(worker, { type: "worker_hosts", sessionId: "s3", kind: "child", parentSessionId: "s2" });
+		await send(worker, { type: "worker_activity", activeSessionIds: ["s3"] });
+		let closed = false;
+		const closing = registry.closeConversation("ws", "s3", "authority").then(() => {
+			closed = true;
+		});
+		// Its group's relays close first; the worker is told to close it, refusal or not.
+		expect(retiring).toEqual([["s2", "s3"]]);
+		expect(closes(worker)).toMatchObject([{ sessionId: "s2", reason: "authority", force: true }]);
+		await send(worker, {
+			type: "worker_close_result",
+			closeId: closes(worker)[0]!.closeId,
+			outcome: "refused_active",
+		});
+		await send(worker, { type: "worker_released", sessionId: "s3" });
+		expect(closed).toBe(false);
+		await send(worker, { type: "worker_released", sessionId: "s2" });
+		await closing;
+		// The closed conversation's relay ends with its stream.
+		relaySettled();
+		expect(registry.list()).toMatchObject([{ state: "live", sessionIds: ["s1"], clients: { remote: 1 } }]);
+		expect(stops(worker)).toEqual([]);
+	});
+
+	it("fails a routed open the worker could not open, or did not report in time, and keeps the worker's others", async () => {
+		const { registry, open, start, send, opensOf, closes } = setup();
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		await first;
+		const locked = open("s2", "remote", "ws", "shared");
+		await waitUntil(() => opensOf(worker).length === 2);
+		await send(worker, {
+			type: "worker_open_failed",
+			sessionId: "s2",
+			outcome: "conversation_locked",
+			message: "locked elsewhere",
+		});
+		await expect(locked).rejects.toMatchObject({ outcome: "conversation_locked" });
+		expect(registry.list()).toMatchObject([{ state: "live", sessionIds: ["s1"] }]);
+
+		vi.useFakeTimers();
+		try {
+			const silent = open("s3", "remote", "ws", "shared");
+			const failed = silent.catch((error: unknown) => error);
+			await vi.waitFor(() => expect(opensOf(worker)).toHaveLength(3));
+			await vi.advanceTimersByTimeAsync(WORKER_READY_TIMEOUT_MS);
+			expect(await failed).toBeInstanceOf(WorkerOpenError);
+			// It may still open it: it is told to close it, and the registry keeps it until it is released.
+			expect(closes(worker)).toMatchObject([{ sessionId: "s3", force: true }]);
+			expect(registry.list()[0]?.sessionIds).toEqual(["s1", "s3"]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+	it("never claims a conversation another group of the worker hosts, and retires a worker stuck in a forced close with the turn cap", async () => {
+		const { registry, open, start, ready, send, stops, closes } = setup();
+		const first = open("s1", "remote", "ws", "shared");
+		const worker = await start(0);
+		await first;
+		const second = open("s2", "remote", "ws", "shared");
+		await ready(worker, "s2");
+		await second;
+		// s1's code switching to s2 (another group's conversation here) is refused: s2 stays where it is.
+		expect(
+			await send(worker, { type: "worker_hosts", sessionId: "s2", kind: "moved", parentSessionId: "s1" }),
+		).toMatchObject({ code: "claimed" });
+		expect(registry.host("ws", "s2")).toMatchObject({ kind: "conversation" });
+
+		vi.useFakeTimers();
+		try {
+			void registry.closeConversation("ws", "s2", "authority");
+			expect(closes(worker)).toMatchObject([{ sessionId: "s2", reason: "authority", force: true }]);
+			await vi.advanceTimersByTimeAsync(WORKER_FORCED_CLOSE_TIMEOUT_MS - 1);
+			expect(stops(worker)).toEqual([]);
+			await vi.advanceTimersByTimeAsync(1);
+			// Its neighbours get the 60 s turn cap, not the close's immediate abort.
+			expect(stops(worker)).toMatchObject([{ reason: "retention", force: true }]);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });

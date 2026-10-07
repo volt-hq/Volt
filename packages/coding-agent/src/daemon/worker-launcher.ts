@@ -32,9 +32,7 @@ import { withoutDaemonCredentials } from "./worker-spawn-options.ts";
 export type WorkerExitReason =
 	/** It was asked to stop and closed its conversations. */
 	| "stopped"
-	/** Its primary conversation closed without a stop (it lost its log). */
-	| "closed"
-	/** It could not connect, or could not open its primary conversation. */
+	/** It could not connect, or could not open the conversation it was spawned for. */
 	| "failed"
 	/** Its control connection to the daemon dropped; it finished its turn and exited. */
 	| "daemon_lost"
@@ -52,7 +50,7 @@ export interface WorkerLaunchRequest {
 	readonly workerToken: string;
 	readonly socketPath: string;
 	readonly agentDir: string;
-	/** The working directory of the conversation the worker opens. */
+	/** The worker process's working directory: its workspace (each conversation runs in a directory of its own). */
 	readonly cwd: string;
 	/** The environment of the TUI whose open spawned the worker; the daemon's own without one. Never logged. */
 	readonly env?: Readonly<Record<string, string>>;
@@ -82,7 +80,6 @@ export interface WorkerBootstrap {
 /** A worker process's exit code for each way it exits; any other code or a signal reads as crashed. */
 export const WORKER_EXIT_CODES = {
 	stopped: 0,
-	closed: 3,
 	failed: 4,
 	daemon_lost: 5,
 } as const satisfies Record<Exclude<WorkerExitReason, "crashed">, number>;

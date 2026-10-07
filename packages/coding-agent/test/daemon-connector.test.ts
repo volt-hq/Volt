@@ -218,7 +218,7 @@ describe("the daemon connector's trust and workspace bounds", () => {
 			const spec = await harness.workers.open(
 				{ workspaceName: "ws", workspaceGeneration: harness.generation(), sessionId },
 				{
-					origin: "tui",
+					compatibility: { origin: "tui", config: {} },
 					client: "probe",
 					prepare: () => Promise.reject(new Error("The worker is live")),
 					attach: (worker) => worker.spec,

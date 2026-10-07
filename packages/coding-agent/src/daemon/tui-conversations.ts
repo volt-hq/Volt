@@ -13,11 +13,13 @@
  * TUI registered it before). The conversation resolves read-only: a new one
  * gets its id here (the spawn creates its log, or a `--no-session` worker
  * keeps it in memory), a stored one is found in its session directory or in
- * the worker hosting it, and a fork's copy is written by the spawn. The
- * registry then attaches the TUI to the live worker hosting it, or spawns
- * one with the TUI's environment and options; an attach to a live worker
- * applies the open's session-level options once the TUI attached, and names
- * the spawn-only ones the worker does not share.
+ * the worker hosting it, and a fork's copy is written by the open. The
+ * registry then attaches the TUI to the live worker hosting it, opens it in
+ * a live worker spawned with the same environment and spawn-only options
+ * (the same compatibility key) that has room (D11 revised), or spawns one
+ * with the TUI's environment and options; an attach to a conversation that
+ * was open already applies the open's session-level options once the TUI
+ * attached, and names the spawn-only ones its worker does not share.
  *
  * The answer carries a single-use relay id and token for the TUI's end of
  * its stream, valid for 10 s, during which the worker counts as attached.
@@ -66,7 +68,13 @@ import {
 	RelayRegistry,
 } from "./relay-stream.ts";
 import { sensitiveDirectoryReason } from "./sensitive-directory.ts";
-import { type LiveWorker, WorkerOpenError, type WorkerRegistry, type WorkerSpawnInput } from "./worker-registry.ts";
+import {
+	type LiveWorker,
+	WorkerOpenError,
+	type WorkerOpenOutcome,
+	type WorkerRegistry,
+	type WorkerSpawnInput,
+} from "./worker-registry.ts";
 import {
 	checkWorkerSpawnOptions,
 	differingSpawnOnlyOptions,
@@ -224,12 +232,12 @@ export class TuiConversations {
 			const opened = await this.options.workers.open(
 				{ workspaceName, workspaceGeneration: generation, sessionId: resolved.sessionId },
 				{
-					origin: "tui",
+					compatibility: { origin: "tui", config: request.spawn.config },
 					client: request.clientKey,
 					exclusive: resolved.inMemory,
 					env: request.spawn.env,
 					prepare: () => resolved.prepare(generation),
-					attach: (worker, spawned) => this.issueTicket(connection, request, resolved, worker, spawned),
+					attach: (worker, outcome) => this.issueTicket(connection, request, resolved, worker, outcome),
 				},
 			);
 			return {
@@ -262,19 +270,22 @@ export class TuiConversations {
 
 	/**
 	 * Count the TUI's stream as attached to `worker`, in the turn the registry
-	 * looked it up in, and issue its end of the relay.
+	 * looked it up in, and issue its end of the relay. A conversation this
+	 * open opened (in a worker it spawned, or one it was routed into) was
+	 * built with the open's options; one it found open keeps its own.
 	 */
 	private issueTicket(
 		connection: ControlConnection,
 		request: ConversationOpenRequest,
 		resolved: ResolvedOpen,
 		worker: LiveWorker,
-		spawned: boolean,
+		outcome: WorkerOpenOutcome,
 	): { ticket: Ticket; spawned: boolean; ignoredOptions: WorkerSpawnOnlyOption[] } {
 		if (this.closed) throw new TuiOpenError("shutting_down", "The daemon is shutting down");
 		const session = request.spawn.session;
+		const attached = outcome === "attached";
 		const apply: WorkerSessionOptions | undefined =
-			spawned || Object.keys(session).length === 0 ? undefined : session;
+			!attached || Object.keys(session).length === 0 ? undefined : session;
 		const release = worker.attach("local");
 		const relayId = `rl-${uuidv7()}`;
 		const ticket: Ticket = {
@@ -304,8 +315,8 @@ export class TuiConversations {
 		this.tickets.set(relayId, ticket);
 		return {
 			ticket,
-			spawned,
-			ignoredOptions: spawned ? [] : differingSpawnOnlyOptions(request.spawn.config, worker.spec),
+			spawned: outcome === "spawned",
+			ignoredOptions: attached ? differingSpawnOnlyOptions(request.spawn.config, worker.spec) : [],
 		};
 	}
 
@@ -567,7 +578,7 @@ export class TuiConversations {
 		return this.spec(placement, generation, ref, cwd, request);
 	}
 
-	/** The spawn of a worker for a TUI's conversation in `cwd`, with the TUI's options. */
+	/** What a worker opens a TUI's conversation in `cwd` from, with the TUI's options. */
 	private spec(
 		placement: Placement,
 		generation: number,

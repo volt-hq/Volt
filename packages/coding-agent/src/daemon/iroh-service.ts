@@ -232,6 +232,16 @@ export function isExactTuiChangeObservationLeaseHolder(
 	);
 }
 
+/** A hosted conversation, by workspace and session: what the per-conversation maps are keyed by. */
+function conversationKey(workspaceName: string, sessionId: string): string {
+	return `${workspaceName}\0${sessionId}`;
+}
+
+function parseConversationKey(key: string): { readonly workspaceName: string; readonly sessionId: string } {
+	const separator = key.indexOf("\0");
+	return { workspaceName: key.slice(0, separator), sessionId: key.slice(separator + 1) };
+}
+
 function normalizeRelayCloseReason(reason: string): RelayCloseReason {
 	switch (reason) {
 		case "phone_disconnected":
@@ -958,12 +968,16 @@ class IrohDaemonService {
 	private readonly workers: WorkerRegistry;
 	/** Relays to workers, by relay id: the client's authorization and the worker serving it. */
 	private readonly workerRelays = new Map<string, WorkerRelay>();
-	/** The client whose open spawned each worker: revoking it, or changing its access, retires the worker. */
-	private readonly workerSpawners = new Map<string, string>();
-	/** Every client each worker served a relay for: revoking one, or changing its access, retires the worker too. */
-	private readonly workerClients = new Map<string, Set<string>>();
-	/** Workers spawned in a managed worktree: their exit lets the worktree's retention run. */
-	private readonly workerWorktrees = new Map<string, { workspaceName: string; worktreeId: string }>();
+	/**
+	 * The client whose open opened each conversation a worker hosts, by
+	 * `conversationKey`: revoking it, or changing its access, closes the
+	 * conversation (its group), and leaves the worker's other conversations serving.
+	 */
+	private readonly conversationOpeners = new Map<string, string>();
+	/** Every client each hosted conversation served a relay for: revoking one, or changing its access, closes it too. */
+	private readonly conversationClients = new Map<string, Set<string>>();
+	/** Conversations a phone opened in a managed worktree: their close lets the worktree's retention run. */
+	private readonly conversationWorktrees = new Map<string, { workspaceName: string; worktreeId: string }>();
 	/** Checkouts workers restored, by pin id: pinned until the worker releases them or its connection ends. */
 	private readonly workerWorktreePins = new Map<
 		string,
@@ -1117,23 +1131,30 @@ class IrohDaemonService {
 				void entry.relay.close("worker_exited", { pendingMessage: "conversation host exited; retry" });
 				this.workerRelays.delete(relayId);
 			}
-			this.workerSpawners.delete(workerId);
-			this.workerClients.delete(workerId);
-			const worktree = this.workerWorktrees.get(workerId);
-			this.workerWorktrees.delete(workerId);
-			if (worktree !== undefined)
-				this.worktreeRetention.onRuntimeDisposed(worktree.workspaceName, worktree.worktreeId);
 		});
-		// A worker retiring without the option to refuse ends the streams whose authority went with it.
-		this.workers.onWorkerRetiring((workerId) => {
+		// Conversations closing without the option to refuse (a retiring worker, or one closed group) end the
+		// streams whose authority went with them.
+		this.workers.onWorkerRetiring((workerId, _reason, sessionIds) => {
 			for (const [relayId, entry] of this.workerRelays) {
-				if (entry.workerId !== workerId) continue;
+				if (entry.workerId !== workerId || !sessionIds.includes(entry.relay.sessionId)) continue;
 				const loss = getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), entry.authorization);
 				if (loss !== undefined) this.endWorkerRelay(relayId, loss);
 			}
 		});
-		// The lease broker sees a session a worker hosts as daemon-owned, until slice 9 deletes it.
-		this.workers.onHostsChanged((workspaceName, sessionId) => this.syncWorkerLease(workspaceName, sessionId));
+		this.workers.onHostsChanged((workspaceName, sessionId, hosted) => {
+			// The lease broker sees a session a worker hosts as daemon-owned, until slice 9 deletes it.
+			this.syncWorkerLease(workspaceName, sessionId);
+			if (hosted) return;
+			// A conversation closed (or its worker exited): who opened it no longer matters, and its worktree's retention runs.
+			const key = conversationKey(workspaceName, sessionId);
+			this.conversationOpeners.delete(key);
+			this.conversationClients.delete(key);
+			const worktree = this.conversationWorktrees.get(key);
+			this.conversationWorktrees.delete(key);
+			if (worktree !== undefined) {
+				this.worktreeRetention.onRuntimeDisposed(worktree.workspaceName, worktree.worktreeId);
+			}
+		});
 		this.worktrees = new WorktreeManager({
 			agentDir: services.agentDir,
 			stateManager: this.stateManager,
@@ -1171,9 +1192,9 @@ class IrohDaemonService {
 		this.leaseBroker = new LeaseBroker({
 			isRuntimeStreaming: (workspaceName, sessionId) => this.workers.isHostActive(workspaceName, sessionId),
 			waitForRuntimeIdle: (workspaceName, sessionId) => this.workers.whenHostIdle(workspaceName, sessionId),
-			// A TUI taking the session's lease retires the worker hosting it.
+			// A TUI taking the session's lease closes the conversation in the worker hosting it.
 			disposeRuntime: (workspaceName, sessionId) =>
-				this.workers.retireHost(workspaceName, sessionId, "lease_transferred"),
+				this.workers.closeConversation(workspaceName, sessionId, "lease_transferred"),
 			closePhoneStreams: async (workspaceName, sessionId) => {
 				await this.closeWorkerRelays(
 					(entry) => entry.relay.workspaceName === workspaceName && entry.relay.sessionId === sessionId,
@@ -3505,20 +3526,18 @@ class IrohDaemonService {
 		if (!record) {
 			return { ok: false, error: "worktree_not_found" };
 		}
-		let closedStreamCount = 0;
-		const boundWorkers = new Set(
-			record.sessionIds.flatMap((sessionId) => this.workers.host(workspace.name, sessionId)?.workerId ?? []),
-		);
-		if (boundWorkers.size > 0) {
-			if (!force) {
-				return { ok: false, error: "worktree_busy" };
-			}
-			for (const workerId of boundWorkers) {
-				closedStreamCount += [...this.workerRelays.values()].filter((entry) => entry.workerId === workerId).length;
-				await this.workers.retireWorker(workerId, "authority");
-			}
+		// The worktree's conversations close in their workers; the workers' other conversations serve on.
+		const bound = record.sessionIds.filter((sessionId) => this.workers.hosts(workspace.name, sessionId));
+		if (bound.length > 0 && !force) {
+			return { ok: false, error: "worktree_busy" };
 		}
-		const stoppedRuntimeCount = boundWorkers.size;
+		const closedStreamCount = [...this.workerRelays.values()].filter(
+			(entry) => entry.relay.workspaceName === workspace.name && bound.includes(entry.relay.sessionId),
+		).length;
+		await Promise.allSettled(
+			bound.map((sessionId) => this.workers.closeConversation(workspace.name, sessionId, "authority")),
+		);
+		const stoppedRuntimeCount = bound.length;
 		const removed = await this.worktrees.remove(workspace, worktreeId, { force });
 		if (!removed.ok) {
 			return removed;
@@ -4280,14 +4299,14 @@ class IrohDaemonService {
 		}
 		for (const relay of relaysOf()) void relay.close("error", { pendingMessage: "conversation reopened; retry" });
 		try {
-			// A fresh pairing replaces the phone-opened worker serving the conversation, as it replaced a daemon
+			// A fresh pairing replaces the conversation a phone-opened worker serves, as it replaced a daemon
 			// runtime; a TUI's worker keeps serving its TUI (the phone uses its tools, D9, or is refused).
 			if (
 				authorization.paired &&
 				target !== "new" &&
 				this.workers.host(workspaceName, sessionId)?.origin === "phone"
 			) {
-				await this.workers.retireHost(workspaceName, sessionId, "authority");
+				await this.workers.closeConversation(workspaceName, sessionId, "authority");
 			}
 			await this.dependencies.beforeAuthorizedStreamPublication?.("conversation", authorization);
 			if (!(await this.isAuthorizationCurrent(authorization))) {
@@ -4303,10 +4322,10 @@ class IrohDaemonService {
 			opened = await this.workers.open(
 				{ workspaceName, workspaceGeneration, sessionId },
 				{
-					origin: "phone",
+					compatibility: resolved.compatibility,
 					signal: admission.signal,
 					prepare: () => resolved.prepare(workspaceGeneration, admission.signal),
-					attach: (worker) => {
+					attach: (worker, outcome) => {
 						// Everything the awaits above could have changed is checked again in this turn.
 						if (!admission.isCurrent()) throw new Error("daemon admission closed");
 						if (getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), authorization) !== undefined) {
@@ -4335,10 +4354,12 @@ class IrohDaemonService {
 								{ workspace: workspaceName, sessionId },
 							);
 						}
-						if (!this.workerSpawners.has(worker.workerId)) {
-							this.workerSpawners.set(worker.workerId, authorization.client.nodeId);
+						// The phone opened the conversation (in a worker it spawned, or one it was routed into).
+						if (outcome !== "attached") {
+							const key = conversationKey(workspaceName, sessionId);
+							this.conversationOpeners.set(key, authorization.client.nodeId);
 							if (resolved.worktree !== undefined) {
-								this.workerWorktrees.set(worker.workerId, { workspaceName, worktreeId: resolved.worktree.id });
+								this.conversationWorktrees.set(key, { workspaceName, worktreeId: resolved.worktree.id });
 							}
 						}
 						const relay = this.mintWorkerRelay(worker, {
@@ -4352,7 +4373,7 @@ class IrohDaemonService {
 						return {
 							relay,
 							workerId: worker.workerId,
-							kind: this.workers.host(workspaceName, sessionId)?.kind ?? "primary",
+							kind: this.workers.host(workspaceName, sessionId)?.kind ?? "conversation",
 						};
 					},
 				},
@@ -4483,9 +4504,10 @@ class IrohDaemonService {
 			throw error;
 		}
 		this.workerRelays.set(relay.relayId, { relay, authorization, workerId: worker.workerId });
-		const clients = this.workerClients.get(worker.workerId) ?? new Set<string>();
+		const key = conversationKey(workspaceName, resolved.sessionId);
+		const clients = this.conversationClients.get(key) ?? new Set<string>();
 		clients.add(authorization.client.nodeId);
-		this.workerClients.set(worker.workerId, clients);
+		this.conversationClients.set(key, clients);
 		this.syncWorkerLease(workspaceName, resolved.sessionId);
 		const delivered = this.services.controlServer.sendTo(worker.connectionId, {
 			type: "relay_offer",
@@ -4557,17 +4579,25 @@ class IrohDaemonService {
 		void entry.relay.settled.finally(() => clearTimeout(timer));
 	}
 
-	/** Retire the workers `clientNodeId` opened, or that serve it, without the option to refuse; resolves once they exited. */
-	private async retireClientWorkers(clientNodeId: string, workspaceName?: string): Promise<number> {
-		const workerIds = new Set<string>();
-		for (const [workerId, spawner] of this.workerSpawners) if (spawner === clientNodeId) workerIds.add(workerId);
-		// Every worker that served the client, whether or not its relay is still open: a turn it started may still run.
-		for (const [workerId, clients] of this.workerClients) if (clients.has(clientNodeId)) workerIds.add(workerId);
-		const retired = [...workerIds].filter(
-			(workerId) => workspaceName === undefined || this.workers.keyOf(workerId)?.workspaceName === workspaceName,
+	/**
+	 * Close the conversations `clientNodeId` opened, or that served it, without
+	 * the option to refuse; resolves once they closed. The workers hosting them
+	 * keep serving their other conversations.
+	 */
+	private async closeClientConversations(clientNodeId: string, workspaceName?: string): Promise<number> {
+		const keys = new Set<string>();
+		for (const [key, opener] of this.conversationOpeners) if (opener === clientNodeId) keys.add(key);
+		// Every conversation that served the client, whether or not its relay is still open: a turn it started may still run.
+		for (const [key, clients] of this.conversationClients) if (clients.has(clientNodeId)) keys.add(key);
+		const closing = [...keys]
+			.map(parseConversationKey)
+			.filter((conversation) => workspaceName === undefined || conversation.workspaceName === workspaceName);
+		await Promise.allSettled(
+			closing.map((conversation) =>
+				this.workers.closeConversation(conversation.workspaceName, conversation.sessionId, "authority"),
+			),
 		);
-		await Promise.allSettled(retired.map((workerId) => this.workers.retireWorker(workerId, "authority")));
-		return retired.length;
+		return closing.length;
 	}
 
 	private async logSessionSelection(
@@ -4783,8 +4813,8 @@ class IrohDaemonService {
 
 	/**
 	 * A device's access changed: its streams and relays end with
-	 * `fatal{revoked}`, and the workers it opened or is served by retire
-	 * (D4). Resolves once they exited.
+	 * `fatal{revoked}`, and the conversations it opened or is served by close
+	 * in their workers (D4). Resolves once they closed.
 	 */
 	private async closeClientForAccessUpdate(nodeId: string): Promise<void> {
 		const entries = new Set(this.activeStreams.entriesForClientNodeId(nodeId));
@@ -4804,7 +4834,7 @@ class IrohDaemonService {
 			if (entry.relay.clientNodeId === nodeId) this.endWorkerRelay(relayId, "revoked");
 		}
 		await this.initiateActiveStreamRetirement(entries, "access_updated");
-		await this.retireClientWorkers(nodeId);
+		await this.closeClientConversations(nodeId);
 	}
 
 	private async closeWorkspaceAuthorizationRemovedStreams(nodeId: string, workspaceName: string): Promise<void> {
@@ -4829,7 +4859,7 @@ class IrohDaemonService {
 			(result): result is PromiseFulfilledResult<true> => result.status === "fulfilled" && result.value,
 		).length;
 		closedStreamCount += await this.closeActiveStreamsForClientWorkspace(nodeId, workspaceName, reason);
-		const stoppedRuntimeCount = await this.retireClientWorkers(nodeId, workspaceName);
+		const stoppedRuntimeCount = await this.closeClientConversations(nodeId, workspaceName);
 		await this.logAudit({
 			type: "workspace_authorization_removed",
 			clientNodeId: nodeId,
@@ -4845,7 +4875,8 @@ class IrohDaemonService {
 
 	/**
 	 * A device was revoked: its connections close, its streams and relays end
-	 * with `fatal{revoked}`, and the workers it opened or is served by retire.
+	 * with `fatal{revoked}`, and the conversations it opened or is served by
+	 * close in their workers.
 	 */
 	async closeActiveStreamsForClient(nodeId: string): Promise<{ closed: boolean; closedCount: number }> {
 		const entries = new Set(this.activeStreams.entriesForClientNodeId(nodeId));
@@ -4869,7 +4900,7 @@ class IrohDaemonService {
 
 		const closedConnectionCount = this.closeClientConnectionsForClient(nodeId, ACTIVE_REVOKE_CLOSE_REASON);
 		await this.initiateActiveStreamRetirement(entries, ACTIVE_REVOKE_CLOSE_REASON);
-		const stoppedRuntimeCount = await this.retireClientWorkers(nodeId);
+		const stoppedRuntimeCount = await this.closeClientConversations(nodeId);
 		const closed =
 			entries.size > 0 || closedConnectionCount > 0 || activeRelays.length > 0 || pendingRelays.length > 0;
 		if (entries.size === 0) {

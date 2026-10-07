@@ -1,15 +1,19 @@
 /**
- * The conversations a worker hosts (Phase 7 plan §1, D1): its primary, and
- * those that must share its writer or process, each claimed from the
- * daemon's registry (`worker_hosts`) before it opens and released once it
- * closed: the children of its subagents, review finding discussions and the
- * review sources they write through (siblings), and the targets of moves an
- * extension starts for a client of the worker (moved). A claim for a
- * conversation another worker hosts is refused; a stored session an
- * extension switches to is then left to that worker. Each hosted
- * conversation's Git state is reported to the daemon for change association,
- * and its settings and credentials are watched for changes other processes
- * write (D12).
+ * The conversations a worker hosts (Phase 7 plan §1, D1, D11 revised): its
+ * top-level conversations, each the daemon sent it (`worker_open`) and each
+ * in a host of its own, and with each the conversations that must share its
+ * writer or process, its group: each claimed from the daemon's registry
+ * (`worker_hosts`) before it opens, into the group of the conversation it
+ * belongs to: the children of its subagents, review finding discussions and
+ * the review sources they write through (siblings), and the targets of moves
+ * an extension starts for a client (moved). A claim for a conversation
+ * another worker hosts is refused; a stored session an extension switches
+ * to is then left to that worker. Every hosted conversation is released
+ * once it closed; a group closes as one, what it claimed first and its
+ * top-level conversation last, which also closes the group when it closes
+ * on its own (it lost its log). Each hosted conversation's Git state is
+ * reported to the daemon for change association, and its settings and
+ * credentials are watched for changes other processes write (D12).
  */
 
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
@@ -21,22 +25,27 @@ import type { HostedRedirect, RedirectTarget } from "../../core/host/targets.ts"
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../core/review-discussions.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import type { SubagentRuntimeRegistration } from "../../core/subagents/index.ts";
-import type { WorkerHostKind } from "../control-protocol.ts";
+import type { WorkerHostKind, WorkerSpawnSpec } from "../control-protocol.ts";
 import type { DaemonLogger } from "../log.ts";
 import { observeCompactionFailures } from "./compaction-failure-log.ts";
 import type { IrohRemoteSubagentRuntimeCreatedEvent } from "./conversation-factory.ts";
 import { type WorkerDaemonClient, WorkerRequestError } from "./daemon-client.ts";
 import { watchConversationSettings } from "./settings-watcher.ts";
 
-/** How long a sibling claim waits for the worker that hosted the conversation to exit. */
+/** How long a sibling claim waits for the group that hosted the conversation to close. */
 const SIBLING_CLAIM_WAIT_MS = 15_000;
 const SIBLING_CLAIM_RETRY_MS = 200;
+/** How long a top-level conversation's release waits for its group's pending claims to settle. */
+const GROUP_RELEASE_WAIT_MS = 15_000;
 
 /** A hosted conversation, in the host it opened in. */
 export interface WorkerConversation {
 	readonly host: ConversationHost;
 	readonly conversation: HostedConversation;
-	readonly kind: "primary" | WorkerHostKind;
+	/** `conversation`: a top-level conversation, heading its group. */
+	readonly kind: "conversation" | WorkerHostKind;
+	/** The top-level conversation whose group it is in (its own id for one). */
+	readonly top: string;
 }
 
 /** The branch Git state the daemon associates changes with; null when there is none to associate. */
@@ -69,13 +78,16 @@ export class WorkerConversations {
 	private readonly workspaceName: string;
 	private readonly log: ReturnType<DaemonLogger["child"]>;
 	private readonly onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
-	private readonly projectTrusted: (cwd: string) => boolean;
+	private readonly projectTrusted: (cwd: string, spec: WorkerSpawnSpec) => boolean;
 	private readonly hosted = new Map<string, WorkerConversation>();
+	/** What each top-level conversation was opened from, by its id. */
+	private readonly specs = new Map<string, WorkerSpawnSpec>();
+	/** Settles once a hosted conversation closed and was released, by its id. */
+	private readonly releases = new Map<string, Promise<void>>();
 	private readonly observations = new Map<string, GitContextObservationBinding>();
 	/** Sessions claimed and not yet open here: released if they never open. */
 	private readonly pendingClaims = new Set<string>();
 	private readonly reviews: HostReviewDiscussionService;
-	private primaryConversation: WorkerConversation | undefined;
 	private stopping = false;
 
 	constructor(options: {
@@ -85,8 +97,8 @@ export class WorkerConversations {
 		log: ReturnType<DaemonLogger["child"]>;
 		/** Settings or credentials another process wrote changed what a hosted conversation's clients see. */
 		onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
-		/** Whether the project in `cwd` is trusted now: a project's settings reload only while it is. */
-		projectTrusted: (cwd: string) => boolean;
+		/** Whether the project in `cwd` is trusted now, for a conversation of the group opened from `spec`: its settings reload only while it is. */
+		projectTrusted: (cwd: string, spec: WorkerSpawnSpec) => boolean;
 	}) {
 		this.client = options.client;
 		this.workspaceName = options.workspaceName;
@@ -102,9 +114,13 @@ export class WorkerConversations {
 			assertCurrent: (runtime) => {
 				if (!this.isHosted(runtime) || this.stopping) throw new Error("Review runtime ownership changed");
 			},
-			// An unloaded source is claimed for the write, so no other worker opens it meanwhile.
+			// An unloaded source is claimed for the write, so no other worker opens it meanwhile. One open here
+			// under another reference (another group's) is that conversation's to write, not this one's.
 			withSourceWrite: async (requester, ref, write) => {
 				if (!this.isHosted(requester)) throw new Error("Review source writer authority changed");
+				if (this.hosted.has(ref.sessionId)) {
+					throw new WorkerRequestError("claimed", "another conversation in this worker hosts that source");
+				}
 				await this.claim(ref.sessionId, "sibling", requester.id);
 				try {
 					return await write();
@@ -117,16 +133,27 @@ export class WorkerConversations {
 		});
 	}
 
-	/** The worker's primary conversation, once it opened. */
-	get primary(): WorkerConversation {
-		if (!this.primaryConversation) throw new Error("The worker's primary conversation is not open");
-		return this.primaryConversation;
+	/** Host `conversation`, a top-level conversation opened from `spec` in a host of its own. */
+	adoptTop(spec: WorkerSpawnSpec, host: ConversationHost, conversation: HostedConversation): void {
+		this.specs.set(conversation.id, spec);
+		this.track({ host, conversation, kind: "conversation", top: conversation.id });
 	}
 
-	/** Host `conversation`, the worker's primary. */
-	adoptPrimary(host: ConversationHost, conversation: HostedConversation): void {
-		this.primaryConversation = { host, conversation, kind: "primary" };
-		this.track(this.primaryConversation);
+	/** What the group of `conversation` was opened from; undefined once it is not hosted. */
+	specOf(conversation: HostedConversation): WorkerSpawnSpec | undefined {
+		const top = this.hosted.get(conversation.id)?.top;
+		return top === undefined ? undefined : this.specs.get(top);
+	}
+
+	/** The open top-level conversation `sessionId`. */
+	top(sessionId: string): WorkerConversation | undefined {
+		const hosted = this.get(sessionId);
+		return hosted?.kind === "conversation" ? hosted : undefined;
+	}
+
+	/** The open conversations of the group of the top-level conversation `top`, it included. */
+	group(top: string): WorkerConversation[] {
+		return this.list().filter((hosted) => hosted.top === top);
 	}
 
 	/** The open conversation `sessionId` this worker hosts. */
@@ -143,6 +170,57 @@ export class WorkerConversations {
 	/** Whether any hosted conversation is active (RFC §7.3): a turn, running work, or a hold. */
 	active(): boolean {
 		return this.list().some((hosted) => hosted.conversation.isActive());
+	}
+
+	/** The hosted conversations that are active, by id. */
+	activeIds(): string[] {
+		return this.list()
+			.filter((hosted) => hosted.conversation.isActive())
+			.map((hosted) => hosted.conversation.id);
+	}
+
+	/**
+	 * Close the group of the top-level conversation `top`: what it claimed
+	 * first, then it (its release follows theirs), then its host. Resolves once
+	 * the group closed and was released.
+	 */
+	async closeGroup(top: string): Promise<void> {
+		const head = this.hosted.get(top);
+		if (!head || head.kind !== "conversation") return;
+		await this.closeMembers(head);
+		await head.host.close(head.conversation).catch(() => undefined);
+		await this.releases.get(top);
+	}
+
+	/**
+	 * The worker stops: close every group, their claims first, without
+	 * releasing anything (the daemon drops what the worker hosted at its exit).
+	 */
+	async closeAll(): Promise<void> {
+		this.stopping = true;
+		const entries = [...this.hosted.values()];
+		const results = await Promise.allSettled([
+			...entries
+				.filter((entry) => entry.kind !== "conversation")
+				.map((entry) => entry.host.close(entry.conversation, { reason: "quit" })),
+		]);
+		const disposed = await Promise.allSettled(
+			entries.filter((entry) => entry.kind === "conversation").map((entry) => entry.host.dispose()),
+		);
+		const errors = [...results, ...disposed].flatMap((result) =>
+			result.status === "rejected" ? [result.reason] : [],
+		);
+		if (errors.length === 1) throw errors[0];
+		if (errors.length > 1) throw new AggregateError(errors, "The worker's conversations did not close");
+	}
+
+	/** Close the conversations `head`'s group claimed, and wait for their release. */
+	private async closeMembers(head: WorkerConversation): Promise<void> {
+		const members = [...this.hosted.values()].filter((entry) => entry.top === head.top && entry !== head);
+		await Promise.allSettled(
+			members.map((entry) => (entry.conversation.closed ? undefined : entry.host.close(entry.conversation))),
+		);
+		await Promise.allSettled(members.map((entry) => this.releases.get(entry.conversation.id)));
 	}
 
 	reviewDiscussions(conversation: HostedConversation): ReviewDiscussionService {
@@ -187,15 +265,18 @@ export class WorkerConversations {
 	/**
 	 * Track a hosted conversation: report its Git state, record its failed
 	 * compactions, close it once it lost its log (a reconnecting client opens
-	 * it again from the store), and release its claim once it closed.
+	 * it again from the store), and release it once it closed; a top-level
+	 * conversation closes its group first, and goes last.
 	 */
 	private track(hosted: WorkerConversation): void {
 		const sessionId = hosted.conversation.id;
+		const spec = this.specs.get(hosted.top);
+		if (!spec) throw new Error("A hosted conversation belongs to no top-level conversation");
 		const stopCompactionLog = observeCompactionFailures(hosted.conversation, this.workspaceName, this.log);
 		const stopWatching = watchConversationSettings(
 			hosted.conversation,
 			(catalog) => this.onCatalogChanged(hosted.conversation, catalog),
-			this.projectTrusted,
+			(cwd) => this.projectTrusted(cwd, spec),
 		);
 		void hosted.conversation.lost.then(() => {
 			if (!hosted.conversation.closed) void hosted.host.close(hosted.conversation).catch(() => undefined);
@@ -213,23 +294,54 @@ export class WorkerConversations {
 		);
 		this.observations.set(sessionId, binding);
 		binding.bind(hosted.conversation.session.gitContextProvider);
-		void hosted.conversation.whenClosed().then(() => {
+		const released = hosted.conversation.whenClosed().then(async () => {
 			stopCompactionLog();
 			stopWatching();
 			binding.dispose();
 			if (this.observations.get(sessionId) === binding) this.observations.delete(sessionId);
 			if (this.hosted.get(sessionId) !== hosted) return;
-			this.hosted.delete(sessionId);
-			// The primary closes with the worker; the daemon drops it then. A claimed one's
-			// observation ends before its claim does: the daemon accepts it only from its host.
-			if (hosted.kind !== "primary") {
-				void this.client
-					.changeObserve(this.workspaceName, sessionId, null)
-					.catch(() => undefined)
-					.then(() => this.client.released(sessionId))
-					.catch(() => undefined);
+			if (hosted.kind === "conversation") {
+				// The group closes with its head, what it claimed released first.
+				await this.closeMembers(hosted);
+				await hosted.host.dispose().catch(() => undefined);
+				this.specs.delete(sessionId);
 			}
+			this.hosted.delete(sessionId);
+			// A stopping worker releases nothing: the daemon drops what it hosted at its exit. Otherwise
+			// the observation ends before the claim does: the daemon accepts it only from its host.
+			if (this.stopping) return;
+			await this.client.changeObserve(this.workspaceName, sessionId, null).catch(() => undefined);
+			await this.release(sessionId, hosted.kind === "conversation");
 		});
+		this.releases.set(sessionId, released);
+		void released.finally(() => {
+			if (this.releases.get(sessionId) === released) this.releases.delete(sessionId);
+		});
+	}
+
+	/**
+	 * Release `sessionId`; a top-level conversation's release waits while a
+	 * claim of its group is still pending (the daemon releases a group's head last).
+	 */
+	private async release(sessionId: string, top: boolean): Promise<void> {
+		const deadline = Date.now() + GROUP_RELEASE_WAIT_MS;
+		for (;;) {
+			try {
+				await this.client.released(sessionId);
+				return;
+			} catch (error) {
+				if (
+					!top ||
+					this.stopping ||
+					!(error instanceof WorkerRequestError) ||
+					error.code !== "group_open" ||
+					Date.now() >= deadline
+				) {
+					return;
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, SIBLING_CLAIM_RETRY_MS));
+		}
 	}
 
 	/**
@@ -254,7 +366,7 @@ export class WorkerConversations {
 			commit: () => {
 				if (state !== "prepared") return;
 				state = "committed";
-				this.track({ host: event.host, conversation: event.conversation, kind: "child" });
+				this.track({ host: event.host, conversation: event.conversation, kind: "child", top: parent.top });
 			},
 			rollback: async () => {
 				if (state === "rolled-back") return;
@@ -317,7 +429,12 @@ export class WorkerConversations {
 				await sourceHosted.host.close(opened.conversation).catch(() => undefined);
 				throw new Error("Review child initialization changed identity");
 			}
-			this.track({ host: sourceHosted.host, conversation: opened.conversation, kind: "sibling" });
+			this.track({
+				host: sourceHosted.host,
+				conversation: opened.conversation,
+				kind: "sibling",
+				top: sourceHosted.top,
+			});
 			return opened.conversation;
 		} catch (error) {
 			await manager?.closePersistence().catch(() => undefined);
@@ -334,6 +451,8 @@ export class WorkerConversations {
 	 */
 	async hostMoved(from: HostedConversation, target: RedirectTarget): Promise<HostedRedirect | undefined> {
 		if (!this.isHosted(from)) throw new Error("The conversation the client left is not hosted here");
+		// A stored target another group here hosts stays in its group: the client is redirected to it.
+		if (target.conversation === undefined && this.hosted.has(target.sessionId)) return undefined;
 		try {
 			// A target the move opened here follows its source's storage: in memory for an in-memory source.
 			await this.claim(
@@ -348,13 +467,14 @@ export class WorkerConversations {
 			}
 			throw error;
 		}
-		const host = this.hosted.get(from.id)?.host;
-		if (!host) throw new Error("The conversation the client left is not hosted here");
+		const source = this.hosted.get(from.id);
+		if (!source) throw new Error("The conversation the client left is not hosted here");
+		const { host, top } = source;
 		const sessionId = target.sessionId;
 		return {
 			commit: async () => {
 				const conversation = target.conversation ?? host.get(sessionId);
-				if (conversation && !conversation.closed) this.track({ host, conversation, kind: "moved" });
+				if (conversation && !conversation.closed) this.track({ host, conversation, kind: "moved", top });
 			},
 			abort: async () => {
 				if (this.pendingClaims.delete(sessionId)) await this.client.released(sessionId).catch(() => undefined);

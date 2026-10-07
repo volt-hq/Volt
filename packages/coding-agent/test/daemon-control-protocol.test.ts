@@ -182,17 +182,19 @@ const REQUESTS: ByType<ControlRequest> = {
 		spawn: SPAWN_OPTIONS,
 		clientKey: "tui-1",
 	},
-	worker_ready: { type: "worker_ready", id: "29", sessionIds: ["s-1"] },
+	worker_ready: { type: "worker_ready", id: "29", sessionId: "s-1" },
 	worker_open_failed: {
 		type: "worker_open_failed",
 		id: "30",
+		sessionId: "s-1",
 		outcome: "conversation_locked",
 		message: "conversation is open in another Volt process on the host",
 	},
-	worker_activity: { type: "worker_activity", id: "31", active: true },
+	worker_activity: { type: "worker_activity", id: "31", activeSessionIds: ["s-1", "s-2"] },
 	worker_hosts: { type: "worker_hosts", id: "32", sessionId: "s-2", kind: "child", parentSessionId: "s-1" },
 	worker_released: { type: "worker_released", id: "33", sessionId: "s-2" },
 	worker_stop_result: { type: "worker_stop_result", id: "34", stopId: "stop-1", outcome: "refused_active" },
+	worker_close_result: { type: "worker_close_result", id: "35", closeId: "close-1", outcome: "closed" },
 	worker_worktree_restore: {
 		type: "worker_worktree_restore",
 		id: "40",
@@ -331,12 +333,16 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ spawn: { ...SPAWN_OPTIONS, config: { flags: { "a=b": true } } } },
 		{ workspaceRegistration: "public" },
 	],
-	worker_ready: [{ sessionIds: "s-1" }],
-	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }],
-	worker_activity: [{ active: "yes" }],
+	worker_ready: [{ sessionId: undefined }, { sessionId: 1 }],
+	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }, { sessionId: undefined }],
+	worker_activity: [
+		{ activeSessionIds: "s-1" },
+		{ activeSessionIds: Array.from({ length: 257 }, (_, i) => `s-${i}`) },
+	],
 	worker_hosts: [{ kind: "primary" }, { sessionId: undefined }],
 	worker_released: [{ sessionId: 1 }],
 	worker_stop_result: [{ outcome: "maybe" }, { stopId: undefined }],
+	worker_close_result: [{ outcome: "stopped" }, { closeId: undefined }],
 	worker_worktree_restore: [{ path: "" }, { path: "p".repeat(4097) }, { sessionRef: undefined }],
 	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
 	worker_forward: [{ frame: undefined }, { relayId: 1 }],
@@ -536,8 +542,8 @@ const EVENTS: ByType<ControlEvent> = {
 	},
 	pairing_progress: { type: "pairing_progress", requestId: "pr-1", phase: "waiting" },
 	daemon_shutdown: { type: "daemon_shutdown" },
-	worker_spawn: {
-		type: "worker_spawn",
+	worker_open: {
+		type: "worker_open",
 		spec: {
 			workerId: "w-1",
 			origin: "phone",
@@ -551,6 +557,7 @@ const EVENTS: ByType<ControlEvent> = {
 		},
 	},
 	worker_stop: { type: "worker_stop", stopId: "stop-1", reason: "retention", force: false },
+	worker_close: { type: "worker_close", closeId: "close-1", sessionId: "s-1", reason: "retention", force: false },
 	relay_authority: { type: "relay_authority", relayId: "rl-1", loss: "revoked" },
 	worker_abort: { type: "worker_abort", sessionId: "s-1" },
 };
@@ -562,8 +569,9 @@ const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unkno
 	theme_snapshot: [{ tokens: { accent: 1 } }],
 	keep_awake_changed: [{ keepAwake: undefined }],
 	pairing_progress: [{ phase: "scanning" }, { qrLines: "line" }],
-	worker_spawn: [{ spec: { workerId: "w-1" } }],
+	worker_open: [{ spec: { workerId: "w-1" } }],
 	worker_stop: [{ reason: "bored" }, { force: undefined }],
+	worker_close: [{ sessionId: undefined }, { force: undefined }, { reason: "bored" }],
 	relay_authority: [{ loss: "current" }],
 	worker_abort: [{ sessionId: undefined }],
 };
@@ -641,7 +649,7 @@ describe("daemon control contract", () => {
 		expect(ControlValidators.event.Check(roundTrip(offer))).toBe(true);
 		expect(ControlValidators.event.Check(roundTrip({ ...offer, clientNodeId: "n-1" }))).toBe(false);
 		const spawn = {
-			type: "worker_spawn",
+			type: "worker_open",
 			spec: {
 				workerId: "w-1",
 				origin: "tui",

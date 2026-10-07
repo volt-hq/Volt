@@ -128,7 +128,8 @@ describe.runIf(nativeIrohAvailable)(
 			expect(await b.phone.intent("prompt", { message: "still on the source" })).toMatchObject({ type: "accepted" });
 			await expect.poll(() => assistantText(b.phone.frames), { timeout: 5000 }).toContain("still here");
 
-			// Only phone A's last session moved: `target:"last"` lands it on the new conversation, in a worker of its own.
+			// Only phone A's last session moved: `target:"last"` lands it on the new conversation, which opens
+			// beside the source in its worker: the phone's open has the worker's compatibility key (D11).
 			const back = await attach(pairedA, { target: "last" });
 			expect(back.sessionId).toBe(targetId);
 			expect(back.stream.handshake).toMatchObject({
@@ -137,13 +138,7 @@ describe.runIf(nativeIrohAvailable)(
 			});
 			await expect
 				.poll(() => workersBySession(harness))
-				.toEqual(
-					expect.arrayContaining([
-						{ sessionIds: ["s-source"], remote: 1 },
-						{ sessionIds: [targetId], remote: 1 },
-					]),
-				);
-			expect((await harness.status()).workers).toHaveLength(2);
+				.toEqual([{ sessionIds: ["s-source", targetId].sort(), remote: 2 }]);
 			// Phone B's last session is still the source.
 			const stays = await attach(pairedB, { target: "last" });
 			expect(stays.sessionId).toBe("s-source");

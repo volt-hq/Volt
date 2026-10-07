@@ -1,36 +1,48 @@
 /**
- * The daemon's conversation workers (Phase 7 plan §1; the model of record is
- * docs/tla/WorkerRegistry.tla). Every conversation a client opens runs in a
- * worker the daemon spawns and supervises; the daemon hosts none itself.
+ * The daemon's conversation workers (Phase 7 plan §1, D11 revised; the model
+ * of record is docs/tla/WorkerRegistry.tla). Every conversation a client
+ * opens runs in a worker the daemon spawns and supervises; the daemon hosts
+ * none itself.
  *
- * A worker is registered for the conversation it was spawned for, its
- * primary, under the key (workspace, generation, session), and for each
- * conversation it claims beside it (`worker_hosts`): a subagent's child, a
- * review sibling, the target of a move an extension started. At most one
+ * Workers are shared. A worker hosts up to `MAX_WORKER_CONVERSATIONS`
+ * top-level conversations, each in a host of its own, under one key
+ * (workspace, generation) and one compatibility key (`worker-spawn-options.ts`:
+ * the opener's kind, and a phone's tool policy, trust, and profile, or a
+ * TUI's environment and spawn-only options). Each top-level conversation
+ * heads a group: the conversations the worker claims for it (`worker_hosts`),
+ * a subagent's child, a review sibling, the target of a move an extension
+ * started, which count toward `MAX_WORKER_HOSTED_SESSIONS`. At most one
  * registered worker hosts a session, whatever its workspace.
  *
- * Its states are `starting` (spawned, primary not open yet), `live` (serving),
- * `retiring` (asked to stop, fenced, or its control connection lost) and
- * `exited` (its process exited; the record is gone). An open of a session:
+ * A worker's states are `starting` (spawned, its first conversation not open
+ * yet), `live` (serving), `retiring` (it hosts nothing, or is fenced, or lost
+ * its control connection) and `exited` (its process exited; the record is
+ * gone). A top-level conversation is `opening`, `open`, or `closing`. An
+ * open of a session:
  *
- *   live host      -> the caller's `attach` runs in the same turn as the lookup
- *   starting host  -> wait for that same spawn (concurrent opens share it)
- *   retiring host  -> wait for its exit, then spawn
- *   no host        -> spawn
+ *   open in a live worker  -> the caller's `attach` runs in the same turn as the lookup
+ *   opening (or starting)  -> wait for that same open (concurrent opens share it)
+ *   closing, or retiring   -> wait for its release or the worker's exit, then route
+ *   nobody hosts it        -> route it into a live worker of the same key and
+ *                             compatibility key with room (`worker_open`), else spawn
  *
- * A live worker is attached while any relayed stream of a conversation it
- * hosts is offered or open, else detached. The retention TTL
- * (`remote.detachedRuntimeTtlMs`) runs only while it is live, detached, and
- * idle (its last `worker_activity`); when it fires, the worker is asked to
- * stop and may refuse because it turned active. A worker a TUI spawned for a
- * conversation without a session file (`--no-session`, D15) is exclusive to
- * that TUI's client key: no other client's open reaches what it hosts, it
- * alone claims conversations in its memory, and it retires once its last client left
- * for `EXCLUSIVE_WORKER_RETENTION_MS` (its client reconnects within it after
- * a move). A fenced workspace closes
- * admission for that workspace and retires its workers without the option to
- * refuse, until their exit is observed. A worker's exit, however it happens,
- * removes its record and fails the opens that waited for its readiness.
+ * Retention is per group: a group is attached while any relayed stream of
+ * one of its conversations is offered or open, else detached. The retention
+ * TTL (`remote.detachedRuntimeTtlMs`) runs only while the group is open,
+ * detached, and idle (the worker's last `worker_activity`); when it fires,
+ * the worker is asked to close the group and may refuse because it turned
+ * active. A worker that hosts nothing after a release retires (`worker_stop`).
+ * One conversation can be closed without the option to refuse (a revoked
+ * client, a removed worktree, a TUI taking its lease), leaving the worker's
+ * other groups serving. A worker a TUI spawned for a conversation without a
+ * session file (`--no-session`, D15) is exclusive to that TUI's client key:
+ * it is never shared, no other client's open reaches what it hosts, it alone
+ * claims conversations in its memory, and its group closes once its last
+ * client left for `EXCLUSIVE_WORKER_RETENTION_MS` (its client reconnects
+ * within it after a move). A fenced workspace closes admission for that
+ * workspace and retires its workers without the option to refuse, until
+ * their exit is observed. A worker's exit, however it happens, removes its
+ * record and fails the opens that waited for its conversations.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
@@ -50,15 +62,25 @@ import {
 	type WorkerStopReason,
 } from "./control-protocol.ts";
 import type { LaunchedWorker, WorkerExit, WorkerLauncher } from "./worker-launcher.ts";
-import { workerCompatibilityKey } from "./worker-spawn-options.ts";
+import { type WorkerCompatibility, workerCompatibilityKey } from "./worker-spawn-options.ts";
 
 /** How long a forced stop may take before the daemon stops waiting for the worker: its 60 s turn cap, and margin. */
 export const WORKER_FORCED_STOP_TIMEOUT_MS = 75_000;
 
-/** How long a spawned worker may take to open its primary (a replacement retries a held lock for 75 s). */
+/**
+ * How long a forced close of one conversation may take before the daemon
+ * retires its worker: the 60 s turn cap, the 15 s its head's release waits
+ * for the group's pending claims, and margin.
+ */
+export const WORKER_FORCED_CLOSE_TIMEOUT_MS = 90_000;
+
+/** How long a worker may take to open a conversation (a replacement retries a held lock for 75 s). */
 export const WORKER_READY_TIMEOUT_MS = 90_000;
 
-/** The conversations one worker may host at most: its primary and its claims. */
+/** The top-level conversations one worker hosts at most (D11 revised). */
+export const MAX_WORKER_CONVERSATIONS = 6;
+
+/** The conversations one worker may host at most: its top-level conversations and their claims. */
 export const MAX_WORKER_HOSTED_SESSIONS = 256;
 
 /** How long an exclusive (`--no-session`) worker outlives its last client: its client reconnects within it after a move. */
@@ -76,30 +98,42 @@ export interface WorkerOpenKey {
 /** A relayed stream's client: a phone, or a local TUI. */
 export type WorkerClientKind = "remote" | "local";
 
+/**
+ * How an open reached its conversation: it spawned the worker for it, it
+ * routed it into a compatible live worker, or it found it open already.
+ */
+export type WorkerOpenOutcome = "spawned" | "routed" | "attached";
+
 /** A live worker, as an open's `attach` sees it. */
 export interface LiveWorker {
 	readonly workerId: string;
 	readonly origin: ControlWorkerOrigin;
 	readonly workspaceName: string;
 	readonly workspaceGeneration: number;
+	/** The session the open reached. */
+	readonly sessionId: string;
 	/** The worker's control connection, where its events go. */
 	readonly connectionId: string;
-	/** What it was spawned with: its tool policy, or its TUI's spawn-only options, are fixed for its lifetime (D9). */
+	/**
+	 * What the worker was spawned with: its tool policy, or its TUI's
+	 * spawn-only options, are fixed for its lifetime (D9) and shared by every
+	 * conversation it hosts.
+	 */
 	readonly spec: WorkerSpawnSpec;
-	/** Opens it could serve run with the same key (see `worker-spawn-options.ts`). */
+	/** The compatibility key of every open routed into it (see `worker-spawn-options.ts`). */
 	readonly compatibilityKey: string;
 	/**
-	 * Count a relayed stream (an offer, then the stream it was redeemed for)
-	 * as attached until the returned release runs: the worker is not detached
-	 * meanwhile. Release once; later calls do nothing.
+	 * Count a relayed stream of the session (an offer, then the stream it was
+	 * redeemed for) as attached until the returned release runs: its group is
+	 * not detached meanwhile. Release once; later calls do nothing.
 	 */
 	attach(kind: WorkerClientKind): () => void;
 }
 
-/** The conversation a spawn opens, as the daemon resolved it; the registry adds the worker id. */
+/** The conversation an open prepares, as the daemon resolved it; the registry adds the worker id. */
 export type WorkerSpawnInput = DistributiveOmit<WorkerSpawnSpec, "workerId">;
 
-/** A spawn failed: the worker could not open its primary, or it exited first. */
+/** An open failed: the worker could not open its conversation, or it exited first. */
 export class WorkerOpenError extends Error {
 	/** A phone handshake outcome the worker reported, such as conversation_locked. */
 	readonly outcome: string | undefined;
@@ -111,7 +145,14 @@ export class WorkerOpenError extends Error {
 }
 
 export interface WorkerRegistryAuditEvent {
-	readonly type: "worker_spawned" | "worker_ready" | "worker_exited" | "worker_hosts" | "worker_stop";
+	readonly type:
+		| "worker_spawned"
+		| "worker_ready"
+		| "worker_exited"
+		| "worker_hosts"
+		| "worker_stop"
+		| "worker_open"
+		| "worker_close";
 	readonly workspace: string;
 	readonly success: boolean;
 	readonly error?: string;
@@ -127,13 +168,13 @@ export interface WorkerRegistryOptions {
 	sendTo(connectionId: string, event: ControlEvent): boolean;
 	/** The workspace's current authority generation; undefined once it is unregistered. */
 	currentGeneration(workspaceName: string): number | undefined;
-	/** `remote.detachedRuntimeTtlMs`, read whenever a detached idle worker arms its timer. */
+	/** `remote.detachedRuntimeTtlMs`, read whenever a detached idle group arms its timer. */
 	detachedRuntimeTtlMs(): number;
 	/**
 	 * Whether `sessionId` is a stored session of `workspaceName`, or of the
-	 * session directory of the claiming worker's primary (a TUI's sessions
-	 * are stored by their working directory): a worker claims only its own
-	 * workspace's sessions.
+	 * session directory of the claiming group's top-level conversation (a
+	 * TUI's sessions are stored by their working directory): a worker claims
+	 * only its own workspace's sessions.
 	 */
 	sessionInWorkspace(workspaceName: string, sessionId: string, sessionDirectory?: string): Promise<boolean>;
 	audit(event: WorkerRegistryAuditEvent): void;
@@ -141,8 +182,34 @@ export interface WorkerRegistryOptions {
 }
 
 interface HostedSession {
-	readonly kind: "primary" | WorkerHostKind;
+	/** `conversation`: a top-level conversation, heading its group. */
+	readonly kind: "conversation" | WorkerHostKind;
 	readonly parentSessionId?: string;
+	/** The top-level conversation whose group it is in (itself for one). */
+	readonly top: string;
+}
+
+interface CloseRequest {
+	readonly closeId: string;
+	readonly reason: WorkerStopReason;
+	readonly force: boolean;
+	/** Settles once the conversation was released, or the worker exited. */
+	readonly done: PromiseWithResolvers<void>;
+}
+
+/** A top-level conversation of a worker, and its group's retention. */
+interface TopLevelConversation {
+	state: "opening" | "open" | "closing";
+	/** Whether the worker reported it open. */
+	opened: boolean;
+	/** What the worker opened it from, once it was sent. */
+	spec: WorkerSpawnSpec | undefined;
+	/** Opens of the group's conversations resolving to it that have not attached yet: it is not closed meanwhile. */
+	routing: number;
+	retention: ReturnType<typeof setTimeout> | undefined;
+	close: CloseRequest | undefined;
+	readonly ready: PromiseWithResolvers<void>;
+	readyTimer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface StopRequest {
@@ -159,29 +226,30 @@ interface WorkerRecord {
 	readonly origin: ControlWorkerOrigin;
 	readonly workspaceName: string;
 	readonly workspaceGeneration: number;
+	/** The conversation it was spawned for. */
 	readonly primarySessionId: string;
-	/** Registry assignment: the primary, then every claim, in order. */
+	/** Registry assignment: every hosted session, top-level ones and claims, in order. */
 	readonly hosts: Map<string, HostedSession>;
+	/** Its top-level conversations. */
+	readonly conversations: Map<string, TopLevelConversation>;
+	/** What it was spawned with (its first conversation's spec). */
 	spec: WorkerSpawnSpec | undefined;
-	compatibilityKey: string | undefined;
+	readonly compatibilityKey: string;
 	/** The only client key whose opens reach this worker (`--no-session`, D15). */
 	readonly exclusiveTo: string | undefined;
 	launched: LaunchedWorker | undefined;
 	connectionId: string | undefined;
 	/** Its key's generation was fenced, or it is being stopped without the option to refuse. */
 	forced: boolean;
-	/** Whether a hosted conversation is active, as the worker last reported it. */
-	active: boolean;
-	readonly attachments: Map<number, WorkerClientKind>;
-	/** Opens resolved to this worker that have not attached yet: it is not retired meanwhile. */
-	routing: number;
-	retention: ReturnType<typeof setTimeout> | undefined;
+	/** The hosted conversations the worker last reported active. */
+	active: Set<string>;
+	readonly attachments: Map<number, { readonly kind: WorkerClientKind; readonly sessionId: string }>;
 	stop: StopRequest | undefined;
 	openFailure: WorkerOpenError | undefined;
-	readonly ready: PromiseWithResolvers<void>;
 	readonly exited: PromiseWithResolvers<WorkerExit>;
+	/** Run at each activity report and at the exit. */
 	readonly idle: Set<() => void>;
-	/** Settles at the worker's next state change (a refused stop, its exit); replaced after each. */
+	/** Settles at the worker's next state change (a refused close or stop, a release, its exit); replaced after each. */
 	changed: PromiseWithResolvers<void>;
 	/** Claims refused once, audited once. */
 	readonly refusedClaims: Set<string>;
@@ -190,6 +258,21 @@ interface WorkerRecord {
 
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function newConversation(): TopLevelConversation {
+	const conversation: TopLevelConversation = {
+		state: "opening",
+		opened: false,
+		spec: undefined,
+		routing: 0,
+		retention: undefined,
+		close: undefined,
+		ready: Promise.withResolvers<void>(),
+		readyTimer: undefined,
+	};
+	void conversation.ready.promise.catch(() => undefined);
+	return conversation;
 }
 
 let attachmentSequence = 0;
@@ -201,7 +284,9 @@ export class WorkerRegistry {
 	/** Workspaces with a fence in flight: admission closes until its fenced workers exited. */
 	private readonly fences = new Map<string, Promise<void>>();
 	private readonly exitListeners = new Set<(workerId: string, exit: WorkerExit) => void>();
-	private readonly retireListeners = new Set<(workerId: string, reason: WorkerStopReason) => void>();
+	private readonly retireListeners = new Set<
+		(workerId: string, reason: WorkerStopReason, sessionIds: readonly string[]) => void
+	>();
 	private readonly hostsListeners = new Set<(workspaceName: string, sessionId: string, hosted: boolean) => void>();
 	private closed = false;
 
@@ -216,32 +301,44 @@ export class WorkerRegistry {
 	/**
 	 * Open `key` for a client: resolves with what `attach` returned, which runs
 	 * synchronously with the lookup of the live worker hosting the session, so
-	 * no retention can fire between them. With no host, `prepare` builds the
-	 * spawn's conversation; concurrent opens of the session share that spawn
-	 * and fail with it. A retiring host is waited for until it exited. An open
-	 * of a fenced generation, a session another workspace's worker hosts, a
-	 * session an exclusive worker of another client hosts, or a closed
-	 * registry is refused. `attach` hears whether this open spawned the worker.
+	 * no retention can fire between them. With no host, the open routes into a
+	 * live worker of the same key whose compatibility key is the open's
+	 * (`compatibility` in `env`) and that has room, else spawns one; `prepare`
+	 * builds the conversation either way, once. Concurrent opens of the session
+	 * share that open and fail with it. A closing group or a retiring host is
+	 * waited for until it was released or exited. An open of a fenced
+	 * generation, a session another workspace's worker hosts, a session an
+	 * exclusive worker of another client hosts, or a closed registry is
+	 * refused. `attach` hears how this open reached the conversation.
 	 */
 	async open<T>(
 		key: WorkerOpenKey,
 		options: {
-			readonly origin: ControlWorkerOrigin;
+			/** What the worker this open spawns runs every conversation with; also who opens (its `origin`). */
+			readonly compatibility: WorkerCompatibility;
 			readonly prepare: () => Promise<WorkerSpawnInput>;
-			readonly attach: (worker: LiveWorker, spawned: boolean) => T;
+			readonly attach: (worker: LiveWorker, outcome: WorkerOpenOutcome) => T;
 			readonly signal?: AbortSignal;
 			/** The opening client's key (a TUI's); phones have none. */
 			readonly client?: string;
-			/** A worker this open spawns admits no other client's open (`--no-session`, D15). */
+			/** A worker this open spawns admits no other client's open, and is never shared (`--no-session`, D15). */
 			readonly exclusive?: boolean;
 			/** The environment a worker this open spawns runs with (a TUI's); the daemon's own without one. */
 			readonly env?: Readonly<Record<string, string>>;
 		},
 	): Promise<T> {
+		const origin = options.compatibility.origin;
 		if (options.exclusive === true && options.client === undefined) {
 			throw new WorkerOpenError("An exclusive worker needs its client's key", "invalid_conversation_target");
 		}
-		let spawned: WorkerRecord | undefined;
+		const compatibilityKey = workerCompatibilityKey(options.compatibility, options.env);
+		let prepared: Promise<WorkerSpawnInput> | undefined;
+		// A conversation is prepared once (a new one's log is created then), whichever worker opens it.
+		const prepare = (): Promise<WorkerSpawnInput> => {
+			prepared ??= options.prepare();
+			return prepared;
+		};
+		let reserved: { readonly record: WorkerRecord; readonly outcome: "spawned" | "routed" } | undefined;
 		for (;;) {
 			options.signal?.throwIfAborted();
 			if (this.closed) throw new WorkerOpenError("The daemon is shutting down");
@@ -255,13 +352,21 @@ export class WorkerRegistry {
 			}
 			const host = this.hostOf(key.sessionId);
 			if (!host) {
-				const record = this.reserve(key, options.origin, options.exclusive === true ? options.client : undefined);
-				spawned = record;
-				record.routing++;
+				const shared = options.exclusive === true ? undefined : this.routable(key, compatibilityKey);
+				const record =
+					shared ??
+					this.reserve(key, origin, compatibilityKey, options.exclusive === true ? options.client : undefined);
+				const conversation = shared
+					? this.reserveConversation(shared, key.sessionId)
+					: record.conversations.get(key.sessionId);
+				if (!conversation) throw new Error("A reserved worker has no conversation");
+				reserved = { record, outcome: shared ? "routed" : "spawned" };
+				conversation.routing++;
 				try {
-					await this.launch(record, options.prepare, options.env);
+					if (shared) await this.openIn(shared, key.sessionId, conversation, prepare, options.env);
+					else await this.launch(record, prepare, options.env);
 				} finally {
-					record.routing--;
+					conversation.routing--;
 					// Armed for a later turn; the attach below, in this turn, cancels it again.
 					this.updateRetention(record);
 				}
@@ -276,22 +381,28 @@ export class WorkerRegistry {
 					"conversation_in_use",
 				);
 			}
-			if (host.state === "live" && !host.forced && host.workspaceGeneration === key.workspaceGeneration) {
+			const top = host.hosts.get(key.sessionId)?.top;
+			const conversation = top === undefined ? undefined : host.conversations.get(top);
+			const current = host.workspaceGeneration === key.workspaceGeneration;
+			if (host.state === "live" && !host.forced && current && conversation?.state === "open") {
 				try {
-					return options.attach(this.liveView(host), host === spawned);
+					return options.attach(
+						this.liveView(host, key.sessionId),
+						reserved?.record === host && top === key.sessionId ? reserved.outcome : "attached",
+					);
 				} finally {
 					this.updateRetention(host);
 				}
 			}
-			// Starting: wait for that same spawn. Retiring, or of a fenced generation: a replacement
-			// opens once it exited, unless it refused the stop and serves again. Either way the
-			// waiting open keeps it from being retired meanwhile.
-			const starting = host.state === "starting" && host.workspaceGeneration === key.workspaceGeneration;
-			host.routing++;
+			// Opening (or its worker starting): wait for that same open. Closing, retiring, or of a fenced
+			// generation: route again once it was released or exited, unless a refused close or stop
+			// leaves it serving. Either way the waiting open keeps its group from being closed meanwhile.
+			const opening = current && !host.forced && host.state !== "retiring" && conversation?.state === "opening";
+			if (conversation) conversation.routing++;
 			try {
-				await this.waitFor(starting ? host.ready.promise : host.changed.promise, options.signal);
+				await this.waitFor(opening ? conversation.ready.promise : host.changed.promise, options.signal);
 			} finally {
-				host.routing--;
+				if (conversation) conversation.routing--;
 				this.updateRetention(host);
 			}
 		}
@@ -321,8 +432,38 @@ export class WorkerRegistry {
 		changed.resolve();
 	}
 
+	/**
+	 * A live worker an open of an unhosted session in `key` can be routed
+	 * into: connected, unfenced, not exclusive, of the same workspace and
+	 * generation and compatibility key, with room for another top-level
+	 * conversation. The oldest such worker fills first.
+	 */
+	private routable(key: WorkerOpenKey, compatibilityKey: string): WorkerRecord | undefined {
+		for (const record of this.workers.values()) {
+			if (
+				record.state === "live" &&
+				!record.forced &&
+				record.connectionId !== undefined &&
+				record.exclusiveTo === undefined &&
+				record.workspaceName === key.workspaceName &&
+				record.workspaceGeneration === key.workspaceGeneration &&
+				record.compatibilityKey === compatibilityKey &&
+				record.conversations.size < MAX_WORKER_CONVERSATIONS &&
+				record.hosts.size < MAX_WORKER_HOSTED_SESSIONS
+			) {
+				return record;
+			}
+		}
+		return undefined;
+	}
+
 	/** Register a starting worker for `key` synchronously, so concurrent opens of the session wait for it. */
-	private reserve(key: WorkerOpenKey, origin: ControlWorkerOrigin, exclusiveTo: string | undefined): WorkerRecord {
+	private reserve(
+		key: WorkerOpenKey,
+		origin: ControlWorkerOrigin,
+		compatibilityKey: string,
+		exclusiveTo: string | undefined,
+	): WorkerRecord {
 		const record: WorkerRecord = {
 			workerId: `w-${randomUUID()}`,
 			token: randomBytes(32),
@@ -332,62 +473,82 @@ export class WorkerRegistry {
 			workspaceName: key.workspaceName,
 			workspaceGeneration: key.workspaceGeneration,
 			primarySessionId: key.sessionId,
-			hosts: new Map([[key.sessionId, { kind: "primary" }]]),
+			hosts: new Map([[key.sessionId, { kind: "conversation", top: key.sessionId }]]),
+			conversations: new Map([[key.sessionId, newConversation()]]),
 			spec: undefined,
-			compatibilityKey: undefined,
+			compatibilityKey,
 			exclusiveTo,
 			launched: undefined,
 			connectionId: undefined,
 			forced: false,
-			active: false,
+			active: new Set(),
 			attachments: new Map(),
-			routing: 0,
-			retention: undefined,
 			stop: undefined,
 			openFailure: undefined,
-			ready: Promise.withResolvers<void>(),
 			exited: Promise.withResolvers<WorkerExit>(),
 			idle: new Set(),
 			changed: Promise.withResolvers<void>(),
 			refusedClaims: new Set(),
 			readyTimer: undefined,
 		};
-		void record.ready.promise.catch(() => undefined);
 		this.workers.set(record.workerId, record);
 		this.hostsChanged(record.workspaceName, key.sessionId, true);
 		return record;
+	}
+
+	/** Register `sessionId` as a top-level conversation `record` opens, synchronously, so concurrent opens wait for it. */
+	private reserveConversation(record: WorkerRecord, sessionId: string): TopLevelConversation {
+		const conversation = newConversation();
+		record.conversations.set(sessionId, conversation);
+		record.hosts.set(sessionId, { kind: "conversation", top: sessionId });
+		this.hostsChanged(record.workspaceName, sessionId, true);
+		return conversation;
 	}
 
 	private hostsChanged(workspaceName: string, sessionId: string, hosted: boolean): void {
 		for (const listener of [...this.hostsListeners]) listener(workspaceName, sessionId, hosted);
 	}
 
-	/** Build the spawn and start the worker; resolves once it is live, rejects with its failure. */
+	/** Why `input` cannot be the conversation `record` opens as `sessionId` (in `env`); undefined when it can be. */
+	private mismatch(
+		record: WorkerRecord,
+		sessionId: string,
+		input: WorkerSpawnInput,
+		env: Readonly<Record<string, string>> | undefined,
+	): string | undefined {
+		if (input.session.sessionId !== sessionId) {
+			return "The prepared conversation is not the one the open was registered for";
+		}
+		// Only a TUI's open runs with an environment of its own, and an in-memory conversation only in its exclusive worker.
+		if (
+			input.origin !== record.origin ||
+			(env !== undefined && input.origin !== "tui") ||
+			"inMemory" in input.session !== (record.exclusiveTo !== undefined)
+		) {
+			return "The prepared conversation does not match the open's client";
+		}
+		if (input.workspace.name !== record.workspaceName || input.workspace.generation !== record.workspaceGeneration) {
+			return "The prepared conversation's workspace authority changed";
+		}
+		if (workerCompatibilityKey(input, env) !== record.compatibilityKey) {
+			return "The prepared conversation does not match the open's compatibility";
+		}
+		return undefined;
+	}
+
+	/** Build the spawn and start the worker; resolves once its first conversation is open, rejects with its failure. */
 	private async launch(
 		record: WorkerRecord,
 		prepare: () => Promise<WorkerSpawnInput>,
 		env: Readonly<Record<string, string>> | undefined,
 	): Promise<void> {
+		const conversation = record.conversations.get(record.primarySessionId);
+		if (!conversation) throw new Error("A starting worker has no conversation");
 		let input: WorkerSpawnInput;
 		try {
 			input = await prepare();
-			if (input.session.sessionId !== record.primarySessionId) {
-				throw new Error("The prepared conversation is not the one the spawn was registered for");
-			}
-			// Only a TUI's spawn runs with an environment of its own, and an in-memory primary only for its exclusive TUI.
-			if (
-				input.origin !== record.origin ||
-				(env !== undefined && input.origin !== "tui") ||
-				"inMemory" in input.session !== (record.exclusiveTo !== undefined)
-			) {
-				throw new Error("The prepared conversation does not match the spawn's client");
-			}
-			if (
-				input.workspace.name !== record.workspaceName ||
-				input.workspace.generation !== record.workspaceGeneration
-			) {
-				throw new Error("The prepared conversation's workspace authority changed");
-			}
+			const mismatch = this.mismatch(record, record.primarySessionId, input, env);
+			if (mismatch !== undefined) throw new Error(mismatch);
 		} catch (error) {
 			this.finish(record, { reason: "failed", error: errorMessage(error) }, error);
 			throw error;
@@ -398,7 +559,7 @@ export class WorkerRegistry {
 			throw error;
 		}
 		record.spec = { ...input, workerId: record.workerId };
-		record.compatibilityKey = workerCompatibilityKey(input, env);
+		conversation.spec = record.spec;
 		this.options.audit({
 			type: "worker_spawned",
 			workspace: record.workspaceName,
@@ -417,7 +578,9 @@ export class WorkerRegistry {
 				workerToken: record.token.toString("base64url"),
 				socketPath: this.options.socketPath(),
 				agentDir: this.options.agentDir,
-				cwd: input.cwd,
+				// The workspace, not the first conversation's directory: the process outlives that conversation,
+				// and its directory (a managed worktree) may be removed while others still run here.
+				cwd: input.workspace.path,
 				...(env === undefined ? {} : { env }),
 			});
 		} catch (error) {
@@ -439,7 +602,105 @@ export class WorkerRegistry {
 			(exit) => this.finish(record, exit),
 			(error: unknown) => this.finish(record, { reason: "crashed", error: errorMessage(error) }),
 		);
-		await record.ready.promise;
+		await conversation.ready.promise;
+	}
+
+	/**
+	 * Prepare the conversation routed into the live worker `record` and have
+	 * the worker open it (`worker_open`); resolves once it is open there,
+	 * rejects with its failure. A worker that does not report it within
+	 * `WORKER_READY_TIMEOUT_MS` is asked to close it without the option to
+	 * refuse, and the open fails.
+	 */
+	private async openIn(
+		record: WorkerRecord,
+		sessionId: string,
+		conversation: TopLevelConversation,
+		prepare: () => Promise<WorkerSpawnInput>,
+		env: Readonly<Record<string, string>> | undefined,
+	): Promise<void> {
+		let input: WorkerSpawnInput;
+		try {
+			input = await prepare();
+			const mismatch = this.mismatch(record, sessionId, input, env);
+			if (mismatch !== undefined) throw new Error(mismatch);
+		} catch (error) {
+			this.dropConversation(record, sessionId, conversation, error);
+			throw error;
+		}
+		const connectionId = record.connectionId;
+		if (
+			this.workers.get(record.workerId) !== record ||
+			record.state !== "live" ||
+			record.forced ||
+			this.closed ||
+			connectionId === undefined ||
+			record.conversations.get(sessionId) !== conversation ||
+			conversation.state !== "opening"
+		) {
+			const error = new WorkerOpenError("The worker stopped serving; retry", "duplicate_conversation_connection");
+			this.dropConversation(record, sessionId, conversation, error);
+			throw error;
+		}
+		const spec: WorkerSpawnSpec = { ...input, workerId: record.workerId };
+		conversation.spec = spec;
+		this.options.audit({
+			type: "worker_open",
+			workspace: record.workspaceName,
+			success: true,
+			details: {
+				workerId: record.workerId,
+				origin: record.origin,
+				sessionId,
+				workspaceGeneration: record.workspaceGeneration,
+				conversations: record.conversations.size,
+			},
+		});
+		if (!this.options.sendTo(connectionId, { type: "worker_open", spec })) {
+			const error = new WorkerOpenError(
+				"The worker's connection closed; retry",
+				"duplicate_conversation_connection",
+			);
+			this.dropConversation(record, sessionId, conversation, error);
+			throw error;
+		}
+		conversation.readyTimer = setTimeout(() => {
+			if (record.conversations.get(sessionId) !== conversation || conversation.opened) return;
+			conversation.ready.reject(new WorkerOpenError("The worker did not open the conversation"));
+			void this.closeTop(record, sessionId, conversation, "authority");
+		}, WORKER_READY_TIMEOUT_MS);
+		conversation.readyTimer.unref?.();
+		await conversation.ready.promise;
+	}
+
+	/**
+	 * Unregister a top-level conversation the worker does not hold (its open
+	 * failed, or never reached the worker): the opens that waited for it fail
+	 * with `error`, and a worker left with nothing retires.
+	 */
+	private dropConversation(
+		record: WorkerRecord,
+		sessionId: string,
+		conversation: TopLevelConversation,
+		error: unknown,
+	): void {
+		if (record.conversations.get(sessionId) !== conversation) return;
+		this.removeConversation(record, sessionId, conversation);
+		conversation.ready.reject(error instanceof Error ? error : new WorkerOpenError(errorMessage(error)));
+		this.notifyChanged(record);
+		this.retireIfEmpty(record);
+	}
+
+	/** Forget a top-level conversation: its timers stop, and its close settles. */
+	private removeConversation(record: WorkerRecord, sessionId: string, conversation: TopLevelConversation): void {
+		clearTimeout(conversation.retention);
+		clearTimeout(conversation.readyTimer);
+		conversation.retention = undefined;
+		record.conversations.delete(sessionId);
+		record.hosts.delete(sessionId);
+		record.active.delete(sessionId);
+		conversation.close?.done.resolve();
+		this.hostsChanged(record.workspaceName, sessionId, false);
 	}
 
 	/** The registered worker hosting `sessionId`, in any workspace. */
@@ -450,28 +711,50 @@ export class WorkerRegistry {
 		return undefined;
 	}
 
-	private liveView(record: WorkerRecord): LiveWorker {
+	/** The top-level conversation heading `sessionId`'s group in `record`. */
+	private topOf(
+		record: WorkerRecord,
+		sessionId: string,
+	): { readonly id: string; readonly conversation: TopLevelConversation } | undefined {
+		const top = record.hosts.get(sessionId)?.top;
+		const conversation = top === undefined ? undefined : record.conversations.get(top);
+		return top === undefined || conversation === undefined ? undefined : { id: top, conversation };
+	}
+
+	/** The sessions of `record` in the group of the top-level conversation `top`. */
+	private groupOf(record: WorkerRecord, top: string): string[] {
+		return [...record.hosts].filter(([, hosted]) => hosted.top === top).map(([sessionId]) => sessionId);
+	}
+
+	private liveView(record: WorkerRecord, sessionId: string): LiveWorker {
 		const spec = record.spec;
 		const connectionId = record.connectionId;
-		const compatibilityKey = record.compatibilityKey;
-		if (!spec || connectionId === undefined || compatibilityKey === undefined) {
-			throw new Error("A live worker has no spawn or connection");
-		}
+		if (!spec || connectionId === undefined) throw new Error("A live worker has no spawn or connection");
 		return {
 			workerId: record.workerId,
 			origin: record.origin,
 			workspaceName: record.workspaceName,
 			workspaceGeneration: record.workspaceGeneration,
+			sessionId,
 			connectionId,
 			spec,
-			compatibilityKey,
+			compatibilityKey: record.compatibilityKey,
 			attach: (kind) => {
-				// Offers go only to a live worker (the model's NoOfferToRetiring).
-				if (this.workers.get(record.workerId) !== record || record.state !== "live" || record.forced) {
-					throw new WorkerOpenError("The worker is retiring; retry", "duplicate_conversation_connection");
+				// Offers go only to a live worker, and never to a closing group (the model's
+				// NoOfferToRetiring and CloseOnlyDetached).
+				if (
+					this.workers.get(record.workerId) !== record ||
+					record.state !== "live" ||
+					record.forced ||
+					this.topOf(record, sessionId)?.conversation.state !== "open"
+				) {
+					throw new WorkerOpenError(
+						"The conversation's worker is closing it; retry",
+						"duplicate_conversation_connection",
+					);
 				}
 				const id = ++attachmentSequence;
-				record.attachments.set(id, kind);
+				record.attachments.set(id, { kind, sessionId });
 				this.updateRetention(record);
 				return () => {
 					if (!record.attachments.delete(id)) return;
@@ -488,9 +771,10 @@ export class WorkerRegistry {
 	/**
 	 * Admit a worker hello: the worker must be starting, proving the unused
 	 * token its spawn issued (which never crosses the socket) on this
-	 * connection (`binding`), a connection of its own. The token is spent here; the conversation the worker opens
-	 * follows the ack. Returns the daemon's proof of the token for the ack, or
-	 * undefined when the hello is refused.
+	 * connection (`binding`), a connection of its own. The token is spent
+	 * here; the conversation the worker opens first follows the ack. Returns
+	 * the daemon's proof of the token for the ack, or undefined when the hello
+	 * is refused.
 	 */
 	admitWorker(
 		hello: Extract<HelloMessage, { role: "worker" }>,
@@ -509,7 +793,7 @@ export class WorkerRegistry {
 		record.connectionId = connectionId;
 		// After the ack the control server writes once this returns.
 		queueMicrotask(() => {
-			if (record.connectionId === connectionId) this.options.sendTo(connectionId, { type: "worker_spawn", spec });
+			if (record.connectionId === connectionId) this.options.sendTo(connectionId, { type: "worker_open", spec });
 		});
 		return createDaemonProof("worker", token, binding, hello.workerProof);
 	}
@@ -537,7 +821,8 @@ export class WorkerRegistry {
 					| "worker_activity"
 					| "worker_hosts"
 					| "worker_released"
-					| "worker_stop_result";
+					| "worker_stop_result"
+					| "worker_close_result";
 			}
 		>,
 	): Promise<ControlResponse> {
@@ -552,41 +837,73 @@ export class WorkerRegistry {
 		if (!record) return refuse("not_registered", "the worker is not registered");
 		switch (request.type) {
 			case "worker_ready": {
-				if (record.state !== "starting") return refuse("invalid_state", `the worker is ${record.state}`);
-				if (request.sessionIds.length !== 1 || request.sessionIds[0] !== record.primarySessionId) {
-					return refuse("invalid_sessions", "the worker reported conversations it was not spawned for");
+				const conversation = record.conversations.get(request.sessionId);
+				if (record.state === "starting") {
+					if (request.sessionId !== record.primarySessionId || !conversation) {
+						return refuse("invalid_sessions", "the worker reported a conversation it was not spawned for");
+					}
+					record.state = "live";
+					clearTimeout(record.readyTimer);
+					this.options.audit({
+						type: "worker_ready",
+						workspace: record.workspaceName,
+						success: true,
+						details: { workerId: record.workerId, sessionId: record.primarySessionId },
+					});
+				} else if (
+					!conversation ||
+					conversation.opened ||
+					record.hosts.get(request.sessionId)?.kind !== "conversation"
+				) {
+					return refuse("invalid_sessions", "the worker reported a conversation it was not sent");
 				}
-				record.state = "live";
-				clearTimeout(record.readyTimer);
-				this.options.audit({
-					type: "worker_ready",
-					workspace: record.workspaceName,
-					success: true,
-					details: { workerId: record.workerId, sessionId: record.primarySessionId },
-				});
-				record.ready.resolve();
+				clearTimeout(conversation.readyTimer);
+				conversation.opened = true;
+				if (conversation.state === "opening") conversation.state = "open";
+				conversation.ready.resolve();
 				this.updateRetention(record);
 				return ok;
 			}
 			case "worker_open_failed": {
-				if (record.state !== "starting") return refuse("invalid_state", `the worker is ${record.state}`);
-				record.openFailure = new WorkerOpenError(request.message, request.outcome);
+				const conversation = record.conversations.get(request.sessionId);
+				const failure = new WorkerOpenError(request.message, request.outcome);
+				if (record.state === "starting") {
+					if (request.sessionId !== record.primarySessionId) {
+						return refuse("invalid_sessions", "the worker reported a conversation it was not spawned for");
+					}
+					// The worker exits; its first conversation's opens fail with this once it did.
+					record.openFailure = failure;
+					return ok;
+				}
+				if (!conversation || conversation.opened) {
+					return refuse("invalid_sessions", "the worker reported a conversation it was not sent");
+				}
+				this.options.audit({
+					type: "worker_open",
+					workspace: record.workspaceName,
+					success: false,
+					error: request.outcome ?? "open_failed",
+					details: { workerId: record.workerId, sessionId: request.sessionId },
+				});
+				this.dropConversation(record, request.sessionId, conversation, failure);
 				return ok;
 			}
 			case "worker_activity": {
-				record.active = request.active;
-				if (!record.active) {
-					for (const resolve of [...record.idle]) resolve();
-					record.idle.clear();
-				}
+				record.active = new Set(request.activeSessionIds.filter((sessionId) => record.hosts.has(sessionId)));
+				for (const check of [...record.idle]) check();
 				this.updateRetention(record);
 				return ok;
 			}
 			case "worker_hosts": {
-				if (record.hosts.has(request.sessionId)) return ok;
+				// A conversation the worker hosts already is in some group, maybe another's: a claim never moves
+				// it, and the release that would follow a granted one would drop it while it is open.
+				if (record.hosts.has(request.sessionId)) {
+					return refuse("claimed", "the worker hosts that conversation already");
+				}
 				// A worker claims only its own workspace's stored sessions, and a `--no-session` one also the
 				// conversations in its memory, which only its client reaches.
-				const primary = record.spec?.session;
+				const parentTop = this.topOf(record, request.parentSessionId);
+				const session = parentTop?.conversation.spec?.session;
 				const owned =
 					request.inMemory === true
 						? record.exclusiveTo !== undefined
@@ -594,7 +911,7 @@ export class WorkerRegistry {
 								.sessionInWorkspace(
 									record.workspaceName,
 									request.sessionId,
-									primary === undefined || "inMemory" in primary ? undefined : primary.sessionDirectory,
+									session === undefined || "inMemory" in session ? undefined : session.sessionDirectory,
 								)
 								.catch(() => false);
 				const refused = owned
@@ -623,19 +940,50 @@ export class WorkerRegistry {
 			case "worker_released": {
 				const hosted = record.hosts.get(request.sessionId);
 				if (!hosted) return refuse("not_hosted", "the worker does not host that conversation");
-				if (hosted.kind === "primary") return refuse("primary", "a worker's primary closes with the worker");
-				record.hosts.delete(request.sessionId);
-				this.hostsChanged(record.workspaceName, request.sessionId, false);
+				if (hosted.kind !== "conversation") {
+					record.hosts.delete(request.sessionId);
+					record.active.delete(request.sessionId);
+					this.hostsChanged(record.workspaceName, request.sessionId, false);
+					this.updateRetention(record);
+					return ok;
+				}
+				const conversation = record.conversations.get(request.sessionId);
+				if (record.state === "starting" || !conversation?.opened) {
+					return refuse("invalid_state", "the conversation is not open yet");
+				}
+				// What a conversation claimed closes before it: the registry never holds a group without its head.
+				if (this.groupOf(record, request.sessionId).length > 1) {
+					return refuse("group_open", "the conversation's group closes before it");
+				}
+				this.options.audit({
+					type: "worker_close",
+					workspace: record.workspaceName,
+					success: true,
+					details: {
+						workerId: record.workerId,
+						sessionId: request.sessionId,
+						...(conversation.close === undefined ? {} : { reason: conversation.close.reason }),
+					},
+				});
+				this.removeConversation(record, request.sessionId, conversation);
+				this.notifyChanged(record);
+				this.retireIfEmpty(record);
 				return ok;
 			}
 			case "worker_stop_result": {
 				const stop = record.stop;
 				if (!stop || stop.stopId !== request.stopId) return refuse("not_found", "no such stop request");
 				record.stop = undefined;
-				if (request.outcome === "refused_active" && !stop.force && !record.forced && record.state === "retiring") {
-					// It turned active, such as a job's wake: back to live; the TTL waits for idle again.
+				if (
+					request.outcome === "refused_active" &&
+					!stop.force &&
+					!record.forced &&
+					record.state === "retiring" &&
+					record.hosts.size > 0
+				) {
+					// It turned active: back to live; its groups' TTLs wait for idle again.
 					record.state = "live";
-					record.active = true;
+					for (const sessionId of record.hosts.keys()) record.active.add(sessionId);
 					this.notifyChanged(record);
 					this.options.audit({
 						type: "worker_stop",
@@ -648,16 +996,44 @@ export class WorkerRegistry {
 				}
 				return ok;
 			}
+			case "worker_close_result": {
+				const entry = [...record.conversations].find(
+					([, candidate]) => candidate.close?.closeId === request.closeId,
+				);
+				if (!entry) return refuse("not_found", "no such close request");
+				const [sessionId, conversation] = entry;
+				const close = conversation.close;
+				if (request.outcome === "refused_active" && close !== undefined && !close.force) {
+					// A conversation of the group turned active, such as a job's wake: it stays open, and its
+					// TTL waits for the worker to report it idle again.
+					conversation.close = undefined;
+					conversation.state = "open";
+					record.active.add(sessionId);
+					close.done.resolve();
+					this.notifyChanged(record);
+					this.options.audit({
+						type: "worker_close",
+						workspace: record.workspaceName,
+						success: false,
+						error: "refused_active",
+						details: { workerId: record.workerId, sessionId, reason: close.reason },
+					});
+					this.updateRetention(record);
+				}
+				// Closed: the worker releases the group's conversations, the head last.
+				return ok;
+			}
 		}
 	}
 
 	/**
-	 * `worker_hosts`: the worker claims `sessionId` before opening it. Refused
-	 * unless the worker is live with a control connection, its generation is
-	 * current and its workspace admits, the parent it names is one it hosts,
-	 * and no registered worker hosts the session. A sibling claim of a
-	 * session a detached, idle worker hosts retires that worker early, as its
-	 * TTL would (`retiring`: the claimant retries).
+	 * `worker_hosts`: the worker claims `sessionId` before opening it, into
+	 * the group of the conversation `parentSessionId` it hosts. Refused unless
+	 * the worker is live with a control connection, its generation is current
+	 * and its workspace admits, the parent's group is not closing, and no
+	 * registered worker hosts the session. A sibling claim of a session a
+	 * detached, idle group hosts closes that group early, as its TTL would
+	 * (`retiring`: the claimant retries).
 	 */
 	private claim(
 		record: WorkerRecord,
@@ -674,27 +1050,35 @@ export class WorkerRegistry {
 		) {
 			return { code: "fenced", message: "the workspace authority changed" };
 		}
-		if (!record.hosts.has(parentSessionId)) {
-			return { code: "not_hosted", message: "the worker does not host the parent conversation" };
+		const parent = this.topOf(record, parentSessionId);
+		if (!parent) return { code: "not_hosted", message: "the worker does not host the parent conversation" };
+		if (parent.conversation.state !== "open") {
+			return { code: "closing", message: "the parent conversation is closing" };
 		}
-		if (record.hosts.has(sessionId)) return undefined;
+		// Hosted meanwhile (an open routed it here as a conversation of its own): never claimed into another group.
+		if (record.hosts.has(sessionId))
+			return { code: "claimed", message: "the worker hosts that conversation already" };
 		const owner = this.hostOf(sessionId);
 		if (owner) {
-			// A review source or discussion a detached, idle worker keeps only until its TTL runs: retention
-			// retires that worker now, and the claimant retries once it exited.
+			// A review source or discussion a detached, idle group keeps only until its TTL runs: retention
+			// closes that group now, and the claimant retries once it was released.
+			const ownerTop = this.topOf(owner, sessionId);
 			if (
 				kind === "sibling" &&
 				owner.workspaceName === record.workspaceName &&
-				(owner.state === "retiring" || this.expire(owner, "sibling_claim"))
+				ownerTop !== undefined &&
+				(owner.state === "retiring" ||
+					ownerTop.conversation.state === "closing" ||
+					this.expire(owner, ownerTop.id, "sibling_claim"))
 			) {
-				return { code: "retiring", message: "the worker hosting that conversation is retiring; retry" };
+				return { code: "retiring", message: "the conversation is being closed where it is hosted; retry" };
 			}
 			return { code: "claimed", message: "another worker hosts that conversation" };
 		}
 		if (record.hosts.size >= MAX_WORKER_HOSTED_SESSIONS) {
 			return { code: "too_many", message: "the worker hosts too many conversations" };
 		}
-		record.hosts.set(sessionId, { kind, parentSessionId });
+		record.hosts.set(sessionId, { kind, parentSessionId, top: parent.id });
 		this.hostsChanged(record.workspaceName, sessionId, true);
 		return undefined;
 	}
@@ -709,62 +1093,159 @@ export class WorkerRegistry {
 	}
 
 	// ==========================================================================
-	// Retirement
+	// Retention and closes
 	// ==========================================================================
 
-	/**
-	 * Arm the retention TTL while the worker is live, unfenced, connected,
-	 * detached, idle, and no open is resolving to it; cancel it otherwise.
-	 */
-	private updateRetention(record: WorkerRecord): void {
-		const detachedIdle =
-			record.state === "live" &&
-			!record.forced &&
-			record.connectionId !== undefined &&
-			record.attachments.size === 0 &&
-			record.routing === 0 &&
-			!record.active &&
-			this.workers.get(record.workerId) === record;
-		if (!detachedIdle) {
-			if (record.retention !== undefined) clearTimeout(record.retention);
-			record.retention = undefined;
-			return;
+	/** Whether a group of `record` is active, as the worker last reported it. */
+	private groupActive(record: WorkerRecord, top: string): boolean {
+		for (const [sessionId, hosted] of record.hosts) {
+			if (hosted.top === top && record.active.has(sessionId)) return true;
 		}
-		if (record.retention !== undefined) return;
-		const ttlMs =
-			record.exclusiveTo !== undefined ? EXCLUSIVE_WORKER_RETENTION_MS : this.options.detachedRuntimeTtlMs();
-		record.retention = setTimeout(() => {
-			record.retention = undefined;
-			this.expire(record, ttlMs);
-		}, ttlMs);
-		record.retention.unref?.();
+		return false;
+	}
+
+	/** Whether a relayed stream of a conversation in the group of `top` is offered or open. */
+	private groupAttached(record: WorkerRecord, top: string): boolean {
+		for (const attachment of record.attachments.values()) {
+			if (record.hosts.get(attachment.sessionId)?.top === top) return true;
+		}
+		return false;
 	}
 
 	/**
-	 * The TTL fired on a detached, idle worker, or a sibling claim needs a
-	 * conversation it hosts: ask it to stop. It may refuse if it turned active.
-	 * Whether it began retiring.
+	 * Whether the group of `top` is one the retention TTL applies to: its
+	 * worker live, unfenced, and connected; the conversation open with no
+	 * close pending; and the group detached, idle, and no open resolving to it.
 	 */
-	private expire(record: WorkerRecord, why: number | "sibling_claim"): boolean {
-		if (
-			record.state !== "live" ||
-			record.forced ||
-			record.attachments.size > 0 ||
-			record.routing > 0 ||
-			record.active ||
-			record.connectionId === undefined
-		) {
-			return false;
+	private detachedIdle(record: WorkerRecord, top: string, conversation: TopLevelConversation): boolean {
+		return (
+			this.workers.get(record.workerId) === record &&
+			record.state === "live" &&
+			!record.forced &&
+			record.connectionId !== undefined &&
+			conversation.state === "open" &&
+			conversation.close === undefined &&
+			conversation.routing === 0 &&
+			!this.groupAttached(record, top) &&
+			!this.groupActive(record, top)
+		);
+	}
+
+	/** Arm the retention TTL of every detached idle group of `record`; cancel the others'. */
+	private updateRetention(record: WorkerRecord): void {
+		for (const [top, conversation] of record.conversations) {
+			if (!this.detachedIdle(record, top, conversation)) {
+				clearTimeout(conversation.retention);
+				conversation.retention = undefined;
+				continue;
+			}
+			if (conversation.retention !== undefined) continue;
+			const ttlMs =
+				record.exclusiveTo !== undefined ? EXCLUSIVE_WORKER_RETENTION_MS : this.options.detachedRuntimeTtlMs();
+			conversation.retention = setTimeout(() => {
+				conversation.retention = undefined;
+				this.expire(record, top, ttlMs);
+			}, ttlMs);
+			conversation.retention.unref?.();
 		}
-		if (record.retention !== undefined) clearTimeout(record.retention);
-		record.retention = undefined;
-		record.state = "retiring";
-		this.sendStop(record, "retention", false);
-		this.options.log?.("info", "retiring detached idle worker", {
+	}
+
+	/**
+	 * The TTL fired on a detached, idle group, or a sibling claim needs a
+	 * conversation in it: ask the worker to close the group. It may refuse if
+	 * it turned active. Whether the close went out.
+	 */
+	private expire(record: WorkerRecord, top: string, why: number | "sibling_claim"): boolean {
+		const conversation = record.conversations.get(top);
+		if (!conversation || !this.detachedIdle(record, top, conversation)) return false;
+		clearTimeout(conversation.retention);
+		conversation.retention = undefined;
+		this.sendClose(record, top, conversation, "retention", false);
+		this.options.log?.("info", "closing a detached idle conversation", {
 			workerId: record.workerId,
+			sessionId: top,
 			...(why === "sibling_claim" ? { why } : { ttlMs: why }),
 		});
 		return true;
+	}
+
+	/** Ask the worker to close the group of `top` (`worker_close`); no open reaches the group meanwhile. */
+	private sendClose(
+		record: WorkerRecord,
+		top: string,
+		conversation: TopLevelConversation,
+		reason: WorkerStopReason,
+		force: boolean,
+	): CloseRequest {
+		const close: CloseRequest = {
+			closeId: randomUUID(),
+			reason,
+			force,
+			done: conversation.close?.done ?? Promise.withResolvers<void>(),
+		};
+		conversation.state = "closing";
+		conversation.close = close;
+		this.options.audit({
+			type: "worker_close",
+			workspace: record.workspaceName,
+			success: true,
+			details: { workerId: record.workerId, sessionId: top, reason, force, requested: true },
+		});
+		if (record.connectionId !== undefined) {
+			this.options.sendTo(record.connectionId, {
+				type: "worker_close",
+				closeId: close.closeId,
+				sessionId: top,
+				reason,
+				force,
+			});
+		}
+		return close;
+	}
+
+	/**
+	 * Close the group of `top` without the option to refuse: the retire
+	 * listeners hear its sessions first (their relays close), then the worker
+	 * closes it, aborting a turn still running after 60 s (at once for lost
+	 * authority). A worker that has not released it by the forced-close timeout
+	 * is stuck: it retires without the option to refuse, its other
+	 * conversations' turns getting the 60 s cap (never aborted at once for this
+	 * group's lost authority). Resolves once the group's head was released, or
+	 * the worker exited.
+	 */
+	private async closeTop(
+		record: WorkerRecord,
+		top: string,
+		conversation: TopLevelConversation,
+		reason: WorkerStopReason,
+	): Promise<void> {
+		if (!conversation.close?.force) {
+			clearTimeout(conversation.retention);
+			conversation.retention = undefined;
+			const sessionIds = this.groupOf(record, top);
+			for (const listener of [...this.retireListeners]) listener(record.workerId, reason, sessionIds);
+			const close = this.sendClose(record, top, conversation, reason, true);
+			this.notifyChanged(record);
+			const timer = setTimeout(() => {
+				if (record.conversations.get(top) !== conversation || this.workers.get(record.workerId) !== record) return;
+				this.options.log?.("warn", "worker did not close a conversation after a forced close; retiring it", {
+					workerId: record.workerId,
+					sessionId: top,
+				});
+				void this.retire(record, "retention");
+			}, WORKER_FORCED_CLOSE_TIMEOUT_MS);
+			timer.unref?.();
+			void close.done.promise.then(() => clearTimeout(timer));
+		}
+		await Promise.race([conversation.close?.done.promise, record.exited.promise]);
+	}
+
+	/** A live worker that hosts nothing retires: no open is routed to it again, and it is asked to stop. */
+	private retireIfEmpty(record: WorkerRecord): void {
+		if (this.workers.get(record.workerId) !== record || record.state !== "live" || record.hosts.size > 0) return;
+		record.state = "retiring";
+		this.sendStop(record, "retention", false);
+		this.options.log?.("info", "retiring a worker that hosts nothing", { workerId: record.workerId });
 	}
 
 	private sendStop(record: WorkerRecord, reason: WorkerStopReason, force: boolean): void {
@@ -781,15 +1262,22 @@ export class WorkerRegistry {
 		}
 	}
 
-	/** Stop admitting to `record`: it is retiring until its exit is observed. */
+	/** Stop admitting to `record`: it is retiring until its exit is observed; the opens waiting for its conversations fail. */
 	private beginRetiring(record: WorkerRecord): void {
 		if (this.workers.get(record.workerId) !== record) return;
-		if (record.retention !== undefined) clearTimeout(record.retention);
-		record.retention = undefined;
-		if (record.state === "starting") {
-			record.ready.reject(record.openFailure ?? new WorkerOpenError("The worker stopped before it was ready"));
+		for (const [sessionId, conversation] of record.conversations) {
+			clearTimeout(conversation.retention);
+			conversation.retention = undefined;
+			if (!conversation.opened) {
+				conversation.ready.reject(
+					sessionId === record.primarySessionId && record.openFailure !== undefined
+						? record.openFailure
+						: new WorkerOpenError("The worker stopped before it opened the conversation"),
+				);
+			}
 		}
 		record.state = "retiring";
+		this.notifyChanged(record);
 	}
 
 	/**
@@ -803,7 +1291,8 @@ export class WorkerRegistry {
 		if (!record.forced) {
 			record.forced = true;
 			this.beginRetiring(record);
-			for (const listener of [...this.retireListeners]) listener(record.workerId, reason);
+			const sessionIds = [...record.hosts.keys()];
+			for (const listener of [...this.retireListeners]) listener(record.workerId, reason, sessionIds);
 			this.sendStop(record, reason, true);
 			const timer = setTimeout(() => {
 				if (this.workers.get(record.workerId) !== record) return;
@@ -824,7 +1313,8 @@ export class WorkerRegistry {
 	 * every registered worker of the workspace whose key is no longer current
 	 * (all of them with `all`) retires without the option to refuse, and the
 	 * returned promise resolves once their exits were observed, when admission
-	 * reopens. Call it after the authority changed in the daemon's state.
+	 * reopens. Every conversation of such a worker is of the fenced workspace
+	 * and generation. Call it after the authority changed in the daemon's state.
 	 */
 	fenceWorkspace(workspaceName: string, options: { all?: boolean; reason?: WorkerStopReason } = {}): Promise<void> {
 		const previous = this.fences.get(workspaceName) ?? Promise.resolve();
@@ -845,29 +1335,50 @@ export class WorkerRegistry {
 	}
 
 	/**
-	 * Retire the worker hosting `sessionId` of `workspaceName` without the
-	 * option to refuse (a TUI took the conversation's lease). Resolves once it
-	 * exited; at once when no worker hosts it.
+	 * Close the conversation hosting `sessionId` of `workspaceName` without the
+	 * option to refuse (its client lost its authority, its worktree is being
+	 * removed, a TUI took its lease): its group closes in its worker, and the
+	 * worker's other groups keep serving. A worker that is starting, or not
+	 * live, retires instead. Resolves once the group was released or the
+	 * worker exited; at once when no worker hosts it.
 	 */
-	async retireHost(workspaceName: string, sessionId: string, reason: WorkerStopReason): Promise<void> {
-		const host = this.hostOf(sessionId);
-		if (!host || host.workspaceName !== workspaceName) return;
-		await this.retire(host, reason);
+	async closeConversation(workspaceName: string, sessionId: string, reason: WorkerStopReason): Promise<void> {
+		const record = this.hostOf(sessionId);
+		if (!record || record.workspaceName !== workspaceName) return;
+		const top = this.topOf(record, sessionId);
+		if (record.state !== "live" || record.forced || !top) {
+			await this.retire(record, reason);
+			return;
+		}
+		await this.closeTop(record, top.id, top.conversation, reason);
 	}
 
-	/** Whether the worker hosting `sessionId` of `workspaceName` reported itself active. */
+	/** Whether the group of the conversation hosting `sessionId` of `workspaceName` was last reported active. */
 	isHostActive(workspaceName: string, sessionId: string): boolean {
 		const host = this.hostOf(sessionId);
-		return host !== undefined && host.workspaceName === workspaceName && host.active;
+		const top = host === undefined ? undefined : this.topOf(host, sessionId);
+		return (
+			host !== undefined &&
+			top !== undefined &&
+			host.workspaceName === workspaceName &&
+			this.groupActive(host, top.id)
+		);
 	}
 
-	/** Resolves once the worker hosting `sessionId` reports itself idle, or is gone. */
+	/** Resolves once the group of the conversation hosting `sessionId` reports itself idle, or is gone. */
 	whenHostIdle(workspaceName: string, sessionId: string): Promise<void> {
 		const host = this.hostOf(sessionId);
-		if (!host || host.workspaceName !== workspaceName || !host.active) return Promise.resolve();
+		if (!host || host.workspaceName !== workspaceName || !this.isHostActive(workspaceName, sessionId)) {
+			return Promise.resolve();
+		}
 		return new Promise<void>((resolve) => {
-			host.idle.add(resolve);
-			void host.exited.promise.then(() => resolve());
+			const check = (): void => {
+				if (this.hostOf(sessionId) === host && this.isHostActive(workspaceName, sessionId)) return;
+				host.idle.delete(check);
+				resolve();
+			};
+			host.idle.add(check);
+			void host.exited.promise.then(check);
 		});
 	}
 
@@ -889,7 +1400,7 @@ export class WorkerRegistry {
 		| {
 				readonly workerId: string;
 				readonly origin: ControlWorkerOrigin;
-				readonly kind: "primary" | WorkerHostKind;
+				readonly kind: "conversation" | WorkerHostKind;
 		  }
 		| undefined {
 		const record = this.hostOf(sessionId);
@@ -974,19 +1485,20 @@ export class WorkerRegistry {
 	/** The worker exited: its record goes, and the opens that waited for it fail or route again. */
 	private finish(record: WorkerRecord, exit: WorkerExit, cause?: unknown): void {
 		if (this.workers.get(record.workerId) !== record) return;
-		if (record.retention !== undefined) clearTimeout(record.retention);
-		record.retention = undefined;
 		clearTimeout(record.readyTimer);
 		this.workers.delete(record.workerId);
-		if (record.state === "starting") {
-			record.ready.reject(
-				cause instanceof Error
-					? cause
-					: (record.openFailure ?? new WorkerOpenError(exit.error ?? "The worker exited before it was ready")),
-			);
+		const failure =
+			cause instanceof Error
+				? cause
+				: (record.openFailure ??
+					new WorkerOpenError(exit.error ?? "The worker exited before it opened the conversation"));
+		for (const conversation of record.conversations.values()) {
+			clearTimeout(conversation.retention);
+			clearTimeout(conversation.readyTimer);
+			conversation.retention = undefined;
+			if (!conversation.opened) conversation.ready.reject(failure);
+			conversation.close?.done.resolve();
 		}
-		for (const resolve of [...record.idle]) resolve();
-		record.idle.clear();
 		if (record.launched !== undefined) {
 			this.options.audit({
 				type: "worker_exited",
@@ -998,8 +1510,11 @@ export class WorkerRegistry {
 		}
 		const hosted = [...record.hosts.keys()];
 		record.hosts.clear();
+		record.conversations.clear();
+		record.active.clear();
 		for (const sessionId of hosted) this.hostsChanged(record.workspaceName, sessionId, false);
 		record.exited.resolve(exit);
+		for (const check of [...record.idle]) check();
 		this.notifyChanged(record);
 		for (const listener of [...this.exitListeners]) listener(record.workerId, exit);
 	}
@@ -1012,7 +1527,7 @@ export class WorkerRegistry {
 		};
 	}
 
-	/** A registered worker started or stopped hosting a session (spawn, claim, release, exit). */
+	/** A registered worker started or stopped hosting a session (spawn, route, claim, release, exit). */
 	onHostsChanged(listener: (workspaceName: string, sessionId: string, hosted: boolean) => void): () => void {
 		this.hostsListeners.add(listener);
 		return () => {
@@ -1020,8 +1535,14 @@ export class WorkerRegistry {
 		};
 	}
 
-	/** A worker retires without the option to refuse; its relayed streams close before it stops. */
-	onWorkerRetiring(listener: (workerId: string, reason: WorkerStopReason) => void): () => void {
+	/**
+	 * Conversations of a worker close without the option to refuse (the
+	 * worker retires, or one group is closed), naming them; their relayed
+	 * streams close before they do.
+	 */
+	onWorkerRetiring(
+		listener: (workerId: string, reason: WorkerStopReason, sessionIds: readonly string[]) => void,
+	): () => void {
 		this.retireListeners.add(listener);
 		return () => {
 			this.retireListeners.delete(listener);
@@ -1034,7 +1555,7 @@ export class WorkerRegistry {
 
 	list(): ControlWorkerStatus[] {
 		return [...this.workers.values()].map((record) => {
-			const kinds = [...record.attachments.values()];
+			const kinds = [...record.attachments.values()].map((attachment) => attachment.kind);
 			return {
 				workerId: record.workerId,
 				pid: record.launched?.pid ?? 0,

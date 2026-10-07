@@ -2,23 +2,25 @@
  * A TUI's spawn options as the daemon takes them (Phase 7 plan §1, "Spawn"):
  * checked, put in a canonical form, and keyed.
  *
- * A worker's compatibility key says which opens could share a worker (D11
- * revised; the sharing itself is a later slice): it hashes what a worker
- * runs every conversation with, and nothing of one conversation (its working
- * directory, session, `--no-session`, session-level options) or one client
- * (its model scope). For a TUI-opened worker that is the opener's kind, its
+ * A worker's compatibility key says which opens share a worker (D11
+ * revised): an open the registry routes into a live worker of the same
+ * workspace and generation must have the worker's key. It hashes what a
+ * worker runs every conversation with, and nothing of one conversation (its
+ * working directory, session, `--no-session`, session-level options) or one
+ * client (its model scope). For a TUI-opened worker that is the opener's kind, its
  * environment as the worker runs with it (without the daemon-only
  * credentials), and its spawn-only options; for a phone-opened one, the
- * opener's kind, its tool policy, its project trust, and its profile. The
- * environment enters only the hash: it is never logged, and never kept
- * beyond the spawn.
+ * opener's kind, its tool policy, its project trust, and its profile.
+ * Identical means identical: no variable of the environment is left out
+ * (`PWD`, `SHLVL`, a terminal's session variables), so two terminals rarely
+ * share a worker while one terminal's own opens do. The environment enters
+ * only the hash: it is never logged, and never kept beyond the spawn.
  */
 
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { WORKER_SPAWN_ONLY_OPTIONS } from "@hansjm10/volt-protocol/daemon-control";
 import { isLocalPath } from "../utils/paths.ts";
-import type { DistributiveOmit } from "./control-client.ts";
 import type {
 	ConversationOpenTarget,
 	WorkerAgentConfig,
@@ -102,12 +104,27 @@ export function checkWorkerSpawnOptions(
 }
 
 /**
- * The compatibility key of a worker spawned with `spec` in the environment
- * `env` (a TUI's; a phone-opened worker runs with the daemon's, which is the
- * same for every such worker).
+ * What a worker's compatibility key is computed from: a phone opener's tool
+ * policy, project trust, and profile, or a TUI opener's spawn-only options
+ * (with its environment). A spawn spec has them; an open knows them before
+ * its conversation is prepared.
+ */
+export type WorkerCompatibility =
+	| {
+			readonly origin: "phone";
+			readonly toolPolicy: { readonly tools: readonly string[]; readonly allowUnlistedExtensionTools: boolean };
+			readonly projectTrusted: boolean;
+			readonly profile?: string;
+	  }
+	| { readonly origin: "tui"; readonly config: WorkerAgentConfig };
+
+/**
+ * The compatibility key of a worker for `spec` (an open's compatibility, or
+ * a spawn spec) in the environment `env` (a TUI's; a phone-opened worker
+ * runs with the daemon's, which is the same for every such worker).
  */
 export function workerCompatibilityKey(
-	spec: DistributiveOmit<WorkerSpawnSpec, "workerId">,
+	spec: WorkerCompatibility,
 	env: Readonly<Record<string, string>> | undefined,
 ): string {
 	const input =

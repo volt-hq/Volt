@@ -33,7 +33,7 @@ to its states and the close reasons it mints.
 | 3 | **`SessionTarget`** | On connect, does the phone pin the *right* session — never a stale one? | `target ∈ {last_noId,last_withId,new,session}`; `hostSession ∈ {exists,missing,liveMoved}`; wire `selection`; `requestedId?`; client `{Validated,StreamOpened,PinCommitted,RolledBack}` | ghost pin (pinned to requested vs canonical id), rekey without requestedId, requestedId leaking onto created/resumed, `target=session` silently creating a session, producer/validator tuple mismatch. |
 | 4 | **`ClientAuth`** | Can a revoked or stale phone ever get back in? Is a one-time secret really one-time? | `clients`; `revoked[node]`; `pending[secretHash]`; `tomb ∈ {consumed(node),expired}`; logical `clock`; per-hello workspace authz | revoked-client re-entry, one-time secret replayed to a *different* node, expired-secret pairing, workspace-authz cached-at-pairing, check-order regressions. |
 | 5 | **`ClientConn`** | Does the phone reconnect exactly once, never when the user said disconnect, and never confuse abort with detach? | app status; `userRequestedDisconnect`; background flag; per-pin status lattice; closure ledger; monotonic `operationToken`/`reconnectGen`/`attemptId` | ghost reconnect while user-disconnected, double reconnect loop, expected-closure marker mis-consume, abort-conflated-with-detach, stale continuation commit. |
-| 6 | **`WorkerRegistry`** | Which worker hosts this chat, and can two processes ever write it, or an open wait forever? | registry worker state, key generation, hosts (spawn + claims), process, open logs, per-log lock, activity, stop acceptance; client target, relay offer, attachment; one durable input id; daemon up, workspace generation, fence in flight | two hosts or two writers per log, attach to a dead or retiring worker, offer reuse, lost or doubled input across crashes and daemon loss, retiring an attached or active worker, fenced authority acting, a wedged open, spawn, retirement, or fence. **Written — model of record; see README and section 4.** |
+| 6 | **`WorkerRegistry`** | Which worker hosts this chat, and can two processes ever write it, or an open wait forever? | registry worker state, key generation and compatibility key, hosts (top-level conversations + claims, by group), per-conversation closes, process, open logs, per-log lock, per-conversation activity, stop acceptance; client target and its open's key, relay offer, attachment; one durable input id; daemon up, workspace generation, fence in flight | two hosts or two writers per log, attach to a dead or retiring worker or a closing conversation, offer reuse, sharing across compatibility keys or past the cap, one conversation's close touching another, lost or doubled input across crashes and daemon loss, closing an attached or active conversation, a worker kept with nothing to host, fenced authority acting, a wedged open, spawn, close, retirement, or fence. **Written — model of record; see README and section 4.** |
 
 **Build order.** `LeaseBroker` → `RelayViewer` (shares the connection-drop
 trigger; compose the two once each is green solo) → `SessionTarget` → `ClientAuth`
@@ -209,24 +209,32 @@ Implemented in `WorkerRegistry.tla` from the Phase 7 plan (#585, sections 1 and 
 and daemon-hosted conversations RFC §4–§5; full detail, model decisions, bounds,
 and results are in [`README.md`](README.md#the-workerregistry-module-model-of-record).
 It models the daemon's worker registry keyed by `(workspace, generation,
-session)`, coalesced spawns, claims, single-use relay offers, the per-log lock
-and exit-ordered replacement, retention with a refusable stop handshake, worker
-crashes, workspace fences, and daemon loss with orphaned workers, which a
-restarted daemon waits for (the worker gate, `RestartWaitsForOrphans = TRUE`).
+session)`, coalesced spawns, shared workers (an open routes into a live worker
+of its compatibility key with room for another of at most `Cap` top-level
+conversations, D11 revised), claims into a conversation's group, single-use
+relay offers, the per-log lock and exit-ordered replacement, per-conversation
+retention with a refusable close handshake, forced closes of one conversation,
+retirement of a worker that hosts nothing, worker crashes, workspace fences,
+and daemon loss with orphaned workers, which a restarted daemon waits for (the
+worker gate, `RestartWaitsForOrphans = TRUE`).
 
 **Safety:** `OneHost`, `OneWriter`, `LockCoherent`, `ReadyHoldsLocks`,
-`AttachOnlyToLive`, `NoOfferToRetiring`, `NoLostInput`, `ExactlyOnce`,
+`RetireWhenEmpty`, `GroupsWellFormed`, `CapRespected`, `AttachOnlyToLive`,
+`NoOfferToRetiring`, `CloseOnlyDetached`, `NoLostInput`, `ExactlyOnce`,
 `RetireOnlyDetachedIdle`, `NoGenerationOverlap` (W5), and the action properties
-`OfferAdmittedOnce`, `ClaimRespectsHost`, `FencedWorkersInert`,
-`RetireReportsAfterExit` (W4). The last two of these hold only with the restart
+`OfferAdmittedOnce`, `ClaimRespectsHost`, `RouteRespectsKey`, `CloseScoped`,
+`FencedWorkersInert`, `RetireReportsAfterExit` (W4). The last two of these hold only with the restart
 wait (Phase 7 slice 5); `WorkerRegistryOrphans.cfg` keeps the trace of the design
 without it (an orphan of a dead daemon outlives a workspace mutation; see the
 README finding).
 
 **Liveness:** `OpenServed`, `RetiringExits`, `StartingSettles`,
-`DetachedIdleRetires`, `OrphansExit`, `WorkspaceRetireCompletes`, under weak
-fairness on daemon and worker steps, with faults (worker crash, offer expiry,
-daemon crash) bounded by `MaxFaults`.
+`DetachedIdleCloses`, `ClosesSettle`, `OrphansExit`, `WorkspaceRetireCompletes`,
+under weak fairness on daemon and worker steps, with faults (worker crash,
+offer expiry, daemon crash) and forced closes bounded by `MaxFaults`.
+`WorkerRegistrySharing.cfg` and `WorkerRegistrySafety.cfg` check safety at
+bounds the liveness run cannot afford (differing keys and a binding cap; a
+third worker id).
 
 **Upkeep.** Every Phase 7 slice that changes registry semantics updates the model
 first and re-runs `./check.sh WorkerRegistry`, pasting the TLC summary in its pull

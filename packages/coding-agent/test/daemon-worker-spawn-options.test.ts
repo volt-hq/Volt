@@ -164,6 +164,20 @@ describe("TUI spawn options", () => {
 				undefined,
 			),
 		).toBe(workerCompatibilityKey(phone, undefined));
+		// Opens with differing trust decisions never share a worker (D11): unset (the saved decision), no, and yes.
+		const env = { PATH: "/bin", HOME: "/home/user" };
+		const trustKeys = [undefined, false, true].map((trust) =>
+			workerCompatibilityKey(
+				tuiSpec({
+					config: { tools: ["read"], extensions: ["/ext/a.ts"], ...(trust === undefined ? {} : { trust }) },
+				}),
+				env,
+			),
+		);
+		expect(new Set(trustKeys).size).toBe(3);
+		expect(workerCompatibilityKey({ ...phone, projectTrusted: true }, undefined)).not.toBe(
+			workerCompatibilityKey(phone, undefined),
+		);
 	});
 
 	it("names the spawn-only options a live worker does not share", () => {

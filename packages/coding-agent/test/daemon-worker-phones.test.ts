@@ -109,7 +109,7 @@ function scriptedWorker(request: WorkerLaunchRequest): { worker: LaunchedWorker;
 		worker: { workerId: request.workerId, workerToken: request.workerToken },
 		reconnect: false,
 		onEvent: (event) => {
-			if (event.type === "worker_spawn") spec.resolve(event.spec);
+			if (event.type === "worker_open") spec.resolve(event.spec);
 			if (event.type === "worker_stop") {
 				void client
 					.request({ type: "worker_stop_result", stopId: event.stopId, outcome: "stopped" })
@@ -122,7 +122,7 @@ function scriptedWorker(request: WorkerLaunchRequest): { worker: LaunchedWorker;
 	const ready = (async () => {
 		await client.connect();
 		const opened = await spec.promise;
-		await client.request({ type: "worker_ready", sessionIds: [opened.session.sessionId] });
+		await client.request({ type: "worker_ready", sessionId: opened.session.sessionId });
 		return client;
 	})();
 	return {
@@ -230,7 +230,7 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		).toMatchObject({ type: "error", code: "workspace_local_only" });
 	}, 60_000);
 
-	it("stops the running turn at once when the client that opened the worker is revoked", async () => {
+	it("stops the running turn at once when the client that opened the conversation is revoked", async () => {
 		const harness = await startHarness();
 		const ref = await harness.createSession();
 		const started = Promise.withResolvers<void>();
@@ -259,15 +259,18 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		expect(await harness.control.request({ type: "client_revoke", clientNodeId: paired.nodeId })).toMatchObject({
 			type: "ok",
 		});
-		// The worker retires for the lost authority without waiting out the 60 s turn cap.
+		// The conversation closes for the lost authority without waiting out the 60 s turn cap, and its worker,
+		// hosting nothing, retires.
 		await expect.poll(async () => (await harness.status()).workers, { timeout: 10_000 }).toEqual([]);
 		expect(aborted).toBe(true);
 		expect(Date.now() - revokedAt).toBeLessThan(10_000);
-		expect(harness.audit()).toContainEqual(
-			expect.objectContaining({
-				type: "worker_stop",
-				details: expect.objectContaining({ reason: "authority", force: true }),
-			}),
+		await vi.waitFor(() =>
+			expect(harness.audit()).toContainEqual(
+				expect.objectContaining({
+					type: "worker_close",
+					details: expect.objectContaining({ sessionId: ref.sessionId, reason: "authority", force: true }),
+				}),
+			),
 		);
 	}, 60_000);
 
@@ -407,7 +410,8 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 			return scripted.worker;
 		});
 		const otherRef = await harness.createSession();
-		await harness.openWorker(otherRef);
+		// Spawn options of its own: the open does not share the phone's worker.
+		await harness.openWorker(otherRef, { spawn: { profile: "scripted" } });
 		if (!other) throw new Error("The scripted worker did not launch");
 		const client = await other;
 
