@@ -9,9 +9,6 @@ import {
 	AuthStorage,
 	ConversationHost,
 	DefaultMcpClientFactory,
-	IrohRemoteActiveStreamRegistry,
-	IrohRemoteAuditLogger,
-	IrohRemoteHostStateManager,
 	McpManager,
 	McpMetadataCache,
 	McpOutputStore,
@@ -20,7 +17,6 @@ import {
 	SettingsManager,
 	createAgentSessionFromServices,
 	createAgentSessionServices,
-	createIrohRemotePresetAccess,
 } from "@hansjm10/volt-coding-agent";
 import {
 	createEmptyMcpMergedConfig,
@@ -28,35 +24,28 @@ import {
 	mergeMcpConfigFile,
 	sourceForMcpConfigPath,
 } from "../packages/coding-agent/src/core/mcp/config.ts";
-import { IntegratedRuntimeRegistry } from "../packages/coding-agent/src/daemon/integrated-runtimes.ts";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const EVENT_PREFIX = "VOLT_MEMORY_BENCHMARK_EVENT ";
 const CONVERSATION_TURNS = 20;
 const PAYLOAD_BYTES = 2048;
-const RECONNECT_CYCLES = 10;
 
 function parseArgs(argv) {
 	let scenario;
 	let root;
-	let retentionTtlMs;
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
-		if (arg !== "--scenario" && arg !== "--root" && arg !== "--retention-ttl-ms") {
+		if (arg !== "--scenario" && arg !== "--root") {
 			throw new Error(`Unknown worker option: ${arg}`);
 		}
 		if (index + 1 >= argv.length) throw new Error(`Missing value for ${arg}`);
 		const value = argv[++index];
 		if (arg === "--scenario") scenario = value;
 		if (arg === "--root") root = resolve(value);
-		if (arg === "--retention-ttl-ms") retentionTtlMs = Number(value);
 	}
 	if (!scenario || !root) throw new Error("worker requires --scenario and --root");
-	if (!Number.isInteger(retentionTtlMs) || retentionTtlMs < 250) {
-		throw new Error("worker requires --retention-ttl-ms >= 250");
-	}
-	return { scenario, root, retentionTtlMs };
+	return { scenario, root };
 }
 
 class CheckpointChannel {
@@ -219,132 +208,6 @@ async function runConversation(context) {
 		await created.runtime.host.dispose();
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
-		await created.runtime.host.dispose();
-	}
-}
-
-function createAuthorization(workspace) {
-	return {
-		ok: true,
-		allowTools: "read",
-		client: {
-			nodeId: "benchmark-client",
-			label: "benchmark-client",
-			allowedWorkspaces: ["benchmark"],
-			allowedTools: "read",
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			pairedAt: 1,
-			lastSeenAt: 2,
-		},
-		paired: false,
-		pairingSecretConsumed: false,
-		workspace: { name: "benchmark", path: workspace },
-		workspaceNames: ["benchmark"],
-		workspaces: [{ name: "benchmark", status: "available" }],
-	};
-}
-
-function createHello(target, sessionId) {
-	return {
-		type: "volt_iroh_hello",
-		protocol: "volt-rpc/0",
-		workspace: "benchmark",
-		mode: "conversation",
-		conversation: { target, sessionId },
-	};
-}
-
-const HANDSHAKE_RESPONSE = {
-	child: "volt",
-	features: ["multi_streams.v1", "conversation_streams.v1"],
-};
-
-async function runReconnectRetention(context) {
-	const sessionId = randomUUID();
-	const created = await createBenchmarkRuntime({ ...context, sessionId });
-	let ttlMs = 60_000;
-	let factoryCalls = 0;
-	const disposals = [];
-	const registry = new IntegratedRuntimeRegistry({
-		agentDir: context.agentDir,
-		auditLogger: new IrohRemoteAuditLogger(),
-		stateManager: new IrohRemoteHostStateManager(),
-		activeStreams: new IrohRemoteActiveStreamRegistry(),
-		detachedRuntimeTtlMs: () => ttlMs,
-		getAllowTools: () => undefined,
-		getProjectTrustedForWorkspace: () => false,
-		setClientLastSessionId: async () => undefined,
-		onRuntimeDisposed: (entry, reason) => disposals.push({ entry, reason }),
-		createRuntime: async () => {
-			factoryCalls++;
-			assert.equal(factoryCalls, 1);
-			return { runtime: created.runtime, sessionSelection: { kind: "created", sessionId } };
-		},
-	});
-	const authorization = createAuthorization(context.workspace);
-	let entry;
-	try {
-		const first = await registry.getOrCreateEntry(
-			{ hello: createHello("new", sessionId), response: HANDSHAKE_RESPONSE },
-			authorization,
-		);
-		entry = first.entry;
-		assert.equal(first.created, true);
-		assert.equal(entry.lifecycle, "prepared");
-		await registry.commitEntry(entry, first.sessionSelection, authorization, first.attachClaim);
-		assert.equal(entry.lifecycle, "active");
-		assert.equal(registry.size, 1);
-		const initialSubscriber = await registry.attachSubscriber(entry, first.attachClaim);
-		first.attachClaim.release();
-		await context.channel.checkpoint("baseline", { lifecycle: entry.lifecycle, registrySize: registry.size });
-		await registry.detachSubscriber(entry, initialSubscriber, "benchmark_initial_detach");
-		assert.equal(registry.isDetached(entry), true);
-		await context.channel.checkpoint("detached", { lifecycle: entry.lifecycle, registrySize: registry.size });
-
-		for (let cycle = 0; cycle < RECONNECT_CYCLES; cycle++) {
-			const warm = await registry.getOrCreateEntry(
-				{ hello: createHello("session", sessionId), response: HANDSHAKE_RESPONSE },
-				authorization,
-			);
-			assert.equal(warm.created, false);
-			assert.equal(warm.entry, entry);
-			assert.equal(warm.entry.runtime, created.runtime);
-			assert.equal(warm.entry.lifecycle, "active");
-			assert.equal(registry.size, 1);
-			assert.equal(factoryCalls, 1);
-			await registry.commitEntry(warm.entry, warm.sessionSelection, authorization, warm.attachClaim);
-			const subscriber = await registry.attachSubscriber(warm.entry, warm.attachClaim);
-			warm.attachClaim.release();
-			assert.equal(warm.entry.subscribers.size, 1);
-			if (cycle === RECONNECT_CYCLES - 1) ttlMs = context.retentionTtlMs;
-			await registry.detachSubscriber(warm.entry, subscriber, `benchmark_cycle_${cycle + 1}`);
-			assert.equal(registry.isDetached(warm.entry), true);
-		}
-		await context.channel.checkpoint("post-cycle", {
-			cycles: RECONNECT_CYCLES,
-			lifecycle: entry.lifecycle,
-			registrySize: registry.size,
-			retentionTtlMs: ttlMs,
-		});
-		const deadline = Date.now() + ttlMs + 5_000;
-		while (!entry.retirementPromise && Date.now() < deadline) {
-			await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-		}
-		assert(entry.retirementPromise, "detached runtime did not begin retirement");
-		await entry.retirementPromise;
-		assert.equal(entry.lifecycle, "retired");
-		assert.equal(registry.size, 0);
-		assert.equal(disposals.length, 1);
-		assert.equal(disposals[0].entry, entry);
-		assert.equal(disposals[0].reason, "detached_runtime_ttl_expired");
-		assert.equal(factoryCalls, 1);
-		await context.channel.checkpoint("post-disposal", {
-			disposed: true,
-			lifecycle: entry.lifecycle,
-			registrySize: registry.size,
-		});
-	} finally {
-		await registry.stopAll("benchmark_cleanup");
 		await created.runtime.host.dispose();
 	}
 }
@@ -513,7 +376,6 @@ async function main() {
 	const scenarios = {
 		"runtime-idle": runRuntimeIdle,
 		conversation: runConversation,
-		"reconnect-retention": runReconnectRetention,
 		extension: runExtension,
 		mcp: runMcp,
 		lsp: runLsp,
