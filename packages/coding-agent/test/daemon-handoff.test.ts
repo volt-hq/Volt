@@ -457,7 +457,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(daemon.broker.lookup("other", "elsewhere")?.state).toBe("tui-owned");
 	}, 20_000);
 
-	it("leases a session to resume only in a registered workspace, registering one once the TUI opened it", async () => {
+	it("leases a session only in a registered workspace, and registers none", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-tentative-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-tentative-ws-"));
 		const otherCwd = mkdtempSync(join(tmpdir(), "volt-tentative-other-"));
@@ -479,10 +479,9 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(tui.attach.workspaceName()).toBe("ws");
 		expect(daemon.broker.lookup("ws", "old")?.state).toBe("tui-owned");
 
-		// Once the TUI opened it, its workspace is registered and leased.
-		expect(await tui.attach.acquire("elsewhere", otherCwd)).toMatchObject({ kind: "granted" });
-		expect(daemon.workspaces).toHaveLength(2);
-		expect(tui.attach.workspaceName()).not.toBe("ws");
+		// Even once the TUI opened it: the daemon registers a TUI's directory when it opens a conversation there.
+		expect(await tui.attach.acquire("elsewhere", otherCwd)).toEqual({ kind: "noop" });
+		expect(daemon.workspaces).toEqual([{ name: "ws", path: cwd }]);
 	}, 20_000);
 
 	it("connects every already-running TUI when a daemon appears without auto-start", async () => {
@@ -527,7 +526,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		});
 		const paths = getDaemonPaths(agentDir);
 		ensureDaemonDirs(paths);
-		const daemon = await startDaemonHalf(paths.socketPath);
+		const daemon = await startDaemonHalf(paths.socketPath, { workspaces: [{ name: "ws", path: cwd }] });
 		cleanups.push(() => daemon.close());
 
 		const { attach, events } = await startTuiHalf(agentDir, cwd);
@@ -582,7 +581,10 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		ensureDaemonDirs(paths);
 		const socketPath = freshControlSocketPath(paths, "a");
 		const currentToken = randomUUID();
-		const daemon = await startDaemonHalf(socketPath, { authToken: currentToken });
+		const daemon = await startDaemonHalf(socketPath, {
+			authToken: currentToken,
+			workspaces: [{ name: "ws", path: cwd }],
+		});
 		cleanups.push(() => daemon.close());
 		publishDaemonEndpoint(paths, socketPath, "stale-token");
 
@@ -614,7 +616,10 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		ensureDaemonDirs(paths);
 		const firstSocketPath = freshControlSocketPath(paths, "first");
 		const firstToken = randomUUID();
-		const first = await startDaemonHalf(firstSocketPath, { authToken: firstToken });
+		const first = await startDaemonHalf(firstSocketPath, {
+			authToken: firstToken,
+			workspaces: [{ name: "ws", path: cwd }],
+		});
 		publishDaemonEndpoint(paths, firstSocketPath, firstToken);
 
 		const { attach, reacquired } = await startTuiHalf(agentDir, cwd);
