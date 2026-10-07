@@ -26,6 +26,7 @@
  * what was not answered.
  */
 
+import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { RpcTransport } from "../core/protocol/transport/transport.ts";
 import type { WorkspaceRegistration } from "../daemon/control-protocol.ts";
 import type { DaemonProbeResult, EnsureDaemonResult, WaitForDaemonExitOptions } from "../daemon/spawn.ts";
@@ -56,6 +57,13 @@ export interface ConnectorOpenOptions {
 	 * (`local`); undefined opens nothing.
 	 */
 	readonly askWorkspaceRegistration?: (directory: string) => Promise<WorkspaceRegistration | undefined>;
+	/**
+	 * A question the host opening the conversation asks before it is open:
+	 * its project trust prompt, or a `project_trust` hook's dialog. Show it
+	 * until the user answers or `signal` aborts (the open ended); undefined
+	 * answers nothing.
+	 */
+	readonly askHostRequest?: (request: HostPromptRequest, signal: AbortSignal) => Promise<HostResponse | undefined>;
 }
 
 /**
@@ -179,6 +187,7 @@ export async function connectThrough(
 		onLost,
 		onStatus,
 		askWorkspaceRegistration,
+		askHostRequest,
 		onReconnecting,
 		onReconnected,
 		onMoveFailed,
@@ -190,6 +199,7 @@ export async function connectThrough(
 		...(onLost === undefined ? {} : { onLost }),
 		...(onStatus === undefined ? {} : { onStatus }),
 		...(askWorkspaceRegistration === undefined ? {} : { askWorkspaceRegistration }),
+		...(askHostRequest === undefined ? {} : { askHostRequest }),
 	};
 	const client = new ProtocolClient({
 		...clientOptions,

@@ -193,7 +193,7 @@ describe("the daemon connector", () => {
 });
 
 describe("the daemon connector's trust and workspace bounds", () => {
-	it("passes its trust decision only to a worker of the project it decided for", async () => {
+	it("passes --approve only to a worker of its startup conversation's project", async () => {
 		const harness = await startHarness();
 		const other = join(harness.workspacePath, "other");
 		mkdirSync(other);

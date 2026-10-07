@@ -608,6 +608,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		// runtimes for up to 60s and clients must not wait blind. New hellos are
 		// already rejected via the shutdown admission gate.
 		controlServer?.broadcast({ type: "daemon_shutdown" });
+		// What workers ask TUIs as they open conversations is not answered now: those opens finish without it.
+		tuiConversations.endQuestions();
 		// Close control request admission synchronously, then let the initiating
 		// shutdown handler return its ok and drain with every request admitted before
 		// the cut. No extension or durable state can quiesce underneath those tasks.
@@ -715,6 +717,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	const handleRequest = async (connection: ControlConnection, request: ControlRequest): Promise<void> => {
 		switch (request.type) {
+			case "worker_host_request":
 			case "worker_ready":
 			case "worker_open_failed":
 			case "worker_activity":
@@ -726,6 +729,9 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				return;
 			case "conversation_open":
 				connection.send(await tuiConversations.open(connection, request));
+				return;
+			case "conversation_host_response":
+				connection.send(tuiConversations.answer(connection, request));
 				return;
 		}
 		for (const extension of extensionInstances) {
@@ -1071,6 +1077,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				},
 				onConnectionClosed(connection) {
 					if (connection.client === "worker") workers.onConnectionClosed(connection.connectionId);
+					else tuiConversations.connectionClosed(connection.connectionId);
 					for (const extension of extensionInstances) {
 						extension.onConnectionClosed?.(connection);
 					}

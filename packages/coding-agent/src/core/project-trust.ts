@@ -12,12 +12,6 @@ import {
 
 export type AppMode = "interactive" | "print" | "json" | "rpc";
 
-/** A project trust decision a TUI made at startup (Phase 6 D4): for the project of `cwd`. */
-export interface DecidedProjectTrust {
-	readonly cwd: string;
-	readonly trusted: boolean;
-}
-
 /**
  * Where a conversation in `cwd` takes its project trust from: the parent
  * checkout of a managed worktree, and none for one whose parent is unknown
@@ -30,29 +24,32 @@ export function projectTrustPath(agentDir: string, cwd: string): string | undefi
 }
 
 /**
- * The project trust of a conversation in `cwd`: the decision a TUI made for
- * the project it opened in, `decided`, applies to that project only;
- * elsewhere, and without one, a project without resources that need trust is
- * trusted, and one with them is trusted only by its saved decision. A worker
- * builds the conversations a TUI opened with it, and the TUI reads its own
- * display settings with it. Read again whenever it matters: a project that
- * had nothing to trust may gain it.
+ * The project trust of a conversation in `cwd` now: the decision made for its
+ * project (`decisions`, by `projectTrustPath`), else trusted when the project
+ * holds nothing that needs trust, else its saved decision. Read again
+ * whenever it matters: a project that had nothing to trust may gain it.
  */
 export function resolveConversationProjectTrust(
 	agentDir: string,
 	cwd: string,
-	decided: DecidedProjectTrust | undefined,
+	decisions: ReadonlyMap<string, boolean>,
 ): boolean {
 	const trustPath = projectTrustPath(agentDir, cwd);
-	if (decided !== undefined && trustPath !== undefined && trustPath === projectTrustPath(agentDir, decided.cwd)) {
-		return decided.trusted;
-	}
+	const decided = trustPath === undefined ? undefined : decisions.get(trustPath);
+	if (decided !== undefined) return decided;
 	if (!hasTrustRequiringProjectResources(cwd)) return true;
 	return trustPath !== undefined && new ProjectTrustStore(agentDir).get(trustPath) === true;
 }
 
 export interface ResolveProjectTrustedOptions {
+	/** The project the decision is for (`projectTrustPath`): hooks are asked, and decisions saved, for it. */
 	cwd: string;
+	/**
+	 * Where the resources that need trust are looked for: the conversation's
+	 * own directory, such as a managed worktree checkout whose project is its
+	 * parent checkout. `cwd` by default.
+	 */
+	resourcesCwd?: string;
 	trustStore: ProjectTrustStore;
 	trustOverride?: boolean;
 	defaultProjectTrust?: DefaultProjectTrust;
@@ -69,7 +66,11 @@ async function selectProjectTrustOption(
 	cwd: string,
 	ctx: ProjectTrustContext,
 ): Promise<ProjectTrustOption | undefined> {
-	const options = getProjectTrustOptions(cwd, { includeSessionOnly: true });
+	const listed = getProjectTrustOptions(cwd, { includeSessionOnly: true });
+	// The answers that do not trust come first, the one that saves nothing first of all: the prompt can show
+	// in a running TUI, where a keystroke meant for the editor must not trust the project.
+	const untrusting = listed.filter((option) => !option.trusted).sort((a, b) => a.updates.length - b.updates.length);
+	const options = [...untrusting, ...listed.filter((option) => option.trusted)];
 	const selected = await ctx.ui.select(
 		formatProjectTrustPrompt(cwd),
 		options.map((option) => option.label),
@@ -83,11 +84,24 @@ function saveProjectTrustPromptResult(trustStore: ProjectTrustStore, result: Pro
 	}
 }
 
+/** `decideProjectTrust`, untrusted when nothing decided. */
 export async function resolveProjectTrusted(options: ResolveProjectTrustedOptions): Promise<boolean> {
+	return (await decideProjectTrust(options)) ?? false;
+}
+
+/**
+ * Decide the trust of the project in `cwd`: the override; trusted when
+ * nothing in it needs trust; else the first yes/no of the `project_trust`
+ * hooks (saved with `remember`), the saved decision, `defaultProjectTrust`,
+ * or the user's answer to the trust prompt (saved unless it is for this
+ * session only). Undefined when nothing decided: the prompt could not be
+ * asked, or closed without an answer (a dismissal).
+ */
+export async function decideProjectTrust(options: ResolveProjectTrustedOptions): Promise<boolean | undefined> {
 	if (options.trustOverride !== undefined) {
 		return options.trustOverride;
 	}
-	if (!hasTrustRequiringProjectResources(options.cwd)) {
+	if (!hasTrustRequiringProjectResources(options.resourcesCwd ?? options.cwd)) {
 		return true;
 	}
 
@@ -124,7 +138,7 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
 	}
 
 	if (!options.projectTrustContext.hasUI) {
-		return false;
+		return undefined;
 	}
 
 	const selected = await selectProjectTrustOption(options.cwd, options.projectTrustContext);
@@ -132,5 +146,5 @@ export async function resolveProjectTrusted(options: ResolveProjectTrustedOption
 		saveProjectTrustPromptResult(options.trustStore, selected);
 		return selected.trusted;
 	}
-	return false;
+	return undefined;
 }

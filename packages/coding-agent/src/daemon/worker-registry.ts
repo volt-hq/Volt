@@ -42,10 +42,15 @@
  * within it after a move). A fenced workspace closes admission for that
  * workspace and retires its workers without the option to refuse, until
  * their exit is observed. A worker's exit, however it happens, removes its
- * record and fails the opens that waited for its conversations.
+ * record and fails the opens that waited for its conversations. A worker
+ * opening a TUI's conversation may ask the TUI whose open opens it
+ * (`worker_host_request`: its project trust prompts, P7-8b); the wait for
+ * that conversation's `worker_ready` pauses while the TUI is asked, and
+ * starts over once it answered.
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
+import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { DistributiveOmit } from "./control-client.ts";
 import {
 	type ControlEvent,
@@ -133,6 +138,16 @@ export interface LiveWorker {
 /** The conversation an open prepares, as the daemon resolved it; the registry adds the worker id. */
 export type WorkerSpawnInput = DistributiveOmit<WorkerSpawnSpec, "workerId">;
 
+/**
+ * Ask the TUI whose open opens a conversation, until `signal` aborts: what it
+ * answered (no `response` when it closed the question without one), or
+ * undefined when it cannot be asked.
+ */
+export type OpenerAsk = (
+	request: HostPromptRequest,
+	signal: AbortSignal,
+) => Promise<{ readonly response?: HostResponse } | undefined>;
+
 /** An open failed: the worker could not open its conversation, or it exited first. */
 export class WorkerOpenError extends Error {
 	/** A phone handshake outcome the worker reported, such as conversation_locked. */
@@ -210,6 +225,12 @@ interface TopLevelConversation {
 	close: CloseRequest | undefined;
 	readonly ready: PromiseWithResolvers<void>;
 	readyTimer: ReturnType<typeof setTimeout> | undefined;
+	/** The TUI whose open opens it, which the worker may ask while it does. */
+	ask: OpenerAsk | undefined;
+	/** The worker's questions to `ask` unanswered: the wait for its readiness pauses meanwhile. */
+	asking: number;
+	/** Aborts those questions once it is gone. */
+	readonly questions: AbortController;
 }
 
 interface StopRequest {
@@ -268,6 +289,9 @@ function newConversation(): TopLevelConversation {
 		close: undefined,
 		ready: Promise.withResolvers<void>(),
 		readyTimer: undefined,
+		ask: undefined,
+		asking: 0,
+		questions: new AbortController(),
 	};
 	void conversation.ready.promise.catch(() => undefined);
 	return conversation;
@@ -323,6 +347,8 @@ export class WorkerRegistry {
 			readonly exclusive?: boolean;
 			/** The environment a worker this open spawns runs with (a TUI's); the daemon's own without one. */
 			readonly env?: Readonly<Record<string, string>>;
+			/** The opening TUI, which the worker opening the conversation may ask while this open opens it. */
+			readonly ask?: OpenerAsk;
 		},
 	): Promise<T> {
 		const origin = options.compatibility.origin;
@@ -358,6 +384,7 @@ export class WorkerRegistry {
 					? this.reserveConversation(shared, key.sessionId)
 					: record.conversations.get(key.sessionId);
 				if (!conversation) throw new Error("A reserved worker has no conversation");
+				conversation.ask = options.ask;
 				reserved = { record, outcome: shared ? "routed" : "spawned" };
 				conversation.routing++;
 				try {
@@ -590,11 +617,7 @@ export class WorkerRegistry {
 			pid: launched.pid,
 			...(launched.logPath === undefined ? {} : { logPath: launched.logPath }),
 		});
-		// A worker that never reports ready (a lock it cannot take) is retired.
-		record.readyTimer = setTimeout(() => {
-			if (record.state === "starting") void this.retire(record, "authority");
-		}, WORKER_READY_TIMEOUT_MS);
-		record.readyTimer.unref?.();
+		this.armSpawnReady(record);
 		void launched.exited.then(
 			(exit) => this.finish(record, exit),
 			(error: unknown) => this.finish(record, { reason: "crashed", error: errorMessage(error) }),
@@ -661,13 +684,72 @@ export class WorkerRegistry {
 			this.dropConversation(record, sessionId, conversation, error);
 			throw error;
 		}
+		this.armOpenReady(record, sessionId, conversation);
+		await conversation.ready.promise;
+	}
+
+	/** A worker that never reports ready (a lock it cannot take) is retired. */
+	private armSpawnReady(record: WorkerRecord): void {
+		clearTimeout(record.readyTimer);
+		record.readyTimer = setTimeout(() => {
+			if (record.state === "starting") void this.retire(record, "authority");
+		}, WORKER_READY_TIMEOUT_MS);
+		record.readyTimer.unref?.();
+	}
+
+	/** A routed conversation the worker does not report open is closed without the option to refuse, and its opens fail. */
+	private armOpenReady(record: WorkerRecord, sessionId: string, conversation: TopLevelConversation): void {
+		clearTimeout(conversation.readyTimer);
 		conversation.readyTimer = setTimeout(() => {
 			if (record.conversations.get(sessionId) !== conversation || conversation.opened) return;
 			conversation.ready.reject(new WorkerOpenError("The worker did not open the conversation"));
 			void this.closeTop(record, sessionId, conversation, "authority");
 		}, WORKER_READY_TIMEOUT_MS);
 		conversation.readyTimer.unref?.();
-		await conversation.ready.promise;
+	}
+
+	/**
+	 * `worker_host_request`: the worker opening the TUI conversation
+	 * `sessionId` asks the TUI whose open opens it. Its wait for readiness
+	 * pauses until the TUI answered, then starts over. Undefined when nobody
+	 * can be asked: no TUI's open opens it, or that TUI left.
+	 */
+	private async askOpener(
+		record: WorkerRecord,
+		sessionId: string,
+		request: HostPromptRequest,
+	): Promise<{ readonly response?: HostResponse } | undefined> {
+		const conversation = record.conversations.get(sessionId);
+		const ask = conversation?.ask;
+		if (
+			conversation === undefined ||
+			ask === undefined ||
+			conversation.opened ||
+			conversation.state !== "opening" ||
+			record.hosts.get(sessionId)?.kind !== "conversation" ||
+			conversation.questions.signal.aborted
+		) {
+			return undefined;
+		}
+		const spawning = record.state === "starting" && sessionId === record.primarySessionId;
+		conversation.asking++;
+		clearTimeout(spawning ? record.readyTimer : conversation.readyTimer);
+		try {
+			return await ask(request, conversation.questions.signal);
+		} finally {
+			conversation.asking--;
+			if (
+				conversation.asking === 0 &&
+				!conversation.opened &&
+				record.conversations.get(sessionId) === conversation
+			) {
+				if (spawning) {
+					if (record.state === "starting") this.armSpawnReady(record);
+				} else {
+					this.armOpenReady(record, sessionId, conversation);
+				}
+			}
+		}
 	}
 
 	/**
@@ -688,10 +770,11 @@ export class WorkerRegistry {
 		this.retireIfEmpty(record);
 	}
 
-	/** Forget a top-level conversation: its timers stop, and its close settles. */
+	/** Forget a top-level conversation: its timers stop, its questions to its TUI end, and its close settles. */
 	private removeConversation(record: WorkerRecord, sessionId: string, conversation: TopLevelConversation): void {
 		clearTimeout(conversation.retention);
 		clearTimeout(conversation.readyTimer);
+		conversation.questions.abort();
 		conversation.retention = undefined;
 		record.conversations.delete(sessionId);
 		record.hosts.delete(sessionId);
@@ -813,6 +896,7 @@ export class WorkerRegistry {
 			ControlRequest,
 			{
 				type:
+					| "worker_host_request"
 					| "worker_ready"
 					| "worker_open_failed"
 					| "worker_activity"
@@ -833,6 +917,16 @@ export class WorkerRegistry {
 		const record = [...this.workers.values()].find((candidate) => candidate.connectionId === connectionId);
 		if (!record) return refuse("not_registered", "the worker is not registered");
 		switch (request.type) {
+			case "worker_host_request": {
+				const answer = await this.askOpener(record, request.sessionId, request.request);
+				if (answer === undefined)
+					return refuse("unavailable", "no terminal waiting for that conversation can be asked");
+				return {
+					type: "worker_host_response",
+					id: request.id,
+					...(answer.response === undefined ? {} : { response: answer.response }),
+				};
+			}
 			case "worker_ready": {
 				const conversation = record.conversations.get(request.sessionId);
 				if (record.state === "starting") {
@@ -1482,6 +1576,7 @@ export class WorkerRegistry {
 		for (const conversation of record.conversations.values()) {
 			clearTimeout(conversation.retention);
 			clearTimeout(conversation.readyTimer);
+			conversation.questions.abort();
 			conversation.retention = undefined;
 			if (!conversation.opened) conversation.ready.reject(failure);
 			conversation.close?.done.resolve();

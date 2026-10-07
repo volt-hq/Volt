@@ -146,6 +146,18 @@ const REQUESTS: ByType<ControlRequest> = {
 		spawn: SPAWN_OPTIONS,
 		clientKey: "tui-1",
 	},
+	conversation_host_response: {
+		type: "conversation_host_response",
+		id: "43",
+		requestId: "hq-1",
+		response: { value: "Trust" },
+	},
+	worker_host_request: {
+		type: "worker_host_request",
+		id: "44",
+		sessionId: "s-1",
+		request: { kind: "select", title: "Trust project folder?", options: ["Trust", "Do not trust"] },
+	},
 	worker_ready: { type: "worker_ready", id: "29", sessionId: "s-1" },
 	worker_open_failed: {
 		type: "worker_open_failed",
@@ -295,6 +307,14 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 		{ spawn: { ...SPAWN_OPTIONS, config: { flags: { "a=b": true } } } },
 		{ workspaceRegistration: "public" },
 	],
+	conversation_host_response: [{ requestId: undefined }, { response: { value: 1 } }, { requestId: "x".repeat(65) }],
+	// A worker asks a TUI only questions in words: never its editor's text, a sign-in, or a dialog.
+	worker_host_request: [
+		{ request: { kind: "editor_text" } },
+		{ request: { kind: "provider_auth", provider: "p", flow: "browser" } },
+		{ request: { kind: "select", title: "t", options: [] } },
+		{ sessionId: undefined },
+	],
 	worker_ready: [{ sessionId: undefined }, { sessionId: 1 }],
 	worker_open_failed: [{ message: "x".repeat(1025) }, { message: 1 }, { sessionId: undefined }],
 	worker_activity: [
@@ -415,6 +435,7 @@ const RESPONSES: ByType<ControlResponse> = {
 		spawned: false,
 		ignoredOptions: ["extensions", "trust"],
 	},
+	worker_host_response: { type: "worker_host_response", id: "21", response: { cancelled: true } },
 	worker_forward_result: {
 		type: "worker_forward_result",
 		id: "17",
@@ -464,6 +485,7 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 		{ frame: { type: "fatal", code: "revoked" } },
 	],
 	relay_push_delivery_result: [{ status: "maybe" }],
+	worker_host_response: [{ response: { value: "x", extra: true } }],
 	worker_authority_result: [{ authority: "lost" }],
 	worker_worktree_pinned: [{ pinId: undefined }],
 };
@@ -488,6 +510,12 @@ const EVENTS: ByType<ControlEvent> = {
 	},
 	pairing_progress: { type: "pairing_progress", requestId: "pr-1", phase: "waiting" },
 	daemon_shutdown: { type: "daemon_shutdown" },
+	conversation_host_request: {
+		type: "conversation_host_request",
+		requestId: "hq-1",
+		sessionId: "s-1",
+		request: { kind: "confirm", title: "Trust project?", message: "/tmp/volt" },
+	},
 	worker_open: {
 		type: "worker_open",
 		spec: {
@@ -513,6 +541,7 @@ const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unkno
 	theme_snapshot: [{ tokens: { accent: 1 } }],
 	keep_awake_changed: [{ keepAwake: undefined }],
 	pairing_progress: [{ phase: "scanning" }, { qrLines: "line" }],
+	conversation_host_request: [{ request: { kind: "editor_text" } }, { requestId: undefined }],
 	worker_open: [{ spec: { workerId: "w-1" } }],
 	worker_stop: [{ reason: "bored" }, { force: undefined }],
 	worker_close: [{ sessionId: undefined }, { force: undefined }, { reason: "bored" }],
@@ -603,26 +632,35 @@ describe("daemon control contract", () => {
 				projectCwd: "/tmp/volt",
 				config: SPAWN_OPTIONS.config,
 				sessionOptions: SPAWN_OPTIONS.session,
+				clientKey: "tui-1",
 			},
 		};
 		expect(ControlValidators.event.Check(roundTrip(spawn))).toBe(true);
-		// A TUI's spawn carries no tool policy, and its environment is the worker process's own.
+		// A TUI's spawn carries no tool policy, its environment is the worker process's own, and it names its opener.
+		const { clientKey: _clientKey, ...withoutOpener } = spawn.spec;
 		for (const spec of [
 			{ ...spawn.spec, toolPolicy: { tools: [], allowUnlistedExtensionTools: false } },
 			{ ...spawn.spec, env: SPAWN_OPTIONS.env },
 			{ ...spawn.spec, session: { sessionId: "s-1", inMemory: false } },
+			withoutOpener,
 		]) {
 			expect(ControlValidators.event.Check(roundTrip({ ...spawn, spec }))).toBe(false);
 		}
 	});
 
-	it("lets only a TUI open a conversation, and only a worker observe one's Git state", () => {
+	it("lets only a TUI open a conversation and answer its worker's questions, and only a worker ask them or observe Git state", () => {
 		expect(isRequestAllowedFor("tui", "conversation_open")).toBe(true);
 		expect(isRequestAllowedFor("cli", "conversation_open")).toBe(false);
 		expect(isRequestAllowedFor("worker", "conversation_open")).toBe(false);
 		expect(isRequestAllowedFor("worker", "change_observe")).toBe(true);
 		expect(isRequestAllowedFor("tui", "change_observe")).toBe(false);
 		expect(isRequestAllowedFor("cli", "change_observe")).toBe(false);
+		expect(isRequestAllowedFor("tui", "conversation_host_response")).toBe(true);
+		expect(isRequestAllowedFor("cli", "conversation_host_response")).toBe(false);
+		expect(isRequestAllowedFor("worker", "conversation_host_response")).toBe(false);
+		expect(isRequestAllowedFor("worker", "worker_host_request")).toBe(true);
+		expect(isRequestAllowedFor("tui", "worker_host_request")).toBe(false);
+		expect(isRequestAllowedFor("cli", "worker_host_request")).toBe(false);
 	});
 
 	it("admits the default, preset, and explicit pairing access selections", () => {

@@ -24,6 +24,7 @@ import {
 	type ExtensionState,
 	type ExtensionSummary,
 	HOST_NOTICE_SOURCE,
+	type HostPromptRequest,
 	type HostRequest,
 	type HostResponse,
 	type HostSettingsValues,
@@ -102,7 +103,6 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
-import { type DecidedProjectTrust, resolveConversationProjectTrust } from "../../core/project-trust.ts";
 import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
 import {
 	MUTABLE_WORKSPACE_REVIEW_TOOLS,
@@ -296,7 +296,12 @@ type TuiDialogOptions = ExtensionUIDialogOptions & {
 	live?: boolean;
 	/** The input is a secret, such as an API key: masked, and kept out of any history. */
 	secret?: boolean;
+	/** A selector that can show while the user types: keys typed as it appears do not answer it. */
+	guardTyping?: boolean;
 };
+
+/** How long a selector guarding against typing ignores what is typed after it shows. */
+export const OPEN_QUESTION_TYPING_GUARD_MS = 500;
 
 /** The sign-in dialog of a provider login: the `provider_auth` requests the host asks show in it. */
 interface SignInView {
@@ -422,20 +427,12 @@ export interface InteractiveModeOptions {
 	migratedProviders?: string[];
 	/**
 	 * Where the TUI reads its own settings until its client says where the
-	 * conversation runs (`conversation_info`): the startup conversation's cwd,
-	 * its project trust, and the settings profile. By default the process's
+	 * conversation runs and how its host decided its project trust
+	 * (`conversation_info`): the startup conversation's cwd, the trust known
+	 * before it opened, and the settings profile. By default the process's
 	 * cwd, untrusted, without a profile.
 	 */
 	settingsScope?: TuiSettingsScope;
-	/**
-	 * The project trust the TUI decided before it opened its conversation
-	 * (Phase 6 D4), for that conversation's project, when its host runs
-	 * elsewhere: the TUI reads its own settings with it there, and with the
-	 * saved decision elsewhere, never with its host's answer (a worker another
-	 * client may have opened). Without it, the TUI takes the trust its host
-	 * reports for the conversation it shows.
-	 */
-	projectTrust?: DecidedProjectTrust;
 	/** A name for the conversation the TUI opens (`--name`). */
 	sessionName?: string;
 	/** Cwd to trust after reload if it gained a .volt directory during this implicitly trusted session. */
@@ -717,8 +714,6 @@ export class InteractiveMode {
 	private settingsScope: TuiSettingsScope;
 	/** Whether the chat shows the project trust warning of the conversation it shows. */
 	private trustWarningShown = false;
-	/** The project trust the TUI decided at startup, when its display settings follow it (and saved decisions elsewhere). */
-	private readonly projectTrust: DecidedProjectTrust | undefined;
 	/**
 	 * What the TUI waits for from its host, shown in the status area: an
 	 * open's progress (the daemon starting, a worker starting), and a lost
@@ -732,7 +727,6 @@ export class InteractiveMode {
 	constructor(connector: ConversationConnector, options: InteractiveModeOptions = {}) {
 		this.connector = connector;
 		this.settingsScope = options.settingsScope ?? { cwd: process.cwd(), projectTrusted: false };
-		this.projectTrust = options.projectTrust;
 		this.settingsManager = this.createDisplaySettings();
 		this.liveView = this.createLiveView();
 		const tuiMode = options.tuiMode ?? this.settingsManager.getTuiMode();
@@ -1193,6 +1187,7 @@ export class InteractiveMode {
 				},
 				onStatus: (status) => this.showHostWait({ open: status }),
 				askWorkspaceRegistration: (directory) => this.askWorkspaceRegistration(directory),
+				askHostRequest: (request, signal) => this.askOpenRequest(request, signal),
 				onReconnecting: (attempt) => {
 					this.showHostWait({
 						reconnect:
@@ -1964,6 +1959,42 @@ export class InteractiveMode {
 		return answer === shared ? "shared" : answer === local ? "local" : undefined;
 	}
 
+	/**
+	 * A question the host opening the conversation asks before it is open: its
+	 * project trust prompt, or a `project_trust` hook's dialog (P7-8b). It
+	 * shows even while the TUI waits for the conversation a move leads to
+	 * (which holds rendering until that conversation shows), and it can show
+	 * while the user types, so keys typed as a choice appears do not answer
+	 * it: a confirmation puts "No" first (the trust prompt lists its
+	 * untrusting answers first itself), letters do not move the selection,
+	 * and nothing but cancelling counts for its first moment.
+	 */
+	private async askOpenRequest(request: HostPromptRequest, signal: AbortSignal): Promise<HostResponse | undefined> {
+		const suspension = this.sessionRenderSuspension;
+		this.sessionRenderSuspension = undefined;
+		suspension?.release();
+		try {
+			if (request.kind === "input") return await this.showLiveRequest(request, signal);
+			const confirm = request.kind === "confirm";
+			const outcome = await this.showExtensionSelectorOutcome(
+				confirm ? `${request.title}\n${request.message}` : request.title,
+				confirm ? ["No", "Yes"] : request.options,
+				{
+					signal,
+					live: true,
+					guardTyping: true,
+					...(request.timeoutMs === undefined ? {} : { timeout: request.timeoutMs }),
+				},
+			);
+			if (outcome.kind === "dismissed") return undefined;
+			if (outcome.kind === "cancelled") return { cancelled: true };
+			return confirm ? { confirmed: outcome.option === "Yes" } : { value: outcome.option };
+		} finally {
+			// Still moving: rendering waits for the conversation again.
+			if (this.store.moving !== undefined) this.sessionRenderSuspension ??= this.ui.suspendRendering();
+		}
+	}
+
 	/** An extension asked to shut down: at once when the conversation is idle, else once it settles. */
 	private onShutdownRequested(): void {
 		this.shutdownRequested = true;
@@ -2103,9 +2134,9 @@ export class InteractiveMode {
 
 	/**
 	 * Where the conversation the store shows runs, as its client tells: its
-	 * cwd and project trust (`conversation_info`, the trust as the TUI decided
-	 * it when it decided), and the settings profile (`settings`); undefined
-	 * when the client could not tell.
+	 * cwd and the project trust its host decided for it (`conversation_info`),
+	 * and the settings profile (`settings`); undefined when the client could
+	 * not tell.
 	 */
 	private async readSettingsScope(): Promise<TuiSettingsScope | undefined> {
 		const client = this.store.client;
@@ -2113,11 +2144,7 @@ export class InteractiveMode {
 			const [info, settings] = await Promise.all([client.query("conversation_info"), client.query("settings")]);
 			return {
 				cwd: info.cwd,
-				// The TUI's own decision, when its host runs elsewhere (Phase 6 D4): another client may have opened it.
-				projectTrusted:
-					this.projectTrust === undefined
-						? info.projectTrusted
-						: resolveConversationProjectTrust(getAgentDir(), info.cwd, this.projectTrust),
+				projectTrusted: info.projectTrusted,
 				...(settings.profile === "" ? {} : { profile: settings.profile }),
 			};
 		} catch {
@@ -2959,7 +2986,12 @@ export class InteractiveMode {
 				options,
 				(option) => settle({ kind: "selected", option }),
 				() => settle({ kind: "cancelled" }),
-				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
+				{
+					tui: this.ui,
+					timeout: opts?.timeout,
+					onToggleToolsExpanded: () => this.toggleToolOutputExpansion(),
+					...(opts?.guardTyping === true ? { typingGuard: { ignoreInputMs: OPEN_QUESTION_TYPING_GUARD_MS } } : {}),
+				},
 			);
 
 			this.activateView(this.createDedicatedView(this.extensionSelector), this.extensionSelector);

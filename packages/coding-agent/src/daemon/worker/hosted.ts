@@ -28,7 +28,7 @@ import type { SubagentRuntimeRegistration } from "../../core/subagents/index.ts"
 import type { WorkerHostKind, WorkerSpawnSpec } from "../control-protocol.ts";
 import type { DaemonLogger } from "../log.ts";
 import { observeCompactionFailures } from "./compaction-failure-log.ts";
-import type { IrohRemoteSubagentRuntimeCreatedEvent } from "./conversation-factory.ts";
+import type { IrohRemoteAgentRuntime, IrohRemoteSubagentRuntimeCreatedEvent } from "./conversation-factory.ts";
 import { type WorkerDaemonClient, WorkerRequestError } from "./daemon-client.ts";
 import { watchConversationSettings } from "./settings-watcher.ts";
 
@@ -78,10 +78,11 @@ export class WorkerConversations {
 	private readonly workspaceName: string;
 	private readonly log: ReturnType<DaemonLogger["child"]>;
 	private readonly onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
-	private readonly projectTrusted: (cwd: string, spec: WorkerSpawnSpec) => boolean;
 	private readonly hosted = new Map<string, WorkerConversation>();
 	/** What each top-level conversation was opened from, by its id. */
 	private readonly specs = new Map<string, WorkerSpawnSpec>();
+	/** Whether a project is trusted now for each top-level conversation's group, by its id: its settings reload only while it is. */
+	private readonly trust = new Map<string, (cwd: string) => boolean>();
 	/** Settles once a hosted conversation closed and was released, by its id. */
 	private readonly releases = new Map<string, Promise<void>>();
 	private readonly observations = new Map<string, GitContextObservationBinding>();
@@ -97,14 +98,11 @@ export class WorkerConversations {
 		log: ReturnType<DaemonLogger["child"]>;
 		/** Settings or credentials another process wrote changed what a hosted conversation's clients see. */
 		onCatalogChanged: (conversation: HostedConversation, catalog: "settings" | "models") => void;
-		/** Whether the project in `cwd` is trusted now, for a conversation of the group opened from `spec`: its settings reload only while it is. */
-		projectTrusted: (cwd: string, spec: WorkerSpawnSpec) => boolean;
 	}) {
 		this.client = options.client;
 		this.workspaceName = options.workspaceName;
 		this.log = options.log;
 		this.onCatalogChanged = options.onCatalogChanged;
-		this.projectTrusted = options.projectTrusted;
 		this.reviews = new HostReviewDiscussionService({
 			findRuntime: (ref, requester) => {
 				if (!this.isHosted(requester)) throw new Error("Review requester runtime is unavailable");
@@ -133,9 +131,11 @@ export class WorkerConversations {
 		});
 	}
 
-	/** Host `conversation`, a top-level conversation opened from `spec` in a host of its own. */
-	adoptTop(spec: WorkerSpawnSpec, host: ConversationHost, conversation: HostedConversation): void {
+	/** Host `opened`, a top-level conversation opened from `spec` in a host of its own. */
+	adoptTop(spec: WorkerSpawnSpec, opened: IrohRemoteAgentRuntime): void {
+		const { host, conversation } = opened;
 		this.specs.set(conversation.id, spec);
+		this.trust.set(conversation.id, opened.projectTrusted);
 		this.track({ host, conversation, kind: "conversation", top: conversation.id });
 	}
 
@@ -270,13 +270,13 @@ export class WorkerConversations {
 	 */
 	private track(hosted: WorkerConversation): void {
 		const sessionId = hosted.conversation.id;
-		const spec = this.specs.get(hosted.top);
-		if (!spec) throw new Error("A hosted conversation belongs to no top-level conversation");
+		const projectTrusted = this.trust.get(hosted.top);
+		if (!projectTrusted) throw new Error("A hosted conversation belongs to no top-level conversation");
 		const stopCompactionLog = observeCompactionFailures(hosted.conversation, this.workspaceName, this.log);
 		const stopWatching = watchConversationSettings(
 			hosted.conversation,
 			(catalog) => this.onCatalogChanged(hosted.conversation, catalog),
-			(cwd) => this.projectTrusted(cwd, spec),
+			projectTrusted,
 		);
 		void hosted.conversation.lost.then(() => {
 			if (!hosted.conversation.closed) void hosted.host.close(hosted.conversation).catch(() => undefined);
@@ -305,6 +305,7 @@ export class WorkerConversations {
 				await this.closeMembers(hosted);
 				await hosted.host.dispose().catch(() => undefined);
 				this.specs.delete(sessionId);
+				this.trust.delete(sessionId);
 			}
 			this.hosted.delete(sessionId);
 			// A stopping worker releases nothing: the daemon drops what it hosted at its exit. Otherwise

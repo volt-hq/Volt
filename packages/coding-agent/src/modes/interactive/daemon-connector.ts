@@ -17,7 +17,11 @@
  *
  * A conversation in a sensitive directory no workspace holds is registered
  * only once the user answered how (D17): shared with paired devices, or
- * local to this host. A move leads the client to a conversation by id: the
+ * local to this host. The worker opening a conversation decides its project
+ * trust (P7-8b): what it asks meanwhile (its trust prompt, a `project_trust`
+ * hook's dialog) reaches the TUI as `conversation_host_request` on this
+ * control connection, which the open's client answers; `--approve` and
+ * `--no-approve` go only to the startup conversation's project. A move leads the client to a conversation by id: the
  * connector finds where it is stored (read-only; a conversation only a
  * worker holds, such as a `--no-session` one, has no store) and opens it
  * there, in the working directory the client was in when its own is gone
@@ -36,6 +40,7 @@
 
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import type { HostResponse } from "@hansjm10/volt-protocol";
 import {
 	type ConnectorDaemon,
 	type ConnectorOpenOptions,
@@ -157,6 +162,10 @@ export class DaemonConnector implements ConversationConnector {
 	/** Conversations whose archived checkout this control connection restored (and pins). */
 	private restored = new Set<string>();
 	private readonly transports = new Set<RpcTransport>();
+	/** The opens in flight, the latest last: what their workers ask meanwhile, the latest one's client answers. */
+	private readonly openings: ConnectorOpenOptions[] = [];
+	/** The questions shown, until answered or no open waits for them. */
+	private readonly questions = new Set<AbortController>();
 	private readonly themeListeners = new Set<(themeName: string) => void>();
 	private stopped = false;
 	private disposing: Promise<void> | undefined;
@@ -176,6 +185,7 @@ export class DaemonConnector implements ConversationConnector {
 	 * `ConversationUnavailableError`.
 	 */
 	async open(target: ConnectorTarget, options: ConnectorOpenOptions = {}): Promise<OpenedConversation> {
+		this.openings.push(options);
 		try {
 			if (this.stopped) throw new ConversationUnavailableError("The TUI stopped");
 			const located = target.kind === "startup" ? this.startup : await this.locate(target.sessionId);
@@ -230,6 +240,8 @@ export class DaemonConnector implements ConversationConnector {
 			}
 			throw error;
 		} finally {
+			this.openings.splice(this.openings.indexOf(options), 1);
+			if (this.openings.length === 0) this.endQuestions();
 			options.onStatus?.(undefined);
 		}
 	}
@@ -249,6 +261,7 @@ export class DaemonConnector implements ConversationConnector {
 	/** Detach: the client's streams and the control connection close; the conversations keep running in their workers. */
 	dispose(options: { beforeDispose?: () => void } = {}): Promise<void> {
 		this.stopped = true;
+		this.endQuestions();
 		this.disposing ??= (async () => {
 			options.beforeDispose?.();
 			const transports = [...this.transports];
@@ -273,10 +286,9 @@ export class DaemonConnector implements ConversationConnector {
 	}
 
 	/**
-	 * The spawn options of an open in `cwd`. The TUI decided project trust for
-	 * its startup conversation's project only (Phase 6 D4): a worker spawned
-	 * for a conversation in another project takes that project's saved
-	 * decision.
+	 * The spawn options of an open in `cwd`. `--approve`/`--no-approve` apply
+	 * to the startup conversation's project only: the worker of a
+	 * conversation in another project decides its trust itself.
 	 */
 	private spawnFor(cwd: string): WorkerSpawnOptions {
 		const { trust, ...config } = this.spawn.config;
@@ -447,9 +459,12 @@ export class DaemonConnector implements ConversationConnector {
 			version: VERSION,
 			...(endpoint.authToken === undefined ? {} : { authToken: endpoint.authToken }),
 			reconnect: false,
-			onEvent: (event) => this.onEvent(event),
+			onEvent: (event) => this.onEvent(client, event),
 			onConnectionStateChange: (state) => {
-				if (state === "gone" && this.control === client) this.control = undefined;
+				if (state !== "gone") return;
+				if (this.control === client) this.control = undefined;
+				// What the daemon asked on it can no longer be answered.
+				this.endQuestions();
 			},
 		});
 		try {
@@ -514,7 +529,56 @@ export class DaemonConnector implements ConversationConnector {
 		return next;
 	}
 
-	private onEvent(event: ControlEvent): void {
+	/** Close the questions shown: nothing answers them now. */
+	private endQuestions(): void {
+		for (const question of [...this.questions]) question.abort();
+		this.questions.clear();
+	}
+
+	/**
+	 * A worker opening a conversation for this TUI asks it (P7-8b): the
+	 * client of the latest open in flight shows the question, and its answer
+	 * goes back on the connection that asked. A worker asks one question at a
+	 * time, so a new one closes any still shown (one it gave up on, such as a
+	 * hook's that timed out). Without an open in flight, or a client that
+	 * answers, it answers nothing.
+	 */
+	private async answerQuestion(
+		control: DaemonClient,
+		event: Extract<ControlEvent, { type: "conversation_host_request" }>,
+	): Promise<void> {
+		const options = this.openings.at(-1);
+		const ask = options?.askHostRequest;
+		let response: HostResponse | undefined;
+		if (options !== undefined && ask !== undefined && !this.stopped) {
+			this.endQuestions();
+			const question = new AbortController();
+			this.questions.add(question);
+			options.onStatus?.(undefined);
+			try {
+				response = await ask(event.request, question.signal);
+			} catch {
+				response = undefined;
+			} finally {
+				this.questions.delete(question);
+			}
+			if (question.signal.aborted) response = undefined;
+			else if (this.openings.includes(options)) options.onStatus?.("Opening the conversation");
+		}
+		await control
+			.request({
+				type: "conversation_host_response",
+				requestId: event.requestId,
+				...(response === undefined ? {} : { response }),
+			})
+			.catch(() => undefined);
+	}
+
+	private onEvent(control: DaemonClient, event: ControlEvent): void {
+		if (event.type === "conversation_host_request") {
+			void this.answerQuestion(control, event);
+			return;
+		}
 		if (event.type === "daemon_shutdown") {
 			this.shutdownAt = Date.now();
 			return;

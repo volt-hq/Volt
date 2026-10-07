@@ -22,6 +22,7 @@ import { LogSessionIdSchema, SessionReferenceSchema } from "./entries.ts";
 import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, ResultFrameSchema } from "./frames.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
+import { HostPromptRequestSchema, HostResponseSchema } from "./live.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
 import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
@@ -259,9 +260,11 @@ const NameListSchema = Type.Array(codePoints(1, 256, SINGLE_LINE), { maxItems: 2
 export const WorkerAgentConfigSchema = Type.Object(
 	{
 		/**
-		 * The project trust the opener decided (`--approve`/`--no-approve`, or
-		 * its saved or prompted decision) for the project of the conversation
-		 * it opens; the worker's conversations elsewhere use their saved decision.
+		 * `--approve`/`--no-approve`: the opener's override of project trust,
+		 * for the project of the conversation it opens. Without one, and for
+		 * the worker's conversations elsewhere, the worker decides each
+		 * conversation's trust itself (its `project_trust` hooks, the saved
+		 * decision, `defaultProjectTrust`, the opener's answer to the trust prompt).
 		 */
 		trust: Type.Optional(Type.Boolean()),
 		/** The settings profile. */
@@ -478,6 +481,12 @@ export const WorkerSpawnSpecSchema = Type.Union([
 			config: WorkerAgentConfigSchema,
 			sessionOptions: WorkerSessionOptionsSchema,
 			modelScopePatterns: Type.Optional(Type.Array(Type.String())),
+			/**
+			 * The opener's client key (the TUI process): the project trust the
+			 * worker decided for that TUI's earlier conversations applies to its
+			 * later ones of the same project, as in one process before.
+			 */
+			clientKey: codePoints(1, 128, SINGLE_LINE),
 		},
 		closed,
 	),
@@ -862,6 +871,27 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		workspaceRegistration: Type.Optional(WorkspaceRegistrationSchema),
 	}),
 	/**
+	 * TUI: its answer to `conversation_host_request`, on the connection that
+	 * was asked; no `response` when it closed the question without one.
+	 * Answered by `ok`.
+	 */
+	conversation_host_response: withId("conversation_host_response", {
+		requestId: Type.String({ maxLength: 64 }),
+		response: Type.Optional(HostResponseSchema),
+	}),
+	/**
+	 * Worker: a question about a TUI-opened conversation it is opening (the
+	 * project trust prompt, or a `project_trust` hook's dialog), for the TUI
+	 * whose open it is. Answered by `worker_host_response` once that TUI
+	 * answered, or at once without a `response` when it cannot (it left, or
+	 * the conversation is not one opening for a TUI). The daemon's wait for
+	 * the conversation's `worker_ready` pauses while the TUI is asked.
+	 */
+	worker_host_request: withId("worker_host_request", {
+		sessionId: LogSessionIdSchema,
+		request: HostPromptRequestSchema,
+	}),
+	/**
 	 * Worker: a conversation `worker_open` sent is open and its log locked;
 	 * offers may follow. The first makes the worker live.
 	 */
@@ -939,6 +969,7 @@ export const CONTROL_REQUEST_SCHEMAS = {
 
 /** The requests a worker connection may send; a control connection may send none of them. */
 export const WORKER_REQUEST_TYPES = [
+	"worker_host_request",
 	"worker_ready",
 	"worker_open_failed",
 	"worker_activity",
@@ -981,6 +1012,8 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.theme_set,
 	CONTROL_REQUEST_SCHEMAS.keep_awake_set,
 	CONTROL_REQUEST_SCHEMAS.conversation_open,
+	CONTROL_REQUEST_SCHEMAS.conversation_host_response,
+	CONTROL_REQUEST_SCHEMAS.worker_host_request,
 	CONTROL_REQUEST_SCHEMAS.worker_ready,
 	CONTROL_REQUEST_SCHEMAS.worker_open_failed,
 	CONTROL_REQUEST_SCHEMAS.worker_activity,
@@ -1087,6 +1120,8 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		directory: Type.String(),
 		reason: SensitiveDirectoryReasonSchema,
 	}),
+	/** The TUI's answer to `worker_host_request`; none when it gave none, or could not be asked. */
+	worker_host_response: withId("worker_host_response", { response: Type.Optional(HostResponseSchema) }),
 	worker_forward_result: withId("worker_forward_result", { frame: ControlRelayOutcomeSchema }),
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
 	/** The checkout a worker restored is pinned until it releases `pinId`. */
@@ -1111,6 +1146,7 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
 	CONTROL_RESPONSE_SCHEMAS.conversation_opened,
 	CONTROL_RESPONSE_SCHEMAS.workspace_confirmation_required,
+	CONTROL_RESPONSE_SCHEMAS.worker_host_response,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_authority_result,
 	CONTROL_RESPONSE_SCHEMAS.worker_worktree_pinned,
@@ -1166,6 +1202,17 @@ export const CONTROL_EVENT_SCHEMAS = {
 	}),
 	daemon_shutdown: event("daemon_shutdown", {}),
 	/**
+	 * To a TUI: a question the worker opening its conversation asks (the
+	 * project trust prompt, or a `project_trust` hook's dialog), sent only to
+	 * the connection whose `conversation_open` that is. Answer it with
+	 * `conversation_host_response`; it ends with that open.
+	 */
+	conversation_host_request: event("conversation_host_request", {
+		requestId: Type.String(),
+		sessionId: LogSessionIdSchema,
+		request: HostPromptRequestSchema,
+	}),
+	/**
 	 * To a worker: a top-level conversation it opens, in a host of its own:
 	 * the one it was spawned for after its hello, then each compatible open
 	 * the daemon routes to it (D11). Answered by `worker_ready` or
@@ -1207,6 +1254,7 @@ export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.keep_awake_changed,
 	CONTROL_EVENT_SCHEMAS.pairing_progress,
 	CONTROL_EVENT_SCHEMAS.daemon_shutdown,
+	CONTROL_EVENT_SCHEMAS.conversation_host_request,
 	CONTROL_EVENT_SCHEMAS.worker_open,
 	CONTROL_EVENT_SCHEMAS.worker_stop,
 	CONTROL_EVENT_SCHEMAS.worker_close,

@@ -79,27 +79,19 @@ describe("the TUI's display settings through its client", () => {
 		expect(info).toMatchObject({ cwd: other, projectTrusted: true });
 	});
 
-	it("keeps to its own trust decision when its host runs elsewhere, not the host's (Phase 6 D4)", async () => {
-		const harness = await createTuiHarness({ globalSettings: SETTINGS });
-		harnesses.push(harness);
-		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
-		const tui = await harness.startMode({
-			columns: 110,
-			rows: 40,
-			projectTrust: { cwd: harness.startup.cwd, trusted: true },
-		});
-		const access = tui.mode as unknown as ModeAccess;
+	it("follows the project trust its host decided, not what is saved (P7-8b)", async () => {
+		const { harness, tui, access } = await start();
 		const other = temporaryDirectory();
 		mkdirSync(join(other, ".volt"));
 		writeFileSync(join(other, ".volt", "settings.json"), JSON.stringify({ editorPaddingX: 2 }));
 		const ref = await storeSession(harness, other);
 		expect(await tui.resume(ref)).toMatchObject({ cancelled: false });
 
+		// The host trusts the project (its factory decides so); nothing saved does, and the TUI follows the host.
 		await vi.waitFor(() => expect(access.settingsScope.cwd).toBe(other));
-		// The host trusts the project; nothing the TUI decided or saved does.
 		expect(await tui.store.client.query("conversation_info")).toMatchObject({ cwd: other, projectTrusted: true });
-		expect(access.settingsScope.projectTrusted).toBe(false);
-		expect(access.settingsManager.getEditorPaddingX()).toBe(0);
+		expect(access.settingsScope.projectTrusted).toBe(true);
+		expect(access.settingsManager.getEditorPaddingX()).toBe(2);
 	});
 
 	it("follows the settings profile a switch moves the conversation to", async () => {

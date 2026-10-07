@@ -1,32 +1,29 @@
 /**
  * Where the interactive TUI starts (Phase 7 plan §9 row 8): the conversation
- * it opens in a daemon worker, resolved read-only from its arguments, and the
- * project trust it decides for that conversation's project before it opens
- * (Phase 6 D4). The TUI never opens a stored log for writing: a worker does.
- * A JSONL file it starts from (`--session`/`--fork` with a file path) is
- * imported into the store here, as a new session the worker then opens.
+ * it opens in a daemon worker, resolved read-only from its arguments. The
+ * TUI never opens a stored log for writing: a worker does, and decides its
+ * project trust (P7-8b). A JSONL file it starts from (`--session`/`--fork`
+ * with a file path) is imported into the store here, as a new session the
+ * worker then opens.
  */
 
 import { existsSync } from "node:fs";
 import chalk from "chalk";
-import { type DecidedProjectTrust, projectTrustPath, resolveProjectTrusted } from "../core/project-trust.ts";
 import { formatMissingSessionCwdPrompt } from "../core/session-cwd.ts";
 import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "../core/session-lookup.ts";
 import { findSessionInfoById, SessionManager, type SessionReference } from "../core/session-manager.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
 import { initTheme, stopThemeWatcher } from "../core/theme/runtime.ts";
-import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../core/trust-manager.ts";
 import type { ConversationOpenTarget } from "../daemon/control-protocol.ts";
 import { isPathUnderWorktreesRoot } from "../daemon/worktree-manager.ts";
 import type { Args } from "./args.ts";
-import { createProjectTrustContext } from "./project-trust.ts";
 import { selectSession } from "./session-picker.ts";
 import { showStartupSelector } from "./startup-ui.ts";
 
 /** The conversation the TUI opens first. */
 export interface TuiStartupTarget {
 	readonly target: ConversationOpenTarget;
-	/** The working directory it runs in, as far as the TUI knows: where its project trust and display settings are read. */
+	/** The working directory it runs in, as far as the TUI knows: where its display settings are read. */
 	readonly cwd: string;
 }
 
@@ -209,36 +206,4 @@ export async function resolveTuiStartupTarget(
 	}
 
 	return newTarget();
-}
-
-/**
- * The project trust the TUI decides for the project of `cwd` before it opens
- * a conversation there (Phase 6 D4): `--approve`/`--no-approve`, else, when
- * the project holds what needs trust, its saved decision, the default the
- * settings name, or the user's answer to the trust prompt. Undefined when
- * there is nothing to decide: the worker trusts a project without such
- * resources until it gains them, and a managed worktree whose parent
- * checkout is unknown runs untrusted.
- */
-export async function decideTuiProjectTrust(
-	parsed: Pick<Args, "projectTrustOverride">,
-	cwd: string,
-	agentDir: string,
-	settingsManager: SettingsManager,
-): Promise<DecidedProjectTrust | undefined> {
-	if (parsed.projectTrustOverride !== undefined) return { cwd, trusted: parsed.projectTrustOverride };
-	const trustPath = projectTrustPath(agentDir, cwd);
-	if (trustPath === undefined || !hasTrustRequiringProjectResources(cwd)) return undefined;
-	const trusted = await resolveProjectTrusted({
-		cwd: trustPath,
-		trustStore: new ProjectTrustStore(agentDir),
-		defaultProjectTrust: settingsManager.getDefaultProjectTrust(),
-		projectTrustContext: createProjectTrustContext({
-			cwd: trustPath,
-			mode: "interactive",
-			settingsManager,
-			hasUI: true,
-		}),
-	});
-	return { cwd, trusted };
 }
