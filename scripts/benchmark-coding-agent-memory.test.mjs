@@ -67,7 +67,7 @@ describe("memory benchmark argument parsing", () => {
 		assert.equal(parsed.runs, 3);
 		assert.equal(parsed.warmup, 1);
 		assert.equal(parsed.settleMs, 250);
-		assert.equal(parsed.scenarios.length, 9);
+		assert.equal(parsed.scenarios.length, 8);
 	});
 
 	test("quick selects one measured run and canonicalizes selected scenarios", () => {

@@ -167,12 +167,11 @@ Comparison requires identical Node version, platform, architecture, selected sce
 | `rpc-idle` | `idle` | Protocol `hello` and a snapshot subscription while stdin and the benchmark snapshot channel remain open, then clean EOF shutdown |
 | `runtime-idle` | `baseline`, `post-disposal` | Persisted conversation in a `ConversationHost` with the faux provider |
 | `conversation` | `baseline`, `populated`, `post-disposal` | Schema-v1 fixed conversation: 20 user/assistant turns, exactly 2 KiB of text per message |
-| `reconnect-retention` | `baseline`, `detached`, `post-cycle`, `post-disposal` | Real registry attach/detach, ten warm same-runtime reattaches, then detached retirement with a short TTL |
 | `extension` | `before-activation`, `active`, `post-disposal` | Generated on-disk TypeScript extension loaded through Jiti, with a registered tool and `session_start` listener |
 | `mcp` | `before-activation`, `active`, `post-disposal` | Local stdio MCP connect, list, call, and disconnect through `McpManager` |
 | `lsp` | `before-activation`, `active`, `post-disposal` | Benchmark-owned stdio language server queried through the session `lsp` tool |
 
-Workload schema v1 also fixes two GC passes, ten reconnect cycles, one MCP call, one LSP query, and a reconnect-retention TTL of `settle-ms + 1000`. Changing any parameter makes reports comparison-incompatible.
+Workload schema v2 also fixes two GC passes, one MCP call, and one LSP query. Changing any parameter makes reports comparison-incompatible.
 
 ### Output and interpretation
 

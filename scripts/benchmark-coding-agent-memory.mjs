@@ -29,7 +29,6 @@ export const MEMORY_BENCHMARK_SCENARIOS = Object.freeze([
 	"rpc-idle",
 	"runtime-idle",
 	"conversation",
-	"reconnect-retention",
 	"extension",
 	"mcp",
 	"lsp",
@@ -41,7 +40,6 @@ export const MEMORY_BENCHMARK_CHECKPOINTS = Object.freeze({
 	"rpc-idle": ["idle"],
 	"runtime-idle": ["baseline", "post-disposal"],
 	conversation: ["baseline", "populated", "post-disposal"],
-	"reconnect-retention": ["baseline", "detached", "post-cycle", "post-disposal"],
 	extension: ["before-activation", "active", "post-disposal"],
 	mcp: ["before-activation", "active", "post-disposal"],
 	lsp: ["before-activation", "active", "post-disposal"],
@@ -755,7 +753,6 @@ async function runWorkerScenario(scenario, options, setActiveCleanup) {
 	const startedAt = performance.now();
 	let running;
 	try {
-		const retentionTtlMs = options.settleMs + 1_000;
 		running = spawnLongRunning(
 			process.execPath,
 			[
@@ -768,8 +765,6 @@ async function runWorkerScenario(scenario, options, setActiveCleanup) {
 				scenario,
 				"--root",
 				context.paths.root,
-				"--retention-ttl-ms",
-				String(retentionTtlMs),
 			],
 			{ cwd: repoRoot, env: context.env },
 		);
@@ -1175,7 +1170,6 @@ function getGitMetadata() {
 
 function createReport(options, runs) {
 	const cpuList = cpus();
-	const retentionTtlMs = options.settleMs + 1_000;
 	const report = {
 		schemaVersion: REPORT_SCHEMA_VERSION,
 		kind: "volt-coding-agent-memory",
@@ -1201,11 +1195,10 @@ function createReport(options, runs) {
 			warmupRuns: options.warmup,
 			measuredRuns: options.runs,
 			workload: {
-				schemaVersion: 1,
+				schemaVersion: 2,
 				settleMs: options.settleMs,
 				gcPasses: 2,
 				conversation: { turns: 20, payloadBytesPerMessage: 2048 },
-				reconnectRetention: { cycles: 10, ttlMs: retentionTtlMs },
 				extension: { schemaVersion: 1, language: "typescript", loader: "jiti" },
 				mcp: { schemaVersion: 1, transport: "stdio", calls: 1 },
 				lsp: { schemaVersion: 1, transport: "stdio", queries: 1 },

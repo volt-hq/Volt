@@ -269,7 +269,7 @@ export async function exportSessionToHtml(
 }
 
 /**
- * Export session file to HTML (standalone, without AgentState).
+ * Export a session file to HTML without a running session.
  * Used by CLI for exporting arbitrary session files.
  */
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
