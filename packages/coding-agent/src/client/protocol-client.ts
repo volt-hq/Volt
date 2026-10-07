@@ -154,6 +154,13 @@ export interface ProtocolClientDisconnected {
 	readonly error: Error;
 }
 
+/** What moved the client: an intent of its own, and the conversation it left. */
+export interface ProtocolClientMoveCause {
+	/** The intent's name. */
+	readonly intent: string;
+	readonly from: string;
+}
+
 /**
  * What changed the client: the frame it applied (a snapshot, entry, head, or
  * live frame, an `ended` subscription, or a `changed` catalog), its lost
@@ -353,6 +360,10 @@ export class ProtocolClient {
 	private failure: Error | undefined;
 	/** The conversation a move redirected the client to, until the next `connect` subscribes to it. */
 	private movingTo: string | undefined;
+	/** What moved the client to `movingTo`, when an intent of its own did. */
+	private movedBy: ProtocolClientMoveCause | undefined;
+	/** The intent the host accepted last as moving the client, and the conversation it named, until a move ends the subscription. */
+	private acceptedMove: { readonly intent: string; readonly conversation: string } | undefined;
 	/** The connection the client lost, until the next `connect` resumes (`resumeAfterLoss`). */
 	private lostConnection: ProtocolClientDisconnected | undefined;
 	private requestOrder = 0;
@@ -387,6 +398,16 @@ export class ProtocolClient {
 	}
 
 	/**
+	 * While the client moves: the intent of its own that moved it, which the
+	 * host accepted naming the target (`accepted{conversation}` before
+	 * `ended{moved}`), and the conversation it left. Undefined for a move it
+	 * did not ask for that way, such as one an extension command started.
+	 */
+	get moveCause(): ProtocolClientMoveCause | undefined {
+		return this.movingTo === undefined ? undefined : this.movedBy;
+	}
+
+	/**
 	 * While the client moves and has no connection to its target yet, move it
 	 * to `conversation` instead (such as back to the one it left, when its
 	 * target cannot be reached): the next `connect` subscribes there.
@@ -394,6 +415,7 @@ export class ProtocolClient {
 	retarget(conversation: string): void {
 		if (this.movingTo === undefined) throw new Error("The client is not moving");
 		this.movingTo = conversation;
+		this.movedBy = undefined;
 	}
 
 	/** Whether the client lost its connection and waits for the next one (`resumeAfterLoss`). */
@@ -467,6 +489,8 @@ export class ProtocolClient {
 		const conversation = moving ?? resume?.conversation ?? welcome.conversation;
 		if (conversation === undefined) throw new Error("The host attached the client to no conversation");
 		this.movingTo = undefined;
+		this.movedBy = undefined;
+		this.acceptedMove = undefined;
 		this.subscribe(conversation, resume ? this.clientState.ordinal : "snapshot");
 		if (moving !== undefined || resuming) {
 			// What the client asked before its move or its lost connection, or since, in the order it asked.
@@ -654,6 +678,7 @@ export class ProtocolClient {
 	async stop(reason: Error = new Error("The client stopped")): Promise<void> {
 		const transport = this.transport ?? this.failedTransport;
 		this.movingTo = undefined;
+		this.movedBy = undefined;
 		this.fail(reason);
 		this.failedTransport = undefined;
 		await transport?.close();
@@ -797,7 +822,13 @@ export class ProtocolClient {
 					this.liveState = emptyLiveFold();
 					this.queueChangedAt = 0;
 					this.phaseBasedOn = -1;
-					if (this.options.followMoves === "reconnect") this.redirected(frame.target);
+					const accepted = this.acceptedMove;
+					this.acceptedMove = undefined;
+					const cause =
+						accepted?.conversation === frame.target && subscription
+							? { intent: accepted.intent, from: subscription.conversation }
+							: undefined;
+					if (this.options.followMoves === "reconnect") this.redirected(frame.target, cause);
 					else this.subscribe(frame.target, "snapshot");
 				} else if (frame.reason === "shutdown" && this.options.resumeAfterLoss === true) {
 					// The host shuts down: the client resumes on the host it reconnects to.
@@ -814,8 +845,13 @@ export class ProtocolClient {
 				if (!pending) return;
 				this.intents.delete(frame.intentId);
 				clearTimeout(pending.timer);
-				if (frame.type === "accepted") pending.resolve(frame);
-				else pending.reject(new ProtocolRejectedError(pending.name, frame.reason));
+				if (frame.type === "accepted") {
+					// A structural intent names the conversation it moved the client to before the move ends the
+					// subscription; one naming where the client is already (a retry answered after the move) moves nothing.
+					if (frame.conversation !== undefined && frame.conversation !== subscription?.conversation)
+						this.acceptedMove = { intent: pending.name, conversation: frame.conversation };
+					pending.resolve(frame);
+				} else pending.reject(new ProtocolRejectedError(pending.name, frame.reason));
 				return;
 			}
 			case "result":
@@ -850,13 +886,15 @@ export class ProtocolClient {
 	}
 
 	/**
-	 * The host redirected the client to `target` and ends this connection: let
-	 * go of it without failing. What the client asked and was not answered
-	 * waits for the next connection, which subscribes to `target`.
+	 * The host redirected the client to `target` (for `cause`, when an intent
+	 * of its own moved it) and ends this connection: let go of it without
+	 * failing. What the client asked and was not answered waits for the next
+	 * connection, which subscribes to `target`.
 	 */
-	private redirected(target: string): void {
+	private redirected(target: string, cause: ProtocolClientMoveCause | undefined): void {
 		const transport = this.transport;
 		this.movingTo = target;
+		this.movedBy = cause;
 		this.subscription = undefined;
 		for (const detach of this.detachTransport.splice(0)) detach();
 		this.transport = undefined;

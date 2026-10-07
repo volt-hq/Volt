@@ -420,6 +420,29 @@ export const ConversationOpenTargetSchema = Type.Union([
 ]);
 export type ConversationOpenTarget = Static<typeof ConversationOpenTargetSchema>;
 
+/**
+ * Why a TUI opens a conversation: a session change of its own led it there
+ * (`new` for a new session, `resume` for a stored or imported one, `fork` for
+ * a fork or clone), from the conversation it left. A worker that starts the
+ * conversation for this open reports the reason in its extensions'
+ * `session_start`; an open that attaches to a running conversation starts
+ * nothing.
+ */
+export const ConversationOpenCauseSchema = Type.Object(
+	{
+		reason: stringEnum(["new", "resume", "fork"]),
+		/**
+		 * The conversation the TUI left, and the session directory it is stored
+		 * in. The daemon names it to the conversation's extensions
+		 * (`previousSessionRef`) only when it finds it stored there, running in
+		 * the same workspace.
+		 */
+		previous: Type.Optional(Type.Object(storedSession, closed)),
+	},
+	closed,
+);
+export type ConversationOpenCause = Static<typeof ConversationOpenCauseSchema>;
+
 const workerSpawnSpecCommon = {
 	workerId: Type.String(),
 	workspace: Type.Object(
@@ -487,6 +510,21 @@ export const WorkerSpawnSpecSchema = Type.Union([
 			 * later ones of the same project, as in one process before.
 			 */
 			clientKey: codePoints(1, 128, SINGLE_LINE),
+			/**
+			 * The opener's session change that led it to the conversation
+			 * (`conversation_open.cause`): its extensions' `session_start` has
+			 * this reason, and the conversation left when it is a stored one of
+			 * the same workspace. Without it, `startup`.
+			 */
+			sessionStart: Type.Optional(
+				Type.Object(
+					{
+						reason: ConversationOpenCauseSchema.properties.reason,
+						previousSessionRef: Type.Optional(SessionReferenceSchema),
+					},
+					closed,
+				),
+			),
 		},
 		closed,
 	),
@@ -869,6 +907,8 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		 * `shared` by default for any other; ignored when a workspace holds it.
 		 */
 		workspaceRegistration: Type.Optional(WorkspaceRegistrationSchema),
+		/** The TUI's own session change that led it to the conversation. */
+		cause: Type.Optional(ConversationOpenCauseSchema),
 	}),
 	/**
 	 * TUI: its answer to `conversation_host_request`, on the connection that

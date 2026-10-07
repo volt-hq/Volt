@@ -54,6 +54,7 @@ export type {
 	ControlWorkerStatus,
 	ControlWorkspaceStatus,
 	ControlWorktreeStatus,
+	ConversationOpenCause,
 	ConversationOpenTarget,
 	DaemonRemotePolicyStatus,
 	HelloAck,
@@ -78,7 +79,7 @@ export type {
 	WorkspaceRegistration,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;

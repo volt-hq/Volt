@@ -34,7 +34,7 @@ import {
 } from "../../core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
-import type { ProjectTrustContext } from "../../core/extensions/index.ts";
+import type { ProjectTrustContext, SessionStartEvent } from "../../core/extensions/index.ts";
 import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
 import { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../core/host/hosted-conversation.ts";
@@ -116,6 +116,8 @@ export interface IrohRemoteAgentRuntimeOptions {
 	worktreeDaemon?: SessionWorktreeDaemon;
 	/** A TUI-opened worker's options, in place of a phone's `toolPolicy`. */
 	cli?: WorkerCliOptions;
+	/** The `session_start` the conversation's extensions see: why its opener opened it, `startup` by default. */
+	sessionStartEvent?: SessionStartEvent;
 }
 
 export interface IrohRemoteSubagentRuntimeCreatedEvent extends SubagentRuntimeCreatedEvent {
@@ -444,7 +446,10 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 		});
 		const opened = await host.open(
 			{ kind: "adopt", sessionManager: sessionTarget.sessionManager, cwd: runtimeCwd },
-			{ profile: options.profile },
+			{
+				profile: options.profile,
+				...(options.sessionStartEvent === undefined ? {} : { sessionStartEvent: options.sessionStartEvent }),
+			},
 		);
 		if (opened.cancelled) throw new Error("Remote conversation open was cancelled");
 		runtime = {
