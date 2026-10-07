@@ -449,11 +449,15 @@ Implementation surface: the TUI's runtime today uses its own process cwd. `Sessi
 
 #### 5.2.2 Fixing the auto-registration trap
 
+> **Amended by the [daemon-hosted conversations design](daemon-hosted-conversations-design.md)** (architecture rewrite Phase 7, [#585](https://github.com/volt-hq/Volt/issues/585)): lease takeover became worker attach. The daemon resolves a TUI's working directory in `conversation_open` (the managed worktree's parent workspace first), and registers a directory only when no workspace holds it, asking first for a sensitive one. A TUI resuming a worktree session attaches to the worker hosting it, or the worker opens it in the checkout, which the daemon restores first when it was archived. There is no TUI relay serving and no `worktrees` control capability.
+
 `createDaemonAttach.resolveWorkspace` (daemon-attach.ts:192-229) prefix-matches the TUI cwd against workspace paths and otherwise **auto-registers a new workspace**. A TUI launched inside `~/.volt/agent/worktrees/--…--/fix-login` would silently mint a bogus workspace, splitting lease keys from the daemon's worktree conversations.
 
 Fix: add control request `{ type: "worktree_resolve"; id: string; path: string }` → `{ workspaceName, worktreeId } | not_found`. `resolveWorkspace` calls it before the auto-register fallback; on a hit, it uses the **parent workspace name** for `lease_acquire`, so lease keys stay `(parentWorkspaceName, sessionId)` and co-attach/relay work identically to main-checkout sessions.
 
 #### 5.2.3 Lease takeover with the worktree cwd
+
+> **Superseded** (see the §5.2.2 note): workers serve relays with the worktree sanitizer roots (`src/daemon/worker/serve-phone.ts`).
 
 - **Session file reload (warm/cold handoff, `interactive-mode.ts:1824-1841`):** the session header cwd *is* the worktree path, so `SessionManager.open` without override already yields the worktree cwd. The TUI must additionally verify the checkout exists and refuse takeover with a clear error when it does not (rather than resurrecting a ghost cwd — session-manager.ts:1477 behavior).
 - **Relay serving after takeover:** the TUI builds its serving authorization from `RelayPreamble.authorization` and passes `workspacePath` into `runIrohRemoteRpcMode` (interactive-mode.ts:1973-1990, 2027-2033) — sanitization would use the parent path while the runtime emits worktree paths, leaking host paths to the phone. Extend `RelayPreamble` (`control-protocol.ts:219-244`):

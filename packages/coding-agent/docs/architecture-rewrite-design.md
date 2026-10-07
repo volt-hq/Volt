@@ -1,6 +1,6 @@
 # RFC: Volt Architecture Rewrite
 
-- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps). §7.1 and §7.3 amended 2026-10-04 (explicit resume, retention on running work). §4.3, §8.1, and §8.3 amended 2026-10-04 (presentations from presenters, single-file manifest trust, settings subset, theme removal).
+- Status: Implemented; progress, per-PR summaries, and measured net line changes are tracked in [#585](https://github.com/volt-hq/Volt/issues/585). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps). §7.1 and §7.3 amended 2026-10-04 (explicit resume, retention on running work). §4.3, §8.1, and §8.3 amended 2026-10-04 (presentations from presenters, single-file manifest trust, settings subset, theme removal). §6.3 amended 2026-10-06 (`worker_forward` replaces `relay_rpc`).
 - Date: 2026-10-02
 - Scope: all four packages (`packages/ai`, `packages/agent`, `packages/tui`, `packages/coding-agent`) plus a new `packages/protocol`. `volt-hq/volt-app` adapts through filed issues.
 - Release: ships in the next release (0.3.0), together with the removal of Pi extension compatibility (#573). There is no intermediate release.

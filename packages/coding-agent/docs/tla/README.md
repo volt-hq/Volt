@@ -208,7 +208,10 @@ plan's properties.
   conversation whose open fails, graceful daemon stop (the forced retirement
   `RetireStale` applies to one workspace), and the handoff write a redirect makes
   to its target log (a lock-guarded write that fails the move when the target is
-  held).
+  held). The answer to an extension command that moves its own client is not
+  written on the old relay, as `Redirect` assumes of earlier frames: the client
+  retries the intent on its new connection and the host answers it from the
+  client key's outcome window.
 
 ### Bounds and result
 

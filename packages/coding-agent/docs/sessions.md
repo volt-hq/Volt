@@ -4,7 +4,7 @@ Volt saves conversations as sessions so you can continue work, branch from earli
 
 ## Session Storage
 
-Volt stores each workspace's sessions in `sessions.sqlite` under its directory in `~/.volt/agent/sessions/`. A custom `--session-dir` contains its own `sessions.sqlite`. This SQLite database is the live authoritative store; sessions are addressed by stable IDs instead of live files.
+Volt stores the sessions of each working directory in `sessions.sqlite`, in a directory of its own under `~/.volt/agent/sessions/`. A custom `--session-dir` contains its own `sessions.sqlite`. This SQLite database is the live authoritative store; sessions are addressed by stable IDs instead of live files.
 
 ```bash
 volt -c                  # Continue most recent session
@@ -15,7 +15,9 @@ volt --session <id|path> # Resume by partial ID, or import a JSONL snapshot by p
 volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a new session
 ```
 
-Use `/session` in interactive mode to see the current store directory, session ID, message count, tokens, and cost.
+In interactive Volt, `--session` with the ID of a session from another project offers to fork it into the current directory.
+
+Use `/session` in interactive mode to see the session's name, store directory (`In-memory` with `--no-session`), session ID, message counts, tokens, and cost.
 
 JSONL is not live storage. It is used only for explicit snapshot import and export; passing a path to `--session` or `--fork` imports a current `snapshotVersion: 1` snapshot into SQLite as a new session (see [Fork Lineage](#fork-lineage)).
 
@@ -23,29 +25,55 @@ Session listing, exact-ID resolution, continuation candidate selection, and remo
 
 For storage, snapshots, and the `SessionManager` API, see [Session Format](session-format.md).
 
+## Where Conversations Run
+
+Interactive Volt does not run its conversations in the terminal's process. They run in conversation workers, processes that the background daemon starts and supervises, and the TUI is a client of the conversation it shows ([Background daemon](daemon.md#conversation-workers)). Interactive Volt starts the daemon when none runs. `volt -p`, `--mode json`, `--mode rpc`, and SDK embeddings run their conversation in their own process.
+
+### Quitting and Coming Back
+
+Quitting the TUI detaches it; its conversation stays open in its worker. If a turn is running, quitting asks first:
+
+- **Stop turn and quit** (the default) stops the turn, waits up to a minute for it to settle, then quits.
+- **Leave running in background** quits and lets the turn finish in the worker.
+
+Other running work, such as background jobs, subagents, and reviews, keeps running in the worker without asking. `volt -c`, `volt -r`, `volt --session <id>`, or `/resume` attach to the conversation again, including while its turn still runs. Stopping the daemon (`volt daemon stop`, or `volt update`) lets each running turn finish for up to a minute, then closes every conversation; see [Background daemon](daemon.md#crashes-restarts-and-stopping).
+
+### Several Terminals and Phones
+
+Any number of terminals, and paired phones, can show the same conversation at once; they are all clients of the one worker that has it open. Every client sees the conversation as it streams, and a message sent while a turn runs queues as it does with one terminal. An extension's dialog goes to every client that can answer it: the first answer counts, and the dialog closes in the others. `/clear`, `/resume`, `/fork`, `/clone`, and `/import` move only the terminal that ran them; the other clients stay on the conversation. See [Background daemon](daemon.md#several-terminals-and-phones).
+
+### When a Conversation Closes
+
+A worker keeps a conversation open while a client shows it and while it is active: a turn or another operation runs, or work runs (a background job, a subagent, a review, an approved host action, or extension work). Once no client is attached and it is idle, the conversation stays open for 30 minutes by default, so attaching again is quick, then closes and its extensions receive `session_shutdown`; see [Background daemon](daemon.md#retention-and-background). Work suspended since a restart and host actions still waiting for approval do not keep it open.
+
+A conversation started with `volt --no-session` exists only in its worker's memory. Only the terminal that started it can attach, it is not listed, and it ends 10 seconds after that terminal leaves it.
+
+If a worker crashes, a turn it was running is lost. The TUI shows `Reconnecting` and opens the conversation again from what was saved.
+
 ### One Volt Process per Session
 
-A session can be open for writing in only one Volt process at a time: the interactive TUI, `volt -p`, `--mode json`, `--mode rpc`, an SDK embedding, a subagent, or a daemon conversation a phone is using. Each takes an exclusive lock on `<session dir>/locks/<sha256(session id)>.lock` before it opens the session and holds it until it closes the session; the operating system releases it if the process exits. Taking the lock never waits.
+A session can be open for writing in only one Volt process at a time: the worker hosting an interactive conversation, or the process of `volt -p`, `--mode json`, `--mode rpc`, or an SDK embedding. A subagent's conversation is open in its parent's process. Each takes an exclusive lock on `<session dir>/locks/<sha256(session id)>.lock` before it opens the session and holds it until it closes the session; the operating system releases it if the process exits. Taking the lock never waits.
 
-Opening a session that is already open elsewhere fails with a `conversation_locked` error that names the session:
+Opening a session that another process has open fails with a `conversation_locked` error that names the session:
 
 ```text
 Session <id> is open in another Volt process. Quit that session there (or switch it to another session), then retry. Listing, searching, and exporting it still work.
 ```
 
-Quit the session in the other process, or switch that process to another session, then retry. RPC clients receive `errorCode: "conversation_locked"`, and phones receive the `conversation_locked` handshake outcome.
+- `volt -p`, `--mode json`, and `--mode rpc` started on such a session print the error and exit with code 1. That includes a session an interactive conversation's worker has open, even after its last terminal quit (see [When a Conversation Closes](#when-a-conversation-closes)). To continue it, attach to it with `volt -r` or `volt --session <id>` instead.
+- A protocol client whose `switch_session` (or another move) reaches such a session gets the intent rejected with code `locked`.
+- Paired phones receive the `conversation_locked` handshake outcome.
+- Interactive Volt attaches to a session a worker has open. When another process, such as `volt -p`, has it open, interactive Volt waits up to 75 seconds for that process to close it, then reports that the conversation is open in another Volt process.
 
-Listing and searching read store summaries, and exporting and forking from a session open it read-only: none of them take the lock, so they keep working while the session is open elsewhere. SDK code reads a session the same way with `SessionManager.openReadOnly(ref)`; every write through a read-only manager throws. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
-
-When the interactive TUI opens a session that the daemon is hosting for a phone, at startup or with `/resume`, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI waits until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session, leaving the TUI where it was. If another TUI has the session open, it refuses with a message. The session the TUI leaves goes back to the daemon once it closed, so phones on it keep using it.
+Listing and searching read store summaries, and exporting and forking from a session open it read-only: none of them take the lock, so they keep working while the session is open elsewhere. SDK code reads a session the same way with `SessionManager.openReadOnly(ref)`; every write through a read-only manager throws. Renaming or deleting another session from the picker takes its lock briefly, so it fails while that session is open anywhere, including while its worker still keeps it open after its last client left.
 
 ### When a Session Stops
 
 Every write to a session names the log position it expects (see [Session Format](session-format.md#the-conversation-log)). If a write finds that another writer appended, that the session was deleted, or that its own outcome cannot be resolved, the session's log is lost: Volt cannot confirm what was saved, so it stops that session instead of continuing.
 
-- The TUI exits with `Volt stopped this session because its saved state could not be confirmed`, suggests `/resume`, and prints any unsent editor text so you can copy it.
+- The TUI exits with `Volt stopped this session because its saved state could not be confirmed`, suggests running volt again and using `/resume`, and prints any unsent editor text so you can copy it.
 - `volt -p`, `--mode json`, and `--mode rpc` print `Volt stopped session <id> because its saved state could not be confirmed: <reason>` and exit with code 1.
-- The daemon closes the conversation.
+- The worker hosting an interactive conversation closes it, and every terminal showing it exits as above.
 
 Extensions observe the stop through the aborted `ctx.signal` of their commands and then receive `session_shutdown`; session writes after the stop throw. Reopen the session with `/resume` or `--session` to continue from what was saved.
 
@@ -67,7 +95,7 @@ Extensions observe the stop through the aborted `ctx.signal` of their commands a
 
 ### Work and Switching Sessions
 
-Background jobs, subagents, reviews, host actions, and extension work are work items of the session that started them (see [Session Format](session-format.md#work-entries-host-only)); `/work` lists them. While work runs, `/clear`, `/resume`, `/fork`, `/clone`, and `/import` refuse to leave the session: cancel the work in `/work` or wait for it to finish. Work suspended since a restart, such as a subagent that was running when Volt stopped, does not hold the session; it stays in `/work` until you resume or cancel it.
+Background jobs, subagents, reviews, host actions, and extension work are work items of the session that started them (see [Session Format](session-format.md#work-entries-host-only)); `/work` lists them. In interactive Volt, `/clear`, `/resume`, `/fork`, `/clone`, and `/import` move the terminal even while work runs: the work keeps running in the session's worker, which keeps the session open until it is idle and then closes it as described in [When a Conversation Closes](#when-a-conversation-closes). `/clear` stops a running turn first; the other commands leave it running. `volt --mode rpc` and SDK hosts refuse to leave a session while work runs, and so does a session change an extension command starts unless another client stays on the session: cancel the work in `/work` or wait for it to finish. Work suspended since a restart, such as a subagent that was running when Volt stopped, does not hold the session; it stays in `/work` until you resume or cancel it.
 
 ## Resuming and Deleting Sessions
 
@@ -83,7 +111,7 @@ In the picker you can:
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-Volt deletes only sessions of the current folder's workspace that no conversation has open: in the All view, another folder's sessions cannot be deleted from here, a session open in this process is refused, and one open in another process fails at its lock. Before deleting a session from SQLite, volt exports it as a JSONL recovery snapshot into `deleted-session-snapshots/` under its session directory, and moves the snapshot to the system trash when a `trash` command is available. Protocol clients delete with the `delete_session` intent and list sessions with the `sessions` query ([RPC](rpc.md#built-in-intents)).
+Volt deletes only sessions of the current folder's workspace that no conversation has open: in the All view, another folder's sessions cannot be deleted from here, and a session that is open anywhere is refused or fails at its lock, including one its worker still keeps open after its last client left (see [When a Conversation Closes](#when-a-conversation-closes)). Before deleting a session from SQLite, volt exports it as a JSONL recovery snapshot into `deleted-session-snapshots/` under its session directory, and moves the snapshot to the system trash when a `trash` command is available. Protocol clients delete with the `delete_session` intent and list sessions with the `sessions` query ([RPC](rpc.md#built-in-intents)).
 
 ## Naming Sessions
 

@@ -411,7 +411,11 @@ Detach(c) ==
 \* extension-started move whose target the worker claimed: the worker sends
 \* ended{moved, target} and the client reconnects through the daemon (D1)
 \* with the same spawn options.  Frames on a relay are ordered, so earlier
-\* frames settle first.  The conversation the client left stays open.
+\* frames settle first, with one exception the model leaves out: the answer
+\* to the extension command that moved its own client is not written on the
+\* old relay; the client retries that intent on its new connection and the
+\* host answers it from the client key's outcome window.  The conversation
+\* the client left stays open.
 Redirect(c, s) ==
     /\ att[c] # NoWorker
     /\ Ctl(att[c])

@@ -1,5 +1,7 @@
 # RFC: Live Shared Sessions: voltd Daemon, Conversation Leases, and TUI Co-Attach
 
+> **Superseded in part.** The [daemon-hosted conversations design](daemon-hosted-conversations-design.md), implemented by the [architecture rewrite](architecture-rewrite-design.md) Phase 7 ([#585](https://github.com/volt-hq/Volt/issues/585)), replaced its TUI-ownership model: every interactive conversation runs in a conversation worker the daemon supervises, and the TUI and phones are clients of it. Deleted with it: the lease broker and every lease state (§4), the viewer and drain events (§5.4), TUI relay serving and the TUI integration (§6, §7), the owner-dependent extension contract (§8), goals G4/G5, and the non-goal against several TUIs on one conversation. `LeaseBroker.tla` and `RelayViewer.tla` were replaced by `docs/tla/WorkerRegistry.tla`. The daemon process, state file, pairing, control socket, and byte relay described here remain in revised form. Current behavior: [daemon.md](daemon.md). This document is kept as history.
+
 - Status: Accepted (implementation-ready)
 - Workspaces: `Volt/packages/coding-agent` (primary), `volt-app` (iOS deltas, section 10)
 - Supersedes: the host-process model described in `docs/iroh-remote-access-design.md` (that doc gets a superseded banner; see M10)
@@ -299,6 +301,8 @@ Reuse `src/core/remote/iroh/audit.ts` (writer + event envelope) targeting `daemo
 ---
 
 ## 4. Lease Broker
+
+> **Superseded.** There are no conversation leases; the daemon's worker registry (`src/daemon/worker-registry.ts`) routes every open to the one worker hosting the conversation. See [daemon-hosted conversations](daemon-hosted-conversations-design.md) §4-§5.
 
 `src/daemon/lease-broker.ts`. Key: `${workspaceName}\0${sessionId}` — **`clientNodeId` is dropped** from today's key (iroh-host.mjs L2298). The broker is the single authority on ownership; runtimes and relays are effects driven by its transitions.
 
@@ -684,6 +688,8 @@ Already specified in §3.1: connect → `status` probe → 2s timeout → unlink
 
 ## 6. TUI Integration
 
+> **Superseded.** The TUI is a protocol client of a conversation worker over a relayed stream (`src/modes/interactive/daemon-connector.ts`); it neither owns a runtime nor serves relayed phones. See [daemon-hosted conversations](daemon-hosted-conversations-design.md) §6.
+
 Surgical changes to `src/modes/interactive/interactive-mode.ts` plus a new façade `src/modes/interactive/daemon-attach.ts` wrapping `src/daemon/control-client.ts`. InteractiveMode is 7152 lines with 64 distinct `this.session.*` member uses — deep coupling that justifies co-locating the runtime with the TUI rather than remoting it.
 
 ### 6.1 `daemon-attach.ts` façade
@@ -753,6 +759,8 @@ For TUI-owned runtimes, extension UI requests route to the TUI's real `Extension
 
 ## 7. Daemon-Owned Runtime Path (headless)
 
+> **Superseded.** The daemon hosts no runtime; phone-opened conversations run in conversation workers (`src/daemon/worker/`).
+
 ### 7.1 Construction
 
 `integrated-runtimes.ts` builds runtimes with `createIrohRemoteAgentRuntimeWithSessionSelection` (iroh-remote-agent-runtime.ts L85) using the pre-resolved target (§3.7). Selection kinds `created` / `created_after_missing` / `resumed` and host-synthesized `session_rekeyed` behavior are preserved bit-for-bit for the iOS selection validation.
@@ -784,6 +792,8 @@ Unchanged: `prompt` while streaming requires `streamingBehavior: "steer" | "foll
 ---
 
 ## 8. Extension Compatibility Contract
+
+> **Superseded.** Extensions bind in `rpc` mode in every worker, and their UI is data every client renders (architecture rewrite §8); behavior no longer depends on which process owns a conversation.
 
 **Fixed constraint: zero source changes to `ExtensionContext` / `ExtensionAPI` / `ExtensionUIContext` (types.ts).** Theme facade shape (types.ts:261-270: `theme` getter, `getAllThemes()`, `getTheme(name)`, `setTheme(string|Theme)`) preserved exactly. Lifecycle reasons remain the existing unions: `session_start` reasons `startup|reload|new|resume|fork`; `session_shutdown` reasons `quit|reload|new|resume|fork`. **No new lifecycle event** (no `session_switched`).
 

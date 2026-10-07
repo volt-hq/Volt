@@ -12,7 +12,7 @@ npm install -g --ignore-scripts @hansjm10/volt-coding-agent
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs. Keep optional dependencies enabled if you want to connect the iOS app; `--omit=optional` leaves phone transport unavailable.
 
-The npm installation supports the daemon on macOS Apple Silicon, Windows x64/arm64, and Linux x64/arm64. Intel macOS has no native Iroh binding. Standalone executables are local CLI/TUI only and cannot host phone connections.
+Interactive Volt runs its conversations in a background daemon with every install. Phone connections also need the daemon's native Iroh binding, which the npm installation includes on macOS Apple Silicon, Windows x64/arm64, and Linux x64/arm64. Intel macOS has no binding and standalone executables do not bundle it, so they cannot host phone connections.
 
 ### Uninstall
 
@@ -76,7 +76,7 @@ Once volt starts, type a request and press Enter:
 Summarize this repository and tell me how to run its checks.
 ```
 
-Volt includes tools for reading and editing files, running shell commands, searching/fetching the web, and managing background jobs and subagents. Other tools depend on the selected model, configuration, and runtime: for example, image generation requires OpenAI Codex, MCP requires configured servers, and structured questions are local-interactive only. See [Tool Options](usage.md#tool-options) to select or exclude tools.
+Volt includes tools for reading and editing files, running shell commands, searching/fetching the web, and managing background jobs and subagents. Other tools depend on the selected model, configuration, and runtime: for example, image generation requires OpenAI Codex, MCP requires configured servers, and structured questions (`request_user_input`) are offered only while a client that can answer them, such as the TUI, is attached. See [Tool Options](usage.md#tool-options) to select or exclude tools.
 
 Volt runs with your user account's permissions, not inside a built-in sandbox. Use git checkpoints for rollback and a [container or VM](containerization.md) when you need isolation.
 
@@ -93,7 +93,7 @@ volt remote pair --workspace my-project
 ```
 
 1. Open the companion app and scan the pairing QR. Treat the QR/ticket as a credential; do not share it in logs or screenshots.
-2. Select the registered workspace and start or resume a conversation. When a terminal session is attached to the daemon, the phone can join that same live conversation.
+2. Select the registered workspace and start or resume a conversation. Conversations you open in a terminal run in the daemon too, so the phone can open one that is open in a terminal and join it live.
 3. Reconnect using the saved computer next time; ordinary reconnects do not require another QR scan.
 
 <p align="center">
@@ -102,9 +102,9 @@ volt remote pair --workspace my-project
 </p>
 <p align="center"><em>One conversation in the Volt iOS app and in the terminal (Volt 0.2.1). The prompt came from the phone and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached phone.</em></p>
 
-You can also open `/remote` in the terminal to start the daemon, register the current directory, pair a phone, or revoke a device. Interactive Volt starts the daemon automatically.
+You can also open `/remote` in the terminal to register the current directory, pair a phone, or revoke a device. Interactive Volt starts the daemon automatically.
 
-Pair only devices you control. Phone prompts can run tools on your computer, and a phone sharing a desktop-owned conversation uses that terminal session's full local tool set. App backgrounding or network loss detaches the phone without cancelling active work; use the app's stop action to cancel. Host shutdown stops in-memory work.
+Pair only devices you control. Phone prompts can run tools on your computer, and a phone that joins a conversation opened in a terminal uses that conversation's full local tool set. App backgrounding or network loss detaches the phone without cancelling active work; use the app's stop action to cancel. Host shutdown stops in-memory work.
 
 Direct and self-hosted connections are separate from Volt Pro's managed relay and completion-notification services. An endpoint marked ready does not confirm managed relay access; `/remote` reports relay enrollment and subscription status separately. See the [privacy policy](https://volt-cli.dev/privacy) and [terms](https://volt-cli.dev/terms).
 

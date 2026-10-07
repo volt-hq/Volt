@@ -11,18 +11,20 @@ Edit directly or use `/settings` for common options.
 
 ## Who reads a setting
 
-Settings belong to the side that reads them. The host (the process that runs the conversation) reads most of them; the interactive TUI, a client of its host, reads its display settings itself.
+Settings belong to the side that reads them. The host (the process that runs the conversation: for interactive Volt, the conversation's worker in the [background daemon](daemon.md#conversation-workers)) reads most of them; the interactive TUI, a client of its host, reads its display settings itself.
 
-- **Host settings change through the host, and apply to the running conversation at once.** `/settings` and protocol clients change them with intents: `personality`, `transport`, `reviewModel`, `promptCache` keepalive, `images.autoResize`, `images.blockImages`, `httpIdleTimeoutMs`, `enableInstallTelemetry`, and `warnings` (`set_settings`); `steeringMode` and `followUpMode`; auto-compaction and its per-model threshold; the thinking level; the model cycle (`enabledModels`, through `/scoped-models`); the default model and thinking level; the settings profile (`/profile`, which reloads the conversation's resources and extensions and applies the profile's model scope and default model); and extension settings and enablement. They save where the host keeps them: globally, or in the active profile for the keys a profile holds (extension settings in the scope the client names). Other conversations open in the same process take the change when they reload; extension settings reach every open conversation at once. See [Intents](rpc.md#intents).
+- **Host settings change through the host, and apply to the running conversation at once.** `/settings` and protocol clients change them with intents: `personality`, `transport`, `reviewModel`, `promptCache` keepalive, `images.autoResize`, `images.blockImages`, `httpIdleTimeoutMs`, `enableInstallTelemetry`, and `warnings` (`set_settings`); `steeringMode` and `followUpMode`; auto-compaction and its per-model threshold; the thinking level; the model cycle (`enabledModels`, through `/scoped-models`); the default model and thinking level; the settings profile (`/profile`, which reloads the conversation's resources and extensions and applies the profile's model scope and default model); and extension settings and enablement. They save where the host keeps them: globally, or in the active profile for the keys a profile holds (extension settings in the scope the client names). Other conversations in daemon workers reload their settings when the settings file changes (each watches the global and project `settings.json`); conversations of other hosts take the change when they reload. Extension settings reach every open conversation at once. See [Intents](rpc.md#intents).
 - **Display settings belong to the TUI**, which writes them itself and applies them at once: `theme`, `hideThinkingBlock`, `terminal.showImages`, `terminal.imageWidthCells`, `terminal.clearOnShrink`, `terminal.showTerminalProgress`, `terminal.turnDoneAlert`, `editorPaddingX`, `autocompleteMaxVisible`, `showHardwareCursor`, `quietStartup`, `collapseChangelog`, `doubleEscapeAction`, `treeFilterMode`, `branchSummary.skipPrompt`, `markdown.codeBlockIndent`, `tuiMode`, `fullscreenExitOutput`, `fullscreenScrollbar`, `enableSkillCommands`, `reviewTools`, and `defaultProjectTrust`. The TUI reads them where the conversation it shows runs: global settings, the active profile, and, for a trusted project, the project's `.volt/settings.json`. It reads them again when it moves to a conversation in another folder, another project trust, or another profile. `warnings.contextTokens` is a host setting the TUI's footer reads from the host.
-- **Credentials** are never settings: `/login` and `/logout` change them through the host.
+- **Credentials** are never settings: `/login` and `/logout` change them through the host. Every daemon worker watches `auth.json` and `models.json`, so a login in one conversation reaches the others.
 - **Packages** (`/store`) are installed by the TUI into the settings files, then load when the conversation reloads.
 
-Edits to the files themselves apply after `/reload`, which reloads the host's settings and the TUI's, or on the next start.
+An edit to the global or project `settings.json` reloads the settings of the conversations daemon workers host. The TUI's display settings, and other hosts' settings, follow edits to the files after `/reload`, which reloads the host's settings and the TUI's, or on the next start.
 
 ## Project Trust
 
-On interactive startup, volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.
+Volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.
+
+In interactive Volt, the conversation's worker in the [background daemon](daemon.md#project-trust) decides when it opens a conversation in such a project, at startup or when you move to a conversation in another project: user/global and `-e` extensions' `project_trust` handlers first, then the saved decision, then `defaultProjectTrust`, whose `ask` shows the trust prompt in the TUI that opened the conversation. Closing the prompt without an answer runs that conversation untrusted and saves nothing. `--approve`/`-a` and `--no-approve`/`-na` decide the startup project's trust without asking.
 
 Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, they use `defaultProjectTrust` from global settings: `ask` (default) and `never` ignore those project resources, while `always` trusts them. Pass `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
 
@@ -30,7 +32,7 @@ If no extension or saved decision applies, `defaultProjectTrust` controls the fa
 
 `volt config` and package commands use the same project trust flow, except `volt update` never prompts. Pass `--approve` to trust project-local settings for one command or `--no-approve` to ignore them.
 
-Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.volt/agent/trust.json` only; the current session is not reloaded, so restart volt for changes to take effect.
+Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.volt/agent/trust.json` only: the current conversation keeps its trust, and so does a conversation still open in its worker when you attach to it again. Conversations opened after you restart volt read the saved decision.
 
 MCP server configuration is not stored in `settings.json`; use `~/.volt/agent/mcp.json` for user-local servers, shared `~/.config/mcp/mcp.json`, trusted project `.mcp.json`, or trusted project `.volt/mcp.json`. OAuth tokens for MCP HTTP/SSE servers are stored separately in `~/.volt/agent/mcp-auth.json`. See [MCP](mcp.md).
 
@@ -386,13 +388,14 @@ See [LSP Diagnostics](lsp.md) for the full reference, including built-in server 
 
 ### Remote Access (daemon)
 
-Settings for the background daemon and live shared sessions; see [Background daemon](daemon.md).
+Settings the background daemon reads; see [Background daemon](daemon.md). The daemon reads them from global settings only (never a project's), when it starts: run `volt daemon restart` after changing them. An invalid value keeps the daemon from starting.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `remote.detachedRuntimeTtlMs` | number | `1800000` | How long the daemon retains an idle detached headless runtime (30 minutes) |
-| `remote.allowTools` | string[] | - | Additional tool ceiling for daemon-owned headless runtimes, intersected with the paired client's persisted grant and any workspace ceiling; `[]` denies all tools. TUI-owned conversations use the TUI session's full tool set. |
+| `remote.allowTools` | string[] | - | Additional tool ceiling for conversations a paired phone opens, intersected with the phone's persisted grant and any workspace ceiling; `[]` denies all tools. A conversation a terminal opened uses that terminal's full tool set, also for phone prompts. |
 | `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the authenticated GitHub CLI to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Linked open or draft PRs keep their status refreshed in the background with batched GitHub CLI queries. Set `false` to disable provider calls, including background PR status refresh; existing private Work state remains local. |
+
+How long a conversation no client is attached to stays open once it is idle (30 minutes by default) is a setting of the daemon itself, not of `settings.json`; see [Background daemon](daemon.md#retention-and-background).
 
 ### Resources
 

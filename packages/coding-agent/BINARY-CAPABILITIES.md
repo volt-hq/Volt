@@ -2,7 +2,8 @@
 
 The prebuilt executable is a local Volt CLI/TUI distribution built as a
 Node.js 22.23.1 Single Executable Application. It supports local interactive
-and print-mode agent sessions.
+and print-mode agent sessions. Interactive sessions run in the conversation
+workers of its daemon, which the binary starts by re-executing itself.
 
 It does **not** include the required `@hansjm10/volt-iroh` wrapper or any native
 Iroh binding and cannot provide remote/iOS access: `volt daemon` runs for local
