@@ -259,7 +259,7 @@ Every stream a paired device opens is served on the remote profile, chosen by th
 | Capability | Intents | Queries |
 |---|---|---|
 | `conversation.observe.v1` | | `intents`, `intent_completions`, `history`, `content`, `sessions`, `settings`, `extensions`, `host_status`, `work_output`, `session_contexts`, `worktrees`, `workspace_directories`, `pr_review`, `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` |
-| `conversation.control.v1` | `prompt`, `steer`, `follow_up`, `abort`, `set_fast_mode`, `set_agent_mode`, `plan_execute`, `plan_change`, `plan_discard`, `new_session`, `switch_session`, `cancel_work`, `set_auto_compaction`, `set_compaction_threshold`, `review_uncommitted`, `review_branch`, `review_pr`, `review_commit`, `review_rerun`, `review_open_session`, `open_work`, `resume_work`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_start_discussions`, `review_reset_discussion`, and the dynamic `extension.command.*` (only commands registered `remoteSafe: true`), `extension.intent.*` (only intents registered `remote: true`, with the capabilities they `require`), `prompt.template.*`, and `skill.*` intents | `editor_completions` (only completion providers registered `remote: true`) |
+| `conversation.control.v1` | `prompt`, `steer`, `follow_up`, `abort`, `set_fast_mode`, `set_agent_mode`, `plan_execute`, `plan_change`, `plan_discard`, `new_session`, `switch_session`, `cancel_work`, `set_auto_compaction`, `set_compaction_threshold`, `review`, `review_rerun`, `review_open_session`, `open_work`, `resume_work`, `review_acknowledge`, `review_record_finding_outcome`, `review_publish`, `review_start_discussions`, `review_reset_discussion`, and the dynamic `extension.command.*` (only commands registered `remoteSafe: true`), `extension.intent.*` (only intents registered `remote: true`, with the capabilities they `require`), `prompt.template.*`, and `skill.*` intents | `editor_completions` (only completion providers registered `remote: true`) |
 | `model.select.v1` | `set_model`, `set_thinking_level` (the bound session only) | `models`, `agent_options` |
 | `model.select.v1` + `host.manage.v1` | `set_default_model`, `set_default_thinking_level` (host defaults) | |
 | `host.manage.v1` | `set_keep_awake`, `set_extension_enabled` (enabling only an extension whose permissions the user acknowledged on the host), `set_extension_settings` (project settings only for a trusted project) | `subscription_usage`, `extension_settings` |
@@ -392,7 +392,7 @@ placement, never checkout paths, credentials or internal repository identities:
 `disposition` is `created` or `reused`. Optional `workingDirectory` is the effective
 workspace-relative source-repository placement. Repeat the returned placement
 in an ordinary `conversation:{"target":"new","sessionId":...,"worktreeId":...}`
-hello, configure model/thinking/Fast/mode, then send the `review_pr` intent. Do
+hello, configure model/thinking/Fast/mode, then send the `review` intent with `target: "pr"`. Do
 not send inference before preparation and configuration succeed. No old-host fallback
 or additional compatibility feature flag is provided.
 
@@ -417,7 +417,7 @@ are retained on cancellation or later failure. Retry or offer explicit cleanup;
 never automatically delete a reused checkout. An unconfirmed review invocation
 must be reconciled through the conversation's review work and `review.runs`, not blindly invoked again.
 
-The session's immutable host-only binding pins `review_pr` to the original PR
+The session's immutable host-only binding pins a `review` of target `pr` to the original PR
 and authorized source repository, not the generated local branch. Head and
 checkout checks run before inference. General/findings handoffs and discussion
 creation/reset/resume preserve checkout authority. Ordinary fix prompts may
@@ -480,7 +480,7 @@ The `upload_device_logs` intent on a conversation stream stores client diagnosti
 
 ## Reviews
 
-All Git-backed review diffs disable textconv and external diff drivers. `review_commit` discloses that it inspects workspace commit history and sends commit metadata and diff to the review model; its required `ref` is trimmed, bounded to 1024 UTF-8 bytes, resolved to a commit object, and replaced with the canonical object id before `git show`. `review_pr` discloses use of the host's GitHub credentials and network and submission to discovery and independent verification of pull request metadata/diff, authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments. Its optional string `number` must be a canonical positive decimal no greater than `2147483647`, and omission selects the current branch's pull request for unprepared sessions. Prepared sessions use their host-owned explicit PR binding instead. Explicit `null` is not omission and fails string argument validation.
+All Git-backed review diffs disable textconv and external diff drivers. A `review` of target `commit` discloses that it inspects workspace commit history and sends commit metadata and diff to the review model; its required `ref` is trimmed, bounded to 1024 UTF-8 bytes, resolved to a commit object, and replaced with the canonical object id before `git show`. A `review` of target `pr` discloses use of the host's GitHub credentials and network and submission to discovery and independent verification of pull request metadata/diff, authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments. Its optional string `number` must be a canonical positive decimal no greater than `2147483647`, and omission selects the current branch's pull request for unprepared sessions. Prepared sessions use their host-owned explicit PR binding instead. Explicit `null` is not omission and fails string argument validation.
 
 PR context is host-captured and bounded to 32 KiB per GitHub text field, 20 linked issues, 200 total discussion entries, and 256 KiB rendered. Volt neither infers links from arbitrary text nor follows relationships recursively. Both isolated analysis passes must inspect the same captured context completely and treat GitHub-authored text as untrusted evidence, not policy or tool instructions. Capture limitations or incomplete inspection make the result incomplete and withhold its correctness verdict; a final exact head-OID check rejects a PR that moved during capture. Newly accepted findings then receive code-derived prose from a fresh context-blind verifier-model pass that sees only one-time host ids, validated finding structure, trusted base policy, and immutable repository tools; it has no GitHub context, target title/body, private analysis prose, extensions, or command-capable tools. It must inspect every accepted hunk and cannot change finding identity, anchor, severity, or status. Runs with no new findings skip that pass.
 

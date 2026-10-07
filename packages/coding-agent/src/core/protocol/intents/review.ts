@@ -77,6 +77,17 @@ interface ReviewControlsInput {
 	url?: string;
 }
 
+/** A review start: the target and the fields that belong to one target, with the controls every target takes. */
+interface ReviewStartInput extends ReviewControlsInput {
+	target: "uncommitted" | "branch" | "pr" | "commit";
+	/** A branch review's base. */
+	base?: string;
+	/** A pull request review's number. */
+	number?: string;
+	/** A commit review's ref. */
+	ref?: string;
+}
+
 /** A review start: refused on remote profiles that name auxiliary tools or pin a pull request, else as reviews are available. */
 function reviewStartAvailability(view: IntentView, input?: ReviewControlsInput): IntentAvailability {
 	const localOnly = localOnlyInput<ReviewControlsInput>(["tools", "url"])(view, input);
@@ -248,7 +259,7 @@ async function completePullRequests(ctx: IntentContext, prefix: string): Promise
 
 /**
  * The current branch's pull request by its URL, which pins it for a local
- * client's review (`review_pr{url}`), when the URL starts with `prefix`.
+ * client's review (`review{target: "pr", url}`), when the URL starts with `prefix`.
  */
 async function completePullRequestUrls(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
 	if (ctx.profile.name !== "local") return [];
@@ -273,59 +284,59 @@ function pullRequestTarget(input: { number?: string; url?: string }): ReviewTarg
 	return { kind: "pr", number: String(pinned.number), expectedUrl: pinned.url };
 }
 
-export const reviewUncommittedIntent = defineIntent({
+/** The input fields that belong to one review target; a field of another target is refused. */
+const REVIEW_TARGET_FIELDS = {
+	uncommitted: [],
+	branch: ["base"],
+	pr: ["number", "url"],
+	commit: ["ref"],
+} as const satisfies Record<ReviewStartInput["target"], readonly string[]>;
+
+/** The target a review start names, refusing a field of another target and a commit review without a ref. */
+function reviewTargetOf(input: ReviewStartInput): ReviewTarget {
+	const applies: readonly string[] = REVIEW_TARGET_FIELDS[input.target];
+	for (const field of ["base", "number", "url", "ref"] as const) {
+		if (input[field] !== undefined && !applies.includes(field)) {
+			throw new IntentRejectedError("invalid_input", `${field} does not apply to a ${input.target} review`);
+		}
+	}
+	switch (input.target) {
+		case "uncommitted":
+			return { kind: "uncommitted" };
+		case "branch":
+			return { kind: "branch", base: input.base?.trim() || undefined };
+		case "pr":
+			return pullRequestTarget(input);
+		case "commit":
+			if (input.ref === undefined) throw new IntentRejectedError("invalid_input", "A commit review needs a ref");
+			return { kind: "commit", sha: input.ref };
+	}
+}
+
+export const reviewIntent = defineIntent({
 	...reviewStart,
-	name: "review_uncommitted",
-	label: "Review changes",
-	description: "Review uncommitted workspace changes.",
+	name: "review",
+	label: "Review",
+	description:
+		"Review code changes. uncommitted: the uncommitted workspace changes. branch: the current branch against a refreshed upstream merge base, using host Git credentials and network; full refs use local cached state. pr: a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context. commit: a commit from workspace history; its metadata and diff are sent to the review model.",
 	presentation: { kind: "card", group: "Review", priority: 100, icon: "magnifyingglass" },
-	slash: { name: "review", example: "/review uncommitted" },
-	run: (ctx, input) => runReview(ctx, { kind: "uncommitted" }, reviewOptions(ctx, input)),
-});
-
-export const reviewBranchIntent = defineIntent({
-	...reviewStart,
-	name: "review_branch",
-	label: "Review branch",
-	description:
-		"Review the current branch against a refreshed upstream merge base using host Git credentials and network; full refs use local cached state.",
-	presentation: {
-		kind: "card",
-		group: "Review",
-		priority: 90,
-		icon: "point.topleft.down.curvedto.point.bottomright.up",
+	slash: { name: "review", example: "/review uncommitted | branch [base] | pr [number] | commit <ref>" },
+	completions: ["base", "number", "url", "ref"],
+	complete: async (ctx, field, prefix) => {
+		switch (field) {
+			case "base":
+				return await completeBaseBranches(ctx, prefix);
+			case "number":
+				return await completePullRequests(ctx, prefix);
+			case "url":
+				return await completePullRequestUrls(ctx, prefix);
+			case "ref":
+				return await completeCommits(ctx, prefix);
+			default:
+				return [];
+		}
 	},
-	slash: { name: "review", example: "/review branch [base]" },
-	completions: ["base"],
-	complete: (ctx, _field, prefix) => completeBaseBranches(ctx, prefix),
-	run: (ctx, input) =>
-		runReview(ctx, { kind: "branch", base: input.base?.trim() || undefined }, reviewOptions(ctx, input)),
-});
-
-export const reviewPrIntent = defineIntent({
-	...reviewStart,
-	name: "review_pr",
-	label: "Review pull request",
-	description:
-		"Review a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context.",
-	presentation: { kind: "card", group: "Review", priority: 80, icon: "arrow.triangle.pull" },
-	slash: { name: "review", example: "/review pr [number]" },
-	completions: ["number", "url"],
-	complete: (ctx, field, prefix) =>
-		field === "url" ? completePullRequestUrls(ctx, prefix) : completePullRequests(ctx, prefix),
-	run: (ctx, input) => runReview(ctx, pullRequestTarget(input), reviewOptions(ctx, input)),
-});
-
-export const reviewCommitIntent = defineIntent({
-	...reviewStart,
-	name: "review_commit",
-	label: "Review commit",
-	description: "Review a commit from workspace history; its metadata and diff are sent to the review model.",
-	presentation: { kind: "card", group: "Review", priority: 70, icon: "clock.arrow.circlepath" },
-	slash: { name: "review", example: "/review commit <ref>" },
-	completions: ["ref"],
-	complete: (ctx, _field, prefix) => completeCommits(ctx, prefix),
-	run: (ctx, input) => runReview(ctx, { kind: "commit", sha: input.ref }, reviewOptions(ctx, input)),
+	run: (ctx, input) => runReview(ctx, reviewTargetOf(input), reviewOptions(ctx, input)),
 });
 
 async function durableReviewRun(ctx: IntentContext, runId: string) {

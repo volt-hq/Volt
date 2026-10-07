@@ -389,7 +389,7 @@ describe("durable review intents over protocol frames", () => {
 		});
 		await phone.hello();
 		await phone.subscribe(source.id);
-		const accepted = await phone.intent("review_uncommitted", {});
+		const accepted = await phone.intent("review", { target: "uncommitted" });
 		const isProgress = (frame: HostFrame): frame is HostFrame =>
 			frame.type === "live" &&
 			frame.items.some(
@@ -737,7 +737,7 @@ describe("durable review intents over protocol frames", () => {
 		});
 		const { client, source } = await setup();
 
-		await expect(client.intent("review_uncommitted", {})).resolves.toMatchObject({
+		await expect(client.intent("review", { target: "uncommitted" })).resolves.toMatchObject({
 			result: { workId: "review:test" },
 		});
 		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());

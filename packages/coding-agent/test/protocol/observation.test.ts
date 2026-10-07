@@ -229,8 +229,8 @@ describe("review passes as observed children", () => {
 		const home = await client.subscribe(conversation.id, "home");
 		expect(home.type).toBe("snapshot");
 
-		const started = await client.intent("review_uncommitted", {});
-		if (started.type !== "accepted") throw new Error(`review_uncommitted was rejected: ${JSON.stringify(started)}`);
+		const started = await client.intent("review", { target: "uncommitted" });
+		if (started.type !== "accepted") throw new Error(`review was rejected: ${JSON.stringify(started)}`);
 		const { workId } = started.result as { workId: string };
 		await discovery.started;
 		const firstPass = conversation.work.get(workId)?.child?.conversation;
@@ -361,32 +361,32 @@ describe("review passes as observed children", () => {
 
 	it("passes the auxiliary tools a local client names, and refuses them and a pinned pull request to paired devices", async () => {
 		const { harness, repo, conversation, client } = await setup();
-		await expect(client.intent("review_uncommitted", { tools: ["edit"] })).resolves.toMatchObject({
+		await expect(client.intent("review", { target: "uncommitted", tools: ["edit"] })).resolves.toMatchObject({
 			type: "rejected",
 			reason: { code: "invalid_input", message: "Not available to reviews: edit" },
 		});
-		await expect(client.intent("review_uncommitted", { tools: ["no_such_tool"] })).resolves.toMatchObject({
+		await expect(client.intent("review", { target: "uncommitted", tools: ["no_such_tool"] })).resolves.toMatchObject({
 			type: "rejected",
 			reason: { code: "invalid_input" },
 		});
 		const phone = await connect(harness, conversation, remote(conversation, repo));
 		cleanups.push(() => phone.close());
-		await expect(phone.intent("review_uncommitted", { tools: ["bash"] })).resolves.toMatchObject({
+		await expect(phone.intent("review", { target: "uncommitted", tools: ["bash"] })).resolves.toMatchObject({
 			type: "rejected",
 			reason: { code: "not_allowed", message: "tools is not available over remote host" },
 		});
 		await expect(
-			phone.intent("review_pr", { url: "https://github.com/contributor/project/pull/42" }),
+			phone.intent("review", { target: "pr", url: "https://github.com/contributor/project/pull/42" }),
 		).resolves.toMatchObject({
 			type: "rejected",
 			reason: { code: "not_allowed", message: "url is not available over remote host" },
 		});
 		await expect(
-			phone.query("intent_completions", { intent: "review_pr", field: "url", prefix: "" }),
+			phone.query("intent_completions", { intent: "review", field: "url", prefix: "" }),
 		).resolves.toMatchObject({ type: "result", data: { completions: [] } });
 
 		// Completing a review reads the workspace's history for a device that may start reviews, and for no other.
-		const complete = { intent: "review_commit", field: "ref", prefix: "" };
+		const complete = { intent: "review", field: "ref", prefix: "" };
 		await expect(phone.query("intent_completions", complete)).resolves.toMatchObject({
 			type: "result",
 			data: { completions: [{ label: "initial" }] },
@@ -409,8 +409,8 @@ describe("review passes as observed children", () => {
 
 		const discovery = held(DISCOVERY_REPORT);
 		harness.faux.setResponses([discovery.step, VERIFICATION_REPORT]);
-		const started = await client.intent("review_uncommitted", { tools: ["bash"] });
-		if (started.type !== "accepted") throw new Error(`review_uncommitted was rejected: ${JSON.stringify(started)}`);
+		const started = await client.intent("review", { target: "uncommitted", tools: ["bash"] });
+		if (started.type !== "accepted") throw new Error(`review was rejected: ${JSON.stringify(started)}`);
 		await discovery.started;
 		const firstPass = conversation.work.get((started.result as { workId: string }).workId)?.child?.conversation;
 		expect(conversation.session.reviewPasses.get(firstPass!)?.session.getActiveToolNames()).toContain("bash");

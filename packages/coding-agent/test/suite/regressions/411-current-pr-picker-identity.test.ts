@@ -1,7 +1,7 @@
 /**
  * #411: the TUI's current-PR choice names the fork's pull request its branch
  * tracks, never the parent's same-numbered one gh infers, and pins it by URL:
- * the `review_pr` intent's `url` completion offers it, and a review started
+ * the `review` intent's `url` completion offers it, and a review started
  * with that URL fails unless the code host resolves the same pull request.
  */
 
@@ -33,9 +33,9 @@ function response(value: unknown): GitHubCliResult {
 	return { ok: true, stdout: Buffer.from(JSON.stringify(value)), stderr: "", outputLimited: false, timedOut: false };
 }
 
-/** The current branch's pull request as the TUI's picker offers it: the `review_pr` intent's `url` completion. */
+/** The current branch's pull request as the TUI's picker offers it: the `review` intent's `url` completion. */
 async function currentPullRequest(): Promise<IntentOption | undefined> {
-	const { completions } = await client.query("intent_completions", { intent: "review_pr", field: "url" });
+	const { completions } = await client.query("intent_completions", { intent: "review", field: "url" });
 	return completions[0];
 }
 
@@ -178,7 +178,7 @@ describe("#411 current-PR picker identity", () => {
 				error: expect.stringContaining("selected pull request does not match"),
 			});
 			// The review the picker starts pins the same pull request, and fails the same way.
-			await expect(client.intent("review_pr", { url: offered.value })).rejects.toThrow(
+			await expect(client.intent("review", { target: "pr", url: offered.value })).rejects.toThrow(
 				"selected pull request does not match",
 			);
 			expect(vi.mocked(runGitHubCli)).not.toHaveBeenCalled();
@@ -186,10 +186,10 @@ describe("#411 current-PR picker identity", () => {
 	);
 
 	it("refuses a pinned URL that is not a pull request, or whose number differs", async () => {
-		await expect(client.intent("review_pr", { url: "https://github.com/contributor/project" })).rejects.toThrow(
-			"Not a GitHub pull request URL",
-		);
-		await expect(client.intent("review_pr", { number: "41", url: FORK_URL })).rejects.toThrow(
+		await expect(
+			client.intent("review", { target: "pr", url: "https://github.com/contributor/project" }),
+		).rejects.toThrow("Not a GitHub pull request URL");
+		await expect(client.intent("review", { target: "pr", number: "41", url: FORK_URL })).rejects.toThrow(
 			"does not match its URL",
 		);
 		expect(vi.mocked(runGitHubCli).mock.calls.some(([args]) => args[1] === "view")).toBe(false);

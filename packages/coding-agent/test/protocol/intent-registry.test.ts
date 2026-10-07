@@ -266,8 +266,8 @@ describe("intent completions", () => {
 			services: {},
 			profile: remote("conversation.observe.v1"),
 		};
-		await expect(intentRegistry.complete(ctx, "review_branch", "base", "")).resolves.toEqual([]);
-		await expect(intentRegistry.complete(ctx, "review_branch", "focus", "")).resolves.toEqual([]);
+		await expect(intentRegistry.complete(ctx, "review", "base", "")).resolves.toEqual([]);
+		await expect(intentRegistry.complete(ctx, "review", "focus", "")).resolves.toEqual([]);
 		await expect(intentRegistry.complete(ctx, "bash", "command", "")).rejects.toMatchObject({
 			code: "not_allowed",
 		});
@@ -369,14 +369,12 @@ describe("intent descriptors", () => {
 		expect(remoteNames.every((name) => intentRegistry.get(name as "prompt").remote === "safe")).toBe(true);
 	});
 
-	it("names the slash aliases its intents take, one shared by the review intents", () => {
+	it("names the slash aliases its intents take", () => {
 		expect(intentRegistry.get("new_session").slash?.name).toBe("clear");
 		expect(intentRegistry.get("set_session_name").slash?.name).toBe("name");
 		expect(intentRegistry.get("set_fast_mode").slash?.name).toBe("fast");
 		expect(intentRegistry.get("compact").slash?.name).toBe("compact");
-		for (const name of ["review_uncommitted", "review_branch", "review_pr", "review_commit"] as const) {
-			expect(intentRegistry.get(name).slash?.name).toBe("review");
-		}
+		expect(intentRegistry.get("review").slash?.name).toBe("review");
 	});
 
 	it("requires the selection and host management to persist a default", () => {

@@ -665,7 +665,10 @@ describe("TUI reviews", () => {
 		const review = tui.submit("/review uncommitted");
 		await discovery.started;
 		await waitForScreen(tui, "Some configured auxiliary review tools are unavailable and were omitted.");
-		expect(intent).toHaveBeenCalledWith("review_uncommitted", expect.objectContaining({ tools: ["bash"] }));
+		expect(intent).toHaveBeenCalledWith(
+			"review",
+			expect.objectContaining({ target: "uncommitted", tools: ["bash"] }),
+		);
 		await tui.submit("/review uncommitted");
 		await waitForScreen(tui, "A review is already running. Cancel it before starting another.");
 		tui.terminal.sendInput(ESC);

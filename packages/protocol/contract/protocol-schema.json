@@ -229,10 +229,7 @@
 				"open_work",
 				"resume_work",
 				"start_subagent",
-				"review_uncommitted",
-				"review_branch",
-				"review_pr",
-				"review_commit",
+				"review",
 				"review_rerun",
 				"review_open_session",
 				"review_acknowledge",
@@ -5348,16 +5345,7 @@
 					"$ref": "#/$defs/Frame.intent.start_subagent"
 				},
 				{
-					"$ref": "#/$defs/Frame.intent.review_uncommitted"
-				},
-				{
-					"$ref": "#/$defs/Frame.intent.review_branch"
-				},
-				{
-					"$ref": "#/$defs/Frame.intent.review_pr"
-				},
-				{
-					"$ref": "#/$defs/Frame.intent.review_commit"
+					"$ref": "#/$defs/Frame.intent.review"
 				},
 				{
 					"$ref": "#/$defs/Frame.intent.review_rerun"
@@ -6699,6 +6687,35 @@
 			},
 			"additionalProperties": false
 		},
+		"Frame.intent.review": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Frame.intent.review_acknowledge": {
 			"type": "object",
 			"required": [
@@ -6724,63 +6741,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.review_acknowledge"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.review_branch": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "review_branch"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.review_branch"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.review_commit": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId",
-				"input"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "review_commit"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.review_commit"
 				}
 			},
 			"additionalProperties": false
@@ -6838,34 +6798,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.review_open_session"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.review_pr": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "review_pr"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.review_pr"
 				}
 			},
 			"additionalProperties": false
@@ -7011,34 +6943,6 @@
 				},
 				"input": {
 					"$ref": "#/$defs/IntentInput.review_start_discussions"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Frame.intent.review_uncommitted": {
-			"type": "object",
-			"required": [
-				"type",
-				"intentId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "review_uncommitted"
-				},
-				"intentId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				},
-				"conversation": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-				},
-				"expectedOrdinal": {
-					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
-				},
-				"input": {
-					"$ref": "#/$defs/IntentInput.review_uncommitted"
 				}
 			},
 			"additionalProperties": false
@@ -10876,67 +10780,33 @@
 			},
 			"additionalProperties": false
 		},
-		"IntentInput.review_acknowledge": {
+		"IntentInput.review": {
 			"type": "object",
 			"required": [
-				"runId"
+				"target"
 			],
 			"properties": {
-				"runId": {
-					"$ref": "#/$defs/RpcConversationIdentifier"
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.review_branch": {
-			"type": "object",
-			"properties": {
+				"target": {
+					"type": "string",
+					"enum": [
+						"uncommitted",
+						"branch",
+						"pr",
+						"commit"
+					]
+				},
 				"base": {
 					"type": "string"
 				},
-				"focus": {
+				"number": {
 					"type": "string"
 				},
-				"scope": {
-					"type": "string"
-				},
-				"effort": {
+				"url": {
 					"type": "string",
-					"enum": [
-						"low",
-						"standard",
-						"high"
-					]
+					"minLength": 1,
+					"maxLength": 2000,
+					"pattern": "^https://\\S+$"
 				},
-				"includeOptional": {
-					"type": "boolean"
-				},
-				"scopeMode": {
-					"type": "string",
-					"enum": [
-						"incremental",
-						"full"
-					]
-				},
-				"tools": {
-					"type": "array",
-					"items": {
-						"type": "string",
-						"minLength": 1,
-						"maxLength": 128
-					},
-					"maxItems": 64,
-					"uniqueItems": true
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.review_commit": {
-			"type": "object",
-			"required": [
-				"ref"
-			],
-			"properties": {
 				"ref": {
 					"type": "string",
 					"minLength": 1
@@ -10978,6 +10848,18 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentInput.review_acknowledge": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
 		"IntentInput.review_export_feedback": {
 			"type": "object",
 			"properties": {
@@ -11002,55 +10884,6 @@
 						"$ref": "#/$defs/RpcConversationIdentifier"
 					},
 					"maxItems": 50
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.review_pr": {
-			"type": "object",
-			"properties": {
-				"number": {
-					"type": "string"
-				},
-				"url": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 2000,
-					"pattern": "^https://\\S+$"
-				},
-				"focus": {
-					"type": "string"
-				},
-				"scope": {
-					"type": "string"
-				},
-				"effort": {
-					"type": "string",
-					"enum": [
-						"low",
-						"standard",
-						"high"
-					]
-				},
-				"includeOptional": {
-					"type": "boolean"
-				},
-				"scopeMode": {
-					"type": "string",
-					"enum": [
-						"incremental",
-						"full"
-					]
-				},
-				"tools": {
-					"type": "array",
-					"items": {
-						"type": "string",
-						"minLength": 1,
-						"maxLength": 128
-					},
-					"maxItems": 64,
-					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -11183,46 +11016,6 @@
 						}
 					},
 					"additionalProperties": false
-				}
-			},
-			"additionalProperties": false
-		},
-		"IntentInput.review_uncommitted": {
-			"type": "object",
-			"properties": {
-				"focus": {
-					"type": "string"
-				},
-				"scope": {
-					"type": "string"
-				},
-				"effort": {
-					"type": "string",
-					"enum": [
-						"low",
-						"standard",
-						"high"
-					]
-				},
-				"includeOptional": {
-					"type": "boolean"
-				},
-				"scopeMode": {
-					"type": "string",
-					"enum": [
-						"incremental",
-						"full"
-					]
-				},
-				"tools": {
-					"type": "array",
-					"items": {
-						"type": "string",
-						"minLength": 1,
-						"maxLength": 128
-					},
-					"maxItems": 64,
-					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -12046,14 +11839,11 @@
 			},
 			"additionalProperties": false
 		},
+		"IntentOutput.review": {
+			"$ref": "#/$defs/ReviewStarted"
+		},
 		"IntentOutput.review_acknowledge": {
 			"$ref": "#/$defs/RpcReviewAcknowledgmentResponse"
-		},
-		"IntentOutput.review_branch": {
-			"$ref": "#/$defs/ReviewStarted"
-		},
-		"IntentOutput.review_commit": {
-			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_export_feedback": {
 			"type": "object",
@@ -12084,9 +11874,6 @@
 		},
 		"IntentOutput.review_open_session": {
 			"$ref": "#/$defs/IntentCancelled"
-		},
-		"IntentOutput.review_pr": {
-			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.review_publish": {
 			"type": "object",
@@ -12166,9 +11953,6 @@
 		},
 		"IntentOutput.review_start_discussions": {
 			"$ref": "#/$defs/RpcStartReviewDiscussions"
-		},
-		"IntentOutput.review_uncommitted": {
-			"$ref": "#/$defs/ReviewStarted"
 		},
 		"IntentOutput.set_keep_awake": {
 			"$ref": "#/$defs/RpcKeepAwakeStatus"
