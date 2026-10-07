@@ -42,7 +42,7 @@ export interface DaemonHarnessOptions {
 	readonly extensions?: readonly VoltdServiceExtension[];
 	/** How workers start; in this process by default. */
 	readonly workerLauncher?: WorkerLauncher;
-	/** `remote.detachedRuntimeTtlMs`; the daemon's default otherwise. */
+	/** The state's `detachedRuntimeTtlMs`; the daemon's default otherwise. */
 	readonly detachedRuntimeTtlMs?: number;
 	/** Single-file extensions (absolute paths) the workers' conversations load beside the faux provider; none may declare permissions. */
 	readonly workerExtensions?: readonly string[];

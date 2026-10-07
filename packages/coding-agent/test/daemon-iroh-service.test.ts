@@ -63,6 +63,13 @@ afterAll(() => {
 	vi.unstubAllEnvs();
 });
 
+/** Registers a directory under `agentDir` as the shared workspace "ws" that pairing requests name. */
+async function registerPairingWorkspace(control: DaemonClient, agentDir: string): Promise<void> {
+	const path = join(agentDir, "ws");
+	mkdirSync(path, { recursive: true });
+	expect(await control.request({ type: "workspace_register", name: "ws", path })).toMatchObject({ type: "ok" });
+}
+
 describe("native Iroh test prerequisite", () => {
 	it("reports an injected missing native binding without taking down local daemon control", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "voltd-missing-iroh-"));
@@ -97,7 +104,7 @@ describe("native Iroh test prerequisite", () => {
 				},
 			});
 			expect(await control.request({ type: "clients_list" })).toMatchObject({ type: "clients_result" });
-			expect(await control.request({ type: "pair_request", access: "coding" })).toMatchObject({
+			expect(await control.request({ type: "pair_request", workspaceName: "ws", access: "coding" })).toMatchObject({
 				type: "error",
 				code: "iroh_unavailable",
 			});
@@ -210,7 +217,9 @@ describe("native Iroh test prerequisite", () => {
 						return status?.type === "status_result" ? status.remoteTransport : undefined;
 					})
 					.toMatchObject({ state: "unavailable", reasonCode: "endpoint_start_failed" });
-				expect(await control.request({ type: "pair_request", access: "coding" })).toMatchObject({
+				expect(
+					await control.request({ type: "pair_request", workspaceName: "ws", access: "coding" }),
+				).toMatchObject({
 					type: "error",
 					code: "iroh_unavailable",
 				});
@@ -821,8 +830,9 @@ describe.skipIf(!nativeAvailable)("voltd Iroh relay restart recovery", () => {
 				reconnect: false,
 				onEvent: (event) => controlEvents.push(event),
 			});
+			await registerPairingWorkspace(control, agentDir);
 			const pairAndReadNodeId = async (): Promise<string> => {
-				const started = await control?.request({ type: "pair_request" });
+				const started = await control?.request({ type: "pair_request", workspaceName: "ws" });
 				if (started?.type !== "pair_started") throw new Error("pair request did not start");
 				let ticket: string | undefined;
 				await expect
@@ -1141,6 +1151,14 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		await daemon;
 		rmSync(agentDir, { recursive: true, force: true });
 	}, 30_000);
+
+	it("refuses a pairing request that names no workspace and registers none", async () => {
+		const unnamed = { type: "pair_request", access: "coding" } as unknown as Parameters<DaemonClient["request"]>[0];
+		expect(await control.request(unnamed)).toMatchObject({ type: "error", code: "invalid_request" });
+		const status = await control.request({ type: "status" });
+		if (status.type !== "status_result") throw new Error("status missing");
+		expect(status.workspaces.map((workspace) => workspace.name)).toEqual(["ws"]);
+	});
 
 	it("pairs a phone, serves workspace discovery, and revokes", async () => {
 		// Pair over the control plane.
@@ -1849,7 +1867,10 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 			});
 			await expectIrohEndpointReady(control);
 			expect(relayWatchStarted).toBe(true);
-			expect(await control.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
+			await registerPairingWorkspace(control, agentDir);
+			expect(await control.request({ type: "pair_request", workspaceName: "ws" })).toMatchObject({
+				type: "pair_started",
+			});
 			await expect.poll(() => reconnectStarted, { timeout: 5_000 }).toBe(true);
 
 			revocationRequest = control.request({ type: "relay_credential_revoke" });
@@ -2041,7 +2062,8 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 				reconnect: false,
 			});
 			await expectIrohEndpointReady(control);
-			const pairing = await control.request({ type: "pair_request" });
+			await registerPairingWorkspace(control, agentDir);
+			const pairing = await control.request({ type: "pair_request", workspaceName: "ws" });
 			expect(pairing).toMatchObject({ type: "pair_started" });
 			if (pairing.type !== "pair_started") throw new Error("managed relay pairing did not start");
 			pairingRequestId = pairing.requestId;
@@ -2173,7 +2195,8 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 				reconnect: false,
 			});
 			await expectIrohEndpointReady(control);
-			const pairing = await control.request({ type: "pair_request" });
+			await registerPairingWorkspace(control, agentDir);
+			const pairing = await control.request({ type: "pair_request", workspaceName: "ws" });
 			expect(pairing).toMatchObject({ type: "pair_started" });
 			if (pairing.type !== "pair_started") throw new Error("managed relay pairing did not start");
 			pairingRequestId = pairing.requestId;
@@ -2853,7 +2876,10 @@ describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => 
 				reconnect: false,
 			});
 
-			expect(await pairingControl.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
+			await registerPairingWorkspace(pairingControl, agentDir);
+			expect(await pairingControl.request({ type: "pair_request", workspaceName: "ws" })).toMatchObject({
+				type: "pair_started",
+			});
 			const paths = getDaemonPaths(agentDir);
 			const pendingBeforeShutdown = JSON.parse(readFileSync(paths.statePath, "utf8")) as {
 				pendingPairingTickets: unknown[];
@@ -2942,7 +2968,8 @@ describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => 
 					settings: { relayCredentialClaim?: { claimId: string } };
 				};
 
-			const firstPairing = await control.request({ type: "pair_request" });
+			await registerPairingWorkspace(control, agentDir);
+			const firstPairing = await control.request({ type: "pair_request", workspaceName: "ws" });
 			expect(firstPairing).toMatchObject({ type: "pair_started" });
 			if (firstPairing.type !== "pair_started") throw new Error("first pairing did not start");
 			activePairingRequestId = firstPairing.requestId;
@@ -2959,7 +2986,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => 
 			expect(cancelledState.pendingPairingTickets).toEqual([]);
 			expect(cancelledState.settings.relayCredentialClaim).toBeUndefined();
 
-			const replacementPairing = await control.request({ type: "pair_request" });
+			const replacementPairing = await control.request({ type: "pair_request", workspaceName: "ws" });
 			expect(replacementPairing).toMatchObject({ type: "pair_started" });
 			if (replacementPairing.type !== "pair_started") throw new Error("replacement pairing did not start");
 			activePairingRequestId = replacementPairing.requestId;

@@ -28,10 +28,11 @@
  *
  * Retention is per group: a group is attached while any relayed stream of
  * one of its conversations is offered or open, else detached. The retention
- * TTL (`remote.detachedRuntimeTtlMs`) runs only while the group is open,
- * detached, and idle (the worker's last `worker_activity`); when it fires,
- * the worker is asked to close the group and may refuse because it turned
- * active. A worker that hosts nothing after a release retires (`worker_stop`).
+ * TTL (`detachedRuntimeTtlMs` in the daemon's state settings) runs only while
+ * the group is open, detached, and idle (the worker's last `worker_activity`);
+ * when it fires, the worker is asked to close the group and may refuse because
+ * it turned active. A worker that hosts nothing after a release retires
+ * (`worker_stop`).
  * One conversation can be closed without the option to refuse (a revoked
  * client, a removed worktree, a phone's fresh pairing), leaving the worker's
  * other groups serving. A worker a TUI spawned for a conversation without a
@@ -183,7 +184,7 @@ export interface WorkerRegistryOptions {
 	sendTo(connectionId: string, event: ControlEvent): boolean;
 	/** The workspace's current authority generation; undefined once it is unregistered. */
 	currentGeneration(workspaceName: string): number | undefined;
-	/** `remote.detachedRuntimeTtlMs`, read whenever a detached idle group arms its timer. */
+	/** The daemon's `detachedRuntimeTtlMs` state setting, read whenever a detached idle group arms its timer. */
 	detachedRuntimeTtlMs(): number;
 	/**
 	 * Whether `sessionId` is a stored session of `workspaceName`, or of the

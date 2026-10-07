@@ -826,11 +826,11 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	/** Progress arrives as pairing_progress events. */
 	pair_request: Type.Union([
 		withId("pair_request", {
-			workspaceName: Type.Optional(Type.String()),
+			workspaceName: Type.String(),
 			...presetAccess,
 			access: Type.Optional(RemoteAccessPresetNameSchema),
 		}),
-		withId("pair_request", { workspaceName: Type.Optional(Type.String()), ...explicitAccess }),
+		withId("pair_request", { workspaceName: Type.String(), ...explicitAccess }),
 	]),
 	pair_cancel: withId("pair_cancel", { requestId: Type.String() }),
 	clients_list: withId("clients_list", {}),

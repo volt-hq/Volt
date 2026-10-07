@@ -505,7 +505,7 @@ ForceAbortClose(w, t) ==
 RetireIfEmpty(w, remaining) ==
     wState' = [wState EXCEPT ![w] = IF remaining = {} THEN "retiring" ELSE @]
 
-\* remote.detachedRuntimeTtlMs fires on a detached, idle group: the registry
+\* The detached-runtime retention TTL fires on a detached, idle group: the registry
 \* sends worker_close{reason: "retention"} for its top-level conversation.
 CloseDetachedIdle(w, t) ==
     /\ daemonUp
