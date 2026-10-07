@@ -708,6 +708,25 @@ describe("SQLite session store", () => {
 		expect((await client.applyTransaction(write)).status).toBe("committed");
 	}, 30_000);
 
+	// Regression #712: an opener queued behind another opener's upgrade failed with store_busy.
+	it("keeps opening a store whose write lock outlasts the busy timeout", async () => {
+		const sessionDirectory = makeSessionDirectory();
+		const first = await openStore(sessionDirectory);
+		const blocker = new DatabaseSync(first.info.databasePath, { timeout: 0 });
+		try {
+			blocker.exec("BEGIN IMMEDIATE");
+			const opening = SQLiteSessionStoreClient.open(sessionDirectory);
+			await delay(SESSION_STORE_BUSY_TIMEOUT_MS + 1_000);
+			blocker.exec("ROLLBACK");
+			const opened = await opening;
+			clients.push(opened);
+			expect(opened.info.storeId).toBe(first.info.storeId);
+		} finally {
+			if (blocker.isTransaction) blocker.exec("ROLLBACK");
+			blocker.close();
+		}
+	}, 30_000);
+
 	it("starts a store worker when the daemon process has V8 optimization arguments", async () => {
 		const daemonFlag = "--optimize-for-size";
 		process.execArgv.push(daemonFlag);
