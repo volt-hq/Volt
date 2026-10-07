@@ -10789,6 +10789,8 @@
 			],
 			"properties": {
 				"target": {
+					"title": "Target",
+					"description": "What to review.",
 					"type": "string",
 					"enum": [
 						"uncommitted",
@@ -10799,28 +10801,39 @@
 					]
 				},
 				"base": {
-					"type": "string"
+					"type": "string",
+					"title": "Base branch"
 				},
 				"number": {
-					"type": "string"
+					"type": "string",
+					"title": "Pull request number"
 				},
 				"url": {
 					"type": "string",
+					"title": "Pull request URL",
 					"minLength": 1,
 					"maxLength": 2000,
 					"pattern": "^https://\\S+$"
 				},
 				"ref": {
 					"type": "string",
+					"title": "Commit",
 					"minLength": 1
 				},
 				"focus": {
-					"type": "string"
+					"type": "string",
+					"title": "Focus",
+					"description": "A question or an area for the review to concentrate on."
 				},
 				"scope": {
-					"type": "string"
+					"type": "string",
+					"title": "Scope",
+					"description": "Comma-separated repository-relative globs; empty reviews every changed file."
 				},
 				"effort": {
+					"title": "Effort",
+					"description": "How much thinking the review passes use.",
+					"default": "standard",
 					"type": "string",
 					"enum": [
 						"low",
@@ -10829,9 +10842,15 @@
 					]
 				},
 				"includeOptional": {
-					"type": "boolean"
+					"type": "boolean",
+					"title": "Include optional findings",
+					"description": "Also report P3 suggestions.",
+					"default": false
 				},
 				"scopeMode": {
+					"title": "Scope mode",
+					"description": "Incremental reviews only what changed since the previous run of the same change; full reviews all.",
+					"default": "incremental",
 					"type": "string",
 					"enum": [
 						"incremental",
@@ -10849,7 +10868,35 @@
 					"uniqueItems": true
 				}
 			},
-			"additionalProperties": false
+			"additionalProperties": false,
+			"x-volt-command": {
+				"keyword": {
+					"field": "target",
+					"aliases": {
+						"unstaged": "uncommitted",
+						"working": "uncommitted"
+					},
+					"positional": {
+						"branch": "base",
+						"branch_uncommitted": "base",
+						"pr": "number",
+						"commit": "ref"
+					}
+				},
+				"flagValues": [
+					"scopeMode"
+				],
+				"lists": [
+					"scope"
+				],
+				"form": [
+					"focus",
+					"scope",
+					"effort",
+					"includeOptional",
+					"scopeMode"
+				]
+			}
 		},
 		"IntentInput.review_acknowledge": {
 			"type": "object",

@@ -253,6 +253,15 @@ The Remote column says whether the remote profile (paired devices) admits the in
 
 Remote-only intents (`set_keep_awake`, `set_web_search_key`, `upload_device_logs`, `register_push_target`, `unregister_workspace`, `create_worktree`, `remove_worktree`, `prepare_pr_review`) are `unavailable` in RPC mode.
 
+**Command hints.** The `review` intent's descriptor `input` carries an `x-volt-command` keyword that says how a client reads the input as a command line, such as `/review branch main --effort high --full`, and which fields an options form offers. It is optional and advisory: a client that sends typed input, or does not know the keyword, ignores it, and it never changes which inputs the host accepts. Every name it uses is a property of the input schema, and `title`, `description`, and `default` on a property label its form field and say what it is when omitted.
+
+| Key | Meaning |
+|---|---|
+| `keyword` | `{field, aliases?, positional?}`: the first word of the command sets the enum property `field`. The words are the enum values, in kebab-case (`branch-uncommitted`) or as spelled; `aliases` maps other words to values (`unstaged` and `working` mean `uncommitted`). `positional` maps a value to the property the next word sets (`branch` sets `base`, `pr` sets `number`, `commit` sets `ref`) when that word does not start with `--`. |
+| `flagValues` | Enum properties set by a bare flag per value (`--incremental`, `--full`) instead of `--name value`. |
+| `lists` | String properties that hold a comma-separated list: the flag may repeat, and entries are trimmed and de-duplicated. |
+| `form` | The properties a client offers as flags and in an options form, in order. A flag is `--kebab-case-name value` or `--kebab-case-name=value`, and a boolean is a bare flag. A property that is not listed (`tools`, `url`) is not a flag. |
+
 ### Dynamic intents
 
 Extension commands, prompt templates, and skills are intents named `extension.command.<extension id>.<command>`, `prompt.template.<id>`, and `skill.<id>`, with input `{arguments?, streamingBehavior?}`. An extension command's name stays the same while its extension keeps its manifest id; prompt template and skill ids are opaque. The `intents` query lists them with their ids, labels, and sources. Invoking one sends its slash text as a prompt. A prompt whose text starts with `/` runs an extension command of that name too.

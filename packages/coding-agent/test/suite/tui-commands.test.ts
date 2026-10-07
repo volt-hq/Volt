@@ -20,7 +20,7 @@ import {
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
 } from "@hansjm10/volt-ai";
-import type { QueryResult } from "@hansjm10/volt-protocol";
+import type { IntentDescriptor, QueryResult } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/index.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
@@ -52,6 +52,7 @@ type ModeAccess = {
 	defaultEditor: CustomEditor;
 	transientUsage: unknown;
 	keybindings: { getKeys(action: string): string[] };
+	input: { readonly catalog: { readonly intents: readonly IntentDescriptor[] }; load(): Promise<boolean> };
 };
 
 const harnesses: TuiHarness[] = [];
@@ -643,6 +644,9 @@ describe("TUI reviews", () => {
 		const review = tui.submit("/review");
 		await choose(tui, "Against base branch");
 		await choose(tui, "main");
+		// The pickers are followed by one form for the options; Enter starts with their defaults.
+		await waitForScreen(tui, "Review options");
+		tui.terminal.sendInput("\r");
 		await discovery.started;
 		await waitForScreen(tui, "Reviewing");
 		tui.terminal.sendInput(ESC);
@@ -653,6 +657,164 @@ describe("TUI reviews", () => {
 		tui.terminal.sendInput(ESC);
 		await commit;
 		await waitForScreen(tui, "Review cancelled");
+	});
+
+	/** The inputs the TUI sent to the review intent. */
+	const reviewInputs = (intent: { mock: { calls: unknown[][] } }): unknown[] =>
+		intent.mock.calls.filter(([name]) => name === "review").map(([, input]) => input);
+
+	it("asks for the options in one form after the target, and starts with the ones it changed", async () => {
+		const { harness, tui } = await start();
+		reviewRepository(harness.tempDir);
+		const discovery = heldTurn("never");
+		harness.faux.setResponses([discovery.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(
+			tui,
+			"Review options",
+			"Focus",
+			"Scope",
+			"Effort",
+			"standard",
+			"Include optional findings",
+			"Scope mode",
+			"incremental",
+		);
+		const DOWN = "\x1b[B";
+		const RIGHT = "\x1b[C";
+		tui.terminal.sendInput("auth");
+		tui.terminal.sendInput(DOWN);
+		tui.terminal.sendInput("src/**");
+		tui.terminal.sendInput(DOWN);
+		// Effort: standard to high.
+		tui.terminal.sendInput(RIGHT);
+		tui.terminal.sendInput(DOWN);
+		tui.terminal.sendInput(RIGHT);
+		tui.terminal.sendInput(DOWN);
+		// Scope mode: incremental to full.
+		tui.terminal.sendInput(RIGHT);
+		tui.terminal.sendInput("\r");
+		await discovery.started;
+		await waitForScreen(tui, "Equivalent command: /review uncommitted --focus auth");
+		expect(reviewInputs(intent)).toEqual([
+			{
+				target: "uncommitted",
+				focus: "auth",
+				scope: "src/**",
+				effort: "high",
+				includeOptional: true,
+				scopeMode: "full",
+			},
+		]);
+		tui.terminal.sendInput(ESC);
+		await review;
+	});
+
+	it("starts with no extra fields when the form is submitted as it opened", async () => {
+		const { harness, tui } = await start();
+		reviewRepository(harness.tempDir);
+		const discovery = heldTurn("never");
+		harness.faux.setResponses([discovery.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(tui, "Review options");
+		tui.terminal.sendInput("\r");
+		await discovery.started;
+		await waitForScreen(tui, "Equivalent command: /review uncommitted");
+		expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
+		tui.terminal.sendInput(ESC);
+		await review;
+	});
+
+	it("cancels the review when the options form is cancelled", async () => {
+		const { harness, tui, access } = await start();
+		reviewRepository(harness.tempDir);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const review = tui.submit("/review");
+		await choose(tui, "Uncommitted changes");
+		await waitForScreen(tui, "Review options");
+		tui.terminal.sendInput(ESC);
+		await review;
+		await waitForScreen(tui, "Review cancelled");
+		expect(reviewInputs(intent)).toEqual([]);
+		// The editor is back.
+		access.defaultEditor.setText("after the form");
+		await waitForScreen(tui, "after the form");
+	});
+
+	it("skips the pickers and the form when the command line says everything", async () => {
+		const { harness, tui } = await start();
+		reviewRepository(harness.tempDir);
+		git(harness.tempDir, "checkout", "-q", "-b", "topic");
+		git(harness.tempDir, "commit", "-q", "-am", "Change the value");
+		const discovery = heldTurn("never");
+		harness.faux.setResponses([discovery.response]);
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const review = tui.submit('/review branch main --effort high --scope "src/**"');
+		await discovery.started;
+		expect(tui.screen()).not.toContain("Review options");
+		expect(tui.screen()).not.toContain("Equivalent command");
+		expect(reviewInputs(intent)).toEqual([{ target: "branch", base: "main", effort: "high", scope: "src/**" }]);
+		tui.terminal.sendInput(ESC);
+		await review;
+	});
+
+	it("keeps /review tools local, and refuses arguments after it", async () => {
+		const { tui } = await start();
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		const tools = tui.submit("/review tools");
+		await waitForScreen(tui, "Auxiliary review tools");
+		tui.terminal.sendInput(ESC);
+		await tools;
+		await waitForScreen(tui, "Review tool selection cancelled");
+
+		await tui.submit("/review tools now");
+		await waitForScreen(tui, 'Unexpected arguments after "tools"', "Usage: /review");
+		expect(reviewInputs(intent)).toEqual([]);
+	});
+
+	it("shows a bad flag with the usage line, and starts nothing", async () => {
+		const { tui } = await start();
+		const intent = vi.spyOn(tui.store.client, "intent");
+
+		await tui.submit("/review uncommitted --effort extreme");
+		await waitForScreen(tui, "--effort must be low, standard, or high", "Usage: /review");
+		await tui.submit("/review uncommitted --tools bash");
+		await waitForScreen(tui, 'Unknown or misplaced argument "--tools"');
+		expect(reviewInputs(intent)).toEqual([]);
+	});
+
+	it("says so when the host does not describe how /review reads its arguments, or describes it wrongly", async () => {
+		const { tui, access } = await start();
+		const intent = vi.spyOn(tui.store.client, "intent");
+		const real = access.input.catalog;
+		const withReview = (change: (descriptor: IntentDescriptor) => IntentDescriptor | undefined) =>
+			vi.spyOn(access.input, "catalog", "get").mockReturnValue({
+				...real,
+				intents: real.intents.flatMap((i) => (i.name === "review" ? (change(i) ?? []) : [i])),
+			});
+		vi.spyOn(access.input, "load").mockResolvedValue(false);
+
+		withReview(() => undefined);
+		await tui.submit("/review uncommitted");
+		await waitForScreen(tui, "does not describe how /review reads its arguments");
+
+		withReview((descriptor) => {
+			const input = structuredClone(descriptor.input) as { "x-volt-command": { keyword: { field: string } } };
+			input["x-volt-command"].keyword.field = "nope";
+			return { ...descriptor, input };
+		});
+		await tui.submit("/review uncommitted");
+		await waitForScreen(tui, "describes /review wrongly", "not a property of the input");
+		expect(reviewInputs(intent)).toEqual([]);
 	});
 
 	it("reviews the branch together with its uncommitted changes", async () => {
