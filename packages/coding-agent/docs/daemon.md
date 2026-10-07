@@ -316,11 +316,11 @@ version:
 - When the TUI starts and the daemon is idle (no workers, no phone
   connections) and was started from a terminal, the TUI restarts it from its
   own installation and continues.
-- When it has running conversations, the TUI refuses with the version of each
-  side and `volt daemon restart` guidance; restarting stops those
-  conversations.
-- When the login service runs it, the TUI refuses and asks you to run `volt
-  daemon install-service` from the TUI's installation.
+- When the login service runs an idle daemon, the TUI refuses and asks you to
+  run `volt daemon install-service` from the TUI's installation.
+- Otherwise (it has workers or connected phones, or the TUI reconnects to it
+  later), the TUI refuses with the version of each side and `volt daemon
+  restart` guidance; restarting stops any running conversations.
 - A daemon that speaks another control protocol is never restarted
   automatically: the TUI asks you to run `volt daemon restart`.
 
@@ -335,9 +335,8 @@ Each worker's standard output and error go to
 `~/.volt/agent/daemon/workers/<workerId>.log` (mode `0600`, in a `0700`
 directory); `volt daemon status` and `/remote` show which worker hosts which
 conversation, and `volt daemon status` prints each worker's log path. The
-daemon keeps the logs of running workers and the most recent others, up to 50
-files. A worker logs the names of its environment variables, never their
-values.
+daemon keeps the logs of running workers and the 49 most recent others. A
+worker logs the names of its environment variables, never their values.
 
 ## Daemon environment
 
