@@ -18,6 +18,7 @@ import {
 	validateReviewVerification,
 } from "../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
+import { deliverReviewDiff, type ReviewObservedCoverage, ReviewRunCoverage } from "../src/core/review-tools.ts";
 
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -620,6 +621,103 @@ describe("structured review reports", () => {
 			completionStatus: "complete",
 			overallCorrectness: "correct",
 			coverage: { exclusions: [exclusion], uncheckedAreas: [] },
+		});
+	});
+
+	describe("completeness of a run with several passes", () => {
+		/** A change to two files, one hunk each, that no single pass below sees whole. */
+		async function setupTwoFiles(): Promise<{ snapshot: ReviewSnapshot; hunkA: string; hunkB: string }> {
+			const directory = join(tmpdir(), `volt-review-union-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+			mkdirSync(join(directory, "src"), { recursive: true });
+			directories.push(directory);
+			git(directory, "init", "--initial-branch=main");
+			git(directory, "config", "user.email", "review@example.com");
+			git(directory, "config", "user.name", "Review Test");
+			writeFileSync(join(directory, "src", "a.ts"), "export const a = 1;\n");
+			writeFileSync(join(directory, "src", "b.ts"), "export const b = 1;\n");
+			git(directory, "add", ".");
+			git(directory, "commit", "-m", "initial");
+			writeFileSync(join(directory, "src", "a.ts"), "export const a = 2;\n");
+			writeFileSync(join(directory, "src", "b.ts"), "export const b = 2;\n");
+			const result = await resolveReviewSnapshot({ kind: "uncommitted" }, directory, {
+				maxCommitRefBytes: 1_024,
+				maxPullRequestNumber: 2_147_483_647,
+			});
+			if ("error" in result) throw new Error(result.error);
+			snapshots.push(result);
+			const hunkOf = (path: string): string => {
+				const hunk = result.changedFiles.find((file) => file.path === path)?.hunks[0];
+				if (!hunk) throw new Error(`Expected a hunk in ${path}`);
+				return hunk.id;
+			};
+			return { snapshot: result, hunkA: hunkOf("src/a.ts"), hunkB: hunkOf("src/b.ts") };
+		}
+
+		/** A review with nothing to report, whose completeness is the coverage it is given. */
+		function reviewOf(snapshot: ReviewSnapshot, coverage: ReviewObservedCoverage) {
+			return buildParsedReview({
+				snapshot,
+				candidateReport: { summary: "Nothing found.", candidates: [], limitations: [] },
+				validatedCandidates: [],
+				verificationReport: {
+					summary: "Nothing to verify.",
+					assessment: "complete",
+					decisions: [],
+					priorFindingDecisions: [],
+					limitations: [],
+				},
+				discoveryCoverage: coverage,
+				verificationCoverage: coverage,
+				commandsRun: [],
+				failedVerificationAttempts: [],
+				excludedPaths: [],
+			});
+		}
+
+		it("is complete when the passes together saw every hunk, though none saw both", async () => {
+			const { snapshot, hunkA, hunkB } = await setupTwoFiles();
+			const run = new ReviewRunCoverage();
+			const first = run.newPass();
+			const second = run.newPass();
+			deliverReviewDiff(snapshot, first, [hunkA], 64 * 1024);
+			deliverReviewDiff(snapshot, second, [hunkB], 64 * 1024);
+			second.recordChangedFilePage(true);
+
+			// Each pass alone leaves a hunk unseen.
+			expect(reviewOf(snapshot, first.snapshot())).toMatchObject({ completionStatus: "incomplete" });
+			expect(reviewOf(snapshot, second.snapshot())).toMatchObject({ completionStatus: "incomplete" });
+
+			const parsed = reviewOf(snapshot, run.snapshot());
+			expect(parsed).toMatchObject({ completionStatus: "complete", overallCorrectness: "correct", findings: [] });
+			expect(parsed.coverage).toMatchObject({ uncheckedAreas: [], hunksInspected: [hunkA, hunkB].sort() });
+		});
+
+		it("is incomplete, naming the hunk, when no pass saw one", async () => {
+			const { snapshot, hunkA, hunkB } = await setupTwoFiles();
+			const run = new ReviewRunCoverage();
+			const first = run.newPass();
+			deliverReviewDiff(snapshot, first, [hunkA], 64 * 1024);
+			first.recordChangedFilePage(true);
+			// The second pass asked for hunk B, which did not fit its budget, so it was not delivered.
+			const second = run.newPass();
+			const delivery = deliverReviewDiff(snapshot, second, [hunkB], 1);
+			expect(delivery.omitted).toEqual([hunkB]);
+
+			const parsed = reviewOf(snapshot, run.snapshot());
+			expect(parsed.completionStatus).toBe("incomplete");
+			expect(parsed).not.toHaveProperty("overallCorrectness");
+			expect(parsed.coverage.uncheckedAreas).toEqual([`Changed hunk was not fully inspected: ${hunkB}`]);
+		});
+
+		it("is incomplete when no pass paged the changed-file inventory, whatever the hunks", async () => {
+			const { snapshot, hunkA, hunkB } = await setupTwoFiles();
+			const run = new ReviewRunCoverage();
+			deliverReviewDiff(snapshot, run.newPass(), [hunkA], 64 * 1024);
+			deliverReviewDiff(snapshot, run.newPass(), [hunkB], 64 * 1024);
+
+			const parsed = reviewOf(snapshot, run.snapshot());
+			expect(parsed.completionStatus).toBe("incomplete");
+			expect(parsed.coverage.uncheckedAreas).toEqual(["Changed-file inventory was not paged to completion."]);
 		});
 	});
 });
