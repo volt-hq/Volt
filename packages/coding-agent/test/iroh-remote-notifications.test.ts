@@ -954,7 +954,7 @@ describe("Iroh remote completion notifications", () => {
 			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
 		});
 
-		expect(await phone.intent("review_uncommitted", {})).toMatchObject({
+		expect(await phone.intent("review", { target: "uncommitted" })).toMatchObject({
 			type: "accepted",
 			result: { workId: "review:test" },
 		});

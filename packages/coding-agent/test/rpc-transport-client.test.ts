@@ -212,16 +212,18 @@ describe("protocol client of an in-process host", () => {
 		expect(named("abort")).toMatchObject({ label: "Cancel run", source: "builtin", remote: "safe" });
 		expect(named("new_session")).toMatchObject({ slash: { name: "clear", example: "/clear" }, remote: "safe" });
 		expect(named("set_session_name")).toMatchObject({ slash: { name: "name" }, remote: "unsafe" });
-		for (const name of ["review_uncommitted", "review_branch", "review_pr", "review_commit"]) {
-			expect(named(name)).toMatchObject({
-				category: "review",
-				presentation: { kind: "card", group: "Review" },
-				confirm: {},
-				remote: "safe",
-			});
-		}
-		expect(Object.keys(named("review_branch")?.input.properties as object)).toEqual([
+		expect(named("review")).toMatchObject({
+			category: "review",
+			presentation: { kind: "card", group: "Review" },
+			confirm: {},
+			remote: "safe",
+		});
+		expect(Object.keys(named("review")?.input.properties as object)).toEqual([
+			"target",
 			"base",
+			"number",
+			"url",
+			"ref",
 			"focus",
 			"scope",
 			"effort",
@@ -233,11 +235,21 @@ describe("protocol client of an in-process host", () => {
 		await client.prompt("long running");
 		await vi.waitFor(() => expect(conversation.session.isStreaming).toBe(true));
 		// Detached reviews stay available while the agent streams; outside a repository the preflight fails.
-		await expect(client.intent("review_uncommitted", {})).rejects.toMatchObject({
+		await expect(client.intent("review", { target: "uncommitted" })).rejects.toMatchObject({
 			reason: { code: "failed", message: "Not inside a git repository." },
 		});
-		await expect(client.intent("review_branch", { base: "main" })).rejects.toMatchObject({
+		await expect(client.intent("review", { target: "branch", base: "main" })).rejects.toMatchObject({
 			reason: { code: "failed", message: "Not inside a git repository." },
+		});
+		// A target takes only its own fields, and a commit review needs its ref.
+		await expect(client.intent("review", { target: "commit" })).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "A commit review needs a ref" },
+		});
+		await expect(client.intent("review", { target: "pr", base: "main" })).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "base does not apply to a pr review" },
+		});
+		await expect(client.intent("review", { target: "branch", ref: "abc" })).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "ref does not apply to a branch review" },
 		});
 
 		await client.intent("abort", {});
@@ -390,7 +402,7 @@ describe("protocol client of an in-process host", () => {
 		await vi.waitFor(() => expect(ran).toEqual(["release prod"]));
 	});
 
-	it("completes the review_branch base from the workspace's branches", async () => {
+	it("completes the review base from the workspace's branches", async () => {
 		const harness = await createHostHarness();
 		cleanups.push(() => harness.cleanup());
 		const repo = tempDir("volt-intent-branches-");
@@ -414,7 +426,7 @@ describe("protocol client of an in-process host", () => {
 		const client = await connect(harness, await openIn(repo));
 
 		const complete = (field: string, prefix: string) =>
-			client.query("intent_completions", { intent: "review_branch", field, prefix });
+			client.query("intent_completions", { intent: "review", field, prefix });
 		await expect(complete("base", "")).resolves.toEqual({
 			completions: [{ value: "main" }, { value: "feature/login" }, { value: "zeta" }],
 		});
@@ -427,11 +439,11 @@ describe("protocol client of an in-process host", () => {
 
 		const visitor = await connect(harness, await openIn(tempDir("volt-intent-no-repo-")));
 		await expect(
-			visitor.query("intent_completions", { intent: "review_branch", field: "base", prefix: "" }),
+			visitor.query("intent_completions", { intent: "review", field: "base", prefix: "" }),
 		).resolves.toEqual({ completions: [] });
 	});
 
-	it("completes the review_commit ref from recent commits and the review_pr number and url from the branch's pull request", async () => {
+	it("completes the review ref from recent commits and its number and url from the branch's pull request", async () => {
 		const harness = await createHostHarness();
 		cleanups.push(() => harness.cleanup());
 		const repo = tempDir("volt-intent-commits-");
@@ -461,22 +473,22 @@ describe("protocol client of an in-process host", () => {
 		const complete = (intent: string, field: string, prefix: string) =>
 			client.query("intent_completions", { intent, field, prefix });
 
-		await expect(complete("review_commit", "ref", "")).resolves.toEqual({
+		await expect(complete("review", "ref", "")).resolves.toEqual({
 			completions: [
 				{ value: second, label: "second change", description: expect.any(String) },
 				{ value: first, label: "first change", description: expect.any(String) },
 			],
 		});
-		await expect(complete("review_commit", "ref", first!.toUpperCase())).resolves.toMatchObject({
+		await expect(complete("review", "ref", first!.toUpperCase())).resolves.toMatchObject({
 			completions: [{ value: first }],
 		});
-		await expect(complete("review_pr", "number", "")).resolves.toEqual({
+		await expect(complete("review", "number", "")).resolves.toEqual({
 			completions: [{ value: "243", label: "#243 Compact width UI", description: "Current branch" }],
 		});
-		await expect(complete("review_pr", "number", "24")).resolves.toMatchObject({ completions: [{ value: "243" }] });
-		await expect(complete("review_pr", "number", "9")).resolves.toEqual({ completions: [] });
+		await expect(complete("review", "number", "24")).resolves.toMatchObject({ completions: [{ value: "243" }] });
+		await expect(complete("review", "number", "9")).resolves.toEqual({ completions: [] });
 		// The url pins the pull request a local client picked.
-		await expect(complete("review_pr", "url", "")).resolves.toEqual({
+		await expect(complete("review", "url", "")).resolves.toEqual({
 			completions: [
 				{ value: "https://example.test/pull/243", label: "#243 — Compact width UI", description: "Current branch" },
 			],
@@ -484,8 +496,7 @@ describe("protocol client of an in-process host", () => {
 		// Completing as the user types probes the code host once, not per keystroke.
 		expect(probe).toHaveBeenCalledTimes(1);
 		const { intents } = await client.query("intents");
-		expect(intents.find((intent) => intent.name === "review_commit")?.completions).toEqual(["ref"]);
-		expect(intents.find((intent) => intent.name === "review_pr")?.completions).toEqual(["number", "url"]);
+		expect(intents.find((intent) => intent.name === "review")?.completions).toEqual(["base", "number", "url", "ref"]);
 	});
 
 	it("asks the attaching client a dialog an extension opens from session_start before the client is ready", async () => {

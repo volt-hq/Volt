@@ -8011,16 +8011,14 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * The completions the conversation's review intents offer for `field` of
-	 * `intent`: the workspace's base branches, recent commits, and its
-	 * current branch's pull request, as the host reads them.
+	 * The completions the conversation's review intent offers for `field`:
+	 * the workspace's base branches (`base`), recent commits (`ref`), and its
+	 * current branch's pull request (`number`, `url`), as the host reads them.
 	 */
-	private async reviewCompletions(
-		intent: "review_branch" | "review_commit" | "review_pr",
-		field: string,
-	): Promise<readonly IntentOption[]> {
+	private async reviewCompletions(field: "base" | "ref" | "number" | "url"): Promise<readonly IntentOption[]> {
 		try {
-			return (await this.store.client.query("intent_completions", { intent, field, prefix: "" })).completions;
+			return (await this.store.client.query("intent_completions", { intent: "review", field, prefix: "" }))
+				.completions;
 		} catch {
 			return [];
 		}
@@ -8032,7 +8030,7 @@ export class InteractiveMode {
 		const prLabel = "Pull request";
 		const commitLabel = "Specific commit";
 		// The current branch's pull request, pinned by its URL as the picker shows it.
-		const currentPullRequest = (await this.reviewCompletions("review_pr", "url"))[0];
+		const currentPullRequest = (await this.reviewCompletions("url"))[0];
 		const currentPullRequestLabel = currentPullRequest
 			? `Current PR ${sanitizeText(currentPullRequest.label ?? currentPullRequest.value)}`
 			: undefined;
@@ -8072,7 +8070,7 @@ export class InteractiveMode {
 
 	/** Show logical local/upstream base branches and return the selected target. */
 	private async promptForReviewBaseBranch(): Promise<string | undefined> {
-		const branches = await this.reviewCompletions("review_branch", "base");
+		const branches = await this.reviewCompletions("base");
 		if (branches.length === 0) {
 			this.showError("No branches to review against.");
 			return undefined;
@@ -8084,7 +8082,7 @@ export class InteractiveMode {
 
 	/** Show a recent-commit picker and return the selected SHA. */
 	private async promptForReviewCommit(): Promise<string | undefined> {
-		const commits = await this.reviewCompletions("review_commit", "ref");
+		const commits = await this.reviewCompletions("ref");
 		if (commits.length === 0) {
 			this.showError("No commits to review.");
 			return undefined;
@@ -8234,24 +8232,26 @@ export class InteractiveMode {
 		let accepted: { result?: { workId: string } };
 		switch (target.kind) {
 			case "uncommitted":
-				accepted = await client.intent("review_uncommitted", options);
+				accepted = await client.intent("review", { ...options, target: "uncommitted" });
 				break;
 			case "branch":
-				accepted = await client.intent("review_branch", {
+				accepted = await client.intent("review", {
 					...options,
+					target: "branch",
 					...(target.base === undefined ? {} : { base: target.base }),
 				});
 				break;
 			case "pr":
-				accepted = await client.intent("review_pr", {
+				accepted = await client.intent("review", {
 					...options,
+					target: "pr",
 					...(target.number === undefined ? {} : { number: target.number }),
 					...(target.expectedUrl === undefined ? {} : { url: target.expectedUrl }),
 				});
 				break;
 			case "commit":
 				if (target.sha === undefined) throw new Error("No commit to review");
-				accepted = await client.intent("review_commit", { ...options, ref: target.sha });
+				accepted = await client.intent("review", { ...options, target: "commit", ref: target.sha });
 				break;
 		}
 		const workId = accepted.result?.workId;

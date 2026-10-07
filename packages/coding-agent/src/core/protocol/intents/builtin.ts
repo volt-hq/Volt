@@ -53,17 +53,14 @@ import {
 } from "./host.ts";
 import {
 	reviewAcknowledgeIntent,
-	reviewBranchIntent,
-	reviewCommitIntent,
 	reviewExportFeedbackIntent,
+	reviewIntent,
 	reviewOpenSessionIntent,
-	reviewPrIntent,
 	reviewPublishIntent,
 	reviewRecordFindingOutcomeIntent,
 	reviewRerunIntent,
 	reviewResetDiscussionIntent,
 	reviewStartDiscussionsIntent,
-	reviewUncommittedIntent,
 } from "./review.ts";
 import {
 	deleteSessionIntent,
@@ -124,10 +121,7 @@ export function createBuiltinIntents() {
 		open_work: openWorkIntent,
 		resume_work: resumeWorkIntent,
 		start_subagent: startSubagentIntent,
-		review_uncommitted: reviewUncommittedIntent,
-		review_branch: reviewBranchIntent,
-		review_pr: reviewPrIntent,
-		review_commit: reviewCommitIntent,
+		review: reviewIntent,
 		review_rerun: reviewRerunIntent,
 		review_open_session: reviewOpenSessionIntent,
 		review_acknowledge: reviewAcknowledgeIntent,

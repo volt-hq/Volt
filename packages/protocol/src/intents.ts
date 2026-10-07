@@ -411,14 +411,15 @@ export const INTENT_SCHEMAS = {
 	},
 
 	// Review
-	review_uncommitted: { input: Type.Object(reviewOptions, closed), output: ReviewStartedSchema },
-	review_branch: {
-		input: Type.Object({ base: Type.Optional(Type.String()), ...reviewOptions }, closed),
-		output: ReviewStartedSchema,
-	},
-	review_pr: {
+	/**
+	 * Start a review of `target`. `base` applies to a branch review, `number` and `url` to a pull request review,
+	 * and `ref` (required) to a commit review; a field of another target is rejected `invalid_input`.
+	 */
+	review: {
 		input: Type.Object(
 			{
+				target: stringEnum(["uncommitted", "branch", "pr", "commit"]),
+				base: Type.Optional(Type.String()),
 				number: Type.Optional(Type.String()),
 				/**
 				 * The pull request a local client picked, by its URL, such as its
@@ -426,14 +427,11 @@ export const INTENT_SCHEMAS = {
 				 * the code host resolves the same one.
 				 */
 				url: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, pattern: "^https://\\S+$" })),
+				ref: Type.Optional(Type.String({ minLength: 1 })),
 				...reviewOptions,
 			},
 			closed,
 		),
-		output: ReviewStartedSchema,
-	},
-	review_commit: {
-		input: Type.Object({ ref: Type.String({ minLength: 1 }), ...reviewOptions }, closed),
 		output: ReviewStartedSchema,
 	},
 	review_rerun: {
