@@ -10,10 +10,10 @@ import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createWorkerSpawnOptions } from "../src/cli/agent-options.ts";
 import { parseArgs } from "../src/cli/args.ts";
+import { resolveConversationProjectTrust } from "../src/core/project-trust.ts";
 import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import type { WorkerSpawnSpec } from "../src/daemon/control-protocol.ts";
 import { sensitiveDirectoryReason } from "../src/daemon/sensitive-directory.ts";
-import { resolveWorkerProjectTrust } from "../src/daemon/worker/conversation-factory.ts";
 import { workerEnvironment } from "../src/daemon/worker-launcher.ts";
 import {
 	checkWorkerSpawnOptions,
@@ -176,6 +176,10 @@ describe("TUI spawn options", () => {
 			"tools",
 		]);
 		expect(normalizeWorkerAgentConfig({ lsp: false, flags: {}, profile: "work" })).toEqual({ profile: "work" });
+		// `--no-approve` is a decision, not a default: the worker keeps it, and a live trusted worker names it.
+		expect(normalizeWorkerAgentConfig({ trust: false, lsp: false })).toEqual({ trust: false });
+		expect(differingSpawnOnlyOptions({ trust: false }, tuiSpec({ config: { trust: true } }))).toEqual(["trust"]);
+		expect(differingSpawnOnlyOptions({}, tuiSpec({ config: { trust: false } }))).toEqual(["trust"]);
 	});
 
 	it("runs a worker with its opener's environment less the daemon's credentials, in the daemon's agent directory", () => {
@@ -201,15 +205,15 @@ describe("TUI spawn options", () => {
 		mkdirSync(plain);
 		new ProjectTrustStore(agentDir).set(saved, true);
 		const decided = { cwd: opened, trusted: true };
-		expect(resolveWorkerProjectTrust(agentDir, opened, decided)).toBe(true);
-		expect(resolveWorkerProjectTrust(agentDir, elsewhere, decided)).toBe(false);
-		expect(resolveWorkerProjectTrust(agentDir, saved, decided)).toBe(true);
+		expect(resolveConversationProjectTrust(agentDir, opened, decided)).toBe(true);
+		expect(resolveConversationProjectTrust(agentDir, elsewhere, decided)).toBe(false);
+		expect(resolveConversationProjectTrust(agentDir, saved, decided)).toBe(true);
 		// Nothing there needs trust; a later `.volt` does.
-		expect(resolveWorkerProjectTrust(agentDir, plain, undefined)).toBe(true);
+		expect(resolveConversationProjectTrust(agentDir, plain, undefined)).toBe(true);
 		projectNeedingTrust(root, "plain");
-		expect(resolveWorkerProjectTrust(agentDir, plain, undefined)).toBe(false);
+		expect(resolveConversationProjectTrust(agentDir, plain, undefined)).toBe(false);
 		// An explicit refusal holds even where nothing needs trust.
-		expect(resolveWorkerProjectTrust(agentDir, plain, { cwd: plain, trusted: false })).toBe(false);
+		expect(resolveConversationProjectTrust(agentDir, plain, { cwd: plain, trusted: false })).toBe(false);
 	});
 
 	it("finds the directories never registered without asking: a root, a home, the agent directory's ancestors and insides", () => {

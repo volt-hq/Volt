@@ -89,7 +89,17 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 			},
 		],
 		phoneConnections: 1,
-		workers: [],
+		workers: [
+			{
+				workerId: "worker-1",
+				pid: 4242,
+				state: "live",
+				origin: "tui",
+				workspaceName: "volt",
+				sessionIds: ["session-current"],
+				clients: { local: 1, remote: 1 },
+			},
+		],
 		remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
 		workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
 		clients: [
@@ -378,7 +388,7 @@ describe("RemoteControlCenterComponent", () => {
 		setCellDimensions(cellDimensions);
 	});
 
-	it("renders daemon, ownership, device, workspace, and headless policy status", async () => {
+	it("renders daemon, worker, device, workspace, and headless policy status", async () => {
 		const backend = new FakeBackend({ kind: "online", status: status() });
 		const { component } = createComponent(backend, 45);
 		await component.start();
@@ -387,7 +397,7 @@ describe("RemoteControlCenterComponent", () => {
 		expect(text).toContain("Remote Access");
 		expect(text).toContain("Phone transport: ready · wrapper 1.1.1-volt.2");
 		expect(text).toContain("1 attached phone · 1 paired device");
-		expect(text).toContain("Current lease: tui-owned");
+		expect(text).toContain("This conversation: worker pid 4242 · live · 1 terminal, 1 phone attached");
 		expect(text).toContain("Register current directory");
 		expect(text).toContain("Tools: read, bash");
 		expect(text).toContain("Detached runtime retention: 30m");
@@ -838,8 +848,8 @@ describe("RemoteControlCenterComponent", () => {
 		component.render(80).lines;
 		for (let index = 0; index < 4; index++) component.handleInput("\x1b[6~");
 		const text = component.render(80).lines.map(stripAnsi).join("\n");
-		expect(text).toContain("LEASES");
-		expect(text).toContain("Current · volt/session-current");
+		expect(text).toContain("WORKERS");
+		expect(text).toContain("Current · volt/session-current · pid 4242");
 	});
 
 	it("starts an offline daemon and refreshes into the overview", async () => {
@@ -917,7 +927,7 @@ describe("RemoteControlCenterComponent", () => {
 		expect(backend.registerCalls).toEqual([]);
 	});
 
-	it("lists the registered child while preserving the active parent workspace and lease", async () => {
+	it("lists the registered child while preserving the active parent workspace and worker", async () => {
 		const originalStatus = status();
 		const backend = new FakeBackend({ kind: "online", status: originalStatus });
 		backend.registerName = "child";
@@ -932,8 +942,8 @@ describe("RemoteControlCenterComponent", () => {
 		expect(text).toContain("Current · volt · /tmp/volt");
 		expect(text).toContain("child · /tmp/volt/child");
 		expect(text).not.toContain("Current · child");
-		expect(text).toContain("Current · volt/session-current · tui-owned");
-		if (backend.snapshot.kind === "online") expect(backend.snapshot.status.leases).toEqual(originalStatus.leases);
+		expect(text).toContain("Current · volt/session-current · pid 4242");
+		if (backend.snapshot.kind === "online") expect(backend.snapshot.status.workers).toEqual(originalStatus.workers);
 	});
 
 	it.each([false, true])("shows registration errors even if the daemon goes offline: %s", async (offline) => {

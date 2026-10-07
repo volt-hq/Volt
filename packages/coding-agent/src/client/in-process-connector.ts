@@ -18,9 +18,10 @@
  * host; until then, a process exit closes the language server traces of the
  * conversations the host serves.
  *
- * `LeasedConnector` is the volt CLI's: this connector with the daemon's
- * conversation leases, until its TUI attaches to daemon workers (Phase 7). It
- * is not part of the package's API.
+ * `LeasedConnector` is this connector with the daemon's conversation leases,
+ * which the volt CLI's TUI used before it attached to daemon workers; it
+ * remains until ownership transfer is deleted (Phase 7 slice 9). It is not
+ * part of the package's API.
  */
 
 import { randomUUID } from "node:crypto";
@@ -221,8 +222,8 @@ export interface LeasedConnectorOptions extends InProcessConnectorOptions {
 }
 
 /**
- * The volt CLI's connector: the in-process connector with the daemon's
- * conversation leases. Once the client first shows its startup
+ * The in-process connector with the daemon's conversation leases (see the
+ * module comment). Once the client first shows its startup
  * conversation, the leases take that conversation's daemon lease, serve the
  * phones relayed into the conversation the client shows, and follow the
  * client's moves; the startup conversation's durable queued input recovers

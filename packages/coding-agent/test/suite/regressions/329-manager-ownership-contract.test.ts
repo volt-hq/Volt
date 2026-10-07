@@ -4,8 +4,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as startupUi from "../../../src/cli/startup-ui.ts";
 import { ENV_AGENT_DIR, ENV_SESSION_DIR } from "../../../src/config.ts";
 import { GitContextProvider } from "../../../src/core/git-context-provider.ts";
-import { ConversationHost } from "../../../src/core/host/conversation-host.ts";
-import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { createEmptyMcpMergedConfig, finalizeMcpConfig } from "../../../src/core/mcp/config.ts";
 import { McpManager } from "../../../src/core/mcp/manager.ts";
 import { McpMetadataCache } from "../../../src/core/mcp/metadata-cache.ts";
@@ -49,14 +47,6 @@ async function isPersistenceClosed(manager: SessionManager): Promise<boolean> {
 	} catch {
 		return true;
 	}
-}
-
-function createDeferred(): { promise: Promise<void>; resolve(): void } {
-	let resolve = (): void => undefined;
-	const promise = new Promise<void>((resolvePromise) => {
-		resolve = resolvePromise;
-	});
-	return { promise, resolve };
 }
 
 describe("PR #329 manager ownership contract", () => {
@@ -164,203 +154,48 @@ describe("PR #329 manager ownership contract", () => {
 		return { fallbackCwd, ref, sessionDir };
 	}
 
-	it("closes and retains a continued manager when missing-cwd selection is cancelled", async () => {
+	it("asks for a continued session's missing cwd without opening its log, and opens nothing when cancelled", async () => {
 		const args = prepareCli("interactive");
 		const seeded = await seedMissingCwdSession("cancelled-missing-cwd");
-		const open = SessionManager.open.bind(SessionManager);
-		const closePersistence = SessionManager.prototype.closePersistence;
-		let selectedManager: SessionManager | undefined;
-		let closeCalls = 0;
-		// --continue finds the most recent session, then opens it for writing.
-		const openSpy = vi.spyOn(SessionManager, "open").mockImplementation(async (...callArgs) => {
-			const manager = await open(...callArgs);
-			if (callArgs[0].sessionId === seeded.ref.sessionId) selectedManager = manager;
-			return manager;
-		});
-		const closeSpy = vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(function (
-			this: SessionManager,
-		): Promise<void> {
-			if (this === selectedManager) closeCalls++;
-			return closePersistence.call(this);
-		});
+		// The interactive TUI resolves its startup session read-only: only its worker opens the log.
+		const openSpy = vi.spyOn(SessionManager, "open");
 		const selectorSpy = vi.spyOn(startupUi, "showStartupSelector").mockResolvedValue(undefined);
+		const initSpy = vi.spyOn(InteractiveMode.prototype, "init");
 
-		try {
-			await main([...args, "--continue"]);
-			expect(selectorSpy).toHaveBeenCalledOnce();
-			expect(process.exitCode).toBe(0);
-			expect(selectedManager).toBeDefined();
-			expect(closeCalls).toBe(1);
-			if (!selectedManager) throw new Error("Expected the continued missing-cwd manager");
-			expect(await isPersistenceClosed(selectedManager)).toBe(true);
-			expect(await SessionManager.findForResume(seeded.sessionDir, seeded.ref.sessionId)).toEqual(seeded.ref);
-		} finally {
-			selectorSpy.mockRestore();
-			openSpy.mockRestore();
-			closeSpy.mockRestore();
-			if (selectedManager && !(await isPersistenceClosed(selectedManager))) {
-				await closePersistence.call(selectedManager);
-			}
-		}
+		await main([...args, "--continue"]);
+		expect(selectorSpy).toHaveBeenCalledOnce();
+		expect(process.exitCode).toBe(0);
+		expect(openSpy).not.toHaveBeenCalled();
+		expect(initSpy).not.toHaveBeenCalled();
+		expect(await SessionManager.findForResume(seeded.sessionDir, seeded.ref.sessionId)).toEqual(seeded.ref);
 	});
 
-	it("closes the original missing-cwd manager before using its replacement", async () => {
+	it("opens a continued session in the current cwd once the user continues there, without opening its log", async () => {
 		const args = prepareCli("interactive");
 		const seeded = await seedMissingCwdSession("replaced-missing-cwd");
-		const initializationError = new Error("injected post-replacement initialization failure");
-		const originalCloseGate = createDeferred();
-		const originalCloseStarted = createDeferred();
-		const open = SessionManager.open.bind(SessionManager);
-		const closePersistence = SessionManager.prototype.closePersistence;
-		const getConversationState = SessionManager.prototype.getConversationState;
-		let originalManager: SessionManager | undefined;
-		let replacementManager: SessionManager | undefined;
-		let originalCloseFinished = false;
-		let replacementUsedBeforeOriginalClose = false;
-		let replacementOpenedBeforeOriginalClose = false;
-		let originalCloseCalls = 0;
-		let replacementCloseCalls = 0;
-		// --continue opens the most recent session; the cwd choice reopens it with the selected cwd.
-		const openSpy = vi.spyOn(SessionManager, "open").mockImplementation(async (...callArgs) => {
-			const reopening = callArgs[0].sessionId === seeded.ref.sessionId && callArgs[1] === seeded.fallbackCwd;
-			if (reopening && !originalCloseFinished) replacementOpenedBeforeOriginalClose = true;
-			const manager = await open(...callArgs);
-			if (callArgs[0].sessionId === seeded.ref.sessionId) {
-				if (reopening) replacementManager = manager;
-				else originalManager = manager;
-			}
-			return manager;
-		});
-		const closeSpy = vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(async function (
-			this: SessionManager,
-		): Promise<void> {
-			if (this === originalManager) {
-				originalCloseCalls++;
-				originalCloseStarted.resolve();
-				await originalCloseGate.promise;
-				await closePersistence.call(this);
-				originalCloseFinished = true;
-				return;
-			}
-			if (this === replacementManager) replacementCloseCalls++;
-			await closePersistence.call(this);
-		});
-		const getConversationStateSpy = vi
-			.spyOn(SessionManager.prototype, "getConversationState")
-			.mockImplementation(function (this: SessionManager) {
-				if (this === replacementManager && !originalCloseFinished) replacementUsedBeforeOriginalClose = true;
-				return getConversationState.call(this);
-			});
-		const selectorSpy = vi.spyOn(startupUi, "showStartupSelector").mockResolvedValue(seeded.fallbackCwd as never);
-		const initSpy = vi.spyOn(InteractiveMode.prototype, "init").mockRejectedValue(initializationError);
-		const running = main([...args, "--continue"]).catch((error: unknown) => error);
-
-		try {
-			await originalCloseStarted.promise;
-			expect(originalManager).toBeDefined();
-			// The replacement reopens the same session, so it waits for the original to release its lock.
-			expect(replacementManager).toBeUndefined();
-			originalCloseGate.resolve();
-			const thrown = await running;
-			expect(thrown).toBe(initializationError);
-			expect(originalCloseFinished).toBe(true);
-			expect(originalCloseCalls).toBe(1);
-			expect(replacementManager).toBeDefined();
-			expect(replacementOpenedBeforeOriginalClose).toBe(false);
-			expect(replacementUsedBeforeOriginalClose).toBe(false);
-			expect(replacementCloseCalls).toBe(1);
-			expect(replacementManager?.getCwd()).toBe(seeded.fallbackCwd);
-			expect(await SessionManager.findForResume(seeded.sessionDir, seeded.ref.sessionId)).toEqual(seeded.ref);
-		} finally {
-			originalCloseGate.resolve();
-			selectorSpy.mockRestore();
-			initSpy.mockRestore();
-			openSpy.mockRestore();
-			closeSpy.mockRestore();
-			getConversationStateSpy.mockRestore();
-			if (originalManager && !(await isPersistenceClosed(originalManager))) {
-				await closePersistence.call(originalManager);
-			}
-			if (replacementManager && !(await isPersistenceClosed(replacementManager))) {
-				await closePersistence.call(replacementManager);
-			}
-		}
-	});
-
-	it("closes the transferred CLI conversation exactly once when interactive initialization rejects", async () => {
 		const initializationError = new Error("injected interactive initialization failure");
-		let cliHost: ConversationHost | undefined;
-		let cliConversation: HostedConversation | undefined;
-		let cliManager: SessionManager | undefined;
-		let conversationCloseCalls = 0;
-		let managerCloseCalls = 0;
-		let managerClosed = false;
-		const openConversation = ConversationHost.prototype.open;
-		const closeConversation = ConversationHost.prototype.close;
-		const closePersistence = SessionManager.prototype.closePersistence;
-		// The CLI opens its startup conversation first.
-		vi.spyOn(ConversationHost.prototype, "open").mockImplementation(async function (
-			this: ConversationHost,
-			target,
-			options,
-		) {
-			const opened = await openConversation.call(this, target, options);
-			if (!opened.cancelled && cliConversation === undefined) {
-				cliHost = this;
-				cliConversation = opened.conversation;
-				cliManager = opened.conversation.session.sessionManager;
-			}
-			return opened;
+		const openSpy = vi.spyOn(SessionManager, "open");
+		vi.spyOn(startupUi, "showStartupSelector").mockResolvedValue(seeded.fallbackCwd as never);
+		let started: unknown;
+		vi.spyOn(InteractiveMode.prototype, "init").mockImplementation(async function (this: InteractiveMode) {
+			started = this;
+			throw initializationError;
 		});
-		vi.spyOn(ConversationHost.prototype, "close").mockImplementation(function (
-			this: ConversationHost,
-			conversation,
-			event,
-		): Promise<void> {
-			if (conversation === cliConversation) conversationCloseCalls++;
-			return closeConversation.call(this, conversation, event);
-		});
-		vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(function (
-			this: SessionManager,
-		): Promise<void> {
-			if (this === cliManager) managerCloseCalls++;
-			return closePersistence.call(this);
-		});
-		vi.spyOn(InteractiveMode.prototype, "init").mockRejectedValue(initializationError);
 
-		let thrown: unknown;
-		try {
-			await main(prepareCli("interactive"));
-		} catch (error) {
-			thrown = error;
-		}
-
-		try {
-			expect(thrown).toBe(initializationError);
-			expect(cliConversation).toBeDefined();
-			expect(cliManager).toBeDefined();
-			expect.soft(conversationCloseCalls, "The transferred CLI conversation must be closed exactly once").toBe(1);
-			expect
-				.soft(managerCloseCalls, "The conversation-owned session manager must be finalized exactly once")
-				.toBe(1);
-			if (cliManager) {
-				managerClosed = await isPersistenceClosed(cliManager);
-				expect.soft(managerClosed, "The transferred CLI session manager must be closed").toBe(true);
-				const sessionRef = cliManager.getSessionRef();
-				expect(sessionRef).toBeDefined();
-				if (sessionRef) {
-					expect(await SessionManager.findForResume(sessionRef.sessionDirectory, sessionRef.sessionId)).toEqual(
-						sessionRef,
-					);
-				}
-			}
-		} finally {
-			if (cliHost && cliConversation && conversationCloseCalls === 0) {
-				await closeConversation.call(cliHost, cliConversation);
-			} else if (cliManager && !managerClosed) {
-				await closePersistence.call(cliManager);
-			}
-		}
+		const thrown = await main([...args, "--continue"]).catch((error: unknown) => error);
+		expect(thrown).toBe(initializationError);
+		expect(openSpy).not.toHaveBeenCalled();
+		// The TUI opens the stored session in its daemon worker, in the cwd the user chose.
+		const connector = (started as { connector: { startup: { target: unknown; cwd: string } } }).connector;
+		expect(connector.startup).toEqual({
+			target: {
+				kind: "session",
+				sessionId: seeded.ref.sessionId,
+				sessionDir: seeded.ref.sessionDirectory,
+				cwdOverride: seeded.fallbackCwd,
+			},
+			cwd: seeded.fallbackCwd,
+		});
 	});
 
 	it("disposes CLI-created Git services when setup fails before AgentSession ownership", async () => {

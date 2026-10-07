@@ -45,8 +45,8 @@ Commands:
   worktree diff <id> [--workspace <name>]
                                 Show the worktree branch's diff against its base ref.
 
-"volt remote host" has been replaced by the background daemon. Run "volt daemon start"
-(or enable remote.background). See docs/daemon.md.
+"volt remote host" has been replaced by the background daemon, which interactive volt
+starts. Run "volt daemon start" to start it without a terminal. See docs/daemon.md.
 `);
 }
 
@@ -839,7 +839,7 @@ export async function handleRemoteControlCommand(args: string[]): Promise<boolea
 	}
 	if (command === "host") {
 		console.error(
-			'"volt remote host" has been replaced by the background daemon. Run "volt daemon start" (or enable remote.background). See docs/daemon.md.',
+			'"volt remote host" has been replaced by the background daemon, which interactive volt starts. Run "volt daemon start" to start it without a terminal. See docs/daemon.md.',
 		);
 		process.exitCode = 1;
 		return true;

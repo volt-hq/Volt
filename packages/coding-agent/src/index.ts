@@ -14,8 +14,10 @@ export {
 	type ConnectorTarget,
 	type ConnectThroughOptions,
 	type ConversationConnector,
+	ConversationUnavailableError,
 	connectThrough,
 	type OpenedConversation,
+	type ReconnectAttempt,
 } from "./client/conversation-connector.ts";
 export { InProcessConnector, type InProcessConnectorOptions } from "./client/in-process-connector.ts";
 // Protocol clients: in-process loopback, a `volt --mode rpc` child, or any transport
@@ -24,7 +26,10 @@ export {
 	LoopbackClient,
 	type LoopbackClientOptions,
 	ProtocolClient,
+	type ProtocolClientChange,
+	type ProtocolClientDisconnected,
 	type ProtocolClientOptions,
+	ProtocolConnectionLostError,
 	type ProtocolIntentOptions,
 	type ProtocolPromptOptions,
 	ProtocolQueryError,

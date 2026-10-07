@@ -245,12 +245,17 @@ export class TuiStore {
 		for (const listener of [...this.listeners]) listener(change);
 	}
 
-	/** Resolve the waiters for the conversation shown now, or reject every waiter with `error`. */
+	/**
+	 * Resolve the waiters for the conversation shown now, or reject every
+	 * waiter with `error`. A waiter for another conversation is rejected: the
+	 * client did not land there (its target could not be reached, and it went
+	 * back to the conversation it left).
+	 */
 	private settleWaiters(error?: Error): void {
 		for (const waiter of [...this.waiters]) {
 			if (error !== undefined) waiter.reject(error);
 			else if (waiter.conversation === this.shown || waiter.conversation === undefined) waiter.resolve();
-			else continue;
+			else waiter.reject(new Error(`The conversation ${waiter.conversation} could not be opened`));
 			this.waiters.delete(waiter);
 		}
 	}
