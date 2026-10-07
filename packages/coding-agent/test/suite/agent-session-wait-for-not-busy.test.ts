@@ -3,7 +3,6 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { BashOperations } from "../../src/core/tools/bash.ts";
-import { scheduleDetachedRuntimeRetention } from "../../src/remote/integrated-runtime-retention.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function gate(): { promise: Promise<void>; release: () => void } {
@@ -141,38 +140,5 @@ describe("AgentSession.waitForNotBusy", () => {
 
 		exit.release();
 		await bash.catch(() => {});
-	});
-
-	it("keeps detached runtime retention waiting, without spinning, while a ! command runs", async () => {
-		const harness = await create();
-		const exit = gate();
-		const bash = harness.session.runUserBash("sleep", { operations: blockingBash(exit.promise) });
-		await drain();
-
-		let waits = 0;
-		let expired = false;
-		// Composed like the daemon's detached-runtime retention for one session.
-		const handle = scheduleDetachedRuntimeRetention({
-			ttlMs: 50,
-			isDetached: () => true,
-			isActive: () => harness.session.isBusy,
-			waitForIdle: async () => {
-				waits++;
-				if (waits > 100) handle.cancel();
-				await harness.session.waitForNotBusy();
-			},
-			onExpire: () => {
-				expired = true;
-			},
-		});
-		await drain();
-		expect(waits).toBe(1);
-		expect(expired).toBe(false);
-
-		exit.release();
-		await bash;
-		await new Promise((resolve) => setTimeout(resolve, 100));
-		expect(waits).toBe(1);
-		expect(expired).toBe(true);
 	});
 });

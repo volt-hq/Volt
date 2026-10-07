@@ -1,0 +1,10 @@
+---
+"@hansjm10/volt-coding-agent": minor
+"@hansjm10/volt-protocol": minor
+---
+
+breaking(daemon): Conversation leases are gone: the session list reports a conversation as `attached` or `detached` in its worker, and phones are never refused `busy` while a desktop TUI takes a conversation over. ([#585](https://github.com/volt-hq/Volt/issues/585))
+
+Every conversation runs in a daemon worker that keeps it for its whole life, so nothing hands a conversation between processes any more. A paired device's `sessions` query reports `runtimeState` as `attached` (a TUI's or a phone's stream of the session is open, or its worker is still starting) or `detached` (a worker keeps it open with no client attached), and omits it when no worker hosts the session; `tui-owned`, `daemon-active`, `daemon-detached`, and `daemon-draining` no longer occur. A phone's stream relayed to a worker that closed it ends with relay close reason `worker_disconnected` (formerly `tui_disconnected`); `lease_transferred` no longer occurs. `volt daemon status` and `volt remote status` list conversation workers instead of leases, and `/remote` and `/worktree` reach the daemon through the TUI's own connection to it.
+
+Migration: phone clients decode `runtimeState` as `attached | detached` and auto-connect to `attached` sessions; drop handling of the drain `busy` retry and of `lease_transferred`. The daemon control protocol (now version 6) drops `lease_acquire`, `lease_release`, `lease_granted`, `lease_pending`, `lease_denied`, `viewer_abort`, `viewer_end`, `relay_rpc`, `relay_rpc_result`, `relay_notification_delivery`, `worker_abort`, `worktree_bind.acquireLease`, `status_result.leases`, the `lease_transferred` worker stop reason, and the `worktrees` and `rpc_grants` capabilities; only conversation workers send `change_observe`. Restart a running daemon (`volt daemon restart`) after upgrading. The SDK exports `DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS`, `parseIntegratedDetachedRuntimeTtlMs`, `scheduleDetachedRuntimeRetention`, and their option types no longer; the daemon's worker registry owns retention.

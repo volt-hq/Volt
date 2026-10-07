@@ -62,8 +62,6 @@ export interface WorkerDaemonClientOptions {
 	onRelayOffer(offer: WorkerRelayOffer): void;
 	/** A relayed client lost its authority: its stream ends with that fatal code. */
 	onRelayAuthority(relayId: string, loss: WorkerAuthorityLoss): void;
-	/** Stop the running turn of a hosted conversation. */
-	onAbort(sessionId: string): void;
 	/** The connection to the daemon dropped. */
 	onLost(): void;
 }
@@ -118,8 +116,6 @@ export class WorkerDaemonClient {
 					options.onRelayOffer(event);
 				} else if (event.type === "relay_authority") {
 					options.onRelayAuthority(event.relayId, event.loss);
-				} else if (event.type === "worker_abort") {
-					options.onAbort(event.sessionId);
 				}
 			},
 			onConnectionStateChange: (state) => {

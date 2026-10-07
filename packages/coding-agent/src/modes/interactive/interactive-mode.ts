@@ -4024,7 +4024,7 @@ export class InteractiveMode {
 	 * keeps running there.
 	 */
 	private async requestQuit(): Promise<void> {
-		if (this.connector.background === true) {
+		if (this.connector.runsInBackground === true) {
 			if (this.connected && this.store.phase?.operation === "turn") {
 				const stop = "Stop turn and quit";
 				const leave = "Leave running in background";
@@ -5085,10 +5085,15 @@ export class InteractiveMode {
 
 	/** `/remote`: the daemon's control center, for the conversation the TUI shows. */
 	private async showRemoteControlCenter(): Promise<void> {
+		const daemon = this.connector.daemon;
+		if (daemon === undefined) {
+			this.showError("Remote access needs the volt daemon: this terminal's conversations do not run in it.");
+			return;
+		}
 		await this.clientConnected.promise;
 		const conversation = await this.sessions.info();
 		this.showSelector((done) => {
-			const center = new RemoteControlCenterComponent(createRemoteControlBackend(getAgentDir()), {
+			const center = new RemoteControlCenterComponent(createRemoteControlBackend(daemon, getAgentDir()), {
 				getTerminalRows: () => this.ui.terminal.rows,
 				getCurrentWorkspaceName: () => this.connector.daemonWorkspaceName(),
 				getCurrentWorkspacePath: () => conversation.cwd,
@@ -6361,6 +6366,7 @@ export class InteractiveMode {
 			cwd,
 			agentDir: getAgentDir(),
 			...(workspaceName === undefined ? {} : { workspaceName }),
+			daemon: this.connector.daemon,
 		});
 		if (!opened.ok) {
 			this.showError(`Worktrees need the volt daemon: ${opened.error}`);

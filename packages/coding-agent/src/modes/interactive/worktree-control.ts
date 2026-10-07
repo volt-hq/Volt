@@ -5,15 +5,12 @@
  */
 
 import { resolve } from "node:path";
+import type { ConnectorDaemon } from "../../client/conversation-connector.ts";
 import { VERSION } from "../../config.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
-import {
-	CONTROL_RPC_GRANTS_CAPABILITY,
-	CONTROL_WORKTREES_CAPABILITY,
-	type ControlWorktreeStatus,
-} from "../../daemon/control-protocol.ts";
+import type { ControlWorktreeStatus } from "../../daemon/control-protocol.ts";
 import { getDaemonSocketPath } from "../../daemon/paths.ts";
-import { type EnsureDaemonResult, ensureDaemonRunning } from "../../daemon/spawn.ts";
+import type { EnsureDaemonResult } from "../../daemon/spawn.ts";
 import { isPathInside } from "../../daemon/workspace-directory.ts";
 
 /**
@@ -72,23 +69,25 @@ export interface OpenDaemonWorktreeControlOptions {
 	agentDir: string;
 	/** The conversation's workspace, when the TUI knows it; else the one containing `cwd`. */
 	workspaceName?: string;
-	/** Injectable for tests; defaults to ensureDaemonRunning. */
-	ensureDaemon?: (agentDir: string) => Promise<EnsureDaemonResult>;
+	/** The daemon the TUI's connector reaches its conversations through; none for a host in the TUI's process. */
+	daemon: Pick<ConnectorDaemon, "ensure"> | undefined;
 }
 
 /**
  * Control-plane handle for the TUI /worktree command (§5.2.1): ensures the
- * daemon is running, takes the conversation's workspace (or resolves the one
- * containing the cwd), and exposes worktree list/create/bind over the
- * control socket.
+ * daemon of the TUI's connector is running, takes the conversation's
+ * workspace (or resolves the one containing the cwd), and exposes worktree
+ * list/create/bind over the control socket.
  */
 export async function openDaemonWorktreeControl(
 	options: OpenDaemonWorktreeControlOptions,
 ): Promise<{ ok: true; control: DaemonWorktreeControl } | { ok: false; error: string }> {
-	const ensureDaemon = options.ensureDaemon ?? ensureDaemonRunning;
+	if (options.daemon === undefined) {
+		return { ok: false, error: "this terminal's conversations do not run in the daemon" };
+	}
 	let ensured: EnsureDaemonResult;
 	try {
-		ensured = await ensureDaemon(options.agentDir);
+		ensured = await options.daemon.ensure(options.agentDir);
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -101,7 +100,6 @@ export async function openDaemonWorktreeControl(
 		version: VERSION,
 		authToken: ensured.authToken,
 		reconnect: false,
-		capabilities: [CONTROL_WORKTREES_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 	});
 	try {
 		await client.connect();

@@ -382,12 +382,6 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 		);
 		if (worker.logPath !== undefined) console.error(`    log: ${worker.logPath}`);
 	}
-	console.error(`leases: ${status.leases.length}`);
-	for (const lease of status.leases) {
-		console.error(
-			`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
-		);
-	}
 	if (!isDaemonStatusHealthy(status)) process.exitCode = 1;
 }
 

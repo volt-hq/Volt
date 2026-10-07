@@ -510,9 +510,9 @@ CloseDetachedIdle(w, t) ==
     /\ UNCHANGED << daemonVars, wState, wGen, wKey, hosts, tops, grp, closeForced, procVars, clientVars >>
 
 \* One conversation is closed without the option to refuse (a revoked client,
-\* a removed worktree, a TUI taking its lease, a phone's fresh pairing): its
-\* group's relays (offered and active) close first, and the clients route
-\* again once the close is done.  Its neighbours in the worker are untouched.
+\* a removed worktree, a phone's fresh pairing): its group's relays (offered
+\* and active) close first, and the clients route again once the close is
+\* done.  Its neighbours in the worker are untouched.
 ForceClose(w, t) ==
     /\ daemonUp
     /\ faults < MaxFaults

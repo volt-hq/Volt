@@ -11,7 +11,7 @@
 \*     live.
 \*   - A terminal failure (revoked / workspace removed) is absorbing: nothing auto-
 \*     recovers out of it; only an explicit user action does.
-\*   - An expected closure (a lease hand-off) leads to a clean reconnect; a
+\*   - An expected closure (a conversation move) leads to a clean reconnect; a
 \*     terminal closure leads to the absorbing failure -- neither is a surprise
 \*     disconnect.
 \*
@@ -142,7 +142,7 @@ MarkTerminal ==
     /\ UNCHANGED << status, dials, loopActive, userDisc, background, netOK, turnAborted,
                     wIllegalReconnect, wTerminalEscape, wAbortDropped >>
 
-\* Expected hand-off closure (lease_transferred / conversation_moved):
+\* Expected hand-off closure (conversation_moved):
 \* consume the marker and reconnect cleanly -- no surprise disconnect.
 LoseStreamHandoff ==
     /\ status = "live"

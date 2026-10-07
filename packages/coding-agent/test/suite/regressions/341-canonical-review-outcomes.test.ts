@@ -179,8 +179,8 @@ async function fixture() {
 		assertCurrent: (conversation) => {
 			if (!runtimes.some((runtime) => runtime.conversation === conversation)) throw new Error("retired");
 		},
-		// These isolated stores have no competing runtime. Broker exclusion is
-		// exercised separately by 341-review-sibling-admission.test.ts.
+		// These isolated stores have no competing runtime. Exclusion by worker
+		// claims is exercised separately by 341-review-sibling-claims.test.ts.
 		withSourceWrite: (_requester, _source, write) => write(),
 		createSibling: async () => {
 			throw new Error("This test never launches a provider turn");

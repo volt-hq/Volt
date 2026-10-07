@@ -267,7 +267,6 @@ describe("the daemon connector against a daemon of another version (D7)", () => 
 							pid: 4242,
 							startedAtMs: 1,
 							environment: { source: "inherited", reason: "test" },
-							leases: [],
 							phoneConnections: 0,
 							remoteTransport: { state: "unavailable" },
 							workspaces: [],

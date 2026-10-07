@@ -82,8 +82,12 @@ export const RpcSessionListItemSchema = Type.Object(
 		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
 		/** Daemon-owned change association, when one has been observed. */
 		changeContext: Type.Optional(RpcSessionChangeContextSchema),
-		/** Which host process serves the session now, when one does (daemon hosts only). */
-		runtimeState: Type.Optional(stringEnum(["tui-owned", "daemon-active", "daemon-detached", "daemon-draining"])),
+		/**
+		 * Whether a conversation worker hosts the session now (daemon hosts only):
+		 * `attached` while a client's stream of it is open or its worker is
+		 * starting, `detached` while it runs with none; absent when no worker hosts it.
+		 */
+		runtimeState: Type.Optional(stringEnum(["attached", "detached"])),
 		/** The daemon-managed worktree the session is bound to. */
 		worktreeId: Type.Optional(Type.String()),
 		/** The session's working directory relative to its workspace or worktree root; absent at the root. */

@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
@@ -11,16 +10,10 @@ import {
 	type IrohBiStreamLike,
 	readIrohJsonlLine,
 } from "../src/core/protocol/transport/iroh-transport.ts";
-import { parseIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
-import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
-import {
-	CONTROL_RPC_GRANTS_CAPABILITY,
-	type ControlEvent,
-	type RemoteTransportHealth,
-} from "../src/daemon/control-protocol.ts";
+import type { ControlEvent, RemoteTransportHealth } from "../src/daemon/control-protocol.ts";
 import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
@@ -268,8 +261,6 @@ interface PhoneConnection {
 }
 
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
-const CHANGE_OID_A = "0123456789abcdef0123456789abcdef01234567";
-const CHANGE_OID_B = "abcdef0123456789abcdef0123456789abcdef01";
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -1105,409 +1096,6 @@ describe("iroh daemon lifecycle ownership", () => {
 	});
 });
 
-describe.skipIf(!nativeAvailable)("TUI change observation receipt revisions", () => {
-	it("keeps delayed positive and null receipts from invalidating a newer claim", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-change-revision-"));
-		const unresolvedWorkspaceDir = join(agentDir, "ws");
-		mkdirSync(join(unresolvedWorkspaceDir, ".git"), { recursive: true });
-		writeFileSync(join(unresolvedWorkspaceDir, ".git", "HEAD"), "ref: refs/heads/main\n");
-		const workspaceDir = realpathSync.native(unresolvedWorkspaceDir);
-		const sessionId = randomUUID();
-		const session = await SessionManager.create(workspaceDir, getDefaultSessionDir(workspaceDir, agentDir), {
-			id: sessionId,
-		});
-		await session.closePersistence();
-
-		const oldPositiveGate = createDeferred();
-		const oldNullGate = createDeferred();
-		let oldPositiveStarted = false;
-		let oldNullStarted = false;
-		let retirementCount = 0;
-		let getCurrentBranch = (): string | undefined => undefined;
-		let daemonStopped = false;
-		let control: DaemonClient | undefined;
-		let tui: DaemonClient | undefined;
-		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
-			(services) => {
-				getCurrentBranch = () => services.changes.getChangeContext("ws", 1, sessionId)?.branch;
-				const retireSession = services.changes.retireSession.bind(services.changes);
-				services.changes.retireSession = (workspaceName, workspaceGeneration, retiredSessionId) => {
-					if (workspaceName === "ws" && retiredSessionId === sessionId) retirementCount++;
-					return retireSession(workspaceName, workspaceGeneration, retiredSessionId);
-				};
-				return {};
-			},
-			createIrohDaemonService(
-				{ relayMode: "disabled" },
-				{
-					beforeTuiChangeObservationValidation: async (request) => {
-						if (request.gitContext?.branch === "feature/old") {
-							oldPositiveStarted = true;
-							await oldPositiveGate.promise;
-						} else if (request.gitContext === null) {
-							oldNullStarted = true;
-							await oldNullGate.promise;
-						}
-					},
-				},
-			),
-		]);
-
-		try {
-			const status = await waitForHealthyDaemon(agentDir);
-			control = createDaemonClient({
-				socketPath: status.socketPath,
-				client: "cli",
-				version: "test",
-				authToken: status.authToken,
-				reconnect: false,
-			});
-			tui = createDaemonClient({
-				socketPath: status.socketPath,
-				client: "tui",
-				version: "test",
-				authToken: status.authToken,
-				reconnect: false,
-			});
-			expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject({
-				type: "ok",
-			});
-			expect(await tui.request({ type: "lease_acquire", workspaceName: "ws", sessionId })).toMatchObject({
-				type: "lease_granted",
-			});
-
-			const oldPositive = tui.request({
-				type: "change_observe",
-				workspaceName: "ws",
-				sessionId,
-				gitContext: {
-					repository: "Volt",
-					branch: "feature/old",
-					headOid: CHANGE_OID_A,
-				},
-			});
-			void oldPositive.catch(() => {});
-			await expect.poll(() => oldPositiveStarted).toBe(true);
-			expect(
-				await tui.request({
-					type: "change_observe",
-					workspaceName: "ws",
-					sessionId,
-					gitContext: {
-						repository: "Volt",
-						branch: "feature/new",
-						headOid: CHANGE_OID_B,
-					},
-				}),
-			).toMatchObject({ type: "ok" });
-			await expect.poll(getCurrentBranch).toBe("feature/new");
-
-			oldPositiveGate.resolve();
-			await expect(oldPositive).resolves.toMatchObject({ type: "ok" });
-			await expect.poll(getCurrentBranch).toBe("feature/new");
-
-			const oldNull = tui.request({
-				type: "change_observe",
-				workspaceName: "ws",
-				sessionId,
-				gitContext: null,
-			});
-			void oldNull.catch(() => {});
-			await expect.poll(() => oldNullStarted).toBe(true);
-			expect(retirementCount).toBe(1);
-			expect(
-				await tui.request({
-					type: "change_observe",
-					workspaceName: "ws",
-					sessionId,
-					gitContext: {
-						repository: "Volt",
-						branch: "feature/replacement",
-						headOid: CHANGE_OID_A,
-					},
-				}),
-			).toMatchObject({ type: "ok" });
-			await expect.poll(getCurrentBranch).toBe("feature/replacement");
-
-			oldNullGate.resolve();
-			await expect(oldNull).resolves.toMatchObject({ type: "ok" });
-			expect(retirementCount).toBe(1);
-			expect(
-				await tui.request({
-					type: "lease_release",
-					workspaceName: "ws",
-					sessionId,
-					reason: "quit",
-				}),
-			).toMatchObject({ type: "ok" });
-			expect(retirementCount).toBe(2);
-			expect(getCurrentBranch()).toBe("feature/replacement");
-
-			expect((await control.request({ type: "shutdown" })).type).toBe("ok");
-			await daemon;
-			daemonStopped = true;
-		} finally {
-			oldPositiveGate.resolve();
-			oldNullGate.resolve();
-			if (!daemonStopped) {
-				await control?.request({ type: "shutdown" }).catch(() => {});
-				await daemon;
-			}
-			await tui?.close();
-			await control?.close();
-			rmSync(agentDir, { recursive: true, force: true });
-		}
-	}, 30_000);
-});
-
-describe.skipIf(!nativeAvailable)("TUI release/reacquire relay admission (#585)", () => {
-	it("hands the session a TUI left back to the daemon and relays the session it moved to", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-release-reacquire-"));
-		const unresolvedWorkspaceDir = join(agentDir, "ws");
-		mkdirSync(unresolvedWorkspaceDir, { recursive: true });
-		const workspaceDir = realpathSync.native(unresolvedWorkspaceDir);
-		const sourceSessionId = randomUUID();
-		const replacementSessionId = randomUUID();
-		// Native relay replacement also drains the previous stream under host load.
-		const relayOfferTimeout = 15_000;
-		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
-		const sourceSession = await SessionManager.create(workspaceDir, sessionDir, { id: sourceSessionId });
-		const replacementSession = await SessionManager.create(workspaceDir, sessionDir, { id: replacementSessionId });
-		await Promise.all([sourceSession.closePersistence(), replacementSession.closePersistence()]);
-
-		const faux = createFauxProvider();
-		const model = faux.getModel();
-		writeFileSync(
-			join(agentDir, "models.json"),
-			`${JSON.stringify(
-				{
-					providers: {
-						[model.provider]: {
-							api: model.api,
-							apiKey: "faux-key",
-							baseUrl: model.baseUrl,
-							models: [{ id: model.id }],
-						},
-					},
-				},
-				null,
-				2,
-			)}\n`,
-		);
-		writeFileSync(
-			join(agentDir, "settings.json"),
-			`${JSON.stringify({ defaultProvider: model.provider, defaultModel: model.id }, null, 2)}\n`,
-		);
-
-		let daemonStopped = false;
-		let control: DaemonClient | undefined;
-		let tui: DaemonClient | undefined;
-		let phone: PhoneEndpoint | undefined;
-		const phoneConnections: PhoneConnection[] = [];
-		const relaySockets: Array<{ destroy(): void }> = [];
-		const controlEvents: ControlEvent[] = [];
-		const tuiEvents: ControlEvent[] = [];
-		const daemon = runVoltDaemon({ agentDir, foreground: false, workerLauncher: new InProcessWorkerLauncher() }, [
-			createIrohDaemonService({ relayMode: "disabled" }),
-		]);
-
-		try {
-			let status: DaemonProbeResult = await probeDaemon(agentDir);
-			for (let attempt = 0; !status.healthy && attempt < 100; attempt++) {
-				await new Promise((resolve) => setTimeout(resolve, 100));
-				status = await probeDaemon(agentDir);
-			}
-			expect(status.healthy).toBe(true);
-			control = createDaemonClient({
-				socketPath: status.socketPath,
-				client: "cli",
-				version: "test",
-				authToken: status.authToken,
-				reconnect: false,
-				onEvent: (event) => controlEvents.push(event),
-			});
-			expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject({
-				type: "ok",
-			});
-
-			const pairStarted = await control.request({ type: "pair_request", workspaceName: "ws" });
-			expect(pairStarted).toMatchObject({ type: "pair_started" });
-			let ticket: string | undefined;
-			await expect
-				.poll(() => {
-					const event = controlEvents.find(
-						(candidate) => candidate.type === "pairing_progress" && candidate.phase === "ticket",
-					);
-					ticket = event?.type === "pairing_progress" ? event.ticket : undefined;
-					return ticket;
-				})
-				.toBeTypeOf("string");
-			const payload = decodeIrohRemoteTicketPayload(ticket as string);
-			const iroh = native.iroh;
-			if (!iroh) throw new Error("native iroh unavailable");
-			const endpointTicket = (
-				iroh.EndpointTicket as unknown as { fromString(value: string): { endpointAddr(): unknown } }
-			).fromString(payload.irohTicket);
-			phone = await createPhoneEndpoint();
-			const pairingConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
-			phoneConnections.push(pairingConnection);
-			const pairingStream = await pairingConnection.openBi();
-			await writeJsonLine(pairingStream, {
-				type: "volt_iroh_hello",
-				protocol: IROH_REMOTE_ALPN,
-				workspace: "ws",
-				secret: payload.secret,
-				clientLabel: "vitest-release-phone",
-				workspaceDiscovery: { purpose: "list_sessions" },
-			});
-			expect((await readJsonLine(pairingStream)).value.success).toBe(true);
-			pairingConnection.close(0n, Array.from(Buffer.from("done", "utf8")));
-			await pairingConnection.closed();
-
-			const clients = await control.request({ type: "clients_list" });
-			expect(clients.type).toBe("clients_result");
-			if (clients.type !== "clients_result" || !clients.clients[0]) {
-				throw new Error("paired client missing");
-			}
-			tui = createDaemonClient({
-				socketPath: status.socketPath,
-				client: "tui",
-				version: "test",
-				authToken: status.authToken,
-				capabilities: [CONTROL_RPC_GRANTS_CAPABILITY],
-				reconnect: false,
-				onEvent: (event) => tuiEvents.push(event),
-			});
-			expect(
-				await tui.request({ type: "lease_acquire", workspaceName: "ws", sessionId: sourceSessionId }),
-			).toMatchObject({ type: "lease_granted" });
-
-			const initialConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
-			phoneConnections.push(initialConnection);
-			const initialStream = await initialConnection.openBi();
-			await writeJsonLine(initialStream, {
-				type: "volt_iroh_hello",
-				protocol: IROH_REMOTE_ALPN,
-				workspace: "ws",
-				conversation: { target: "session", sessionId: sourceSessionId },
-			});
-			const initialResponse = readJsonLine(initialStream).then((response) => {
-				throw new Error(`initial relay failed before offer: ${JSON.stringify(response.value)}`);
-			});
-			await Promise.race([
-				expect
-					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
-						timeout: relayOfferTimeout,
-					})
-					.toBe(1),
-				initialResponse,
-			]);
-			const initialOffer = tuiEvents.find((event) => event.type === "relay_offer");
-			if (initialOffer?.type !== "relay_offer") throw new Error("initial relay offer missing");
-			const initialRelay = await tui.openRelay(initialOffer);
-			relaySockets.push(initialRelay.stream);
-			expect(initialRelay.preamble).toMatchObject({
-				resolvedTarget: { sessionId: sourceSessionId, selection: "resumed" },
-			});
-
-			// The TUI moves to the replacement: it acquires the new session's lease
-			// and releases the one it left, whose relays close.
-			expect(
-				await tui.request({ type: "lease_acquire", workspaceName: "ws", sessionId: replacementSessionId }),
-			).toMatchObject({ type: "lease_granted" });
-			expect(
-				await tui.request({
-					type: "lease_release",
-					workspaceName: "ws",
-					sessionId: sourceSessionId,
-					reason: "switch",
-				}),
-			).toMatchObject({ type: "ok" });
-			await expect
-				.poll(() =>
-					tuiEvents.some((event) => event.type === "relay_closed" && event.reason === "lease_transferred"),
-				)
-				.toBe(true);
-
-			// The phone reconnects to the session it was on: the daemon hosts it now.
-			const sourceConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
-			phoneConnections.push(sourceConnection);
-			const sourceStream = await sourceConnection.openBi();
-			await writeJsonLine(sourceStream, {
-				type: "volt_iroh_hello",
-				protocol: IROH_REMOTE_ALPN,
-				workspace: "ws",
-				conversation: { target: "session", sessionId: sourceSessionId },
-			});
-			const sourceHandshake = parseIrohRemoteHandshakeResponse((await readJsonLine(sourceStream)).value);
-			expect(sourceHandshake).toMatchObject({
-				success: true,
-				sessionId: sourceSessionId,
-				conversation: { target: "session", sessionId: sourceSessionId, selection: "resumed" },
-			});
-			expect(tuiEvents.filter((event) => event.type === "relay_offer")).toHaveLength(1);
-
-			// A phone opening the session the TUI moved to is relayed to the TUI.
-			const directConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
-			phoneConnections.push(directConnection);
-			const directStream = await directConnection.openBi();
-			await writeJsonLine(directStream, {
-				type: "volt_iroh_hello",
-				protocol: IROH_REMOTE_ALPN,
-				workspace: "ws",
-				conversation: { target: "session", sessionId: replacementSessionId },
-			});
-			const directResponse = readJsonLine(directStream).then((response) => {
-				throw new Error(`replacement relay failed before offer: ${JSON.stringify(response.value)}`);
-			});
-			await Promise.race([
-				expect
-					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
-						timeout: relayOfferTimeout,
-					})
-					.toBe(2),
-				directResponse,
-			]);
-			const directOffer = tuiEvents.filter((event) => event.type === "relay_offer")[1];
-			if (directOffer?.type !== "relay_offer") throw new Error("replacement relay offer missing");
-			expect(directOffer.sessionId).toBe(replacementSessionId);
-			const directRelay = await tui.openRelay(directOffer);
-			relaySockets.push(directRelay.stream);
-			expect(directRelay.preamble).toMatchObject({
-				resolvedTarget: {
-					sessionId: replacementSessionId,
-					selection: "resumed",
-					requestedSessionId: replacementSessionId,
-				},
-			});
-
-			const currentStatus = await control.request({ type: "status" });
-			if (currentStatus.type !== "status_result") throw new Error("status missing");
-			expect(currentStatus.leases).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({ workspaceName: "ws", sessionId: sourceSessionId, state: "daemon-active" }),
-					expect.objectContaining({ workspaceName: "ws", sessionId: replacementSessionId, state: "tui-owned" }),
-				]),
-			);
-			expect(readFileSync(getDaemonPaths(agentDir).auditPath, "utf8")).not.toContain('"type":"runtime_failure"');
-		} finally {
-			for (const socket of relaySockets) socket.destroy();
-			for (const connection of phoneConnections) {
-				connection.close(0n, Array.from(Buffer.from("done", "utf8")));
-			}
-			await phone?.close().catch(() => {});
-			if (!daemonStopped) {
-				await control?.request({ type: "shutdown" }).catch(() => {});
-				await daemon;
-				daemonStopped = true;
-			}
-			await tui?.close();
-			await control?.close();
-			rmSync(agentDir, { recursive: true, force: true });
-		}
-	}, 60_000);
-});
-
 describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 	let agentDir: string;
 	let workspaceDir: string;
@@ -1634,14 +1222,12 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		}
 		const pairedClientNodeId = clients.type === "clients_result" ? (clients.clients[0]?.clientNodeId as string) : "";
 
-		// relay_rpc is bound to a live relay and its owning TUI control connection;
-		// a regular control client cannot forge that authority.
+		// A relayed phone's daemon-backed intents come only from the worker serving its relay:
+		// a control client cannot forge that authority.
+		expect(pairedClientNodeId).not.toBe("");
 		const missingRelay = await control.request({
-			type: "relay_rpc",
+			type: "worker_forward",
 			relayId: "rl-missing",
-			clientNodeId: pairedClientNodeId,
-			workspaceName: "ws",
-			sessionId: "s-relay",
 			frame: {
 				type: "register_push_target",
 				intentId: "rp-1",
@@ -1654,7 +1240,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 				},
 			},
 		});
-		expect(missingRelay).toMatchObject({ type: "error", code: "not_found", message: "active relay not found" });
+		expect(missingRelay).toMatchObject({ type: "error", code: "forbidden" });
 
 		const reconnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
 		const reconnectStream = await reconnection.openBi();
@@ -1985,7 +1571,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 			await expect
 				.poll(async () => {
 					const current = await control?.request({ type: "status" });
-					return current?.type === "status_result" ? current.leases : undefined;
+					return current?.type === "status_result" ? current.workers : undefined;
 				})
 				.toEqual([]);
 			await expect(control.request({ type: "workspace_unregister", name: "ws" })).resolves.toMatchObject({

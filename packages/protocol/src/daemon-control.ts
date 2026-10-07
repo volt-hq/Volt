@@ -58,32 +58,13 @@ const EpochMsSchema = Type.Integer({ minimum: 1, maximum: RPC_WIRE_MAX_SAFE_INTE
 // Shared vocabulary
 // ============================================================================
 
-export const ControlLeaseStateSchema = stringEnum([
-	"unowned",
-	"daemon-active",
-	"daemon-detached",
-	"daemon-draining",
-	"tui-owned",
-]);
-export type LeaseState = Static<typeof ControlLeaseStateSchema>;
-
-export const ControlLeaseReleaseReasonSchema = stringEnum([
-	"quit",
-	"switch",
-	"connection_lost",
-	"shutdown",
-	"retention_expired",
-	"workspace_unregistered",
-]);
-export type LeaseReleaseReason = Static<typeof ControlLeaseReleaseReasonSchema>;
-
 export const ControlClientKindSchema = stringEnum(["tui", "cli"]);
 export type ControlClientKind = Static<typeof ControlClientKindSchema>;
 
 export const ControlRelayCloseReasonSchema = stringEnum([
 	"phone_disconnected",
-	"tui_disconnected",
-	"lease_transferred",
+	/** The worker serving the relay closed its end. */
+	"worker_disconnected",
 	"workspace_unregistered",
 	"host_shutdown",
 	/** The worker serving the relay exited; the client reconnects with resume. */
@@ -104,18 +85,6 @@ export const ControlKeepAwakeStatusSchema = Type.Object(
 	closed,
 );
 export type ControlKeepAwakeStatus = Static<typeof ControlKeepAwakeStatusSchema>;
-
-export const ControlLeaseStatusSchema = Type.Object(
-	{
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		state: ControlLeaseStateSchema,
-		relayCount: NonNegativeIntegerSchema,
-		streamCount: NonNegativeIntegerSchema,
-	},
-	closed,
-);
-export type ControlLeaseStatus = Static<typeof ControlLeaseStatusSchema>;
 
 export const ControlWorkspaceStatusSchema = Type.Object(
 	{
@@ -271,7 +240,7 @@ export const WorkerRelayAuthoritySchema = stringEnum(["current", "revoked", "wor
 export type WorkerRelayAuthority = Static<typeof WorkerRelayAuthoritySchema>;
 
 /** Why the daemon asks a worker to stop. */
-export const WorkerStopReasonSchema = stringEnum(["retention", "authority", "shutdown", "lease_transferred"]);
+export const WorkerStopReasonSchema = stringEnum(["retention", "authority", "shutdown"]);
 export type WorkerStopReason = Static<typeof WorkerStopReasonSchema>;
 
 /** An absolute path, or a package source: one line, no NUL. */
@@ -547,9 +516,8 @@ const explicitAccess = {
 };
 
 /**
- * The intents a host serving a relayed phone (a worker, or a TUI holding
- * the conversation's lease) forwards to the daemon, which executes them
- * against its own state: push targets, workspace registration and
+ * The intents a worker serving a relayed phone forwards to the daemon
+ * (`worker_forward`), which executes them against its own state: push targets, workspace registration and
  * worktrees, keep-awake, the web search key, and device log uploads (written
  * under the workspace and audited there).
  */
@@ -562,7 +530,7 @@ export const RELAY_INTENT_NAMES = [
 	"upload_device_logs",
 ] as const satisfies readonly BuiltinIntentName[];
 
-/** The queries a host serving a relayed phone forwards to the daemon. */
+/** The queries a worker serving a relayed phone forwards to the daemon. */
 export const RELAY_QUERY_NAMES = [
 	"sessions",
 	"worktrees",
@@ -584,7 +552,7 @@ export const ControlRelayFrameSchema = Type.Unsafe<ControlRelayFrame>(
 	]),
 );
 
-/** The daemon's outcome for a relayed frame: what the serving host writes to the phone. */
+/** The daemon's outcome for a relayed frame: what the serving worker writes to the phone. */
 export const ControlRelayOutcomeSchema = Type.Union([
 	AcceptedFrameSchema,
 	RejectedFrameSchema,
@@ -632,7 +600,7 @@ export const ControlHelloSchema = Type.Union([
 			client: ControlClientKindSchema,
 			/** Proof of the per-daemon instance token read from the local pidfile. */
 			controlProof: Type.Optional(HelloProofSchema),
-			/** Client capabilities, e.g. "worktrees". */
+			/** Client capabilities. */
 			capabilities: Type.Optional(Type.Array(Type.String())),
 		},
 		open,
@@ -791,18 +759,7 @@ const withId = <T extends string, P extends Record<string, TSchema>>(type: T, pr
 export const CONTROL_REQUEST_SCHEMAS = {
 	status: withId("status", {}),
 	shutdown: withId("shutdown", {}),
-	lease_acquire: withId("lease_acquire", {
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		/** Reserved: true is answered with lease_denied{force_unsupported}. */
-		force: Type.Optional(Type.Boolean()),
-	}),
-	lease_release: withId("lease_release", {
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		reason: ControlLeaseReleaseReasonSchema,
-	}),
-	/** Path-free authoritative Git state from the exact TUI lease holder, or the worker hosting the session. */
+	/** Worker: path-free authoritative Git state of a session it hosts. */
 	change_observe: withId("change_observe", {
 		workspaceName: codePoints(1, 256),
 		sessionId: codePoints(1, 128),
@@ -880,30 +837,11 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		workspaceName: Type.String(),
 		worktreeId: Type.String(),
 		sessionId: Type.String(),
-		/** Direct managed-checkout startup: acquire the lease on this connection while binding. */
-		acquireLease: Type.Optional(Type.Boolean()),
 	}),
 	/** A theme name; the daemon resolves it and broadcasts a theme_snapshot. */
 	theme_set: withId("theme_set", { theme: Type.String() }),
 	/** Hold or release the host sleep-prevention assertion. */
 	keep_awake_set: withId("keep_awake_set", { enabled: Type.Boolean() }),
-	/** Stop the draining runtime's turn (the lease drain's interrupt). */
-	viewer_abort: withId("viewer_abort", { viewerFeedId: Type.String() }),
-	relay_rpc: withId("relay_rpc", {
-		/** The active relay whose phone frame is forwarded. */
-		relayId: Type.String(),
-		clientNodeId: Type.String(),
-		workspaceName: Type.String(),
-		/** The TUI's current session id for the relayed conversation. */
-		sessionId: Type.String(),
-		frame: ControlRelayFrameSchema,
-	}),
-	relay_notification_delivery: withId("relay_notification_delivery", {
-		clientNodeId: Type.String(),
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		notification: IrohRemotePushNotificationSchema,
-	}),
 	/**
 	 * TUI: open a conversation in a worker (Phase 7 plan §1). The daemon
 	 * resolves its workspace from the conversation's working directory
@@ -1021,8 +959,6 @@ export type WorkerRequestType = (typeof WORKER_REQUEST_TYPES)[number];
 export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.status,
 	CONTROL_REQUEST_SCHEMAS.shutdown,
-	CONTROL_REQUEST_SCHEMAS.lease_acquire,
-	CONTROL_REQUEST_SCHEMAS.lease_release,
 	CONTROL_REQUEST_SCHEMAS.change_observe,
 	CONTROL_REQUEST_SCHEMAS.pair_request,
 	CONTROL_REQUEST_SCHEMAS.pair_cancel,
@@ -1044,9 +980,6 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worktree_bind,
 	CONTROL_REQUEST_SCHEMAS.theme_set,
 	CONTROL_REQUEST_SCHEMAS.keep_awake_set,
-	CONTROL_REQUEST_SCHEMAS.viewer_abort,
-	CONTROL_REQUEST_SCHEMAS.relay_rpc,
-	CONTROL_REQUEST_SCHEMAS.relay_notification_delivery,
 	CONTROL_REQUEST_SCHEMAS.conversation_open,
 	CONTROL_REQUEST_SCHEMAS.worker_ready,
 	CONTROL_REQUEST_SCHEMAS.worker_open_failed,
@@ -1072,16 +1005,6 @@ export type ControlRequest = Static<typeof ControlRequestSchema>;
 export const CONTROL_RESPONSE_SCHEMAS = {
 	ok: withId("ok", {}),
 	error: withId("error", { code: Type.String(), message: Type.String() }),
-	lease_granted: withId("lease_granted", {
-		workspaceName: Type.String(),
-		sessionId: Type.String(),
-		handoff: stringEnum(["cold", "warm", "none"]),
-	}),
-	/** Provisional: the terminal response for the same id follows when the drain completes or fails. */
-	lease_pending: withId("lease_pending", { viewerFeedId: Type.String() }),
-	lease_denied: withId("lease_denied", {
-		reason: stringEnum(["held_by_tui", "force_unsupported", "draining_elsewhere"]),
-	}),
 	status_result: withId("status_result", {
 		version: Type.String(),
 		protocolVersion: Type.Number(),
@@ -1090,7 +1013,6 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		environment: DaemonEnvironmentStatusSchema,
 		/** Optional feature flags. */
 		capabilities: Type.Optional(Type.Array(Type.String())),
-		leases: Type.Array(ControlLeaseStatusSchema),
 		phoneConnections: NonNegativeIntegerSchema,
 		workspaces: Type.Array(ControlWorkspaceStatusSchema),
 		clients: Type.Array(ControlClientStatusSchema),
@@ -1132,7 +1054,6 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		),
 	}),
 	pair_started: withId("pair_started", { requestId: Type.String() }),
-	relay_rpc_result: withId("relay_rpc_result", { frame: ControlRelayOutcomeSchema }),
 	/**
 	 * The conversation a TUI opened: dial a relay hello with `relayId` and
 	 * `relayToken` (single-use, expiring after 10 seconds) within that time to
@@ -1170,6 +1091,7 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 	worker_authority_result: withId("worker_authority_result", { authority: WorkerRelayAuthoritySchema }),
 	/** The checkout a worker restored is pinned until it releases `pinId`. */
 	worker_worktree_pinned: withId("worker_worktree_pinned", { pinId: Type.String() }),
+	/** The status of a worker's `worker_notification_delivery`. */
 	relay_push_delivery_result: withId("relay_push_delivery_result", {
 		status: IrohRemotePushNotificationDeliveryStatusSchema,
 	}),
@@ -1178,9 +1100,6 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.ok,
 	CONTROL_RESPONSE_SCHEMAS.error,
-	CONTROL_RESPONSE_SCHEMAS.lease_granted,
-	CONTROL_RESPONSE_SCHEMAS.lease_pending,
-	CONTROL_RESPONSE_SCHEMAS.lease_denied,
 	CONTROL_RESPONSE_SCHEMAS.status_result,
 	CONTROL_RESPONSE_SCHEMAS.keep_awake_result,
 	CONTROL_RESPONSE_SCHEMAS.clients_result,
@@ -1190,7 +1109,6 @@ export const ControlResponseSchema = Type.Union([
 	CONTROL_RESPONSE_SCHEMAS.worktree_resolve_result,
 	CONTROL_RESPONSE_SCHEMAS.worktree_prune_result,
 	CONTROL_RESPONSE_SCHEMAS.pair_started,
-	CONTROL_RESPONSE_SCHEMAS.relay_rpc_result,
 	CONTROL_RESPONSE_SCHEMAS.conversation_opened,
 	CONTROL_RESPONSE_SCHEMAS.workspace_confirmation_required,
 	CONTROL_RESPONSE_SCHEMAS.worker_forward_result,
@@ -1233,10 +1151,6 @@ export const CONTROL_EVENT_SCHEMAS = {
 		}),
 	]),
 	relay_closed: event("relay_closed", { relayId: Type.String(), reason: ControlRelayCloseReasonSchema }),
-	viewer_end: event("viewer_end", {
-		viewerFeedId: Type.String(),
-		reason: stringEnum(["granted", "cancelled", "error"]),
-	}),
 	theme_snapshot: event("theme_snapshot", {
 		themeName: Type.String(),
 		tokens: Type.Record(Type.String(), Type.String()),
@@ -1284,14 +1198,11 @@ export const CONTROL_EVENT_SCHEMAS = {
 	 * itself if the worker has not within 2 s.
 	 */
 	relay_authority: event("relay_authority", { relayId: Type.String(), loss: WorkerAuthorityLossSchema }),
-	/** To a worker: stop the running turn of a conversation it hosts (a TUI acquiring its lease stops the turn it waits for). */
-	worker_abort: event("worker_abort", { sessionId: LogSessionIdSchema }),
 } as const;
 
 export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.relay_offer,
 	CONTROL_EVENT_SCHEMAS.relay_closed,
-	CONTROL_EVENT_SCHEMAS.viewer_end,
 	CONTROL_EVENT_SCHEMAS.theme_snapshot,
 	CONTROL_EVENT_SCHEMAS.keep_awake_changed,
 	CONTROL_EVENT_SCHEMAS.pairing_progress,
@@ -1300,6 +1211,5 @@ export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.worker_stop,
 	CONTROL_EVENT_SCHEMAS.worker_close,
 	CONTROL_EVENT_SCHEMAS.relay_authority,
-	CONTROL_EVENT_SCHEMAS.worker_abort,
 ]);
 export type ControlEvent = Static<typeof ControlEventSchema>;

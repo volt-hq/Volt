@@ -17,11 +17,6 @@
  * input runs. `dispose` closes the conversation the client shows, then the
  * host; until then, a process exit closes the language server traces of the
  * conversations the host serves.
- *
- * `LeasedConnector` is this connector with the daemon's conversation leases,
- * which the volt CLI's TUI used before it attached to daemon workers; it
- * remains until ownership transfer is deleted (Phase 7 slice 9). It is not
- * part of the package's API.
  */
 
 import { randomUUID } from "node:crypto";
@@ -32,7 +27,6 @@ import type { HostedRedirect } from "../core/host/targets.ts";
 import { localProfile } from "../core/protocol/profiles.ts";
 import { serveConnection } from "../core/protocol/server/connection.ts";
 import { createLoopbackRpcTransportPair } from "../core/protocol/transport/loopback-transport.ts";
-import type { DaemonLeases } from "../modes/interactive/host/daemon-link.ts";
 import type {
 	ConnectorOpenOptions,
 	ConnectorTarget,
@@ -59,14 +53,10 @@ export class InProcessConnector implements ConversationConnector {
 	private readonly clientKey = randomUUID();
 	/** The conversation the client shows: the one it is on, or the one a move redirected it to. */
 	private shown: HostedConversation;
-	/** Whether the startup conversation was served once. */
-	private startupServed = false;
-	/** The client quits or its conversation lost its log. */
-	private stopped = false;
 	private exitHook = false;
 	private disposing: Promise<void> | undefined;
 
-	protected constructor(options: InProcessConnectorOptions) {
+	private constructor(options: InProcessConnectorOptions) {
 		this.host = options.host;
 		this.startup = options.conversation;
 		this.shown = options.conversation;
@@ -81,11 +71,6 @@ export class InProcessConnector implements ConversationConnector {
 	/** The conversation the client shows: the one it is on, the one a move redirected it to, or the last one it was on. */
 	get conversation(): HostedConversation {
 		return this.shown;
-	}
-
-	/** Whether the host still serves others through the client: false once it quits or its conversation lost its log. */
-	protected get serving(): boolean {
-		return !this.stopped;
 	}
 
 	/** A process exit stops the language server traces of the conversations the host serves, synchronously. */
@@ -139,10 +124,7 @@ export class InProcessConnector implements ConversationConnector {
 			}),
 			beforeServing: (served) => this.serve(served),
 			...(options.onShutdownRequested === undefined ? {} : { onShutdownRequested: options.onShutdownRequested }),
-			onLost: (_conversation, error) => {
-				this.stopServing();
-				options.onLost?.(error);
-			},
+			onLost: (_conversation, error) => options.onLost?.(error),
 		});
 		this.shown = conversation;
 		const workspaceName = this.daemonWorkspaceName();
@@ -154,32 +136,15 @@ export class InProcessConnector implements ConversationConnector {
 		};
 	}
 
-	/**
-	 * The client attached to `conversation`: its durable queued input starts
-	 * replaying before the client's own input runs. The first time the startup
-	 * conversation is served, `startServing` decides first.
-	 */
+	/** The client attached to `conversation`: its durable queued input starts replaying before the client's own input runs. */
 	private async serve(conversation: HostedConversation): Promise<void> {
-		if (conversation === this.startup && !this.startupServed) {
-			this.startupServed = true;
-			if (!(await this.startServing())) return;
-		}
 		if (conversation.closed) return;
 		// Recovered turns belong to no client, whoever the client reconnected for.
 		void ClientScope.exit(() => conversation.startRecoveredClientInputs()).catch(() => undefined);
 	}
 
-	/**
-	 * The client attached to the startup conversation for the first time:
-	 * resolves whether its durable queued input recovers now.
-	 */
-	protected async startServing(): Promise<boolean> {
-		return true;
-	}
-
-	stopServing(): void {
-		this.stopped = true;
-	}
+	/** Nothing to stop: the host serves only this client, until `dispose`. */
+	stopServing(): void {}
 
 	daemonWorkspaceName(): string | undefined {
 		return undefined;
@@ -196,7 +161,6 @@ export class InProcessConnector implements ConversationConnector {
 	 * join the first.
 	 */
 	dispose(options: { beforeDispose?: () => void } = {}): Promise<void> {
-		this.stopServing();
 		this.disposing ??= (async () => {
 			try {
 				await this.host.close(this.shown, {
@@ -206,66 +170,8 @@ export class InProcessConnector implements ConversationConnector {
 				await this.host.dispose();
 			} finally {
 				process.off("exit", this.closeLspTraces);
-				await this.disposed();
 			}
 		})();
 		return this.disposing;
-	}
-
-	/** The host is disposed. */
-	protected async disposed(): Promise<void> {}
-}
-
-export interface LeasedConnectorOptions extends InProcessConnectorOptions {
-	/** The daemon leases, whose open gate the host was built with. */
-	readonly daemon: DaemonLeases;
-}
-
-/**
- * The in-process connector with the daemon's conversation leases (see the
- * module comment). Once the client first shows its startup
- * conversation, the leases take that conversation's daemon lease, serve the
- * phones relayed into the conversation the client shows, and follow the
- * client's moves; the startup conversation's durable queued input recovers
- * once the lease is granted, or without a daemon. The host's open gate takes
- * the lease of a stored session the client resumes before the session opens.
- * `dispose` gives the lease back once the host is disposed and the relayed
- * phones heard where to reconnect.
- */
-export class LeasedConnector extends InProcessConnector {
-	private readonly daemon: DaemonLeases;
-
-	constructor(options: LeasedConnectorOptions) {
-		super(options);
-		this.daemon = options.daemon;
-	}
-
-	protected override async startServing(): Promise<boolean> {
-		const outcome = await this.daemon.start({
-			host: this.host,
-			shown: () => this.conversation,
-			serving: () => this.serving,
-		});
-		return outcome.kind === "granted" || outcome.kind === "noop";
-	}
-
-	/** Phones relayed into the conversation the client shows and served now; its client sees them as `presence`. */
-	relayCount(): number {
-		return this.daemon.relayCount();
-	}
-
-	override daemonWorkspaceName(): string | undefined {
-		return this.daemon.workspaceName();
-	}
-
-	override onThemeSnapshot(listener: (themeName: string) => void): () => void {
-		return this.daemon.onEvent((event) => {
-			if (event.type === "theme_snapshot") listener(event.themeName);
-		});
-	}
-
-	/** The daemon gets the session back only once it is written and its lock released. */
-	protected override async disposed(): Promise<void> {
-		await this.daemon.dispose();
 	}
 }

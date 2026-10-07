@@ -336,12 +336,7 @@ async function handleStatusCommand(args: string[]): Promise<void> {
 			console.error(`  ${client.clientNodeId}${client.label ? ` (${client.label})` : ""}`);
 		}
 		console.error(`phone connections: ${response.phoneConnections}`);
-		console.error(`leases: ${response.leases.length}`);
-		for (const lease of response.leases) {
-			console.error(
-				`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
-			);
-		}
+		console.error(`conversation workers: ${response.workers.length}`);
 		if (!isRemoteAccessReady(response)) process.exitCode = 1;
 	} finally {
 		await session.close();

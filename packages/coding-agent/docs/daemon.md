@@ -24,10 +24,9 @@ resolves its working directory to a registered workspace, and acquires a
 conversation lease for the open session so a paired phone can co-attach to it
 live. Automatic attachment uses the nearest registered ancestor (or a managed
 worktree's parent workspace); it registers the directory only when neither
-matches. Set
-`remote.background: true` to additionally start the daemon on demand. A TUI
-that was already open while the daemon was stopped reconnects automatically
-when another process starts it.
+matches. Interactive Volt starts the daemon when none runs. A TUI that was
+already open while the daemon was stopped reconnects automatically when it
+starts again.
 
 ## CLI
 
@@ -298,12 +297,14 @@ retain their existing behavior. See the [wire contract](iroh-remote-protocol.md#
 
 ## Conversation leases
 
-Exactly one process owns the live runtime for each `(workspace, session)`
-conversation at a time:
+Exactly one conversation worker hosts each `(workspace, session)`
+conversation at a time; phones see whether a client is on it as the session's
+`runtimeState`:
 
-- **daemon-active / daemon-detached** — the daemon runs a headless runtime for
-  phones. When the last phone disconnects, the runtime is retained for
-  `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm. A
+- **attached** — a TUI's or a phone's stream of the conversation is open, or
+  its worker is still starting.
+- **detached** — no client is attached. The worker keeps the conversation open
+  for `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm. A
   session the last phone moved away from (see below) closes as soon as it is
   idle instead. The timer starts only once the conversation is idle: no turn
   or other operation holds it, no work runs (a background job, a subagent, a
@@ -313,16 +314,6 @@ conversation at a time:
   in the log and the conversation closes as any idle one does; a suspended
   subagent resumes once a client asks after the conversation opens again, and
   a pending approval ends with the runtime.
-- **tui-owned** — a desktop TUI owns the runtime. The daemon still terminates
-  the phone's Iroh connection, then relays the raw stream bytes to the TUI,
-  which serves it from its in-process session. Prompts from either side appear
-  on both; the TUI footer shows `📱 n` while phones are attached.
-- **daemon-draining** — a TUI asked to take over while a remote turn is
-  streaming. At startup the TUI prints a waiting line; `/resume` asks in a
-  dialog (**Stop remote turn** stops it, **Cancel** keeps the current session
-  and leaves the target with the daemon); new prompts from phones are rejected
-  `busy` with a one-second retry hint, and ownership transfers at the turn
-  boundary.
 
 Every process that writes a session holds that session's lock (see
 [Sessions](sessions.md#one-volt-process-per-session)), so the TUI takes the

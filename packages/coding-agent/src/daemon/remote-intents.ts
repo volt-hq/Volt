@@ -59,13 +59,12 @@ import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-
 import { getReviewDiscussionLink } from "../core/review-discussions.ts";
 import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
-import type { LeaseState } from "./lease-broker.ts";
 import { listWorkspaceDirectories } from "./workspace-directory.ts";
 import { getRegisteredWorkingDirectoryForWorktree, getWorktreesRoot } from "./worktree-manager.ts";
 
 type SessionListItem = Static<typeof RpcSessionListItemSchema>;
 type SessionChangeContext = Static<typeof RpcSessionChangeContextSchema>;
-export type RemoteSessionRuntimeState = Exclude<LeaseState, "unowned">;
+export type RemoteSessionRuntimeState = NonNullable<SessionListItem["runtimeState"]>;
 
 /** Longest session title a device is sent, in Unicode scalars. */
 const SESSION_TITLE_MAX_SCALARS = 160;
@@ -84,7 +83,7 @@ export interface RemoteIntentHost {
 	agentOptions(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteAgentOptionsRpcBackend;
 	sessionContexts(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteSessionContextsRpcBackend;
 	prReviews(authorization: IrohRemoteClientAuthorizationSuccess, signal?: AbortSignal): IrohRemotePrReviewRpcBackend;
-	/** Which host process serves each live session of a workspace. */
+	/** Whether a client is on each session a worker of the workspace hosts. */
 	listRuntimeStates?(workspaceName: string): ReadonlyMap<string, RemoteSessionRuntimeState>;
 	/** The daemon's change and pull request association of a session. */
 	getChangeContext?(
@@ -107,13 +106,13 @@ export interface RemoteIntentHost {
 export interface RemoteStreamKeep {
 	/** The requesting stream's id. */
 	readonly streamId?: string;
-	/** The requesting relays, for a stream a worker or a TUI serves. */
+	/** The requesting relays, for a stream a worker serves. */
 	readonly relayIds?: ReadonlySet<string>;
 }
 
 /** The kind of stream a device opened: a relayed conversation, or one workspace purpose. */
 export type RemoteStreamScope =
-	/** Frames the host serving a phone's conversation `sessionId` relays to the daemon. */
+	/** Frames the worker serving a phone's conversation `sessionId` relays to the daemon. */
 	| { readonly kind: "relay"; readonly sessionId: string }
 	| { readonly kind: "discovery"; readonly purpose: IrohRemoteWorkspaceDiscoveryTarget["purpose"] }
 	| { readonly kind: "management"; readonly purpose: IrohRemoteWorkspaceManagementTarget["purpose"] };
@@ -221,8 +220,8 @@ function timestamp(value: string | Date): string {
 
 /**
  * The sessions of the stream's workspace, newest first: its stored sessions
- * (`currentId` the stream's own), the worktree each is bound to, which host
- * process serves it, and the daemon's change association.
+ * (`currentId` the stream's own), the worktree each is bound to, whether a
+ * worker hosts it with a client on it, and the daemon's change association.
  */
 export async function listRemoteWorkspaceSessions(
 	host: Pick<RemoteIntentHost, "agentDir" | "stateManager" | "listRuntimeStates" | "getChangeContext">,
@@ -555,13 +554,10 @@ const OBSERVER_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_retry", "
 
 const DYNAMIC_INTENT = new RegExp(DYNAMIC_INTENT_PATTERN);
 
-/** Retry hint while a conversation hands off to a desktop TUI. */
-export const LEASE_DRAINING_RETRY_AFTER_MS = 1000;
-
-/** The daemon's own admission of a device's intent on a conversation it hosts. */
+/** A worker's own admission of a device's intent on a conversation it hosts. */
 export function admitRemoteIntent(
 	intent: string,
-	state: { readonly shuttingDown: boolean; readonly draining: boolean; readonly subagent: boolean },
+	state: { readonly shuttingDown: boolean; readonly subagent: boolean },
 ): RejectionReason | undefined {
 	// The phone hides the composer for subagent tabs; a stray client must not inject turns into a delegated run.
 	if (state.subagent && !OBSERVER_INTENTS.has(intent)) {
@@ -570,13 +566,6 @@ export function admitRemoteIntent(
 	if (!WORK_INTENTS.has(intent) && !DYNAMIC_INTENT.test(intent)) return undefined;
 	if (state.shuttingDown) {
 		return { code: "host_shutdown", message: "The host is shutting down; reconnect after it restarts." };
-	}
-	if (state.draining) {
-		return {
-			code: "busy",
-			message: "Handing off to the desktop TUI; retry shortly.",
-			retryAfterMs: LEASE_DRAINING_RETRY_AFTER_MS,
-		};
 	}
 	return undefined;
 }

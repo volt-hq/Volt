@@ -109,7 +109,6 @@ function mintTestRelay(
 		workspaceName: "ws",
 		sessionId: "s-1",
 		clientNodeId: "n-phone-a",
-		ownerControlConnectionId: "control-1",
 		connectionId: "conn-1",
 		streamId: "st-1",
 		stream: phone,
@@ -190,41 +189,6 @@ describe("relay framing (§12.2.3)", () => {
 		expect(settle).not.toHaveBeenCalled();
 	});
 
-	it("authorizes relay RPC only for the active relay owner and exact conversation scope", async () => {
-		const { socketPath, registry } = await startRelayHarness();
-		const relay = mintTestRelay(registry, new FakePhoneIrohStream(), vi.fn());
-		const client = connectRawRelayClient(socketPath, relay);
-		await vi.waitFor(() => expect(client.messages).toHaveLength(2));
-
-		const scope = { clientNodeId: "n-phone-a", workspaceName: "ws", sessionId: "s-1" };
-		expect(registry.authorizeRpc(relay.relayId, "control-1", scope)).toMatchObject({
-			ok: true,
-			relay: { relayId: relay.relayId },
-		});
-		expect(registry.authorizeRpc(relay.relayId, "wrong-owner", scope)).toEqual({
-			ok: false,
-			code: "not_held",
-			message: "relay is not owned by this control connection",
-		});
-		expect(registry.authorizeRpc(relay.relayId, "control-1", { ...scope, sessionId: "other" })).toEqual({
-			ok: false,
-			code: "session_mismatch",
-			message: "relay RPC scope does not match active relay",
-		});
-		expect(registry.authorizeRpc("missing-relay", "control-1", scope)).toEqual({
-			ok: false,
-			code: "not_found",
-			message: "active relay not found",
-		});
-
-		await relay.close("tui_disconnected");
-		expect(registry.authorizeRpc(relay.relayId, "control-1", scope)).toEqual({
-			ok: false,
-			code: "not_found",
-			message: "active relay not found",
-		});
-	});
-
 	it("pumps raw binary bytes transparently in both directions, including bytes buffered with the hello", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
@@ -263,7 +227,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(phone.finished).toBe(false);
 	});
 
-	it("propagates a TUI-side close to the phone's send side", async () => {
+	it("propagates a worker-side close to the phone's send side", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const settle = vi.fn();
@@ -280,7 +244,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.activeCount()).toBe(0);
 	});
 
-	it("fences on TUI EOF while the ordered raw write tail owns FIN and stop settlement", async () => {
+	it("fences on worker EOF while the ordered raw write tail owns FIN and stop settlement", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const writeGate = createDeferred<void>();
@@ -331,7 +295,7 @@ describe("relay framing (§12.2.3)", () => {
 		// and stop promises may remain pending under bounded daemon disposal.
 		expect(onSettled).toHaveBeenCalledTimes(1);
 		observerGate.resolve(undefined);
-		expect(await relay.settled).toMatchObject({ reason: "tui_disconnected", bytesUp: tail.length, bytesDown: 0 });
+		expect(await relay.settled).toMatchObject({ reason: "worker_disconnected", bytesUp: tail.length, bytesDown: 0 });
 		expect(didSettle).toBe(true);
 
 		readGate.resolve(Buffer.from("phone bytes returned after fence", "utf8"));
@@ -343,7 +307,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(stop).toHaveBeenCalledTimes(1);
 	});
 
-	it("propagates phone EOF to the TUI and settles phone_disconnected with byte counts", async () => {
+	it("propagates phone EOF to the worker and settles phone_disconnected with byte counts", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const settle = vi.fn();
@@ -504,7 +468,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(registry.activeCount()).toBe(0);
 	});
 
-	it("settles with tui_disconnected when the TUI destroys the relay socket", async () => {
+	it("settles with worker_disconnected when the worker destroys the relay socket", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		const settle = vi.fn();
@@ -515,7 +479,7 @@ describe("relay framing (§12.2.3)", () => {
 		client.socket.destroy();
 		await vi.waitFor(() => expect(settle).toHaveBeenCalled());
 		const outcome = settle.mock.calls[0]?.[0] as RelayOutcome;
-		expect(outcome.reason).toBe("tui_disconnected");
+		expect(outcome.reason).toBe("worker_disconnected");
 	});
 
 	it("keeps one owner through redemption and settles competing active closes once", async () => {
@@ -611,7 +575,7 @@ describe("relay framing (§12.2.3)", () => {
 		expect(onSettled).toHaveBeenCalledTimes(1);
 	});
 
-	it("pauses the TUI socket while a phone write is in flight (backpressure)", async () => {
+	it("pauses the worker socket while a phone write is in flight (backpressure)", async () => {
 		const { socketPath, registry } = await startRelayHarness();
 		const phone = new FakePhoneIrohStream();
 		// Gate writeAll so a second chunk can only be pulled once the first write

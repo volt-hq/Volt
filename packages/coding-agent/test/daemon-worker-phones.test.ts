@@ -1,4 +1,4 @@
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
@@ -153,11 +153,17 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 				clients: { local: 0, remote: 1 },
 			}),
 		]);
-		expect(status.leases).toEqual([
-			expect.objectContaining({ sessionId: ref.sessionId, state: "daemon-active", streamCount: 1 }),
-		]);
+		// The phone's session list shows its conversation attached (`runtimeState`, D18).
+		expect(await phone.query("sessions")).toMatchObject({
+			type: "result",
+			data: { sessions: [expect.objectContaining({ sessionId: ref.sessionId, runtimeState: "attached" })] },
+		});
 		await opened.close();
 		await expect.poll(async () => (await harness.status()).workers[0]?.clients.remote).toBe(0);
+		// Its worker keeps it open, detached, until the retention TTL.
+		expect(harness.services.workers.runtimeStates(harness.workspaceName)).toEqual(
+			new Map([[ref.sessionId, "detached"]]),
+		);
 	}, 60_000);
 
 	it("relays a phone into the worker a TUI opened, beside the TUI, with that worker's tools", async () => {
@@ -375,21 +381,6 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		await vi.waitFor(async () => expect((await harness.status()).workers).toEqual([]));
 	}, 60_000);
 
-	it("retires the worker when a TUI acquires the conversation's lease, ending the phone's stream", async () => {
-		const harness = await startHarness();
-		const ref = await harness.createSession();
-		const { phone } = await attach(await pair(harness), ref.sessionId);
-		const tui = await harness.connect("tui");
-
-		expect(
-			await tui.request({ type: "lease_acquire", workspaceName: harness.workspaceName, sessionId: ref.sessionId }),
-		).toMatchObject({ type: "lease_granted", handoff: "warm" });
-		await phone.ended;
-		const status = await harness.status();
-		expect(status.workers).toEqual([]);
-		expect(status.leases).toEqual([expect.objectContaining({ sessionId: ref.sessionId, state: "tui-owned" })]);
-	}, 60_000);
-
 	it("refuses a worker's requests for a relay another worker serves", async () => {
 		const launcher = new TestWorkerLauncher();
 		const harness = await startHarness({ workerLauncher: launcher });
@@ -440,6 +431,25 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 				},
 			}),
 		).toMatchObject(refused);
+		// Nor does it observe the Git state of a conversation it does not host; a control client observes none.
+		const gitContext = { repository: "Volt", branch: "feature/x", headOid: "a".repeat(40) };
+		expect(
+			await client.request({
+				type: "change_observe",
+				workspaceName: harness.workspaceName,
+				sessionId: ref.sessionId,
+				gitContext,
+			}),
+		).toMatchObject({ type: "error", code: "not_hosted" });
+		const tui = await harness.connect("tui");
+		expect(
+			await tui.request({
+				type: "change_observe",
+				workspaceName: harness.workspaceName,
+				sessionId: otherRef.sessionId,
+				gitContext,
+			}),
+		).toMatchObject({ type: "error", code: "forbidden" });
 		// A conversation it does not host is not its to move from.
 		expect(await client.request({ type: "worker_moved", from: ref.sessionId, to: ref.sessionId })).toMatchObject({
 			type: "error",
@@ -514,5 +524,97 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		expect((await harness.status()).workers).toEqual([
 			expect.objectContaining({ workerId: source?.workerId, clients: { local: 0, remote: 1 } }),
 		]);
+	}, 60_000);
+});
+
+describe("change observation from workers", () => {
+	it("keeps delayed positive and null receipts from invalidating a newer claim, and retires the claim with the worker", async () => {
+		const oldPositiveGate = Promise.withResolvers<void>();
+		const oldNullGate = Promise.withResolvers<void>();
+		let oldPositiveStarted = false;
+		let oldNullStarted = false;
+		const launcher = new TestWorkerLauncher();
+		const harness = await createDaemonHarness({
+			workerLauncher: launcher,
+			extensions: [
+				createIrohDaemonService(
+					{ relayMode: "disabled" },
+					{
+						beforeTuiChangeObservationValidation: async (request) => {
+							if (request.gitContext?.branch === "feature/old") {
+								oldPositiveStarted = true;
+								await oldPositiveGate.promise;
+							} else if (request.gitContext === null) {
+								oldNullStarted = true;
+								await oldNullGate.promise;
+							}
+						},
+					},
+				),
+			],
+		});
+		cleanups.push(() => harness.dispose());
+		cleanups.push(async () => {
+			oldPositiveGate.resolve();
+			oldNullGate.resolve();
+		});
+		// The workspace is a Git checkout: its conversations' observations associate with it.
+		mkdirSync(join(harness.workspacePath, ".git"), { recursive: true });
+		writeFileSync(join(harness.workspacePath, ".git", "HEAD"), "ref: refs/heads/main\n");
+		const ref = await harness.createSession();
+		const changes = harness.services.changes;
+		let retirementCount = 0;
+		const retireSession = changes.retireSession.bind(changes);
+		changes.retireSession = (workspaceName, workspaceGeneration, sessionId) => {
+			if (workspaceName === harness.workspaceName && sessionId === ref.sessionId) retirementCount++;
+			return retireSession(workspaceName, workspaceGeneration, sessionId);
+		};
+		const branch = (): string | undefined =>
+			changes.getChangeContext(harness.workspaceName, harness.generation(), ref.sessionId)?.branch;
+
+		let worker: Promise<DaemonClient> | undefined;
+		let launched: LaunchedWorker | undefined;
+		launcher.script((request) => {
+			const scripted = scriptedWorker(request);
+			worker = scripted.client;
+			launched = scripted.worker;
+			return scripted.worker;
+		});
+		await harness.openWorker(ref);
+		if (!worker) throw new Error("The scripted worker did not launch");
+		const client = await worker;
+		const observe = (gitContext: { branch: string; headOid: string } | null) =>
+			client.request({
+				type: "change_observe",
+				workspaceName: harness.workspaceName,
+				sessionId: ref.sessionId,
+				gitContext: gitContext === null ? null : { repository: "Volt", ...gitContext },
+			});
+
+		const oldPositive = observe({ branch: "feature/old", headOid: "a".repeat(40) });
+		void oldPositive.catch(() => {});
+		await expect.poll(() => oldPositiveStarted).toBe(true);
+		expect(await observe({ branch: "feature/new", headOid: "b".repeat(40) })).toMatchObject({ type: "ok" });
+		await expect.poll(branch).toBe("feature/new");
+		oldPositiveGate.resolve();
+		await expect(oldPositive).resolves.toMatchObject({ type: "ok" });
+		await expect.poll(branch).toBe("feature/new");
+
+		const oldNull = observe(null);
+		void oldNull.catch(() => {});
+		await expect.poll(() => oldNullStarted).toBe(true);
+		expect(retirementCount).toBe(1);
+		expect(await observe({ branch: "feature/replacement", headOid: "a".repeat(40) })).toMatchObject({ type: "ok" });
+		await expect.poll(branch).toBe("feature/replacement");
+		oldNullGate.resolve();
+		await expect(oldNull).resolves.toMatchObject({ type: "ok" });
+		expect(retirementCount).toBe(1);
+
+		// The worker exits, its connection with it: its claim retires, and the association stays.
+		await client.close();
+		launched?.kill();
+		await expect.poll(() => retirementCount).toBe(2);
+		expect(branch()).toBe("feature/replacement");
+		await vi.waitFor(async () => expect((await harness.status()).workers).toEqual([]));
 	}, 60_000);
 });

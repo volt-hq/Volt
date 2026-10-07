@@ -89,7 +89,7 @@ The TUI is a protocol client of the host that runs its conversations ([architect
 
 Extensions reach the TUI only through the protocol: the `request_user_input` tool's questions are `user_input` host requests the TUI answers in its question dialog, and `ctx.ui.setTheme` is a `set_theme` directive the TUI applies unless its user picked a theme in it.
 
-TUI tests use [`test/suite/tui-harness.ts`](../test/suite/tui-harness.ts): an `InProcessConnector` (a `LeasedConnector` with a daemon link) over the faux-provider host harness (`test/suite/host-harness.ts`), the TUI's client connected through it, and InteractiveMode rendering into a `VirtualTerminal` (`startMode()`, `submit()`, `waitForScreen()`, `choose()`). Daemon behavior runs against a scripted link (`createScriptedDaemonLink()`) that records lease calls and offers relayed phones (`relayPreamble()`, `connectRelayedPhone()`).
+TUI tests use [`test/suite/tui-harness.ts`](../test/suite/tui-harness.ts): an `InProcessConnector` over the faux-provider host harness (`test/suite/host-harness.ts`), the TUI's client connected through it, and InteractiveMode rendering into a `VirtualTerminal` (`startMode()`, `submit()`, `waitForScreen()`, `choose()`). Phones the daemon relays into that host are served as a conversation worker serves them (`relayPhone()`, `relayPreamble()`, `connectRelayedPhone()`); the daemon and its workers run in [`test/suite/daemon-harness.ts`](../test/suite/daemon-harness.ts).
 
 ## Testing
 

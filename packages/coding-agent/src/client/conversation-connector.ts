@@ -28,6 +28,7 @@
 
 import type { RpcTransport } from "../core/protocol/transport/transport.ts";
 import type { WorkspaceRegistration } from "../daemon/control-protocol.ts";
+import type { DaemonProbeResult, EnsureDaemonResult, WaitForDaemonExitOptions } from "../daemon/spawn.ts";
 import { ProtocolClient, type ProtocolClientDisconnected, type ProtocolClientOptions } from "./protocol-client.ts";
 
 /** What a connector opens for its client. */
@@ -81,12 +82,25 @@ export interface OpenedConversation {
 }
 
 /** How the TUI reaches the conversations of its host. */
+/**
+ * How a client whose conversations run in the daemon's workers reaches the
+ * daemon itself: `/remote` manages it, and `/worktree` asks it for checkouts.
+ */
+export interface ConnectorDaemon {
+	/** The daemon of `agentDir`, started when none runs. */
+	ensure(agentDir: string): Promise<EnsureDaemonResult>;
+	probe(agentDir: string): Promise<DaemonProbeResult>;
+	waitForExit(options: WaitForDaemonExitOptions): Promise<"exited" | "timeout">;
+}
+
 export interface ConversationConnector {
 	/**
 	 * Whether the client's conversations keep running after it quits (daemon
 	 * workers): quitting while a turn runs offers to leave it running.
 	 */
-	readonly background?: boolean;
+	readonly runsInBackground?: boolean;
+	/** The daemon whose workers host the client's conversations; none for a host in the client's process. */
+	readonly daemon?: ConnectorDaemon;
 	/**
 	 * Whether the host runs elsewhere and a connection can end unannounced:
 	 * the client then resumes on a connection the connector opens again.
@@ -101,7 +115,7 @@ export interface ConversationConnector {
 	hostRestarting?(): Promise<boolean>;
 	/** Open `target` for the client: the transport its host attaches the client there on. Rejects when it cannot. */
 	open(target: ConnectorTarget, options?: ConnectorOpenOptions): Promise<OpenedConversation>;
-	/** The client quits, or the conversation it shows lost its log: the host stops serving others through it. */
+	/** The client quits, or the conversation it shows lost its log: the connector opens nothing more for it. */
 	stopServing(): void;
 	/**
 	 * Close the conversation the client shows, with its client still attached

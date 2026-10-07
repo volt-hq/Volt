@@ -505,8 +505,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 							if (created) void client.moved(conversation.id, sessionId).catch(() => undefined);
 						},
 					},
-					admit: (intent) =>
-						admitRemoteIntent(intent, { shuttingDown: stopping !== undefined, draining: false, subagent: false }),
+					admit: (intent) => admitRemoteIntent(intent, { shuttingDown: stopping !== undefined, subagent: false }),
 					reviewDiscussions: hosted.reviewDiscussions(conversation),
 					onConnection,
 				});
@@ -536,7 +535,6 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 				admit: (intent, admitted) =>
 					admitRemoteIntent(intent, {
 						shuttingDown: stopping !== undefined,
-						draining: false,
 						subagent: admitted.subagentContext !== undefined,
 					}),
 				authority: () => losses.get(relayId),
@@ -562,11 +560,6 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 		onClose,
 		onRelayOffer,
 		onRelayAuthority,
-		onAbort: (sessionId) =>
-			void conversations
-				?.get(sessionId)
-				?.conversation.session.abort()
-				.catch(() => undefined),
 		// The daemon is gone: workers never outlive it.
 		onLost: () => void stop("daemon_lost", WORKER_TURN_CAP_MS),
 	});

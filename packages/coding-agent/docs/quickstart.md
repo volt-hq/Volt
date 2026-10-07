@@ -102,7 +102,7 @@ volt remote pair --workspace my-project
 </p>
 <p align="center"><em>One conversation in the Volt iOS app and in the terminal (Volt 0.2.1). The prompt came from the phone and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached phone.</em></p>
 
-You can also open `/remote` in the terminal to start the daemon, register the current directory, pair a phone, or revoke a device. Set `remote.background: true` in settings if you want interactive Volt to start the daemon automatically.
+You can also open `/remote` in the terminal to start the daemon, register the current directory, pair a phone, or revoke a device. Interactive Volt starts the daemon automatically.
 
 Pair only devices you control. Phone prompts can run tools on your computer, and a phone sharing a desktop-owned conversation uses that terminal session's full local tool set. App backgrounding or network loss detaches the phone without cancelling active work; use the app's stop action to cancel. Host shutdown stops in-memory work.
 

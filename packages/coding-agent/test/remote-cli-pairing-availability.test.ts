@@ -44,7 +44,6 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 					pid: 42,
 					startedAtMs: 0,
 					environment: { source: "inherited", reason: "not resolved" },
-					leases: [],
 					phoneConnections: 0,
 					workspaces: [{ name: "volt", path: "/tmp/volt" }],
 					clients: [],
@@ -59,9 +58,6 @@ vi.mock("../src/daemon/control-client.ts", () => ({
 				code: "pair_failed",
 				message: "pair request observed",
 			};
-		},
-		async waitForResponse() {
-			throw new Error("not used");
 		},
 		async openRelay() {
 			throw new Error("not used");

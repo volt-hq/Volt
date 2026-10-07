@@ -876,9 +876,6 @@
 					"$ref": "#/$defs/Control.Event.relay_closed"
 				},
 				{
-					"$ref": "#/$defs/Control.Event.viewer_end"
-				},
-				{
 					"$ref": "#/$defs/Control.Event.theme_snapshot"
 				},
 				{
@@ -901,9 +898,6 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Event.relay_authority"
-				},
-				{
-					"$ref": "#/$defs/Control.Event.worker_abort"
 				}
 			]
 		},
@@ -1130,51 +1124,6 @@
 							"type": "string"
 						}
 					}
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Event.viewer_end": {
-			"type": "object",
-			"required": [
-				"type",
-				"viewerFeedId",
-				"reason"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "viewer_end"
-				},
-				"viewerFeedId": {
-					"type": "string"
-				},
-				"reason": {
-					"type": "string",
-					"enum": [
-						"granted",
-						"cancelled",
-						"error"
-					]
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Event.worker_abort": {
-			"type": "object",
-			"required": [
-				"type",
-				"sessionId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "worker_abort"
-				},
-				"sessionId": {
-					"type": "string",
-					"maxLength": 512,
-					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
 				}
 			},
 			"additionalProperties": false
@@ -1523,65 +1472,11 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.LeaseReleaseReason": {
-			"type": "string",
-			"enum": [
-				"quit",
-				"switch",
-				"connection_lost",
-				"shutdown",
-				"retention_expired",
-				"workspace_unregistered"
-			]
-		},
-		"Control.LeaseState": {
-			"type": "string",
-			"enum": [
-				"unowned",
-				"daemon-active",
-				"daemon-detached",
-				"daemon-draining",
-				"tui-owned"
-			]
-		},
-		"Control.LeaseStatus": {
-			"type": "object",
-			"required": [
-				"workspaceName",
-				"sessionId",
-				"state",
-				"relayCount",
-				"streamCount"
-			],
-			"properties": {
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"state": {
-					"$ref": "#/$defs/Control.LeaseState"
-				},
-				"relayCount": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 9007199254740991
-				},
-				"streamCount": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 9007199254740991
-				}
-			},
-			"additionalProperties": false
-		},
 		"Control.RelayCloseReason": {
 			"type": "string",
 			"enum": [
 				"phone_disconnected",
-				"tui_disconnected",
-				"lease_transferred",
+				"worker_disconnected",
 				"workspace_unregistered",
 				"host_shutdown",
 				"worker_exited",
@@ -1942,12 +1837,6 @@
 					"$ref": "#/$defs/Control.Request.shutdown"
 				},
 				{
-					"$ref": "#/$defs/Control.Request.lease_acquire"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.lease_release"
-				},
-				{
 					"$ref": "#/$defs/Control.Request.change_observe"
 				},
 				{
@@ -2009,15 +1898,6 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.keep_awake_set"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.viewer_abort"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.relay_rpc"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.relay_notification_delivery"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.conversation_open"
@@ -2329,63 +2209,6 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Request.lease_acquire": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"workspaceName",
-				"sessionId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "lease_acquire"
-				},
-				"id": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"force": {
-					"type": "boolean"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.lease_release": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"workspaceName",
-				"sessionId",
-				"reason"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "lease_release"
-				},
-				"id": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"reason": {
-					"$ref": "#/$defs/Control.LeaseReleaseReason"
-				}
-			},
-			"additionalProperties": false
-		},
 		"Control.Request.pair_cancel": {
 			"type": "object",
 			"required": [
@@ -2508,76 +2331,6 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Request.relay_notification_delivery": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"clientNodeId",
-				"workspaceName",
-				"sessionId",
-				"notification"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "relay_notification_delivery"
-				},
-				"id": {
-					"type": "string"
-				},
-				"clientNodeId": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"notification": {
-					"$ref": "#/$defs/IrohRemotePushNotification"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.relay_rpc": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"relayId",
-				"clientNodeId",
-				"workspaceName",
-				"sessionId",
-				"frame"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "relay_rpc"
-				},
-				"id": {
-					"type": "string"
-				},
-				"relayId": {
-					"type": "string"
-				},
-				"clientNodeId": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"frame": {
-					"$ref": "#/$defs/Control.RelayFrame"
-				}
-			},
-			"additionalProperties": false
-		},
 		"Control.Request.shutdown": {
 			"type": "object",
 			"required": [
@@ -2628,27 +2381,6 @@
 					"type": "string"
 				},
 				"theme": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.viewer_abort": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"viewerFeedId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "viewer_abort"
-				},
-				"id": {
-					"type": "string"
-				},
-				"viewerFeedId": {
 					"type": "string"
 				}
 			},
@@ -3151,9 +2883,6 @@
 				},
 				"sessionId": {
 					"type": "string"
-				},
-				"acquireLease": {
-					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -3314,15 +3043,6 @@
 					"$ref": "#/$defs/Control.Response.error"
 				},
 				{
-					"$ref": "#/$defs/Control.Response.lease_granted"
-				},
-				{
-					"$ref": "#/$defs/Control.Response.lease_pending"
-				},
-				{
-					"$ref": "#/$defs/Control.Response.lease_denied"
-				},
-				{
 					"$ref": "#/$defs/Control.Response.status_result"
 				},
 				{
@@ -3348,9 +3068,6 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Response.pair_started"
-				},
-				{
-					"$ref": "#/$defs/Control.Response.relay_rpc_result"
 				},
 				{
 					"$ref": "#/$defs/Control.Response.conversation_opened"
@@ -3521,87 +3238,6 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Response.lease_denied": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"reason"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "lease_denied"
-				},
-				"id": {
-					"type": "string"
-				},
-				"reason": {
-					"type": "string",
-					"enum": [
-						"held_by_tui",
-						"force_unsupported",
-						"draining_elsewhere"
-					]
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Response.lease_granted": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"workspaceName",
-				"sessionId",
-				"handoff"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "lease_granted"
-				},
-				"id": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string"
-				},
-				"sessionId": {
-					"type": "string"
-				},
-				"handoff": {
-					"type": "string",
-					"enum": [
-						"cold",
-						"warm",
-						"none"
-					]
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Response.lease_pending": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"viewerFeedId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "lease_pending"
-				},
-				"id": {
-					"type": "string"
-				},
-				"viewerFeedId": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
 		"Control.Response.ok": {
 			"type": "object",
 			"required": [
@@ -3661,27 +3297,6 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.Response.relay_rpc_result": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"frame"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "relay_rpc_result"
-				},
-				"id": {
-					"type": "string"
-				},
-				"frame": {
-					"$ref": "#/$defs/Control.RelayOutcome"
-				}
-			},
-			"additionalProperties": false
-		},
 		"Control.Response.status_result": {
 			"type": "object",
 			"required": [
@@ -3692,7 +3307,6 @@
 				"pid",
 				"startedAtMs",
 				"environment",
-				"leases",
 				"phoneConnections",
 				"workspaces",
 				"clients",
@@ -3727,12 +3341,6 @@
 					"type": "array",
 					"items": {
 						"type": "string"
-					}
-				},
-				"leases": {
-					"type": "array",
-					"items": {
-						"$ref": "#/$defs/Control.LeaseStatus"
 					}
 				},
 				"phoneConnections": {
@@ -4551,8 +4159,7 @@
 			"enum": [
 				"retention",
 				"authority",
-				"shutdown",
-				"lease_transferred"
+				"shutdown"
 			]
 		},
 		"Control.WorkspaceRegistration": {
@@ -22869,10 +22476,8 @@
 				"runtimeState": {
 					"type": "string",
 					"enum": [
-						"tui-owned",
-						"daemon-active",
-						"daemon-detached",
-						"daemon-draining"
+						"attached",
+						"detached"
 					]
 				},
 				"worktreeId": {
