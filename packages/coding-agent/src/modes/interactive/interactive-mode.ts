@@ -28,6 +28,7 @@ import {
 	type HostRequest,
 	type HostResponse,
 	type HostSettingsValues,
+	type IntentInput,
 	type IntentOption,
 	type LiveValue,
 	type ProjectedEntry,
@@ -82,6 +83,17 @@ import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
 import { type ConversationConnector, connectThrough } from "../../client/conversation-connector.ts";
 import {
+	completeIntentCommand,
+	formatIntentCommand,
+	type IntentCommand,
+	type IntentCommandInput,
+	intentCommandForm,
+	intentCommandFormInput,
+	intentCommandUsage,
+	parseIntentCommand,
+	readCommandHints,
+} from "../../client/intent-command.ts";
+import {
 	APP_NAME,
 	APP_TITLE,
 	getAgentDir,
@@ -104,13 +116,7 @@ import { findExactModelReferenceMatch } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { DEFAULT_PLANNING_STATE, type PlanningState, type PlanPhase, type PlanState } from "../../core/planning.ts";
 import { BEDROCK_PROVIDER_ID } from "../../core/provider-auth.ts";
-import {
-	MUTABLE_WORKSPACE_REVIEW_TOOLS,
-	parseReviewCommandArgs,
-	REVIEW_USAGE,
-	type ReviewRunControls,
-	type ReviewTarget,
-} from "../../core/review.ts";
+import { MUTABLE_WORKSPACE_REVIEW_TOOLS } from "../../core/review.ts";
 import { formatMissingSessionCwdPrompt } from "../../core/session-cwd.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -979,14 +985,26 @@ export class InteractiveMode {
 			};
 		}
 
-		const reviewCommand = slashCommands.find((command) => command.name === "review");
-		if (reviewCommand) {
-			reviewCommand.getArgumentCompletions = (prefix: string): AutocompleteItem[] | null => {
-				const options = ["tools", "uncommitted", "branch", "branch-uncommitted", "pr", "commit"];
-				const normalized = prefix.trim().toLowerCase();
-				const filtered = options.filter((option) => option.startsWith(normalized));
-				if (filtered.length === 0) return null;
-				return filtered.map((value) => ({ value, label: value }));
+		const reviewSlashCommand = slashCommands.find((command) => command.name === "review");
+		if (reviewSlashCommand) {
+			// The words and flags come from the grammar the host declares for its review intent.
+			reviewSlashCommand.getArgumentCompletions = async (prefix: string): Promise<AutocompleteItem[] | null> => {
+				let command: IntentCommand | undefined;
+				try {
+					command = this.readReviewCommand();
+				} catch {
+					return null;
+				}
+				if (!command) return null;
+				const completions = await completeIntentCommand(command, prefix, (field, text) =>
+					this.reviewCompletions(field, text),
+				);
+				if (completions.length === 0) return null;
+				return completions.map((completion) => ({
+					value: completion.value,
+					label: completion.label,
+					...(completion.description === undefined ? {} : { description: completion.description }),
+				}));
 			};
 		}
 
@@ -8011,20 +8029,49 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * The completions the conversation's review intent offers for `field`:
-	 * the workspace's base branches (`base`), recent commits (`ref`), and its
-	 * current branch's pull request (`number`, `url`), as the host reads them.
+	 * The completions the conversation's review intent offers for `field` that start with `prefix`: the workspace's
+	 * base branches (`base`), recent commits (`ref`), and its current branch's pull request (`number`, `url`), as the
+	 * host reads them.
 	 */
-	private async reviewCompletions(field: "base" | "ref" | "number" | "url"): Promise<readonly IntentOption[]> {
+	private async reviewCompletions(field: string, prefix = ""): Promise<readonly IntentOption[]> {
 		try {
-			return (await this.store.client.query("intent_completions", { intent: "review", field, prefix: "" }))
-				.completions;
+			return (await this.store.client.query("intent_completions", { intent: "review", field, prefix })).completions;
 		} catch {
 			return [];
 		}
 	}
 
-	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
+	/**
+	 * `/review`'s command, read from the grammar the conversation's review intent declares in its input schema;
+	 * undefined when the host declares none. Throws when the declaration does not fit its schema.
+	 */
+	private readReviewCommand(): IntentCommand | undefined {
+		const descriptor = this.input.catalog.intents.find((intent) => intent.name === "review");
+		if (!descriptor) return undefined;
+		return readCommandHints(descriptor.input, {
+			name: "review",
+			localKeywords: [{ word: "tools", description: "Choose the auxiliary tools reviews may use" }],
+		});
+	}
+
+	/** {@link readReviewCommand}, showing why when `/review` cannot read its arguments here. */
+	private async loadReviewCommand(): Promise<IntentCommand | undefined> {
+		try {
+			let command = this.readReviewCommand();
+			// The catalog is empty for a moment after the client moved to another conversation.
+			if (command === undefined && (await this.input.load().catch(() => false))) command = this.readReviewCommand();
+			if (command === undefined) {
+				this.showError("This host does not describe how /review reads its arguments, so /review cannot run here.");
+			}
+			return command;
+		} catch (error) {
+			this.showError(`This host describes /review wrongly: ${errorText(error)}`);
+			return undefined;
+		}
+	}
+
+	/** What to review, as the review intent's input: the pickers of the no-argument launcher. */
+	private async promptForReviewTarget(): Promise<IntentCommandInput | undefined> {
 		const branchLabel = "Against base branch";
 		const branchUncommittedLabel = "Against base branch, with uncommitted changes";
 		const uncommittedLabel = "Uncommitted changes";
@@ -8047,27 +8094,37 @@ export class InteractiveMode {
 			return undefined;
 		}
 		if (choice === currentPullRequestLabel && currentPullRequest) {
-			return { kind: "pr", expectedUrl: currentPullRequest.value };
+			return { target: "pr", url: currentPullRequest.value };
 		}
 		if (choice === branchLabel || choice === branchUncommittedLabel) {
 			const base = await this.promptForReviewBaseBranch();
 			if (!base) {
 				return undefined;
 			}
-			return choice === branchLabel ? { kind: "branch", base } : { kind: "branch_uncommitted", base };
+			return { target: choice === branchLabel ? "branch" : "branch_uncommitted", base };
 		}
 		if (choice === uncommittedLabel) {
-			return { kind: "uncommitted" };
+			return { target: "uncommitted" };
 		}
 		if (choice === prLabel) {
 			const number = await this.showExtensionInput("PR number (empty for current branch's PR)", "123");
 			if (number === undefined) {
 				return undefined;
 			}
-			return { kind: "pr", number: number.trim() || undefined };
+			return number.trim() ? { target: "pr", number: number.trim() } : { target: "pr" };
 		}
 		// Commit: the SHA is picked from the recent-commit list in handleReviewCommand.
-		return { kind: "commit" };
+		return { target: "commit" };
+	}
+
+	/** The review's options in one form, from the grammar's declaration; undefined when it is cancelled. */
+	private async promptForReviewOptions(command: IntentCommand): Promise<IntentCommandInput | undefined> {
+		const response = await this.showHostRequestDialog(
+			{ kind: "form", title: "Review options (Enter starts the review)", fields: intentCommandForm(command) },
+			{},
+		);
+		if (response === undefined || !("values" in response)) return undefined;
+		return intentCommandFormInput(command, response.values);
 	}
 
 	/** Show logical local/upstream base branches and return the selected target. */
@@ -8189,80 +8246,53 @@ export class InteractiveMode {
 			return;
 		}
 
-		const parsedArgs = parseReviewCommandArgs(argsText);
-		if (parsedArgs.error) {
+		const command = await this.loadReviewCommand();
+		if (!command) return;
+		const parsedArgs = parseIntentCommand(command, argsText);
+		if (parsedArgs.error !== undefined) {
 			this.showError(parsedArgs.error);
 			return;
 		}
-		if (parsedArgs.configureTools) {
+		if (parsedArgs.local === "tools") {
 			await this.configureReviewTools();
 			return;
 		}
 
-		let target = parsedArgs.target;
-		if (!target) {
-			target = await this.promptForReviewTarget();
-			if (!target) {
-				this.showStatus("Review cancelled");
-				return;
-			}
+		// With no arguments the pickers choose the target and one form sets the options.
+		const launched = parsedArgs.input === undefined;
+		let input = parsedArgs.input ?? (await this.promptForReviewTarget());
+		if (input === undefined) {
+			this.showStatus("Review cancelled");
+			return;
 		}
-		if (target.kind === "commit" && !target.sha) {
-			const sha = await this.promptForReviewCommit();
-			if (!sha) {
+		if (input.target === "commit" && input.ref === undefined) {
+			const ref = await this.promptForReviewCommit();
+			if (!ref) {
 				this.showStatus("Review cancelled");
 				return;
 			}
-			target = { kind: "commit", sha };
+			input = { ...input, ref };
+		}
+		if (launched) {
+			const options = await this.promptForReviewOptions(command);
+			if (options === undefined) {
+				this.showStatus("Review cancelled");
+				return;
+			}
+			input = { ...input, ...options };
+			this.showStatus(`Equivalent command: /review ${formatIntentCommand(command, input)}`);
 		}
 
-		await this.runReview(target, parsedArgs.controls);
+		await this.runReview(input, intentCommandUsage(command));
 	}
 
-	/** Start a review of `target` through the conversation's review intent; resolves its work id. */
-	private async startReview(target: ReviewTarget, controls: ReviewRunControls | undefined): Promise<string> {
-		const client = this.store.client;
+	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */
+	private async startReview(input: IntentCommandInput): Promise<string> {
 		const tools = await this.getReviewToolsForRun();
-		const options = {
-			...(controls?.focus === undefined ? {} : { focus: controls.focus }),
-			...(controls === undefined || controls.scope.length === 0 ? {} : { scope: controls.scope.join(",") }),
-			...(controls === undefined
-				? {}
-				: { effort: controls.effort, includeOptional: controls.includeOptional, scopeMode: controls.scopeMode }),
+		const accepted = await this.store.client.intent("review", {
+			...input,
 			...(tools.length === 0 ? {} : { tools }),
-		};
-		let accepted: { result?: { workId: string } };
-		switch (target.kind) {
-			case "uncommitted":
-				accepted = await client.intent("review", { ...options, target: "uncommitted" });
-				break;
-			case "branch":
-				accepted = await client.intent("review", {
-					...options,
-					target: "branch",
-					...(target.base === undefined ? {} : { base: target.base }),
-				});
-				break;
-			case "branch_uncommitted":
-				accepted = await client.intent("review", {
-					...options,
-					target: "branch_uncommitted",
-					...(target.base === undefined ? {} : { base: target.base }),
-				});
-				break;
-			case "pr":
-				accepted = await client.intent("review", {
-					...options,
-					target: "pr",
-					...(target.number === undefined ? {} : { number: target.number }),
-					...(target.expectedUrl === undefined ? {} : { url: target.expectedUrl }),
-				});
-				break;
-			case "commit":
-				if (target.sha === undefined) throw new Error("No commit to review");
-				accepted = await client.intent("review", { ...options, target: "commit", ref: target.sha });
-				break;
-		}
+		} as IntentInput<"review">);
 		const workId = accepted.result?.workId;
 		if (workId === undefined) throw new Error("The review did not start");
 		return workId;
@@ -8275,7 +8305,7 @@ export class InteractiveMode {
 	 * Escape cancels it (`cancel_work`). A completed review opens its findings
 	 * in a new conversation (`review_open_session`) while the loader shows.
 	 */
-	private async runReview(target: ReviewTarget, controls: ReviewRunControls | undefined): Promise<void> {
+	private async runReview(input: IntentCommandInput, usage: string): Promise<void> {
 		if (this.activeReview) {
 			this.showWarning("A review is already running. Cancel it before starting another.");
 			return;
@@ -8311,7 +8341,7 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		};
 		try {
-			workId = await this.startReview(target, controls);
+			workId = await this.startReview(input);
 			// Escape while the review prepared cancels it as soon as it runs.
 			if (loader.signal.aborted) cancel();
 			view = new ReviewView({
@@ -8337,9 +8367,7 @@ export class InteractiveMode {
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			this.showError(
-				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
-			);
+			this.showError(message.includes("git") || message.includes("repository") ? `${message} ${usage}` : message);
 		} finally {
 			loader.signal.removeEventListener("abort", cancel);
 			view?.dispose();

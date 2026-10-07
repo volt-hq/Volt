@@ -6,6 +6,7 @@
  * menu, shortcuts, and completion triggers from the intents catalog.
  */
 
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -481,5 +482,77 @@ describe("the TUI's startup input", () => {
 		}
 		expect(unhandled).not.toHaveBeenCalled();
 		expect(receiver.showError).toHaveBeenCalledWith("The model to cycle to is not available");
+	});
+});
+
+describe("the slash menu completes /review from the grammar the host declares", () => {
+	const git = (cwd: string, ...args: string[]): void => {
+		execFileSync("git", ["-c", "core.hooksPath=/dev/null", ...args], { cwd, stdio: "pipe" });
+	};
+
+	/** A TUI over a repository with the branches main and feature/login. */
+	async function startInRepository() {
+		const started = await start();
+		const cwd = started.harness.tempDir;
+		git(cwd, "init", "--initial-branch=main");
+		git(cwd, "config", "user.email", "review@example.com");
+		git(cwd, "config", "user.name", "Review Test");
+		git(cwd, "config", "commit.gpgsign", "false");
+		writeFileSync(join(cwd, "file.txt"), "one\n");
+		git(cwd, "add", "file.txt");
+		git(cwd, "commit", "-m", "Add the file");
+		git(cwd, "branch", "feature/login");
+		return started;
+	}
+
+	const providerOf = (access: ModeAccess): AutocompleteProvider =>
+		(access.defaultEditor as unknown as { autocompleteProvider: AutocompleteProvider }).autocompleteProvider;
+
+	async function offered(access: ModeAccess, line: string): Promise<string[] | undefined> {
+		const result = await providerOf(access).getSuggestions([line], 0, line.length, {
+			signal: new AbortController().signal,
+		});
+		return result?.items.map((item) => item.value);
+	}
+
+	it("offers the target words, then the base branches and the flags, then an enum flag's values", async () => {
+		const { access } = await startInRepository();
+		expect(await offered(access, "/review ")).toEqual([
+			"tools",
+			"uncommitted",
+			"branch",
+			"branch-uncommitted",
+			"pr",
+			"commit",
+		]);
+		expect(await offered(access, "/review br")).toEqual(["branch", "branch-uncommitted"]);
+
+		const afterBranch = (await offered(access, "/review branch ")) ?? [];
+		expect(afterBranch.slice(0, 2)).toEqual(["branch main", "branch feature/login"]);
+		expect(afterBranch).toContain("branch --effort");
+		expect(await offered(access, "/review branch fe")).toEqual(["branch feature/login"]);
+
+		expect(await offered(access, "/review uncommitted --effort ")).toEqual([
+			"uncommitted --effort low",
+			"uncommitted --effort standard",
+			"uncommitted --effort high",
+		]);
+	});
+
+	it("offers nothing for a flag before the target word, or for free text", async () => {
+		const { access } = await startInRepository();
+		expect(await offered(access, "/review --e")).toBeUndefined();
+		expect(await offered(access, "/review uncommitted --focus ")).toBeUndefined();
+	});
+
+	it("leaves the whole argument text when a completion is applied", async () => {
+		const { access } = await startInRepository();
+		const provider = providerOf(access);
+		const line = "/review uncommitted --effort h";
+		const result = await provider.getSuggestions([line], 0, line.length, { signal: new AbortController().signal });
+		const item = result?.items[0];
+		if (!result || !item) throw new Error("Expected a suggestion");
+		const applied = provider.applyCompletion([line], 0, line.length, item, result.prefix);
+		expect(applied.lines[0]).toBe("/review uncommitted --effort high");
 	});
 });

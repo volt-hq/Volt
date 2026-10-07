@@ -167,12 +167,38 @@ const planRevision = {
 };
 
 const reviewOptions = {
-	focus: Type.Optional(Type.String()),
+	focus: Type.Optional(
+		Type.String({ title: "Focus", description: "A question or an area for the review to concentrate on." }),
+	),
 	/** Comma-separated repository-relative globs. */
-	scope: Type.Optional(Type.String()),
-	effort: Type.Optional(stringEnum(["low", "standard", "high"])),
-	includeOptional: Type.Optional(Type.Boolean()),
-	scopeMode: Type.Optional(stringEnum(["incremental", "full"])),
+	scope: Type.Optional(
+		Type.String({
+			title: "Scope",
+			description: "Comma-separated repository-relative globs; empty reviews every changed file.",
+		}),
+	),
+	effort: Type.Optional(
+		stringEnum(["low", "standard", "high"], {
+			title: "Effort",
+			description: "How much thinking the review passes use.",
+			default: "standard",
+		}),
+	),
+	includeOptional: Type.Optional(
+		Type.Boolean({
+			title: "Include optional findings",
+			description: "Also report P3 suggestions.",
+			default: false,
+		}),
+	),
+	scopeMode: Type.Optional(
+		stringEnum(["incremental", "full"], {
+			title: "Scope mode",
+			description:
+				"Incremental reviews only what changed since the previous run of the same change; full reviews all.",
+			default: "incremental",
+		}),
+	),
 	/**
 	 * Auxiliary tools of the conversation the review passes may use besides
 	 * their immutable snapshot tools, such as `bash`, run in a disposable
@@ -185,6 +211,47 @@ const reviewOptions = {
 		}),
 	),
 };
+
+/**
+ * The root keyword of an intent input schema that declares a slash command's grammar. A client that fills an intent's
+ * input from text (a slash command) or from a form reads it from the descriptor's `input`; a client that sends typed
+ * input, or does not know the keyword, ignores it. It never affects admission.
+ */
+export const INTENT_COMMAND_KEYWORD = "x-volt-command";
+
+/**
+ * How an intent's input reads as a command line: `/name <keyword> [positional] [--flag value] ...`. Every field named
+ * here is a property of the input schema.
+ */
+export interface IntentCommandHints {
+	/** A leading word that selects an enum property: its values are the words, in kebab-case (`branch-uncommitted`) or as spelled. */
+	readonly keyword?: {
+		/** The enum property the word sets. */
+		readonly field: string;
+		/** Other words for a value: word to enum value. */
+		readonly aliases?: Readonly<Record<string, string>>;
+		/** The property the word after the keyword sets, by enum value; used when that word is not a flag. */
+		readonly positional?: Readonly<Record<string, string>>;
+	};
+	/** Enum properties set by a bare flag per value (`--full`) instead of `--name value`. */
+	readonly flagValues?: readonly string[];
+	/** String properties that hold a comma-separated list: the flag repeats, and entries are trimmed and de-duplicated. */
+	readonly lists?: readonly string[];
+	/** The properties offered as flags and in the options form, in order. */
+	readonly form?: readonly string[];
+}
+
+/** `/review`'s grammar: `/review branch main --effort high --scope "src/**" --full`. */
+const REVIEW_COMMAND = {
+	keyword: {
+		field: "target",
+		aliases: { unstaged: "uncommitted", working: "uncommitted" },
+		positional: { branch: "base", branch_uncommitted: "base", pr: "number", commit: "ref" },
+	},
+	flagValues: ["scopeMode"],
+	lists: ["scope"],
+	form: ["focus", "scope", "effort", "includeOptional", "scopeMode"],
+} as const satisfies IntentCommandHints;
 
 const runId = RpcConversationIdentifierSchema;
 const server = Type.String();
@@ -419,19 +486,24 @@ export const INTENT_SCHEMAS = {
 	review: {
 		input: Type.Object(
 			{
-				target: stringEnum(["uncommitted", "branch", "branch_uncommitted", "pr", "commit"]),
-				base: Type.Optional(Type.String()),
-				number: Type.Optional(Type.String()),
+				target: stringEnum(["uncommitted", "branch", "branch_uncommitted", "pr", "commit"], {
+					title: "Target",
+					description: "What to review.",
+				}),
+				base: Type.Optional(Type.String({ title: "Base branch" })),
+				number: Type.Optional(Type.String({ title: "Pull request number" })),
 				/**
 				 * The pull request a local client picked, by its URL, such as its
 				 * current branch's (the `url` completions): the review fails unless
 				 * the code host resolves the same one.
 				 */
-				url: Type.Optional(Type.String({ minLength: 1, maxLength: 2_000, pattern: "^https://\\S+$" })),
-				ref: Type.Optional(Type.String({ minLength: 1 })),
+				url: Type.Optional(
+					Type.String({ title: "Pull request URL", minLength: 1, maxLength: 2_000, pattern: "^https://\\S+$" }),
+				),
+				ref: Type.Optional(Type.String({ title: "Commit", minLength: 1 })),
 				...reviewOptions,
 			},
-			closed,
+			{ ...closed, [INTENT_COMMAND_KEYWORD]: REVIEW_COMMAND },
 		),
 		output: ReviewStartedSchema,
 	},

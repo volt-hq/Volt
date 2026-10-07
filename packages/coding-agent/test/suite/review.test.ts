@@ -21,7 +21,6 @@ import {
 	listRecentCommits,
 	MAX_PULL_REQUEST_NUMBER,
 	normalizeReviewPullRequestNumber,
-	parseReviewCommandArgs,
 	prepareReviewWorkflow,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
 	type ReviewUsageSnapshot,
@@ -245,33 +244,7 @@ function privateReviewResponses(marker: string, assessment: "complete" | "incomp
 }
 
 describe("review command controls", () => {
-	it("parses quoted focus, scopes, effort, optional findings, and scope mode", () => {
-		expect(
-			parseReviewCommandArgs(
-				'branch main --focus "security boundary" --scope "src/**/*.ts,test/**/*.ts" --effort high --include-optional --full',
-			),
-		).toEqual({
-			target: { kind: "branch", base: "main" },
-			controls: {
-				focus: "security boundary",
-				scope: ["src/**/*.ts", "test/**/*.ts"],
-				effort: "high",
-				includeOptional: true,
-				scopeMode: "full",
-			},
-		});
-		expect(parseReviewCommandArgs("uncommitted --incremental").controls?.scopeMode).toBe("incremental");
-		expect(parseReviewCommandArgs('commit HEAD --focus "unterminated').error).toMatch(/Unterminated/);
-		expect(parseReviewCommandArgs("pr 1 --effort extreme").error).toMatch(/low, standard, or high/);
-		expect(parseReviewCommandArgs("tools now").error).toMatch(/Unexpected arguments/);
-	});
-
-	it("parses the branch and uncommitted target, and reruns it from its base locator", () => {
-		expect(parseReviewCommandArgs("branch-uncommitted main --focus tests")).toEqual({
-			target: { kind: "branch_uncommitted", base: "main" },
-			controls: { focus: "tests", scope: [], effort: "standard", includeOptional: false, scopeMode: "incremental" },
-		});
-		expect(parseReviewCommandArgs("branch_uncommitted").target).toEqual({ kind: "branch_uncommitted" });
+	it("reruns the branch and uncommitted target from its base locator", () => {
 		const branchBase = { kind: "remote", remote: "origin", remoteRef: "refs/heads/main" } as const;
 		const record = { target: { identity: { kind: "branch_uncommitted" }, branchBase } };
 		expect(reviewTargetForRerun(record as unknown as Parameters<typeof reviewTargetForRerun>[0])).toEqual({
