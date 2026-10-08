@@ -1,6 +1,6 @@
 # Review engines and the review launcher
 
-- Status: In progress. Steps 0 through 3b are shipped. Step 4 ships as four pull requests, 4a through 4d (section 6); step 5 follows.
+- Status: In progress. Steps 0 through 3b are shipped. Step 4 ships as five pull requests, 4a through 4e (section 6); step 5 follows.
 - Date: 2026-10-07
 - Audience: Volt maintainers and extension API implementers.
 - Scope: How `/review` and review engines that extensions provide (today the project-local `/swarm-review`) share targets, coverage, launching, running, and results.
@@ -255,7 +255,7 @@ Each step is its own pull request, with an issue first. This is the baseline ord
 1. **Targets.** Split resolution from snapshot construction and unify the Git source. Add the combined target. Valuable by itself.
 2. **Coverage.** The host diff call (`deliverReviewDiff`) and the union of the passes' coverage (`ReviewRunCoverage`), which make a multi-pass run completable under today's rule. Multiplicity, per-finding verification coverage, a stricter k-pass rule, and the bounded record shape come later.
 3. **Typed parameters.** The declaration (D1), host or client parsing, the launcher form, and completion; `/review` adopts it first, which means giving today's hard-coded TUI dispatch (`handleReviewCommand`) and four typed intents a declaration (D8). Swarm follows with typed settings. Independent of steps 1, 2, and 4; the form picks up the combined target once step 1 lands.
-4. **The engine contract**, in four pull requests:
+4. **The engine contract**, in five pull requests:
    - **4a. Run records name their engine, and PR snapshots can skip the discussion context.** The `engine` field and its projection, rerun and incremental filtering by engine, and the provider's identity-only capture. Host-internal.
    - **4b. The host runs an engine.** The start path (work id is the run id), the engine context (`target`, `changedFiles`, `pass`, `validate`, `submit`, `checkout`), the work's channels, snapshot lifetime, the registry on the session, and the `review` intent's `engine` field, proven by test engines through the real work registry and protocol. Detail from an engine is passed through as UI data here; 4c normalizes it under the extension's action policy.
    - **4c. The public API.** `registerReviewEngine`, typed `parameters` and `localOnly`, the `review` intent's `engineParams`, the engine kept in the session's registry for as long as its extension runs (its reviews are cancelled with it), its reports normalized under the extension's action policy, and the engine named in the posted pull request review.
