@@ -588,6 +588,23 @@ describe("the slash menu completes /review from the grammar the host declares", 
 		expect(await offered(access, "/review uncommitted --engine standard --w")).toBeUndefined();
 	});
 
+	it("offers the flags of the engine the reviewEngine setting names, until the line says standard", async () => {
+		const { access } = await startInRepository({
+			globalSettings: { ...SETTINGS, reviewEngine: "swarm" },
+			extension: (volt) => {
+				volt.registerReviewEngine("swarm", {
+					label: "Swarm",
+					description: "Many reviewers.",
+					targets: ["uncommitted", "branch"],
+					parameters: { type: "object", properties: { workers: { type: "integer", minimum: 1, maximum: 32 } } },
+					async run() {},
+				});
+			},
+		});
+		expect(await offered(access, "/review uncommitted --w")).toEqual(["uncommitted --workers"]);
+		expect(await offered(access, "/review uncommitted --engine standard --w")).toBeUndefined();
+	});
+
 	it("leaves the whole argument text when a completion is applied", async () => {
 		const { access } = await startInRepository();
 		const provider = providerOf(access);

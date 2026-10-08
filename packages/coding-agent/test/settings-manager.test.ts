@@ -394,6 +394,28 @@ describe("SettingsManager", () => {
 			expect(reloadedManager.getReviewModel()).toBeUndefined();
 		});
 
+		it("keeps the engine /review runs on, trimmed, and clears it with an empty value", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.getReviewEngine()).toBeUndefined();
+
+			manager.setReviewEngine("  swarm ");
+			await manager.flush();
+			expect(manager.getReviewEngine()).toBe("swarm");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8")).reviewEngine).toBe("swarm");
+			expect(SettingsManager.create(projectDir, agentDir).getReviewEngine()).toBe("swarm");
+
+			// A stored blank or non-string value is no engine.
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ reviewEngine: "   " }));
+			expect(SettingsManager.create(projectDir, agentDir).getReviewEngine()).toBeUndefined();
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ reviewEngine: 3 }));
+			expect(SettingsManager.create(projectDir, agentDir).getReviewEngine()).toBeUndefined();
+
+			manager.setReviewEngine("swarm");
+			manager.setReviewEngine("");
+			await manager.flush();
+			expect(manager.getReviewEngine()).toBeUndefined();
+		});
+
 		it("should let project profile clears override inherited global settings", () => {
 			writeFileSync(
 				join(agentDir, "settings.json"),
