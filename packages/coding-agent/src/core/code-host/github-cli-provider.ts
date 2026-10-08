@@ -1,6 +1,9 @@
 import { runGitHubCli } from "./github-cli.ts";
 import { resolvePullRequestCheckoutWithGitHubCli } from "./github-cli-checkout.ts";
-import { capturePullRequestContextWithGitHubCli } from "./github-cli-context.ts";
+import {
+	capturePullRequestContextWithGitHubCli,
+	capturePullRequestIdentityWithGitHubCli,
+} from "./github-cli-context.ts";
 import { parseGitHubPullRequestUrl, resolveCurrentReviewPullRequest } from "./github-cli-review-target.ts";
 import type {
 	CodeHostProvider,
@@ -105,6 +108,7 @@ export const githubCliCodeHostProvider: CodeHostProvider = {
 	probeCurrentPullRequest,
 	resolvePullRequestCheckout: resolvePullRequestCheckoutWithGitHubCli,
 	capturePullRequestContext: capturePullRequestContextWithGitHubCli,
+	capturePullRequestIdentity: capturePullRequestIdentityWithGitHubCli,
 	verifyPullRequestHead,
 	publishPullRequestReview,
 };

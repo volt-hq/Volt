@@ -21123,6 +21123,7 @@
 			"required": [
 				"runId",
 				"workflowAction",
+				"engine",
 				"status",
 				"startedAt",
 				"endedAt",
@@ -21134,6 +21135,9 @@
 					"type": "string"
 				},
 				"workflowAction": {
+					"type": "string"
+				},
+				"engine": {
 					"type": "string"
 				},
 				"status": {
@@ -21695,6 +21699,7 @@
 			"required": [
 				"runId",
 				"workflowAction",
+				"engine",
 				"status",
 				"startedAt",
 				"endedAt",
@@ -21706,6 +21711,9 @@
 					"type": "string"
 				},
 				"workflowAction": {
+					"type": "string"
+				},
+				"engine": {
 					"type": "string"
 				},
 				"status": {

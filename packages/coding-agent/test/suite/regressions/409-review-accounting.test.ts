@@ -706,6 +706,7 @@ describe("#409 initial review accounting", () => {
 			probeCurrentPullRequest: vi.fn(),
 			resolvePullRequestCheckout: vi.fn(),
 			capturePullRequestContext: vi.fn(),
+			capturePullRequestIdentity: vi.fn(),
 			verifyPullRequestHead: vi.fn(async () => {}),
 			publishPullRequestReview: publish,
 		};

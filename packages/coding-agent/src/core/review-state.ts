@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
+import { EXTENSION_WORK_KIND_PATTERN, type ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 import { minimatch } from "minimatch";
 import type { ReviewRunControls } from "./review.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-links.ts";
@@ -32,6 +32,22 @@ const MAX_REVIEW_SCOPE_PATTERNS = 50;
 const MAX_REVIEW_SCOPE_PATTERN_BYTES = 500;
 
 export type ReviewRunStatus = "completed" | "incomplete" | "failed" | "cancelled";
+
+/** The engine of the built-in review pipeline. A run of it records no engine. */
+export const STANDARD_REVIEW_ENGINE = "standard";
+
+/** An extension's engine is named like its work kinds: `ext:<extension id>/<engine name>`. */
+const EXTENSION_REVIEW_ENGINE_PATTERN = new RegExp(EXTENSION_WORK_KIND_PATTERN);
+
+/** Whether `value` names an extension's review engine. */
+export function isExtensionReviewEngine(value: unknown): value is string {
+	return typeof value === "string" && EXTENSION_REVIEW_ENGINE_PATTERN.test(value);
+}
+
+/** The engine that produced `run`: `standard`, or an extension's engine. */
+export function reviewRunEngine(run: Pick<ReviewRunRecord, "engine">): string {
+	return run.engine ?? STANDARD_REVIEW_ENGINE;
+}
 
 export interface ReviewRunFileIdentity {
 	path: string;
@@ -71,6 +87,12 @@ export interface ReviewRunRecord {
 	schemaVersion: 1;
 	runId: string;
 	workflowAction: string;
+	/**
+	 * The extension engine that produced the run, as the host named it when it started the run; absent for the
+	 * built-in pipeline ({@link STANDARD_REVIEW_ENGINE}). Extensions cannot write run records, so a run's engine is
+	 * never its own claim.
+	 */
+	engine?: string;
 	status: ReviewRunStatus;
 	startedAt: number;
 	endedAt: number;
@@ -299,6 +321,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 function parseRun(value: unknown): ReviewRunRecord | undefined {
 	if (!isObject(value) || value.schemaVersion !== REVIEW_STATE_SCHEMA_VERSION) return undefined;
 	if (typeof value.runId !== "string" || typeof value.workflowAction !== "string") return undefined;
+	if (value.engine !== undefined && !isExtensionReviewEngine(value.engine)) return undefined;
 	if (
 		value.status !== "completed" &&
 		value.status !== "incomplete" &&
@@ -455,7 +478,7 @@ export async function restoreReviewStateFromHandoff(
 
 export function listReviewRuns(
 	sessionManager: SessionManager,
-	options: { cursor?: string; limit?: number } = {},
+	options: { cursor?: string; limit?: number; engine?: string } = {},
 ): ReviewRunPage {
 	const limit = options.limit ?? 10;
 	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 50)
@@ -465,6 +488,8 @@ export function listReviewRuns(
 	const transitions = transitionMap(entries);
 	const byRunId = hydrateRuns(entries);
 	let runs = [...byRunId.values()].sort(compareRuns).slice(0, MAX_HYDRATED_REVIEW_RUNS);
+	const { engine } = options;
+	if (engine !== undefined) runs = runs.filter((run) => reviewRunEngine(run) === engine);
 	if (options.cursor) {
 		const cursor = decodeCursor(options.cursor);
 		const index = runs.findIndex((run) => run.endedAt === cursor.endedAt && run.runId === cursor.runId);
@@ -559,7 +584,7 @@ export async function getCanonicalReviewRun(
 
 export async function listCanonicalReviewRuns(
 	manager: SessionManager,
-	options: { cursor?: string; limit?: number } = {},
+	options: { cursor?: string; limit?: number; engine?: string } = {},
 ): Promise<ReviewRunPage> {
 	const assertCurrent = reviewConversationGuard(manager);
 	const page = listReviewRuns(manager, options);
@@ -744,6 +769,8 @@ function snapshotContextMetadata(snapshot: ReviewSnapshot): ReviewRunContextMeta
 export function createReviewRunRecord(options: {
 	workflowId: string;
 	workflowAction: string;
+	/** The extension engine running the review; none for the built-in pipeline. */
+	engine?: string;
 	startedAt: number;
 	endedAt?: number;
 	snapshot: ReviewSnapshot;
@@ -756,11 +783,15 @@ export function createReviewRunRecord(options: {
 }): ReviewRunRecord {
 	assertReviewControlsPersistLosslessly(options.controls);
 	if (options.usage && !parseReviewUsage(options.usage)) throw new Error("Invalid review accounting");
+	if (options.engine !== undefined && !isExtensionReviewEngine(options.engine)) {
+		throw new Error(`Invalid review engine ${JSON.stringify(options.engine)}`);
+	}
 	const fileInventory = snapshotFileInventory(options.snapshot);
 	const createRecord = (includeEvidence: boolean): ReviewRunRecord => ({
 		schemaVersion: REVIEW_STATE_SCHEMA_VERSION,
 		runId: options.workflowId,
 		workflowAction: options.workflowAction,
+		...(options.engine === undefined ? {} : { engine: options.engine }),
 		status: options.status,
 		startedAt: options.startedAt,
 		endedAt: options.endedAt ?? Date.now(),
@@ -837,38 +868,50 @@ function pathInControlScope(path: string, controls: ReviewRunControls): boolean 
 	);
 }
 
+/** What an incremental plan builds on: the prior run to continue (the newest run of `engine` unless `parentRunId` names one). */
+interface IncrementalReviewOptions {
+	parentRunId?: string;
+	/** The engine reviewing now: another engine's runs are never a prior run. The built-in pipeline by default. */
+	engine?: string;
+}
+
 export function planIncrementalReview(
 	sessionManager: SessionManager | undefined,
 	snapshot: ReviewSnapshot,
 	controls: ReviewRunControls,
-	options: { parentRunId?: string } = {},
+	options: IncrementalReviewOptions = {},
 ): ReviewIncrementalPlan {
 	if (controls.scopeMode === "full" || !sessionManager) return fullReviewPlan(snapshot);
+	const engine = options.engine ?? STANDARD_REVIEW_ENGINE;
 	const previousRun = options.parentRunId
 		? getReviewRun(sessionManager, options.parentRunId)
-		: listReviewRuns(sessionManager, { limit: 1 }).runs[0];
-	return planReviewFromPreviousRun(previousRun, snapshot, controls, options);
+		: listReviewRuns(sessionManager, { limit: 1, engine }).runs[0];
+	return planReviewFromPreviousRun(previousRun, snapshot, controls, { ...options, engine });
 }
 
 export async function planCanonicalIncrementalReview(
 	sessionManager: SessionManager | undefined,
 	snapshot: ReviewSnapshot,
 	controls: ReviewRunControls,
-	options: { parentRunId?: string } = {},
+	options: IncrementalReviewOptions = {},
 ): Promise<ReviewIncrementalPlan> {
 	if (controls.scopeMode === "full" || !sessionManager) return fullReviewPlan(snapshot);
+	const engine = options.engine ?? STANDARD_REVIEW_ENGINE;
 	const previousRun = options.parentRunId
 		? await getCanonicalReviewRun(sessionManager, options.parentRunId)
-		: (await listCanonicalReviewRuns(sessionManager, { limit: 1 })).runs[0];
-	return planReviewFromPreviousRun(previousRun, snapshot, controls, options);
+		: (await listCanonicalReviewRuns(sessionManager, { limit: 1, engine })).runs[0];
+	return planReviewFromPreviousRun(previousRun, snapshot, controls, { ...options, engine });
 }
 
 function planReviewFromPreviousRun(
 	previousRun: ReviewRunRecord | undefined,
 	snapshot: ReviewSnapshot,
 	controls: ReviewRunControls,
-	options: { parentRunId?: string },
+	options: IncrementalReviewOptions & { engine: string },
 ): ReviewIncrementalPlan {
+	if (previousRun && reviewRunEngine(previousRun) !== options.engine) {
+		return fullReviewPlan(snapshot, "The prior review came from another review engine.");
+	}
 	if (!previousRun) {
 		return fullReviewPlan(
 			snapshot,

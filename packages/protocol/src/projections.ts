@@ -197,6 +197,8 @@ export const RpcReviewTargetIdentitySchema = Type.Object(
 const reviewRunProperties = {
 	runId: Type.String(),
 	workflowAction: Type.String(),
+	/** The review engine that produced the run: `standard`, or `ext:<extension id>/<engine name>`. */
+	engine: Type.String(),
 	status: RpcReviewRunStatusSchema,
 	startedAt: Type.Number(),
 	endedAt: Type.Number(),

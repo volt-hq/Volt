@@ -18,9 +18,13 @@ import { tmpdir } from "node:os";
 import { delimiter, join, relative, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { capturePullRequestContextWithGitHubCli } from "../src/core/code-host/github-cli-context.ts";
+import {
+	capturePullRequestContextWithGitHubCli,
+	capturePullRequestIdentityWithGitHubCli,
+} from "../src/core/code-host/github-cli-context.ts";
 import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
+import { createReviewSnapshotTools, ReviewCoverageTracker } from "../src/core/review-tools.ts";
 
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
 
@@ -1628,6 +1632,89 @@ if (!args.includes("--numstat")) {
 			const result = await resolution;
 			if (!("error" in result)) await result.dispose();
 		}
+	});
+
+	it("captures a pull request by its identity alone, requesting none of the code host's context", async () => {
+		const repository = createRepository();
+		const remote = join(tmpdir(), `volt-review-snapshot-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(repository, "remote", "add", "origin", remote);
+		git(repository, "push", "origin", "main");
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "tracked.txt"), "pull request\n");
+		git(repository, "add", "tracked.txt");
+		git(repository, "commit", "-m", "pull request");
+		git(repository, "push", "origin", "HEAD:refs/pull/7/head");
+		const baseOid = git(repository, "rev-parse", "main");
+		const headOid = git(repository, "rev-parse", "HEAD");
+		git(repository, "checkout", "main");
+		const config: GitHubShimConfig = {
+			view: {
+				id: "PR_node_7",
+				number: 7,
+				title: "Identity only",
+				body: "Discussion stays unread",
+				baseRefName: "main",
+				headRefName: "feature",
+				url: "https://example.test/o/r/pull/7",
+				baseRefOid: baseOid,
+				headRefOid: headOid,
+			},
+		};
+		const logPath = installGitHubShim(repository, config);
+		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+
+		const snapshot = await resolveReviewSnapshot({ kind: "pr", number: "7" }, repository, {
+			...OPTIONS,
+			pullRequestContext: false,
+		});
+		if ("error" in snapshot) throw new Error(snapshot.error);
+		try {
+			expect(snapshot.identity.pullRequest).toMatchObject({
+				number: 7,
+				title: "Identity only",
+				baseRefOid: baseOid,
+				headRefOid: headOid,
+			});
+			expect(snapshot.identity).toMatchObject({ kind: "pr", headCommit: headOid });
+			expect(snapshot.codeHostContext).toBeUndefined();
+			expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["tracked.txt"]);
+			// No linked-issue, comment, review, or thread query was sent: the shim logs only those.
+			expect(existsSync(logPath)).toBe(false);
+			// Without context there is no context tool for a pass to read.
+			expect(
+				createReviewSnapshotTools(snapshot, new ReviewCoverageTracker()).map((tool) => tool.name),
+			).not.toContain("review_context");
+		} finally {
+			await snapshot.dispose();
+		}
+
+		// The default still captures the context.
+		const withContext = await resolveReviewSnapshot({ kind: "pr", number: "7" }, repository, OPTIONS);
+		if ("error" in withContext) throw new Error(withContext.error);
+		try {
+			expect(withContext.codeHostContext?.manifest.status).toBe("complete");
+			expect(existsSync(logPath)).toBe(true);
+		} finally {
+			await withContext.dispose();
+		}
+
+		// An identity-only capture still refuses a head that moved while it ran.
+		config.finalHeadOid = baseOid;
+		writeFileSync(join(repository, "bin", "gh-config.json"), JSON.stringify(config));
+		const moved = await resolveReviewSnapshot({ kind: "pr", number: "7" }, repository, {
+			...OPTIONS,
+			pullRequestContext: false,
+		});
+		expect(moved).toMatchObject({ error: expect.stringContaining("pull request moved") });
+		const direct = await capturePullRequestIdentityWithGitHubCli({
+			cwd: repository,
+			number: "7",
+			maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
+		});
+		expect(direct).toMatchObject({ ok: false });
 	});
 
 	it("detaches fetched PR snapshots from borrowed local objects and rejects moved metadata", async () => {

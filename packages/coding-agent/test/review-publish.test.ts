@@ -232,6 +232,7 @@ switch (args.slice(0, 2).join(" ")) {
 			probeCurrentPullRequest: async () => undefined,
 			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
 			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
+			capturePullRequestIdentity: async () => ({ ok: false, error: "unused" }),
 			verifyPullRequestHead: async (_cwd, pullRequest) => {
 				verifiedHead = pullRequest.headRefOid;
 			},
