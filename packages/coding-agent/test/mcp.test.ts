@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { Tool as SdkTool } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryAuthStorageBackend } from "../src/core/auth-storage.ts";
+import { cloneCanonicalData } from "../src/core/canonical-data.ts";
 import { getMcpServerAuthState } from "../src/core/mcp/auth.ts";
 import {
 	createEmptyMcpMergedConfig,
@@ -174,6 +175,11 @@ function createMetadataCountingManager(
 		outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
 	});
 	return { manager, counts };
+}
+
+/** Fails when `value` is not JSON data: results and events are persisted and projected as such. */
+function expectJsonData(value: unknown, description: string): void {
+	expect(() => cloneCanonicalData(value, description), description).not.toThrow();
 }
 
 /**
@@ -1101,18 +1107,21 @@ describe("MCP support", () => {
 
 		const started = await startMcpOAuthDeviceAuth({ server, store: oauthStore, fetchFn });
 		expect(started.result.userCode).toBe("ABCD-EFGH");
+		expectJsonData(started.result, "Device start result");
 		expect(JSON.stringify(started.result)).not.toContain("secret-device-code");
 		expect(getMcpServerAuthState(server, process.env, oauthStore)).toBe("required");
 
 		started.pending.nextPollAtMs = Date.now();
 		const pending = await pollMcpOAuthDeviceAuth({ server, store: oauthStore, pending: started.pending, fetchFn });
 		expect(pending.result.status).toBe("pending");
+		expectJsonData(pending.result, "Device poll result while pending");
 		expect(pending.pending).toBeDefined();
 		const nextPending = pending.pending;
 		expect(nextPending).toBeDefined();
 		nextPending!.nextPollAtMs = Date.now();
 		const completed = await pollMcpOAuthDeviceAuth({ server, store: oauthStore, pending: nextPending!, fetchFn });
 		expect(completed.result.status).toBe("authenticated");
+		expectJsonData(completed.result, "Device poll result once authenticated");
 		expect(oauthStore.getRecord(server)?.tokens?.access_token).toBe("access-token");
 		expect(getMcpServerAuthState(server, process.env, oauthStore)).toBe("authenticated");
 	});
@@ -1363,6 +1372,34 @@ describe("MCP support", () => {
 		] satisfies McpGatewayToolInput[]) {
 			await run(input);
 		}
+		await manager.dispose();
+	});
+
+	it("returns JSON-admissible auth results and events for a server that has not connected", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const manager = new McpManager({
+			config: createTestConfig(tempDir, {
+				transport: "streamable-http",
+				url: "https://api.example/mcp",
+				auth: { type: "oauth", flow: "device", clientId: "volt-test" },
+			}),
+			clientFactory: createFakeFactory("unused"),
+			metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+			outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 1024, maxOutputLines: 10 }),
+			oauthStore: McpOAuthStore.fromStorage(new InMemoryAuthStorageBackend()),
+		});
+		const events: McpManagerEvent[] = [];
+		manager.subscribe((event) => events.push(event));
+
+		expectJsonData(manager.cancelServerAuth("fake"), "Cancel result");
+		const loggedOut = await manager.logoutServer("fake");
+		expectJsonData(loggedOut, "Logout result");
+		expect(loggedOut.serverSummary).toMatchObject({ id: "fake", authState: "required" });
+
+		const authStatuses = events.flatMap((event) => (event.type === "mcp_auth_update" ? [event.status] : []));
+		expect(authStatuses).toEqual(["cancelled", "logged_out"]);
+		for (const event of events) expectJsonData(event, `${event.type} event`);
 		await manager.dispose();
 	});
 });
