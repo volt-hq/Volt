@@ -13,6 +13,7 @@ import {
 	type CodeHostProvider,
 	type CodeHostPullRequestSummary,
 	githubCliCodeHostProvider,
+	type ReviewCodeHostContextCaptureOptions,
 } from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
 import type { SessionIntentResult, ToolDefinition } from "./extensions/types.ts";
@@ -28,6 +29,7 @@ import {
 	PR_CHECKOUT_CHANGED,
 	readPrReviewBinding,
 } from "./pr-review-binding.ts";
+import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { ReviewPasses } from "./review-passes.ts";
 import { reviewUsageDetail, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
@@ -367,7 +369,7 @@ function escapeXml(value: string): string {
 	return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-function controlsWithDefaults(controls: Partial<ReviewRunControls> | undefined): ReviewRunControls {
+export function controlsWithDefaults(controls: Partial<ReviewRunControls> | undefined): ReviewRunControls {
 	return {
 		...DEFAULT_REVIEW_RUN_CONTROLS,
 		...controls,
@@ -379,7 +381,7 @@ function inScope(path: string, scope: readonly string[]): boolean {
 	return scope.length === 0 || scope.some((pattern) => minimatch(path, pattern, { dot: true, matchBase: false }));
 }
 
-function inRunScope(
+export function inRunScope(
 	path: string,
 	controls: ReviewRunControls,
 	incrementalPlan: ReviewIncrementalPlan | undefined,
@@ -388,7 +390,7 @@ function inRunScope(
 	return incrementalPlan?.mode !== "incremental" || incrementalPlan.changedPaths.includes(path);
 }
 
-function reviewExclusions(
+export function reviewExclusions(
 	snapshot: ReviewSnapshot,
 	controls: ReviewRunControls,
 	incrementalPlan: ReviewIncrementalPlan | undefined,
@@ -844,7 +846,7 @@ export function reviewActionIdForTarget(target: ReviewTarget): string {
 	return `review.${target.kind}`;
 }
 
-function createReviewWorkflowId(): string {
+export function createReviewWorkflowId(): string {
 	return `review:${randomUUID()}`;
 }
 
@@ -872,7 +874,7 @@ export function reviewWorkTarget(resolution: Pick<ResolvedReview, "description" 
 	return resolution.workflowDescription ?? resolution.description;
 }
 
-class ReviewPreparationCancelledError extends Error {
+export class ReviewPreparationCancelledError extends Error {
 	constructor() {
 		super("Review preparation was cancelled.");
 		this.name = "ReviewPreparationCancelledError";
@@ -883,13 +885,28 @@ function throwIfReviewPreparationCancelled(signal: AbortSignal | undefined): voi
 	if (signal?.aborted) throw new ReviewPreparationCancelledError();
 }
 
-export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOptions): Promise<PreparedReviewWorkflow> {
-	throwIfReviewPreparationCancelled(options.signal);
-	if (options.requireProjectTrust && !options.settingsManager.isProjectTrusted()) {
-		throw new Error("Project trust is required before running a remote review.");
-	}
-	const controls = controlsWithDefaults(options.controls);
-	assertReviewControlsPersistLosslessly(controls);
+export interface ResolveBoundReviewSnapshotOptions {
+	target: ReviewTarget;
+	cwd: string;
+	sessionManager?: SessionManager;
+	/** The run this review continues: a pull request review binds to the conversation its run came from. */
+	parentRunId?: string;
+	/** `false`: a pull request is captured by its identity alone (see {@link resolveReviewTarget}). */
+	pullRequestContext?: boolean;
+	sanitizeRemoteErrors?: boolean;
+	signal?: AbortSignal;
+	onProgress?: (message: string) => void;
+}
+
+/**
+ * Resolve `target` to a snapshot. A pull request review in a conversation bound to a pull request must be
+ * that pull request, in its checkout: the target takes the binding's number and URL, the code host is asked
+ * from where the binding was made, and the snapshot is checked against the binding. The caller disposes
+ * the snapshot.
+ */
+export async function resolveBoundReviewSnapshot(
+	options: ResolveBoundReviewSnapshotOptions,
+): Promise<{ target: ReviewTarget; resolution: ResolvedReview }> {
 	const binding =
 		options.target.kind === "pr" ? await readPrReviewBinding(options.sessionManager, options.parentRunId) : undefined;
 	let target = options.target;
@@ -904,15 +921,21 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 			throw new Error("This session is bound to a different PR; prepare a new review.");
 		target = { kind: "pr", number, expectedUrl: binding.pullRequest.url };
 		await assertPrReviewCheckout(binding, options.cwd, options.signal);
+		const bound = (captureOptions: ReviewCodeHostContextCaptureOptions): ReviewCodeHostContextCaptureOptions => ({
+			...captureOptions,
+			cwd: binding.sourceCwd,
+			number,
+			expectedUrl: binding.pullRequest.url,
+		});
 		codeHostProvider = {
 			...githubCliCodeHostProvider,
 			async capturePullRequestContext(captureOptions) {
-				const captured = await githubCliCodeHostProvider.capturePullRequestContext({
-					...captureOptions,
-					cwd: binding.sourceCwd,
-					number,
-					expectedUrl: binding.pullRequest.url,
-				});
+				const captured = await githubCliCodeHostProvider.capturePullRequestContext(bound(captureOptions));
+				if (captured.ok) assertBoundPullRequest(binding, captured.pullRequest);
+				return captured;
+			},
+			async capturePullRequestIdentity(captureOptions) {
+				const captured = await githubCliCodeHostProvider.capturePullRequestIdentity(bound(captureOptions));
 				if (captured.ok) assertBoundPullRequest(binding, captured.pullRequest);
 				return captured;
 			},
@@ -922,6 +945,7 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 		signal: options.signal,
 		onProgress: options.onProgress,
 		codeHostProvider,
+		pullRequestContext: options.pullRequestContext,
 	});
 	if ("error" in resolution) {
 		if (resolution.cancelled || options.signal?.aborted) throw new ReviewPreparationCancelledError();
@@ -938,6 +962,49 @@ export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOption
 			}
 			assertBoundPullRequest(binding, resolution.identity.pullRequest);
 		}
+		return { target, resolution };
+	} catch (error) {
+		await resolution.dispose();
+		throw error;
+	}
+}
+
+/**
+ * Before a review of a bound pull request runs: the snapshot is still that pull request at the bound head, the
+ * code host still has it there, and the conversation is still in its checkout.
+ */
+export async function verifyBoundPullRequest(
+	binding: PrReviewPlacement,
+	resolution: ResolvedReview,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	const identity = resolution.identity.pullRequest;
+	if (!identity || resolution.identity.headCommit !== binding.pullRequest.headRefOid) {
+		throw new Error(PR_CHECKOUT_CHANGED);
+	}
+	assertBoundPullRequest(binding, identity);
+	await githubCliCodeHostProvider.verifyPullRequestHead(binding.sourceCwd, identity);
+	await assertPrReviewCheckout(binding, cwd, signal);
+}
+
+export async function prepareReviewWorkflow(options: PrepareReviewWorkflowOptions): Promise<PreparedReviewWorkflow> {
+	throwIfReviewPreparationCancelled(options.signal);
+	if (options.requireProjectTrust && !options.settingsManager.isProjectTrusted()) {
+		throw new Error("Project trust is required before running a remote review.");
+	}
+	const controls = controlsWithDefaults(options.controls);
+	assertReviewControlsPersistLosslessly(controls);
+	const { target, resolution } = await resolveBoundReviewSnapshot({
+		target: options.target,
+		cwd: options.cwd,
+		sessionManager: options.sessionManager,
+		parentRunId: options.parentRunId,
+		sanitizeRemoteErrors: options.sanitizeRemoteErrors,
+		signal: options.signal,
+		onProgress: options.onProgress,
+	});
+	try {
 		const reviewModel = resolveReviewModel(options);
 		if (!reviewModel.model) throw new Error("No model available for review. Use /model to select one.");
 		const verifier = resolveVerifierModel({
@@ -1716,12 +1783,7 @@ export async function executeReviewWorkflow(
 			);
 			assertSource();
 			if (binding) {
-				const identity = prepared.resolution.identity.pullRequest;
-				if (!identity || prepared.resolution.identity.headCommit !== binding.pullRequest.headRefOid)
-					throw new Error(PR_CHECKOUT_CHANGED);
-				assertBoundPullRequest(binding, identity);
-				await githubCliCodeHostProvider.verifyPullRequestHead(binding.sourceCwd, identity);
-				await assertPrReviewCheckout(binding, options.cwd, options.signal);
+				await verifyBoundPullRequest(binding, prepared.resolution, options.cwd, options.signal);
 				assertSource();
 			}
 		}

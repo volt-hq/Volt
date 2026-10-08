@@ -6,6 +6,9 @@
  * `review_*` intents and `review.*` queries; `cancel_work` cancels a run.
  */
 
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient, ProtocolRejectedError } from "../src/client/protocol-client.ts";
@@ -760,6 +763,60 @@ describe("durable review intents over protocol frames", () => {
 		expect(reviewMocks.prepareReviewWorkflow).toHaveBeenCalledWith(
 			expect.objectContaining({ parentRunId: "review:standard" }),
 		);
+	});
+
+	test("starts an extension engine's review from the review intent and reports its run to clients", async () => {
+		const { source, client } = await setup();
+		const git = (...args: string[]): void => {
+			const result = spawnSync("git", args, { cwd: source.cwd, encoding: "utf8" });
+			if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+		};
+		mkdirSync(join(source.cwd, "src"), { recursive: true });
+		git("init", "--initial-branch=main");
+		git("config", "user.email", "review@example.com");
+		git("config", "user.name", "Review Test");
+		writeFileSync(join(source.cwd, "src", "value.ts"), "export const value = 1;\nexport const other = 2;\n");
+		git("add", ".");
+		git("commit", "-m", "initial");
+		writeFileSync(join(source.cwd, "src", "value.ts"), "export const value = 1;\nexport const other = 3;\n");
+		const id = "ext:swarm-review/swarm";
+		source.session.reviewEngines.register({
+			id,
+			label: "Swarm",
+			description: "Many reviewers.",
+			targets: ["uncommitted"],
+			remoteSafe: false,
+			async run(ctx) {
+				const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
+				ctx.pass().diff(hunks, 64 * 1024);
+				await ctx.submit({
+					candidates: { summary: "Nothing found.", candidates: [], limitations: [] },
+					verification: {
+						summary: "Nothing to verify.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						limitations: [],
+					},
+				});
+			},
+		});
+
+		const started = await client.intent("review", { target: "uncommitted", engine: id });
+		const workId = (started as { result: { workId: string } }).result.workId;
+		await vi.waitFor(() => expect(runOf(source, workId)?.status).toBe("completed"));
+		// The host ran it: neither of the built-in pipeline's stages did.
+		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
+		expect(reviewMocks.executeReviewWorkflow).not.toHaveBeenCalled();
+		const list = await client.query("review.runs", {});
+		expect(list.runs[0]).toMatchObject({ runId: workId, engine: id, completionStatus: "complete" });
+		expect(source.session.work.get(workId)).toMatchObject({ kind: "review", outcome: "completed" });
+
+		await expect(
+			client.intent("review", { target: "uncommitted", engine: "ext:other/engine" }),
+		).rejects.toMatchObject({
+			reason: { code: "invalid_input", message: "Unknown review engine: ext:other/engine" },
+		});
 	});
 
 	test("cancels a review's work and reaches a terminal state", async () => {

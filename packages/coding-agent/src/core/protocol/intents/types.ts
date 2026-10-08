@@ -76,6 +76,8 @@ export interface IntentTarget {
 export interface IntentReviewOptions {
 	readonly remote: boolean;
 	readonly requireConfirmation: boolean;
+	/** The id of the extension engine to review with; none for the built-in pipeline. */
+	readonly engine?: string;
 	readonly controls?: Partial<ReviewRunControls>;
 	readonly parentRunId?: string;
 	/** Auxiliary tools of the conversation the passes may use besides their snapshot tools (local clients only). */

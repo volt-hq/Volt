@@ -15,6 +15,7 @@ import {
 	reviewWorkExecution,
 	reviewWorkTarget,
 } from "../../review.ts";
+import { startEngineReview } from "../../review-engine-run.ts";
 import { reviewWorkInput } from "../../review-work.ts";
 import type { SubagentDefinition } from "../../subagents/index.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
@@ -69,6 +70,22 @@ export function createLocalIntentServices(
 		abortRun: (target) => target.abort("remote_request", { deliverQueuedMessages: true }),
 		detachedReviews: true,
 		runReview: async (target, reviewOptions) => {
+			if (reviewOptions.engine !== undefined) {
+				const engine = session.reviewEngines.get(reviewOptions.engine);
+				if (!engine) throw new Error(`Unknown review engine: ${reviewOptions.engine}`);
+				const { workId } = await startEngineReview({
+					engine,
+					target,
+					controls: reviewOptions.controls,
+					remote: reviewOptions.remote,
+					cwd: conversation.cwd,
+					work: conversation.work,
+					settingsManager: session.settingsManager,
+					sessionManager: session.sessionManager,
+					sessionWriter: session.sessionWriter,
+				});
+				return { status: "accepted", workId };
+			}
 			// The fast preflight runs inline so target errors fail the intent; the
 			// review then runs as the conversation's work.
 			const prepared = await prepareReviewWorkflow({

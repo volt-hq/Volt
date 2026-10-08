@@ -501,6 +501,18 @@ export const INTENT_SCHEMAS = {
 					Type.String({ title: "Pull request URL", minLength: 1, maxLength: 2_000, pattern: "^https://\\S+$" }),
 				),
 				ref: Type.Optional(Type.String({ title: "Commit", minLength: 1 })),
+				/**
+				 * The review engine: `standard` (the default), the host's own pipeline, or an extension's engine by its
+				 * id, `ext:<extension id>/<engine name>`. The host refuses an engine it does not have.
+				 */
+				engine: Type.Optional(
+					Type.String({
+						title: "Engine",
+						description: "The review engine: standard (the default) or an extension's engine by id.",
+						minLength: 1,
+						maxLength: 160,
+					}),
+				),
 				...reviewOptions,
 			},
 			{ ...closed, [INTENT_COMMAND_KEYWORD]: REVIEW_COMMAND },

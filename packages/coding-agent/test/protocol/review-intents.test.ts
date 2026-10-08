@@ -7,7 +7,9 @@ import {
 	intentRegistry,
 	LOCAL_INTENT_PROFILE,
 } from "../../src/core/protocol/intents/index.ts";
+import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import type { ReviewWorkflowResult } from "../../src/core/review.ts";
+import { type ReviewEngineDeclaration, ReviewEngineRegistry } from "../../src/core/review-engine.ts";
 import type { ParsedReview } from "../../src/core/review-report.ts";
 import {
 	acknowledgeReviewRun,
@@ -120,8 +122,17 @@ function durableBranchRecord(runId = "review:branch"): ReviewRunRecord {
 }
 
 /** An intent context on a conversation whose session reads and writes `manager`. */
-function contextOf(manager: SessionManager, services: IntentServices = {}): IntentContext {
-	const session = { sessionId: manager.getSessionId(), sessionManager: manager, sessionWriter: manager.logWriter };
+function contextOf(
+	manager: SessionManager,
+	services: IntentServices = {},
+	session: Record<string, unknown> = {},
+): IntentContext {
+	session = {
+		sessionId: manager.getSessionId(),
+		sessionManager: manager,
+		sessionWriter: manager.logWriter,
+		...session,
+	};
 	return {
 		target: { session, conversation: {}, host: {}, client: {} } as unknown as IntentContext["target"],
 		services,
@@ -191,6 +202,93 @@ describe("durable review lifecycle intents", () => {
 		await appendReviewRun(manager.logWriter, missing);
 		await expect(intentRegistry.invoke(ctx, "review_rerun", { runId: missing.runId })).rejects.toThrow(
 			"Durable branch review run does not retain a base locator.",
+		);
+	});
+});
+
+describe("review intent with an engine", () => {
+	const SWARM = "ext:swarm-review/swarm";
+
+	function swarm(overrides: Partial<ReviewEngineDeclaration> = {}): ReviewEngineDeclaration {
+		return {
+			id: SWARM,
+			label: "Swarm",
+			description: "Many reviewers.",
+			targets: ["uncommitted", "branch"],
+			remoteSafe: false,
+			run: async () => {},
+			...overrides,
+		};
+	}
+
+	function setup(engine = swarm(), remote = false) {
+		const manager = SessionManager.inMemory("/workspace");
+		const reviewEngines = new ReviewEngineRegistry();
+		reviewEngines.register(engine);
+		const runReview = vi.fn<NonNullable<IntentServices["runReview"]>>(async () => ({
+			status: "accepted",
+			workId: "review:engine",
+		}));
+		const ctx = {
+			...contextOf(manager, { runReview }, { reviewEngines, getAllTools: () => [{ name: "bash" }] }),
+			...(remote
+				? { profile: { name: "remote" as const, grant: createIrohRemoteRpcGrant(["conversation.control.v1"]) } }
+				: {}),
+		} satisfies IntentContext;
+		return { ctx, runReview };
+	}
+
+	test("starts the built-in pipeline unless an extension's engine is named", async () => {
+		const { ctx, runReview } = setup();
+		await intentRegistry.invoke(ctx, "review", { target: "uncommitted" });
+		await intentRegistry.invoke(ctx, "review", { target: "uncommitted", engine: "standard" });
+		expect(runReview).toHaveBeenCalledTimes(2);
+		for (const call of runReview.mock.calls) expect(call[1]).not.toHaveProperty("engine");
+	});
+
+	test("hands the engine's id to the host that runs it", async () => {
+		const { ctx, runReview } = setup();
+		await expect(
+			intentRegistry.invoke(ctx, "review", { target: "branch", base: "main", engine: SWARM, focus: "auth" }),
+		).resolves.toMatchObject({ outcome: { status: "accepted", workId: "review:engine" } });
+		expect(runReview).toHaveBeenCalledWith(
+			{ kind: "branch", base: "main" },
+			expect.objectContaining({ engine: SWARM, controls: expect.objectContaining({ focus: "auth" }) }),
+		);
+	});
+
+	test.each([
+		[
+			"an engine the conversation does not have",
+			{ engine: "ext:other/engine" },
+			"Unknown review engine: ext:other/engine",
+		],
+		[
+			"a target the engine does not review",
+			{ target: "commit" as const, ref: "abc123", engine: SWARM },
+			"The Swarm engine does not review a commit target",
+		],
+		["auxiliary tools", { engine: SWARM, tools: ["bash"] }, "Auxiliary tools do not apply to an engine's review"],
+	])("refuses %s before anything starts", async (_name, input, message) => {
+		const { ctx, runReview } = setup();
+		await expect(
+			intentRegistry.invoke(ctx, "review", { target: "uncommitted", ...input } as never),
+		).rejects.toMatchObject({ code: "invalid_input", message });
+		expect(runReview).not.toHaveBeenCalled();
+	});
+
+	test("lets a remote client name only an engine that allows it", async () => {
+		const refused = setup(swarm(), true);
+		await expect(
+			intentRegistry.invoke(refused.ctx, "review", { target: "uncommitted", engine: SWARM }),
+		).rejects.toMatchObject({ code: "not_allowed", message: "The Swarm engine is not available to remote clients" });
+		expect(refused.runReview).not.toHaveBeenCalled();
+
+		const allowed = setup(swarm({ remoteSafe: true }), true);
+		await intentRegistry.invoke(allowed.ctx, "review", { target: "uncommitted", engine: SWARM });
+		expect(allowed.runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			expect.objectContaining({ engine: SWARM, remote: true }),
 		);
 	});
 });

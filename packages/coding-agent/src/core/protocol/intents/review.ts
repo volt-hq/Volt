@@ -69,6 +69,8 @@ function reviewAvailability(view: IntentView): IntentAvailability {
 }
 
 interface ReviewControlsInput {
+	/** The review engine: the built-in pipeline when absent or `standard`. */
+	engine?: string;
 	focus?: string;
 	scope?: string;
 	effort?: "low" | "standard" | "high";
@@ -118,13 +120,38 @@ function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): 
 	return tools;
 }
 
+/**
+ * The extension engine a review start names, or none for the built-in pipeline. The conversation must have the
+ * engine, it must review the target, a remote device may start only an engine that allows it, and an engine
+ * takes no auxiliary tools: its passes are its own.
+ */
+function reviewEngineOf(ctx: IntentContext, input: ReviewControlsInput, target: ReviewTarget): string | undefined {
+	if (input.engine === undefined || input.engine === STANDARD_REVIEW_ENGINE) return undefined;
+	const engine = targetOf(ctx).session.reviewEngines.get(input.engine);
+	if (!engine) throw new IntentRejectedError("invalid_input", `Unknown review engine: ${input.engine}`);
+	if (!engine.targets.includes(target.kind)) {
+		throw new IntentRejectedError(
+			"invalid_input",
+			`The ${engine.label} engine does not review a ${target.kind} target`,
+		);
+	}
+	if (ctx.profile.name === "remote" && !engine.remoteSafe) {
+		throw new IntentRejectedError("not_allowed", `The ${engine.label} engine is not available to remote clients`);
+	}
+	if (input.tools !== undefined) {
+		throw new IntentRejectedError("invalid_input", "Auxiliary tools do not apply to an engine's review");
+	}
+	return engine.id;
+}
+
 /** Remote reviews confirm before they start, require project trust, and sanitize failures. */
-function reviewOptions(ctx: IntentContext, input: ReviewControlsInput): IntentReviewOptions {
+function reviewOptions(ctx: IntentContext, input: ReviewControlsInput, engine?: string): IntentReviewOptions {
 	const remote = ctx.profile.name === "remote";
 	const tools = remote ? undefined : reviewTools(ctx, input.tools);
 	return {
 		remote,
 		requireConfirmation: remote,
+		...(engine === undefined ? {} : { engine }),
 		...(tools === undefined ? {} : { tools }),
 		controls: {
 			...(input.focus ? { focus: input.focus } : {}),
@@ -344,7 +371,10 @@ export const reviewIntent = defineIntent({
 				return [];
 		}
 	},
-	run: (ctx, input) => runReview(ctx, reviewTargetOf(input), reviewOptions(ctx, input)),
+	run: (ctx, input) => {
+		const target = reviewTargetOf(input);
+		return runReview(ctx, target, reviewOptions(ctx, input, reviewEngineOf(ctx, input, target)));
+	},
 });
 
 async function durableReviewRun(ctx: IntentContext, runId: string) {
