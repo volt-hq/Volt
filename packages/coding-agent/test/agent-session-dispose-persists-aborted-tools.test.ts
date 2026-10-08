@@ -398,8 +398,9 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		}
 	});
 
-	it("persists no result for a tool call of an errored or aborted turn", async () => {
-		// Neither turn ran its calls, and replay drops both with any result written for them.
+	it("persists no result for a tool call of an errored turn, but one for an aborted turn's", async () => {
+		// The provider rejected the first turn, so a result saying the session closed would be false. The
+		// second was cut off by the close, and its result records that the call never started.
 		const rejected = fauxToolCall("write", { path: "rejected.ts" });
 		const interrupted = fauxToolCall("read", { path: "interrupted.ts" });
 		const dangling = fauxToolCall("read", { path: "dangling.ts" });
@@ -424,7 +425,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			const results = harness.sessionManager
 				.getConversationState()
 				.context.messages.filter((message) => message.role === "toolResult");
-			expect(results.map((message) => message.toolCallId)).toEqual([dangling.id]);
+			expect(results.map((message) => message.toolCallId)).toEqual([interrupted.id, dangling.id]);
 		} finally {
 			await harness.cleanupAsync();
 		}
