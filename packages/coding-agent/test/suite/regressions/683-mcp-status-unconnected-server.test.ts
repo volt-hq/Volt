@@ -89,14 +89,11 @@ describe("#683 MCP server summary for a server with no cached metadata", () => {
 		expect(connected.server).toMatchObject({ resourceCount: 1, promptCount: 2 });
 	});
 
-	it.each<[string, Record<string, string>]>([
-		["status", { action: "status" }],
-		["list_servers", { action: "list_servers" }],
-		["disconnect", { action: "disconnect", server: "fake" }],
-	])("persists the %s result for an unconnected server", async (_action, input) => {
+	// Every other gateway action is covered by the result contract in test/mcp.test.ts.
+	it("persists the status result for an unconnected server", async () => {
 		const harness = await createSessionFixture();
 		harness.setResponses([
-			fauxAssistantMessage([fauxToolCall("mcp", input)], { stopReason: "toolUse" }),
+			fauxAssistantMessage([fauxToolCall("mcp", { action: "status" })], { stopReason: "toolUse" }),
 			fauxAssistantMessage("done"),
 		]);
 
@@ -104,8 +101,8 @@ describe("#683 MCP server summary for a server with no cached metadata", () => {
 
 		const toolResult = harness.session.messages.find((message) => message.role === "toolResult");
 		expect(toolResult).toMatchObject({ toolName: "mcp", isError: false });
-		const details = toolResult?.details as { result: { servers?: unknown[]; server?: unknown } };
-		const summary = (details.result.servers?.[0] ?? details.result.server) as Record<string, unknown>;
+		const details = toolResult?.details as { result: { servers: Array<Record<string, unknown>> } };
+		const summary = details.result.servers[0];
 		expect(summary).toMatchObject({ id: "fake" });
 		expect(Object.keys(summary)).not.toContain("resourceCount");
 		expect(Object.keys(summary)).not.toContain("promptCount");

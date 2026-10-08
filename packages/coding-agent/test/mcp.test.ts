@@ -15,7 +15,7 @@ import {
 import { loadMcpConfig } from "../src/core/mcp/config-loader.ts";
 import { McpConfigWriter } from "../src/core/mcp/config-writer.ts";
 import { createMcpDirectToolDefinitions } from "../src/core/mcp/direct-tools.ts";
-import { createMcpToolDefinition } from "../src/core/mcp/gateway-tool.ts";
+import { createMcpTool, createMcpToolDefinition, type McpGatewayToolInput } from "../src/core/mcp/gateway-tool.ts";
 import { McpManager } from "../src/core/mcp/manager.ts";
 import { McpMetadataCache } from "../src/core/mcp/metadata-cache.ts";
 import {
@@ -40,7 +40,11 @@ function makeTempDir(): string {
 	return mkdtempSync(join(tmpdir(), "volt-mcp-test-"));
 }
 
-function createTestConfig(tempDir: string, serverOverrides: Record<string, unknown> = {}): McpResolvedConfig {
+function createTestConfig(
+	tempDir: string,
+	serverOverrides: Record<string, unknown> = {},
+	settings: Record<string, unknown> = {},
+): McpResolvedConfig {
 	const source = sourceForMcpConfigPath(join(tempDir, "mcp.json"), {
 		scope: "user",
 		label: "test",
@@ -51,7 +55,7 @@ function createTestConfig(tempDir: string, serverOverrides: Record<string, unkno
 	mergeMcpConfigFile(
 		merged,
 		{
-			settings: { maxOutputBytes: 1024, maxOutputLines: 10 },
+			settings: { maxOutputBytes: 1024, maxOutputLines: 10, ...settings },
 			servers: {
 				fake: {
 					command: "fake-mcp",
@@ -170,6 +174,28 @@ function createMetadataCountingManager(
 		outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 4096, maxOutputLines: 100 }),
 	});
 	return { manager, counts };
+}
+
+/**
+ * The `mcp` gateway tool over a manager. `run` calls an action as the model would and returns its result
+ * details. The wrapped tool admits its final result as JSON data and throws when it is not, so a result
+ * with an undefined property fails here as it does in a session.
+ */
+function createContractGateway(tempDir: string, clientFactory: McpClientFactory) {
+	const manager = new McpManager({
+		config: createTestConfig(tempDir, {}, { prompts: "model", maxOutputBytes: 8192 }),
+		clientFactory,
+		metadataCache: new McpMetadataCache({ agentDir: tempDir }),
+		outputStore: new McpOutputStore({ agentDir: tempDir, maxOutputBytes: 8192, maxOutputLines: 100 }),
+		configWriter: new McpConfigWriter({ cwd: tempDir, agentDir: tempDir, projectTrusted: true }),
+	});
+	const gateway = createMcpTool({ manager });
+	const run = async (input: McpGatewayToolInput) => {
+		const result = await gateway.execute(`contract-${input.action}`, input, undefined, undefined);
+		expect(result, `${input.action} result`).not.toMatchObject({ isError: true });
+		return result.details.result as Record<string, unknown>;
+	};
+	return { manager, run };
 }
 
 describe("MCP support", () => {
@@ -1261,5 +1287,82 @@ describe("MCP support", () => {
 			apiKey: "[redacted]",
 			nested: { password: "[redacted]", keep: "visible" },
 		});
+	});
+
+	// Tool results are persisted as JSON data, which has no undefined: producers must omit optional
+	// properties. The fake server omits every optional field, as real servers do.
+	it("returns JSON-admissible results from every gateway action", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const connection = {
+			getServerVersion: () => ({ name: "fake", version: "1.0.0" }),
+			listTools: async () => ({ tools: [{ name: "read_note", inputSchema: { type: "object" } }] }),
+			listResources: async () => ({ resources: [{ uri: "file:///note", name: "note" }] }),
+			readResource: async () => ({ contents: [{ uri: "file:///note", text: "hello" }] }),
+			listPrompts: async () => ({ prompts: [{ name: "summarize" }] }),
+			getPrompt: async () => ({ messages: [{ role: "user", content: { type: "text", text: "hi" } }] }),
+			callTool: async () => ({
+				content: [{ type: "text", text: "note" }],
+				structuredContent: { rows: [{ id: 1 }] },
+			}),
+			close: async () => undefined,
+		} as McpClientConnection;
+		const { manager, run } = createContractGateway(tempDir, { connect: async () => connection });
+
+		// Before the server has connected, no metadata is cached.
+		for (const input of [
+			{ action: "status" },
+			{ action: "list_servers" },
+			{ action: "search", query: "note" },
+			{ action: "describe", server: "fake", tool: "read_note" },
+			{ action: "disconnect", server: "fake" },
+		] satisfies McpGatewayToolInput[]) {
+			await run(input);
+		}
+
+		await run({ action: "connect", server: "fake" });
+		await run({ action: "set_enabled", server: "fake", enabled: true });
+		for (const input of [
+			{ action: "status" },
+			{ action: "list_servers" },
+			{ action: "search", query: "note", includeSchema: true },
+			{ action: "describe", server: "fake", tool: "read_note" },
+			{ action: "list_tools", server: "fake" },
+			{ action: "list_resources", server: "fake" },
+			{ action: "read_resource", server: "fake", resourceUri: "file:///note" },
+			{ action: "list_prompts", server: "fake" },
+			{ action: "get_prompt", server: "fake", prompt: "summarize" },
+		] satisfies McpGatewayToolInput[]) {
+			await run(input);
+		}
+
+		const called = await run({ action: "call", server: "fake", tool: "read_note" });
+		const cacheId = (called.cache as { id: string }).id;
+		await run({ action: "read_cache", cacheId });
+		await run({ action: "read_cache", cacheId, pointer: "/rows" });
+		await run({ action: "disconnect", server: "fake" });
+		await manager.dispose();
+	});
+
+	it("returns JSON-admissible results for a server that cannot connect", async () => {
+		const tempDir = makeTempDir();
+		tempDirs.push(tempDir);
+		const { manager, run } = createContractGateway(tempDir, {
+			connect: async () => {
+				throw new Error("connection refused");
+			},
+		});
+
+		for (const input of [
+			{ action: "status" },
+			{ action: "list_servers" },
+			{ action: "search", query: "note" },
+			{ action: "describe", server: "fake", tool: "read_note" },
+			{ action: "list_tools", server: "fake" },
+			{ action: "status" },
+		] satisfies McpGatewayToolInput[]) {
+			await run(input);
+		}
+		await manager.dispose();
 	});
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, unlinkSync, utimesSync } from "node:fs";
 import { join } from "node:path";
+import { omitUndefined } from "../../utils/json.ts";
 import {
 	ensurePrivateDirectorySync,
 	hardenPrivateRegularFileSync,
@@ -206,12 +207,14 @@ export class McpOutputStore {
 			typeof record.totalBytes === "number"
 		) {
 			const { startByte, totalBytes } = record;
-			return this.fitResult(record.content, (content) => ({
-				...record,
-				content,
-				nextCursor:
-					startByte + byteLength(content) < totalBytes ? String(startByte + byteLength(content)) : undefined,
-			}));
+			return this.fitResult(record.content, (content) =>
+				omitUndefined({
+					...record,
+					content,
+					nextCursor:
+						startByte + byteLength(content) < totalBytes ? String(startByte + byteLength(content)) : undefined,
+				}),
+			);
 		}
 
 		const hasContent = typeof record.content === "string";

@@ -9,6 +9,7 @@ import type {
 	Resource,
 	Tool as SdkTool,
 } from "@modelcontextprotocol/sdk/types.js";
+import { omitUndefined } from "../../utils/json.ts";
 import { getMcpServerAuthState } from "./auth.ts";
 import {
 	getServerTimeoutMs,
@@ -396,10 +397,10 @@ export class McpServerSupervisor {
 				enabled:
 					cachedMetadata?.tools.filter((tool) => serverMatchesToolFilters(this.server, tool.name)).length ?? 0,
 			},
-			// Omitted, not undefined, until metadata is cached: tool results reject undefined properties.
-			...(cachedMetadata
-				? { resourceCount: cachedMetadata.resources.length, promptCount: cachedMetadata.prompts.length }
-				: {}),
+			...omitUndefined({
+				resourceCount: cachedMetadata?.resources.length,
+				promptCount: cachedMetadata?.prompts.length,
+			}),
 			recentCalls: this.recentCalls,
 			...(this.lastErrorValue ? { lastError: this.lastErrorValue } : {}),
 			...(this.lastConnectedAtValue ? { lastConnectedAt: this.lastConnectedAtValue } : {}),
