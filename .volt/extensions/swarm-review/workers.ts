@@ -1,8 +1,10 @@
 import { defineTool } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
+import type { ReviewEnginePass } from "@hansjm10/volt-coding-agent";
 import { changeSection, WORKER_REPAIR, WORKER_SYSTEM_PROMPT, WORKER_WRAP_UP } from "./prompts.ts";
 import { type PassControl, runPass } from "./session.ts";
 import { normalizeFile } from "./tools.ts";
+import { SHARD_DELIVERY_BYTES } from "./target.ts";
 import type { Cluster, DiffShard, ReviewTarget, SwarmSetup, SwarmState, WorkerState } from "./types.ts";
 import { emptyUsage, errorText, lineRange, runPool } from "./util.ts";
 
@@ -77,16 +79,30 @@ function createFindingsTool(worker: WorkerState, state: SwarmState, checkout: st
 	});
 }
 
-function shardNotes(target: ReviewTarget, shard: DiffShard): string[] {
+/** What the host delivered of a shard's diff to one pass: its text, and the files with a hunk it left out. */
+export interface ShardDelivery {
+	text: string;
+	omittedFiles: string[];
+}
+
+/** Gives `pass` the diff text of `shard`. The host counts what it delivers whole as reviewed by this pass. */
+export function deliverShard(target: ReviewTarget, pass: ReviewEnginePass, shard: DiffShard): ShardDelivery {
+	const delivery = pass.diff(shard.hunkIds, SHARD_DELIVERY_BYTES);
+	const omitted = new Set(delivery.omitted);
+	const omittedFiles = shard.files.filter((file) => target.fileHunks.get(file)?.some((id) => omitted.has(id)));
+	return { text: delivery.text, omittedFiles };
+}
+
+function shardNotes(target: ReviewTarget, shard: DiffShard, delivery: ShardDelivery): string[] {
 	const notes: string[] = [];
 	if (target.shards.length > 1) {
 		notes.push(
 			`This change is large and was split among reviewers. Your part of the diff covers ${shard.files.length} file(s); other reviewers cover the rest. Focus on your files, but read any code you need.`,
 		);
 	}
-	if (shard.partialFiles.length > 0) {
+	if (delivery.omittedFiles.length > 0) {
 		notes.push(
-			`The diffs of these files were cut to fit: ${shard.partialFiles.join(", ")}. Read their current contents, and use read_base for their previous versions.`,
+			`The diff text of some hunks in these files was too large to include: ${delivery.omittedFiles.join(", ")}. Page them with review_diff, read their current contents, and use read_base for their previous versions.`,
 		);
 	}
 	if (target.submodules) {
@@ -98,9 +114,15 @@ function shardNotes(target: ReviewTarget, shard: DiffShard): string[] {
 }
 
 /** Everything before the already-reported list is identical for workers in the same shard. */
-function workerPrompt(target: ReviewTarget, shard: DiffShard, reported: Cluster[], focus: string | undefined): string {
+function workerPrompt(
+	target: ReviewTarget,
+	shard: DiffShard,
+	delivery: ShardDelivery,
+	reported: Cluster[],
+	focus: string | undefined,
+): string {
 	const lines = [
-		changeSection(target, shard.diff, shardNotes(target, shard)),
+		changeSection(target, delivery.text, shardNotes(target, shard, delivery)),
 		"",
 		"# Task",
 		...(focus ? [`User focus: ${focus}`] : []),
@@ -176,6 +198,9 @@ export async function runWave(setup: SwarmSetup, state: SwarmState, workers: Wor
 			setup.onProgress();
 			let reportedFindings = false;
 			try {
+				// One host pass per worker: the diff it is given, and the tools it reads through, count for it alone.
+				const hostPass = setup.engine.pass();
+				const delivery = deliverShard(target, hostPass, target.shards[worker.shard]);
 				await runPass(setup, {
 					label: `Swarm review worker ${worker.index + 1}`,
 					model: setup.workerModel,
@@ -185,7 +210,8 @@ export async function runWave(setup: SwarmSetup, state: SwarmState, workers: Wor
 						reportedFindings = true;
 					}),
 					hasReport: () => reportedFindings,
-					prompt: workerPrompt(target, target.shards[worker.shard], reported, options.focus),
+					prompt: workerPrompt(target, target.shards[worker.shard], delivery, reported, options.focus),
+					hostTools: hostPass.tools().filter((tool) => tool.name === "review_diff"),
 					wrapUpMessage: WORKER_WRAP_UP,
 					repairMessage: WORKER_REPAIR,
 					turns: WORKER_TURNS,

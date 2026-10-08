@@ -15,7 +15,6 @@ import {
 	truncateHead,
 } from "@hansjm10/volt-coding-agent";
 import { type TSchema, Type } from "typebox";
-import { readBaseFile } from "./git.ts";
 import type { ReviewTarget } from "./types.ts";
 
 export function insideRoot(root: string, path: string): boolean {
@@ -168,7 +167,7 @@ function createReadBaseTool(target: ReviewTarget) {
 		async execute(_toolCallId, params, signal) {
 			const path = repositoryPath(params.path);
 			if (!path) throw new Error(`read_base needs a repository-relative path: ${params.path}`);
-			const content = await readBaseFile(target, path, signal ?? new AbortController().signal);
+			const content = await target.readBase(path, signal ?? new AbortController().signal);
 			if (content === undefined) {
 				throw new Error(`${path} does not exist in the base revision (it may be new in this change).`);
 			}

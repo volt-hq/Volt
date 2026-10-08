@@ -1,13 +1,8 @@
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
-import type { ExtensionCommandContext, SettingsManager } from "@hansjm10/volt-coding-agent";
-
-export type TargetSpec =
-	| { kind: "worktree"; base?: string }
-	| { kind: "commit"; rev: string }
-	| { kind: "pr"; number: number };
+import type { ModelRegistry, ReviewEngineContext, SettingsManager } from "@hansjm10/volt-coding-agent";
 
 export interface SwarmOptions {
-	target: TargetSpec;
+	/** The review's path scope: where the host limits the change to. */
 	scope: string[];
 	/** Maximum total workers across all waves. */
 	workers: number;
@@ -30,9 +25,10 @@ export interface SwarmOptions {
 export interface DiffShard {
 	index: number;
 	files: string[];
-	/** Files whose diff sections were cut to fit the shard budget. */
+	/** The hunks of those files this shard holds, in order. Their diff text is delivered to a worker when it starts. */
+	hunkIds: string[];
+	/** Files with a hunk too large for any shard to hold whole: its diff text is not delivered, so reviewers page it. */
 	partialFiles: string[];
-	diff: string;
 }
 
 export interface ReviewTarget {
@@ -40,24 +36,24 @@ export interface ReviewTarget {
 	repoRoot: string;
 	/** Frozen, materialized checkout of the reviewed state; the working directory of every pass. */
 	checkout: string;
-	/** Commit the diff is taken against; review policies and base file contents come from it. */
-	baseRev: string;
-	headTree: string;
 	description: string;
 	stat: string;
 	scope: string[];
 	shards: DiffShard[];
-	/** Diff section per file (possibly truncated), for cluster-scoped verifier prompts. */
-	fileDiffs: Map<string, string>;
-	/** Whether a single shard holds the complete diff. */
+	/** The hunks of each reviewable changed file in scope, for cluster-scoped verifier prompts. */
+	fileHunks: Map<string, string[]>;
+	/** Each hunk's patch size in bytes, to budget what a prompt carries. */
+	hunkBytes: Map<string, number>;
+	/** Whether a single shard holds the whole change. */
 	complete: boolean;
 	/** Whether the diff changes submodule gitlinks, whose contents reviewers cannot inspect. */
 	submodules: boolean;
 	/** Git common directory; identifies the repository across worktrees. */
 	commonDir: string;
-	/** Materializes another private checkout of the reviewed state; the caller removes it. */
+	/** A file as it was before the change, from the host's snapshot; undefined when it did not exist or is not text. */
+	readBase(path: string, signal: AbortSignal): Promise<string | undefined>;
+	/** Materializes another private checkout of the reviewed state, with dependencies linked; the caller removes it. */
 	createCheckout(): Promise<string>;
-	dispose(): Promise<void>;
 }
 
 export interface UsageTotals {
@@ -161,17 +157,22 @@ export interface SwarmState {
 	/** One clustering pass per wave. */
 	clusterPasses: PassState[];
 	nextCandidate: number;
+	/** Commands verifiers ran (--exec), one line each, and the ones that failed. */
+	commands: string[];
+	failedCommands: string[];
 	cancelling: boolean;
 	saturated: boolean;
 }
 
 export interface SwarmSetup {
+	/** The host's review: passes whose reads the host counts, and the validation findings must pass. */
+	engine: ReviewEngineContext;
 	target: ReviewTarget;
 	options: SwarmOptions;
 	workerModel: Model<Api>;
 	verifierModel: Model<Api>;
 	settingsManager: SettingsManager;
-	modelRegistry: ExtensionCommandContext["modelRegistry"];
+	modelRegistry: ModelRegistry;
 	contextFiles: Array<{ path: string; content: string }>;
 	signal: AbortSignal;
 	onProgress: () => void;

@@ -1,5 +1,4 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
-import type { WorkDetailInput } from "@hansjm10/volt-coding-agent";
 import type { UiNode, UiNodeStyledText, WorkProgress, WorkProgressStep } from "@hansjm10/volt-protocol";
 import type { Cluster, SwarmOptions, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
 import { addUsage, emptyUsage, formatCost, formatDuration, lineRange, usageText } from "./util.ts";
@@ -315,58 +314,49 @@ export function reportSummary(state: SwarmState, findings: readonly ReportedFind
 	].join("\n");
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
+/** What a run reviews and with which models: what its detail shows. */
+export interface RunInfo {
+	description: string;
+	scope: readonly string[];
+	workers: number;
+	waveSize: number;
+	model: string;
+	thinking: string;
+	verifier: string;
+	verifierThinking: string;
+	exec: boolean;
+	focus?: string;
 }
 
-function targetText(target: unknown): string | undefined {
-	if (!isRecord(target)) return undefined;
-	if (target.kind === "commit" && typeof target.rev === "string") return `commit ${target.rev}`;
-	if (target.kind === "pr" && typeof target.number === "number") return `PR #${target.number}`;
-	if (target.kind === "worktree") {
-		return typeof target.base === "string" ? `changes since ${target.base}` : "uncommitted changes";
-	}
-	return undefined;
-}
-
-/**
- * A run's detail, which every client shows with its progress: what it reviews and with which models, from the
- * input the run started with. Pure: it reads only the work item.
- */
-export function runDetail(work: WorkDetailInput): UiNode | undefined {
-	const input = work.input;
-	if (!isRecord(input)) return undefined;
-	const items: { key: string; label: UiNodeStyledText; value: UiNodeStyledText }[] = [];
-	const target = targetText(input.target);
-	if (target) items.push({ key: "target", label: "Target", value: target });
-	if (Array.isArray(input.scope) && input.scope.length > 0) {
-		items.push({ key: "scope", label: "Scope", value: input.scope.map(String).join(", ") });
-	}
-	if (typeof input.model === "string") {
-		items.push({
+/** A run's detail, which every client shows with its progress: what it reviews and with which models. */
+export function runDetail(info: RunInfo): UiNode {
+	const items: { key: string; label: UiNodeStyledText; value: UiNodeStyledText }[] = [
+		{ key: "target", label: "Target", value: info.description },
+	];
+	if (info.scope.length > 0) items.push({ key: "scope", label: "Scope", value: info.scope.join(", ") });
+	items.push(
+		{
 			key: "workers",
 			label: "Workers",
 			value: [
-				{ text: `${input.workers} × `, token: "muted" },
-				{ text: input.model, token: "accent" },
-				{ text: ` (${input.thinking}), waves of ${input.waveSize}`, token: "muted" },
+				{ text: `${info.workers} × `, token: "muted" },
+				{ text: info.model, token: "accent" },
+				{ text: ` (${info.thinking}), waves of ${info.waveSize}`, token: "muted" },
 			],
-		});
-	}
-	if (typeof input.verifier === "string") {
-		items.push({
+		},
+		{
 			key: "verifiers",
 			label: "Verifiers",
 			value: [
 				{ text: "2 × ", token: "muted" },
-				{ text: input.verifier, token: "accent" },
-				{ text: ` (${input.verifierThinking}) per cluster`, token: "muted" },
+				{ text: info.verifier, token: "accent" },
+				{ text: ` (${info.verifierThinking}) per cluster`, token: "muted" },
 			],
-		});
-	}
-	if (input.exec === true) {
+		},
+	);
+	if (info.exec) {
 		items.push({ key: "exec", label: "Commands", value: [{ text: "verifiers may run commands", token: "warning" }] });
 	}
-	if (typeof input.focus === "string") items.push({ key: "focus", label: "Focus", value: input.focus });
-	return items.length === 0 ? undefined : { type: "keyValue", key: "run", items };
+	if (info.focus !== undefined) items.push({ key: "focus", label: "Focus", value: info.focus });
+	return { type: "keyValue", key: "run", items };
 }

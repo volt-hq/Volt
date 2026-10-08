@@ -227,6 +227,18 @@ What the host snapshot gives today (`changedFiles` with hunk patches, `readFile`
 6. Anchors must overlap changed lines (section 4.4).
 7. `--pr` is supported through the identity-only PR snapshot (D3), and `--base` needs the combined target.
 
+**Shipped in 4e.** Swarm is the engine `ext:swarm-review/swarm`, run with `/review <target> --engine swarm`. What answered each gap above, without a host change:
+
+1. `ctx.checkout()` gives a checkout of the reviewed head. Swarm links the repository's ignored `node_modules` into it itself (for a verifier's `--exec`), and gets a private checkout per verifier that way.
+2. Hunks are packed into shards by their `patchBytes`. A worker or verifier is given its diff text with `pass.diff`, at the moment its session starts, so the host counts a hunk as reviewed only by a pass that was given it. A hunk too large to carry whole is left out of the prompt and its file marked partial; the pass has the host's `review_diff` to page it.
+3. Swarm keeps its own `read`, `grep`, `find`, and `ls` over the checkout (regex and glob included), so its prompts are unchanged. `read_base` now reads through the host's `review_file` tool, because a fetched merge base or a pull request's base lives only in the host's snapshot.
+4. Context files (`AGENTS.md`, `REVIEW.md`) are read from the base through the same tool, so the change cannot rewrite its own instructions.
+5. The repository's common directory comes from git.
+6. A verifier's `report_verdict` runs `ctx.validate` on the finding's anchor and sends the host's error back to the verifier, which fixes it while its session is still open.
+7. `--pr`, `--commit`, and `--base` are the host's targets (`pr`, `commit`, `branch_uncommitted`); their flags are gone.
+
+Confirmed findings become host candidates by the mapping above, with a decision to accept each; the assessment is incomplete when verifiers disagreed or could not settle a cluster, every worker of a wave failed, or part of the diff had no successful worker. Rejected, disputed, and uncertain clusters stay in the report text, which is the work's output. Defaults for models, thinking, and counts are manifest settings; a flag overrides one for a run. Lost, as approved: the notice that rode the next turn, the Escape cancel, the `--exec` confirmation prompt (the engine's `run` has no UI; the flag is `localOnly`, so typing it at the host is the consent), cut diff sections for oversized hunks (paged instead), and positional focus text (`--focus`).
+
 ## 5. Trust model
 
 Matches `/review`, because the user chose to run the extension.
@@ -248,7 +260,7 @@ Each step is its own pull request, with an issue first. This is the baseline ord
    - **4b. The host runs an engine.** The start path (work id is the run id), the engine context (`target`, `changedFiles`, `pass`, `validate`, `submit`, `checkout`), the work's channels, snapshot lifetime, the registry on the session, and the `review` intent's `engine` field, proven by test engines through the real work registry and protocol. Detail from an engine is passed through as UI data here; 4c normalizes it under the extension's action policy.
    - **4c. The public API.** `registerReviewEngine`, typed `parameters` and `localOnly`, the `review` intent's `engineParams`, the engine kept in the session's registry for as long as its extension runs (its reviews are cancelled with it), its reports normalized under the extension's action policy, and the engine named in the posted pull request review.
    - **4d. Launching an engine from `/review`.** An engine catalog for clients (without `localOnly` parameters for a remote client), `/review --engine <name>` with the engine's flags, parsed, completed, and shown in the options form from its declaration, and the engine named in the publish confirmation.
-   - **4e. Swarm as an engine.** Swarm moves onto the contract with typed settings; its hand-written parser, report-only result, and command go.
+   - **4e. Swarm as an engine.** Swarm moves onto the contract (`.volt/extensions/swarm-review/`), with its options as typed parameters over typed manifest settings; its hand-written parser, its own target resolution, and `/swarm-review` go. See the end of section 4.7.
 5. **One run experience and one entry point.** `/review` moves to the job-list flow, the Engine row appears in the form, and the default-engine setting and cost note ship.
 
 ## 7. Decisions and open questions
