@@ -1,6 +1,6 @@
 import { rm } from "node:fs/promises";
 import { StringEnum } from "@hansjm10/volt-ai";
-import { defineTool } from "@hansjm10/volt-coding-agent";
+import { type AgentSessionEvent, defineTool, type ReviewEnginePass } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import {
 	changeSection,
@@ -10,6 +10,7 @@ import {
 	VERIFIER_WRAP_UP,
 } from "./prompts.ts";
 import { runPass } from "./session.ts";
+import { candidateFor } from "./submit.ts";
 import { normalizeFile } from "./tools.ts";
 import type { Cluster, ClusterOutcome, PassState, SwarmSetup, SwarmState, Verdict, VerifiedFinding } from "./types.ts";
 import { emptyUsage, errorText, lineRange, runPool } from "./util.ts";
@@ -44,7 +45,7 @@ const VERDICT_SCHEMA = Type.Object({
 	),
 });
 
-function createVerdictTool(checkout: string, onReport: (verdict: Verdict) => void) {
+function createVerdictTool(setup: SwarmSetup, cluster: Cluster, checkout: string, onReport: (verdict: Verdict) => void) {
 	return defineTool({
 		name: "report_verdict",
 		label: "Report verdict",
@@ -68,6 +69,20 @@ function createVerdictTool(checkout: string, onReport: (verdict: Verdict) => voi
 					);
 				}
 			}
+			// The host accepts a finding only anchored on a changed line of at most 10 lines: it says so now, while
+			// the verifier can still move the anchor.
+			if (errors.length === 0 && findings.length > 0) {
+				const validation = await setup.engine.validate({
+					summary: "Anchors of a verdict",
+					candidates: findings.map((finding, index) => candidateFor(cluster, finding, index + 1)),
+					limitations: [],
+				});
+				for (const error of validation.errors) {
+					const index = Number(/^candidates\[(\d+)\]/.exec(error)?.[1]);
+					const finding = findings[index];
+					errors.push(finding ? error.replace(/^candidates\[\d+\]/, `Finding "${finding.title}"`) : error);
+				}
+			}
 			if (errors.length > 0) {
 				return {
 					content: [{ type: "text", text: `Verdict rejected. Fix and resubmit:\n- ${errors.join("\n- ")}` }],
@@ -85,27 +100,33 @@ function createVerdictTool(checkout: string, onReport: (verdict: Verdict) => voi
 	});
 }
 
-/** The whole diff when small (more context); otherwise only the sections of the cluster's files. */
-function verifierDiff(setup: SwarmSetup, cluster: Cluster): { diff: string; notes: string[] } {
+function patchBytes(target: SwarmSetup["target"], hunkIds: readonly string[]): number {
+	return hunkIds.reduce((sum, id) => sum + (target.hunkBytes.get(id) ?? 0), 0);
+}
+
+/** The whole diff when small (more context); otherwise only the hunks of the cluster's files. Delivered through `pass`. */
+function verifierDiff(setup: SwarmSetup, pass: ReviewEnginePass, cluster: Cluster): { diff: string; notes: string[] } {
 	const { target } = setup;
-	const full = target.shards.map((shard) => shard.diff).join("");
-	if (target.complete && full.length <= FULL_DIFF_FOR_VERIFIERS) return { diff: full, notes: [] };
+	const all = target.shards.flatMap((shard) => shard.hunkIds);
+	if (target.complete && patchBytes(target, all) <= FULL_DIFF_FOR_VERIFIERS) {
+		return { diff: pass.diff(all, FULL_DIFF_FOR_VERIFIERS * 2).text, notes: [] };
+	}
 	const files = [...new Set(cluster.candidates.map((candidate) => candidate.file))];
-	let diff = "";
+	const ids: string[] = [];
 	for (const file of files) {
-		const section = target.fileDiffs.get(file);
-		if (section && diff.length + section.length <= CLUSTER_DIFF_BUDGET) diff += section;
+		const fileIds = target.fileHunks.get(file) ?? [];
+		if (patchBytes(target, [...ids, ...fileIds]) <= CLUSTER_DIFF_BUDGET) ids.push(...fileIds);
 	}
 	return {
-		diff,
+		diff: pass.diff(ids, CLUSTER_DIFF_BUDGET + 64 * 1024).text,
 		notes: [
-			"Only the diff sections of the files these claims cite are shown; the changed-files list above covers the whole change. Read other files, and use read_base for previous versions, as needed.",
+			"Only the diff of the files these claims cite is shown; the changed-files list above covers the whole change. Read other files, use read_base for previous versions, and page any other diff with review_diff, as needed.",
 		],
 	};
 }
 
-function verifierPrompt(setup: SwarmSetup, cluster: Cluster): string {
-	const { diff, notes } = verifierDiff(setup, cluster);
+function verifierPrompt(setup: SwarmSetup, pass: ReviewEnginePass, cluster: Cluster): string {
+	const { diff, notes } = verifierDiff(setup, pass, cluster);
 	const lines = [
 		changeSection(setup.target, diff, notes),
 		"",
@@ -139,6 +160,19 @@ function combine(cluster: Cluster): ClusterOutcome {
 	return verdicts[0].verdict;
 }
 
+/** Notes the commands a verifier runs with bash (--exec) and which of them fail. */
+function recordCommand(state: SwarmState, pending: Map<string, string>, event: AgentSessionEvent): void {
+	if (event.type === "tool_execution_start" && event.toolName === "bash") {
+		const command = (event.args as { command?: unknown } | undefined)?.command;
+		if (typeof command === "string") pending.set(event.toolCallId, command.replace(/\s+/g, " ").trim().slice(0, 500));
+	} else if (event.type === "tool_execution_end") {
+		const command = pending.get(event.toolCallId);
+		pending.delete(event.toolCallId);
+		if (command === undefined) return;
+		(event.isError ? state.failedCommands : state.commands).push(command);
+	}
+}
+
 /** Verifies every pending cluster with independent verifier sessions, then combines their verdicts. */
 export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Promise<void> {
 	const { options, signal, target } = setup;
@@ -167,6 +201,9 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		pass.status = "running";
 		setup.onProgress();
 		let verdict: Verdict | undefined;
+		// One host pass per verifier: the diff it is given counts for it alone.
+		const hostPass = setup.engine.pass();
+		const pending = new Map<string, string>();
 		// With --exec, commands can change files, so each verifier gets a private checkout.
 		let privateCheckout: string | undefined;
 		try {
@@ -178,11 +215,13 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 				thinking: options.verifierThinking,
 				systemPrompt,
 				checkout,
-				reportTool: createVerdictTool(checkout, (value) => {
+				reportTool: createVerdictTool(setup, cluster, checkout, (value) => {
 					verdict = value;
 				}),
 				hasReport: () => verdict !== undefined,
-				prompt: verifierPrompt(setup, cluster),
+				prompt: verifierPrompt(setup, hostPass, cluster),
+				hostTools: hostPass.tools().filter((tool) => tool.name === "review_diff"),
+				onEvent: (event) => recordCommand(state, pending, event),
 				wrapUpMessage: VERIFIER_WRAP_UP,
 				repairMessage: VERIFIER_REPAIR,
 				turns: VERIFIER_TURNS,

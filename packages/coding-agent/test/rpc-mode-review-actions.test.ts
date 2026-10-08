@@ -810,6 +810,8 @@ describe("durable review intents over protocol frames", () => {
 		expect(reviewMocks.executeReviewWorkflow).not.toHaveBeenCalled();
 		const list = await client.query("review.runs", {});
 		expect(list.runs[0]).toMatchObject({ runId: workId, engine: id, completionStatus: "complete" });
+		// The record is written before the work's executor returns.
+		await source.session.work.settled(workId);
 		expect(source.session.work.get(workId)).toMatchObject({ kind: "review", outcome: "completed" });
 
 		await expect(

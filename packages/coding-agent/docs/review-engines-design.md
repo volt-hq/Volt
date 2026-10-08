@@ -1,6 +1,6 @@
 # Review engines and the review launcher
 
-- Status: In progress. Steps 0 through 3b are shipped. Step 4 ships as four pull requests, 4a through 4d (section 6); step 5 follows.
+- Status: In progress. Steps 0 through 3b are shipped. Step 4 ships as five pull requests, 4a through 4e (section 6); step 5 follows.
 - Date: 2026-10-07
 - Audience: Volt maintainers and extension API implementers.
 - Scope: How `/review` and review engines that extensions provide (today the project-local `/swarm-review`) share targets, coverage, launching, running, and results.
@@ -227,6 +227,18 @@ What the host snapshot gives today (`changedFiles` with hunk patches, `readFile`
 6. Anchors must overlap changed lines (section 4.4).
 7. `--pr` is supported through the identity-only PR snapshot (D3), and `--base` needs the combined target.
 
+**Shipped in 4e.** Swarm is the engine `ext:swarm-review/swarm`, run with `/review <target> --engine swarm`. What answered each gap above, without a host change:
+
+1. `ctx.checkout()` gives a checkout of the reviewed head. Swarm links the repository's ignored `node_modules` into it itself (for a verifier's `--exec`), and gets a private checkout per verifier that way.
+2. Hunks are packed into shards by their `patchBytes`. A worker or verifier is given its diff text with `pass.diff`, at the moment its session starts, so the host counts a hunk as reviewed only by a pass that was given it. A hunk too large to carry whole is left out of the prompt and its file marked partial; the pass has the host's `review_diff` to page it.
+3. Swarm keeps its own `read`, `grep`, `find`, and `ls` over the checkout (regex and glob included), so its prompts are unchanged. `read_base` now reads through the host's `review_file` tool, because a fetched merge base or a pull request's base lives only in the host's snapshot.
+4. Context files (`AGENTS.md`, `REVIEW.md`) are read from the base through the same tool, so the change cannot rewrite its own instructions.
+5. The repository's common directory comes from git.
+6. A verifier's `report_verdict` runs `ctx.validate` on the finding's anchor and sends the host's error back to the verifier, which fixes it while its session is still open.
+7. `--pr`, `--commit`, and `--base` are the host's targets (`pr`, `commit`, `branch_uncommitted`); their flags are gone.
+
+Confirmed findings become host candidates by the mapping above, with a decision to accept each; the assessment is incomplete when verifiers disagreed or could not settle a cluster, every worker of a wave failed, or part of the diff had no successful worker. Rejected, disputed, and uncertain clusters stay in the report text, which is the work's output. Defaults for models, thinking, and counts are manifest settings; a flag overrides one for a run. Lost, as approved: the notice that rode the next turn, the Escape cancel, the `--exec` confirmation prompt (the engine's `run` has no UI; the flag is `localOnly`, so typing it at the host is the consent), cut diff sections for oversized hunks (paged instead), and positional focus text (`--focus`).
+
 ## 5. Trust model
 
 Matches `/review`, because the user chose to run the extension.
@@ -243,12 +255,12 @@ Each step is its own pull request, with an issue first. This is the baseline ord
 1. **Targets.** Split resolution from snapshot construction and unify the Git source. Add the combined target. Valuable by itself.
 2. **Coverage.** The host diff call (`deliverReviewDiff`) and the union of the passes' coverage (`ReviewRunCoverage`), which make a multi-pass run completable under today's rule. Multiplicity, per-finding verification coverage, a stricter k-pass rule, and the bounded record shape come later.
 3. **Typed parameters.** The declaration (D1), host or client parsing, the launcher form, and completion; `/review` adopts it first, which means giving today's hard-coded TUI dispatch (`handleReviewCommand`) and four typed intents a declaration (D8). Swarm follows with typed settings. Independent of steps 1, 2, and 4; the form picks up the combined target once step 1 lands.
-4. **The engine contract**, in four pull requests:
+4. **The engine contract**, in five pull requests:
    - **4a. Run records name their engine, and PR snapshots can skip the discussion context.** The `engine` field and its projection, rerun and incremental filtering by engine, and the provider's identity-only capture. Host-internal.
    - **4b. The host runs an engine.** The start path (work id is the run id), the engine context (`target`, `changedFiles`, `pass`, `validate`, `submit`, `checkout`), the work's channels, snapshot lifetime, the registry on the session, and the `review` intent's `engine` field, proven by test engines through the real work registry and protocol. Detail from an engine is passed through as UI data here; 4c normalizes it under the extension's action policy.
    - **4c. The public API.** `registerReviewEngine`, typed `parameters` and `localOnly`, the `review` intent's `engineParams`, the engine kept in the session's registry for as long as its extension runs (its reviews are cancelled with it), its reports normalized under the extension's action policy, and the engine named in the posted pull request review.
    - **4d. Launching an engine from `/review`.** The `review.engines` query (an engine's id, name, label, description, cost, targets, `remoteSafe`, and `parameters`; a remote client is told only of `remoteSafe` engines and never of their `localOnly` parameters), and `/review ... --engine <name>` in the TUI. `engine` is a flag-only property of the command grammar (a new `flags` hint beside `form`, so the options form does not show it until step 5 turns it into the Engine row). A line says an engine by its name within its extension, or its full id when two engines share a name; once it names one, the engine's parameters become flags beside the review's own (kebab-case, typed by their declaration, completed, and in the usage line), and the client splits the parsed line into the review's fields, the engine's id, and `engineParams`. The auxiliary tools of `/review tools` are not sent with an engine. There is no publish confirmation in the TUI to name the engine in: apps read `engine` from `review.result` (4a), and the posted review names it (4c).
-   - **4e. Swarm as an engine.** Swarm moves onto the contract with typed settings; its hand-written parser, report-only result, and command go.
+   - **4e. Swarm as an engine.** Swarm moves onto the contract (`.volt/extensions/swarm-review/`), with its options as typed parameters over typed manifest settings; its hand-written parser, its own target resolution, and `/swarm-review` go. See the end of section 4.7.
 5. **One run experience and one entry point.** `/review` moves to the job-list flow, the Engine row appears in the form, and the default-engine setting and cost note ship.
 
 ## 7. Decisions and open questions

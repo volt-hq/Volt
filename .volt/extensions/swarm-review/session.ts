@@ -66,6 +66,8 @@ export interface PassOptions {
 	extraTools?: string[];
 	/** Working checkout for this pass (default: the shared frozen checkout). */
 	checkout?: string;
+	/** The host's tools this pass may call, from the host pass it reads through (such as review_diff). */
+	hostTools?: ToolDefinition[];
 	onEvent?: (event: AgentSessionEvent) => void;
 	bindControl?: (control: PassControl) => void;
 }
@@ -85,8 +87,17 @@ export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<voi
 		thinkingLevel: pass.thinking,
 		sessionManager,
 		resourceLoader: isolatedResourceLoader(pass.systemPrompt, setup.contextFiles),
-		customTools: [...(inspect ? createRepositoryTools(setup.target, checkout) : []), pass.reportTool],
-		tools: [...(inspect ? REPOSITORY_TOOL_NAMES : []), ...(pass.extraTools ?? []), pass.reportTool.name],
+		customTools: [
+			...(inspect ? createRepositoryTools(setup.target, checkout) : []),
+			...(inspect ? (pass.hostTools ?? []) : []),
+			pass.reportTool,
+		],
+		tools: [
+			...(inspect ? REPOSITORY_TOOL_NAMES : []),
+			...(inspect ? (pass.hostTools ?? []).map((tool) => tool.name) : []),
+			...(pass.extraTools ?? []),
+			pass.reportTool.name,
+		],
 		disableMcp: true,
 	});
 	let limitsActive = true;
