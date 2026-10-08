@@ -262,7 +262,10 @@ export class SessionLifecycle {
 	/**
 	 * Append an aborted toolResult for every persisted toolCall on the current
 	 * session path that has no persisted result, so a transcript closed mid-call
-	 * resumes coherently instead of with a dangling call. Persistence-only: no
+	 * resumes coherently instead of with a dangling call. An errored or aborted
+	 * turn is skipped: it never ran its tool calls, and replay drops it together
+	 * with their results, so a result written for it would be left without its call
+	 * once compaction summarized the turn away. Persistence-only: no
 	 * events are emitted (dispose is tearing the listeners down), and the agent
 	 * loop's own late aborted results are dropped by the disposed guard.
 	 */
@@ -276,7 +279,7 @@ export class SessionLifecycle {
 				}
 			}
 			for (const message of context.messages) {
-				if (message.role !== "assistant") {
+				if (message.role !== "assistant" || message.stopReason === "error" || message.stopReason === "aborted") {
 					continue;
 				}
 				const toolCalls = (message as AssistantMessage).content.filter(

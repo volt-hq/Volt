@@ -43,6 +43,22 @@ function unansweredToolCallIds(messages: readonly Message[]): string[] {
 	return unanswered;
 }
 
+/** The ids of tool results that do not answer a tool call of the assistant message directly before them. */
+function unmatchedToolResultIds(messages: readonly Message[]): string[] {
+	const unmatched: string[] = [];
+	messages.forEach((message, index) => {
+		if (message.role !== "toolResult") return;
+		let previous = index - 1;
+		while (previous >= 0 && messages[previous].role === "toolResult") previous--;
+		const turn = messages[previous];
+		const answers =
+			turn?.role === "assistant" &&
+			turn.content.some((block) => block.type === "toolCall" && block.id === message.toolCallId);
+		if (!answers) unmatched.push(message.toolCallId);
+	});
+	return unmatched;
+}
+
 describe("AgentSession cache-preserving compaction", () => {
 	it("preserves the provider prefix and policy while persisting compaction request usage and diagnostics", async () => {
 		// The prior compaction is seeded before the session opens; a live session refuses structural writes.
@@ -612,5 +628,48 @@ describe("AgentSession cache-preserving compaction", () => {
 		expect(history).toContainEqual(
 			expect.objectContaining({ role: "toolResult", toolCallId: answered.id, isError: false }),
 		);
+	});
+
+	it("does not replay a result whose call the checkpoint summarized away", async () => {
+		const rejected = fauxToolCall("write", { path: "rejected.ts" });
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) =>
+				seed
+					.user("Update the files", { timestamp: 1 })
+					.assistant("", {
+						toolCalls: [rejected],
+						stopReason: "error",
+						error: {
+							kind: "invalid_tool_call",
+							retryable: false,
+							message: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+						},
+					})
+					.user("Try again", { timestamp: 2 })
+					.assistant("Working on it")
+					.user("Continue", { timestamp: 3 })
+					.assistant("Recent answer")
+					// What closing the session wrote for the rejected call, after everything else.
+					.toolResult(rejected.id, "Operation aborted: the session closed", { isError: true }),
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("checkpoint")]);
+		await harness.session.compact();
+		// The checkpoint ends before the result, so the turn that made the call is no longer in the context.
+		const retained = harness.session.messages;
+		expect(retained.some((message) => message.role === "toolResult")).toBe(true);
+		expect(JSON.stringify(retained.filter((message) => message.role === "assistant"))).not.toContain(rejected.id);
+
+		let request: Context | undefined;
+		harness.setResponses([
+			(context) => {
+				request = context;
+				return fauxAssistantMessage("Continued");
+			},
+		]);
+		await harness.session.prompt("Carry on");
+		expect(request!.messages.some((message) => message.role === "toolResult")).toBe(false);
+		expect(unmatchedToolResultIds(request!.messages)).toEqual([]);
 	});
 });

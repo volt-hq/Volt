@@ -199,4 +199,62 @@ describe("applyReplayPolicy", () => {
 		const messages = [user("go"), assistant("toolUse", ["x"]), result("x"), assistant("stop", [], 30)];
 		expect(applyReplayPolicy(messages)).toEqual(messages);
 	});
+
+	describe("results without a call in the turn directly before them", () => {
+		it("drops a result whose call is not in the history", () => {
+			const messages = [user("go"), result("gone"), assistant("stop", [], 30)];
+			expect(applyReplayPolicy(messages)).toEqual([messages[0], messages[2]]);
+		});
+
+		it("drops results left behind when compaction summarized their calls away", () => {
+			// An errored turn is gone with its call; the aborted results written for it stayed.
+			const messages = [user("checkpoint"), user("next", 5), result("x"), result("y")];
+			expect(applyReplayPolicy(messages)).toEqual([messages[0], messages[1]]);
+		});
+
+		it("drops a result that answers a call of an earlier turn", () => {
+			const messages = [
+				user("go"),
+				assistant("toolUse", ["a"], 7),
+				result("a"),
+				assistant("stop", [], 30),
+				result("a", 40),
+			];
+			expect(applyReplayPolicy(messages)).toEqual([messages[0], messages[1], messages[2], messages[3]]);
+		});
+
+		it("drops a result that arrives after a user message and keeps the synthesized one", () => {
+			const messages = [
+				user("go"),
+				assistant("toolUse", ["a", "b"], 7),
+				result("a"),
+				user("interrupt", 30),
+				result("b", 40),
+			];
+			expect(applyReplayPolicy(messages)).toEqual([
+				messages[0],
+				messages[1],
+				messages[2],
+				synthetic("b", 7),
+				messages[3],
+			]);
+		});
+
+		it("keeps only the first result of a call", () => {
+			const messages = [user("go"), assistant("toolUse", ["a"], 7), result("a"), result("a", 40)];
+			expect(applyReplayPolicy(messages)).toEqual([messages[0], messages[1], messages[2]]);
+		});
+
+		it("keeps the results of a turn in any order", () => {
+			const messages = [user("go"), assistant("toolUse", ["a", "b"], 7), result("b"), result("a")];
+			expect(applyReplayPolicy(messages)).toEqual(messages);
+		});
+
+		it("is idempotent after dropping results", () => {
+			const messages = [user("checkpoint"), result("x"), assistant("toolUse", ["a"], 7), result("a"), result("x")];
+			const replay = applyReplayPolicy(messages);
+			expect(replay).toEqual([messages[0], messages[2], messages[3]]);
+			expect(applyReplayPolicy(replay)).toEqual(replay);
+		});
+	});
 });
