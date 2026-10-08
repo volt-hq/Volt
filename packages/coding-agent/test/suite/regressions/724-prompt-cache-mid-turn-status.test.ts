@@ -4,7 +4,22 @@ import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { feedLiveState } from "../../../src/core/host/live-feed.ts";
+import type * as Messages from "../../../src/core/messages.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+const conversion = vi.hoisted(() => ({ fails: false }));
+
+// Passes through until a test makes the conversion fail, which ends the turn before any provider request.
+vi.mock("../../../src/core/messages.ts", async (importOriginal) => {
+	const actual = await importOriginal<typeof Messages>();
+	return {
+		...actual,
+		convertToLlm: (messages: Parameters<typeof actual.convertToLlm>[0]) => {
+			if (conversion.fails) throw new Error("conversion failed");
+			return actual.convertToLlm(messages);
+		},
+	};
+});
 
 const MINUTE = 60_000;
 const SECOND = 1_000;
@@ -25,6 +40,7 @@ describe("issue #724: prompt cache status while a turn runs", () => {
 	});
 
 	afterEach(async () => {
+		conversion.fails = false;
 		for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 		vi.useRealTimers();
 	});
@@ -178,5 +194,55 @@ describe("issue #724: prompt cache status while a turn runs", () => {
 		expect(started.map((message) => message.stopReason)).toEqual(["aborted"]);
 		expect(changes).toEqual([]);
 		expect(harness.session.liveState.get("prompt_cache")).toEqual(liveBefore);
+	});
+
+	it("publishes nothing for the failure marker of a turn that never reached the provider", async () => {
+		const harness = await create();
+		harness.setResponses([() => fauxAssistantMessage("hello")]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+		await vi.advanceTimersByTimeAsync(MINUTE);
+
+		const liveBefore = harness.session.liveState.get("prompt_cache");
+		const started: AssistantMessage[] = [];
+		const changes: unknown[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "prompt_cache_changed") changes.push(event.promptCache);
+			else if (event.type === "message_start" && event.message.role === "assistant") started.push(event.message);
+		});
+
+		// The turn fails converting its context, so the conversation ends it with a zero-usage error marker
+		// stamped later than the last request. No provider request was sent, so it must not move the status.
+		conversion.fails = true;
+		await harness.session.prompt("again").catch(() => undefined);
+		await harness.session.waitForIdle();
+
+		expect(started.map((message) => message.stopReason)).toEqual(["error"]);
+		expect(changes).toEqual([]);
+		expect(harness.session.liveState.get("prompt_cache")).toEqual(liveBefore);
+	});
+
+	it("announces the cache ending to a live reader of a resumed session that was handed a retained status", async () => {
+		const lastRequestAt = Date.now() - MINUTE;
+		const harness = await createHarness({
+			models: [{ id: "cached", promptCache: shortRetention }, { id: "plain" }],
+			seed: (seed) =>
+				seed.user("hi").assistant("hello", { usage: { input: 100, totalTokens: 100 }, timestamp: lastRequestAt }),
+		});
+		harnesses.push(harness);
+		feedLiveState(harness.session);
+		expect(harness.session.liveState.get("prompt_cache")).toEqual(liveRetained(lastRequestAt));
+		const changes: unknown[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "prompt_cache_changed") changes.push(event.promptCache);
+		});
+
+		// Nothing has published yet, and a model without a prompt cache has no status to show.
+		const { promptCache: _cache, ...uncached } = harness.getModel("plain")!;
+		await harness.session.setModel(uncached);
+
+		expect(harness.session.getPromptCacheStatus()).toBeUndefined();
+		expect(changes).toEqual([null]);
+		expect(harness.session.liveState.get("prompt_cache")).toEqual({ kind: "prompt_cache", promptCache: null });
 	});
 });

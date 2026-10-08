@@ -73,8 +73,12 @@ export class SessionPromptCache {
 				renewal?: PromptCacheRefreshRecord;
 		  }
 		| undefined;
-	/** The last status published; a session starts with no cache, so an absent status is not announced. */
-	private published: PromptCacheStatus | undefined;
+	/**
+	 * The status consumers last saw: the last one published, or else the first one read through `status()`.
+	 * A session nobody has read starts with no cache, so an absent status is not announced; a reader that
+	 * was handed a retained status still hears when it becomes absent.
+	 */
+	private published: { status: PromptCacheStatus | undefined } | undefined;
 
 	constructor(host: SessionPromptCacheHost) {
 		this.host = host;
@@ -103,6 +107,13 @@ export class SessionPromptCache {
 
 	/** Documented retention of the current model's reusable prompt prefix; undefined when caching does not apply. */
 	status(): PromptCacheStatus | undefined {
+		const status = this.presentedStatus();
+		this.published ??= { status };
+		return status;
+	}
+
+	/** The current status with the keepalive horizon, without recording it as seen. */
+	private presentedStatus(): PromptCacheStatus | undefined {
 		const status = this.currentStatus();
 		if (status?.kind !== "retained") return status;
 		const keepAliveUntil = this.keepAlive.keepAliveUntil();
@@ -186,10 +197,11 @@ export class SessionPromptCache {
 	 * the renewed status publishes without waiting for the turn to settle.
 	 */
 	requestStarted(message: AssistantMessage): void {
-		// The agent loop's abort markers are final on arrival and carry no prompt usage: no provider request
-		// was sent, so they renew nothing and must not publish a renewal that `requestEnded` would withdraw.
+		// The conversation's abort and failure markers are final on arrival and carry no prompt usage: no
+		// provider request was sent, so they renew nothing and must not publish a renewal that `requestEnded`
+		// would withdraw. A request in flight starts as a `stop` partial.
 		if (
-			message.stopReason === "aborted" &&
+			(message.stopReason === "aborted" || message.stopReason === "error") &&
 			message.usage.input + message.usage.cacheRead + message.usage.cacheWrite <= 0
 		) {
 			return;
@@ -328,13 +340,13 @@ export class SessionPromptCache {
 		this.keepAlive.update();
 		let status: PromptCacheStatus | undefined;
 		try {
-			status = this.status();
+			status = this.presentedStatus();
 		} catch {
 			// Derived presentation state cannot fail the event that triggered it.
 			return;
 		}
-		if (promptCacheStatusEquals(this.published, status)) return;
-		this.published = status;
+		if (promptCacheStatusEquals(this.published?.status, status)) return;
+		this.published = { status };
 		this.host.emit({ type: "prompt_cache_changed", promptCache: status ?? null });
 	}
 
