@@ -81,6 +81,8 @@ export function createLocalIntentServices(
 					remote: reviewOptions.remote,
 					cwd: conversation.cwd,
 					work: conversation.work,
+					modelRegistry: session.modelRegistry,
+					...(session.model === undefined ? {} : { model: session.model }),
 					settingsManager: session.settingsManager,
 					sessionManager: session.sessionManager,
 					sessionWriter: session.sessionWriter,

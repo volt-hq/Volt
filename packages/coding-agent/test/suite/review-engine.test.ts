@@ -163,6 +163,8 @@ describe("review engines", () => {
 				remote: options.remote ?? false,
 				cwd: harness.tempDir,
 				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
 				settingsManager: { isProjectTrusted: () => options.trusted ?? true },
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
@@ -399,6 +401,25 @@ describe("review engines", () => {
 		expect(harness.session.work.list().filter((item) => item.kind === "review")).toHaveLength(1);
 	});
 
+	it("gives the engine the conversation's models and whether its project is trusted, to run model sessions of its own", async () => {
+		const { harness, start } = await fixture();
+		const seen: Array<{ registry: unknown; model: unknown; trusted: boolean }> = [];
+		const declaration = engine(async (ctx) => {
+			seen.push({ registry: ctx.modelRegistry, model: ctx.model, trusted: ctx.isProjectTrusted() });
+			await reviewCarefully(ctx);
+		});
+		await start(declaration);
+		await start(declaration, { trusted: false });
+		expect(seen.map((entry) => entry.trusted)).toEqual([true, false]);
+		expect(seen[0]?.registry).toBe(harness.session.modelRegistry);
+		expect(seen[0]?.model).toBe(harness.session.model);
+		// The registry resolves the models the engine's options name.
+		expect(harness.session.model).toBeDefined();
+		expect(
+			(seen[0]?.registry as typeof harness.session.modelRegistry).getAvailable().map((model) => model.id),
+		).toContain(harness.session.model?.id);
+	});
+
 	it("says a static review was static, and what it never delivered is unchecked", async () => {
 		const { start } = await fixture();
 		const { runs, work } = await start(
@@ -579,6 +600,8 @@ describe("review engines", () => {
 				remote,
 				cwd: harness.tempDir,
 				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
 				settingsManager: { isProjectTrusted: () => true },
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
@@ -700,6 +723,8 @@ describe("review engines", () => {
 				remote: false,
 				cwd: harness.tempDir,
 				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
 				settingsManager: { isProjectTrusted: () => true },
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
@@ -765,6 +790,8 @@ describe("review engines", () => {
 					remote: false,
 					cwd: harness.tempDir,
 					work: harness.session.work,
+					modelRegistry: harness.session.modelRegistry,
+					model: harness.session.model,
 					settingsManager: { isProjectTrusted: () => true },
 					sessionManager: harness.session.sessionManager!,
 					sessionWriter: harness.session.sessionWriter,
@@ -807,6 +834,8 @@ describe("review engines", () => {
 			remote: false,
 			cwd: harness.tempDir,
 			work: harness.session.work,
+			modelRegistry: harness.session.modelRegistry,
+			model: harness.session.model,
 			settingsManager: { isProjectTrusted: () => true },
 			sessionManager: harness.session.sessionManager!,
 			sessionWriter: harness.session.sessionWriter,
