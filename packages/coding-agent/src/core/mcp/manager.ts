@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { CallToolResult, GetPromptResult, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
+import { omitUndefined } from "../../utils/json.ts";
 import type { McpAuditLogger } from "./audit.ts";
 import {
 	getMcpDirectToolName,
@@ -871,15 +872,16 @@ export class McpManager {
 			}
 		}
 		const page: Array<{ name: string; description: string; risk: McpRisk; trustedRead: boolean }> = [];
-		const envelope = (next: number) => ({
-			action: "list_tools",
-			server: server.id,
-			tools: page,
-			metadataHash: metadata?.metadataHash,
-			stale: this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES),
-			total: tools.length,
-			...(next < tools.length ? { nextCursor: `${snapshot}.${next}` } : {}),
-		});
+		const envelope = (next: number) =>
+			omitUndefined({
+				action: "list_tools",
+				server: server.id,
+				tools: page,
+				metadataHash: metadata?.metadataHash,
+				stale: this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES),
+				total: tools.length,
+				nextCursor: next < tools.length ? `${snapshot}.${next}` : undefined,
+			});
 		let next = offset;
 		if (byteLength(JSON.stringify(envelope(next))) > budget) {
 			throw new Error("MCP tool page metadata exceeds maxBytes; increase maxBytes");
@@ -964,19 +966,21 @@ export class McpManager {
 			throw new Error("MCP resources are disabled by config");
 		}
 		const result = await this.getSupervisor(serverId).listResources(cursor, signal);
-		return {
-			action: "list_resources",
+		return omitUndefined({
+			action: "list_resources" as const,
 			server: serverId,
-			resources: result.resources.map((resource) => ({
-				server: serverId,
-				uri: resource.uri,
-				name: resource.name,
-				description: compactText(resource.description),
-				mimeType: resource.mimeType,
-				size: resource.size,
-			})),
+			resources: result.resources.map((resource) =>
+				omitUndefined({
+					server: serverId,
+					uri: resource.uri,
+					name: resource.name,
+					description: compactText(resource.description),
+					mimeType: resource.mimeType,
+					size: resource.size,
+				}),
+			),
 			nextCursor: result.nextCursor,
-		};
+		});
 	}
 
 	async readResource(
@@ -1029,18 +1033,20 @@ export class McpManager {
 			throw new Error("MCP prompts are disabled by config");
 		}
 		const result = await this.getSupervisor(serverId).listPrompts(cursor, signal);
-		return {
-			action: "list_prompts",
+		return omitUndefined({
+			action: "list_prompts" as const,
 			server: serverId,
-			prompts: result.prompts.map((prompt) => ({
-				server: serverId,
-				name: prompt.name,
-				title: prompt.title,
-				description: compactText(prompt.description),
-				arguments: prompt.arguments,
-			})),
+			prompts: result.prompts.map((prompt) =>
+				omitUndefined({
+					server: serverId,
+					name: prompt.name,
+					title: prompt.title,
+					description: compactText(prompt.description),
+					arguments: prompt.arguments,
+				}),
+			),
 			nextCursor: result.nextCursor,
-		};
+		});
 	}
 
 	async getPrompt(
