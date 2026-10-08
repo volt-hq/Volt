@@ -670,6 +670,52 @@ export const reviewDiscussionSourceQuery = defineQuery({
 	run: (ctx) => runReviewDiscussion(ctx, async (service) => ({ discussion: await service.source() })),
 });
 
+/**
+ * The review engines the conversation's extensions registered that this client may start. A remote client is
+ * told of the engines marked `remoteSafe`, with the parameters it may set: a local-only parameter is not hidden
+ * from it by being refused, it is not mentioned.
+ */
+export const reviewEnginesQuery = defineQuery({
+	...review,
+	name: "review.engines",
+	async run(ctx) {
+		const remote = ctx.profile.name === "remote";
+		const engines = targetOf(ctx)
+			.session.reviewEngines.list()
+			.filter((engine) => !remote || engine.remoteSafe);
+		return {
+			engines: engines.map((engine) => {
+				const hidden = new Set(remote ? (engine.localOnly ?? []) : []);
+				const properties = Object.entries(engine.parameters?.properties ?? {}).filter(
+					([name]) => !hidden.has(name),
+				);
+				const required = (engine.parameters?.required ?? []).filter((name) => !hidden.has(name));
+				const [, extension = "", name = ""] = /^ext:([^/]+)\/(.+)$/.exec(engine.id) ?? [];
+				return {
+					id: engine.id,
+					name,
+					extension,
+					label: engine.label,
+					description: engine.description,
+					...(engine.cost === undefined ? {} : { cost: engine.cost }),
+					targets: [...engine.targets],
+					remoteSafe: engine.remoteSafe,
+					...(engine.parameters === undefined
+						? {}
+						: {
+								parameters: {
+									type: "object" as const,
+									properties: Object.fromEntries(properties),
+									...(required.length === 0 ? {} : { required }),
+								},
+							}),
+					...(remote || engine.localOnly === undefined ? {} : { localOnly: [...engine.localOnly] }),
+				};
+			}),
+		} as QueryResult<"review.engines">;
+	},
+});
+
 export const reviewGeneralQuery = defineQuery({
 	...review,
 	name: "review.general",
@@ -741,6 +787,7 @@ export const BUILTIN_QUERIES = {
 	"mcp.recent_calls": mcpRecentCallsQuery,
 	"review.discussions": reviewDiscussionsQuery,
 	"review.discussion_source": reviewDiscussionSourceQuery,
+	"review.engines": reviewEnginesQuery,
 	"review.general": reviewGeneralQuery,
 	"review.result": reviewResultQuery,
 	"review.runs": reviewRunsQuery,

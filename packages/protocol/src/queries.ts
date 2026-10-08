@@ -45,6 +45,7 @@ import {
 	RpcReviewDiscussionSchema,
 	RpcReviewGeneralSchema,
 } from "./review-discussions.ts";
+import { RpcListReviewEnginesSchema } from "./review-engines.ts";
 import {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
@@ -451,6 +452,8 @@ export const QUERY_SCHEMAS = {
 		params: EmptyInputSchema,
 		result: Type.Object({ discussion: Type.Union([RpcReviewDiscussionSchema, Type.Null()]) }, closed),
 	},
+	/** The review engines extensions registered that this client may start, with their options. */
+	"review.engines": { params: EmptyInputSchema, result: RpcListReviewEnginesSchema },
 	"review.general": {
 		params: Type.Object({ runId }, closed),
 		result: Type.Object(RpcReviewGeneralSchema.properties, {

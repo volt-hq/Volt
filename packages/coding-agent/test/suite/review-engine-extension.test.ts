@@ -6,9 +6,12 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { createLoopbackClient, type LoopbackClient } from "../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
+import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import type { ReviewEngineContext } from "../../src/core/review-engine.ts";
 import { getReviewRun } from "../../src/core/review-state.ts";
 import { createHostHarness, type HostHarness } from "./host-harness.ts";
@@ -86,6 +89,22 @@ async function setup(): Promise<Fixture> {
 					});
 				},
 			});
+			volt.registerReviewEngine("deep", {
+				label: "Deep",
+				description: "Reads everything twice.",
+				targets: ["uncommitted", "pr"],
+				remoteSafe: true,
+				parameters: {
+					type: "object",
+					properties: {
+						depth: { type: "integer", minimum: 1, maximum: 5, title: "Depth" },
+						exec: { type: "boolean", default: false },
+					},
+					required: ["depth"],
+				},
+				localOnly: ["exec"],
+				async run() {},
+			});
 			for (const [name, engine] of [
 				["Swarm", { label: "x", description: "x", targets: ["commit"], run: async () => {} }],
 				["swarm", { label: "x", description: "x", targets: ["commit"], run: async () => {} }],
@@ -120,7 +139,10 @@ async function setup(): Promise<Fixture> {
 describe("a review engine an extension registers", () => {
 	test("is kept under the extension's id, and what its author gets wrong is thrown at the call", async () => {
 		const { source, registrationErrors } = await setup();
-		expect(source.session.reviewEngines.list().map((engine) => engine.id)).toEqual([ENGINE]);
+		expect(source.session.reviewEngines.list().map((engine) => engine.id)).toEqual([
+			ENGINE,
+			"ext:test-extension/deep",
+		]);
 		expect(source.session.reviewEngines.get(ENGINE)).toMatchObject({
 			label: "Swarm",
 			cost: "Much slower than standard.",
@@ -239,5 +261,43 @@ describe("a review engine an extension registers", () => {
 		await client.intent("set_extension_enabled", { id: "engine-ext", enabled: true, scope: "global" });
 		expect(instances).toBe(2);
 		expect(source.session.reviewEngines.get(id)).toBeDefined();
+	});
+
+	test("is offered to clients: all of it to a local one, and a remote one only what it may start and set", async () => {
+		const { source, client } = await setup();
+		const local = await client.query("review.engines", {});
+		expect(local.engines.map((engine) => [engine.id, engine.name, engine.extension])).toEqual([
+			[ENGINE, "swarm", "test-extension"],
+			["ext:test-extension/deep", "deep", "test-extension"],
+		]);
+		expect(local.engines[0]).toMatchObject({
+			label: "Swarm",
+			description: "Many reviewers.",
+			cost: "Much slower than standard.",
+			targets: ["uncommitted"],
+			remoteSafe: false,
+			localOnly: ["exec"],
+			parameters: { properties: { workers: { type: "integer", default: 30 }, exec: { type: "boolean" } } },
+		});
+		expect(local.engines[1]).toMatchObject({
+			remoteSafe: true,
+			localOnly: ["exec"],
+			parameters: { required: ["depth"], properties: { depth: { title: "Depth" }, exec: { type: "boolean" } } },
+		});
+
+		const remote = await queryRegistry.run(
+			{
+				target: { session: source.session } as never,
+				services: {},
+				profile: { name: "remote", grant: createIrohRemoteRpcGrant(REMOTE_CAPABILITIES) },
+			},
+			"review.engines",
+			{},
+		);
+		expect(remote.engines.map((engine) => engine.id)).toEqual(["ext:test-extension/deep"]);
+		// The local-only parameter is not mentioned, in the parameters or beside them.
+		expect(remote.engines[0]).not.toHaveProperty("localOnly");
+		expect(Object.keys(remote.engines[0]?.parameters?.properties ?? {})).toEqual(["depth"]);
+		expect(JSON.stringify(remote)).not.toContain("exec");
 	});
 });

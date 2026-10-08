@@ -491,8 +491,8 @@ describe("the slash menu completes /review from the grammar the host declares", 
 	};
 
 	/** A TUI over a repository with the branches main and feature/login. */
-	async function startInRepository() {
-		const started = await start();
+	async function startInRepository(options: Parameters<typeof start>[0] = {}) {
+		const started = await start(options);
 		const cwd = started.harness.tempDir;
 		git(cwd, "init", "--initial-branch=main");
 		git(cwd, "config", "user.email", "review@example.com");
@@ -543,6 +543,49 @@ describe("the slash menu completes /review from the grammar the host declares", 
 		const { access } = await startInRepository();
 		expect(await offered(access, "/review --e")).toBeUndefined();
 		expect(await offered(access, "/review uncommitted --focus ")).toBeUndefined();
+	});
+
+	it("offers the engines after --engine, and the named engine's own flags", async () => {
+		const started = await startInRepository({
+			extension: (volt) => {
+				volt.registerReviewEngine("swarm", {
+					label: "Swarm",
+					description: "Many reviewers.",
+					targets: ["uncommitted", "branch"],
+					parameters: {
+						type: "object",
+						properties: {
+							workers: { type: "integer", minimum: 1, maximum: 32 },
+							thinking: { type: "string", enum: ["low", "high"] },
+						},
+					},
+					async run() {},
+				});
+			},
+		});
+		const { access } = started;
+		expect(await offered(access, "/review uncommitted --engine ")).toEqual([
+			"uncommitted --engine standard",
+			"uncommitted --engine swarm",
+		]);
+		expect(await offered(access, "/review uncommitted --engine sw")).toEqual(["uncommitted --engine swarm"]);
+		// The engine's flags are offered once the line names it, beside the review's.
+		const named = (await offered(access, "/review uncommitted --engine swarm --")) ?? [];
+		expect(named).toEqual(
+			expect.arrayContaining([
+				"uncommitted --engine swarm --workers",
+				"uncommitted --engine swarm --thinking",
+				"uncommitted --engine swarm --focus",
+			]),
+		);
+		expect(named).not.toContain("uncommitted --engine swarm --engine");
+		expect(await offered(access, "/review uncommitted --engine swarm --thinking ")).toEqual([
+			"uncommitted --engine swarm --thinking low",
+			"uncommitted --engine swarm --thinking high",
+		]);
+		// Before the line names an engine, and for standard, the flags are the review's own.
+		expect(await offered(access, "/review uncommitted --w")).toBeUndefined();
+		expect(await offered(access, "/review uncommitted --engine standard --w")).toBeUndefined();
 	});
 
 	it("leaves the whole argument text when a completion is applied", async () => {
