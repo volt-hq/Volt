@@ -73,7 +73,8 @@ export class SessionPromptCache {
 				renewal?: PromptCacheRefreshRecord;
 		  }
 		| undefined;
-	private published: { status: PromptCacheStatus | undefined } | undefined;
+	/** The last status published; a session starts with no cache, so an absent status is not announced. */
+	private published: PromptCacheStatus | undefined;
 
 	constructor(host: SessionPromptCacheHost) {
 		this.host = host;
@@ -180,7 +181,10 @@ export class SessionPromptCache {
 		return undefined;
 	}
 
-	/** A provider request started: it renews the prefix, so keepalive restarts from its start time. */
+	/**
+	 * A provider request started: it renews the prefix, so keepalive restarts from its start time and
+	 * the renewed status publishes without waiting for the turn to settle.
+	 */
 	requestStarted(message: AssistantMessage): void {
 		if (!this.isCurrentModelMessage(message)) return;
 		const base = this.branchStatus();
@@ -199,9 +203,13 @@ export class SessionPromptCache {
 			this.requestBasis = { precededBy: "none" };
 		}
 		this.keepAlive.requestStarted();
+		this.publish();
 	}
 
-	/** A provider request ended: audit it, and confirm its renewal once the provider read the prompt. */
+	/**
+	 * A provider request ended: confirm its renewal once the provider read the prompt, publish the
+	 * resulting status, and audit it.
+	 */
 	requestEnded(message: AssistantMessage): void {
 		const basis = this.requestBasis;
 		this.requestBasis = undefined;
@@ -209,11 +217,12 @@ export class SessionPromptCache {
 		const usage = message.usage;
 		if (usage.input + usage.cacheRead + usage.cacheWrite <= 0) {
 			// No evidence the provider read the prompt, so the request renewed nothing; renewals confirmed
-			// meanwhile (such as a refresh that overlapped it) stand.
-			this.keepAlive.update();
+			// meanwhile (such as a refresh that overlapped it) stand. Publishing withdraws its provisional renewal.
+			this.publish();
 			return;
 		}
 		if (basis.renewal) this.confirmRenewal(basis.renewal);
+		this.publish();
 		if (!this.isCurrentModelMessage(message)) return;
 		const model = this.host.model();
 		if (!model) return;
@@ -316,9 +325,8 @@ export class SessionPromptCache {
 			// Derived presentation state cannot fail the event that triggered it.
 			return;
 		}
-		const published = this.published;
-		if (published && promptCacheStatusEquals(published.status, status)) return;
-		this.published = { status };
+		if (promptCacheStatusEquals(this.published, status)) return;
+		this.published = status;
 		this.host.emit({ type: "prompt_cache_changed", promptCache: status ?? null });
 	}
 
