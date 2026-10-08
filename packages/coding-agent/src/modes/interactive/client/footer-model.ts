@@ -116,28 +116,3 @@ export function footerViewModel(store: TuiStore, catalogs: TuiCatalogs, local: F
 		statuses: footerStatuses(store, local.phoneLabel),
 	};
 }
-
-/** The usage of another conversation the footer shows in place of the conversation's own, such as a review's. */
-export interface TransientUsage {
-	readonly model: FooterModel;
-	readonly thinkingLevel: string;
-	readonly fastMode: boolean;
-	readonly usage: FooterUsage;
-}
-
-/**
- * `model` showing the usage of another conversation in place of its own,
- * such as a review's: its model, thinking level, Fast mode, and usage. The
- * conversation's prompt-cache status does not apply to it.
- */
-export function withTransientUsage(model: FooterViewModel, transient: TransientUsage | undefined): FooterViewModel {
-	if (transient === undefined) return model;
-	return {
-		...model,
-		model: transient.model,
-		thinkingLevel: transient.thinkingLevel,
-		fastMode: transient.fastMode,
-		usage: transient.usage,
-		promptCache: undefined,
-	};
-}

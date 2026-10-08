@@ -315,6 +315,19 @@ export class WorkInspector implements Component {
 		this.syncOutput();
 	}
 
+	/** The item the inspector shows in detail, when it shows one (not the list). */
+	get detailWorkId(): string | undefined {
+		return this.mode === "list" ? undefined : this.selectedId;
+	}
+
+	/** Show `workId` in detail. */
+	show(workId: string): void {
+		if (this.disposed) return;
+		this.closeConversation();
+		this.showDetail(workId);
+		this.options.requestRender();
+	}
+
 	/** Re-read the source: a changed item may need its output read again. */
 	refresh(): void {
 		if (this.disposed) return;

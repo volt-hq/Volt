@@ -173,9 +173,8 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
-import { footerViewModel, type TransientUsage, withTransientUsage } from "./client/footer-model.ts";
+import { footerViewModel } from "./client/footer-model.ts";
 import { type Delivery, type InputDiagnostic, type Interruptible, TuiInput } from "./client/input.ts";
-import { ReviewView } from "./client/review-view.ts";
 import {
 	entryTree,
 	forkableMessages,
@@ -268,7 +267,6 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { WorkInspector } from "./components/work-inspector.ts";
 import { queuedWorkNoticeLine, workOutcomeLine } from "./components/work-notice.ts";
 import { WorkStatus } from "./components/work-status.ts";
-import { createUiNodeView } from "./ui-node/registry.ts";
 
 /** Interface for components that can be expanded/collapsed */
 interface Expandable {
@@ -573,8 +571,6 @@ export class InteractiveMode {
 	private shownPhase: PhaseValue | undefined;
 	/** The client fold the status last followed. */
 	private shownFold: ClientState | undefined;
-	/** Usage of another conversation the footer shows in place of the conversation's own, such as a review's. */
-	private transientUsage: TransientUsage | undefined;
 	/** The title an extension set; the TUI's own shows without one. */
 	private extensionTitle: string | undefined;
 	private workStatus: WorkStatus;
@@ -620,8 +616,6 @@ export class InteractiveMode {
 	private lastEscapeTime = 0;
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
-	/** Whether a review this TUI started runs: its loader shows. */
-	private activeReview = false;
 	/** The review engines the host offered the last time they were read, by the client that read them. */
 	private reviewEnginesRead:
 		| { readonly client: object; readonly at: number; readonly engines: Promise<RpcReviewEngine[]> }
@@ -2109,15 +2103,12 @@ export class InteractiveMode {
 	 * catalogs; a review's usage shows in place of the conversation's own.
 	 */
 	private footerViewModel(): FooterViewModel {
-		return withTransientUsage(
-			footerViewModel(this.store, this.catalogs, {
-				// Warnings are the host's settings: they show as its catalog holds them.
-				contextWarningTokens:
-					this.catalogs.settings?.warnings?.contextTokens ?? this.settingsManager.getContextWarningTokens(),
-				phoneLabel: (count) => (isAsciiOnlyTerminal() ? `[phone ${count}]` : `📱 ${count}`),
-			}),
-			this.transientUsage,
-		);
+		return footerViewModel(this.store, this.catalogs, {
+			// Warnings are the host's settings: they show as its catalog holds them.
+			contextWarningTokens:
+				this.catalogs.settings?.warnings?.contextTokens ?? this.settingsManager.getContextWarningTokens(),
+			phoneLabel: (count) => (isAsciiOnlyTerminal() ? `[phone ${count}]` : `📱 ${count}`),
+		});
 	}
 
 	/** The plan state of the conversation the TUI shows, as its client fold holds it. */
@@ -4071,13 +4062,12 @@ export class InteractiveMode {
 	private activity(): string | undefined {
 		const phase = this.store.phase;
 		const working = this.input.workRunning();
-		if (phase?.busy !== true && !working && !this.activeReview) return undefined;
+		if (phase?.busy !== true && !working) return undefined;
 		return JSON.stringify([
 			phase?.operation ?? null,
 			phase?.run?.startedAt ?? null,
 			phase?.compaction?.startedAt ?? null,
 			working,
-			this.activeReview,
 		]);
 	}
 
@@ -5110,7 +5100,8 @@ export class InteractiveMode {
 		if (this.isShuttingDown || this.sessionRenderSuspension) return;
 		if (this.workOverlay) {
 			this.workOverlay.focus();
-			this.workInspector?.refresh();
+			if (workId === undefined) this.workInspector?.refresh();
+			else this.workInspector?.show(workId);
 			return;
 		}
 		let closed = false;
@@ -8361,88 +8352,54 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Run a review as the conversation's detached `review` work (D2) and show
-	 * it until it ends: a loader shows the work's progress and accounting,
-	 * its passes draw inline in the chat, and the footer shows its usage.
-	 * Escape cancels it (`cancel_work`). A completed review opens its findings
-	 * in a new conversation (`review_open_session`) while the loader shows.
+	 * Start a review as the conversation's detached `review` work (every engine runs the same way) and show the
+	 * job list on it: its progress, steps, and detail, and its cancel key. The command returns once the review has
+	 * started, so the conversation stays usable, and the footer's work line follows the review while the list is
+	 * closed. A review that completes while the list still shows it opens its findings in a new conversation
+	 * (`review_open_session`) and moves the client there; otherwise a status line says how it ended, and Open in
+	 * /work opens its findings.
 	 */
 	private async runReview(start: ReviewEngineStart, usage: string): Promise<void> {
-		if (this.activeReview) {
-			this.showWarning("A review is already running. Cancel it before starting another.");
-			return;
-		}
-		this.activeReview = true;
-		this.quitConfirmation = undefined;
-		this.lastSigintTime = 0;
-		const client = this.store.client;
-		const loader = new BorderedLoader(this.ui, theme, "Preparing review…");
-		const detail = createUiNodeView();
-		this.editorContainer.clear();
-		this.editorContainer.addChild(loader);
-		this.editorContainer.addChild(detail);
-		this.ui.setFocus(loader);
-		this.ui.requestRender();
-
-		let workId: string | undefined;
-		let view: ReviewView | undefined;
-		const cancel = (): void => {
-			loader.setMessage("Cancelling review…");
-			if (workId !== undefined) void client.intent("cancel_work", { workId }).catch(() => undefined);
-		};
-		loader.signal.addEventListener("abort", cancel, { once: true });
-		const show = (): void => {
-			const progress = view?.progress();
-			if (!loader.signal.aborted) loader.setMessage(progress?.text ?? "Preparing review…");
-			try {
-				detail.update(progress?.detail === undefined ? [] : [progress.detail]);
-			} catch {
-				detail.update([]);
-			}
-			this.transientUsage = view?.usage(this.catalogs.models?.models);
-			this.ui.requestRender();
-		};
+		let workId: string;
 		try {
 			workId = await this.startReview(start);
-			// Escape while the review prepared cancels it as soon as it runs.
-			if (loader.signal.aborted) cancel();
-			view = new ReviewView({
-				store: this.store,
-				workId,
-				container: this.chatContainer,
-				transcript: {
-					ui: this.ui,
-					markdownTheme: () => this.getMarkdownThemeWithSettings(),
-					hideThinkingBlock: () => this.hideThinkingBlock,
-					toolsExpanded: () => this.toolOutputExpanded,
-					showImages: () => this.settingsManager.getShowImages(),
-					imageWidthCells: () => this.settingsManager.getImageWidthCells(),
-				},
-				onChange: show,
-			});
-			// How a review that did not complete ended shows as its work's end does (showWorkEnd).
-			if ((await view.finished()).outcome === "completed") {
-				loader.setMessage("Opening the review's findings…");
-				const opened = await client.intent("review_open_session", { runId: workId });
-				if (opened.conversation !== undefined) await this.store.showing(opened.conversation);
-				else this.showStatus("Opening the review's findings was cancelled; open them from /work.");
-			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.showError(message.includes("git") || message.includes("repository") ? `${message} ${usage}` : message);
-		} finally {
-			loader.signal.removeEventListener("abort", cancel);
-			view?.dispose();
-			this.transientUsage = undefined;
-			loader.dispose();
-			detail.dispose();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.activeReview = false;
-			this.quitConfirmation = undefined;
-			this.lastSigintTime = 0;
-			this.ui.requestRender();
+			return;
+		}
+		this.showWorkInspector(workId);
+		this.openFindingsWhenDone(workId);
+	}
+
+	/** Open the findings of review `workId` once it completes, if the job list still shows it then. */
+	private openFindingsWhenDone(workId: string): void {
+		const conversation = this.store.conversation;
+		const check = (): void => {
+			// The client moved to another conversation: this one's work is no longer the client's.
+			if (this.store.conversation !== conversation) {
+				unsubscribe();
+				return;
+			}
+			const item = this.work.item(workId);
+			if (item?.outcome === undefined) return;
+			unsubscribe();
+			// A review that did not complete is reported as any work's end is (showWorkEnd).
+			if (item.outcome !== "completed" || this.workInspector?.detailWorkId !== workId) return;
+			void this.openReviewFindings(workId);
+		};
+		const unsubscribe = this.work.subscribe(check);
+		check();
+	}
+
+	private async openReviewFindings(workId: string): Promise<void> {
+		this.dismissWorkInspector?.();
+		try {
+			const opened = await this.store.client.intent("review_open_session", { runId: workId });
+			if (opened.conversation !== undefined) await this.store.showing(opened.conversation);
+			else this.showStatus("Opening the review's findings was cancelled; open them from /work.");
+		} catch (error) {
+			this.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 

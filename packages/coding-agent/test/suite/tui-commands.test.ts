@@ -50,7 +50,7 @@ const ESC = "\x1b";
 
 type ModeAccess = {
 	defaultEditor: CustomEditor;
-	transientUsage: unknown;
+	dismissWorkInspector?: () => void;
 	keybindings: { getKeys(action: string): string[] };
 	input: { readonly catalog: { readonly intents: readonly IntentDescriptor[] }; load(): Promise<boolean> };
 };
@@ -99,6 +99,24 @@ const fastProvider: ExtensionFactory = (volt: ExtensionAPI) => {
 		],
 	});
 };
+
+/**
+ * Stop the reviews that run the way the job list does (cancel the work), and close the list a started review
+ * opens, so the next command meets the conversation and not the list.
+ */
+async function stopReviews(tui: TuiModeFixture): Promise<void> {
+	for (const item of tui.store.state.work.values()) {
+		if (item.kind === "review" && item.outcome === undefined) {
+			await tui.store.client.intent("cancel_work", { workId: item.workId });
+		}
+	}
+	(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+}
+
+/** Close the job list a started review opens, so the status lines behind it show. */
+function closeJobList(tui: TuiModeFixture): void {
+	(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+}
 
 /** A turn the faux provider holds open until it is released. */
 function heldTurn(text: string) {
@@ -585,9 +603,9 @@ function quietReview() {
 
 describe("TUI reviews", () => {
 	it.each(["regular", "fullscreen"] as const)(
-		"shows the review work and its live pass, then opens its findings (%s)",
+		"shows the review in the job list, and opens its findings when it completes there (%s)",
 		async (tuiMode) => {
-			const { harness, tui, access } = await start({ tuiMode });
+			const { harness, tui } = await start({ tuiMode });
 			reviewRepository(harness.tempDir);
 			const discovery = Promise.withResolvers<void>();
 			const [candidates, verification] = quietReview();
@@ -600,38 +618,94 @@ describe("TUI reviews", () => {
 			]);
 			const source = tui.store.conversation;
 
-			void tui.submit("/review uncommitted");
-			await waitForScreen(tui, "Reviewing uncommitted changes with faux-1", "Discovery pass");
-			// The footer shows the review's usage in place of the conversation's.
-			expect(access.transientUsage).toMatchObject({ model: { provider: "faux", id: "faux-1" } });
+			// The command returns once the review started; the job list is on it, with its progress.
+			await tui.submit("/review uncommitted");
+			await waitForScreen(tui, "Review uncommitted changes", "Discovery pass");
+			expect(tui.store.conversation).toBe(source);
 			discovery.resolve();
 			await vi.waitFor(() => expect(tui.store.conversation).not.toBe(source), { timeout: 10_000 });
 			await waitForScreen(tui, "Uncommitted changes", "Static review only.");
-			expect(tui.screen()).not.toContain("Reviewing uncommitted changes with faux-1");
-			expect(access.transientUsage).toBeUndefined();
 		},
 	);
 
-	it("cancels the review's work when Escape stops the loader", async () => {
+	it("leaves a completed review's findings to /work when the job list was closed before it ended", async () => {
+		const { harness, tui, access } = await start();
+		reviewRepository(harness.tempDir);
+		const discovery = Promise.withResolvers<void>();
+		const [candidates, verification] = quietReview();
+		harness.faux.setResponses([
+			async () => {
+				await discovery.promise;
+				return candidates!;
+			},
+			verification!,
+		]);
+		const source = tui.store.conversation;
+
+		await tui.submit("/review uncommitted");
+		await waitForScreen(tui, "Discovery pass");
+		// Close the list: the conversation is the user's again, and the footer's work line follows the review.
+		access.dismissWorkInspector?.();
+		await waitForScreen(tui, "Work · ● running · review");
+		access.defaultEditor.setText("typing while it runs");
+		await waitForScreen(tui, "typing while it runs");
+		discovery.resolve();
+		await waitForScreen(tui, "Review uncommitted changes completed");
+		// Nothing moved the client: the findings open from the item in /work.
+		expect(tui.store.conversation).toBe(source);
+		const work = [...tui.store.state.work.values()].find((item) => item.kind === "review");
+		expect(work).toMatchObject({ outcome: "completed" });
+		const opened = await tui.store.client.intent("review_open_session", { runId: work!.workId });
+		expect(opened.conversation).toBeDefined();
+	});
+
+	it("cancels the review's work from the job list", async () => {
 		const { harness, tui, access } = await start();
 		reviewRepository(harness.tempDir);
 		const discovery = heldTurn("never");
 		harness.faux.setResponses([discovery.response]);
 		const source = tui.store.conversation;
 
-		const review = tui.submit("/review uncommitted");
+		await tui.submit("/review uncommitted");
 		await discovery.started;
-		await waitForScreen(tui, "Reviewing uncommitted changes with faux-1");
-		tui.terminal.sendInput(ESC);
-		await review;
-		await waitForScreen(tui, "Review uncommitted changes cancelled");
+		await waitForScreen(tui, "Review uncommitted changes", "Discovery pass");
+		// Ctrl+K asks, and Enter confirms.
+		tui.terminal.sendInput("\x0b");
+		await waitForScreen(tui, "Cancel this work?");
+		tui.terminal.sendInput("\r");
+		await vi.waitFor(() => {
+			const work = [...tui.store.state.work.values()].find((item) => item.kind === "review");
+			expect(work).toMatchObject({ outcome: "cancelled" });
+		});
 		expect(tui.store.conversation).toBe(source);
-		const work = [...tui.store.state.work.values()].find((item) => item.kind === "review");
-		expect(work).toMatchObject({ outcome: "cancelled" });
-		expect(access.transientUsage).toBeUndefined();
-		// The editor is back.
+		access.dismissWorkInspector?.();
+		await waitForScreen(tui, "Review uncommitted changes cancelled");
 		access.defaultEditor.setText("after the review");
 		await waitForScreen(tui, "after the review");
+	});
+
+	it("runs several reviews at once, each its own work", async () => {
+		const { harness, tui } = await start();
+		reviewRepository(harness.tempDir);
+		const first = heldTurn("never");
+		const second = heldTurn("never");
+		harness.faux.setResponses([first.response, second.response]);
+
+		await tui.submit("/review uncommitted");
+		await first.started;
+		(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+		await tui.submit("/review uncommitted --focus second");
+		await second.started;
+		const running = [...tui.store.state.work.values()].filter(
+			(item) => item.kind === "review" && item.outcome === undefined,
+		);
+		expect(running).toHaveLength(2);
+		await stopReviews(tui);
+		await vi.waitFor(() =>
+			expect(
+				[...tui.store.state.work.values()].filter((item) => item.kind === "review").map((item) => item.outcome),
+			).toEqual(["cancelled", "cancelled"]),
+		);
 	});
 
 	it("offers base branches and recent commits from the host's review completions", async () => {
@@ -648,8 +722,8 @@ describe("TUI reviews", () => {
 		await waitForScreen(tui, "Review options");
 		tui.terminal.sendInput("\r");
 		await discovery.started;
-		await waitForScreen(tui, "Reviewing");
-		tui.terminal.sendInput(ESC);
+		await waitForScreen(tui, "Discovery pass");
+		await stopReviews(tui);
 		await review;
 
 		const commit = tui.submit("/review commit");
@@ -698,6 +772,7 @@ describe("TUI reviews", () => {
 		tui.terminal.sendInput(RIGHT);
 		tui.terminal.sendInput("\r");
 		await discovery.started;
+		closeJobList(tui);
 		await waitForScreen(tui, "Equivalent command: /review uncommitted --focus auth");
 		expect(reviewInputs(intent)).toEqual([
 			{
@@ -709,7 +784,7 @@ describe("TUI reviews", () => {
 				scopeMode: "full",
 			},
 		]);
-		tui.terminal.sendInput(ESC);
+		await stopReviews(tui);
 		await review;
 	});
 
@@ -725,9 +800,10 @@ describe("TUI reviews", () => {
 		await waitForScreen(tui, "Review options");
 		tui.terminal.sendInput("\r");
 		await discovery.started;
+		closeJobList(tui);
 		await waitForScreen(tui, "Equivalent command: /review uncommitted");
 		expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
-		tui.terminal.sendInput(ESC);
+		await stopReviews(tui);
 		await review;
 	});
 
@@ -762,7 +838,7 @@ describe("TUI reviews", () => {
 		expect(tui.screen()).not.toContain("Review options");
 		expect(tui.screen()).not.toContain("Equivalent command");
 		expect(reviewInputs(intent)).toEqual([{ target: "branch", base: "main", effort: "high", scope: "src/**" }]);
-		tui.terminal.sendInput(ESC);
+		await stopReviews(tui);
 		await review;
 	});
 
@@ -868,9 +944,11 @@ describe("TUI reviews", () => {
 				{ target: "uncommitted", engine: ENGINE, focus: "auth", engineParams: { workers: 4, waveSize: 2 } },
 			]);
 			expect(swarm.runs[0]?.params).toEqual({ workers: 4, waveSize: 2, thinking: "high" });
-			tui.terminal.sendInput(ESC);
+			await stopReviews(tui);
 			await review;
-			expect(harness.startup.session.work.get(swarm.runs[0]!.workId)).toMatchObject({ outcome: "cancelled" });
+			await vi.waitFor(() =>
+				expect(harness.startup.session.work.get(swarm.runs[0]!.workId)).toMatchObject({ outcome: "cancelled" }),
+			);
 		});
 
 		it("opens its findings in a new conversation, as any review's", async () => {
@@ -929,7 +1007,7 @@ describe("TUI reviews", () => {
 			const review = tui.submit("/review uncommitted --engine standard");
 			await discovery.started;
 			expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
-			tui.terminal.sendInput(ESC);
+			await stopReviews(tui);
 			await review;
 		});
 
@@ -956,16 +1034,16 @@ describe("TUI reviews", () => {
 
 		const review = tui.submit("/review branch-uncommitted main");
 		await discovery.started;
-		await waitForScreen(tui, "Reviewing branch and uncommitted changes vs main");
+		await waitForScreen(tui, "Review branch and uncommitted changes");
 		expect(intent).toHaveBeenCalledWith(
 			"review",
 			expect.objectContaining({ target: "branch_uncommitted", base: "main" }),
 		);
-		tui.terminal.sendInput(ESC);
+		await stopReviews(tui);
 		await review;
 	});
 
-	it("refuses a second review while one runs, and reviews with the configured auxiliary tools", async () => {
+	it("reviews with the configured auxiliary tools, and says which it omitted", async () => {
 		const { harness, tui } = await start({ globalSettings: { reviewTools: ["bash", "missing-tool"] } });
 		reviewRepository(harness.tempDir);
 		const discovery = heldTurn("never");
@@ -974,14 +1052,13 @@ describe("TUI reviews", () => {
 
 		const review = tui.submit("/review uncommitted");
 		await discovery.started;
+		closeJobList(tui);
 		await waitForScreen(tui, "Some configured auxiliary review tools are unavailable and were omitted.");
 		expect(intent).toHaveBeenCalledWith(
 			"review",
 			expect.objectContaining({ target: "uncommitted", tools: ["bash"] }),
 		);
-		await tui.submit("/review uncommitted");
-		await waitForScreen(tui, "A review is already running. Cancel it before starting another.");
-		tui.terminal.sendInput(ESC);
+		await stopReviews(tui);
 		await review;
 	});
 });
