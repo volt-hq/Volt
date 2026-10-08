@@ -396,8 +396,10 @@ export class McpServerSupervisor {
 				enabled:
 					cachedMetadata?.tools.filter((tool) => serverMatchesToolFilters(this.server, tool.name)).length ?? 0,
 			},
-			resourceCount: cachedMetadata?.resources.length,
-			promptCount: cachedMetadata?.prompts.length,
+			// Omitted, not undefined, until metadata is cached: tool results reject undefined properties.
+			...(cachedMetadata
+				? { resourceCount: cachedMetadata.resources.length, promptCount: cachedMetadata.prompts.length }
+				: {}),
 			recentCalls: this.recentCalls,
 			...(this.lastErrorValue ? { lastError: this.lastErrorValue } : {}),
 			...(this.lastConnectedAtValue ? { lastConnectedAt: this.lastConnectedAtValue } : {}),
