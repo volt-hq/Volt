@@ -33,6 +33,10 @@ export interface IntentCommandField {
 	readonly default?: IntentCommandValue;
 	/** An enum's values. */
 	readonly options?: readonly string[];
+	/** The options form shows it; a flag only is not in the form. */
+	readonly inForm: boolean;
+	/** Values a client suggests for a string flag, which the host does not complete. */
+	readonly suggestions?: readonly IntentCommandOption[];
 	/** A string that holds a comma-separated list. */
 	readonly list: boolean;
 	/** An enum set by a bare flag per value (`--full`), not `--name value`. */
@@ -185,9 +189,12 @@ export function readCommandHints(
 	const properties = isRecord(input.properties) ? input.properties : {};
 
 	const formNames = stringList(declared.form ?? [], "form");
+	const flagNames = stringList(declared.flags ?? [], "flags");
 	const listNames = new Set(stringList(declared.lists ?? [], "lists"));
 	const bareNames = new Set(stringList(declared.flagValues ?? [], "flagValues"));
-	if (new Set(formNames).size !== formNames.length) throw new IntentCommandHintsError("form names a property twice");
+	if (new Set([...formNames, ...flagNames]).size !== formNames.length + flagNames.length) {
+		throw new IntentCommandHintsError("form and flags name a property twice");
+	}
 
 	let keyword: IntentCommandKeyword | undefined;
 	if (declared.keyword !== undefined) {
@@ -233,9 +240,10 @@ export function readCommandHints(
 	}
 
 	const fields: IntentCommandField[] = [];
-	for (const name of formNames) {
-		if (name === keyword?.field) throw new IntentCommandHintsError(`form: "${name}" is the keyword's property`);
-		const property = propertyOf(properties, name, "form");
+	for (const name of [...formNames, ...flagNames]) {
+		const where = formNames.includes(name) ? "form" : "flags";
+		if (name === keyword?.field) throw new IntentCommandHintsError(`${where}: "${name}" is the keyword's property`);
+		const property = propertyOf(properties, name, where);
 		const list = listNames.has(name);
 		const bare = bareNames.has(name);
 		if (list && property.kind !== "string") throw new IntentCommandHintsError(`lists: "${name}" must be a string`);
@@ -254,6 +262,7 @@ export function readCommandHints(
 			...(description === undefined ? {} : { description }),
 			...(fallback === undefined ? {} : { default: fallback }),
 			...(property.options === undefined ? {} : { options: property.options }),
+			inForm: where === "form",
 			list,
 			bare,
 			...(minimum === undefined ? {} : { minimum }),
@@ -264,7 +273,9 @@ export function readCommandHints(
 		});
 	}
 	for (const name of [...listNames, ...bareNames]) {
-		if (!formNames.includes(name)) throw new IntentCommandHintsError(`"${name}" is a flag but not in form`);
+		if (!formNames.includes(name) && !flagNames.includes(name)) {
+			throw new IntentCommandHintsError(`"${name}" is a flag but not in form or flags`);
+		}
 	}
 
 	const flags = new Map<string, IntentCommandFlag>();
@@ -511,47 +522,73 @@ export function parseIntentCommand(command: IntentCommand, text: string): Parsed
 	return { input };
 }
 
+/**
+ * The value `--name` is given in `text` (`--name value` or `--name=value`), or undefined when the text does not
+ * give one: for a client that must know a flag's value before it can parse the rest, such as the engine a review
+ * names, whose own flags the rest may use. The last one wins, as in {@link parseIntentCommand}.
+ */
+export function intentCommandFlagValue(text: string, name: string): string | undefined {
+	const { tokens, error } = tokenize(text);
+	if (error !== undefined) return undefined;
+	let found: string | undefined;
+	for (let index = 0; index < tokens.length; index++) {
+		const token = tokens[index] as string;
+		if (!token.startsWith("--")) continue;
+		const equals = token.indexOf("=");
+		if (token.slice(2, equals === -1 ? undefined : equals) !== name) continue;
+		const value = equals === -1 ? tokens[index + 1] : token.slice(equals + 1);
+		if (value !== undefined && value !== "" && (equals !== -1 || !value.startsWith("--"))) found = value;
+	}
+	return found;
+}
+
 // ============================================================================
 // The options form
 // ============================================================================
 
 /** The options form: one field per declared flag, in order, each with its default. */
 export function intentCommandForm(command: IntentCommand): UiNodeFormField[] {
-	return command.fields.map((field): UiNodeFormField => {
-		const base = {
-			id: field.name,
-			label: field.title,
-			...(field.description === undefined ? {} : { description: field.description }),
-		};
-		if (field.kind === "boolean") {
-			return { ...base, kind: "boolean", ...(typeof field.default === "boolean" ? { value: field.default } : {}) };
-		}
-		if (field.kind === "integer") {
-			return {
-				...base,
-				kind: "integer",
-				...(typeof field.default === "number" ? { value: field.default } : {}),
-				...(field.minimum === undefined ? {} : { min: field.minimum }),
-				...(field.maximum === undefined ? {} : { max: field.maximum }),
+	return command.fields
+		.filter((field) => field.inForm)
+		.map((field): UiNodeFormField => {
+			const base = {
+				id: field.name,
+				label: field.title,
+				...(field.description === undefined ? {} : { description: field.description }),
 			};
-		}
-		if (field.kind === "enum") {
+			if (field.kind === "boolean") {
+				return {
+					...base,
+					kind: "boolean",
+					...(typeof field.default === "boolean" ? { value: field.default } : {}),
+				};
+			}
+			if (field.kind === "integer") {
+				return {
+					...base,
+					kind: "integer",
+					...(typeof field.default === "number" ? { value: field.default } : {}),
+					...(field.minimum === undefined ? {} : { min: field.minimum }),
+					...(field.maximum === undefined ? {} : { max: field.maximum }),
+				};
+			}
+			if (field.kind === "enum") {
+				return {
+					...base,
+					kind: "enum",
+					options: (field.options ?? []).map((value) => ({ value })),
+					...(typeof field.default === "string" ? { value: field.default } : {}),
+				};
+			}
 			return {
 				...base,
-				kind: "enum",
-				options: (field.options ?? []).map((value) => ({ value })),
+				kind: "string",
 				...(typeof field.default === "string" ? { value: field.default } : {}),
+				...(field.minLength === undefined ? {} : { minLength: field.minLength }),
+				...(field.maxLength === undefined ? {} : { maxLength: field.maxLength }),
+				...(field.pattern === undefined ? {} : { pattern: field.pattern }),
 			};
-		}
-		return {
-			...base,
-			kind: "string",
-			...(typeof field.default === "string" ? { value: field.default } : {}),
-			...(field.minLength === undefined ? {} : { minLength: field.minLength }),
-			...(field.maxLength === undefined ? {} : { maxLength: field.maxLength }),
-			...(field.pattern === undefined ? {} : { pattern: field.pattern }),
-		};
-	});
+		});
 }
 
 /** The input a submitted options form fills: only what is set and differs from the default. */
@@ -561,6 +598,7 @@ export function intentCommandFormInput(
 ): IntentCommandInput {
 	const input: IntentCommandInput = {};
 	for (const field of command.fields) {
+		if (!field.inForm) continue;
 		const given = values[field.name];
 		if (given === undefined || given === "") continue;
 		const value = field.list && typeof given === "string" ? listEntries(given).join(",") : given;
@@ -661,9 +699,12 @@ export async function completeIntentCommand(
 	}
 
 	if (awaiting !== undefined) {
-		return (awaiting.kind === "enum" ? (awaiting.options ?? []) : [])
-			.filter((value) => value.startsWith(partial))
-			.map((value) => item(value, value));
+		if (awaiting.kind !== "enum") {
+			return (awaiting.suggestions ?? [])
+				.filter((option) => option.value.startsWith(partial))
+				.map((option) => item(quoteWord(option.value), option.label ?? option.value, option.description));
+		}
+		return (awaiting.options ?? []).filter((value) => value.startsWith(partial)).map((value) => item(value, value));
 	}
 	const completions: IntentCommandCompletion[] = [];
 	if (positional !== undefined && !partial.startsWith("--")) {

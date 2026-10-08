@@ -37,6 +37,7 @@ import {
 	type ResourceSource,
 	type Resources,
 	type RpcCatalogModel,
+	type RpcReviewEngine,
 	type ScopedModel,
 	type UiNodeStyledText,
 	type WithdrawnInput,
@@ -87,12 +88,22 @@ import {
 	formatIntentCommand,
 	type IntentCommand,
 	type IntentCommandInput,
+	intentCommandFlagValue,
 	intentCommandForm,
 	intentCommandFormInput,
 	intentCommandUsage,
 	parseIntentCommand,
 	readCommandHints,
 } from "../../client/intent-command.ts";
+import {
+	findReviewEngine,
+	type ReviewEngineStart,
+	reviewEngineInput,
+	reviewEngineWords,
+	STANDARD_ENGINE_WORD,
+	withReviewEngine,
+	withReviewEngines,
+} from "../../client/review-engine-command.ts";
 import {
 	APP_NAME,
 	APP_TITLE,
@@ -611,6 +622,10 @@ export class InteractiveMode {
 	private startupNoticesShown = false;
 	/** Whether a review this TUI started runs: its loader shows. */
 	private activeReview = false;
+	/** The review engines the host offered the last time they were read, by the client that read them. */
+	private reviewEnginesRead:
+		| { readonly client: object; readonly at: number; readonly engines: Promise<RpcReviewEngine[]> }
+		| undefined;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -996,7 +1011,8 @@ export class InteractiveMode {
 					return null;
 				}
 				if (!command) return null;
-				const completions = await completeIntentCommand(command, prefix, (field, text) =>
+				const named = this.reviewEngineCommand(command, await this.loadReviewEngines(), prefix);
+				const completions = await completeIntentCommand(named.command, prefix, (field, text) =>
 					this.reviewCompletions(field, text),
 				);
 				if (completions.length === 0) return null;
@@ -8042,6 +8058,44 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * The review engines the host offers. Completing as the user types asks often, so a read is kept a few seconds;
+	 * a host that cannot say offers none.
+	 */
+	private loadReviewEngines(fresh = false): Promise<RpcReviewEngine[]> {
+		const client = this.store.client;
+		const kept = this.reviewEnginesRead;
+		if (!fresh && kept !== undefined && kept.client === client && Date.now() - kept.at < 5_000) return kept.engines;
+		const engines = client
+			.query("review.engines", {})
+			.then((result) => result.engines)
+			.catch((): RpcReviewEngine[] => []);
+		this.reviewEnginesRead = { client, at: Date.now(), engines };
+		return engines;
+	}
+
+	/**
+	 * `command` for the line `text`: the engines offered after `--engine`, and, when the line names an engine, that
+	 * engine's own flags. An engine the host does not offer is an error naming the ones it does.
+	 */
+	private reviewEngineCommand(
+		command: IntentCommand,
+		engines: readonly RpcReviewEngine[],
+		text: string,
+	): { command: IntentCommand; engine?: RpcReviewEngine | typeof STANDARD_ENGINE_WORD; error?: string } {
+		const offered = withReviewEngines(command, engines);
+		const word = intentCommandFlagValue(text, "engine");
+		if (word === undefined) return { command: offered };
+		const engine = findReviewEngine(word, engines);
+		if (engine === undefined) {
+			return {
+				command: offered,
+				error: `Unknown review engine "${word}". Available: ${reviewEngineWords(engines).join(", ")}.`,
+			};
+		}
+		return { command: engine === STANDARD_ENGINE_WORD ? offered : withReviewEngine(offered, engine), engine };
+	}
+
+	/**
 	 * `/review`'s command, read from the grammar the conversation's review intent declares in its input schema;
 	 * undefined when the host declares none. Throws when the declaration does not fit its schema.
 	 */
@@ -8246,8 +8300,14 @@ export class InteractiveMode {
 			return;
 		}
 
-		const command = await this.loadReviewCommand();
-		if (!command) return;
+		const baseCommand = await this.loadReviewCommand();
+		if (!baseCommand) return;
+		const named = this.reviewEngineCommand(baseCommand, await this.loadReviewEngines(true), argsText);
+		if (named.error !== undefined) {
+			this.showError(named.error);
+			return;
+		}
+		const command = named.command;
 		const parsedArgs = parseIntentCommand(command, argsText);
 		if (parsedArgs.error !== undefined) {
 			this.showError(parsedArgs.error);
@@ -8283,14 +8343,16 @@ export class InteractiveMode {
 			this.showStatus(`Equivalent command: /review ${formatIntentCommand(command, input)}`);
 		}
 
-		await this.runReview(input, intentCommandUsage(command));
+		await this.runReview(reviewEngineInput(input, named.engine), intentCommandUsage(command));
 	}
 
 	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */
-	private async startReview(input: IntentCommandInput): Promise<string> {
-		const tools = await this.getReviewToolsForRun();
+	private async startReview(start: ReviewEngineStart): Promise<string> {
+		// An engine's passes are its own: the conversation's auxiliary tools are for the built-in review.
+		const tools = start.input.engine === undefined ? await this.getReviewToolsForRun() : [];
 		const accepted = await this.store.client.intent("review", {
-			...input,
+			...start.input,
+			...(start.engineParams === undefined ? {} : { engineParams: start.engineParams }),
 			...(tools.length === 0 ? {} : { tools }),
 		} as IntentInput<"review">);
 		const workId = accepted.result?.workId;
@@ -8305,7 +8367,7 @@ export class InteractiveMode {
 	 * Escape cancels it (`cancel_work`). A completed review opens its findings
 	 * in a new conversation (`review_open_session`) while the loader shows.
 	 */
-	private async runReview(input: IntentCommandInput, usage: string): Promise<void> {
+	private async runReview(start: ReviewEngineStart, usage: string): Promise<void> {
 		if (this.activeReview) {
 			this.showWarning("A review is already running. Cancel it before starting another.");
 			return;
@@ -8341,7 +8403,7 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		};
 		try {
-			workId = await this.startReview(input);
+			workId = await this.startReview(start);
 			// Escape while the review prepared cancels it as soon as it runs.
 			if (loader.signal.aborted) cancel();
 			view = new ReviewView({

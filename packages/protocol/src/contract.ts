@@ -332,6 +332,7 @@ import {
 	RpcReviewDiscussionSchema,
 	RpcStartReviewDiscussionsSchema,
 } from "./review-discussions.ts";
+import { RpcListReviewEnginesSchema, RpcReviewEngineSchema } from "./review-engines.ts";
 import {
 	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
@@ -481,6 +482,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcReviewDiscussion: RpcReviewDiscussionSchema,
 	RpcStartReviewDiscussions: RpcStartReviewDiscussionsSchema,
 	RpcListReviewDiscussions: RpcListReviewDiscussionsSchema,
+	RpcListReviewEngines: RpcListReviewEnginesSchema,
+	RpcReviewEngine: RpcReviewEngineSchema,
 	RpcResetReviewDiscussion: RpcResetReviewDiscussionSchema,
 	RpcReviewAcknowledgmentResponse: RpcReviewAcknowledgmentResponseSchema,
 	RpcReviewRunStatus: RpcReviewRunStatusSchema,

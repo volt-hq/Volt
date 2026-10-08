@@ -261,6 +261,7 @@ Remote-only intents (`set_keep_awake`, `set_web_search_key`, `upload_device_logs
 | `flagValues` | Enum properties set by a bare flag per value (`--incremental`, `--full`) instead of `--name value`. |
 | `lists` | String properties that hold a comma-separated list: the flag may repeat, and entries are trimmed and de-duplicated. |
 | `form` | The properties a client offers as flags and in an options form, in order. A flag is `--kebab-case-name value` or `--kebab-case-name=value`, and a boolean is a bare flag. A property that is not listed (`tools`, `url`) is not a flag. |
+| `flags` | Properties offered as flags only, after the form's: `engine`, which a client completes from `review.engines` and, once a line names an engine, extends with that engine's `parameters` as flags (their values go in `engineParams`). |
 
 ### Dynamic intents
 
@@ -297,6 +298,7 @@ Remote says whether the remote profile admits the query; fields marked *local* r
 | `debug_report` | | `{path}`: save a diagnostic capture of the conversation's recent tool calls (argument samples, with credentials redacted) and name the file. | no |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. | yes |
 | `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.runs` | see the contract | Durable review reads; `review.runs` pages the conversation's review runs. | yes |
+| `review.engines` | none | The review engines the conversation's extensions registered that this client may start: each engine's id (what `review`'s `engine` takes), name within its extension, label, description, cost, targets, `remoteSafe`, and `parameters` (what `engineParams` takes, declared as extension settings). A local client also gets `localOnly`, the parameters only it may set. A remote client is told only of `remoteSafe` engines, and never of their local-only parameters (not in `parameters`, not in `required`, and no `localOnly`). | yes |
 
 `changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, or after `set_model_scope`, `set_profile`, `auth.login`, or `auth.logout`; `settings` after a settings intent (`set_settings`, `set_profile`, `set_model_scope`, and the queue, retry, and compaction setters) or when any client, extension, or conversation saves extension settings; `mcp` when MCP servers change; `sessions` when the conversation's name changes, after `set_session_name` or `delete_session`, or when an intent moved the client to another conversation; `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, or an extension is enabled, disabled, or changes state; `resources` (local profile) after they reload, for the `resources` and `tools` queries; and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes. A catalog an intent changed is announced to the client that sent it.
 

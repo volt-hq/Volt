@@ -7854,6 +7854,9 @@
 					"$ref": "#/$defs/Frame.query.review.discussion_source"
 				},
 				{
+					"$ref": "#/$defs/Frame.query.review.engines"
+				},
+				{
 					"$ref": "#/$defs/Frame.query.review.general"
 				},
 				{
@@ -8713,6 +8716,36 @@
 				},
 				"params": {
 					"$ref": "#/$defs/QueryParams.review.discussions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.engines": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.engines"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
 				}
 			},
 			"additionalProperties": false
@@ -10925,6 +10958,9 @@
 					"effort",
 					"includeOptional",
 					"scopeMode"
+				],
+				"flags": [
+					"engine"
 				]
 			}
 		},
@@ -16486,6 +16522,7 @@
 				"mcp.recent_calls",
 				"review.discussions",
 				"review.discussion_source",
+				"review.engines",
 				"review.general",
 				"review.result",
 				"review.runs"
@@ -16796,6 +16833,9 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"QueryParams.review.engines": {
+			"$ref": "#/$defs/EmptyInput"
 		},
 		"QueryParams.review.general": {
 			"type": "object",
@@ -17325,6 +17365,9 @@
 		},
 		"QueryResult.review.discussions": {
 			"$ref": "#/$defs/RpcListReviewDiscussions"
+		},
+		"QueryResult.review.engines": {
+			"$ref": "#/$defs/RpcListReviewEngines"
 		},
 		"QueryResult.review.general": {
 			"type": "object",
@@ -19556,6 +19599,22 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcListReviewEngines": {
+			"type": "object",
+			"required": [
+				"engines"
+			],
+			"properties": {
+				"engines": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcReviewEngine"
+					},
+					"maxItems": 128
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcListSubagentsResponse": {
 			"type": "object",
 			"required": [
@@ -20955,6 +21014,69 @@
 				},
 				"sessionId": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewEngine": {
+			"type": "object",
+			"required": [
+				"id",
+				"name",
+				"extension",
+				"label",
+				"description",
+				"targets",
+				"remoteSafe"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 160
+				},
+				"name": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64
+				},
+				"extension": {
+					"$ref": "#/$defs/ExtensionId"
+				},
+				"label": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"cost": {
+					"type": "string"
+				},
+				"targets": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"enum": [
+							"uncommitted",
+							"branch",
+							"branch_uncommitted",
+							"pr",
+							"commit"
+						]
+					},
+					"minItems": 1
+				},
+				"remoteSafe": {
+					"type": "boolean"
+				},
+				"parameters": {
+					"$ref": "#/$defs/ExtensionSettings"
+				},
+				"localOnly": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
 				}
 			},
 			"additionalProperties": false
