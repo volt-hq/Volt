@@ -8374,13 +8374,7 @@ export class InteractiveMode {
 
 	/** Open the findings of review `workId` once it completes, if the job list still shows it then. */
 	private openFindingsWhenDone(workId: string): void {
-		const conversation = this.store.conversation;
 		const check = (): void => {
-			// The client moved to another conversation: this one's work is no longer the client's.
-			if (this.store.conversation !== conversation) {
-				unsubscribe();
-				return;
-			}
 			const item = this.work.item(workId);
 			if (item?.outcome === undefined) return;
 			unsubscribe();

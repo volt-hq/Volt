@@ -641,6 +641,7 @@ describe("TUI reviews", () => {
 			verification!,
 		]);
 		const source = tui.store.conversation;
+		const intent = vi.spyOn(tui.store.client, "intent");
 
 		await tui.submit("/review uncommitted");
 		await waitForScreen(tui, "Discovery pass");
@@ -651,10 +652,13 @@ describe("TUI reviews", () => {
 		await waitForScreen(tui, "typing while it runs");
 		discovery.resolve();
 		await waitForScreen(tui, "Review uncommitted changes completed");
-		// Nothing moved the client: the findings open from the item in /work.
+		// Nothing opens or moves: opening the findings is a round trip, so give one the time to show itself.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(intent.mock.calls.filter(([name]) => name === "review_open_session")).toEqual([]);
 		expect(tui.store.conversation).toBe(source);
 		const work = [...tui.store.state.work.values()].find((item) => item.kind === "review");
 		expect(work).toMatchObject({ outcome: "completed" });
+		// The findings open from the item in /work.
 		const opened = await tui.store.client.intent("review_open_session", { runId: work!.workId });
 		expect(opened.conversation).toBeDefined();
 	});
@@ -665,6 +669,7 @@ describe("TUI reviews", () => {
 		const discovery = heldTurn("never");
 		harness.faux.setResponses([discovery.response]);
 		const source = tui.store.conversation;
+		const intent = vi.spyOn(tui.store.client, "intent");
 
 		await tui.submit("/review uncommitted");
 		await discovery.started;
@@ -680,6 +685,9 @@ describe("TUI reviews", () => {
 		expect(tui.store.conversation).toBe(source);
 		access.dismissWorkInspector?.();
 		await waitForScreen(tui, "Review uncommitted changes cancelled");
+		// A cancelled review has no findings to open, and the list showing it does not try.
+		await new Promise((resolve) => setTimeout(resolve, 300));
+		expect(intent.mock.calls.filter(([name]) => name === "review_open_session")).toEqual([]);
 		access.defaultEditor.setText("after the review");
 		await waitForScreen(tui, "after the review");
 	});
