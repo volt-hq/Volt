@@ -182,6 +182,8 @@ export async function resolveReviewTarget(
 	cwd: string,
 	options: {
 		codeHostProvider?: CodeHostProvider;
+		/** `false`: a pull request is captured by its identity only, without the code host's context for it. */
+		pullRequestContext?: boolean;
 		signal?: AbortSignal;
 		onProgress?: (message: string) => void;
 	} = {},
@@ -190,6 +192,7 @@ export async function resolveReviewTarget(
 		maxCommitRefBytes: MAX_REVIEW_COMMIT_REF_BYTES,
 		maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 		codeHostProvider: options.codeHostProvider,
+		pullRequestContext: options.pullRequestContext,
 		signal: options.signal,
 		onProgress: options.onProgress,
 	});

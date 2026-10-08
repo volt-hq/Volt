@@ -7,6 +7,7 @@ import {
 	resolveNumberedReviewPullRequest,
 } from "./github-cli-review-target.ts";
 import type {
+	PullRequestFetchPlan,
 	ReviewCodeHostActor,
 	ReviewCodeHostContextCaptureOptions,
 	ReviewCodeHostContextCaptureResult,
@@ -14,6 +15,7 @@ import type {
 	ReviewCodeHostContextLimitationCode,
 	ReviewCodeHostContextManifest,
 	ReviewCodeHostDiscussionEntry,
+	ReviewCodeHostIdentityCaptureResult,
 	ReviewCodeHostLinkedIssue,
 	ReviewPullRequestAuthor,
 	ReviewPullRequestCheckSummary,
@@ -1024,7 +1026,7 @@ async function finalHeadCheck(
 	cwd: string,
 	pullRequest: PullRequestView,
 	signal?: AbortSignal,
-): Promise<ReviewCodeHostContextCaptureResult | undefined> {
+): Promise<Extract<ReviewCodeHostContextCaptureResult, { ok: false }> | undefined> {
 	const result = await runGh(["pr", "view", pullRequest.url, "--json", "headRefOid"], cwd, undefined, signal);
 	if (!result.ok) {
 		return {
@@ -1051,10 +1053,26 @@ async function finalHeadCheck(
 	return undefined;
 }
 
-export async function capturePullRequestContextWithGitHubCli(
-	options: ReviewCodeHostContextCaptureOptions,
-): Promise<ReviewCodeHostContextCaptureResult> {
-	const initialLimitations: ReviewCodeHostContextLimitation[] = [];
+/** A pull request the selection resolved to: by number, or the current branch's. */
+type ResolvedPullRequest = Extract<
+	Awaited<ReturnType<typeof resolveNumberedReviewPullRequest> | ReturnType<typeof resolveCurrentReviewPullRequest>>,
+	{ ok: true }
+>;
+
+type LoadedPullRequest =
+	| {
+			ok: true;
+			target: ResolvedPullRequest;
+			github: GitHubContextSource;
+			pullRequest: PullRequestView;
+			/** What parsing the metadata left out, which the captured context's manifest reports. */
+			limitations: ReviewCodeHostContextLimitation[];
+	  }
+	| { ok: false; error: string; remoteError?: string };
+
+/** Resolve the selected pull request and read its metadata and checks: everything but its linked issues and discussion. */
+async function loadPullRequest(options: ReviewCodeHostContextCaptureOptions): Promise<LoadedPullRequest> {
+	const limitations: ReviewCodeHostContextLimitation[] = [];
 	options.onProgress?.("Loading pull request metadata…");
 	const target = options.number
 		? await resolveNumberedReviewPullRequest(options)
@@ -1102,7 +1120,7 @@ export async function capturePullRequestContextWithGitHubCli(
 		};
 	}
 	const metadata = value.data.repository.pullRequest;
-	const pullRequest = parsePullRequestView(metadata, options.maxPullRequestNumber, initialLimitations, Date.now());
+	const pullRequest = parsePullRequestView(metadata, options.maxPullRequestNumber, limitations, Date.now());
 	if (!pullRequest)
 		return {
 			ok: false,
@@ -1124,6 +1142,60 @@ export async function capturePullRequestContextWithGitHubCli(
 	pullRequest.url = locator.url;
 	const checks = await capturePullRequestChecks(github, metadata, pullRequest.headRefOid, options.signal);
 	if (checks) pullRequest.checks = checks;
+	return { ok: true, target, github, pullRequest, limitations };
+}
+
+function pullRequestIdentity(pullRequest: PullRequestView): ReviewPullRequestIdentity {
+	return {
+		providerId: "github",
+		number: pullRequest.number,
+		title: pullRequest.title,
+		body: pullRequest.body,
+		url: pullRequest.url,
+		baseRefName: pullRequest.baseRefName,
+		headRefName: pullRequest.headRefName,
+		baseRefOid: pullRequest.baseRefOid,
+		headRefOid: pullRequest.headRefOid,
+		...(pullRequest.author ? { author: { ...pullRequest.author } } : {}),
+		...(pullRequest.reviewState ? { reviewState: pullRequest.reviewState } : {}),
+		...(pullRequest.mergeability ? { mergeability: pullRequest.mergeability } : {}),
+		...(pullRequest.checks ? { checks: { ...pullRequest.checks } } : {}),
+		...(pullRequest.observedAt === undefined ? {} : { observedAt: pullRequest.observedAt }),
+	};
+}
+
+function pullRequestFetchPlan(target: ResolvedPullRequest, identity: ReviewPullRequestIdentity): PullRequestFetchPlan {
+	return {
+		remote: target.remote,
+		remoteUrl: target.remoteUrl,
+		base: { remoteRef: `refs/heads/${identity.baseRefName}`, localRef: "refs/review/base" },
+		head: { remoteRef: `refs/pull/${identity.number}/head`, localRef: "refs/review/head" },
+		diffCommand: `gh pr diff ${identity.url}`,
+	};
+}
+
+/**
+ * The pull request's identity and fetch plan, without its linked issues, comments, reviews, or threads: none of
+ * those are requested. The head is checked once more, as a full capture checks it.
+ */
+export async function capturePullRequestIdentityWithGitHubCli(
+	options: ReviewCodeHostContextCaptureOptions,
+): Promise<ReviewCodeHostIdentityCaptureResult> {
+	const loaded = await loadPullRequest(options);
+	if (!loaded.ok) return loaded;
+	options.onProgress?.("Verifying pull request head…");
+	const finalError = await finalHeadCheck(options.cwd, loaded.pullRequest, options.signal);
+	if (finalError) return finalError;
+	const identity = pullRequestIdentity(loaded.pullRequest);
+	return { ok: true, pullRequest: identity, fetchPlan: pullRequestFetchPlan(loaded.target, identity) };
+}
+
+export async function capturePullRequestContextWithGitHubCli(
+	options: ReviewCodeHostContextCaptureOptions,
+): Promise<ReviewCodeHostContextCaptureResult> {
+	const loaded = await loadPullRequest(options);
+	if (!loaded.ok) return loaded;
+	const { target, github, pullRequest, limitations: initialLimitations } = loaded;
 
 	options.onProgress?.("Capturing pull request context…");
 	const closingLimitations: ReviewCodeHostContextLimitation[] = [];
@@ -1249,22 +1321,7 @@ export async function capturePullRequestContextWithGitHubCli(
 	const finalError = await finalHeadCheck(options.cwd, pullRequest, options.signal);
 	if (finalError) return finalError;
 
-	const identity: ReviewPullRequestIdentity = {
-		providerId: "github",
-		number: pullRequest.number,
-		title: pullRequest.title,
-		body: pullRequest.body,
-		url: pullRequest.url,
-		baseRefName: pullRequest.baseRefName,
-		headRefName: pullRequest.headRefName,
-		baseRefOid: pullRequest.baseRefOid,
-		headRefOid: pullRequest.headRefOid,
-		...(pullRequest.author ? { author: { ...pullRequest.author } } : {}),
-		...(pullRequest.reviewState ? { reviewState: pullRequest.reviewState } : {}),
-		...(pullRequest.mergeability ? { mergeability: pullRequest.mergeability } : {}),
-		...(pullRequest.checks ? { checks: { ...pullRequest.checks } } : {}),
-		...(pullRequest.observedAt === undefined ? {} : { observedAt: pullRequest.observedAt }),
-	};
+	const identity = pullRequestIdentity(pullRequest);
 	const capturedAt = new Date().toISOString();
 	const createManifest = (
 		renderedLinkedIssueCount: number,
@@ -1306,13 +1363,7 @@ export async function capturePullRequestContextWithGitHubCli(
 			return {
 				ok: true,
 				pullRequest: identity,
-				fetchPlan: {
-					remote: target.remote,
-					remoteUrl: target.remoteUrl,
-					base: { remoteRef: `refs/heads/${identity.baseRefName}`, localRef: "refs/review/base" },
-					head: { remoteRef: `refs/pull/${identity.number}/head`, localRef: "refs/review/head" },
-					diffCommand: `gh pr diff ${identity.url}`,
-				},
+				fetchPlan: pullRequestFetchPlan(target, identity),
 				context: {
 					manifest,
 					linkedIssues,

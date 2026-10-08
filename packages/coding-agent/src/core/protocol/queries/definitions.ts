@@ -15,7 +15,12 @@ import type { McpGatewayExecutionContext } from "../../mcp/types.ts";
 import { listAuthProviders } from "../../provider-auth.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../remote/iroh/agent-options.ts";
 import { getReviewGeneral } from "../../review-links.ts";
-import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalReviewRuns } from "../../review-state.ts";
+import {
+	getCanonicalReviewRun,
+	type HydratedReviewRunRecord,
+	listCanonicalReviewRuns,
+	reviewRunEngine,
+} from "../../review-state.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-target-metadata.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "../../review-usage.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
@@ -611,6 +616,7 @@ export function projectReviewRun(record: HydratedReviewRunRecord, includeResult:
 	return {
 		runId: record.runId,
 		workflowAction: record.workflowAction,
+		engine: reviewRunEngine(record),
 		status: record.status,
 		startedAt: record.startedAt,
 		endedAt: record.endedAt,

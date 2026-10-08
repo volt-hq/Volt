@@ -25,6 +25,8 @@ import {
 	exportCanonicalReviewFeedback,
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
+	reviewRunEngine,
+	STANDARD_REVIEW_ENGINE,
 } from "../../review-state.ts";
 import { localOnlyInput, targetOf } from "./conversation.ts";
 import { boundedDisplayString, MAX_INTENT_COMPLETIONS, MAX_INTENT_LABEL_LENGTH } from "./dynamic.ts";
@@ -367,6 +369,11 @@ export const reviewRerunIntent = defineIntent({
 	sourceOwned: true,
 	async run(ctx, input) {
 		const record = await durableReviewRun(ctx, input.runId);
+		// A rerun replays the built-in pipeline: an engine's run is not one it can reproduce.
+		const engine = reviewRunEngine(record);
+		if (engine !== STANDARD_REVIEW_ENGINE) {
+			throw new IntentRejectedError("invalid_input", `This review ran on the ${engine} engine and cannot be rerun`);
+		}
 		// Reruns take the remote review options on every host, as they always have.
 		return runReview(ctx, reviewTargetForRerun(record), {
 			remote: true,

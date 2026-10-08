@@ -30,6 +30,7 @@ export type {
 	ReviewCodeHostContextLimitationCode,
 	ReviewCodeHostContextManifest,
 	ReviewCodeHostDiscussionEntry,
+	ReviewCodeHostIdentityCaptureResult,
 	ReviewCodeHostInlineComment,
 	ReviewCodeHostLinkedIssue,
 	ReviewCodeHostPublishRequest,

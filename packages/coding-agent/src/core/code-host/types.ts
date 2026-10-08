@@ -126,6 +126,16 @@ export type ReviewCodeHostContextCaptureResult =
 	  }
 	| { ok: false; error: string; remoteError?: string };
 
+/** A pull request's identity and fetch plan, captured without its linked issues and discussion. */
+export type ReviewCodeHostIdentityCaptureResult =
+	| {
+			ok: true;
+			pullRequest: ReviewPullRequestIdentity;
+			fetchPlan: PullRequestFetchPlan;
+			context?: undefined;
+	  }
+	| { ok: false; error: string; remoteError?: string };
+
 export interface ReviewCodeHostContextCaptureOptions {
 	cwd: string;
 	number?: string;
@@ -290,6 +300,13 @@ export interface CodeHostProvider {
 	probeCurrentPullRequest(cwd: string, signal?: AbortSignal): Promise<CodeHostPullRequestSummary | undefined>;
 	resolvePullRequestCheckout(options: ResolvePullRequestCheckoutOptions): Promise<ResolvePullRequestCheckoutResult>;
 	capturePullRequestContext(options: ReviewCodeHostContextCaptureOptions): Promise<ReviewCodeHostContextCaptureResult>;
+	/**
+	 * The pull request's identity and fetch plan only: no linked issues, comments, reviews, or threads are read,
+	 * so a snapshot of it carries no code-host context. For a review engine that never reads that text.
+	 */
+	capturePullRequestIdentity(
+		options: ReviewCodeHostContextCaptureOptions,
+	): Promise<ReviewCodeHostIdentityCaptureResult>;
 	verifyPullRequestHead(cwd: string, pullRequest: ReviewPullRequestIdentity): Promise<void>;
 	publishPullRequestReview(request: ReviewCodeHostPublishRequest): Promise<ReviewCodeHostPublishResult>;
 }

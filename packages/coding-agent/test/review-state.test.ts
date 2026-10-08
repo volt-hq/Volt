@@ -26,6 +26,8 @@ import {
 	type ReviewRunRecord,
 	reconcileFindingIdentities,
 	restoreReviewStateFromHandoff,
+	reviewRunEngine,
+	STANDARD_REVIEW_ENGINE,
 } from "../src/core/review-state.ts";
 import { createReviewFileMetadata } from "../src/core/review-target-metadata.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -664,6 +666,106 @@ describe("durable review state", () => {
 			mode: "incremental",
 			previousRun: { runId: "run-1" },
 			changedPaths: [],
+		});
+	});
+
+	describe("review engines", () => {
+		const SWARM = "ext:swarm-review/swarm";
+		const controls = {
+			scope: [],
+			effort: "standard" as const,
+			includeOptional: false,
+			scopeMode: "incremental" as const,
+		};
+
+		function engineRecord(runId: string, endedAt: number, engine = SWARM): ReviewRunRecord {
+			return { ...record(runId, endedAt), engine };
+		}
+
+		it("names the built-in pipeline when a run records no engine, and writes none for it", () => {
+			expect(reviewRunEngine(record("run-1", 1))).toBe(STANDARD_REVIEW_ENGINE);
+			expect(reviewRunEngine(engineRecord("run-2", 2))).toBe(SWARM);
+			const built = (engine?: string) =>
+				createReviewRunRecord({
+					workflowId: "review:engine",
+					workflowAction: "review.branch",
+					...(engine === undefined ? {} : { engine }),
+					startedAt: 1,
+					snapshot: snapshot("new-blob"),
+					controls,
+					status: "completed",
+					result: result(),
+				});
+			expect(built()).not.toHaveProperty("engine");
+			expect(built(SWARM)).toMatchObject({ engine: SWARM });
+			for (const invalid of [STANDARD_REVIEW_ENGINE, "swarm", "ext:swarm-review", "ext:/swarm", "ext:a/b/c", ""]) {
+				expect(() => built(invalid)).toThrow("Invalid review engine");
+			}
+		});
+
+		it("keeps an engine's runs and drops a record naming a malformed engine", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(manager.logWriter, engineRecord("run-engine", 2));
+			await appendReviewRun(manager.logWriter, { ...record("run-standard", 1) });
+			await appendReviewRun(manager.logWriter, { ...record("run-forged", 3), engine: "standard" });
+			await appendReviewRun(manager.logWriter, { ...record("run-garbled", 4), engine: "ext:" });
+			expect(listReviewRuns(manager, { limit: 10 }).runs.map((run) => [run.runId, reviewRunEngine(run)])).toEqual([
+				["run-engine", SWARM],
+				["run-standard", STANDARD_REVIEW_ENGINE],
+			]);
+		});
+
+		it("lists the runs of one engine", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(manager.logWriter, record("run-1", 1));
+			await appendReviewRun(manager.logWriter, engineRecord("run-2", 2));
+			await appendReviewRun(manager.logWriter, record("run-3", 3));
+			await appendReviewRun(manager.logWriter, engineRecord("run-4", 4));
+			const ids = (engine?: string) =>
+				listReviewRuns(manager, { limit: 10, ...(engine === undefined ? {} : { engine }) }).runs.map(
+					(run) => run.runId,
+				);
+			expect(ids()).toEqual(["run-4", "run-3", "run-2", "run-1"]);
+			expect(ids(STANDARD_REVIEW_ENGINE)).toEqual(["run-3", "run-1"]);
+			expect(ids(SWARM)).toEqual(["run-4", "run-2"]);
+			expect(ids("ext:other/engine")).toEqual([]);
+			const page = listReviewRuns(manager, { limit: 1, engine: SWARM });
+			expect(page.runs.map((run) => run.runId)).toEqual(["run-4"]);
+			expect(listReviewRuns(manager, { limit: 1, engine: SWARM, cursor: page.nextCursor }).runs[0]?.runId).toBe(
+				"run-2",
+			);
+		});
+
+		it("never builds an incremental review on another engine's run", async () => {
+			const manager = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(manager.logWriter, record("run-standard", 1));
+			// The newest run is the engine's: the built-in pipeline still continues its own.
+			await appendReviewRun(manager.logWriter, engineRecord("run-engine", 2));
+			expect(planIncrementalReview(manager, snapshot("blob-run-standard"), controls)).toMatchObject({
+				mode: "incremental",
+				previousRun: { runId: "run-standard" },
+			});
+			expect(planIncrementalReview(manager, snapshot("blob-run-engine"), controls, { engine: SWARM })).toMatchObject(
+				{ mode: "incremental", previousRun: { runId: "run-engine" } },
+			);
+			// A parent run of another engine is no prior run, even when named.
+			expect(
+				planIncrementalReview(manager, snapshot("blob-run-engine"), controls, { parentRunId: "run-engine" }),
+			).toMatchObject({ mode: "full", fallbackReason: "The prior review came from another review engine." });
+			expect(
+				planIncrementalReview(manager, snapshot("blob-run-standard"), controls, {
+					parentRunId: "run-standard",
+					engine: SWARM,
+				}),
+			).toMatchObject({ mode: "full", fallbackReason: "The prior review came from another review engine." });
+			// With no run of its own, an engine reviews in full.
+			const alone = SessionManager.inMemory("/tmp/review-state");
+			await appendReviewRun(alone.logWriter, record("run-standard", 1));
+			expect(planIncrementalReview(alone, snapshot("blob-run-standard"), controls, { engine: SWARM })).toMatchObject(
+				{
+					mode: "full",
+				},
+			);
 		});
 	});
 

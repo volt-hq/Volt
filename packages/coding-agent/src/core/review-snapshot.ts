@@ -163,6 +163,12 @@ export interface ResolveReviewSnapshotOptions {
 	maxCommitRefBytes: number;
 	maxPullRequestNumber: number;
 	codeHostProvider?: CodeHostProvider;
+	/**
+	 * A pull request snapshot also carries the code host's context for it (linked issues, comments, reviews, and
+	 * threads) unless this is `false`: the snapshot then has the pull request's identity only, no `codeHostContext`,
+	 * and so none of the protections that context brings (a context-blind presentation pass).
+	 */
+	pullRequestContext?: boolean;
 	limits?: Partial<ReviewSnapshotLimits>;
 	signal?: AbortSignal;
 	onProgress?: (message: string) => void;
@@ -3297,14 +3303,18 @@ export async function resolveReviewSnapshot(
 					};
 				}
 				const codeHostProvider = options.codeHostProvider ?? githubCliCodeHostProvider;
-				const captured = await codeHostProvider.capturePullRequestContext({
+				const capture = {
 					cwd: root,
 					...(normalized ? { number: normalized } : {}),
 					...(target.expectedUrl === undefined ? {} : { expectedUrl: target.expectedUrl }),
 					maxPullRequestNumber: options.maxPullRequestNumber,
 					signal: options.signal,
 					onProgress: options.onProgress,
-				});
+				};
+				const captured =
+					options.pullRequestContext === false
+						? await codeHostProvider.capturePullRequestIdentity(capture)
+						: await codeHostProvider.capturePullRequestContext(capture);
 				if (!captured.ok) return captured;
 				const { pullRequest, fetchPlan } = captured;
 				if (pullRequest.providerId !== codeHostProvider.id) {
