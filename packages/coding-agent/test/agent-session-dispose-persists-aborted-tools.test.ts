@@ -11,9 +11,11 @@
  */
 
 import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { fauxToolCall } from "@hansjm10/volt-ai";
 import { type Static, Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { createHarness as createSeededHarness } from "./suite/harness.ts";
 import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
 import { appendsEntryType, injectFaultyLog } from "./utilities/faulty-log.ts";
 
@@ -393,6 +395,39 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		} finally {
 			releaseFlush();
 			harness.cleanup();
+		}
+	});
+
+	it("persists no result for a tool call of an errored turn, but one for an aborted turn's", async () => {
+		// The provider rejected the first turn, so a result saying the session closed would be false. The
+		// second was cut off by the close, and its result records that the call never started.
+		const rejected = fauxToolCall("write", { path: "rejected.ts" });
+		const interrupted = fauxToolCall("read", { path: "interrupted.ts" });
+		const dangling = fauxToolCall("read", { path: "dangling.ts" });
+		const harness = await createSeededHarness({
+			seed: (seed) =>
+				seed
+					.user("Update the files", { timestamp: 1 })
+					.assistant("", {
+						toolCalls: [rejected],
+						stopReason: "error",
+						error: { kind: "invalid_tool_call", retryable: false, message: "Tool arguments were invalid" },
+					})
+					.user("Try again", { timestamp: 2 })
+					.assistant("", { toolCalls: [interrupted], stopReason: "aborted" })
+					.user("Continue", { timestamp: 3 })
+					.assistant("", { toolCalls: [dangling] }),
+		});
+		try {
+			harness.session.dispose();
+			await harness.session.waitForClosed();
+
+			const results = harness.sessionManager
+				.getConversationState()
+				.context.messages.filter((message) => message.role === "toolResult");
+			expect(results.map((message) => message.toolCallId)).toEqual([interrupted.id, dangling.id]);
+		} finally {
+			await harness.cleanupAsync();
 		}
 	});
 });
