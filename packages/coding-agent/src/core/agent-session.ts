@@ -61,6 +61,7 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import { ReviewEngineRegistry } from "./review-engine.ts";
 import { ReviewPasses } from "./review-passes.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
@@ -434,6 +435,8 @@ export class AgentSession {
 	 * any left.
 	 */
 	readonly reviewPasses = new ReviewPasses();
+	/** The review engines this session can run besides the built-in pipeline. */
+	readonly reviewEngines = new ReviewEngineRegistry();
 	/** The work kinds the extensions declare, registered while their runner generation is current. */
 	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
 	/**

@@ -224,6 +224,7 @@ describe("protocol client of an in-process host", () => {
 			"number",
 			"url",
 			"ref",
+			"engine",
 			"focus",
 			"scope",
 			"effort",

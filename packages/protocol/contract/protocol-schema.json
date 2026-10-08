@@ -10820,6 +10820,13 @@
 					"title": "Commit",
 					"minLength": 1
 				},
+				"engine": {
+					"type": "string",
+					"title": "Engine",
+					"description": "The review engine: standard (the default) or an extension's engine by id.",
+					"minLength": 1,
+					"maxLength": 160
+				},
 				"focus": {
 					"type": "string",
 					"title": "Focus",
