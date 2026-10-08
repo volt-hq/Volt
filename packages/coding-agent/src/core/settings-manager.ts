@@ -738,17 +738,32 @@ export class SettingsManager {
 		}
 	}
 
-	/** Why parts of loaded settings are ignored. */
+	/** Why parts of loaded settings are ignored, in the settings themselves and in each of their profiles. */
 	private static shapeErrors(settings: Settings): Error[] {
+		const errors = SettingsManager.shapeErrorsAt(settings, "");
+		if (isSettingsRecord(settings.profiles)) {
+			for (const [name, profile] of Object.entries(settings.profiles)) {
+				if (isSettingsRecord(profile)) errors.push(...SettingsManager.shapeErrorsAt(profile, `profiles.${name}.`));
+			}
+		}
+		return errors;
+	}
+
+	/** Shape errors of one settings object or profile; `path` prefixes the setting names in messages. */
+	private static shapeErrorsAt(settings: Pick<Settings, "extensions" | "promptCache">, path: string): Error[] {
 		const errors: Error[] = [];
 		// `extensions` holds a list of paths, which `extensionPaths` now holds.
 		if (Array.isArray(settings.extensions)) {
-			errors.push(new Error('"extensions" holds a list of paths and is ignored; rename it to "extensionPaths"'));
+			errors.push(
+				new Error(`"${path}extensions" holds a list of paths and is ignored; rename it to "${path}extensionPaths"`),
+			);
 		}
 		const retention: unknown = settings.promptCache?.retention;
 		if (retention !== undefined && retention !== "short" && retention !== "long") {
 			errors.push(
-				new Error(`"promptCache.retention" must be "short" or "long"; ${JSON.stringify(retention)} is ignored`),
+				new Error(
+					`"${path}promptCache.retention" must be "short" or "long"; ${JSON.stringify(retention)} is ignored`,
+				),
 			);
 		}
 		return errors;

@@ -1005,6 +1005,63 @@ describe("SettingsManager", () => {
 			]);
 		});
 
+		it("reports an invalid value in the active profile, naming the profile, and applies short", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					promptCache: { retention: "long" },
+					defaultProfile: "work",
+					profiles: { work: { promptCache: { retention: "forever" } } },
+				}),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors().map(({ scope, error }) => [scope, error.message])).toEqual([
+				["global", '"profiles.work.promptCache.retention" must be "short" or "long"; "forever" is ignored'],
+			]);
+		});
+
+		it("reports an invalid value in a profile that is not active, in either scope", () => {
+			writeFileSync(
+				join(agentDir, "settings.json"),
+				JSON.stringify({
+					profiles: { dev: { promptCache: { retention: 1 } }, ok: { promptCache: { retention: "long" } } },
+				}),
+			);
+			writeFileSync(
+				join(projectDir, ".volt", "settings.json"),
+				JSON.stringify({ profiles: { ci: { promptCache: { retention: "LONG" } } } }),
+			);
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors().map(({ scope, error }) => [scope, error.message])).toEqual([
+				["global", '"profiles.dev.promptCache.retention" must be "short" or "long"; 1 is ignored'],
+				["project", '"profiles.ci.promptCache.retention" must be "short" or "long"; "LONG" is ignored'],
+			]);
+		});
+
+		it("reports an invalid profile value again when settings reload", async () => {
+			const globalSettingsPath = join(agentDir, "settings.json");
+			writeFileSync(globalSettingsPath, JSON.stringify({ defaultProfile: "work", profiles: { work: {} } }));
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors()).toEqual([]);
+
+			writeFileSync(
+				globalSettingsPath,
+				JSON.stringify({ defaultProfile: "work", profiles: { work: { promptCache: { retention: "forever" } } } }),
+			);
+			await manager.reload();
+
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors().map(({ error }) => error.message)).toEqual([
+				'"profiles.work.promptCache.retention" must be "short" or "long"; "forever" is ignored',
+			]);
+		});
+
 		it("reports an invalid value again when settings reload", async () => {
 			const globalSettingsPath = join(agentDir, "settings.json");
 			const manager = SettingsManager.create(projectDir, agentDir);

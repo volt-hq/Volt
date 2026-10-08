@@ -302,7 +302,7 @@ export class ModelSettings {
 			thinkingBudgets: this.host.settingsManager.getThinkingBudgets(),
 			maxRetryDelayMs: this.host.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		});
-		// A changed retention changes when the cached prefix expires.
+		// Requests this session sent keep the window they asked for; ones from before it opened take the current retention.
 		this.host.publishPromptCacheStatus();
 	}
 

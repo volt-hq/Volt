@@ -397,6 +397,15 @@ describe("extension settings storage", () => {
 		);
 	});
 
+	it("reports an extensions path list in a profile as a setting to rename", () => {
+		const storage = new InMemorySettingsStorage();
+		storage.withLock("global", () => JSON.stringify({ profiles: { work: { extensions: ["./ext.ts"] } } }));
+		const manager = SettingsManager.fromStorage(storage);
+		expect(manager.drainErrors().map((error) => error.error.message)).toEqual([
+			'"profiles.work.extensions" holds a list of paths and is ignored; rename it to "profiles.work.extensionPaths"',
+		]);
+	});
+
 	it("notifies observers once a change is durable, not for unrelated settings", async () => {
 		const manager = SettingsManager.create(projectDir, agentDir);
 		let notified = 0;

@@ -25,15 +25,20 @@ export interface PromptCacheStatusInput {
 	model: Model<string> | undefined;
 	/** Active branch, root first. */
 	branch: readonly SessionEntry[];
+	/** Retention the next request asks for; also applies to earlier requests whose own retention is unknown. */
 	cacheRetention?: CacheRetention;
+	/**
+	 * Retention the request that started at `requestAt` was sent with, when known. A cached prefix
+	 * lives for the tier its request wrote, so a later change of `cacheRetention` does not move it.
+	 */
+	requestRetention?: (requestAt: number) => CacheRetention | undefined;
 }
 
 /** Undefined when the model does not cache or the active prefix has no prior request. */
 export function resolvePromptCacheStatus(input: PromptCacheStatusInput): PromptCacheStatus | undefined {
 	const model = input.model;
 	if (!model?.promptCache) return undefined;
-	const retention = resolvePromptCacheRetention(model, input.cacheRetention);
-	if (retention === "none") return undefined;
+	if (resolvePromptCacheRetention(model, input.cacheRetention) === "none") return undefined;
 
 	let sawRequest = false;
 	for (let index = input.branch.length - 1; index >= 0; index--) {
@@ -46,6 +51,11 @@ export function resolvePromptCacheStatus(input: PromptCacheStatusInput): PromptC
 		if (message.usage.input + message.usage.cacheRead + message.usage.cacheWrite <= 0) continue;
 		sawRequest = true;
 		if (message.provider !== model.provider || message.model !== model.id) continue;
+		const retention = resolvePromptCacheRetention(
+			model,
+			input.requestRetention?.(message.timestamp) ?? input.cacheRetention,
+		);
+		if (retention === "none") return undefined;
 		const ttlSeconds = model.promptCache.retention[retention]?.ttlSeconds;
 		return {
 			kind: "retained",

@@ -11,7 +11,13 @@ import type {
 	ConversationPromptCacheRefreshResult,
 	ConversationStreamOptions,
 } from "@hansjm10/volt-agent-core";
-import { type Api, type AssistantMessage, type Model, resolvePromptCacheRetention } from "@hansjm10/volt-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type CacheRetention,
+	type Model,
+	resolvePromptCacheRetention,
+} from "@hansjm10/volt-ai";
 import type { AgentSessionEvent } from "../agent-session.ts";
 import { PromptCacheAudit, promptCacheAuditUsage } from "../prompt-cache-audit.ts";
 import {
@@ -58,6 +64,13 @@ export class SessionPromptCache {
 	private readonly audit: PromptCacheAudit;
 	private readonly keepAlive: PromptCacheKeepAlive;
 	private readonly refreshAbort = new AbortController();
+	/**
+	 * Retention each provider request of this session was sent with, by request start time. A cached
+	 * prefix lives for the tier its request wrote, so a retention setting that changes later (on
+	 * reload) must not move it. Requests from before the session opened are absent; the current
+	 * retention stands in for them.
+	 */
+	private readonly requestRetention = new Map<number, CacheRetention>();
 	/**
 	 * Latest confirmed renewal of the branch request's prefix: a keepalive refresh, or a request the
 	 * provider read that is not persisted yet.
@@ -126,6 +139,7 @@ export class SessionPromptCache {
 			model: this.host.model(),
 			branch: this.host.sessionManager.getBranch(),
 			cacheRetention: this.host.cacheRetention(),
+			requestRetention: (requestAt) => this.requestRetention.get(requestAt),
 		});
 	}
 
@@ -182,6 +196,8 @@ export class SessionPromptCache {
 
 	/** A provider request started: it renews the prefix, so keepalive restarts from its start time. */
 	requestStarted(message: AssistantMessage): void {
+		// Reload is refused while a request runs, so the retention now is the one this request was sent with.
+		this.requestRetention.set(message.timestamp, this.host.cacheRetention() ?? "short");
 		if (!this.isCurrentModelMessage(message)) return;
 		const base = this.branchStatus();
 		const confirmed = this.renewal;
