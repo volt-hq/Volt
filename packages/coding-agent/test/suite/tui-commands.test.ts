@@ -24,6 +24,7 @@ import type { IntentDescriptor, QueryResult } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/index.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
+import { workOutcomeLine } from "../../src/modes/interactive/components/work-notice.ts";
 import { openBrowser } from "../../src/utils/open-browser.ts";
 import {
 	choose,
@@ -105,17 +106,43 @@ const fastProvider: ExtensionFactory = (volt: ExtensionAPI) => {
  * opens, so the next command meets the conversation and not the list.
  */
 async function stopReviews(tui: TuiModeFixture): Promise<void> {
+	const stopped: string[] = [];
 	for (const item of tui.store.state.work.values()) {
 		if (item.kind === "review" && item.outcome === undefined) {
 			await tui.store.client.intent("cancel_work", { workId: item.workId });
+			stopped.push(item.workId);
 		}
 	}
 	(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+	if (stopped.length === 0) return;
+	// A review ends after the cancel is sent, and the TUI says so in a status line a moment later. Wait for that
+	// line: a status the test waits for next would otherwise be replaced by it, as the TUI keeps one status line.
+	await vi.waitFor(
+		() => {
+			const lines = stopped.flatMap((workId) => {
+				const item = tui.store.state.work.get(workId);
+				return item?.outcome === undefined ? [] : [workOutcomeLine(item).text];
+			});
+			const screen = tui.screen().replace(/\s+/g, " ");
+			expect(lines.some((line) => screen.includes(line))).toBe(true);
+		},
+		{ timeout: 5_000 },
+	);
 }
 
-/** Close the job list a started review opens, so the status lines behind it show. */
-function closeJobList(tui: TuiModeFixture): void {
-	(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+/**
+ * Close the job list a started review opens, so the status lines behind it show. The review may be running before
+ * the TUI has opened the list on it, so wait for the list first.
+ */
+async function closeJobList(tui: TuiModeFixture): Promise<void> {
+	const access = tui.mode as unknown as ModeAccess;
+	await vi.waitFor(() => expect(access.dismissWorkInspector).toBeDefined());
+	access.dismissWorkInspector?.();
+}
+
+/** Wait for `text` on the screen, wherever the terminal wrapped it. */
+async function waitForWrappedText(tui: TuiModeFixture, text: string): Promise<void> {
+	await vi.waitFor(() => expect(tui.screen().replace(/\s+/g, " ")).toContain(text), { timeout: 5_000 });
 }
 
 /** A turn the faux provider holds open until it is released. */
@@ -780,7 +807,7 @@ describe("TUI reviews", () => {
 		tui.terminal.sendInput(RIGHT);
 		tui.terminal.sendInput("\r");
 		await discovery.started;
-		closeJobList(tui);
+		await closeJobList(tui);
 		await waitForScreen(tui, "Equivalent command: /review uncommitted --focus auth");
 		expect(reviewInputs(intent)).toEqual([
 			{
@@ -808,7 +835,7 @@ describe("TUI reviews", () => {
 		await waitForScreen(tui, "Review options");
 		tui.terminal.sendInput("\r");
 		await discovery.started;
-		closeJobList(tui);
+		await closeJobList(tui);
 		await waitForScreen(tui, "Equivalent command: /review uncommitted");
 		expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
 		await stopReviews(tui);
@@ -935,6 +962,132 @@ describe("TUI reviews", () => {
 			return { extension, runs, entered: entered.promise };
 		}
 
+		it("asks which engine after the target, with what each costs, and adds its options to the form", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({ extension: swarm.extension });
+			reviewRepository(harness.tempDir);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			const review = tui.submit("/review");
+			await choose(tui, "Uncommitted changes");
+			// The standard review is the default, so it is first; each engine says what it costs.
+			await waitForScreen(
+				tui,
+				"Review with which engine?",
+				"Standard: the built-in review (default)",
+				"Swarm: Many reviewers. Much slower than standard.",
+			);
+			await choose(tui, "Swarm: Many reviewers.");
+			// The review's own options, then the engine's.
+			await waitForScreen(tui, "Review options", "Focus", "Effort", "workers", "waveSize", "thinking");
+			// Down through focus, scope, effort, optional findings, scope mode, workers, and wave size to thinking.
+			for (let field = 0; field < 7; field++) tui.terminal.sendInput("\x1b[B");
+			tui.terminal.sendInput("\x1b[D");
+			tui.terminal.sendInput("\r");
+			await swarm.entered;
+			await closeJobList(tui);
+			await waitForScreen(tui, "Equivalent command: /review uncommitted --engine swarm --thinking low");
+			expect(reviewInputs(intent)).toEqual([
+				{ target: "uncommitted", engine: ENGINE, engineParams: { thinking: "low" } },
+			]);
+			expect(swarm.runs[0]?.params).toEqual({ workers: 30, thinking: "low" });
+			await stopReviews(tui);
+			await review;
+		});
+
+		it("offers only the engines that review the chosen target, and no row when none does", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({ extension: swarm.extension });
+			reviewRepository(harness.tempDir);
+
+			// The engine reviews uncommitted changes and branches, not a commit: straight to the form.
+			const review = tui.submit("/review");
+			await choose(tui, "Specific commit");
+			await choose(tui, "Add the value");
+			await waitForScreen(tui, "Review options");
+			expect(tui.screen()).not.toContain("Review with which engine?");
+			tui.terminal.sendInput(ESC);
+			await review;
+			await waitForScreen(tui, "Review cancelled");
+		});
+
+		it("runs the engine the reviewEngine setting names, with its flags, unless the line says standard", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({
+				extension: swarm.extension,
+				globalSettings: { reviewEngine: "swarm" },
+			});
+			reviewRepository(harness.tempDir);
+			const discovery = heldTurn("never");
+			harness.faux.setResponses([discovery.response]);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			// The engine's flags work without --engine, and the status line names where the engine came from.
+			await tui.submit("/review uncommitted --workers 4");
+			await swarm.entered;
+			await closeJobList(tui);
+			await waitForScreen(
+				tui,
+				"Reviewing with the Swarm engine (the reviewEngine setting). Much slower than standard.",
+			);
+			expect(reviewInputs(intent)).toEqual([
+				{ target: "uncommitted", engine: ENGINE, engineParams: { workers: 4 } },
+			]);
+			await stopReviews(tui);
+
+			// The line overrides the setting, and the engine's flags are then the review's own flags only.
+			await tui.submit("/review uncommitted --engine standard --workers 4");
+			await waitForScreen(tui, 'Unknown or misplaced argument "--workers"');
+			await tui.submit("/review uncommitted --engine standard");
+			await discovery.started;
+			expect(reviewInputs(intent).at(-1)).toEqual({ target: "uncommitted" });
+			await stopReviews(tui);
+		});
+
+		it("puts the engine the setting names first in the launcher", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({
+				extension: swarm.extension,
+				globalSettings: { reviewEngine: "swarm" },
+			});
+			reviewRepository(harness.tempDir);
+
+			const review = tui.submit("/review");
+			await choose(tui, "Uncommitted changes");
+			await waitForScreen(tui, "Review with which engine?", "Much slower than standard. (default)");
+			const lines = tui.screen().split("\n");
+			const swarmRow = lines.findIndex((line) => line.includes("Swarm: Many reviewers."));
+			const standardRow = lines.findIndex((line) => line.includes("Standard: the built-in review"));
+			expect(swarmRow).toBeGreaterThan(-1);
+			expect(swarmRow).toBeLessThan(standardRow);
+			expect(lines[standardRow]).not.toContain("(default)");
+			tui.terminal.sendInput(ESC);
+			await review;
+			await waitForScreen(tui, "Review cancelled");
+		});
+
+		it("warns and runs the standard engine when the setting names one the host does not offer", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({
+				extension: swarm.extension,
+				globalSettings: { reviewEngine: "nothing" },
+			});
+			reviewRepository(harness.tempDir);
+			const discovery = heldTurn("never");
+			harness.faux.setResponses([discovery.response]);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			await tui.submit("/review uncommitted");
+			await discovery.started;
+			await closeJobList(tui);
+			await waitForWrappedText(
+				tui,
+				'The reviewEngine setting names "nothing", which this host does not offer. Available: standard, swarm. Reviewing with the standard engine.',
+			);
+			expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
+			await stopReviews(tui);
+		});
+
 		it("starts the engine the line names, with its own flags, and sends no auxiliary tools", async () => {
 			const swarm = swarmExtension();
 			// A tool configured for the built-in review is not the engine's: its passes are its own.
@@ -1060,7 +1213,7 @@ describe("TUI reviews", () => {
 
 		const review = tui.submit("/review uncommitted");
 		await discovery.started;
-		closeJobList(tui);
+		await closeJobList(tui);
 		await waitForScreen(tui, "Some configured auxiliary review tools are unavailable and were omitted.");
 		expect(intent).toHaveBeenCalledWith(
 			"review",

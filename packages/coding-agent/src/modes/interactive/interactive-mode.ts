@@ -99,6 +99,7 @@ import {
 	findReviewEngine,
 	type ReviewEngineStart,
 	reviewEngineInput,
+	reviewEngineWord,
 	reviewEngineWords,
 	STANDARD_ENGINE_WORD,
 	withReviewEngine,
@@ -1005,7 +1006,12 @@ export class InteractiveMode {
 					return null;
 				}
 				if (!command) return null;
-				const named = this.reviewEngineCommand(command, await this.loadReviewEngines(), prefix);
+				const named = this.reviewEngineCommand(
+					command,
+					await this.loadReviewEngines(),
+					prefix,
+					this.settingsManager.getReviewEngine(),
+				);
 				const completions = await completeIntentCommand(named.command, prefix, (field, text) =>
 					this.reviewCompletions(field, text),
 				);
@@ -8065,25 +8071,43 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * `command` for the line `text`: the engines offered after `--engine`, and, when the line names an engine, that
-	 * engine's own flags. An engine the host does not offer is an error naming the ones it does.
+	 * `command` for the line `text`: the engines offered after `--engine`, and, when the line names an engine (or
+	 * the `reviewEngine` setting does, for a line that does not), that engine's own flags. An engine named on the line
+	 * that the host does not offer is an error naming the ones it does; one the setting names is a warning, and the
+	 * review runs on the standard engine.
 	 */
 	private reviewEngineCommand(
 		command: IntentCommand,
 		engines: readonly RpcReviewEngine[],
 		text: string,
-	): { command: IntentCommand; engine?: RpcReviewEngine | typeof STANDARD_ENGINE_WORD; error?: string } {
+		defaultWord?: string,
+	): {
+		command: IntentCommand;
+		engine?: RpcReviewEngine | typeof STANDARD_ENGINE_WORD;
+		/** The engine came from the setting, not from the line. */
+		viaSetting?: true;
+		error?: string;
+		warning?: string;
+	} {
 		const offered = withReviewEngines(command, engines);
-		const word = intentCommandFlagValue(text, "engine");
+		const named = intentCommandFlagValue(text, "engine");
+		const word = named ?? defaultWord;
 		if (word === undefined) return { command: offered };
 		const engine = findReviewEngine(word, engines);
+		const available = `Available: ${reviewEngineWords(engines).join(", ")}.`;
 		if (engine === undefined) {
-			return {
-				command: offered,
-				error: `Unknown review engine "${word}". Available: ${reviewEngineWords(engines).join(", ")}.`,
-			};
+			return named === undefined
+				? {
+						command: offered,
+						warning: `The reviewEngine setting names "${word}", which this host does not offer. ${available} Reviewing with the standard engine.`,
+					}
+				: { command: offered, error: `Unknown review engine "${word}". ${available}` };
 		}
-		return { command: engine === STANDARD_ENGINE_WORD ? offered : withReviewEngine(offered, engine), engine };
+		return {
+			command: engine === STANDARD_ENGINE_WORD ? offered : withReviewEngine(offered, engine),
+			engine,
+			...(named === undefined ? { viaSetting: true as const } : {}),
+		};
 	}
 
 	/**
@@ -8293,12 +8317,15 @@ export class InteractiveMode {
 
 		const baseCommand = await this.loadReviewCommand();
 		if (!baseCommand) return;
-		const named = this.reviewEngineCommand(baseCommand, await this.loadReviewEngines(true), argsText);
+		const engines = await this.loadReviewEngines(true);
+		const named = this.reviewEngineCommand(baseCommand, engines, argsText, this.settingsManager.getReviewEngine());
 		if (named.error !== undefined) {
 			this.showError(named.error);
 			return;
 		}
-		const command = named.command;
+		if (named.warning !== undefined) this.showWarning(named.warning);
+		let command = named.command;
+		let engine = named.engine;
 		const parsedArgs = parseIntentCommand(command, argsText);
 		if (parsedArgs.error !== undefined) {
 			this.showError(parsedArgs.error);
@@ -8325,16 +8352,74 @@ export class InteractiveMode {
 			input = { ...input, ref };
 		}
 		if (launched) {
+			// The engine, when the host offers one for this target; its own options join the form.
+			const chosen = await this.promptForReviewEngine(engines, String(input.target), engine);
+			if (chosen === undefined) {
+				this.showStatus("Review cancelled");
+				return;
+			}
+			engine = chosen;
+			const offered = withReviewEngines(baseCommand, engines);
+			command = engine === STANDARD_ENGINE_WORD ? offered : withReviewEngine(offered, engine, { inForm: true });
 			const options = await this.promptForReviewOptions(command);
 			if (options === undefined) {
 				this.showStatus("Review cancelled");
 				return;
 			}
-			input = { ...input, ...options };
+			input = {
+				...input,
+				...options,
+				...(engine === STANDARD_ENGINE_WORD || engine === undefined
+					? {}
+					: { engine: reviewEngineWord(engine, engines) }),
+			};
 			this.showStatus(`Equivalent command: /review ${formatIntentCommand(command, input)}`);
+		} else if (engine !== undefined && engine !== STANDARD_ENGINE_WORD) {
+			// What the engine costs, before it starts: the launcher's selector shows it, a command line does not.
+			this.showStatus(
+				`Reviewing with the ${engine.label} engine${named.viaSetting ? " (the reviewEngine setting)" : ""}.${engine.cost === undefined ? "" : ` ${engine.cost}`}`,
+			);
 		}
 
-		await this.runReview(reviewEngineInput(input, named.engine), intentCommandUsage(command));
+		await this.runReview(reviewEngineInput(input, engine), intentCommandUsage(command));
+	}
+
+	/**
+	 * Ask which engine reviews, when the host offers one for `target`: the standard review, and each such engine
+	 * with its description and what it costs. The default (the `reviewEngine` setting, when it applies, else the
+	 * standard engine) is first. Undefined when the selector is cancelled.
+	 */
+	private async promptForReviewEngine(
+		engines: readonly RpcReviewEngine[],
+		target: string,
+		preferred: RpcReviewEngine | typeof STANDARD_ENGINE_WORD | undefined,
+	): Promise<RpcReviewEngine | typeof STANDARD_ENGINE_WORD | undefined> {
+		const usable = engines.filter((engine) => engine.targets.some((kind) => kind === target));
+		if (usable.length === 0) return STANDARD_ENGINE_WORD;
+		const fallback =
+			typeof preferred === "object" && usable.some((engine) => engine.id === preferred.id)
+				? preferred
+				: STANDARD_ENGINE_WORD;
+		const entries = [
+			{
+				engine: STANDARD_ENGINE_WORD as RpcReviewEngine | typeof STANDARD_ENGINE_WORD,
+				text: "Standard: the built-in review",
+			},
+			...usable.map((engine) => ({
+				engine,
+				text: `${engine.label}: ${engine.description}${engine.cost === undefined ? "" : ` ${engine.cost}`}`,
+			})),
+		]
+			.map((entry) => ({
+				engine: entry.engine,
+				label: `${sanitizeText(entry.text)}${entry.engine === fallback ? " (default)" : ""}`,
+			}))
+			.sort((a, b) => Number(b.engine === fallback) - Number(a.engine === fallback));
+		const choice = await this.showExtensionSelector(
+			"Review with which engine?",
+			entries.map((entry) => entry.label),
+		);
+		return choice === undefined ? undefined : entries.find((entry) => entry.label === choice)?.engine;
 	}
 
 	/** Start a review through the conversation's review intent, with the configured auxiliary tools; resolves its work id. */

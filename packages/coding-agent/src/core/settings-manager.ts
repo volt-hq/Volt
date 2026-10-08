@@ -168,6 +168,7 @@ export interface Settings {
 	reviewModel?: string; // Discovery model for /review (falls back to the session model)
 	reviewVerifierModel?: string; // Independent verification model for /review (falls back to reviewModel)
 	reviewTools?: string[]; // Optional auxiliary tool names; immutable review snapshot tools are always active
+	reviewEngine?: string; // The engine /review runs on without --engine: an extension's engine by name (default: standard)
 	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
 	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
 	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
@@ -2084,6 +2085,17 @@ export class SettingsManager {
 	setReviewVerifierModel(modelReference: string | undefined): void {
 		this.updateGlobalSettings("reviewVerifierModel", (settings) => {
 			settings.reviewVerifierModel = modelReference;
+		});
+	}
+
+	getReviewEngine(): string | undefined {
+		const engine = this.settings.reviewEngine;
+		return typeof engine === "string" && engine.trim() !== "" ? engine.trim() : undefined;
+	}
+
+	setReviewEngine(engine: string | undefined): void {
+		this.updateGlobalSettings("reviewEngine", (settings) => {
+			settings.reviewEngine = engine?.trim() || undefined;
 		});
 	}
 

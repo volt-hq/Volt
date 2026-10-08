@@ -76,13 +76,13 @@ function replaceField(command: IntentCommand, replacement: IntentCommandField): 
 	};
 }
 
-function parameterField(name: string, setting: ExtensionSetting): IntentCommandField {
+function parameterField(name: string, setting: ExtensionSetting, inForm: boolean): IntentCommandField {
 	const base = {
 		name,
 		title: setting.title ?? name,
 		...(setting.description === undefined ? {} : { description: setting.description }),
 		...(setting.default === undefined ? {} : { default: setting.default }),
-		inForm: false,
+		inForm,
 		list: false,
 		bare: false,
 	};
@@ -112,16 +112,20 @@ export function reviewEngineParameterNames(engine: RpcReviewEngine): string[] {
 
 /**
  * `command` with `engine`'s parameters as flags after the review's own, so a line that names the engine can use
- * them. A parameter named like a flag the command already has is left out: the host refuses such an engine, so
+ * them. With `inForm`, they are also fields of the options form, after the review's own. A parameter named like a flag the command already has is left out: the host refuses such an engine, so
  * this only guards a client that is told of one.
  */
-export function withReviewEngine(command: IntentCommand, engine: RpcReviewEngine): IntentCommand {
+export function withReviewEngine(
+	command: IntentCommand,
+	engine: RpcReviewEngine,
+	options: { readonly inForm?: boolean } = {},
+): IntentCommand {
 	const fields = [...command.fields];
 	const flags = new Map(command.flags);
 	for (const [name, setting] of Object.entries(engine.parameters?.properties ?? {})) {
 		const flag = kebab(name);
 		if (flags.has(flag)) continue;
-		const field = parameterField(name, setting);
+		const field = parameterField(name, setting, options.inForm === true);
 		fields.push(field);
 		flags.set(flag, { field });
 	}

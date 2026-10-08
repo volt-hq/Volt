@@ -1,6 +1,6 @@
 # Review engines and the review launcher
 
-- Status: In progress. Steps 0 through 3b are shipped. Step 4 is shipped (five pull requests, 4a through 4e; section 6). Step 5 ships as two, 5a and 5b.
+- Status: In progress. Steps 0 through 5 are shipped: step 4 as five pull requests (4a through 4e) and step 5 as two (5a and 5b; section 6).
 - Date: 2026-10-07
 - Audience: Volt maintainers and extension API implementers.
 - Scope: How `/review` and review engines that extensions provide (today the project-local `/swarm-review`) share targets, coverage, launching, running, and results.
@@ -210,7 +210,8 @@ Review
 ```
 
 - The line under Start echoes the equivalent command, so flags stay learnable and scriptable.
-- `standard` is the default engine; a setting changes it. A non-default engine shows its cost note before it starts.
+- `standard` is the default engine; the `reviewEngine` setting changes it. A non-default engine shows its cost note before it starts.
+- **Shipped (5b).** The launcher is the two-step form below (D6): the target picker, then an engine selector, then one options form. The selector appears only when the host offers an engine that reviews the chosen target, its labels carry each engine's description and cost, and the default is first and marked. The form is the review's options followed by the chosen engine's parameters, and the line under Start is the `Equivalent command:` status line. The default engine is the `reviewEngine` setting in `settings.json`: client-side and read by the TUI only, flat like `reviewModel`, so the `review` intent still defaults to `standard` and no host-settings protocol changes. It also applies to a command line that does not name an engine, where a status line gives the cost note (the launcher's selector has it in the label); a setting that names an engine the host does not offer is a warning and a standard review. `--engine standard` overrides the setting for one review.
 - A form today is one-shot with no conditional fields, so the Engine row cannot swap the Advanced fields live. The default is a two-step launcher: engine first (`ctx.ui.select` takes plain strings, so the cost note goes in the labels or the form title; `ctx.ui.dialog`, which takes a body and action buttons, is an alternative), then that engine's form. That needs no protocol change and works in the TUI and, for `remoteSafe` commands, on a phone. When a TUI and a phone are both attached, their dialogs race and the first valid answer wins. A live dependent form needs a new client frame or intent (client frames today are only hello, subscribe, unsubscribe, and host response), a patchable host request, and changes in the TUI form, the protocol contract, and volt-app (D6).
 
 ### 4.7 Swarm as an engine
@@ -263,7 +264,7 @@ Each step is its own pull request, with an issue first. This is the baseline ord
    - **4e. Swarm as an engine.** Swarm moves onto the contract (`.volt/extensions/swarm-review/`), with its options as typed parameters over typed manifest settings; its hand-written parser, its own target resolution, and `/swarm-review` go. See the end of section 4.7.
 5. **One run experience and one entry point**, in two pull requests:
    - **5a. One run experience.** `/review` starts the review and opens the job list on it for every engine, as section 4.5 describes, and the loader goes. The maintainer chose (2026-10-08) to drop the live pass view rather than keep it for `standard` or open the running pass from the list: the list's progress, steps, and detail (which carries the review's usage) are the view. The command returns once the review has started, so several reviews (up to the shared limit of three) can run at once and the conversation stays usable; a review that completes while the list shows it opens its findings and moves the client there, and otherwise a status line says how it ended and Open in `/work` opens the findings. The footer no longer shows a review's usage in place of the conversation's.
-   - **5b. The Engine row.** The launcher asks for the engine and then that engine's form (D6), `review.engine` sets the default, and a non-default engine shows its cost note before it starts.
+   - **5b. The Engine row.** The launcher asks for the engine and then that engine's form (D6). The `reviewEngine` setting sets the default (it replaces the `review.engine` this plan first named: the TUI is its only reader, and a flat client-side key needs no change to the host-settings protocol), and a non-default engine shows its cost note before it starts: in the selector's label in the launcher, and as a status line for an engine a command line or the setting chose. Only engines that review the chosen target are offered.
 
 ## 7. Decisions and open questions
 
