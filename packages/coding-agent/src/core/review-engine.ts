@@ -13,6 +13,7 @@
  * reported and the host observed, and no more.
  */
 
+import type { Api, Model } from "@hansjm10/volt-ai";
 import {
 	type ExtensionSettings,
 	ExtensionSettingsSchema,
@@ -29,6 +30,7 @@ import {
 	settingValueProblem,
 } from "./extensions/settings.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
+import type { ModelRegistry } from "./model-registry.ts";
 import { formatSchemaError } from "./protocol/schema-errors.ts";
 import {
 	controlsWithDefaults,
@@ -406,6 +408,15 @@ export interface ReviewEngineContext {
 	readonly target: ReviewEngineTarget;
 	/** The conversation's working directory. */
 	readonly cwd: string;
+	/**
+	 * The conversation's models and their credentials, for an engine that starts model sessions of its own.
+	 * Resolve the models the engine's options name here; the engine does not fall back to the conversation's.
+	 */
+	readonly modelRegistry: ModelRegistry;
+	/** The conversation's current model when the review started, if it has one: an engine may prefer its provider. */
+	readonly model: Model<Api> | undefined;
+	/** Whether the project is trusted, so project-local settings apply. */
+	isProjectTrusted(): boolean;
 	/** Fine-grained progress and detail (UI data), which clients see live. */
 	progress(progress: WorkProgress, detail?: UiNode): void;
 	/** A phase: live at once, and durable as a coarse checkpoint. */
@@ -518,7 +529,18 @@ export class ReviewEngineRun {
 
 	/** The context for an engine's run, with the work's channels. */
 	context(
-		channels: Pick<ReviewEngineContext, "workId" | "params" | "signal" | "progress" | "checkpoint" | "output">,
+		channels: Pick<
+			ReviewEngineContext,
+			| "workId"
+			| "params"
+			| "signal"
+			| "modelRegistry"
+			| "model"
+			| "isProjectTrusted"
+			| "progress"
+			| "checkpoint"
+			| "output"
+		>,
 	): ReviewEngineContext {
 		const snapshot = this.snapshot;
 		const controls = this.controls;

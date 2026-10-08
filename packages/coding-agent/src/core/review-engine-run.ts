@@ -6,6 +6,8 @@
  * cancelled when the work was. The host disposes the snapshot after the engine returns.
  */
 
+import type { Api, Model } from "@hansjm10/volt-ai";
+import type { ModelRegistry } from "./model-registry.ts";
 import { readPrReviewBinding } from "./pr-review-binding.ts";
 import {
 	controlsWithDefaults,
@@ -45,6 +47,10 @@ export interface StartEngineReviewOptions {
 	remote: boolean;
 	cwd: string;
 	work: WorkRegistry;
+	/** The conversation's models, which the engine's own sessions use. */
+	modelRegistry: ModelRegistry;
+	/** The conversation's current model. */
+	model?: Model<Api>;
 	settingsManager: Pick<SettingsManager, "isProjectTrusted">;
 	/** The conversation's log, which a pull request review's binding and the run's records belong to. */
 	sessionManager: SessionManager;
@@ -94,6 +100,9 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 					workId,
 					params,
 					signal: work.signal,
+					modelRegistry: options.modelRegistry,
+					model: options.model,
+					isProjectTrusted: () => options.settingsManager.isProjectTrusted(),
 					progress: (progress, detail) => work.progress(progress, detail),
 					checkpoint: (progress, detail) => work.checkpoint(progress, detail),
 					output: (text) => work.output(text),

@@ -1890,6 +1890,7 @@ The declaration:
 `ctx` holds:
 
 - `workId` (the review's id, which is its run id), `params` (your declared parameters, checked, with the defaults filled in), `signal` (aborted when the review is cancelled, the extensions reload, or the conversation closes), and `cwd`.
+- `modelRegistry`, `model`, and `isProjectTrusted()`: the conversation's models and credentials, its current model when the review started, and whether the project is trusted. An engine that runs model sessions of its own resolves its models here; it should not fall back to the conversation's model unasked, which could run every pass on an expensive one.
 - `target`: what is reviewed (`kind`, `description`, the git `identity` including a pull request's, the repository `root`, host text about the target, and the review's `controls`: `focus`, `scope`, `effort`, `includeOptional`).
 - `progress(progress, detail?)`, `checkpoint(progress, detail?)`, and `output(text)` report as [background work](#voltregisterworkkindname-kind) does. `detail` is [UI data](#ui-as-data) every client shows with the running review; it is normalized under your extension's action policy (an action may send your own intents and commands, and `open_work` or `cancel_work` for your own reviews, whose id is `ctx.workId`) and bounded.
 - `changedFiles()`: the changed files with their statuses, whether each is reviewable and in scope, and their hunks' ids and sizes. It carries no patch text. Receiving it counts as your engine getting the changed-file inventory, which a complete run needs.
