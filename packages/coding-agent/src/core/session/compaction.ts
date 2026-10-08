@@ -19,7 +19,7 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "@hansjm10/volt-agent-core";
-import { type Api, estimateToolDefinitionTokens, type Model } from "@hansjm10/volt-ai";
+import { type Api, applyReplayPolicy, estimateToolDefinitionTokens, type Model } from "@hansjm10/volt-ai";
 import type { ActiveCompaction, AgentSessionConfig, AgentSessionEvent, CompactionReason } from "../agent-session.ts";
 import { formatNoModelSelectedMessage } from "../auth-guidance.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
@@ -147,7 +147,8 @@ export class SessionCompaction {
 					(entry.type === "branch_summary" && entry.summary),
 			).length;
 		// Keep the full rebuilt conversation warm, including the latest response.
-		// Describe the retained suffix only in the appended checkpoint instruction.
+		// Describe the retained suffix only in the appended checkpoint instruction. The history gets the
+		// replay policy a turn's request gets, so dropped errored turns leave no unmatched tool calls.
 		return compactContext(preparation, model, {
 			sourceMessageCount: messages.length,
 			retainedMessageCount: retainedCount,
@@ -156,7 +157,7 @@ export class SessionCompaction {
 					this.host.extensionRunner().emitContext(cloneCanonicalData([...messages], "Agent message delivery")),
 				);
 				signal.throwIfAborted();
-				const llmMessages = await this.host.convertToLlm(transformed);
+				const llmMessages = applyReplayPolicy(await this.host.convertToLlm(transformed));
 				signal.throwIfAborted();
 				return {
 					systemPrompt: this.host.systemPrompt(),
