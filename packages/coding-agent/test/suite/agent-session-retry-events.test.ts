@@ -492,10 +492,10 @@ describe("AgentSession retry and event characterization", () => {
 			"message_start:assistant",
 			"message_update",
 			"message_end:assistant",
+			"prompt_cache_changed",
 			"turn_end",
 			"agent_end",
 			"agent_settled",
-			"prompt_cache_changed",
 		]);
 	});
 
@@ -522,7 +522,8 @@ describe("AgentSession retry and event characterization", () => {
 		await harness.session.prompt("hi");
 
 		expect(toolRuns).toEqual(["hello"]);
-		expect(normalizeEventOrder(harness.events)).toEqual([
+		// The second request publishes a renewed prompt cache only if it starts in a later millisecond.
+		expect(normalizeEventOrder(harness.events).filter((label) => label !== "prompt_cache_changed")).toEqual([
 			"agent_start",
 			"delivery_start",
 			"message_start:user",
@@ -543,7 +544,6 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_end",
 			"agent_end",
 			"agent_settled",
-			"prompt_cache_changed",
 		]);
 	});
 
@@ -579,11 +579,7 @@ describe("AgentSession retry and event characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(harness.events.slice(-3).map((event) => event.type)).toEqual([
-			"agent_end",
-			"agent_settled",
-			"prompt_cache_changed",
-		]);
+		expect(harness.events.slice(-2).map((event) => event.type)).toEqual(["agent_end", "agent_settled"]);
 	});
 
 	it("runs no turn when a resumed overflow's next prompt fails its construction", async () => {
@@ -645,11 +641,7 @@ describe("AgentSession retry and event characterization", () => {
 		await harness.session.abort();
 		await promptPromise;
 
-		expect(harness.events.slice(-3).map((event) => event.type)).toEqual([
-			"agent_end",
-			"agent_settled",
-			"prompt_cache_changed",
-		]);
+		expect(harness.events.slice(-2).map((event) => event.type)).toEqual(["agent_end", "agent_settled"]);
 		const lastMessage = harness.session.messages[harness.session.messages.length - 1];
 		expect(lastMessage?.role).toBe("assistant");
 		if (lastMessage?.role === "assistant") {

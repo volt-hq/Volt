@@ -86,6 +86,11 @@ export class SessionPromptCache {
 				renewal?: PromptCacheRefreshRecord;
 		  }
 		| undefined;
+	/**
+	 * The status consumers last saw: the last one published, or else the first one read through `status()`.
+	 * A session nobody has read starts with no cache, so an absent status is not announced; a reader that
+	 * was handed a retained status still hears when it becomes absent.
+	 */
 	private published: { status: PromptCacheStatus | undefined } | undefined;
 
 	constructor(host: SessionPromptCacheHost) {
@@ -115,6 +120,13 @@ export class SessionPromptCache {
 
 	/** Documented retention of the current model's reusable prompt prefix; undefined when caching does not apply. */
 	status(): PromptCacheStatus | undefined {
+		const status = this.presentedStatus();
+		this.published ??= { status };
+		return status;
+	}
+
+	/** The current status with the keepalive horizon, without recording it as seen. */
+	private presentedStatus(): PromptCacheStatus | undefined {
 		const status = this.currentStatus();
 		if (status?.kind !== "retained") return status;
 		const keepAliveUntil = this.keepAlive.keepAliveUntil();
@@ -194,8 +206,20 @@ export class SessionPromptCache {
 		return undefined;
 	}
 
-	/** A provider request started: it renews the prefix, so keepalive restarts from its start time. */
+	/**
+	 * A provider request started: it renews the prefix, so keepalive restarts from its start time and
+	 * the renewed status publishes without waiting for the turn to settle.
+	 */
 	requestStarted(message: AssistantMessage): void {
+		// The conversation's abort and failure markers are final on arrival and carry no prompt usage: no
+		// provider request was sent, so they renew nothing and must not publish a renewal that `requestEnded`
+		// would withdraw. A request in flight starts as a `stop` partial.
+		if (
+			(message.stopReason === "aborted" || message.stopReason === "error") &&
+			message.usage.input + message.usage.cacheRead + message.usage.cacheWrite <= 0
+		) {
+			return;
+		}
 		// Reload is refused while a request runs, so the retention now is the one this request was sent with.
 		this.requestRetention.set(message.timestamp, this.host.cacheRetention() ?? "short");
 		if (!this.isCurrentModelMessage(message)) return;
@@ -215,9 +239,13 @@ export class SessionPromptCache {
 			this.requestBasis = { precededBy: "none" };
 		}
 		this.keepAlive.requestStarted();
+		this.publish();
 	}
 
-	/** A provider request ended: audit it, and confirm its renewal once the provider read the prompt. */
+	/**
+	 * A provider request ended: confirm its renewal once the provider read the prompt, publish the
+	 * resulting status, and audit it.
+	 */
 	requestEnded(message: AssistantMessage): void {
 		const basis = this.requestBasis;
 		this.requestBasis = undefined;
@@ -225,11 +253,12 @@ export class SessionPromptCache {
 		const usage = message.usage;
 		if (usage.input + usage.cacheRead + usage.cacheWrite <= 0) {
 			// No evidence the provider read the prompt, so the request renewed nothing; renewals confirmed
-			// meanwhile (such as a refresh that overlapped it) stand.
-			this.keepAlive.update();
+			// meanwhile (such as a refresh that overlapped it) stand. Publishing withdraws its provisional renewal.
+			this.publish();
 			return;
 		}
 		if (basis.renewal) this.confirmRenewal(basis.renewal);
+		this.publish();
 		if (!this.isCurrentModelMessage(message)) return;
 		const model = this.host.model();
 		if (!model) return;
@@ -327,13 +356,12 @@ export class SessionPromptCache {
 		this.keepAlive.update();
 		let status: PromptCacheStatus | undefined;
 		try {
-			status = this.status();
+			status = this.presentedStatus();
 		} catch {
 			// Derived presentation state cannot fail the event that triggered it.
 			return;
 		}
-		const published = this.published;
-		if (published && promptCacheStatusEquals(published.status, status)) return;
+		if (promptCacheStatusEquals(this.published?.status, status)) return;
 		this.published = { status };
 		this.host.emit({ type: "prompt_cache_changed", promptCache: status ?? null });
 	}
