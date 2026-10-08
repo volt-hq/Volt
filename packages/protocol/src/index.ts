@@ -35,6 +35,7 @@ export * from "./remote-access.ts";
 export * from "./remote-handshake.ts";
 export * from "./resources.ts";
 export * from "./review-discussions.ts";
+export * from "./review-engines.ts";
 export * from "./review-usage.ts";
 export * from "./session.ts";
 export * from "./subscription-usage.ts";

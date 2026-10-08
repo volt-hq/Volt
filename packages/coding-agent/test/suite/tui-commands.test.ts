@@ -817,6 +817,134 @@ describe("TUI reviews", () => {
 		expect(reviewInputs(intent)).toEqual([]);
 	});
 
+	describe("on an extension's engine", () => {
+		const ENGINE = "ext:test-extension/swarm";
+
+		/** What each run of the extension's engine was given, and a way to hold it until it is told to finish. */
+		function swarmExtension() {
+			const runs: Array<{ params: Readonly<Record<string, unknown>>; workId: string }> = [];
+			const entered = Promise.withResolvers<void>();
+			const extension = (volt: ExtensionAPI): void => {
+				volt.registerReviewEngine("swarm", {
+					label: "Swarm",
+					description: "Many reviewers.",
+					cost: "Much slower than standard.",
+					targets: ["uncommitted", "branch"],
+					parameters: {
+						type: "object",
+						properties: {
+							workers: { type: "integer", minimum: 1, maximum: 32, default: 30 },
+							waveSize: { type: "integer", minimum: 1, maximum: 32 },
+							thinking: { type: "string", enum: ["low", "high"], default: "high" },
+						},
+					},
+					async run(ctx) {
+						runs.push({ params: ctx.params, workId: ctx.workId });
+						entered.resolve();
+						ctx.progress({ text: "Wave 1 of 3" });
+						await new Promise<void>((resolve) =>
+							ctx.signal.addEventListener("abort", () => resolve(), { once: true }),
+						);
+					},
+				});
+			};
+			return { extension, runs, entered: entered.promise };
+		}
+
+		it("starts the engine the line names, with its own flags, and sends no auxiliary tools", async () => {
+			const swarm = swarmExtension();
+			// A tool configured for the built-in review is not the engine's: its passes are its own.
+			const { harness, tui } = await start({
+				extension: swarm.extension,
+				globalSettings: { reviewTools: ["bash"] },
+			});
+			reviewRepository(harness.tempDir);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			const review = tui.submit("/review uncommitted --engine swarm --workers 4 --wave-size 2 --focus auth");
+			await swarm.entered;
+			await waitForScreen(tui, "Wave 1 of 3");
+			expect(reviewInputs(intent)).toEqual([
+				{ target: "uncommitted", engine: ENGINE, focus: "auth", engineParams: { workers: 4, waveSize: 2 } },
+			]);
+			expect(swarm.runs[0]?.params).toEqual({ workers: 4, waveSize: 2, thinking: "high" });
+			tui.terminal.sendInput(ESC);
+			await review;
+			expect(harness.startup.session.work.get(swarm.runs[0]!.workId)).toMatchObject({ outcome: "cancelled" });
+		});
+
+		it("opens its findings in a new conversation, as any review's", async () => {
+			const entered = Promise.withResolvers<void>();
+			const { harness, tui } = await start({
+				extension: (volt) => {
+					volt.registerReviewEngine("quick", {
+						label: "Quick",
+						description: "Finds nothing.",
+						targets: ["uncommitted"],
+						async run(ctx) {
+							entered.resolve();
+							const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
+							ctx.pass().diff(hunks, 64 * 1024);
+							await ctx.submit({
+								candidates: { summary: "Nothing found.", candidates: [], limitations: [] },
+								verification: {
+									summary: "Nothing to verify.",
+									assessment: "complete",
+									decisions: [],
+									priorFindingDecisions: [],
+									limitations: [],
+								},
+							});
+						},
+					});
+				},
+			});
+			reviewRepository(harness.tempDir);
+			const source = tui.store.conversation;
+
+			void tui.submit("/review uncommitted --engine quick");
+			await entered.promise;
+			await vi.waitFor(() => expect(tui.store.conversation).not.toBe(source), { timeout: 10_000 });
+			await waitForScreen(tui, "Uncommitted changes", "Static review only.");
+		});
+
+		it("names the engines the host offers when the line names one it does not, and runs standard the built-in way", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({ extension: swarm.extension });
+			reviewRepository(harness.tempDir);
+			const discovery = heldTurn("never");
+			harness.faux.setResponses([discovery.response]);
+			const intent = vi.spyOn(tui.store.client, "intent");
+
+			await tui.submit("/review uncommitted --engine nothing");
+			await waitForScreen(tui, 'Unknown review engine "nothing". Available: standard, swarm.');
+			await tui.submit("/review uncommitted --engine swarm --colour red");
+			await waitForScreen(tui, 'Unknown or misplaced argument "--colour"');
+			// The engine's flags are not the built-in review's.
+			await tui.submit("/review uncommitted --engine standard --workers 4");
+			await waitForScreen(tui, 'Unknown or misplaced argument "--workers"');
+			expect(reviewInputs(intent)).toEqual([]);
+			expect(swarm.runs).toEqual([]);
+
+			const review = tui.submit("/review uncommitted --engine standard");
+			await discovery.started;
+			expect(reviewInputs(intent)).toEqual([{ target: "uncommitted" }]);
+			tui.terminal.sendInput(ESC);
+			await review;
+		});
+
+		it("says what the engine refuses by name, before anything starts", async () => {
+			const swarm = swarmExtension();
+			const { harness, tui } = await start({ extension: swarm.extension });
+			reviewRepository(harness.tempDir);
+			await tui.submit("/review uncommitted --engine swarm --workers 99");
+			await waitForScreen(tui, "--workers must be an integer from 1 to 32");
+			await tui.submit("/review pr --engine swarm");
+			await waitForScreen(tui, "The Swarm engine does not review a pr target");
+			expect(swarm.runs).toEqual([]);
+		});
+	});
+
 	it("reviews the branch together with its uncommitted changes", async () => {
 		const { harness, tui } = await start();
 		// A committed file on main, edited in the workspace: the branch has no commits of its own.

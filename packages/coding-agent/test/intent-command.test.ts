@@ -15,6 +15,7 @@ import {
 	IntentCommandHintsError,
 	type IntentCommandInput,
 	intentCommandExample,
+	intentCommandFlagValue,
 	intentCommandForm,
 	intentCommandFormInput,
 	intentCommandUsage,
@@ -271,8 +272,19 @@ describe("the declaration", () => {
 			"effort",
 			"includeOptional",
 			"scopeMode",
+			"engine",
 		]);
-		expect([...review.flags.keys()]).toEqual(["focus", "scope", "effort", "include-optional", "incremental", "full"]);
+		expect([...review.flags.keys()]).toEqual([
+			"focus",
+			"scope",
+			"effort",
+			"include-optional",
+			"incremental",
+			"full",
+			"engine",
+		]);
+		// The engine is a flag the options form does not show.
+		expect(review.fields.filter((field) => !field.inForm).map((field) => field.name)).toEqual(["engine"]);
 	});
 
 	it("is undefined for a schema that declares none", () => {
@@ -318,6 +330,18 @@ describe("the declaration", () => {
 			],
 			["the keyword as a flag", broken((hints) => listOf(hints, "form").push("target")), /keyword's property/],
 			["a flag twice", broken((hints) => listOf(hints, "form").push("focus")), /twice/],
+			["a flag in the form and beside it", broken((hints) => listOf(hints, "flags").push("focus")), /twice/],
+			[
+				"the keyword as a flag beside the form",
+				broken((hints) => listOf(hints, "flags").push("target")),
+				/flags: "target" is the keyword's property/,
+			],
+			[
+				"a flag beside the form of nothing",
+				broken((hints) => listOf(hints, "flags").push("nope")),
+				/flags: "nope" is not a property/,
+			],
+			["flags that are not a list", broken((hints) => set(hints, "flags", "engine")), /flags must be a list/],
 			[
 				"bare flags on a field that is not an enum",
 				broken((hints) => set(hints, "flagValues", ["scopeMode", "effort", "focus"])),
@@ -368,8 +392,47 @@ describe("the declaration", () => {
 
 	it("names every keyword, positional word, and flag in the usage line", () => {
 		expect(intentCommandUsage(review)).toBe(
-			"Usage: /review [tools | uncommitted | branch [base] | branch-uncommitted [base] | pr [number] | commit [ref]] [--focus <focus>] [--scope <scope>] [--effort low|standard|high] [--include-optional] [--incremental|--full]",
+			"Usage: /review [tools | uncommitted | branch [base] | branch-uncommitted [base] | pr [number] | commit [ref]] [--focus <focus>] [--scope <scope>] [--effort low|standard|high] [--include-optional] [--incremental|--full] [--engine <engine>]",
 		);
+	});
+});
+
+describe("a flag the options form does not show", () => {
+	it("parses and writes like any other flag, and the form leaves it out", () => {
+		expect(parseIntentCommand(review, "uncommitted --engine swarm --effort high").input).toEqual({
+			target: "uncommitted",
+			engine: "swarm",
+			effort: "high",
+		});
+		expect(parseIntentCommand(review, "branch main --engine=ext:a/b").input).toEqual({
+			target: "branch",
+			base: "main",
+			engine: "ext:a/b",
+		});
+		expect(parseIntentCommand(review, "uncommitted --engine").error).toContain("--engine needs a value.");
+		expect(formatIntentCommand(review, { target: "uncommitted", engine: "swarm", effort: "high" })).toBe(
+			"uncommitted --effort high --engine swarm",
+		);
+		// A submitted options form fills only what the form shows.
+		expect(intentCommandFormInput(review, { focus: "auth", engine: "swarm" })).toEqual({ focus: "auth" });
+	});
+
+	it("is found in a line before the rest of it is read", () => {
+		const value = (text: string) => intentCommandFlagValue(text, "engine");
+		expect(value("uncommitted --engine swarm")).toBe("swarm");
+		expect(value("branch main --focus x --engine=deep --effort high")).toBe("deep");
+		expect(value('uncommitted --engine "ext:a/b"')).toBe("ext:a/b");
+		// The last one wins, as in parsing.
+		expect(value("uncommitted --engine a --engine b")).toBe("b");
+		// Not given, or not given a value.
+		expect(value("uncommitted")).toBeUndefined();
+		expect(value("uncommitted --engine")).toBeUndefined();
+		expect(value("uncommitted --engine --effort high")).toBeUndefined();
+		expect(value("uncommitted --engine=")).toBeUndefined();
+		// A value that merely contains the flag, another flag, and a broken quote are not it.
+		expect(value('uncommitted --focus "--engine swarm"')).toBeUndefined();
+		expect(value("uncommitted --engines swarm")).toBeUndefined();
+		expect(value('uncommitted --engine "swarm')).toBeUndefined();
 	});
 });
 
@@ -464,6 +527,7 @@ describe("completions", () => {
 			"branch --include-optional",
 			"branch --incremental",
 			"branch --full",
+			"branch --engine",
 		]);
 		expect(await values("branch ma")).toEqual(["branch main"]);
 		expect(await values("pr ")).toContain("pr 243");
@@ -483,8 +547,8 @@ describe("completions", () => {
 			"branch main --scope",
 			"branch main --effort",
 		]);
-		expect(await values("branch main --e")).toEqual(["branch main --effort"]);
-		expect(await values("uncommitted --effort high --e")).toEqual([]);
+		expect(await values("branch main --e")).toEqual(["branch main --effort", "branch main --engine"]);
+		expect(await values("uncommitted --effort high --e")).toEqual(["uncommitted --effort high --engine"]);
 		// One bare flag of an enum uses the enum.
 		expect(await values("uncommitted --full --")).not.toContain("uncommitted --full --full");
 		expect(await values("uncommitted --full --")).not.toContain("uncommitted --full --incremental");

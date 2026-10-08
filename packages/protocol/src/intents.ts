@@ -241,6 +241,8 @@ export interface IntentCommandHints {
 	readonly lists?: readonly string[];
 	/** The properties offered as flags and in the options form, in order. */
 	readonly form?: readonly string[];
+	/** Properties offered as flags only, after the form's: a flag the options form does not show. */
+	readonly flags?: readonly string[];
 }
 
 /** `/review`'s grammar: `/review branch main --effort high --scope "src/**" --full`. */
@@ -253,6 +255,7 @@ const REVIEW_COMMAND = {
 	flagValues: ["scopeMode"],
 	lists: ["scope"],
 	form: ["focus", "scope", "effort", "includeOptional", "scopeMode"],
+	flags: ["engine"],
 } as const satisfies IntentCommandHints;
 
 const runId = RpcConversationIdentifierSchema;
