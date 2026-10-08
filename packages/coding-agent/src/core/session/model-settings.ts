@@ -294,12 +294,16 @@ export class ModelSettings {
 			followUp: this.host.settingsManager.getFollowUpMode(),
 		});
 		const transport = this.host.settingsManager.getTransport();
+		const { cacheRetention: _previousRetention, ...options } = this.options;
 		this.setStreamOptions({
-			...this.options,
+			...options,
+			...(this.host.settingsManager.getPromptCacheRetention() === "long" ? { cacheRetention: "long" } : {}),
 			...(transport === undefined ? {} : { transport }),
 			thinkingBudgets: this.host.settingsManager.getThinkingBudgets(),
 			maxRetryDelayMs: this.host.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		});
+		// Requests this session sent keep the window they asked for; ones from before it opened take the current retention.
+		this.host.publishPromptCacheStatus();
 	}
 
 	/** Current steering mode */

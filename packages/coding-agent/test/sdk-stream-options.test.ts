@@ -14,7 +14,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { type PromptCacheSettings, SettingsManager } from "../src/core/settings-manager.ts";
 import { createAgentSessionTestControl } from "./agent-session-test-control.ts";
 
 describe("createAgentSession stream options", () => {
@@ -81,6 +81,7 @@ describe("createAgentSession stream options", () => {
 			httpIdleTimeoutMs?: number;
 			websocketConnectTimeoutMs?: number;
 			toolArgumentLimits?: ToolArgumentLimits;
+			promptCache?: PromptCacheSettings;
 		},
 		requestOptions: SimpleStreamOptions = {},
 		startupLimits?: ToolArgumentLimits,
@@ -212,10 +213,21 @@ describe("createAgentSession stream options", () => {
 		[undefined, undefined],
 		["short", undefined],
 		["long", "long"],
-	] as const)("reads VOLT_CACHE_RETENTION=%s as the session's cacheRetention", async (env, expected) => {
-		vi.stubEnv("VOLT_CACHE_RETENTION", env);
-		const options = await captureStreamOptions("openai-completions", {}, {}, undefined, true);
+	] as const)("reads promptCache.retention=%s as the session's cacheRetention", async (retention, expected) => {
+		const options = await captureStreamOptions(
+			"openai-completions",
+			retention === undefined ? {} : { promptCache: { retention } },
+			{},
+			undefined,
+			true,
+		);
 		expect(options?.cacheRetention).toBe(expected);
+	});
+
+	it("does not read VOLT_CACHE_RETENTION from the environment", async () => {
+		vi.stubEnv("VOLT_CACHE_RETENTION", "long");
+		const options = await captureStreamOptions("openai-completions", {}, {}, undefined, true);
+		expect(options?.cacheRetention).toBeUndefined();
 	});
 
 	it("isolates settings limit objects from callers and preserves omitted defaults", () => {

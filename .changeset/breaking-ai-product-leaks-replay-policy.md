@@ -6,7 +6,7 @@
 
 breaking(ai): The AI library no longer reads `VOLT_*` environment variables, no longer carries `clientMessageId` on user messages, and no longer applies the conversation replay policy inside providers; callers apply the new `applyReplayPolicy(messages)` before each request.
 
-Volt itself reads `VOLT_CACHE_RETENTION`, `VOLT_CODEX_REQUEST_DIAGNOSTICS`, and `VOLT_OAUTH_CALLBACK_HOST` from the process environment as before; provider-scoped credential `env` values no longer set `VOLT_CACHE_RETENTION`. Direct users of `@hansjm10/volt-ai` pass `cacheRetention: "long"` (default `"short"`), `requestDiagnostics: true` for OpenAI Codex request fingerprints, and `callbackHost` in OAuth login options instead. `resolvePromptCacheRetention(model, cacheRetention, options)` no longer takes an `env` argument.
+Volt itself reads `VOLT_CODEX_REQUEST_DIAGNOSTICS` and `VOLT_OAUTH_CALLBACK_HOST` from the process environment as before, and takes prompt cache retention from the `promptCache.retention` setting. Direct users of `@hansjm10/volt-ai` pass `cacheRetention: "long"` (default `"short"`), `requestDiagnostics: true` for OpenAI Codex request fingerprints, and `callbackHost` in OAuth login options instead. `resolvePromptCacheRetention(model, cacheRetention, options)` no longer takes an `env` argument.
 
 `UserMessage` and `UserMessageSchema` no longer have `clientMessageId`. Volt stores a client input identity on the session entry beside the message (`{"type":"message","message":{...},"clientMessageId":"..."}`) instead of inside it; existing session files are not migrated. Transcript projections are unchanged.
 

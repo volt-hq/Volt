@@ -676,7 +676,7 @@ async function createAgentSessionWithTrackedResources(
 	const transport = settingsManager.getTransport();
 	// Fast mode comes from the session log.
 	const streamOptions: ConversationStreamOptions = {
-		...(process.env.VOLT_CACHE_RETENTION === "long" ? { cacheRetention: "long" } : {}),
+		...(settingsManager.getPromptCacheRetention() === "long" ? { cacheRetention: "long" } : {}),
 		...(transport === undefined ? {} : { transport }),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		...(options.toolArgumentLimits === undefined ? {} : { toolArgumentLimits: { ...options.toolArgumentLimits } }),

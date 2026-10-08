@@ -119,7 +119,7 @@ Store credentials in `~/.volt/agent/auth.json`:
 
 The file is created with `0600` permissions (user read/write only). Auth file credentials take priority over environment variables.
 
-API key credentials can also include provider-scoped environment values. These values are used before process environment variables when resolving the credential key, provider/model headers, and provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, and `HTTP_PROXY`/`HTTPS_PROXY`. Volt settings such as `VOLT_CACHE_RETENTION` are read only from the process environment.
+API key credentials can also include provider-scoped environment values. These values are used before process environment variables when resolving the credential key, provider/model headers, and provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, and `HTTP_PROXY`/`HTTPS_PROXY`. Volt's own `VOLT_*` environment variables, such as `VOLT_CODEX_REQUEST_DIAGNOSTICS`, are read only from the process environment.
 
 ```json
 {

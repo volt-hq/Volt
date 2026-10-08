@@ -71,6 +71,7 @@ export interface MarkdownSettings {
 }
 
 export interface PromptCacheSettings {
+	retention?: "short" | "long"; // default: "short" - "long" asks for the extended cache lifetime where the provider offers one (Anthropic: 1h, OpenAI: 24h)
 	keepAlive?: boolean; // default: true - refresh renewing prompt caches shortly before expiry
 	keepAliveIdleMinutes?: number; // default: 15 - keep refreshing this long after work settles; 0 = only while work runs
 }
@@ -684,8 +685,7 @@ export class SettingsManager {
 			["global", globalLoad],
 			["project", projectLoad],
 		] as const) {
-			const shapeError = SettingsManager.extensionsShapeError(load.settings);
-			if (shapeError) initialErrors.push({ scope, error: shapeError });
+			for (const error of SettingsManager.shapeErrors(load.settings)) initialErrors.push({ scope, error });
 		}
 
 		return new SettingsManager(
@@ -738,11 +738,35 @@ export class SettingsManager {
 		}
 	}
 
-	/** Why loaded settings' `extensions` is ignored: it holds a list of paths, which `extensionPaths` now holds. */
-	private static extensionsShapeError(settings: Settings): Error | undefined {
-		return Array.isArray(settings.extensions)
-			? new Error('"extensions" holds a list of paths and is ignored; rename it to "extensionPaths"')
-			: undefined;
+	/** Why parts of loaded settings are ignored, in the settings themselves and in each of their profiles. */
+	private static shapeErrors(settings: Settings): Error[] {
+		const errors = SettingsManager.shapeErrorsAt(settings, "");
+		if (isSettingsRecord(settings.profiles)) {
+			for (const [name, profile] of Object.entries(settings.profiles)) {
+				if (isSettingsRecord(profile)) errors.push(...SettingsManager.shapeErrorsAt(profile, `profiles.${name}.`));
+			}
+		}
+		return errors;
+	}
+
+	/** Shape errors of one settings object or profile; `path` prefixes the setting names in messages. */
+	private static shapeErrorsAt(settings: Pick<Settings, "extensions" | "promptCache">, path: string): Error[] {
+		const errors: Error[] = [];
+		// `extensions` holds a list of paths, which `extensionPaths` now holds.
+		if (Array.isArray(settings.extensions)) {
+			errors.push(
+				new Error(`"${path}extensions" holds a list of paths and is ignored; rename it to "${path}extensionPaths"`),
+			);
+		}
+		const retention: unknown = settings.promptCache?.retention;
+		if (retention !== undefined && retention !== "short" && retention !== "long") {
+			errors.push(
+				new Error(
+					`"${path}promptCache.retention" must be "short" or "long"; ${JSON.stringify(retention)} is ignored`,
+				),
+			);
+		}
+		return errors;
 	}
 
 	/** Migrate old settings format to new format */
@@ -924,8 +948,7 @@ export class SettingsManager {
 		if (projectLoad.error) {
 			this.recordError("project", projectLoad.error);
 		}
-		const shapeError = SettingsManager.extensionsShapeError(projectLoad.settings);
-		if (shapeError) this.recordError("project", shapeError);
+		for (const error of SettingsManager.shapeErrors(projectLoad.settings)) this.recordError("project", error);
 		this.mergeEffectiveSettings();
 	}
 
@@ -962,8 +985,7 @@ export class SettingsManager {
 			["global", this.globalSettings],
 			["project", this.projectSettings],
 		] as const) {
-			const shapeError = SettingsManager.extensionsShapeError(settings);
-			if (shapeError) this.recordError(scope, shapeError);
+			for (const error of SettingsManager.shapeErrors(settings)) this.recordError(scope, error);
 		}
 
 		this.mergeEffectiveSettings();
@@ -1946,6 +1968,11 @@ export class SettingsManager {
 			},
 			"showTerminalProgress",
 		);
+	}
+
+	/** The retention requests ask for: `"long"` only when the settings say so; a missing or invalid value is `"short"`. */
+	getPromptCacheRetention(): "short" | "long" {
+		return this.settings.promptCache?.retention === "long" ? "long" : "short";
 	}
 
 	getPromptCacheKeepAlive(): PromptCacheKeepAliveConfig {

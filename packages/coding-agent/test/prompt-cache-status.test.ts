@@ -94,6 +94,56 @@ describe("resolvePromptCacheStatus", () => {
 		expect(status).toEqual({ kind: "retained", lastRequestAt: 5_000, expiresAt: 3_605_000 });
 	});
 
+	it("anchors each request's window to the retention it was sent with, not the current retention", () => {
+		const model = createModel("claude");
+		const retentionByRequest = new Map<number, "short" | "long">([
+			[1_000, "short"],
+			[5_000, "long"],
+		]);
+
+		expect(
+			resolvePromptCacheStatus({
+				model,
+				branch: [assistantEntry({ model: "claude", timestamp: 1_000 })],
+				cacheRetention: "long",
+				requestRetention: (requestAt) => retentionByRequest.get(requestAt),
+			}),
+		).toEqual({ kind: "retained", lastRequestAt: 1_000, expiresAt: 301_000 });
+
+		expect(
+			resolvePromptCacheStatus({
+				model,
+				branch: [
+					assistantEntry({ model: "claude", timestamp: 1_000 }),
+					assistantEntry({ model: "claude", timestamp: 5_000 }),
+				],
+				cacheRetention: "short",
+				requestRetention: (requestAt) => retentionByRequest.get(requestAt),
+			}),
+		).toEqual({ kind: "retained", lastRequestAt: 5_000, expiresAt: 3_605_000 });
+	});
+
+	it("uses the current retention for a request whose retention is unknown", () => {
+		const status = resolvePromptCacheStatus({
+			model: createModel("claude"),
+			branch: [assistantEntry({ model: "claude", timestamp: 5_000 })],
+			cacheRetention: "long",
+			requestRetention: () => undefined,
+		});
+
+		expect(status).toEqual({ kind: "retained", lastRequestAt: 5_000, expiresAt: 3_605_000 });
+	});
+
+	it("falls back to the short window when a request asked for long on a model without one", () => {
+		const status = resolvePromptCacheStatus({
+			model: createModel("claude", { modes: ["explicit"], retention: { short: { ttlSeconds: 300 } } }),
+			branch: [assistantEntry({ model: "claude", timestamp: 5_000 })],
+			requestRetention: () => "long",
+		});
+
+		expect(status).toEqual({ kind: "retained", lastRequestAt: 5_000, expiresAt: 305_000 });
+	});
+
 	it("omits expiry when the provider publishes no retention window", () => {
 		const status = resolvePromptCacheStatus({
 			model: createModel("gpt", { modes: ["implicit"], retention: { short: {} } }),

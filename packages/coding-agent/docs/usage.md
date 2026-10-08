@@ -602,7 +602,6 @@ volt --exclude-tools ask_question
 | `VOLT_REPORT_INSTALL_URL` | Enable hosted install/update telemetry against this endpoint |
 | `VOLT_SHARE_VIEWER_URL` | Base URL for `/share` command viewer links |
 | `VOLT_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
-| `VOLT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
 | `VOLT_OAUTH_CALLBACK_HOST` | Host the local OAuth callback server listens on during `/login`; default is `127.0.0.1` |
 | `VOLT_PROMPT_CACHE_AUDIT` | Set to `0` to stop writing prompt-cache audit logs to `~/.volt/agent/prompt-cache-audit/` |
 | `VOLT_TUI_ESC_TIMEOUT` | Milliseconds to wait for bytes following a lone Escape key; defaults to 10 locally and 100 over SSH |
