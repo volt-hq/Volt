@@ -24,6 +24,7 @@ import type { IntentDescriptor, QueryResult } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/index.ts";
 import type { CustomEditor } from "../../src/modes/interactive/components/custom-editor.ts";
+import { workOutcomeLine } from "../../src/modes/interactive/components/work-notice.ts";
 import { openBrowser } from "../../src/utils/open-browser.ts";
 import {
 	choose,
@@ -105,12 +106,28 @@ const fastProvider: ExtensionFactory = (volt: ExtensionAPI) => {
  * opens, so the next command meets the conversation and not the list.
  */
 async function stopReviews(tui: TuiModeFixture): Promise<void> {
+	const stopped: string[] = [];
 	for (const item of tui.store.state.work.values()) {
 		if (item.kind === "review" && item.outcome === undefined) {
 			await tui.store.client.intent("cancel_work", { workId: item.workId });
+			stopped.push(item.workId);
 		}
 	}
 	(tui.mode as unknown as ModeAccess).dismissWorkInspector?.();
+	if (stopped.length === 0) return;
+	// A review ends after the cancel is sent, and the TUI says so in a status line a moment later. Wait for that
+	// line: a status the test waits for next would otherwise be replaced by it, as the TUI keeps one status line.
+	await vi.waitFor(
+		() => {
+			const lines = stopped.flatMap((workId) => {
+				const item = tui.store.state.work.get(workId);
+				return item?.outcome === undefined ? [] : [workOutcomeLine(item).text];
+			});
+			const screen = tui.screen().replace(/\s+/g, " ");
+			expect(lines.some((line) => screen.includes(line))).toBe(true);
+		},
+		{ timeout: 5_000 },
+	);
 }
 
 /**
