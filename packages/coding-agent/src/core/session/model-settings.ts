@@ -294,12 +294,16 @@ export class ModelSettings {
 			followUp: this.host.settingsManager.getFollowUpMode(),
 		});
 		const transport = this.host.settingsManager.getTransport();
+		const { cacheRetention: _previousRetention, ...options } = this.options;
 		this.setStreamOptions({
-			...this.options,
+			...options,
+			...(this.host.settingsManager.getPromptCacheRetention() === "long" ? { cacheRetention: "long" } : {}),
 			...(transport === undefined ? {} : { transport }),
 			thinkingBudgets: this.host.settingsManager.getThinkingBudgets(),
 			maxRetryDelayMs: this.host.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 		});
+		// A changed retention changes when the cached prefix expires.
+		this.host.publishPromptCacheStatus();
 	}
 
 	/** Current steering mode */

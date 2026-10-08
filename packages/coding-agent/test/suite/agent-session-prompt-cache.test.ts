@@ -39,6 +39,46 @@ describe("AgentSession prompt cache status", () => {
 		expect(harness.session.liveState.get("prompt_cache")).toEqual({ kind: "prompt_cache", promptCache: expected });
 	});
 
+	it("applies a changed promptCache.retention when settings reload and republishes the status", async () => {
+		const harness = await createHarness({
+			models: [
+				{
+					id: "cached",
+					promptCache: {
+						modes: ["explicit"],
+						retention: { short: { ttlSeconds: 300 }, long: { ttlSeconds: 3600 } },
+					},
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([() => fauxAssistantMessage("hello")]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+		const requestAt = lastAssistant(harness).timestamp;
+		expect(harness.session.getPromptCacheStatus()).toEqual({
+			kind: "retained",
+			lastRequestAt: requestAt,
+			expiresAt: requestAt + 300_000,
+		});
+
+		harness.settingsManager.applyOverrides({ promptCache: { retention: "long" } });
+		await harness.session.reload();
+
+		const longRetained = { kind: "retained", lastRequestAt: requestAt, expiresAt: requestAt + 3_600_000 };
+		expect(harness.session.getPromptCacheStatus()).toEqual(longRetained);
+		expect(harness.eventsOfType("prompt_cache_changed").at(-1)?.promptCache).toEqual(longRetained);
+
+		harness.settingsManager.applyOverrides({ promptCache: { retention: "short" } });
+		await harness.session.reload();
+
+		expect(harness.session.getPromptCacheStatus()).toEqual({
+			kind: "retained",
+			lastRequestAt: requestAt,
+			expiresAt: requestAt + 300_000,
+		});
+	});
+
 	it("reports a cold cache after switching to a model without prior requests", async () => {
 		const harness = await createHarness({
 			models: [

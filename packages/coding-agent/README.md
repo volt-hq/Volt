@@ -764,7 +764,6 @@ volt --thinking high "Solve this complex problem"
 | `VOLT_REPORT_INSTALL_URL` | Enable hosted install/update telemetry against this endpoint |
 | `VOLT_SHARE_VIEWER_URL` | Base URL for `/share` command viewer links |
 | `VOLT_TELEMETRY` | Override install/update telemetry and provider attribution headers. Use `1`/`true`/`yes` to enable or `0`/`false`/`no` to disable. This does not disable update checks |
-| `VOLT_CACHE_RETENTION` | Set to `long` for extended prompt cache (Anthropic: 1h, OpenAI: 24h) |
 | `VOLT_OAUTH_CALLBACK_HOST` | Host the local OAuth callback server listens on during `/login` (default `127.0.0.1`) |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 

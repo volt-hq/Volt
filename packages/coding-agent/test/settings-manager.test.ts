@@ -980,6 +980,50 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("promptCache.retention", () => {
+		it("defaults to short", () => {
+			const manager = SettingsManager.inMemory();
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors()).toEqual([]);
+		});
+
+		it.each(["short", "long"] as const)("reads %s without reporting an error", (retention) => {
+			const manager = SettingsManager.inMemory({ promptCache: { retention } });
+			expect(manager.getPromptCacheRetention()).toBe(retention);
+			expect(manager.drainErrors()).toEqual([]);
+		});
+
+		it.each(["LONG", "1h", "none", 1, null])("reports %j when settings load and applies short", (retention) => {
+			const globalSettingsPath = join(agentDir, "settings.json");
+			writeFileSync(globalSettingsPath, JSON.stringify({ promptCache: { retention } }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors().map(({ scope, error }) => [scope, error.message])).toEqual([
+				["global", `"promptCache.retention" must be "short" or "long"; ${JSON.stringify(retention)} is ignored`],
+			]);
+		});
+
+		it("reports an invalid value again when settings reload", async () => {
+			const globalSettingsPath = join(agentDir, "settings.json");
+			const manager = SettingsManager.create(projectDir, agentDir);
+			expect(manager.drainErrors()).toEqual([]);
+
+			writeFileSync(globalSettingsPath, JSON.stringify({ promptCache: { retention: "forever" } }));
+			await manager.reload();
+
+			expect(manager.getPromptCacheRetention()).toBe("short");
+			expect(manager.drainErrors()).toHaveLength(1);
+
+			writeFileSync(globalSettingsPath, JSON.stringify({ promptCache: { retention: "long" } }));
+			await manager.reload();
+
+			expect(manager.getPromptCacheRetention()).toBe("long");
+			expect(manager.drainErrors()).toEqual([]);
+		});
+	});
+
 	describe("contextWarningTokens", () => {
 		it("should default to 350k tokens", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);

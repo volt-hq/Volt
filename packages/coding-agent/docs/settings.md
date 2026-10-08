@@ -174,6 +174,7 @@ Both options are available under **Warnings** in `/settings`.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
+| `promptCache.retention` | `"short"` \| `"long"` | `"short"` | `"long"` asks for the provider's extended cache lifetime on models that offer one (Anthropic: 1 hour, OpenAI: 24 hours); other models keep their default lifetime. The footer's cache countdown follows it. A change applies to conversations that start afterwards, and to open ones after `/reload`. Any other value is reported when settings load and ignored |
 | `promptCache.keepAlive` | boolean | `true` | Refresh the prompt cache shortly before it expires, so the next request reuses it instead of resending the conversation uncached |
 | `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while work runs: a turn, compaction, background job, `!` command, or extension command (including one waiting for your input) |
 
@@ -188,6 +189,7 @@ Volt records metadata-only prompt-cache audit logs (request token counts and gap
 ```json
 {
   "promptCache": {
+    "retention": "long",
     "keepAlive": true,
     "keepAliveIdleMinutes": 15
   }
