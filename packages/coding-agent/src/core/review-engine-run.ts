@@ -6,6 +6,8 @@
  * cancelled when the work was. The host disposes the snapshot after the engine returns.
  */
 
+import type { Api, Model } from "@hansjm10/volt-ai";
+import type { ModelRegistry } from "./model-registry.ts";
 import { readPrReviewBinding } from "./pr-review-binding.ts";
 import {
 	controlsWithDefaults,
@@ -19,7 +21,7 @@ import {
 	reviewWorkTarget,
 	verifyBoundPullRequest,
 } from "./review.ts";
-import { type ReviewEngineDeclaration, ReviewEngineRun } from "./review-engine.ts";
+import { type ReviewEngineDeclaration, ReviewEngineRun, resolveReviewEngineParameters } from "./review-engine.ts";
 import {
 	appendReviewRunDurably,
 	assertReviewControlsPersistLosslessly,
@@ -36,10 +38,19 @@ export interface StartEngineReviewOptions {
 	engine: ReviewEngineDeclaration;
 	target: ReviewTarget;
 	controls?: Partial<ReviewRunControls>;
+	/**
+	 * The parameters the client supplied. They are checked here, against the engine that runs, for the client that
+	 * asked: the engine may have been replaced since a client was told what it declares.
+	 */
+	params?: Readonly<Record<string, unknown>>;
 	/** A paired remote device started it: the project must be trusted, and a failure is not described to clients. */
 	remote: boolean;
 	cwd: string;
 	work: WorkRegistry;
+	/** The conversation's models, which the engine's own sessions use. */
+	modelRegistry: ModelRegistry;
+	/** The conversation's current model. */
+	model?: Model<Api>;
 	settingsManager: Pick<SettingsManager, "isProjectTrusted">;
 	/** The conversation's log, which a pull request review's binding and the run's records belong to. */
 	sessionManager: SessionManager;
@@ -59,6 +70,7 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 	if (remote && !options.settingsManager.isProjectTrusted()) {
 		throw new Error("Project trust is required before running a remote review.");
 	}
+	const params = resolveReviewEngineParameters(engine, options.params, { remote });
 	const controls = controlsWithDefaults(options.controls);
 	assertReviewControlsPersistLosslessly(controls);
 	// An engine reviews a pull request's code, not its discussion: the snapshot has its identity only.
@@ -85,7 +97,12 @@ export async function startEngineReview(options: StartEngineReviewOptions): Prom
 			work.progress({ text: `Reviewing ${shown}` });
 			await engine.run(
 				run.context({
+					workId,
+					params,
 					signal: work.signal,
+					modelRegistry: options.modelRegistry,
+					model: options.model,
+					isProjectTrusted: () => options.settingsManager.isProjectTrusted(),
 					progress: (progress, detail) => work.progress(progress, detail),
 					checkpoint: (progress, detail) => work.checkpoint(progress, detail),
 					output: (text) => work.output(text),

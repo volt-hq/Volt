@@ -55,6 +55,7 @@ import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions, ExecResult } from "../exec.ts";
 import type { CustomMessage, CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { ReviewEngineDeclaration } from "../review-engine.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -316,6 +317,12 @@ export interface ExtensionContext {
 // ============================================================================
 // Work
 // ============================================================================
+
+/** A review engine an extension registers with `volt.registerReviewEngine(name, engine)`. */
+export type ReviewEngineOptions = Omit<ReviewEngineDeclaration, "id" | "remoteSafe"> & {
+	/** Whether a paired remote device may start it. Defaults to `false`. */
+	readonly remoteSafe?: boolean;
+};
 
 /** A kind of work an extension runs (RFC §7): `volt.registerWorkKind(name, kind)`. */
 export interface WorkKindDeclaration {
@@ -1541,6 +1548,17 @@ export interface ExtensionAPI<TSettings extends ExtensionSettingsShape = Extensi
 	 */
 	registerWorkKind(name: string, kind?: WorkKindDeclaration): void;
 
+	/**
+	 * Register a review engine: `/review` can run a review on it. `name` is lowercase letters, digits, `-`, and
+	 * `_`, starting with a letter or digit; the engine is `ext:<manifest id>/<name>`. The host resolves what is
+	 * reviewed and starts the review as `review` work in the job list; the engine's `run(ctx)` reviews it with
+	 * passes of its own and submits a candidate report and a verification report with `ctx.submit`, in the
+	 * host's report shapes. The host validates them, builds the findings (ids, fingerprints, completeness) with
+	 * the code the built-in pipeline uses, and writes the run's record; an engine never writes records.
+	 * Reloading the extensions removes the engine and cancels the reviews it runs.
+	 */
+	registerReviewEngine(name: string, engine: ReviewEngineOptions): void;
+
 	// =========================================================================
 	// Message Presentation
 	// =========================================================================
@@ -1871,8 +1889,8 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionId: string }>;
-	/** Registers the work kinds declared since the runner bound; does nothing before. */
-	refreshWorkKinds: () => void;
+	/** Registers the work kinds and review engines declared since the runner bound; does nothing before. */
+	refreshDeclarations: () => void;
 	/** Throws when this extension instance is stale after runtime replacement. */
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
@@ -2053,6 +2071,8 @@ export interface Extension {
 	completionProviders: Map<string, RegisteredCompletionProvider>;
 	/** The work kinds the extension declared, by name. */
 	workKinds: Map<string, WorkKindDeclaration>;
+	/** The review engines the extension registered, by name, each with its full id. */
+	reviewEngines: Map<string, ReviewEngineDeclaration>;
 	/** The model providers the extension registered, by name: they are unregistered when it stops. */
 	providers: Set<string>;
 	/**

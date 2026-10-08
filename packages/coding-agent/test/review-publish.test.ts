@@ -264,4 +264,37 @@ switch (args.slice(0, 2).join(" ")) {
 			summaryOnlyFindingIds: ["finding-summary"],
 		});
 	});
+
+	it("says in the posted review which engine produced it, and that the engine reported its coverage", async () => {
+		const bodyOf = async (engine?: string): Promise<string> => {
+			const run = reviewRun();
+			if (!run.target.identity.pullRequest) throw new Error("Expected a PR review fixture");
+			run.target.identity.pullRequest.providerId = "test-host";
+			if (engine !== undefined) run.engine = engine;
+			let body = "";
+			const provider: CodeHostProvider = {
+				id: "test-host",
+				displayName: "Test Host",
+				probeCurrentPullRequest: async () => undefined,
+				resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
+				capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
+				capturePullRequestIdentity: async () => ({ ok: false, error: "unused" }),
+				verifyPullRequestHead: async () => {},
+				publishPullRequestReview: async (request) => {
+					body = request.body;
+					return { reviewId: 1 };
+				},
+			};
+			await publishReviewRun("/workspace", run, provider);
+			return body;
+		};
+		const standard = await bodyOf();
+		expect(standard).not.toContain("review engine");
+		const swarm = await bodyOf("ext:swarm-review/swarm");
+		expect(swarm).toContain(
+			"Reviewed with the ext:swarm-review/swarm review engine; its coverage and verification are reported by the engine.",
+		);
+		// Only the engine's line differs.
+		expect(swarm.replace(/\n\nReviewed with the [^\n]*/, "")).toBe(standard);
+	});
 });

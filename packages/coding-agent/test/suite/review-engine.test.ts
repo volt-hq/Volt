@@ -7,9 +7,11 @@ import {
 	type ReviewEngineContext,
 	type ReviewEngineDeclaration,
 	ReviewEngineDeclarationError,
+	ReviewEngineParametersError,
 	ReviewEngineRegistry,
 	type ReviewEngineResult,
 	ReviewEngineSubmissionError,
+	resolveReviewEngineParameters,
 	validateReviewEngine,
 } from "../../src/core/review-engine.ts";
 import { startEngineReview } from "../../src/core/review-engine-run.ts";
@@ -161,6 +163,8 @@ describe("review engines", () => {
 				remote: options.remote ?? false,
 				cwd: harness.tempDir,
 				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
 				settingsManager: { isProjectTrusted: () => options.trusted ?? true },
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
@@ -207,6 +211,112 @@ describe("review engines", () => {
 				);
 			}
 			expect(() => validateReviewEngine(undefined)).toThrow(ReviewEngineDeclarationError);
+		});
+
+		const parameters = {
+			type: "object",
+			properties: {
+				workers: { type: "integer", title: "Workers", minimum: 1, maximum: 32, default: 30 },
+				model: { type: "string", maxLength: 100 },
+				thinking: { type: "string", enum: ["low", "high"], default: "high" },
+				exec: { type: "boolean", default: false },
+			},
+			required: ["model"],
+		} as const;
+
+		it("declares parameters the way a manifest declares settings, and refuses what a manifest would", () => {
+			const engineWith = (extra: Record<string, unknown>) => validateReviewEngine({ ...valid(), ...extra });
+			const kept = engineWith({ parameters, localOnly: ["exec", "exec"] });
+			expect(kept.parameters?.properties.workers).toEqual(parameters.properties.workers);
+			expect(kept.localOnly).toEqual(["exec"]);
+			expect(Object.isFrozen(kept.parameters)).toBe(true);
+			expect(Object.isFrozen(kept.parameters?.properties)).toBe(true);
+			// What is kept is a copy: the author changing its declaration afterwards changes nothing.
+			const authored = structuredClone(parameters) as unknown as { properties: { workers: { default: number } } };
+			const copy = engineWith({ parameters: authored });
+			authored.properties.workers.default = 99;
+			expect(copy.parameters?.properties.workers).toMatchObject({ default: 30 });
+
+			for (const [name, broken, message] of [
+				[
+					"a parameter that is not a setting",
+					{ type: "object", properties: { x: { type: "number" } } },
+					"parameters",
+				],
+				[
+					"a default outside its bounds",
+					{ type: "object", properties: { x: { type: "integer", minimum: 5, default: 1 } } },
+					"must be at least 5",
+				],
+				["a credential", { type: "object", properties: { apiToken: { type: "string" } } }, "names a credential"],
+				[
+					"a required parameter that is not declared",
+					{ type: "object", properties: {}, required: ["x"] },
+					"not declared",
+				],
+				[
+					"a name that shadows a review option",
+					{ type: "object", properties: { focus: { type: "string" } } },
+					"named like a review option: focus",
+				],
+				[
+					"a name that shadows the engine flag",
+					{ type: "object", properties: { engine: { type: "string" } } },
+					"named like a review option: engine",
+				],
+			] as const) {
+				expect(() => engineWith({ parameters: broken }), name).toThrow(message);
+			}
+			expect(() => engineWith({ parameters, localOnly: ["nope"] })).toThrow(
+				"localOnly must list declared parameters",
+			);
+			expect(() => engineWith({ localOnly: ["exec"] })).toThrow("localOnly must list declared parameters");
+			expect(() => engineWith({ parameters, localOnly: "exec" })).toThrow("localOnly must list declared parameters");
+		});
+
+		it("checks a run's parameters against the declaration, over its defaults", () => {
+			const engine = validateReviewEngine({ ...valid(), parameters, localOnly: ["exec"] });
+			const resolve = (supplied: Record<string, unknown> | undefined, remote = false) =>
+				resolveReviewEngineParameters(engine, supplied, { remote });
+			expect(resolve({ model: "gpt" })).toEqual({ workers: 30, thinking: "high", exec: false, model: "gpt" });
+			expect(resolve({ model: "gpt", workers: 4, exec: true })).toEqual({
+				workers: 4,
+				thinking: "high",
+				exec: true,
+				model: "gpt",
+			});
+			const refused = (
+				supplied: Record<string, unknown> | undefined,
+				remote = false,
+			): ReviewEngineParametersError => {
+				try {
+					resolve(supplied, remote);
+				} catch (error) {
+					if (error instanceof ReviewEngineParametersError) return error;
+					throw error;
+				}
+				throw new Error("Expected the parameters to be refused");
+			};
+			expect(refused(undefined).message).toBe("model is required");
+			expect(refused({ model: "gpt", workers: 0 }).message).toBe("workers must be at least 1");
+			expect(refused({ model: "gpt", workers: "many" }).message).toBe("workers must be an integer");
+			expect(refused({ model: "gpt", thinking: "max" }).message).toContain("thinking must be one of");
+			expect(refused({ model: "gpt", extra: 1 }).message).toBe("extra is not a parameter of the Swarm engine");
+			// Every problem is named, not just the first.
+			expect(refused({ workers: 99, extra: 1 }).message).toBe(
+				"workers must be at most 32; extra is not a parameter of the Swarm engine; model is required",
+			);
+			expect(refused(undefined).reason).toBe("invalid");
+			// A remote client may leave a local-only parameter at its default and may not set it.
+			expect(resolve({ model: "gpt" }, true).exec).toBe(false);
+			const local = refused({ model: "gpt", exec: true }, true);
+			expect(local).toMatchObject({ reason: "local_only", message: "exec can only be set by a client at the host" });
+			expect(resolve({ model: "gpt", exec: true }, false).exec).toBe(true);
+			// An engine with no parameters takes none.
+			expect(resolveReviewEngineParameters(validateReviewEngine(valid()), undefined, { remote: false })).toEqual({});
+			expect(() =>
+				resolveReviewEngineParameters(validateReviewEngine(valid()), { a: 1 }, { remote: false }),
+			).toThrow("a is not a parameter");
 		});
 
 		it("registers an engine once and removes only its own registration", () => {
@@ -289,6 +399,25 @@ describe("review engines", () => {
 		expect(() => ended!.pass()).toThrow("The review has ended");
 		await expect(ended!.checkout()).rejects.toThrow("The review has ended");
 		expect(harness.session.work.list().filter((item) => item.kind === "review")).toHaveLength(1);
+	});
+
+	it("gives the engine the conversation's models and whether its project is trusted, to run model sessions of its own", async () => {
+		const { harness, start } = await fixture();
+		const seen: Array<{ registry: unknown; model: unknown; trusted: boolean }> = [];
+		const declaration = engine(async (ctx) => {
+			seen.push({ registry: ctx.modelRegistry, model: ctx.model, trusted: ctx.isProjectTrusted() });
+			await reviewCarefully(ctx);
+		});
+		await start(declaration);
+		await start(declaration, { trusted: false });
+		expect(seen.map((entry) => entry.trusted)).toEqual([true, false]);
+		expect(seen[0]?.registry).toBe(harness.session.modelRegistry);
+		expect(seen[0]?.model).toBe(harness.session.model);
+		// The registry resolves the models the engine's options name.
+		expect(harness.session.model).toBeDefined();
+		expect(
+			(seen[0]?.registry as typeof harness.session.modelRegistry).getAvailable().map((model) => model.id),
+		).toContain(harness.session.model?.id);
 	});
 
 	it("says a static review was static, and what it never delivered is unchecked", async () => {
@@ -455,6 +584,77 @@ describe("review engines", () => {
 		});
 	});
 
+	it("checks the parameters against the engine that runs, for the client that asked", async () => {
+		const { harness } = await fixture();
+		const declared = (localOnly: string[]) =>
+			engine(async (ctx) => void (await reviewCarefully(ctx)), {
+				remoteSafe: true,
+				parameters: { type: "object", properties: { exec: { type: "boolean", default: false } } },
+				localOnly,
+			});
+		const run = (declaration: ReviewEngineDeclaration, params: Record<string, unknown>, remote: boolean) =>
+			startEngineReview({
+				engine: declaration,
+				target: { kind: "uncommitted" },
+				params,
+				remote,
+				cwd: harness.tempDir,
+				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
+				settingsManager: { isProjectTrusted: () => true },
+				sessionManager: harness.session.sessionManager!,
+				sessionWriter: harness.session.sessionWriter,
+			});
+		// A client was told `exec` is free to set; the engine that runs has since made it local-only.
+		await expect(run(declared(["exec"]), { exec: true }, true)).rejects.toMatchObject({
+			reason: "local_only",
+			message: "exec can only be set by a client at the host",
+		});
+		await expect(run(declared([]), { exec: "yes" }, false)).rejects.toThrow("exec must be true or false");
+		expect(harness.session.work.list().filter((item) => item.kind === "review")).toEqual([]);
+	});
+
+	it("bounds the commands an engine reports", async () => {
+		const { start } = await fixture();
+		const reported = await start(
+			engine(async (ctx) => {
+				const hunks = ctx.changedFiles().flatMap((file) => file.hunks.map((hunk) => hunk.id));
+				ctx.pass().diff(hunks, 64 * 1024);
+				await ctx.submit({
+					candidates: { ...candidates(), candidates: [] },
+					verification: { ...verification(), decisions: [] },
+					commandsRun: ["npm   test\n  --  --run", `x${"y".repeat(600)}`],
+					failedVerificationAttempts: ["bash: false"],
+				});
+			}),
+		);
+		const coverage = reported.runs.runs[0]!.result!.coverage;
+		expect(coverage.commandsRun).toEqual(["npm test -- --run", `x${"y".repeat(499)}`]);
+		expect(coverage.failedVerificationAttempts).toEqual(["bash: false"]);
+
+		const refused: unknown[] = [];
+		await start(
+			engine(async (ctx) => {
+				const empty = {
+					candidates: { ...candidates(), candidates: [] },
+					verification: { ...verification(), decisions: [] },
+				};
+				for (const bad of [
+					{ commandsRun: "npm test" },
+					{ commandsRun: [1] },
+					{ commandsRun: Array.from({ length: 101 }, () => "x") },
+					{ failedVerificationAttempts: "nope" },
+				]) {
+					await ctx.submit({ ...empty, ...bad } as never).catch((error: unknown) => refused.push(error));
+				}
+			}),
+		);
+		expect(refused).toHaveLength(4);
+		expect((refused[0] as ReviewEngineSubmissionError).errors).toEqual(["commandsRun must be a list of strings"]);
+		expect((refused[2] as ReviewEngineSubmissionError).errors).toEqual(["commandsRun lists more than 100 entries"]);
+	});
+
 	describe("how a run ends", () => {
 		it("records a failure when the engine throws, and when it submits nothing", async () => {
 			const { start } = await fixture();
@@ -523,6 +723,8 @@ describe("review engines", () => {
 				remote: false,
 				cwd: harness.tempDir,
 				work: harness.session.work,
+				modelRegistry: harness.session.modelRegistry,
+				model: harness.session.model,
 				settingsManager: { isProjectTrusted: () => true },
 				sessionManager: harness.session.sessionManager!,
 				sessionWriter: harness.session.sessionWriter,
@@ -588,6 +790,8 @@ describe("review engines", () => {
 					remote: false,
 					cwd: harness.tempDir,
 					work: harness.session.work,
+					modelRegistry: harness.session.modelRegistry,
+					model: harness.session.model,
 					settingsManager: { isProjectTrusted: () => true },
 					sessionManager: harness.session.sessionManager!,
 					sessionWriter: harness.session.sessionWriter,
@@ -630,6 +834,8 @@ describe("review engines", () => {
 			remote: false,
 			cwd: harness.tempDir,
 			work: harness.session.work,
+			modelRegistry: harness.session.modelRegistry,
+			model: harness.session.model,
 			settingsManager: { isProjectTrusted: () => true },
 			sessionManager: harness.session.sessionManager!,
 			sessionWriter: harness.session.sessionWriter,

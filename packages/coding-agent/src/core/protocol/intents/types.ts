@@ -78,6 +78,8 @@ export interface IntentReviewOptions {
 	readonly requireConfirmation: boolean;
 	/** The id of the extension engine to review with; none for the built-in pipeline. */
 	readonly engine?: string;
+	/** The engine's parameters as the client supplied them; the engine's run checks them again and fills in defaults. */
+	readonly engineParams?: Readonly<Record<string, string | boolean | number>>;
 	readonly controls?: Partial<ReviewRunControls>;
 	readonly parentRunId?: string;
 	/** Auxiliary tools of the conversation the passes may use besides their snapshot tools (local clients only). */

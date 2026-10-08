@@ -18,6 +18,7 @@ import {
 	reviewTargetForRerun,
 } from "../../review.ts";
 import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../review-discussions.ts";
+import { ReviewEngineParametersError, resolveReviewEngineParameters } from "../../review-engine.ts";
 import { publishReviewRun } from "../../review-publish.ts";
 import {
 	acknowledgeReviewRun,
@@ -71,6 +72,8 @@ function reviewAvailability(view: IntentView): IntentAvailability {
 interface ReviewControlsInput {
 	/** The review engine: the built-in pipeline when absent or `standard`. */
 	engine?: string;
+	/** The engine's own options by parameter name. */
+	engineParams?: Record<string, string | boolean | number>;
 	focus?: string;
 	scope?: string;
 	effort?: "low" | "standard" | "high";
@@ -125,8 +128,17 @@ function reviewTools(ctx: IntentContext, tools: readonly string[] | undefined): 
  * engine, it must review the target, a remote device may start only an engine that allows it, and an engine
  * takes no auxiliary tools: its passes are its own.
  */
-function reviewEngineOf(ctx: IntentContext, input: ReviewControlsInput, target: ReviewTarget): string | undefined {
-	if (input.engine === undefined || input.engine === STANDARD_REVIEW_ENGINE) return undefined;
+function reviewEngineOf(
+	ctx: IntentContext,
+	input: ReviewControlsInput,
+	target: ReviewTarget,
+): { id: string; params: Readonly<Record<string, string | boolean | number>> | undefined } | undefined {
+	if (input.engine === undefined || input.engine === STANDARD_REVIEW_ENGINE) {
+		if (input.engineParams !== undefined) {
+			throw new IntentRejectedError("invalid_input", "Engine options need an engine other than standard");
+		}
+		return undefined;
+	}
 	const engine = targetOf(ctx).session.reviewEngines.get(input.engine);
 	if (!engine) throw new IntentRejectedError("invalid_input", `Unknown review engine: ${input.engine}`);
 	if (!engine.targets.includes(target.kind)) {
@@ -141,17 +153,31 @@ function reviewEngineOf(ctx: IntentContext, input: ReviewControlsInput, target: 
 	if (input.tools !== undefined) {
 		throw new IntentRejectedError("invalid_input", "Auxiliary tools do not apply to an engine's review");
 	}
-	return engine.id;
+	try {
+		// Checked here to refuse early and by name; the run checks them again against the engine it runs.
+		resolveReviewEngineParameters(engine, input.engineParams, { remote: ctx.profile.name === "remote" });
+		return { id: engine.id, params: input.engineParams };
+	} catch (error) {
+		if (error instanceof ReviewEngineParametersError) {
+			throw new IntentRejectedError(error.reason === "local_only" ? "not_allowed" : "invalid_input", error.message);
+		}
+		throw error;
+	}
 }
 
 /** Remote reviews confirm before they start, require project trust, and sanitize failures. */
-function reviewOptions(ctx: IntentContext, input: ReviewControlsInput, engine?: string): IntentReviewOptions {
+function reviewOptions(
+	ctx: IntentContext,
+	input: ReviewControlsInput,
+	engine?: { id: string; params: Readonly<Record<string, string | boolean | number>> | undefined },
+): IntentReviewOptions {
 	const remote = ctx.profile.name === "remote";
 	const tools = remote ? undefined : reviewTools(ctx, input.tools);
 	return {
 		remote,
 		requireConfirmation: remote,
-		...(engine === undefined ? {} : { engine }),
+		...(engine === undefined ? {} : { engine: engine.id }),
+		...(engine?.params === undefined ? {} : { engineParams: engine.params }),
 		...(tools === undefined ? {} : { tools }),
 		controls: {
 			...(input.focus ? { focus: input.focus } : {}),

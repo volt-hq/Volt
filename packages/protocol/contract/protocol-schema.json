@@ -10827,6 +10827,29 @@
 					"minLength": 1,
 					"maxLength": 160
 				},
+				"engineParams": {
+					"type": "object",
+					"patternProperties": {
+						"^(?!(?:constructor|prototype)$)[A-Za-z][A-Za-z0-9_]{0,63}$": {
+							"anyOf": [
+								{
+									"type": "string"
+								},
+								{
+									"type": "boolean"
+								},
+								{
+									"type": "integer"
+								}
+							]
+						}
+					},
+					"additionalProperties": false,
+					"title": "Engine options",
+					"description": "The engine's own options, by parameter name.",
+					"maxProperties": 64,
+					"x-volt-max-serialized-bytes": 16384
+				},
 				"focus": {
 					"type": "string",
 					"title": "Focus",

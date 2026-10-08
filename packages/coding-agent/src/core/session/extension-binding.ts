@@ -55,6 +55,7 @@ import { type HostRequestOptions, hostRequestTimeout, type LiveState } from "../
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
+import type { ExtensionReviewEngines, ReviewEngineRefusal } from "../review-engine-extensions.ts";
 import type { SessionManager } from "../session-manager.ts";
 import {
 	assertExtensionEntryType,
@@ -144,6 +145,11 @@ function refusedKind(refusal: WorkKindRefusal): ExtensionError {
 	return { extensionId: refusal.extensionId, event: "register_work_kind", error: refusal.error };
 }
 
+/** A review engine the session refused to register, as an extension error. */
+function refusedEngine(refusal: ReviewEngineRefusal): ExtensionError {
+	return { extensionId: refusal.extensionId, event: "register_review_engine", error: refusal.error };
+}
+
 export interface SessionExtensionBindingHost {
 	readonly session: ExtensionBindingSession;
 	readonly sessionManager: SessionManager;
@@ -164,6 +170,8 @@ export interface SessionExtensionBindingHost {
 	extensionServices(): SessionExtensionServices;
 	/** The work kinds the extensions declared, registered in the conversation's work registry. */
 	extensionKinds(): ExtensionKinds;
+	/** The review engines the extensions registered, kept in the conversation's engine registry. */
+	extensionReviewEngines(): ExtensionReviewEngines;
 	jobs(): SessionJobs;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */
@@ -269,7 +277,9 @@ export class SessionExtensionBinding {
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
-		ownsWork: (extensionId, workId) => this.host.extensionKinds().owns(extensionId, workId),
+		ownsWork: (extensionId, workId) =>
+			this.host.extensionKinds().owns(extensionId, workId) ||
+			this.host.extensionReviewEngines().owns(extensionId, workId),
 		droppedIntent: (extensionId, intent) =>
 			this.extensionRunner.emitError({
 				extensionId,
@@ -310,14 +320,16 @@ export class SessionExtensionBinding {
 			bound: () => this.started,
 			changed: () => {
 				const runner = this.extensionRunner;
-				this.refuseKinds(runner, this.host.extensionKinds().sync(runner.getWorkKinds()));
+				this.refuseDeclarations(runner);
 				// The next request offers the active extensions' tools, and no others.
 				this.host.tools().refreshRegistry();
 				this.host.extensionsChanged();
 			},
 			statesChanged: () => this.host.extensionsChanged(),
 			retireDeclarations: (extension) => this.retireDeclarations(extension),
-			retireWork: (id) => this.host.extensionKinds().retire(id),
+			retireWork: async (id) => {
+				await Promise.all([this.host.extensionKinds().retire(id), this.host.extensionReviewEngines().retire(id)]);
+			},
 			turnBoundary: () => this.host.turnBoundary(),
 			reportError: (error) => this.extensionRunner.emitError(error),
 			...(resourceLoader.rescanExtensions === undefined
@@ -784,9 +796,15 @@ export class SessionExtensionBinding {
 		runner.reportDroppedSettings();
 	}
 
-	/** Report the work kinds the session refused to register: at once, or once clients listen. */
-	private refuseKinds(runner: ExtensionRunner, refusals: readonly WorkKindRefusal[]): void {
-		const errors = refusals.map(refusedKind);
+	/**
+	 * Register the work kinds and review engines the extensions declared since the last time, and report the ones
+	 * the session refused: at once, or once clients listen.
+	 */
+	private refuseDeclarations(runner: ExtensionRunner): void {
+		const errors = [
+			...this.host.extensionKinds().sync(runner.getWorkKinds()).map(refusedKind),
+			...this.host.extensionReviewEngines().sync(runner.getReviewEngines()).map(refusedEngine),
+		];
 		if (this.bound) for (const error of errors) runner.emitError(error);
 		else this.refusedKinds.push(...errors);
 	}
@@ -886,7 +904,12 @@ export class SessionExtensionBinding {
 		// Its refusals reach the clients once they listen to it.
 		const kinds = this.host.extensionKinds();
 		void this.host.trackAncillaryWork(kinds.clear());
-		this.refusedKinds = kinds.bind(this.extensionRunner.getWorkKinds()).map(refusedKind);
+		const engines = this.host.extensionReviewEngines();
+		void this.host.trackAncillaryWork(engines.clear());
+		this.refusedKinds = [
+			...kinds.bind(this.extensionRunner.getWorkKinds()).map(refusedKind),
+			...engines.bind(this.extensionRunner.getReviewEngines()).map(refusedEngine),
+		];
 		if (this.bound) this.applyExtensionBindings(this.extensionRunner);
 	}
 
@@ -894,7 +917,7 @@ export class SessionExtensionBinding {
 		const session = this.host.session;
 		runner.bindServices(this.host.extensionServices().servicesManager);
 		const kinds = this.host.extensionKinds();
-		runner.bindWork(kinds.start, () => this.refuseKinds(runner, kinds.sync(runner.getWorkKinds())));
+		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -1051,6 +1074,7 @@ export class SessionExtensionBinding {
 		}
 		// The shut-down extensions' work kinds go with them, interrupting the work they still run.
 		await this.host.extensionKinds().clear();
+		await this.host.extensionReviewEngines().clear();
 		this.host.assertActive();
 		await this.host.settingsManager.reload();
 		this.host.assertActive();

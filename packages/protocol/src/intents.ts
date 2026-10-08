@@ -27,6 +27,8 @@ import { type Static, type TObject, type TSchema, type TString, type TUnion, Typ
 import { RpcAgentOptionsModelSelectionSchema } from "./agent-options.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import {
+	EXTENSION_SETTING_NAME_PATTERN,
+	EXTENSION_SETTINGS_MAX_SERIALIZED_BYTES,
 	ExtensionIdSchema,
 	ExtensionSettingsScopeSchema,
 	ExtensionSettingsValuesSchema,
@@ -512,6 +514,23 @@ export const INTENT_SCHEMAS = {
 						minLength: 1,
 						maxLength: 160,
 					}),
+				),
+				/**
+				 * The engine's own options by parameter name. The host refuses a name the engine does not declare and
+				 * a value that is not valid for it; an option only a local client may set is refused from a remote one.
+				 */
+				engineParams: Type.Optional(
+					Type.Record(
+						Type.String({ pattern: EXTENSION_SETTING_NAME_PATTERN }),
+						Type.Union([Type.String(), Type.Boolean(), Type.Integer()]),
+						{
+							...closed,
+							title: "Engine options",
+							description: "The engine's own options, by parameter name.",
+							maxProperties: 64,
+							"x-volt-max-serialized-bytes": EXTENSION_SETTINGS_MAX_SERIALIZED_BYTES,
+						},
+					),
 				),
 				...reviewOptions,
 			},

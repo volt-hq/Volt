@@ -16,6 +16,7 @@ import { EXTENSION_ID_PATTERN } from "@hansjm10/volt-protocol";
 import { CanonicalDataError, cloneCanonicalData } from "../canonical-data.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { DeclaredReviewEngine } from "../review-engine-extensions.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { ExtensionSessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -499,10 +500,10 @@ export class ExtensionRunner {
 		};
 	}
 
-	/** Start the extensions' work through `start`; `refresh` registers the work kinds they declare after binding. */
+	/** Start the extensions' work through `start`; `refresh` registers the work kinds and review engines they declare after binding. */
 	bindWork(start: StartWorkHandler, refresh: () => void): void {
 		this.startWorkFn = start;
-		this.runtime.refreshWorkKinds = () => {
+		this.runtime.refreshDeclarations = () => {
 			this.assertActive();
 			refresh();
 		};
@@ -789,6 +790,13 @@ export class ExtensionRunner {
 	getWorkKinds(): DeclaredWorkKind[] {
 		return this.extensions.flatMap((ext) =>
 			[...ext.workKinds].map(([name, kind]) => ({ extensionId: ext.id, name, kind })),
+		);
+	}
+
+	/** The review engines every extension registered, in load order. */
+	getReviewEngines(): DeclaredReviewEngine[] {
+		return this.extensions.flatMap((ext) =>
+			[...ext.reviewEngines].map(([name, engine]) => ({ extensionId: ext.id, name, engine })),
 		);
 	}
 

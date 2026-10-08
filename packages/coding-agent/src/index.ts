@@ -192,6 +192,7 @@ export type {
 	RegisteredTool,
 	RequestBoundaryEvent,
 	ResolvedCommand,
+	ReviewEngineOptions,
 	SessionBeforeCompactEvent,
 	SessionBeforeForkEvent,
 	SessionBeforeSwitchEvent,
@@ -649,6 +650,24 @@ export type {
 	ResourceLoaderSubagentsResult,
 } from "./core/resource-loader.ts";
 export { DefaultResourceLoader, loadProjectContextFiles } from "./core/resource-loader.ts";
+export type {
+	ReviewEngineChangedFile,
+	ReviewEngineContext,
+	ReviewEngineHunk,
+	ReviewEnginePass,
+	ReviewEngineResult,
+	ReviewEngineSubmission,
+	ReviewEngineTarget,
+	ReviewEngineValidation,
+} from "./core/review-engine.ts";
+export { ReviewEngineSubmissionError } from "./core/review-engine.ts";
+export type {
+	ReviewCandidate,
+	ReviewCandidateReport,
+	ReviewLocation,
+	ReviewVerificationDecision,
+	ReviewVerificationReport,
+} from "./core/review-report.ts";
 // SDK for programmatic usage
 export {
 	type AgentSessionDiagnostic,

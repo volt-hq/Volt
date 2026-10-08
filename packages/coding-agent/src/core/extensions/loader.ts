@@ -49,6 +49,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { isSafeFormPattern } from "../host/live-state.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
+import { EXTENSION_REVIEW_ENGINES_MAX, REVIEW_ENGINE_NAME_PATTERN, validateReviewEngine } from "../review-engine.ts";
 import { createSyntheticSourceInfo, type SourceInfo, type SourceScope } from "../source-info.ts";
 import { HOST_CUSTOM_MESSAGE_TYPES } from "../ui/message-presenters.ts";
 import type { MessagePresenter } from "../ui/presentation.ts";
@@ -80,6 +81,7 @@ import {
 	type ProviderConfig,
 	type RegisteredCommand,
 	type RegisteredIntent,
+	type ReviewEngineOptions,
 	type ToolDefinition,
 	type WorkKindDeclaration,
 } from "./types.ts";
@@ -397,7 +399,7 @@ export function createExtensionRuntime(settings = new ExtensionSettingsRuntime()
 		// registerTool() is valid during extension load; refresh is only needed post-bind.
 		refreshTools: () => {},
 		// Likewise registerWorkKind(): the session registers declared kinds when the runner binds.
-		refreshWorkKinds: () => {},
+		refreshDeclarations: () => {},
 		getCommands: notInitialized,
 		setModel: () => Promise.reject(new Error("Extension runtime not initialized")),
 		getThinkingLevel: notInitialized,
@@ -566,7 +568,26 @@ function createExtensionAPI(
 				throw new Error(`An extension registers at most ${EXTENSION_KINDS_MAX} work kinds`);
 			}
 			extension.workKinds.set(name, declaration);
-			runtime.refreshWorkKinds();
+			runtime.refreshDeclarations();
+		},
+
+		registerReviewEngine(name: string, engine: ReviewEngineOptions): void {
+			assertRunning();
+			if (typeof name !== "string" || !REVIEW_ENGINE_NAME_PATTERN.test(name)) {
+				throw new Error(
+					`Invalid review engine name ${JSON.stringify(name)}: use at most 64 lowercase letters, digits, "-", and "_", starting with a letter or digit`,
+				);
+			}
+			if (typeof engine !== "object" || engine === null) {
+				throw new TypeError(`Review engine ${name} must be declared as an object`);
+			}
+			const declaration = validateReviewEngine({ ...engine, id: `ext:${extension.id}/${name}` });
+			if (extension.reviewEngines.has(name)) throw new Error(`Review engine ${name} is already registered`);
+			if (extension.reviewEngines.size >= EXTENSION_REVIEW_ENGINES_MAX) {
+				throw new Error(`An extension registers at most ${EXTENSION_REVIEW_ENGINES_MAX} review engines`);
+			}
+			extension.reviewEngines.set(name, declaration);
+			runtime.refreshDeclarations();
 		},
 
 		registerMessagePresenter<T>(customType: string, present: MessagePresenter<T>): void {
@@ -900,6 +921,7 @@ function createExtension(candidate: Candidate): Extension {
 		intents: new Map(),
 		completionProviders: new Map(),
 		workKinds: new Map(),
+		reviewEngines: new Map(),
 		providers: new Set(),
 		clientRegistrations: new Set(),
 		lifetime: new ExtensionLifetime(),

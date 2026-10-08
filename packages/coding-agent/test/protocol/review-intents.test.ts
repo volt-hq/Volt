@@ -291,4 +291,56 @@ describe("review intent with an engine", () => {
 			expect.objectContaining({ engine: SWARM, remote: true }),
 		);
 	});
+
+	test("hands the engine its checked parameters, and keeps a remote client from a local-only one", async () => {
+		const engine = swarm({
+			remoteSafe: true,
+			parameters: {
+				type: "object",
+				properties: {
+					workers: { type: "integer", minimum: 1, maximum: 32, default: 30 },
+					exec: { type: "boolean", default: false },
+				},
+			},
+			localOnly: ["exec"],
+		});
+		const local = setup(engine);
+		await intentRegistry.invoke(local.ctx, "review", {
+			target: "uncommitted",
+			engine: SWARM,
+			engineParams: { workers: 4, exec: true },
+		});
+		expect(local.runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			expect.objectContaining({ engine: SWARM, engineParams: { workers: 4, exec: true } }),
+		);
+
+		const remote = setup(engine, true);
+		await intentRegistry.invoke(remote.ctx, "review", {
+			target: "uncommitted",
+			engine: SWARM,
+			engineParams: { workers: 4 },
+		});
+		expect(remote.runReview).toHaveBeenCalledWith(
+			{ kind: "uncommitted" },
+			// The run checks them again against the engine it runs, and fills in the defaults.
+			expect.objectContaining({ engineParams: { workers: 4 } }),
+		);
+		remote.runReview.mockClear();
+		await expect(
+			intentRegistry.invoke(remote.ctx, "review", {
+				target: "uncommitted",
+				engine: SWARM,
+				engineParams: { exec: true },
+			}),
+		).rejects.toMatchObject({ code: "not_allowed", message: "exec can only be set by a client at the host" });
+		await expect(
+			intentRegistry.invoke(remote.ctx, "review", {
+				target: "uncommitted",
+				engine: SWARM,
+				engineParams: { workers: 0 },
+			}),
+		).rejects.toMatchObject({ code: "invalid_input", message: "workers must be at least 1" });
+		expect(remote.runReview).not.toHaveBeenCalled();
+	});
 });
