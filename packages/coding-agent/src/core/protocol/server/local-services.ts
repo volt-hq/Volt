@@ -77,6 +77,7 @@ export function createLocalIntentServices(
 					engine,
 					target,
 					controls: reviewOptions.controls,
+					...(reviewOptions.engineParams === undefined ? {} : { params: reviewOptions.engineParams }),
 					remote: reviewOptions.remote,
 					cwd: conversation.cwd,
 					work: conversation.work,

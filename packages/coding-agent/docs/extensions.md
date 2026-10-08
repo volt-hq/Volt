@@ -51,6 +51,7 @@ See [examples/extensions/](../examples/extensions/) for working implementations.
 - [ExtensionCommandContext](#extensioncommandcontext)
 - [ExtensionAPI Methods](#extensionapi-methods)
   - [Background work](#voltregisterworkkindname-kind)
+  - [Review engines](#voltregisterreviewenginename-engine)
 - [Managed context preparation](#managed-context-preparation)
 - [State Management](#state-management)
 - [Custom Tools](#custom-tools)
@@ -1844,6 +1845,62 @@ The declaration (all optional):
 In the TUI, open work shows in the footer's work line and in `/work` (Alt+J), which lists its progress, steps, result, and output and cancels it; a finished item that delivers no notice says how it ended in a status line. A notice's own text renders as Markdown, after the line naming the work; a `message` notice shows above the editor until the next turn takes it. Work notices are the host's: `volt.sendMessage()` refuses the `work_notice` custom type.
 
 Reloading the extensions removes their kinds: `/reload` is refused while work runs, and work still running when the kinds are removed (for example, started by a `session_shutdown` handler) ends `interrupted`; whatever its `run` reports or returns afterwards is ignored. Extension work does not survive a restart: work open when the conversation reopens ends `interrupted`.
+
+### volt.registerReviewEngine(name, engine)
+
+Register a review engine: `/review` can run a review on it. The host resolves what is reviewed (a snapshot of the uncommitted changes, a branch, a pull request's code, or a commit) and starts the review as `review` work, so it shows in the job list and `/work` like any review. Your `run(ctx)` reviews the snapshot with passes of its own and submits a result; the host validates it, builds the findings, and writes the run's record. The review opens into the same findings conversation (acknowledge, fix, discuss, publish a pull request review) as the built-in pipeline's.
+
+```typescript
+volt.registerReviewEngine("swarm", {
+  label: "Swarm",
+  description: "Many reviewers, clustered, each cluster verified twice.",
+  cost: "Much slower and costlier than the standard review.",
+  targets: ["uncommitted", "branch", "branch_uncommitted", "commit", "pr"],
+  parameters: {
+    type: "object",
+    properties: {
+      workers: { type: "integer", minimum: 1, maximum: 32, default: 30 },
+      exec: { type: "boolean", default: false, description: "Let verifiers run commands." },
+    },
+  },
+  localOnly: ["exec"],
+  async run(ctx) {
+    const files = ctx.changedFiles(); // paths, hunk ids and sizes; no patch text
+    const pass = ctx.pass(); // one per independent pass
+    const diff = pass.diff(files.flatMap((file) => file.hunks.map((hunk) => hunk.id)), 200_000);
+    // ... give diff.text (or pass.tools()) to your reviewers, then:
+    await ctx.submit({ candidates: { summary, candidates, limitations: [] }, verification });
+  },
+});
+```
+
+The engine's id is `ext:<id>/<name>`, where `<id>` is the extension's manifest id; clients and run records name it so. `name` is at most 64 lowercase letters, digits, `-`, and `_`, starting with a letter or digit. An extension registers at most 8 engines. Registering throws what you must fix: the name, the declaration, or a parameter.
+
+The declaration:
+
+| Field | Meaning |
+|---|---|
+| `label`, `description` | One line each for a client to show, at most 500 characters. |
+| `cost` | What choosing it costs compared with the standard review, shown before it starts. |
+| `targets` | The targets it reviews: `uncommitted`, `branch`, `branch_uncommitted`, `pr`, `commit`. A pull request is captured by its identity and code only: the host does not read its linked issues or discussion for an engine. |
+| `remoteSafe` | `true` lets a paired remote device start it, in a trusted project. Audit it first: a remote client chooses its targets, options, and focus. Defaults to `false`. |
+| `parameters` | The engine's options, declared as an extension manifest declares its settings: a flat object of string, string enum, boolean, and integer parameters with defaults and bounds. A name must not be one of the review's own options (`focus`, `scope`, `effort`, `includeOptional`, `scopeMode`, `target`, `engine`, and so on). |
+| `localOnly` | Parameters only a client at the host may set. A paired remote device is refused them and never sees them; their defaults apply. Use it for what gives the engine more power, such as running commands. |
+
+`ctx` holds:
+
+- `workId` (the review's id, which is its run id), `params` (your declared parameters, checked, with the defaults filled in), `signal` (aborted when the review is cancelled, the extensions reload, or the conversation closes), and `cwd`.
+- `target`: what is reviewed (`kind`, `description`, the git `identity` including a pull request's, the repository `root`, host text about the target, and the review's `controls`: `focus`, `scope`, `effort`, `includeOptional`).
+- `progress(progress, detail?)`, `checkpoint(progress, detail?)`, and `output(text)` report as [background work](#voltregisterworkkindname-kind) does. `detail` is [UI data](#ui-as-data) every client shows with the running review; it is normalized under your extension's action policy (an action may send your own intents and commands, and `open_work` or `cancel_work` for your own reviews, whose id is `ctx.workId`) and bounded.
+- `changedFiles()`: the changed files with their statuses, whether each is reviewable and in scope, and their hunks' ids and sizes. It carries no patch text. Receiving it counts as your engine getting the changed-file inventory, which a complete run needs.
+- `pass()`: starts an independent pass. `pass.diff(hunkIds, maxBytes)` returns the diff text of those hunks within the budget, each whole or left in `omitted`; `pass.tools()` returns the host's snapshot tools (changed files, diff, file, tree, search) for a pass to call; `pass.coverage()` says what the pass has seen.
+- `validate(candidates)`: checks a candidate report as `submit` would, without keeping anything, so your own reporting tools can send a reviewer back to fix an anchor.
+- `submit({ candidates, verification, commandsRun?, failedVerificationAttempts? })`: submits the result once. The reports have the host's shapes: a candidate has a title, body, trigger, impact, kebab-case `category` and `rootCauseKey`, a priority from 0 to 2 (3 only when the review includes optional findings), a confidence, and a `changeLocation` on a changed line of at most 10 lines; the verification has a decision for every candidate, an `assessment` of `complete` or `incomplete` (with a `challenge`), and `priorFindingDecisions: []`. A candidate the host's checks complain about is dropped with its decision, and `submit` returns which (`rejected`) and why (`errors`). A result that cannot stand at all (not the host's shape, a candidate without a decision, an incomplete assessment without a challenge) throws a `ReviewEngineSubmissionError`, and you may submit again; a successful submit is final.
+- `checkout()`: a disposable checkout of the reviewed head, removed when the review ends.
+
+The host derives finding ids and fingerprints, the scope and exclusions, the completion status, and the target's files from git; you supply what only you know: the verification method and rationale, the assessment, limitations, and the commands you ran. A run is `complete` when your verification assessment is complete and nothing is left unchecked: every reviewable hunk was delivered to at least one pass through `pass.diff` or the pass's tools, and you received the changed-file inventory. That says what the host observed delivering and what you reported; it does not say a model read the diff or that your passes were independent. A run without a command in `commandsRun` is marked as a static review. The pull request review the user posts names your engine and says its coverage is reported by the engine.
+
+The host writes the run's record when your `run` returns: completed or incomplete with your result, failed if `run` threw or submitted nothing (a remote client sees only the host's standard failure message), and cancelled if the review was. The record names your engine; a rerun of it is refused, and the built-in pipeline's incremental reviews never build on it. Your `ctx` stops working once the review ends. Reloading the extensions, or disabling yours, removes your engines and cancels the reviews they run. Engine reviews count against the same limit of three open reviews as the built-in pipeline's.
 
 ### volt.registerMessagePresenter(customType, present)
 

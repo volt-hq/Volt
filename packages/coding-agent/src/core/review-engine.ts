@@ -13,8 +13,21 @@
  * reported and the host observed, and no more.
  */
 
-import type { UiNode, WorkProgress } from "@hansjm10/volt-protocol";
+import {
+	type ExtensionSettings,
+	ExtensionSettingsSchema,
+	type ExtensionSettingsValues,
+	type UiNode,
+	type WorkProgress,
+} from "@hansjm10/volt-protocol";
 import { Compile, type Validator } from "typebox/compile";
+import {
+	checkSettingsSchema,
+	ExtensionSettingsError,
+	normalizeSettingsSchema,
+	settingsDefaults,
+	settingValueProblem,
+} from "./extensions/settings.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
 import { formatSchemaError } from "./protocol/schema-errors.ts";
 import {
@@ -49,10 +62,40 @@ import {
 	ReviewRunCoverage,
 } from "./review-tools.ts";
 
+/** An engine's name within its extension. */
+export const REVIEW_ENGINE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** Most review engines one extension registers. */
+export const EXTENSION_REVIEW_ENGINES_MAX = 8;
+
 /** Most characters of an engine's label, description, and cost note. */
 const ENGINE_TEXT_MAX_CHARS = 500;
 
 const TARGET_KINDS: readonly ReviewTarget["kind"][] = ["uncommitted", "branch", "branch_uncommitted", "pr", "commit"];
+
+/**
+ * Names an engine's parameters cannot take: they are flags beside the review's own options (`/review --focus
+ * ... --workers 10`), so a parameter named like one of those would shadow it.
+ */
+export const RESERVED_REVIEW_PARAMETER_NAMES: ReadonlySet<string> = new Set([
+	"target",
+	"base",
+	"number",
+	"url",
+	"ref",
+	"engine",
+	"engineParams",
+	"focus",
+	"scope",
+	"effort",
+	"includeOptional",
+	"scopeMode",
+	"tools",
+	"incremental",
+	"full",
+]);
+
+let parametersValidator: Validator | undefined;
 
 /** What an engine declares about itself, and the function that runs its reviews. */
 export interface ReviewEngineDeclaration {
@@ -66,6 +109,14 @@ export interface ReviewEngineDeclaration {
 	readonly targets: readonly ReviewTarget["kind"][];
 	/** Whether a paired remote device may start it. */
 	readonly remoteSafe: boolean;
+	/**
+	 * The engine's options, declared like an extension's manifest settings: a flat object of string, string enum,
+	 * boolean, and integer parameters with defaults and bounds. A run's {@link ReviewEngineContext.params} are
+	 * these, checked, with the defaults filled in.
+	 */
+	readonly parameters?: ExtensionSettings;
+	/** Parameters only a client at the host may set: a paired remote device is refused them, and never sees them. */
+	readonly localOnly?: readonly string[];
 	/** Review `ctx.target`, submit the result with {@link ReviewEngineContext.submit}, and return. */
 	run(ctx: ReviewEngineContext): Promise<void>;
 }
@@ -83,7 +134,10 @@ export function validateReviewEngine(engine: unknown): ReviewEngineDeclaration {
 	if (typeof engine !== "object" || engine === null) {
 		throw new ReviewEngineDeclarationError("A review engine must be declared as an object");
 	}
-	const { id, label, description, cost, targets, remoteSafe, run } = engine as Record<string, unknown>;
+	const { id, label, description, cost, targets, remoteSafe, parameters, localOnly, run } = engine as Record<
+		string,
+		unknown
+	>;
 	if (!isExtensionReviewEngine(id)) {
 		throw new ReviewEngineDeclarationError(
 			`Invalid review engine id ${JSON.stringify(id)}: use ext:<extension id>/<engine name>`,
@@ -117,6 +171,46 @@ export function validateReviewEngine(engine: unknown): ReviewEngineDeclaration {
 		throw new ReviewEngineDeclarationError(`Review engine ${id}: remoteSafe must be a boolean`);
 	}
 	if (typeof run !== "function") throw new ReviewEngineDeclarationError(`Review engine ${id}: run must be a function`);
+	let keptParameters: ExtensionSettings | undefined;
+	if (parameters !== undefined) {
+		const normalized = normalizeSettingsSchema(parameters);
+		parametersValidator ??= Compile(ExtensionSettingsSchema);
+		if (!parametersValidator.Check(normalized)) {
+			throw new ReviewEngineDeclarationError(
+				`Review engine ${id}: parameters ${formatSchemaError(ExtensionSettingsSchema, parametersValidator.Errors(normalized))}`,
+			);
+		}
+		// Plain data from here on: what is checked is what is kept.
+		keptParameters = structuredClone(normalized) as ExtensionSettings;
+		try {
+			checkSettingsSchema(keptParameters);
+		} catch (error) {
+			if (error instanceof ExtensionSettingsError) {
+				throw new ReviewEngineDeclarationError(`Review engine ${id}: parameters: ${error.message}`);
+			}
+			throw error;
+		}
+		const shadowing = Object.keys(keptParameters.properties).filter((name) =>
+			RESERVED_REVIEW_PARAMETER_NAMES.has(name),
+		);
+		if (shadowing.length > 0) {
+			throw new ReviewEngineDeclarationError(
+				`Review engine ${id}: parameters cannot be named like a review option: ${shadowing.join(", ")}`,
+			);
+		}
+		deepFreeze(keptParameters);
+	}
+	let keptLocalOnly: string[] | undefined;
+	if (localOnly !== undefined) {
+		const names: unknown[] | undefined = Array.isArray(localOnly) ? [...localOnly] : undefined;
+		if (
+			!names ||
+			names.some((name) => typeof name !== "string" || !Object.hasOwn(keptParameters?.properties ?? {}, name))
+		) {
+			throw new ReviewEngineDeclarationError(`Review engine ${id}: localOnly must list declared parameters`);
+		}
+		keptLocalOnly = [...new Set(names as string[])];
+	}
 	return Object.freeze({
 		id,
 		label: kept.label,
@@ -124,8 +218,62 @@ export function validateReviewEngine(engine: unknown): ReviewEngineDeclaration {
 		...(kept.cost === undefined ? {} : { cost: kept.cost }),
 		targets: Object.freeze([...new Set(keptTargets)]),
 		remoteSafe: remoteSafe === true,
+		...(keptParameters === undefined ? {} : { parameters: keptParameters }),
+		...(keptLocalOnly === undefined ? {} : { localOnly: Object.freeze(keptLocalOnly) }),
 		run: run as ReviewEngineDeclaration["run"],
 	});
+}
+
+function deepFreeze<T>(value: T): T {
+	if (typeof value === "object" && value !== null) {
+		for (const child of Object.values(value)) deepFreeze(child);
+		Object.freeze(value);
+	}
+	return value;
+}
+
+/** Parameters that cannot be used; `localOnly` says a remote client set one only a local client may. */
+export class ReviewEngineParametersError extends Error {
+	readonly reason: "invalid" | "local_only";
+
+	constructor(reason: "invalid" | "local_only", message: string) {
+		super(message);
+		this.name = "ReviewEngineParametersError";
+		this.reason = reason;
+	}
+}
+
+/**
+ * The parameters of a run of `engine`: the values a client supplied, checked against its declaration, over its
+ * defaults. A remote client may not set a `localOnly` parameter; the default stands for it.
+ */
+export function resolveReviewEngineParameters(
+	engine: Pick<ReviewEngineDeclaration, "label" | "parameters" | "localOnly">,
+	supplied: Readonly<Record<string, unknown>> | undefined,
+	options: { remote: boolean },
+): Readonly<ExtensionSettingsValues> {
+	const properties = engine.parameters?.properties ?? {};
+	const problems: string[] = [];
+	const values: ExtensionSettingsValues = {};
+	for (const [name, value] of Object.entries(supplied ?? {})) {
+		const setting = Object.hasOwn(properties, name) ? properties[name] : undefined;
+		if (!setting) {
+			problems.push(`${name} is not a parameter of the ${engine.label} engine`);
+			continue;
+		}
+		if (options.remote && engine.localOnly?.includes(name)) {
+			throw new ReviewEngineParametersError("local_only", `${name} can only be set by a client at the host`);
+		}
+		const problem = settingValueProblem(setting, value);
+		if (problem !== undefined) problems.push(`${name} ${problem}`);
+		else Object.defineProperty(values, name, { value, enumerable: true, configurable: true, writable: true });
+	}
+	const effective: ExtensionSettingsValues = { ...settingsDefaults(engine.parameters), ...values };
+	for (const name of engine.parameters?.required ?? []) {
+		if (!Object.hasOwn(effective, name)) problems.push(`${name} is required`);
+	}
+	if (problems.length > 0) throw new ReviewEngineParametersError("invalid", problems.join("; "));
+	return Object.freeze(effective);
 }
 
 /** The engines a conversation can run besides the built-in pipeline, by id. */
@@ -219,9 +367,9 @@ export interface ReviewEngineValidation {
 export interface ReviewEngineResult {
 	candidates: ReviewCandidateReport;
 	verification: ReviewVerificationReport;
-	/** Commands the engine ran while verifying; none means the review was static. */
+	/** Commands the engine ran while verifying (at most 100, one line of 500 characters each); none means the review was static. */
 	commandsRun?: string[];
-	/** Verification attempts that failed. */
+	/** Verification attempts that failed, bounded the same way. */
 	failedVerificationAttempts?: string[];
 }
 
@@ -249,6 +397,10 @@ export class ReviewEngineSubmissionError extends Error {
 
 /** What an engine's run gets: the target, the passes, the host's validation, and the work's channels. */
 export interface ReviewEngineContext {
+	/** The review's work id, which is its run id: what a detail action names to cancel or open this run. */
+	readonly workId: string;
+	/** The run's parameters: checked against {@link ReviewEngineDeclaration.parameters}, defaults filled in. */
+	readonly params: Readonly<ExtensionSettingsValues>;
 	/** Aborted when the review is cancelled or the conversation closes. */
 	readonly signal: AbortSignal;
 	readonly target: ReviewEngineTarget;
@@ -277,6 +429,23 @@ export interface ReviewEngineContext {
 	submit(result: ReviewEngineResult): Promise<ReviewEngineSubmission>;
 	/** A disposable checkout of the reviewed head, removed when the review ends. */
 	checkout(): Promise<string>;
+}
+
+/** Most commands, and most failed attempts, one result reports. */
+const REPORTED_COMMANDS_MAX = 100;
+/** Longest command or failed attempt a result reports, in characters. */
+const REPORTED_COMMAND_MAX_CHARS = 500;
+
+/** A reported list of commands: strings, one line each, bounded as the built-in pipeline bounds the commands it saw. */
+function reportedCommands(label: string, value: unknown): string[] {
+	if (value === undefined) return [];
+	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
+		throw new ReviewEngineSubmissionError([`${label} must be a list of strings`]);
+	}
+	if (value.length > REPORTED_COMMANDS_MAX) {
+		throw new ReviewEngineSubmissionError([`${label} lists more than ${REPORTED_COMMANDS_MAX} entries`]);
+	}
+	return value.map((entry: string) => entry.replace(/\s+/g, " ").trim().slice(0, REPORTED_COMMAND_MAX_CHARS));
 }
 
 let candidateValidator: Validator | undefined;
@@ -348,7 +517,9 @@ export class ReviewEngineRun {
 	}
 
 	/** The context for an engine's run, with the work's channels. */
-	context(channels: Pick<ReviewEngineContext, "signal" | "progress" | "checkpoint" | "output">): ReviewEngineContext {
+	context(
+		channels: Pick<ReviewEngineContext, "workId" | "params" | "signal" | "progress" | "checkpoint" | "output">,
+	): ReviewEngineContext {
 		const snapshot = this.snapshot;
 		const controls = this.controls;
 		const context: ReviewEngineContext = {
@@ -485,7 +656,11 @@ export class ReviewEngineRun {
 		const verificationErrors = validateReviewVerification(validated, verification);
 		if (verificationErrors.length > 0) throw new ReviewEngineSubmissionError(verificationErrors);
 		const observed = this.coverage.snapshot();
-		const commandsRun = [...(result.commandsRun ?? [])];
+		const commandsRun = reportedCommands("commandsRun", result.commandsRun);
+		const failedVerificationAttempts = reportedCommands(
+			"failedVerificationAttempts",
+			result.failedVerificationAttempts,
+		);
 		const parsed = buildParsedReview({
 			snapshot: this.snapshot,
 			candidateReport: { ...result.candidates, candidates: validated },
@@ -495,7 +670,7 @@ export class ReviewEngineRun {
 			discoveryCoverage: observed,
 			verificationCoverage: observed,
 			commandsRun,
-			failedVerificationAttempts: [...(result.failedVerificationAttempts ?? [])],
+			failedVerificationAttempts,
 			excludedPaths: reviewExclusions(this.snapshot, this.controls, undefined),
 		});
 		if (commandsRun.length === 0) parsed.coverage.residualRisk.unshift(STATIC_REVIEW_LIMITATION);

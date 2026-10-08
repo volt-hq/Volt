@@ -123,10 +123,10 @@ export function validateWorkKind(name: unknown, kind: unknown = {}): WorkKindDec
 }
 
 /** Largest detail an extension kind presents, as serialized JSON in UTF-8 bytes: room for its progress in the live value. */
-const EXTENSION_DETAIL_MAX_BYTES = WORK_CHECKPOINT_MAX_SERIALIZED_BYTES - 1024;
+export const EXTENSION_DETAIL_MAX_BYTES = WORK_CHECKPOINT_MAX_SERIALIZED_BYTES - 1024;
 
 /** Progress a client can render: text without control sequences, finite numbers, and well-formed steps. */
-function keptProgress(progress: unknown): WorkProgress | undefined {
+export function keptProgress(progress: unknown): WorkProgress | undefined {
 	if (!isRecord(progress)) return undefined;
 	const { text, value, max, steps } = progress;
 	const kept: WorkProgressStep[] = [];

@@ -62,6 +62,7 @@ import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { ReviewEngineRegistry } from "./review-engine.ts";
+import { ExtensionReviewEngines } from "./review-engine-extensions.ts";
 import { ReviewPasses } from "./review-passes.ts";
 import { reviewWorkKind } from "./review-work.ts";
 import { SessionBash } from "./session/bash.ts";
@@ -439,6 +440,8 @@ export class AgentSession {
 	readonly reviewEngines = new ReviewEngineRegistry();
 	/** The work kinds the extensions declare, registered while their runner generation is current. */
 	private readonly _extensionKinds = new ExtensionKinds(() => this._work);
+	/** The review engines the extensions register, kept in {@link reviewEngines} while their runner generation is current. */
+	private readonly _extensionReviewEngines = new ExtensionReviewEngines(this.reviewEngines, () => this._work);
 	/**
 	 * How this session's tool calls and custom messages look (RFC §8.3): the
 	 * presenters of its registered tools, the built-in ones, and its
@@ -456,7 +459,8 @@ export class AgentSession {
 			};
 		},
 		message: (customType) => this._extensions?.runner?.getMessagePresenter(customType),
-		ownsWork: (extensionId, workId) => this._extensionKinds.owns(extensionId, workId),
+		ownsWork: (extensionId, workId) =>
+			this._extensionKinds.owns(extensionId, workId) || this._extensionReviewEngines.owns(extensionId, workId),
 	});
 
 	// Extension system
@@ -667,6 +671,7 @@ export class AgentSession {
 				tools: () => this._tools,
 				extensionServices: () => this._extensionServices,
 				extensionKinds: () => this._extensionKinds,
+				extensionReviewEngines: () => this._extensionReviewEngines,
 				jobs: () => this._jobs,
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),
