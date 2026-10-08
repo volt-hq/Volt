@@ -2,7 +2,6 @@ import type { RpcPromptCacheStatus } from "@hansjm10/volt-protocol";
 import { visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
-import { withTransientUsage } from "../src/modes/interactive/client/footer-model.ts";
 import {
 	FooterComponent,
 	type FooterViewModel,
@@ -231,50 +230,6 @@ describe("FooterComponent width handling", () => {
 		expect(statsLine).toContain("CH25.0%");
 	});
 
-	it("shows transient isolated-workflow usage without changing the workspace session", () => {
-		const session = viewModel({
-			sessionName: "parent-session",
-			modelId: "parent-model",
-			reasoning: true,
-			thinkingLevel: "low",
-			usage: {
-				input: 100,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: { total: 0.1 },
-			},
-		});
-		let transient: Parameters<typeof withTransientUsage>[1] = {
-			model: { id: "review-model", provider: "test", reasoning: true, contextWindow: 100_000 },
-			thinkingLevel: "high",
-			fastMode: true,
-			usage: {
-				input: 300,
-				output: 30,
-				cacheRead: 150,
-				cacheWrite: 0,
-				cost: 0.3,
-				latestCacheHitRate: 50,
-				contextUsage: { tokens: 75_000, contextWindow: 100_000, percent: 75 },
-			},
-		};
-		const footer = new FooterComponent(() => withTransientUsage(session, transient));
-
-		const workflowLines = footer.render(120).lines.map(stripAnsi);
-		expect(workflowLines[0]).toContain("project · main · parent-session");
-		expect(workflowLines[0]).toContain("review-model · fast · high");
-		expect(workflowLines[1]).toContain("context 75.0%/100k auto");
-		expect(workflowLines[1]).toContain("$0.300");
-		expect(workflowLines[1]).toContain("CH50.0%");
-
-		transient = undefined;
-		const restoredLines = footer.render(120).lines.map(stripAnsi);
-		expect(restoredLines[0]).toContain("parent-model · low");
-		expect(restoredLines[1]).toContain("context 12.3%/200k auto");
-		expect(restoredLines[1]).toContain("$0.100");
-	});
-
 	describe("prompt cache status", () => {
 		const now = Date.UTC(2026, 8, 23, 15, 0, 0);
 
@@ -341,40 +296,12 @@ describe("FooterComponent width handling", () => {
 			expect(footer.render(160).lines[1]).toContain(theme.fg("warning", "cache cold"));
 		});
 
-		it("omits the status without a published window or while showing workflow usage", () => {
+		it("omits the status without a published window", () => {
 			vi.useFakeTimers({ now });
 			const unknown = footerOf(
 				viewModel({ sessionName: "", promptCache: { kind: "retained", lastRequestAt: now } }),
 			);
 			expect(renderStats(unknown)).not.toContain("cache");
-
-			const session = viewModel({
-				sessionName: "",
-				promptCache: { kind: "retained", lastRequestAt: now, expiresAt: now + 300_000 },
-			});
-			const workflow = session.model;
-			if (workflow === undefined) throw new Error("The view model names no model");
-			const transient = footerOf(
-				withTransientUsage(session, {
-					model: {
-						id: workflow.id,
-						provider: workflow.provider,
-						reasoning: false,
-						contextWindow: workflow.contextWindow,
-					},
-					thinkingLevel: "off",
-					fastMode: false,
-					usage: {
-						input: 1,
-						output: 1,
-						cacheRead: 0,
-						cacheWrite: 0,
-						cost: 0,
-						contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
-					},
-				}),
-			);
-			expect(renderStats(transient)).not.toContain("cache");
 		});
 
 		it("requests a render when the countdown changes while idle", () => {

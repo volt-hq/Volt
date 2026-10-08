@@ -1,6 +1,6 @@
 # Review engines and the review launcher
 
-- Status: In progress. Steps 0 through 3b are shipped. Step 4 ships as five pull requests, 4a through 4e (section 6); step 5 follows.
+- Status: In progress. Steps 0 through 3b are shipped. Step 4 is shipped (five pull requests, 4a through 4e; section 6). Step 5 ships as two, 5a and 5b.
 - Date: 2026-10-07
 - Audience: Volt maintainers and extension API implementers.
 - Scope: How `/review` and review engines that extensions provide (today the project-local `/swarm-review`) share targets, coverage, launching, running, and results.
@@ -261,7 +261,9 @@ Each step is its own pull request, with an issue first. This is the baseline ord
    - **4c. The public API.** `registerReviewEngine`, typed `parameters` and `localOnly`, the `review` intent's `engineParams`, the engine kept in the session's registry for as long as its extension runs (its reviews are cancelled with it), its reports normalized under the extension's action policy, and the engine named in the posted pull request review.
    - **4d. Launching an engine from `/review`.** The `review.engines` query (an engine's id, name, label, description, cost, targets, `remoteSafe`, and `parameters`; a remote client is told only of `remoteSafe` engines and never of their `localOnly` parameters), and `/review ... --engine <name>` in the TUI. `engine` is a flag-only property of the command grammar (a new `flags` hint beside `form`, so the options form does not show it until step 5 turns it into the Engine row). A line says an engine by its name within its extension, or its full id when two engines share a name; once it names one, the engine's parameters become flags beside the review's own (kebab-case, typed by their declaration, completed, and in the usage line), and the client splits the parsed line into the review's fields, the engine's id, and `engineParams`. The auxiliary tools of `/review tools` are not sent with an engine. There is no publish confirmation in the TUI to name the engine in: apps read `engine` from `review.result` (4a), and the posted review names it (4c).
    - **4e. Swarm as an engine.** Swarm moves onto the contract (`.volt/extensions/swarm-review/`), with its options as typed parameters over typed manifest settings; its hand-written parser, its own target resolution, and `/swarm-review` go. See the end of section 4.7.
-5. **One run experience and one entry point.** `/review` moves to the job-list flow, the Engine row appears in the form, and the default-engine setting and cost note ship.
+5. **One run experience and one entry point**, in two pull requests:
+   - **5a. One run experience.** `/review` starts the review and opens the job list on it for every engine, as section 4.5 describes, and the loader goes. The maintainer chose (2026-10-08) to drop the live pass view rather than keep it for `standard` or open the running pass from the list: the list's progress, steps, and detail (which carries the review's usage) are the view. The command returns once the review has started, so several reviews (up to the shared limit of three) can run at once and the conversation stays usable; a review that completes while the list shows it opens its findings and moves the client there, and otherwise a status line says how it ended and Open in `/work` opens the findings. The footer no longer shows a review's usage in place of the conversation's.
+   - **5b. The Engine row.** The launcher asks for the engine and then that engine's form (D6), `review.engine` sets the default, and a non-default engine shows its cost note before it starts.
 
 ## 7. Decisions and open questions
 
