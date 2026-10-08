@@ -186,6 +186,14 @@ export class SessionPromptCache {
 	 * the renewed status publishes without waiting for the turn to settle.
 	 */
 	requestStarted(message: AssistantMessage): void {
+		// The agent loop's abort markers are final on arrival and carry no prompt usage: no provider request
+		// was sent, so they renew nothing and must not publish a renewal that `requestEnded` would withdraw.
+		if (
+			message.stopReason === "aborted" &&
+			message.usage.input + message.usage.cacheRead + message.usage.cacheWrite <= 0
+		) {
+			return;
+		}
 		if (!this.isCurrentModelMessage(message)) return;
 		const base = this.branchStatus();
 		const confirmed = this.renewal;

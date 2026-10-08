@@ -1,5 +1,5 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall, type PromptCacheMetadata } from "@hansjm10/volt-ai";
+import { type AssistantMessage, fauxAssistantMessage, fauxToolCall, type PromptCacheMetadata } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
@@ -131,5 +131,52 @@ describe("issue #724: prompt cache status while a turn runs", () => {
 		await vi.advanceTimersByTimeAsync(2 * MINUTE);
 		await second;
 		await harness.session.waitForIdle();
+	});
+
+	it("publishes nothing for the abort marker that ends an aborted turn", async () => {
+		let release: () => void = () => {};
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const hold: AgentTool = {
+			name: "hold",
+			label: "Hold",
+			description: "Wait until released",
+			parameters: Type.Object({}),
+			execute: async () => {
+				await released;
+				return { content: [{ type: "text", text: "released" }], details: {} };
+			},
+		};
+		const harness = await create({ tools: [hold] });
+		harness.setResponses([
+			() => fauxAssistantMessage("hello"),
+			() => fauxAssistantMessage([fauxToolCall("hold", {})], { stopReason: "toolUse" }),
+		]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+
+		const toolStarted = nextEvent(harness, "tool_execution_start");
+		const prompt = harness.session.prompt("again");
+		await toolStarted;
+		const liveBefore = harness.session.liveState.get("prompt_cache");
+		const started: AssistantMessage[] = [];
+		const changes: unknown[] = [];
+		harness.session.subscribe((event) => {
+			if (event.type === "prompt_cache_changed") changes.push(event.promptCache);
+			else if (event.type === "message_start" && event.message.role === "assistant") started.push(event.message);
+		});
+
+		// The loop ends the aborted turn with a zero-usage marker stamped later than the last request. No
+		// provider request was sent for it, so it must not move the status, even briefly.
+		await vi.advanceTimersByTimeAsync(MINUTE);
+		const abort = harness.session.abort();
+		release();
+		await Promise.all([prompt, abort]);
+		await harness.session.waitForIdle();
+
+		expect(started.map((message) => message.stopReason)).toEqual(["aborted"]);
+		expect(changes).toEqual([]);
+		expect(harness.session.liveState.get("prompt_cache")).toEqual(liveBefore);
 	});
 });
