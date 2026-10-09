@@ -1,3 +1,5 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolPresentation, UiNode } from "@hansjm10/volt-protocol";
 import { PRESENTATION_REMOTE_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
@@ -13,6 +15,7 @@ import {
 	presentRead,
 	presentWrite,
 } from "../src/core/tools/presenters.ts";
+import { createReadTool } from "../src/core/tools/read.ts";
 import {
 	genericToolPresentation,
 	presentToolCall,
@@ -265,6 +268,44 @@ describe("read presenter", () => {
 			}),
 		);
 		expect(plain(truncated.body)).toBe("a\n[Truncated: 1 lines shown (50.0KB limit)]");
+	});
+
+	it("never shows the note the read tool leaves the model", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "volt-read-presenter-"));
+		try {
+			const read = createReadTool(dir);
+			const presentFile = async (name: string, lines: number, lineText: string, limit?: number) => {
+				const path = join(dir, name);
+				writeFileSync(path, Array.from({ length: lines }, (_, index) => `${index} ${lineText}`).join("\n"));
+				const args = { path, ...(limit === undefined ? {} : { limit }) };
+				const result = await read.execute(name, args);
+				// The tool still leaves the model a note, so this checks the presenter against the tool's real wording.
+				expect(JSON.stringify(result.content)).toContain("to continue.]");
+				const presented = presentRead({
+					args,
+					argsComplete: true,
+					state: "done",
+					result: {
+						content: result.content,
+						...(result.details === undefined ? {} : { details: result.details }),
+						isError: false,
+						partial: false,
+					},
+					cwd: dir,
+				});
+				expect(JSON.stringify(presented)).not.toContain("to continue");
+				return presented;
+			};
+
+			const limited = await presentFile("limited.txt", 30, "line", 12);
+			expect(plain(limited.body)).toMatch(/11 line\n\[18 more lines in file\]$/);
+			const byLines = await presentFile("lines.txt", 2500, "line");
+			expect(plain(byLines.body)).toContain("Truncated: showing 2000 of 2500 lines");
+			const byBytes = await presentFile("bytes.txt", 500, "x".repeat(200));
+			expect(plain(byBytes.body)).toContain("limit)]");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("shows truncation, errors, and image notes", () => {

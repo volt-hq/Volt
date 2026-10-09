@@ -4,8 +4,7 @@ import { Container, getKeybindings, setKeybindings, type TUI } from "@hansjm10/v
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { KeybindingsManager } from "../src/core/keybindings.ts";
 import { getMarkdownTheme, initTheme } from "../src/core/theme/runtime.ts";
-import { TranscriptView } from "../src/modes/interactive/client/transcript-view.ts";
-import type { TuiStore } from "../src/modes/interactive/client/tui-store.ts";
+import { type TranscriptSource, TranscriptView } from "../src/modes/interactive/client/transcript-view.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const EMPTY_USAGE: Usage = {
@@ -77,11 +76,11 @@ function resultEntry(call: string, more: boolean): ProjectedEntry {
 
 function createView(transcript: ProjectedEntry[]) {
 	const state = { transcript };
-	const store = {
+	const store: TranscriptSource = {
 		transcript: () => state.transcript,
 		live: emptyLiveFold(0),
 		phase: undefined,
-	} as unknown as TuiStore;
+	};
 	const container = new Container();
 	const view = new TranscriptView(store, container, {
 		ui: { requestRender: vi.fn() } as unknown as TUI,
