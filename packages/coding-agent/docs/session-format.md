@@ -458,13 +458,13 @@ When it commits these entries, the store maintains two derived indexes: `review_
 
 ### Store Location
 
-Default storage is organized by workspace:
+One default store holds the sessions of every working directory:
 
 ```text
-~/.volt/agent/sessions/--<encoded-workspace>--/sessions.sqlite
+~/.volt/agent/sessions/sessions.sqlite
 ```
 
-The workspace directory name is the resolved cwd without its leading separator, with `/`, `\`, and `:` replaced by `-`. `VOLT_CODING_AGENT_DIR` moves `~/.volt/agent`. A directory passed through `--session-dir`, `VOLT_CODING_AGENT_SESSION_DIR`, or the SDK instead contains its own `sessions.sqlite`.
+`VOLT_CODING_AGENT_DIR` moves `~/.volt/agent`. A directory passed through `--session-dir`, `VOLT_CODING_AGENT_SESSION_DIR`, the `sessionDir` setting, or the SDK instead contains its own `sessions.sqlite`. Stores that earlier versions kept per working directory, in `~/.volt/agent/sessions/--<encoded-cwd>--/`, are neither read nor migrated; pass one as a session directory to open it.
 
 A session directory holds:
 
@@ -474,9 +474,9 @@ A session directory holds:
 | `locks/` | Per-session writer locks (see [Locking](#locking)). |
 | `deleted-session-snapshots/` | Recovery snapshots of deleted sessions that no `trash` command took. |
 
-The directory is owner-only (`0700`), and the database and its sidecars are owner-readable and -writable only (`0600`); symlinked and hard-linked store files are refused. The store runs in WAL mode with full synchronous commits and foreign keys on; Volt reaches it through a worker thread, and every session of the directory shares it.
+The directory is owner-only (`0700`), and the database and its sidecars are owner-readable and -writable only (`0600`); symlinked and hard-linked store files are refused. The store runs in WAL mode with full synchronous commits and foreign keys on; Volt reaches it through a worker thread, and every Volt process using the store shares it, waiting up to 5 seconds for another's commit.
 
-Listing, exact-ID resolution, continuation candidate selection, and RPC session discovery use materialized summaries rather than scanning entries or JSONL. Listing the default directory of a workspace includes every session in it, worktree-bound sessions with another cwd among them; a custom directory's cwd filter compares canonical filesystem identities, so symlink and junction aliases match the same workspace. A session is listed once it has a message or a plan state; a hidden session with pending input can still be continued. Tree loading opens and verifies one selected session. Deep search scans extracted searchable text (user and assistant text, and displayed custom messages) one session at a time; it is not a full-text index.
+Listing, exact-ID resolution, continuation candidate selection, and RPC session discovery use materialized summaries rather than scanning entries or JSONL. When it creates a session, the store records its canonical cwd: the real path of its working directory, or the resolved path when that cannot be read. Listing, searching, and continuing for a cwd (`SessionManager.list`, `search`, and `findContinuation`, and the pickers' current-folder view) match exactly that canonical cwd, in any store, so symlink and junction aliases match the same directory and a subdirectory's sessions are not the parent's. `listAll` and `searchAll` read every session of one store: the default store, or the given directory's. A session ID is unique in a store. A session is listed once it has a message or a plan state; a hidden session with pending input can still be continued. Tree loading opens and verifies one selected session. Deep search scans extracted searchable text (user and assistant text, and displayed custom messages) one session at a time; it is not a full-text index.
 
 ### Store Layout
 
@@ -491,6 +491,7 @@ The layout is informational, not an interface: read sessions through `SessionMan
 | `search_chunks` | The searchable text of each entry that has any. |
 | `transaction_commits` | Each committed batch's commit ID, payload digest, and ordinal range, which make commits idempotent. |
 | `review_run_index`, `review_discussion_index` | The [review indexes](#review-state-entries-host-only). |
+| `session_cwd_index` | Each session's canonical cwd, recorded when the session is created. |
 
 `entries` is the log. Each commit writes the `sessions` row, `client_inputs`, and `search_chunks` projections in the same transaction, and every load replays the entries and refuses a session whose projections do not match.
 
@@ -504,11 +505,11 @@ Listing, searching, read-only opens, exports, and forks from a stored session ta
 
 ### Store Version and Upgrade
 
-The SQLite schema is v5 (`PRAGMA user_version`); entries are format version 5. New stores initialize at v5 directly. Before opening an existing store with this version, stop older Volt CLI and daemon processes that use it; do not run old and new versions against the same live store.
+The SQLite schema is v6 (`PRAGMA user_version`); entries are format version 5. New stores initialize at v6 directly. Before opening an existing store with this version, stop older Volt CLI and daemon processes that use it; do not run old and new versions against the same live store.
 
-The first open upgrades only an exact v1, v2, v3, or v4 schema, in one serialized transaction. It preserves the store ID, session IDs and generations, entries, parent references, and client inputs. Upgrading from v1 or v2 removes the per-session store revision and its revision-keyed commit records; the log ordinal replaces them. Upgrading from v2, v3, or v4 drops the earlier review tables without carrying their rows anywhere: a review run from before v5 stays readable as an unanchored report, and the v5 review indexes start empty. Concurrent opens converge on the same upgrade, and a failed upgrade rolls back.
+The first open upgrades only an exact v1, v2, v3, v4, or v5 schema, in one serialized transaction. It preserves the store ID, session IDs and generations, entries, parent references, and client inputs. Upgrading from v1 or v2 removes the per-session store revision and its revision-keyed commit records; the log ordinal replaces them. Upgrading from v2, v3, or v4 drops the earlier review tables without carrying their rows anywhere: a review run from before v5 stays readable as an unanchored report, and the v5 review indexes start empty. Every upgrade to v6 records each stored session's canonical cwd from its stored cwd, read from the filesystem once. Concurrent opens converge on the same upgrade, and a failed upgrade rolls back.
 
-Unknown versions, altered schema objects, invalid metadata, and failed integrity checks are rejected without repair or deletion. Older binaries cannot reopen a v5 store; downgrading the executable does not downgrade storage.
+Unknown versions, altered schema objects, invalid metadata, and failed integrity checks are rejected without repair or deletion. Older binaries cannot reopen a v6 store; downgrading the executable does not downgrade storage.
 
 ### Deleting Sessions
 

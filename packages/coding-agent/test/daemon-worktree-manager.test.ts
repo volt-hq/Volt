@@ -1054,7 +1054,7 @@ describe("worktree manager (fake git)", () => {
 		// A rekeyed (fork/new) descendant of a worktree conversation: the session
 		// lives in the parent-keyed store with the worktree cwd, but its id was
 		// never appended to worktrees[].sessionIds.
-		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
+		const sessionDir = getDefaultSessionDir(agentDir);
 		await createStoredSession(sessionDir, "s-rekeyed", join(checkoutPath, "src"));
 
 		const resolved = await manager.resolveSessionWorktree("repo", "s-rekeyed");
@@ -1071,7 +1071,7 @@ describe("worktree manager (fake git)", () => {
 		expect((await manager.create(workspace, { id: "heal" })).ok).toBe(true);
 		const checkoutPath = getWorktreeCheckoutPath(agentDir, workspaceDir, "heal");
 		mkdirSync(checkoutPath, { recursive: true });
-		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
+		const sessionDir = getDefaultSessionDir(agentDir);
 		await createStoredSession(sessionDir, "s-parent", workspaceDir);
 
 		expect(await manager.resolveSessionWorktree("repo", "s-parent")).toBeUndefined();
@@ -1093,7 +1093,7 @@ describe("worktree manager (fake git)", () => {
 			const decoyDir = join(agentDir, "decoy-sessions");
 			mkdirSync(decoyDir, { recursive: true });
 			await createStoredSession(decoyDir, "s-link", checkoutPath);
-			const sessionDir = getDefaultSessionDirPath(workspaceDir, agentDir);
+			const sessionDir = getDefaultSessionDirPath(agentDir);
 			mkdirSync(dirname(sessionDir), { recursive: true });
 			symlinkSync(decoyDir, sessionDir);
 

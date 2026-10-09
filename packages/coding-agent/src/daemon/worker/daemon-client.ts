@@ -278,6 +278,15 @@ export class WorkerDaemonClient {
 		return this.request({ type: "worker_last_session", relayId, sessionId });
 	}
 
+	/** Whether `sessionId` is a stored session of the relay's workspace; a failure to ask reads as not. */
+	async sessionOwned(relayId: string, sessionId: string): Promise<boolean> {
+		try {
+			return (await this.request({ type: "worker_session_owned", relayId, sessionId })).type === "ok";
+		} catch {
+			return false;
+		}
+	}
+
 	/** Report a hosted conversation's branch Git state (null: none to associate). */
 	changeObserve(
 		workspaceName: string,

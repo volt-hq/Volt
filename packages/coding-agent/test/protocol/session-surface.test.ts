@@ -746,6 +746,49 @@ describe("the session surface on the remote profile", () => {
 		expect(conversation.liveState.get("presence")).toEqual({ kind: "presence", remote: 1 });
 	});
 
+	it("names as a new session's parent only a stored session of the conversation's cwd", async () => {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const store = join(harness.tempDir, "sessions");
+		const elsewhereId = await storedSession(harness, join(harness.tempDir, "elsewhere"), "faraway");
+		const siblingId = await storedSession(harness, conversation.cwd, "sibling");
+		const device = await phoneOn(harness, conversation);
+
+		device.send({
+			type: "new_session",
+			intentId: "elsewhere",
+			input: { parentSessionId: elsewhereId },
+			expectedOrdinal: device.position(),
+		});
+		const refused = await device.answer("elsewhere");
+		if (refused.type !== "rejected") throw new Error("Expected the other directory's parent to be refused");
+		expect(refused.reason.message).toContain("Unknown parent session");
+
+		device.send({
+			type: "new_session",
+			intentId: "sibling",
+			input: { parentSessionId: siblingId },
+			expectedOrdinal: device.position(),
+		});
+		const accepted = await device.answer("sibling");
+		if (accepted.type !== "accepted" || accepted.conversation === undefined) {
+			throw new Error("Expected the same directory's parent to be accepted");
+		}
+		const childId = accepted.conversation;
+		const ref = await vi.waitFor(async () => {
+			const found = await SessionManager.findForResume(store, childId);
+			expect(found).toBeDefined();
+			return found!;
+		});
+		const child = await SessionManager.openReadOnly(ref);
+		try {
+			expect(child.getHeader()?.parentSession?.sessionId).toBe(siblingId);
+		} finally {
+			await child.closePersistence();
+		}
+	});
+
 	it("lists only remote-safe intents' shortcuts and remote completion triggers", async () => {
 		const harness = await createHostHarness({
 			whenUnattached: "keep",

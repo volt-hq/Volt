@@ -1736,3 +1736,88 @@ describe("SQLite session store", () => {
 		expect(statSync(join(sessionDirectory, SESSION_STORE_DATABASE_FILENAME)).mode & 0o777).toBe(0o600);
 	});
 });
+
+describe("session cwd index", () => {
+	/** A real root holding `repo` (with a subdirectory), a sibling `repo-other`, `elsewhere`, and `alias` -> `repo`. */
+	function cwdFixture(): string {
+		const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-cwd-index-")));
+		roots.push(root);
+		for (const directory of ["repo/packages/app", "repo-other", "elsewhere"]) {
+			mkdirSync(join(root, directory), { recursive: true });
+		}
+		symlinkSync(join(root, "repo"), join(root, "alias"), "dir");
+		return root;
+	}
+
+	async function listedIds(
+		client: SQLiteSessionStoreClient,
+		options: { cwd?: string; cwdRoots?: readonly string[] },
+	): Promise<string[]> {
+		return (await client.listSessionSummaries({ includeHidden: true, ...options })).map(({ id }) => id).sort();
+	}
+
+	it("indexes each session's real cwd when it is created, so a symlink alias matches the same sessions", async () => {
+		const root = cwdFixture();
+		const client = await openStore();
+		expect(await client.createHiddenSession({ ...createInput("via-alias"), cwd: join(root, "alias") })).toMatchObject(
+			{
+				cwd: join(root, "alias"),
+				cwdKey: join(root, "repo"),
+			},
+		);
+		await client.createHiddenSession({ ...createInput("direct"), cwd: join(root, "repo") });
+		await client.createHiddenSession({ ...createInput("sub"), cwd: join(root, "repo", "packages", "app") });
+
+		expect(await listedIds(client, { cwd: join(root, "repo") })).toEqual(["direct", "via-alias"]);
+		expect(await listedIds(client, { cwd: join(root, "alias") })).toEqual(["direct", "via-alias"]);
+		expect((await client.findSessionSummaryById("sub"))?.cwdKey).toBe(join(root, "repo", "packages", "app"));
+	});
+
+	it("lists the sessions in or under cwd roots, never a sibling sharing a root's prefix", async () => {
+		const root = cwdFixture();
+		const client = await openStore();
+		for (const [id, cwd] of [
+			["root", join(root, "repo")],
+			["sub", join(root, "repo", "packages", "app")],
+			["sibling", join(root, "repo-other")],
+			["elsewhere", join(root, "elsewhere")],
+		] as const) {
+			await client.createHiddenSession({ ...createInput(id), cwd });
+		}
+
+		expect(await listedIds(client, { cwdRoots: [join(root, "repo")] })).toEqual(["root", "sub"]);
+		expect(await listedIds(client, { cwdRoots: [join(root, "alias")] })).toEqual(["root", "sub"]);
+		expect(await listedIds(client, { cwdRoots: [join(root, "repo"), join(root, "elsewhere")] })).toEqual([
+			"elsewhere",
+			"root",
+			"sub",
+		]);
+		expect(await listedIds(client, { cwdRoots: [] })).toEqual([]);
+		// Both filters apply.
+		expect(await listedIds(client, { cwd: join(root, "repo"), cwdRoots: [join(root, "repo")] })).toEqual(["root"]);
+		const searched = await client.searchSessionSummaries("", { includeHidden: true, cwdRoots: [join(root, "repo")] });
+		expect(searched.map(({ summary }) => summary.id).sort()).toEqual(["root", "sub"]);
+	});
+
+	it("drops a session's index row with the session, so its id can be stored again for another cwd", async () => {
+		const root = cwdFixture();
+		const client = await openStore();
+		await client.createHiddenSession({ ...createInput(), cwd: join(root, "repo") });
+		await expect(
+			client.createHiddenSession({ ...createInput(), cwd: join(root, "elsewhere") }),
+		).rejects.toMatchObject({ code: "session_already_exists" });
+		expect(
+			await client.deleteSession({
+				sessionId: "session-1",
+				sessionGeneration: generationFor("session-1"),
+				expectedOrdinal: 0,
+			}),
+		).toEqual({ status: "deleted" });
+		expect(await listedIds(client, { cwdRoots: [root] })).toEqual([]);
+
+		await client.createHiddenSession({ ...createInput(), cwd: join(root, "elsewhere") });
+		expect(await listedIds(client, { cwd: join(root, "repo") })).toEqual([]);
+		expect(await listedIds(client, { cwd: join(root, "elsewhere") })).toEqual(["session-1"]);
+		expect(await client.verifyForeignKeys()).toEqual({ status: "valid" });
+	});
+});

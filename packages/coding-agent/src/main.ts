@@ -39,6 +39,7 @@ import { type AppMode, projectTrustPath, resolveProjectTrusted } from "./core/pr
 import { getMissingSessionCwdIssue, MissingSessionCwdError } from "./core/session-cwd.ts";
 import { findLocalSessionByExactId, type ResolvedSession, resolveSessionArgument } from "./core/session-lookup.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { SessionStoreError } from "./core/session-store/index.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { SubagentManager } from "./core/subagents/index.ts";
 import { initTheme, stopThemeWatcher } from "./core/theme/runtime.ts";
@@ -335,7 +336,18 @@ async function createSessionManager(
 		}
 	}
 
-	return SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
+	try {
+		return await SessionManager.create(cwd, sessionDir, { id: parsed.sessionId });
+	} catch (error) {
+		// The store holds that id for another directory: a session never moves between directories.
+		if (parsed.sessionId && error instanceof SessionStoreError && error.code === "session_already_exists") {
+			console.error(
+				chalk.red(`Session '${parsed.sessionId}' already exists for another directory; choose another id`),
+			);
+			process.exit(1);
+		}
+		throw error;
+	}
 }
 
 async function throwAfterClosingSessionManager(

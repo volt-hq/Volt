@@ -96,7 +96,7 @@ async function runCli(
 }
 
 async function hasSessionWithId(result: CliResult, sessionId: string): Promise<boolean> {
-	const sessionDir = getDefaultSessionDir(result.projectDir, result.agentDir);
+	const sessionDir = getDefaultSessionDir(result.agentDir);
 	return (await SessionManager.findForResume(sessionDir, sessionId)) !== undefined;
 }
 

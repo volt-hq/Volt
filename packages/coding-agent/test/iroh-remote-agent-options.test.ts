@@ -17,6 +17,7 @@ import {
 	serveIrohRemoteConnection,
 } from "../src/core/remote/iroh/index.ts";
 import { type RemoteIntentHost, remoteIntentServices, remoteStreamAllows } from "../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -61,6 +62,11 @@ function remoteHost(agentOptions: IrohRemoteAgentOptionsRpcBackend, requested: s
 	};
 	return {
 		agentDir: "/tmp/volt-agent",
+		workspaceSessions: new WorkspaceSessions({
+			agentDir: "/tmp/volt-agent",
+			workspaces: () => [],
+			worktrees: async () => [],
+		}),
 		auditLogger: new IrohRemoteAuditLogger(),
 		stateManager: new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() }),
 		pushTargets: unused,

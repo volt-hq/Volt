@@ -6,7 +6,7 @@
 
 ---
 
-> **Current session-storage note:** Volt now stores live sessions in the parent workspace's `sessions.sqlite` database. References below to a session file/header should be read as the corresponding session row/`SessionReference`; worktree sessions still use the parent workspace session directory and persist their effective worktree `cwd` in the session row. JSONL is import/export only.
+> **Current session-storage note:** Volt now stores the live sessions of every working directory in one default `sessions.sqlite` database (`~/.volt/agent/sessions/`), recording each session's canonical cwd; the per-cwd `--<encoded-cwd>--` session directories and parent-keyed session directories described below are gone (#722). A worktree session persists its effective worktree `cwd` in its session row, and the daemon assigns it to the worktree record's workspace: the innermost managed worktree containing a session's cwd decides its workspace, else the innermost registered workspace. References below to a session file/header should be read as the corresponding session row/`SessionReference`. JSONL is import/export only.
 
 ## 1. Summary
 

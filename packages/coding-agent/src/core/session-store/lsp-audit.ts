@@ -1,7 +1,8 @@
-import { opendir, realpath, stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
-import { ENV_SESSION_DIR, expandTildePath, getSessionsDir } from "../../config.ts";
+import { ENV_SESSION_DIR, expandTildePath } from "../../config.ts";
+import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import type { LspOperationMetadata } from "../lsp/outcome.ts";
 import { getDefaultSessionDirPath } from "../session-manager.ts";
 import {
@@ -15,7 +16,6 @@ import { SESSION_STORE_SCHEMA_ID, SESSION_STORE_SCHEMA_SQL } from "./schema.ts";
 import { SESSION_STORE_SCHEMA_VERSION } from "./types.ts";
 
 export const LSP_AUDIT_LIMITS = {
-	maxStores: 128,
 	maxSessions: 10_000,
 	maxEntries: 100_000,
 	maxBytes: 64 * 1024 * 1024,
@@ -386,29 +386,13 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 	const cwd = options.cwd ?? process.cwd();
 	const canonicalCwd = await canonical(cwd);
 	const explicitDir = options.sessionDir ?? process.env[ENV_SESSION_DIR];
-	const directories: string[] = [];
-	if (explicitDir) directories.push(await canonical(explicitDir));
-	else if (!options.allWorkspaces) {
-		// Store names encode the writer's lexical cwd, not its canonical workspace identity.
-		directories.push(getDefaultSessionDirPath(cwd));
-	} else {
-		try {
-			const root = await opendir(getSessionsDir());
-			let inspected = 0;
-			for await (const entry of root) {
-				if (++inspected > limits.maxStores) {
-					hitLimit("stores");
-					break;
-				}
-				if (entry.isDirectory() || entry.isSymbolicLink()) directories.push(join(getSessionsDir(), entry.name));
-			}
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-				increment(coverage.skippedStores, "unreadable");
-				coverage.partial = true;
-			}
-		}
-	}
+	// A workspace audit of the default store reads only its cwd's sessions (by their `session_cwd_index` key,
+	// `sessionCwdKey`, computed without loading the store's schema module), so other workspaces never spend its
+	// scan limits. An explicit store is read whole, so an operation a clone copied is credited to its original
+	// session in another workspace; the cwd scope below then keeps this workspace's.
+	const cwdKey = options.allWorkspaces || explicitDir ? null : canonicalizePath(resolvePath(cwd));
+	// One store holds every workspace's sessions; the cwd scope below keeps this workspace's unless `allWorkspaces`.
+	const directories = [explicitDir ? await canonical(explicitDir) : getDefaultSessionDirPath()];
 	const uniqueDirectories = new Set<string>();
 	for (const directory of directories) uniqueDirectories.add(await canonical(directory));
 	coverage.storesDiscovered = uniqueDirectories.size;
@@ -464,6 +448,7 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 				maxEntries: limits.maxEntries - coverage.entriesScanned,
 				maxBytes: limits.maxBytes - coverage.bytesScanned,
 				maxEntryBytes: limits.maxEntryBytes,
+				cwdKey,
 			},
 			Math.min(limits.maxStoreMs, remainingMs),
 			options.signal,

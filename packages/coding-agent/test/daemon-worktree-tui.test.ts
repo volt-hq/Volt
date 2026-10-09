@@ -611,7 +611,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				} as unknown as ConversationFactoryResult;
 			},
 		);
-		const parentSessionDir = getDefaultSessionDir(parentCwd, agentDir);
+		const parentSessionDir = getDefaultSessionDir(agentDir);
 		const initialManager = await SessionManager.create(parentCwd, parentSessionDir);
 		const { host, conversation } = adoptTestSession(
 			makeSessionDouble(initialManager),
@@ -623,7 +623,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		return { runtime, createRuntime, createdSessions, parentSessionDir };
 	}
 
-	it("creates the session with the worktree cwd in the PARENT workspace's session dir", async () => {
+	it("creates the session with the worktree cwd in the session dir it is given", async () => {
 		const {
 			agentDir,
 			workspacePath: parentCwd,
@@ -674,8 +674,8 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		expect(created.workspaceName).toBe("parent-workspace");
 		expect(created.baseRef).toBe("origin/main");
 		expect(fixture.runtime.session.sessionManager.getCwd()).toBe(worktreeCwd);
-		// §5.1.7 pin: the parent-dir listing includes the worktree session once it
-		// has persisted content (session files flush on the first assistant message).
+		// The store lists it for its own directory once it has persisted content (session
+		// files flush on the first assistant message); its workspace owns it through the worktree.
 		await fixture.runtime.session.sessionWriter.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "worktree session" }],
@@ -693,7 +693,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		const listed = await SessionManager.list(parentCwd, fixture.parentSessionDir);
+		const listed = await SessionManager.list(worktreeCwd, fixture.parentSessionDir);
 		expect(listed.some((info) => info.id === fixture.runtime.session.sessionManager.getSessionId())).toBe(true);
 	});
 

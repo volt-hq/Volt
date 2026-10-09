@@ -91,6 +91,8 @@ export interface RelayedPhoneDaemon {
 	): Promise<IrohRemotePushNotificationDeliveryStatus>;
 	/** Re-read the relay's authority before a frame of the phone acts; false is a revocation. */
 	revalidate?(): Promise<boolean>;
+	/** Whether the relay's workspace owns the stored session `sessionId`, as the phone's `sessions` query lists it. */
+	ownsSession?(sessionId: string): Promise<boolean>;
 	/** The phone's accepted `unregister_workspace` was answered and its stream ended. */
 	unregistered?(): Promise<void>;
 }
@@ -154,6 +156,7 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 				};
 	let unregistered = false;
 	const revalidate = daemon.revalidate;
+	const ownsSession = daemon.ownsSession;
 	try {
 		// The serving host writes the handshake success response itself.
 		const handshakeResponse = createIntegratedConversationHandshakeResponse(
@@ -177,7 +180,12 @@ export async function servePhoneRelay(options: ServePhoneRelayOptions): Promise<
 			redirect: options.redirect ?? {},
 			// The host's services are the daemon's, reached through `relay`.
 			services: () => ({
-				workspace: { name: authorization.workspace.name },
+				workspace: {
+					name: authorization.workspace.name,
+					...(ownsSession === undefined
+						? {}
+						: { ownsSession: (sessionId: string) => ownsSession.call(daemon, sessionId) }),
+				},
 				...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
 			}),
 			relay: async (frame) => {

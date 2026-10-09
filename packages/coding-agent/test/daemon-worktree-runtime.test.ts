@@ -2,7 +2,6 @@ import { mkdirSync, mkdtempSync, realpathSync as nodeRealpathSync, rmSync } from
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ENV_AGENT_DIR } from "../src/config.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import type { IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
@@ -14,6 +13,7 @@ import {
 	resolveConversationOpen,
 } from "../src/daemon/conversation-open.ts";
 import { resolveWorkspaceDirectory } from "../src/daemon/workspace-directory.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import type { WorktreeRuntimePreparation } from "../src/daemon/worktree-manager.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 
@@ -57,8 +57,8 @@ describe("worktree conversation placement (conversation open)", () => {
 		worktreePath = join(agentDir, "worktrees", "--repo--", "fix-login");
 		mkdirSync(workspacePath, { recursive: true });
 		mkdirSync(worktreePath, { recursive: true });
-		// Parent-keyed: worktree sessions are stored with the workspace's.
-		sessionDir = getDefaultSessionDir(workspacePath, agentDir);
+		// One default store holds the workspace's and its worktrees' sessions.
+		sessionDir = getDefaultSessionDir(agentDir);
 		worktree = {
 			id: "fix-login",
 			workspaceName: "ws",
@@ -116,7 +116,11 @@ describe("worktree conversation placement (conversation open)", () => {
 		});
 		const projectTrusted = vi.fn(() => true);
 		const services: ConversationOpenServices = {
-			agentDir,
+			workspaceSessions: new WorkspaceSessions({
+				agentDir,
+				workspaces: () => [authorization.workspace],
+				worktrees: async () => [worktree],
+			}),
 			toolPolicy: () => TOOL_POLICY,
 			projectTrusted,
 			resolveWorktree: options.resolveWorktree ?? (async () => undefined),
@@ -446,26 +450,20 @@ describe("worktree conversation placement (conversation open)", () => {
 	});
 });
 
-describe("worktree session-dir keying (§5.1.7 filterCwd pin)", () => {
-	it("a session with a worktree cwd in the parent session dir stays visible in the parent listing", async () => {
+describe("worktree sessions in the default store", () => {
+	it("lists a worktree checkout's session for its workspace through the worktree record, not by exact cwd", async () => {
 		const agentDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-worktree-sessiondir-")));
-		const originalAgentDir = process.env[ENV_AGENT_DIR];
 		const managerOwner = createSessionManagerTestOwner();
 		managerOwner.start();
 		try {
-			// The daemon always uses the env-aware agent dir; pin that setup here so
-			// SessionManager.list's filterCwd stays OFF for the parent's default dir.
-			process.env[ENV_AGENT_DIR] = agentDir;
 			const parentPath = join(agentDir, "repo");
 			const worktreePath = join(agentDir, "worktrees", "--repo--", "fix-login");
 			mkdirSync(parentPath, { recursive: true });
 			mkdirSync(worktreePath, { recursive: true });
 
-			const parentSessionDir = getDefaultSessionDir(parentPath, agentDir);
-			const worktreeSession = await SessionManager.create(worktreePath, parentSessionDir, {
-				id: "s-worktree",
-			});
-			const parentSession = await SessionManager.create(parentPath, parentSessionDir, { id: "s-parent" });
+			const sessionDir = getDefaultSessionDir(agentDir);
+			const worktreeSession = await SessionManager.create(worktreePath, sessionDir, { id: "s-worktree" });
+			const parentSession = await SessionManager.create(parentPath, sessionDir, { id: "s-parent" });
 			await worktreeSession.logWriter.appendMessage({
 				role: "user",
 				content: "worktree session",
@@ -477,18 +475,29 @@ describe("worktree session-dir keying (§5.1.7 filterCwd pin)", () => {
 				timestamp: Date.now(),
 			});
 
-			// The daemon's list_sessions call shape: parent cwd + parent default dir.
-			const sessions = await SessionManager.list(parentPath, parentSessionDir);
-			const ids = sessions.map((session) => session.id);
-			expect(ids).toContain("s-worktree");
-			expect(ids).toContain("s-parent");
+			// Current Folder is the exact directory.
+			expect((await SessionManager.list(parentPath, sessionDir)).map((session) => session.id)).toEqual(["s-parent"]);
+			const worktrees: IrohRemoteWorkspaceWorktree[] = [
+				{
+					id: "fix-login",
+					workspaceName: "ws",
+					path: worktreePath,
+					branch: "volt/fix-login",
+					createdAt: 1,
+					sessionIds: [],
+				},
+			];
+			const sessions = new WorkspaceSessions({
+				agentDir,
+				workspaces: () => [{ name: "ws", path: parentPath }],
+				worktrees: async () => worktrees,
+			});
+			expect((await sessions.list("ws")).map((session) => session.id).sort()).toEqual(["s-parent", "s-worktree"]);
+			// Once the worktree's record is gone, its sessions are no workspace's.
+			worktrees.length = 0;
+			expect((await sessions.list("ws")).map((session) => session.id)).toEqual(["s-parent"]);
 		} finally {
 			await managerOwner.drain();
-			if (originalAgentDir === undefined) {
-				delete process.env[ENV_AGENT_DIR];
-			} else {
-				process.env[ENV_AGENT_DIR] = originalAgentDir;
-			}
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	});

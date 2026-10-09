@@ -215,10 +215,10 @@ seconds after that TUI's last connection to it ends.
 ### Several terminals and phones
 
 Every client attaches to the same conversation: there is no read-only mode
-and no handoff. Phones reach the conversations stored for a workspace's root
-directory: a conversation you open in a subdirectory of a workspace is stored
-for that subdirectory (see [Sessions](sessions.md#session-storage)), so phones
-do not list or open it. Prompts from any client follow the usual rules while a turn
+and no handoff. Phones reach every conversation of a workspace, wherever in it
+a terminal or phone started it: at its root, in any of its subdirectories, or
+in a checkout of one of its managed worktrees (see [Session
+storage](#session-storage)). Prompts from any client follow the usual rules while a turn
 streams (steer or follow up) and appear in every client. A dialog, such as an
 extension's confirmation, goes to every attached client that can answer it,
 and the first answer wins.
@@ -489,9 +489,23 @@ client must pair again to receive an explicit current grant.
 
 ## Session storage
 
-Conversation history uses the same authoritative SQLite storage as local Volt.
-Each registered workspace's session directory, or an explicitly configured
-session directory, contains `sessions.sqlite`; session lists and resumes use its
+Conversation history uses the same authoritative SQLite storage as local Volt:
+the default store, `~/.volt/agent/sessions/sessions.sqlite`, holds the sessions
+of every working directory, each recorded with the real path of the directory it
+was started in (see [Sessions](sessions.md#session-storage)). A session belongs
+to the workspace where that directory runs, by the rule a TUI's conversation is
+placed with: the innermost managed worktree containing it (its parent
+workspace), else the innermost registered workspace containing it. So a
+workspace's phones list and open the sessions started anywhere under its root or
+in its worktrees' checkouts, except under a subdirectory registered as a
+workspace of its own (a local-only one too), and never a session of a sibling
+directory whose path only starts with the workspace's. A directory registered
+under several workspace names belongs to each of them, except in a checkout of
+a managed worktree, which belongs to that worktree's own workspace. A session of
+a worktree whose record was removed, and a session of an explicitly configured session
+directory, belong to no workspace for phones. A phone's new conversation cannot
+take the ID of a stored session its workspace does not own
+(`invalid_conversation_target`). Session lists and resumes use the store's
 indexes. The daemon addresses conversations by stable workspace/session IDs and
 never sends the database path, session directory, or host-side
 `SessionReference` over the remote wire.
@@ -561,9 +575,9 @@ Each worker reports fresh path-free Git branch state for the conversations it
 hosts over its own daemon connection; the daemon accepts it only from the
 worker hosting that conversation, under the workspace's current registration.
 A new session or fork a client starts from a conversation inherits that
-conversation's association when both are stored in the workspace's own
-session directory, as phone conversations and TUI conversations opened at the
-workspace root are. Phone input and
+conversation's association when it is a stored session the workspace owns (see
+[Session storage](#session-storage)), as every conversation started in the
+workspace or its worktrees is. Phone input and
 `sessions` queries cannot choose an association or start provider discovery.
 
 For trusted workspaces, the daemon uses configured Git remotes plus the local

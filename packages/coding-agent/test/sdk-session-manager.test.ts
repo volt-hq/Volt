@@ -71,8 +71,8 @@ describe("createAgentSession session manager defaults", () => {
 			model: model!,
 		});
 
-		const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-		const expectedSessionDir = join(agentDir, "sessions", safePath);
+		// One default store holds every directory's sessions.
+		const expectedSessionDir = join(agentDir, "sessions");
 		const sessionDir = session.sessionManager.getSessionDir();
 		const sessionRef = session.sessionManager.getSessionRef();
 
@@ -117,7 +117,7 @@ describe("createAgentSession session manager defaults", () => {
 
 	it("consumes and closes an explicit persisted manager when setup fails", async () => {
 		const setupError = new Error("injected resource reload failure");
-		const sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+		const sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(agentDir));
 		const sessionRef = sessionManager.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
 		vi.spyOn(DefaultResourceLoader.prototype, "reload").mockRejectedValue(setupError);

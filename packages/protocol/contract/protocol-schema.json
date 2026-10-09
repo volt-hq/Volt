@@ -1999,6 +1999,9 @@
 					"$ref": "#/$defs/Control.Request.worker_last_session"
 				},
 				{
+					"$ref": "#/$defs/Control.Request.worker_session_owned"
+				},
+				{
 					"$ref": "#/$defs/Control.Request.worker_authority"
 				},
 				{
@@ -2819,6 +2822,33 @@
 					"const": "worker_released"
 				},
 				"id": {
+					"type": "string"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_session_owned": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"relayId",
+				"sessionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_session_owned"
+				},
+				"id": {
+					"type": "string"
+				},
+				"relayId": {
 					"type": "string"
 				},
 				"sessionId": {

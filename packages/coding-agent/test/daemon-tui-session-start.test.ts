@@ -95,9 +95,13 @@ function startsOf(sessionId: string): Omit<SessionStartRecord, "sessionId">[] {
 		.map(({ sessionId: _sessionId, ...rest }) => rest);
 }
 
-/** A stored, empty session whose working directory is `cwd`, in its default session directory. */
-async function storedSession(harness: DaemonHarness, cwd: string): Promise<SessionReference> {
-	const manager = await SessionManager.create(cwd, getDefaultSessionDir(cwd, harness.agentDir));
+/** A stored, empty session whose working directory is `cwd`, in `sessionDir` or the default store. */
+async function storedSession(
+	harness: DaemonHarness,
+	cwd: string,
+	sessionDir = getDefaultSessionDir(harness.agentDir),
+): Promise<SessionReference> {
+	const manager = await SessionManager.create(cwd, sessionDir);
 	const ref = manager.getSessionRef();
 	await manager.closePersistence();
 	if (!ref) throw new Error("The session has no reference");
@@ -159,7 +163,8 @@ describe("session_start of a session a TUI's session change leads it to", () => 
 			const registered = await harness.control.request({ type: "workspace_register", name, path });
 			expect(registered.type).toBe("ok");
 		}
-		const elsewhere = await storedSession(harness, otherPath);
+		// In a store of its own, which holds none of the workspace's sessions.
+		const elsewhere = await storedSession(harness, otherPath, join(harness.workspacePath, "..", "other-sessions"));
 		const nested = await storedSession(harness, innerPath);
 		const sibling = await storedSession(harness, harness.workspacePath);
 		const tui = await harness.connect("tui");
@@ -188,7 +193,7 @@ describe("session_start of a session a TUI's session change leads it to", () => 
 				previous: { sessionId: sibling.sessionId, sessionDir: sibling.sessionDirectory },
 			})),
 		).toEqual([{ reason: "resume", previousSessionId: sibling.sessionId }]);
-		// The opener's default session directory holds it too.
+		// The default store holds it too.
 		expect(await openFor(() => ({ reason: "new", previous: { sessionId: sibling.sessionId } }))).toEqual([
 			{ reason: "new", previousSessionId: sibling.sessionId },
 		]);

@@ -1,4 +1,4 @@
-export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v5";
+export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v6";
 
 export const SESSION_STORE_TABLE_NAMES = [
 	"store_metadata",
@@ -9,6 +9,7 @@ export const SESSION_STORE_TABLE_NAMES = [
 	"transaction_commits",
 	"review_run_index",
 	"review_discussion_index",
+	"session_cwd_index",
 ] as const;
 
 export const SESSION_STORE_INDEX_NAMES = [
@@ -21,6 +22,7 @@ export const SESSION_STORE_INDEX_NAMES = [
 	"review_run_index_session_idx",
 	"review_discussion_index_finding_idx",
 	"review_discussion_index_session_idx",
+	"session_cwd_index_key_idx",
 ] as const;
 
 /** Commit evidence fenced on the session's last entry ordinal. Every commit appends at least one entry. */
@@ -118,7 +120,23 @@ CREATE UNIQUE INDEX review_discussion_index_finding_idx ON review_discussion_ind
 CREATE INDEX review_discussion_index_session_idx ON review_discussion_index (session_id, session_generation);
 `;
 
-/** Every table but the review indexes: unchanged since v4. */
+/**
+ * Each session's canonical working directory: the real path of its stored cwd
+ * (the resolved path when that cannot be read), recorded when the session is
+ * created and never updated. Listings by directory match this key, exactly or
+ * as a path prefix, without reading the filesystem per row.
+ */
+export const SESSION_STORE_CWD_INDEX_SCHEMA_SQL = `
+CREATE TABLE session_cwd_index (
+	session_id TEXT PRIMARY KEY NOT NULL,
+	cwd_key TEXT NOT NULL CHECK (length(cwd_key) >= 1),
+	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX session_cwd_index_key_idx ON session_cwd_index (cwd_key, session_id);
+`;
+
+/** Every table but the review and cwd indexes: unchanged since v4. */
 export const SESSION_STORE_BASE_SCHEMA_SQL = `
 CREATE TABLE store_metadata (
 	key TEXT PRIMARY KEY NOT NULL,
@@ -201,4 +219,4 @@ CREATE INDEX search_chunks_entry_idx ON search_chunks (session_id, entry_id);
 
 ${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}`;
 
-export const SESSION_STORE_SCHEMA_SQL = `${SESSION_STORE_BASE_SCHEMA_SQL}${SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL}`;
+export const SESSION_STORE_SCHEMA_SQL = `${SESSION_STORE_BASE_SCHEMA_SQL}${SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL}${SESSION_STORE_CWD_INDEX_SCHEMA_SQL}`;

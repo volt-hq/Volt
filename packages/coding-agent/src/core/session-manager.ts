@@ -42,12 +42,11 @@ import {
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { randomUUID } from "crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync } from "fs";
-import { readdir } from "fs/promises";
-import { basename, join } from "path";
+import { join } from "path";
 import { type Static, Type } from "typebox";
 import { Check } from "typebox/value";
 import { TextDecoder } from "util";
-import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
+import { getAgentDir as getDefaultAgentDir } from "../config.ts";
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import {
@@ -84,12 +83,10 @@ import {
 import type { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import {
 	acquireSharedSQLiteSessionStore,
-	SESSION_STORE_DATABASE_FILENAME,
 	SESSION_STORE_READ_ENTRIES_MAX,
 	type SessionStoreSessionSummary,
 	type SessionStoreSnapshot,
 	type SQLiteSessionStoreClient,
-	type SQLiteSessionStoreLease,
 } from "./session-store/index.ts";
 import {
 	applySessionEntry,
@@ -614,6 +611,70 @@ export async function findSessionInfoById(sessionDir: string, sessionId: string)
 	return result ? sessionInfoFromStoreSummary(result.directory, result.storeId, result.summary) : undefined;
 }
 
+/** A stored session, with the canonical cwd its store indexed when the session was created. */
+export interface SessionLocation extends SessionInfo {
+	/** The real path of the session's cwd when it was created, or its resolved path when that could not be read. */
+	readonly cwdKey: string;
+}
+
+/**
+ * @internal The sessions of `sessionDir` whose canonical cwd is one of
+ * `cwdRoots` or inside one (`/repo` covers `/repo/pkg`, never `/repo-other`).
+ * Not exported from the package entry point.
+ */
+export async function listSessionLocations(
+	sessionDir: string,
+	cwdRoots: readonly string[],
+	options?: SessionListOptions,
+): Promise<SessionLocation[]> {
+	const dir = resolvePath(sessionDir);
+	return scopedSessionStore(dir, async (store) => {
+		const summaries = await store.listSessionSummaries({
+			includeHidden: options?.includeMessageFreeDurable,
+			cwdRoots,
+		});
+		return summaries.map((summary) => ({
+			...sessionInfoFromStoreSummary(dir, store.info.storeId, summary),
+			cwdKey: summary.cwdKey,
+		}));
+	});
+}
+
+/** @internal The session `sessionId` of `sessionDir`, with its canonical cwd; not exported from the package entry point. */
+export async function findSessionLocation(sessionDir: string, sessionId: string): Promise<SessionLocation | undefined> {
+	const result = await findSessionSummaryById(sessionDir, sessionId);
+	return result
+		? {
+				...sessionInfoFromStoreSummary(result.directory, result.storeId, result.summary),
+				cwdKey: result.summary.cwdKey,
+			}
+		: undefined;
+}
+
+/** Run `operation` on a lease of the store in `dir`, released whether or not it succeeds. */
+async function scopedSessionStore<T>(
+	dir: string,
+	operation: (store: SQLiteSessionStoreClient) => Promise<T>,
+): Promise<T> {
+	const lease = await acquireSharedSQLiteSessionStore(normalizePath(dir));
+	let result: T;
+	try {
+		result = await operation(lease.client);
+	} catch (error) {
+		try {
+			await lease.release();
+		} catch (releaseError) {
+			throw new AggregateError(
+				[error, releaseError],
+				"Session store operation failed and its lease could not be released",
+			);
+		}
+		throw error;
+	}
+	await lease.release();
+	return result;
+}
+
 function storedEntryToSessionEntry(stored: SessionStoreSnapshot["entries"][number]): SessionEntry {
 	return decodeStoredSessionEntry(stored);
 }
@@ -739,34 +800,18 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
-/** Encode a cwd into the safe `--…--` session-directory name. */
-function encodeSessionDirName(cwd: string): string {
-	const resolvedCwd = resolvePath(cwd);
-	return `--${resolvedCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-}
-
 /**
- * True when a session directory is the default-shaped directory for a cwd
- * (under ANY agent dir). Such directories hold every session of that
- * workspace — including worktree-bound sessions whose header cwd differs —
- * so cwd filtering must not apply to them.
+ * The default session store's directory, `<agentDir>/sessions`: one store
+ * holds the sessions of every working directory. Pure path computation;
+ * `getDefaultSessionDir` also creates and hardens the directory. Exported for
+ * read-only daemon lookups that must not mutate it.
  */
-function isDefaultShapedSessionDir(dir: string, cwd: string): boolean {
-	return basename(dir) === encodeSessionDirName(cwd);
+export function getDefaultSessionDirPath(agentDir: string = getDefaultAgentDir()): string {
+	return join(resolvePath(agentDir), "sessions");
 }
 
-/**
- * Compute the default session directory for a cwd.
- * Encodes cwd into a safe directory name under ~/.volt/agent/sessions/.
- * Pure path computation; `getDefaultSessionDir` also creates and hardens the
- * directory. Exported for read-only daemon lookups that must not mutate it.
- */
-export function getDefaultSessionDirPath(cwd: string, agentDir: string = getDefaultAgentDir()): string {
-	return join(resolvePath(agentDir), "sessions", encodeSessionDirName(cwd));
-}
-
-export function getDefaultSessionDir(cwd: string, agentDir: string = getDefaultAgentDir()): string {
-	const sessionDir = getDefaultSessionDirPath(cwd, agentDir);
+export function getDefaultSessionDir(agentDir: string = getDefaultAgentDir()): string {
+	const sessionDir = getDefaultSessionDirPath(agentDir);
 	ensurePrivateDirectorySync(sessionDir);
 	return sessionDir;
 }
@@ -1263,7 +1308,7 @@ export class SessionManager {
 	}
 
 	usesDefaultSessionDir(): boolean {
-		return this.sessionDir === getDefaultSessionDirPath(this.cwd);
+		return this.sessionDir === getDefaultSessionDirPath();
 	}
 
 	getSessionId(): string {
@@ -1867,39 +1912,12 @@ export class SessionManager {
 		return roots;
 	}
 
-	private static async _store(dir: string): Promise<SQLiteSessionStoreLease> {
-		return acquireSharedSQLiteSessionStore(normalizePath(dir));
-	}
-
-	private static async _scopedStore<T>(
-		dir: string,
-		operation: (store: SQLiteSessionStoreClient) => Promise<T>,
-	): Promise<T> {
-		const lease = await SessionManager._store(dir);
-		let result: T;
-		try {
-			result = await operation(lease.client);
-		} catch (error) {
-			try {
-				await lease.release();
-			} catch (releaseError) {
-				throw new AggregateError(
-					[error, releaseError],
-					"Session store operation failed and its lease could not be released",
-				);
-			}
-			throw error;
-		}
-		await lease.release();
-		return result;
-	}
-
 	/**
 	 * Create and durably reserve a hidden persisted session. Its log takes the
 	 * session's lock and holds it until persistence closes.
 	 */
 	static async create(cwd: string, sessionDir?: string, options?: NewSessionOptions): Promise<SessionManager> {
-		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
+		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir();
 		const manager = new SessionManager(cwd, dir, true);
 		await manager._createSession(options);
 		return manager;
@@ -1937,7 +1955,7 @@ export class SessionManager {
 	static async openReadOnly(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
 		const canonicalRef = parseSessionReference(ref);
 		const dir = resolvePath(canonicalRef.sessionDirectory);
-		const { snapshot, storeId } = await SessionManager._scopedStore(dir, async (store) => {
+		const { snapshot, storeId } = await scopedSessionStore(dir, async (store) => {
 			if (store.info.storeId !== canonicalRef.storeId) {
 				throw new Error("Session reference belongs to a different store");
 			}
@@ -1952,12 +1970,11 @@ export class SessionManager {
 		return manager;
 	}
 
-	/** The most recent visible or pending-input session for a cwd, found without opening it. */
+	/** The most recent visible or pending-input session of exactly `cwd`, found without opening it. */
 	static async findContinuation(cwd: string, sessionDir?: string): Promise<SessionReference | undefined> {
-		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
-		return SessionManager._scopedStore(dir, async (store) => {
-			const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
-			const latest = await store.findContinuationSession(filterCwd ? resolvePath(cwd) : undefined);
+		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir();
+		return scopedSessionStore(dir, async (store) => {
+			const latest = await store.findContinuationSession(resolvePath(cwd));
 			return latest ? sessionReference(dir, store.info.storeId, latest.id, latest.sessionGeneration) : undefined;
 		});
 	}
@@ -1982,7 +1999,7 @@ export class SessionManager {
 		}
 		const contexts = new Map<string, RpcGitContext | null>(sessionIds.map((sessionId) => [sessionId, null]));
 		if (sessionIds.length === 0) return contexts;
-		return SessionManager._scopedStore(normalizePath(sessionDir), async (store) => {
+		return scopedSessionStore(normalizePath(sessionDir), async (store) => {
 			for (const sessionId of sessionIds) {
 				const summary = await store.findSessionSummaryById(sessionId);
 				if (!summary?.startingGitContextRecorded) continue;
@@ -2176,7 +2193,7 @@ export class SessionManager {
 			return manager;
 		}
 
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir();
 		const manager = await SessionManager.create(cwd, dir, newSessionOptions);
 		try {
 			await manager._commit(lineage, true);
@@ -2255,18 +2272,18 @@ export class SessionManager {
 		return target;
 	}
 
+	/** The sessions of exactly `cwd` in `sessionDir`, else in the default store. */
 	static async list(
 		cwd: string,
 		sessionDir?: string,
 		onProgress?: SessionListProgress,
 		options?: SessionListOptions,
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
-		return SessionManager._scopedStore(dir, async (store) => {
-			const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
+		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir();
+		return scopedSessionStore(dir, async (store) => {
 			const summaries = await store.listSessionSummaries({
 				includeHidden: options?.includeMessageFreeDurable,
-				...(filterCwd ? { cwd: resolvePath(cwd) } : {}),
+				cwd: resolvePath(cwd),
 			});
 			onProgress?.(summaries.length, summaries.length);
 			return summaries.map((summary) => sessionInfoFromStoreSummary(dir, store.info.storeId, summary));
@@ -2279,59 +2296,23 @@ export class SessionManager {
 		sessionDir?: string,
 		options?: SessionListOptions,
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
-		return SessionManager._scopedStore(dir, async (store) => {
-			const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
+		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir();
+		return scopedSessionStore(dir, async (store) => {
 			const results = await store.searchSessionSummaries(query, {
 				includeHidden: options?.includeMessageFreeDurable,
-				...(filterCwd ? { cwd: resolvePath(cwd) } : {}),
+				cwd: resolvePath(cwd),
 			});
 			return results.map(({ summary }) => sessionInfoFromStoreSummary(dir, store.info.storeId, summary));
 		});
 	}
 
+	/** Search every session of `sessionDir`, else of the default store. */
 	static async searchAll(query: string, sessionDir?: string): Promise<SessionInfo[]> {
-		if (sessionDir) {
-			const dir = resolvePath(sessionDir);
-			return SessionManager._scopedStore(dir, async (store) => {
-				const results = await store.searchSessionSummaries(query);
-				return results.map(({ summary }) => sessionInfoFromStoreSummary(dir, store.info.storeId, summary));
-			});
-		}
-		const sessionsRoot = getSessionsDir();
-		if (!existsSync(sessionsRoot)) return [];
-		const directories = (await readdir(sessionsRoot, { withFileTypes: true }))
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => join(sessionsRoot, entry.name));
-		const result: { session: SessionInfo; score: number }[] = [];
-		const storeFailures: unknown[] = [];
-		let successfulStores = 0;
-		for (const directory of directories) {
-			if (!existsSync(join(directory, SESSION_STORE_DATABASE_FILENAME))) continue;
-			let storeResults: { session: SessionInfo; score: number }[];
-			try {
-				storeResults = await SessionManager._scopedStore(directory, async (store) => {
-					const results = await store.searchSessionSummaries(query);
-					return results.map(({ summary, score }) => ({
-						session: sessionInfoFromStoreSummary(directory, store.info.storeId, summary),
-						score,
-					}));
-				});
-			} catch (error) {
-				storeFailures.push(error);
-				continue;
-			}
-			successfulStores += 1;
-			result.push(...storeResults);
-		}
-		if (successfulStores === 0 && storeFailures.length > 0) {
-			throw new AggregateError(storeFailures, "Could not search sessions in any project store");
-		}
-		result.sort((left, right) => {
-			if (left.score !== right.score) return left.score - right.score;
-			return right.session.modified.getTime() - left.session.modified.getTime();
+		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir();
+		return scopedSessionStore(dir, async (store) => {
+			const results = await store.searchSessionSummaries(query);
+			return results.map(({ summary }) => sessionInfoFromStoreSummary(dir, store.info.storeId, summary));
 		});
-		return result.map(({ session }) => session);
 	}
 
 	static async exportJsonlSnapshot(ref: SessionReference, outputPath: string): Promise<{ lastOrdinal: number }> {
@@ -2363,7 +2344,7 @@ export class SessionManager {
 		const canonicalRef = parseSessionReference(ref);
 		const lock = ConversationLock.acquire(resolvePath(canonicalRef.sessionDirectory), canonicalRef.sessionId);
 		try {
-			return await SessionManager._scopedStore(canonicalRef.sessionDirectory, async (store) => {
+			return await scopedSessionStore(canonicalRef.sessionDirectory, async (store) => {
 				if (store.info.storeId !== canonicalRef.storeId) {
 					throw new Error("Session reference belongs to a different store");
 				}
@@ -2384,6 +2365,7 @@ export class SessionManager {
 		}
 	}
 
+	/** Every session of `sessionDir`, else of the default store. */
 	static async listAll(onProgress?: SessionListProgress, options?: SessionListOptions): Promise<SessionInfo[]>;
 	static async listAll(
 		sessionDir?: string,
@@ -2411,52 +2393,14 @@ export class SessionManager {
 				: typeof onProgressOrOptions === "object" && onProgressOrOptions !== null
 					? onProgressOrOptions
 					: options;
-		if (customDir) {
-			return SessionManager._scopedStore(customDir, async (store) => {
-				const summaries = await store.listSessionSummaries({
-					includeHidden: listOptions?.includeMessageFreeDurable,
-				});
-				progress?.(summaries.length, summaries.length);
-				return summaries.map((summary) => sessionInfoFromStoreSummary(customDir, store.info.storeId, summary));
+		const dir = customDir ?? getDefaultSessionDir();
+		return scopedSessionStore(dir, async (store) => {
+			const summaries = await store.listSessionSummaries({
+				includeHidden: listOptions?.includeMessageFreeDurable,
 			});
-		}
-
-		const sessionsRoot = getSessionsDir();
-		if (!existsSync(sessionsRoot)) return [];
-		const directories = (await readdir(sessionsRoot, { withFileTypes: true }))
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => join(sessionsRoot, entry.name));
-		const result: SessionInfo[] = [];
-		const storeFailures: unknown[] = [];
-		let successfulStores = 0;
-		let loaded = 0;
-		for (const directory of directories) {
-			if (existsSync(join(directory, SESSION_STORE_DATABASE_FILENAME))) {
-				let storeResults: SessionInfo[] | undefined;
-				try {
-					storeResults = await SessionManager._scopedStore(directory, async (store) => {
-						const summaries = await store.listSessionSummaries({
-							includeHidden: listOptions?.includeMessageFreeDurable,
-						});
-						return summaries.map((summary) =>
-							sessionInfoFromStoreSummary(directory, store.info.storeId, summary),
-						);
-					});
-				} catch (error) {
-					storeFailures.push(error);
-				}
-				if (storeResults) {
-					successfulStores += 1;
-					result.push(...storeResults);
-				}
-			}
-			loaded += 1;
-			progress?.(loaded, directories.length);
-		}
-		if (successfulStores === 0 && storeFailures.length > 0) {
-			throw new AggregateError(storeFailures, "Could not list sessions from any project store");
-		}
-		return result.sort((left, right) => right.modified.getTime() - left.modified.getTime());
+			progress?.(summaries.length, summaries.length);
+			return summaries.map((summary) => sessionInfoFromStoreSummary(dir, store.info.storeId, summary));
+		});
 	}
 }
 

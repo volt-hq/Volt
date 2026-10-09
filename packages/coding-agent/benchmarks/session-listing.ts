@@ -32,7 +32,7 @@ function regexPattern(bytes: number): string {
 }
 
 const sessionCount = environmentInteger("VOLT_BENCH_SESSION_COUNT", 100, 1);
-const storeCount = environmentInteger("VOLT_BENCH_STORE_COUNT", 4, 1);
+const workspaceCount = environmentInteger("VOLT_BENCH_WORKSPACE_COUNT", 4, 1);
 const summaryBytes = environmentInteger("VOLT_BENCH_SESSION_SUMMARY_BYTES", 128, 1);
 const nonSearchableBytes = environmentInteger("VOLT_BENCH_SESSION_NON_SEARCHABLE_BYTES", 256 * 1024, 0);
 const searchablePayloadBytes = environmentInteger("VOLT_BENCH_SESSION_SEARCHABLE_BYTES", 64 * 1024, 1);
@@ -71,9 +71,10 @@ const root = mkdtempSync(join(tmpdir(), "volt-session-list-benchmark-"));
 const agentDir = join(root, "agent");
 const previousAgentDir = process.env[ENV_AGENT_DIR];
 process.env[ENV_AGENT_DIR] = agentDir;
-const workspaces = Array.from({ length: storeCount }, (_, index) => join(root, `workspace-${index}`));
+const workspaces = Array.from({ length: workspaceCount }, (_, index) => join(root, `workspace-${index}`));
 for (const workspace of workspaces) mkdirSync(workspace, { recursive: true });
-const sessionDirs = workspaces.map((workspace) => getDefaultSessionDir(workspace, agentDir));
+// The default store holds every workspace's sessions.
+const sessionDir = getDefaultSessionDir(agentDir);
 
 async function measured<T>(name: string, operation: () => Promise<T>): Promise<T> {
 	const before = process.memoryUsage();
@@ -105,10 +106,10 @@ function requireResultCount(name: string, actual: number): void {
 
 const managers = new Set<SessionManager>();
 const warmLeases = new Set<SQLiteSessionStoreLease>();
-const sessionsPerStore = Array.from({ length: storeCount }, () => 0);
+const sessionsPerWorkspace = Array.from({ length: workspaceCount }, () => 0);
 const extractedSearchableBytesPerSession = summaryBytes + 1 + searchablePayloadBytes;
-const extractedSearchableBytesPerStore = Array.from({ length: storeCount }, () => 0);
-const nonSearchablePayloadBytesPerStore = Array.from({ length: storeCount }, () => 0);
+const extractedSearchableBytesPerWorkspace = Array.from({ length: workspaceCount }, () => 0);
+const nonSearchablePayloadBytesPerWorkspace = Array.from({ length: workspaceCount }, () => 0);
 const releaseWarmLeases = async (): Promise<void> => {
 	const leases = [...warmLeases];
 	warmLeases.clear();
@@ -118,30 +119,29 @@ const releaseWarmLeases = async (): Promise<void> => {
 try {
 	const summary = "s".repeat(summaryBytes);
 	const nonSearchablePayload = "n".repeat(nonSearchableBytes);
-	for (const sessionDir of sessionDirs) warmLeases.add(await acquireSharedSQLiteSessionStore(sessionDir));
+	warmLeases.add(await acquireSharedSQLiteSessionStore(sessionDir));
 	for (let index = 0; index < sessionCount; index += 1) {
-		const storeIndex = index % storeCount;
-		const manager = await SessionManager.create(workspaces[storeIndex]!, sessionDirs[storeIndex]!);
+		const workspaceIndex = index % workspaceCount;
+		const manager = await SessionManager.create(workspaces[workspaceIndex]!, sessionDir);
 		managers.add(manager);
-		manager.appendMessage({ role: "user", content: summary, timestamp: Date.now() + index });
-		manager.appendCustomEntry("benchmark-non-searchable", nonSearchablePayload);
-		manager.appendCustomMessageEntry(
+		await manager.logWriter.appendMessage({ role: "user", content: summary, timestamp: Date.now() + index });
+		await manager.logWriter.appendCustomEntry("benchmark-non-searchable", nonSearchablePayload);
+		await manager.logWriter.appendCustomMessageEntry(
 			"benchmark-searchable",
 			searchablePayloadForSession(index),
 			true,
 		);
-		await manager.flush();
 		await manager.closePersistence();
 		managers.delete(manager);
-		sessionsPerStore[storeIndex]!++;
-		extractedSearchableBytesPerStore[storeIndex]! += extractedSearchableBytesPerSession;
-		nonSearchablePayloadBytesPerStore[storeIndex]! += nonSearchableBytes;
+		sessionsPerWorkspace[workspaceIndex]!++;
+		extractedSearchableBytesPerWorkspace[workspaceIndex]! += extractedSearchableBytesPerSession;
+		nonSearchablePayloadBytesPerWorkspace[workspaceIndex]! += nonSearchableBytes;
 	}
 	await releaseWarmLeases();
 
-	const cold = await measured("cold list across stores", () => SessionManager.listAll());
+	const cold = await measured("cold list", () => SessionManager.listAll());
 	requireResultCount("cold list", cold.length);
-	const coldTokenResults = await measured("cold deep token search across stores", () =>
+	const coldTokenResults = await measured("cold deep token search", () =>
 		SessionManager.searchAll(tokenQuery),
 	);
 	requireResultCount("cold deep token search", coldTokenResults.length);
@@ -154,42 +154,43 @@ try {
 	};
 	const opened = await measured("cold exact lookup + open", openSelected);
 	managers.add(opened);
-	for (const sessionDir of sessionDirs) warmLeases.add(await acquireSharedSQLiteSessionStore(sessionDir));
+	warmLeases.add(await acquireSharedSQLiteSessionStore(sessionDir));
+	// A conversation is opened for writing by one manager at a time; the lease keeps the store warm.
+	await opened.closePersistence();
+	managers.delete(opened);
 
-	const warm = await measured("warm list across stores", () => SessionManager.listAll());
+	const warm = await measured("warm list", () => SessionManager.listAll());
 	requireResultCount("warm list", warm.length);
 	const warmOpened = await measured("warm exact lookup + open", openSelected);
 	managers.add(warmOpened);
 	await warmOpened.closePersistence();
 	managers.delete(warmOpened);
-	const warmTokenResults = await measured("warm deep token search across stores", () =>
+	const warmTokenResults = await measured("warm deep token search", () =>
 		SessionManager.searchAll(tokenQuery),
 	);
 	requireResultCount("warm deep token search", warmTokenResults.length);
-	const warmPhraseResults = await measured("warm deep phrase search across stores", () =>
+	const warmPhraseResults = await measured("warm deep phrase search", () =>
 		SessionManager.searchAll(phraseQuery),
 	);
 	requireResultCount("warm deep phrase search", warmPhraseResults.length);
-	const warmRegexResults = await measured("warm deep regex search across stores", () =>
+	const warmRegexResults = await measured("warm deep regex search", () =>
 		SessionManager.searchAll(regexQuery),
 	);
 	requireResultCount("warm deep regex search", warmRegexResults.length);
 
-	await opened.closePersistence();
-	managers.delete(opened);
 	await releaseWarmLeases();
 
 	console.log(
 		JSON.stringify({
 			sessionCount,
-			storeCount,
-			sessionsPerStore,
+			workspaceCount,
+			sessionsPerWorkspace,
 			summaryBytesPerSession: summaryBytes,
 			nonSearchablePayloadBytesPerSession: nonSearchableBytes,
 			searchablePayloadBytesPerSession: searchablePayloadBytes,
 			extractedSearchableBytesPerSession,
-			nonSearchablePayloadBytesPerStore,
-			extractedSearchableBytesPerStore,
+			nonSearchablePayloadBytesPerWorkspace,
+			extractedSearchableBytesPerWorkspace,
 			totalNonSearchablePayloadMiB: (sessionCount * nonSearchableBytes) / 1024 / 1024,
 			totalExtractedSearchableMiB: (sessionCount * extractedSearchableBytesPerSession) / 1024 / 1024,
 			queries: {

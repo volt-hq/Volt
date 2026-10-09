@@ -154,7 +154,7 @@ async function main() {
 			.getHostState()
 			.workspaceGenerations?.find((record) => record.workspaceName === WORKSPACE_NAME)?.generation;
 		assert(generation !== undefined, "the benchmark workspace has no generation");
-		const manager = await SessionManager.create(workspace, getDefaultSessionDir(workspace, agentDir));
+		const manager = await SessionManager.create(workspace, getDefaultSessionDir(agentDir));
 		const session = manager.getSessionRef();
 		await manager.closePersistence();
 		assert(session, "the benchmark session has no reference");

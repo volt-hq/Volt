@@ -266,7 +266,7 @@ describe("#426 disposable checkout lifecycle", () => {
 		const request = r.request(1);
 		const first = await r.reviews.prepare(f.workspace, request, r.authority);
 		const record = (await f.state.listWorktrees())[0];
-		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.source, f.agentDir), {
+		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.agentDir), {
 			id: request.sessionId,
 		});
 		try {
@@ -294,7 +294,7 @@ describe("#426 disposable checkout lifecycle", () => {
 	it("runs more than 16 completed reviews under defaults, preserving history and restoring exact placement after restart", async () => {
 		const f = await fixture();
 		const r = reviewManager(f);
-		const sessionDir = getDefaultSessionDirPath(f.source, f.agentDir);
+		const sessionDir = getDefaultSessionDirPath(f.agentDir);
 		for (let n = 1; n <= 18; n++) {
 			const request = r.request(n);
 			const prepared = await r.reviews.prepare(f.workspace, request, r.authority);
@@ -320,7 +320,7 @@ describe("#426 disposable checkout lifecycle", () => {
 		expect(records.filter((record) => existsSync(record.path))).toHaveLength(16);
 		expect(records.filter((record) => record.checkoutArchive)).toHaveLength(2);
 		expect(await f.manager.listRecoveryCheckouts()).toEqual([]);
-		expect(await SessionManager.list(f.source, sessionDir)).toHaveLength(18);
+		expect(await SessionManager.listAll(sessionDir)).toHaveLength(18);
 		const archived = records.find((record) => record.sessionIds.includes("review-1"))!;
 		expect(archived.prReviewLaunches?.[0].sessionGeneration).toBeTruthy();
 		expect(git(f.source, "rev-parse", archived.branch)).toBe(f.head);
@@ -401,7 +401,7 @@ describe("#426 disposable checkout lifecycle", () => {
 			reason: "busy",
 		});
 		const record = (await f.state.listWorktrees())[0];
-		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.source, f.agentDir), {
+		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.agentDir), {
 			id: request.sessionId,
 		});
 		await r.reviews.bind(f.workspace, session.logWriter, record.prReviewLaunches![0].placement, r.authority);
@@ -484,7 +484,7 @@ describe("#426 disposable checkout lifecycle", () => {
 	it("protects a live descendant found through stored cwd even when its binding is missing", async () => {
 		const f = await fixture();
 		const record = await f.create("descendant");
-		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.source, f.agentDir), {
+		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.agentDir), {
 			id: "unbound-child",
 		});
 		await session.closePersistence();

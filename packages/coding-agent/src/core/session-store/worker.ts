@@ -1,8 +1,7 @@
 import { lstatSync } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
-import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import { ensurePrivateDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { decodeStoredSessionEntry, parsePersistedSessionEntry, sessionEntryEnvelope } from "../session-entry-codec.ts";
 import type { SessionEntry } from "../session-manager.ts";
@@ -26,7 +25,7 @@ import {
 	type SessionStoreWorkerOperation,
 	type SessionStoreWorkerResponseEnvelope,
 } from "./protocol.ts";
-import { initializeSessionStoreSchema } from "./schema-migration.ts";
+import { initializeSessionStoreSchema, sessionCwdKey } from "./schema-migration.ts";
 import { classifyOperationalStoreError } from "./sqlite-errors.ts";
 import {
 	SESSION_STORE_BUSY_TIMEOUT_MS,
@@ -247,6 +246,7 @@ const SUMMARY_COLUMNS = `
 	session_generation AS sessionGeneration,
 	format_version AS formatVersion,
 	cwd,
+	(SELECT cwd_key FROM session_cwd_index WHERE session_cwd_index.session_id = sessions.id) AS cwdKey,
 	created_at AS createdAt,
 	updated_at AS updatedAt,
 	parent_session_directory AS parentSessionDirectory,
@@ -269,6 +269,7 @@ const SUMMARY_RESULT_COLUMNS = `
 	sessionGeneration,
 	formatVersion,
 	cwd,
+	cwdKey,
 	createdAt,
 	updatedAt,
 	parentSessionDirectory,
@@ -304,6 +305,7 @@ function summaryFromRow(row: Record<string, unknown>): SessionStoreSessionSummar
 		sessionGeneration: sqlString(row, "sessionGeneration"),
 		formatVersion: sqlInteger(row, "formatVersion"),
 		cwd: sqlString(row, "cwd"),
+		cwdKey: sqlString(row, "cwdKey"),
 		createdAt: sqlString(row, "createdAt"),
 		updatedAt: sqlString(row, "updatedAt"),
 		parentSessionDirectory: sqlNullableString(row, "parentSessionDirectory"),
@@ -499,7 +501,7 @@ function indexReviewEntries(
 				if (
 					!general ||
 					!source ||
-					canonicalCwdIdentity(general.cwd) !== canonicalCwdIdentity(source.cwd) ||
+					sessionCwdKey(general.cwd) !== sessionCwdKey(source.cwd) ||
 					findReviewDiscussionChild(db, entry.general)
 				) {
 					throw reviewIndexError("A review General must be a conversation in its source's cwd, not a discussion");
@@ -575,34 +577,70 @@ function indexReviewEntries(
 
 function createSession(input: SessionStoreCreateSessionInput): SessionStoreSessionSummary {
 	const db = requireDatabase();
+	const cwdKey = sessionCwdKey(input.cwd);
 	return withTransaction(db, () => {
 		insertSession(db, input);
+		db.prepare("INSERT INTO session_cwd_index (session_id, cwd_key) VALUES (?, ?)").run(input.id, cwdKey);
 		const summary = findSummary(db, input.id, input.sessionGeneration);
 		if (!summary) throw new Error("Inserted session row could not be read");
 		return summary;
 	});
 }
 
-function canonicalCwdIdentity(cwd: string): string {
-	return canonicalizePath(resolvePath(cwd));
+/**
+ * A condition on `sessions.id` keeping the sessions whose indexed cwd is
+ * `cwd`'s canonical one, and is one of `cwdRoots` or inside one. A key under
+ * a root starts with the root and a separator, so it sorts between that prefix
+ * and the prefix with its separator incremented: `/repo` never covers
+ * `/repo-other`.
+ */
+function cwdCondition(
+	cwd: string | null,
+	cwdRoots: readonly string[] | null,
+): { readonly sql: string; readonly params: string[] } {
+	const conditions: string[] = [];
+	const params: string[] = [];
+	if (cwd !== null) {
+		conditions.push("sessions.id IN (SELECT session_id FROM session_cwd_index WHERE cwd_key = ?)");
+		params.push(sessionCwdKey(cwd));
+	}
+	if (cwdRoots !== null) {
+		const ranges: string[] = [];
+		for (const root of new Set(cwdRoots.map(sessionCwdKey))) {
+			const prefix = root.endsWith(sep) ? root : `${root}${sep}`;
+			const end = `${prefix.slice(0, -1)}${String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1)}`;
+			ranges.push("(cwd_key = ? OR (cwd_key >= ? AND cwd_key < ?))");
+			params.push(root, prefix, end);
+		}
+		conditions.push(
+			ranges.length === 0
+				? "0"
+				: `sessions.id IN (SELECT session_id FROM session_cwd_index WHERE ${ranges.join(" OR ")})`,
+		);
+	}
+	return { sql: conditions.length === 0 ? "1" : conditions.join(" AND "), params };
 }
 
-function sessionCwdMatches(summary: SessionStoreSessionSummary, canonicalCwd: string | null): boolean {
-	return canonicalCwd === null || canonicalCwdIdentity(summary.cwd) === canonicalCwd;
-}
-
-function listSessions(includeHidden: boolean, cwd: string | null): SessionStoreSessionSummary[] {
+function listSessions(
+	includeHidden: boolean,
+	cwd: string | null,
+	cwdRoots: readonly string[] | null,
+): SessionStoreSessionSummary[] {
 	const db = requireDatabase();
-	const rows = includeHidden
-		? db.prepare(`SELECT ${SUMMARY_COLUMNS} FROM sessions ORDER BY updated_at DESC, id`).all()
-		: db.prepare(`SELECT ${SUMMARY_COLUMNS} FROM sessions WHERE visible = 1 ORDER BY updated_at DESC, id`).all();
-	const canonicalCwd = cwd === null ? null : canonicalCwdIdentity(cwd);
-	return rows.map(summaryFromRow).filter((summary) => sessionCwdMatches(summary, canonicalCwd));
+	const filter = cwdCondition(cwd, cwdRoots);
+	return db
+		.prepare(
+			`SELECT ${SUMMARY_COLUMNS} FROM sessions
+			WHERE ${includeHidden ? "1" : "visible = 1"} AND ${filter.sql}
+			ORDER BY updated_at DESC, id`,
+		)
+		.all(...filter.params)
+		.map(summaryFromRow);
 }
 
 function findContinuationSession(cwd: string | null): SessionStoreSessionSummary | null {
 	const db = requireDatabase();
-	const limitClause = cwd === null ? "LIMIT 1" : "";
+	const filter = cwdCondition(cwd, null);
 	const statement = db.prepare(
 		`WITH continuation_candidates AS (
 			SELECT
@@ -626,6 +664,7 @@ function findContinuationSession(cwd: string | null): SessionStoreSessionSummary
 					LIMIT 1
 				) AS pendingInputAt
 			FROM sessions
+			WHERE ${filter.sql}
 		)
 		SELECT ${SUMMARY_RESULT_COLUMNS}
 		FROM continuation_candidates
@@ -636,14 +675,10 @@ function findContinuationSession(cwd: string | null): SessionStoreSessionSummary
 				ELSE updatedAt
 			END DESC,
 			id
-		${limitClause}`,
+		LIMIT 1`,
 	);
-	const canonicalCwd = cwd === null ? null : canonicalCwdIdentity(cwd);
-	for (const row of statement.iterate()) {
-		const summary = summaryFromRow(row);
-		if (sessionCwdMatches(summary, canonicalCwd)) return summary;
-	}
-	return null;
+	const row = statement.get(...filter.params);
+	return row ? summaryFromRow(row) : null;
 }
 
 interface ParsedSearchQuery {
@@ -733,10 +768,15 @@ function matchSearchText(text: string, parsed: ParsedSearchQuery): { matches: bo
  * most one session document. Latency still scales with searchable bytes and
  * query complexity; JavaScript RegExp execution has no general time bound.
  */
-function searchSessions(query: string, includeHidden: boolean, cwd: string | null): SessionStoreSearchResult[] {
+function searchSessions(
+	query: string,
+	includeHidden: boolean,
+	cwd: string | null,
+	cwdRoots: readonly string[] | null,
+): SessionStoreSearchResult[] {
 	const db = requireDatabase();
 	return withDeferredReadTransaction(db, () => {
-		const sessions = listSessions(includeHidden, cwd);
+		const sessions = listSessions(includeHidden, cwd, cwdRoots);
 		const parsed = parseSearchQuery(query);
 		if (parsed.invalid || sessions.length === 0) return [];
 
@@ -1351,9 +1391,9 @@ function execute(operation: SessionStoreWorkerOperation): unknown {
 		case "find_continuation_session":
 			return findContinuationSession(operation.cwd);
 		case "list_sessions":
-			return listSessions(operation.includeHidden, operation.cwd);
+			return listSessions(operation.includeHidden, operation.cwd, operation.cwdRoots);
 		case "search_sessions":
-			return searchSessions(operation.query, operation.includeHidden, operation.cwd);
+			return searchSessions(operation.query, operation.includeHidden, operation.cwd, operation.cwdRoots);
 		case "find_session":
 			return findSummary(requireDatabase(), operation.sessionId, operation.sessionGeneration);
 		case "find_session_by_id":

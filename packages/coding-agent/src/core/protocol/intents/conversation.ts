@@ -535,6 +535,8 @@ function acceptMove<O extends { cancelled: true } | { cancelled: false; sessionI
 /**
  * `cwd` (an existing directory; local clients only) starts the session
  * there, with `workspaceName` and `baseRef` for its Git context.
+ * `parentSessionId` names a stored session of the conversation's store for a
+ * local client; a remote one names only a session of the conversation's cwd.
  */
 export const newSessionIntent = defineIntent({
 	name: "new_session",
@@ -551,7 +553,7 @@ export const newSessionIntent = defineIntent({
 	sourceOwned: true,
 	available: localOnlyInput(["cwd", "workspaceName", "baseRef"]),
 	async run(ctx, input) {
-		const { host, client, session } = targetOf(ctx);
+		const { host, client, session, conversation } = targetOf(ctx);
 		const cwd = input.cwd === undefined ? undefined : existingDirectory(input.cwd, session.sessionManager.getCwd());
 		const preservedReviewRun = input.preserveReviewRunId
 			? await getCanonicalReviewRun(session.sessionManager, input.preserveReviewRunId)
@@ -562,10 +564,13 @@ export const newSessionIntent = defineIntent({
 		let parentSessionRef =
 			input.parentSessionId === session.sessionId ? session.sessionManager.getSessionRef() : undefined;
 		if (input.parentSessionId && !parentSessionRef) {
-			const candidates = await SessionManager.listAll(session.sessionManager.getSessionDir(), undefined, {
-				includeMessageFreeDurable: true,
-			});
-			parentSessionRef = candidates.find((candidate) => candidate.id === input.parentSessionId)?.ref;
+			parentSessionRef = (
+				await findStoredSession(
+					conversation,
+					input.parentSessionId,
+					ctx.profile.name === "local" ? "all" : "workspace",
+				)
+			)?.ref;
 			if (!parentSessionRef) throw new Error(`Unknown parent session: ${input.parentSessionId}`);
 		}
 		return openNewSession(host, client, {
@@ -593,10 +598,12 @@ export const newSessionIntent = defineIntent({
 });
 
 /**
- * A local client opens a stored session of any session directory the
- * `sessions` query lists; a remote one only its workspace's. A session whose
- * cwd is gone is rejected `unavailable` unless `cwdOverride` (local clients
- * only) names an existing directory to run it in.
+ * A local client opens any stored session of its conversation's store; a
+ * remote one only its workspace's, as its `sessions` query lists them
+ * (wherever in the workspace they started, when the host knows the
+ * workspace's sessions; else those of the conversation's cwd). A session
+ * whose cwd is gone is rejected `unavailable` unless `cwdOverride` (local
+ * clients only) names an existing directory to run it in.
  */
 export const switchSessionIntent = defineIntent({
 	name: "switch_session",
@@ -616,9 +623,10 @@ export const switchSessionIntent = defineIntent({
 			input.cwdOverride === undefined
 				? undefined
 				: existingDirectory(input.cwdOverride, session.sessionManager.getCwd());
+		const ownsSession = ctx.services.workspace?.ownsSession;
 		return rejectingMissingCwd(() =>
 			openStoredSessionById(host, client, input.sessionId, {
-				scope: ctx.profile.name === "local" ? "all" : "workspace",
+				scope: ctx.profile.name === "local" ? "all" : ownsSession ? { owns: ownsSession } : "workspace",
 				...(cwdOverride === undefined ? {} : { cwdOverride }),
 				...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 			}),

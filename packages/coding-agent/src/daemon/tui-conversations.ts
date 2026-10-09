@@ -46,24 +46,17 @@
  */
 
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 import { uuidv7 } from "@hansjm10/volt-agent-core";
 import type { HostPromptRequest, HostResponse } from "@hansjm10/volt-protocol";
 import type { IrohRemoteAuditEventInput } from "../core/remote/iroh/audit.ts";
 import { isIrohRemoteWorkspaceName } from "../core/remote/iroh/handshake.ts";
-import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
+import type { IrohRemoteWorkspace } from "../core/remote/iroh/state.ts";
 import { getIrohRemoteWorkspaceNameAlias } from "../core/remote/iroh/workspace.ts";
-import {
-	findSessionInfoById,
-	getDefaultSessionDirPath,
-	SessionManager,
-	type SessionReference,
-} from "../core/session-manager.ts";
-import { SESSION_STORE_DATABASE_FILENAME } from "../core/session-store/index.ts";
+import { SessionManager, type SessionReference } from "../core/session-manager.ts";
 import type {
 	ControlEvent,
 	ControlRequest,
@@ -100,7 +93,7 @@ import {
 	differingSpawnOnlyOptions,
 	normalizeWorkerAgentConfig,
 } from "./worker-spawn-options.ts";
-import { isPathInside } from "./workspace-directory.ts";
+import { findStoredSessionLocation, type SessionPlacement, type WorkspaceSessions } from "./workspace-sessions.ts";
 
 type ConversationOpenRequest = Extract<ControlRequest, { type: "conversation_open" }>;
 type ConversationHostResponse = Extract<ControlRequest, { type: "conversation_host_response" }>;
@@ -116,10 +109,10 @@ interface Question {
 export interface TuiConversationsOptions {
 	readonly agentDir: string;
 	readonly workers: WorkerRegistry;
+	/** Where the default store is, and where registered directories run: the placement every daemon lookup uses. */
+	readonly sessions: WorkspaceSessions;
 	/** The registered workspaces now. */
 	workspaces(): readonly IrohRemoteWorkspace[];
-	/** The daemon-managed worktrees now. */
-	worktrees(): Promise<readonly IrohRemoteWorkspaceWorktree[]>;
 	/** A workspace's current authority generation; undefined once it is unregistered. */
 	currentGeneration(workspaceName: string): number | undefined;
 	/**
@@ -160,12 +153,7 @@ class TuiOpenError extends Error {
 }
 
 /** Where a conversation runs: its workspace, and the root its working directory stays inside. */
-interface Placement {
-	readonly workspace: IrohRemoteWorkspace;
-	/** The workspace, or the managed worktree checkout the working directory is in. */
-	readonly root: string;
-	readonly worktree?: IrohRemoteWorkspaceWorktree;
-}
+type Placement = SessionPlacement;
 
 /** A TUI's conversation, resolved read-only. */
 interface ResolvedOpen {
@@ -216,13 +204,9 @@ async function realPathOrUndefined(path: string): Promise<string | undefined> {
 	}
 }
 
-function hasSessionStore(directory: string): boolean {
-	return existsSync(join(directory, SESSION_STORE_DATABASE_FILENAME));
-}
-
 /** A session's reference in `directory`, without creating a store there. */
 async function findStored(directory: string, sessionId: string): Promise<SessionReference | undefined> {
-	return hasSessionStore(directory) ? SessionManager.findForResume(directory, sessionId) : undefined;
+	return (await findStoredSessionLocation(directory, sessionId))?.ref;
 }
 
 export class TuiConversations {
@@ -545,9 +529,9 @@ export class TuiConversations {
 	/** The conversation `request` names, read-only. */
 	private async resolve(request: ConversationOpenRequest): Promise<ResolvedOpen> {
 		const { target, spawn } = request;
-		const defaultDirectory = (cwd: string) => getDefaultSessionDirPath(cwd, this.options.agentDir);
+		const defaultDirectory = this.options.sessions.sessionDir;
 		if (target.kind === "session") {
-			const directory = target.sessionDir ?? defaultDirectory(spawn.cwd);
+			const directory = target.sessionDir ?? defaultDirectory;
 			const ref = await findStored(directory, target.sessionId);
 			if (ref !== undefined) return this.resolveStored(ref, target.cwdOverride, request);
 			// Not stored there: a conversation a worker hosts (a `--no-session` one, or one a move led to).
@@ -564,7 +548,7 @@ export class TuiConversations {
 		}
 		const cwd = await realDirectory(spawn.cwd);
 		const placement = await this.placement(cwd, request);
-		const sessionDir = target.sessionDir ?? defaultDirectory(cwd);
+		const sessionDir = target.sessionDir ?? defaultDirectory;
 		if (target.kind === "new") {
 			if (!spawn.persist) {
 				if (target.sessionId !== undefined) {
@@ -580,9 +564,16 @@ export class TuiConversations {
 						this.spec(placement, generation, { sessionId, inMemory: true }, cwd, request),
 				};
 			}
-			// An id the store or a worker has already resumes that conversation, as `--session-id` does.
-			const existing = target.sessionId === undefined ? undefined : await findStored(sessionDir, target.sessionId);
-			if (existing !== undefined) return this.resolveStored(existing, undefined, request);
+			// An id the store has for this directory, or a worker has, resumes that conversation, as `--session-id`
+			// does; one the store has for another directory names that conversation, which never moves here.
+			const existing =
+				target.sessionId === undefined ? undefined : await findStoredSessionLocation(sessionDir, target.sessionId);
+			if (existing !== undefined) {
+				if (existing.cwdKey !== cwd) {
+					throw new TuiOpenError("session_exists", "A conversation with that id is stored for another directory");
+				}
+				return this.resolveStored(existing.ref, undefined, request);
+			}
 			if (target.sessionId !== undefined && this.options.workers.workspaceHosting(target.sessionId) !== undefined) {
 				return this.resolve({ ...request, target: { kind: "session", sessionId: target.sessionId, sessionDir } });
 			}
@@ -598,7 +589,7 @@ export class TuiConversations {
 					),
 			};
 		}
-		const source = await findStored(target.source.sessionDir ?? defaultDirectory(spawn.cwd), target.source.sessionId);
+		const source = await findStored(target.source.sessionDir ?? defaultDirectory, target.source.sessionId);
 		if (source === undefined) throw new TuiOpenError("session_not_found", "No such conversation to fork");
 		if (target.sessionId !== undefined && (await findStored(sessionDir, target.sessionId)) !== undefined) {
 			throw new TuiOpenError("session_exists", "A conversation with that id exists");
@@ -701,8 +692,7 @@ export class TuiConversations {
 	): Promise<WorkerSpawnInput> {
 		const cause = request.cause;
 		if (cause === undefined || input.origin !== "tui") return input;
-		const previous =
-			cause.previous === undefined ? undefined : await this.previousSession(cause.previous, request, resolved);
+		const previous = cause.previous === undefined ? undefined : await this.previousSession(cause.previous, resolved);
 		return {
 			...input,
 			sessionStart: { reason: cause.reason, ...(previous === undefined ? {} : { previousSessionRef: previous }) },
@@ -711,36 +701,26 @@ export class TuiConversations {
 
 	/**
 	 * The stored conversation a TUI says it left: found in the session
-	 * directory it names (else the TUI's default for its cwd, where a new
-	 * conversation of its was created or a stored one found), and only when
-	 * its working directory is in the workspace `resolved` runs in. Anything
-	 * else is dropped, so the open tells the TUI nothing about it.
+	 * directory it names (else the default store, where a new conversation
+	 * of its was created or a stored one found), and only when its working
+	 * directory is in the workspace `resolved` runs in. Anything else is
+	 * dropped, so the open tells the TUI nothing about it.
 	 */
 	private async previousSession(
 		previous: { readonly sessionId: string; readonly sessionDir?: string },
-		request: ConversationOpenRequest,
 		resolved: ResolvedOpen,
 	): Promise<SessionReference | undefined> {
 		if (previous.sessionId === resolved.sessionId) return undefined;
 		if (previous.sessionDir !== undefined && !isAbsolute(previous.sessionDir)) return undefined;
 		try {
-			const cwd = request.spawn.cwd;
-			const directories =
-				previous.sessionDir !== undefined
-					? [previous.sessionDir]
-					: [...new Set([(await realPathOrUndefined(cwd)) ?? cwd, cwd])].map((path) =>
-							getDefaultSessionDirPath(path, this.options.agentDir),
-						);
-			for (const directory of directories) {
-				// Read from an existing store only: none is created where the TUI points.
-				if (!hasSessionStore(directory)) continue;
-				const info = await findSessionInfoById(directory, previous.sessionId);
-				if (info === undefined) continue;
-				const storedCwd = info.cwd ? await realPathOrUndefined(info.cwd) : undefined;
-				const placement = storedCwd === undefined ? undefined : await this.registeredPlacement(storedCwd);
-				return placement?.workspace.name === resolved.placement.workspace.name ? info.ref : undefined;
-			}
-			return undefined;
+			// Read from an existing store only: none is created where the TUI points.
+			const info = await findStoredSessionLocation(
+				previous.sessionDir ?? this.options.sessions.sessionDir,
+				previous.sessionId,
+			);
+			if (info === undefined) return undefined;
+			const placement = (await this.options.sessions.placements()).place(info.cwdKey);
+			return placement?.workspace.name === resolved.placement.workspace.name ? info.ref : undefined;
 		} catch {
 			return undefined;
 		}
@@ -757,18 +737,7 @@ export class TuiConversations {
 
 	/** Where the real directory `cwd` runs among what is registered: `placement` without registering anything. */
 	private async registeredPlacement(cwd: string): Promise<Placement | undefined> {
-		const workspaces = this.options.workspaces();
-		let worktreeMatch: { worktree: IrohRemoteWorkspaceWorktree; root: string } | undefined;
-		for (const worktree of await this.options.worktrees()) {
-			const root = await realPathOrUndefined(worktree.path);
-			if (root === undefined || !isPathInside(root, cwd)) continue;
-			if (worktreeMatch === undefined || root.length > worktreeMatch.root.length) worktreeMatch = { worktree, root };
-		}
-		if (worktreeMatch !== undefined) {
-			const workspace = workspaces.find((candidate) => candidate.name === worktreeMatch.worktree.workspaceName);
-			if (workspace !== undefined) return { workspace, root: worktreeMatch.root, worktree: worktreeMatch.worktree };
-		}
-		return this.containingWorkspace(workspaces, cwd);
+		return (await this.options.sessions.placements()).place(cwd);
 	}
 
 	/** The real paths a directory's sensitivity is decided by: the user's home directories, and the agent directory. */
@@ -791,19 +760,6 @@ export class TuiConversations {
 		};
 	}
 
-	private async containingWorkspace(
-		workspaces: readonly IrohRemoteWorkspace[],
-		cwd: string,
-	): Promise<Placement | undefined> {
-		let match: Placement | undefined;
-		for (const workspace of workspaces) {
-			const root = await realPathOrUndefined(workspace.path);
-			if (root === undefined || !isPathInside(root, cwd)) continue;
-			if (match === undefined || root.length > match.root.length) match = { workspace, root };
-		}
-		return match;
-	}
-
 	/**
 	 * Register `cwd` as a workspace named after it, unless one now contains it:
 	 * as the open asks (`workspaceRegistration`), else shared, except that a
@@ -811,9 +767,9 @@ export class TuiConversations {
 	 */
 	private register(cwd: string, request: ConversationOpenRequest): Promise<Placement> {
 		const registration = this.registering.then(async (): Promise<Placement> => {
-			const workspaces = this.options.workspaces();
-			const containing = await this.containingWorkspace(workspaces, cwd);
+			const containing = (await this.options.sessions.placements()).workspaceContaining(cwd);
 			if (containing !== undefined) return containing;
+			const workspaces = this.options.workspaces();
 			const reason = sensitiveDirectoryReason(cwd, await this.sensitivityContext(request.spawn.env));
 			if (reason !== undefined && request.workspaceRegistration === undefined) {
 				throw new WorkspaceConfirmationRequired(cwd, reason);

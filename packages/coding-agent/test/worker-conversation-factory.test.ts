@@ -209,7 +209,13 @@ export default function (volt) {
 			expect(process.env.HTTPS_PROXY).toBe("http://127.0.0.1:7890");
 			expect(existsSync(join(agentDir, "prompts", "remote.md"))).toBe(true);
 			expect(existsSync(join(agentDir, "commands"))).toBe(false);
-			expect(readdirSync(join(agentDir, "sessions"))).toHaveLength(1);
+			// The session is in the default store; no per-directory store is created.
+			expect(existsSync(join(agentDir, "sessions", "sessions.sqlite"))).toBe(true);
+			expect(
+				readdirSync(join(agentDir, "sessions"), { withFileTypes: true })
+					.filter((entry) => entry.isDirectory())
+					.map((entry) => entry.name),
+			).toEqual(["locks"]);
 			expect(runtime.conversation.session.getActiveToolNames()).toEqual(
 				DEFAULT_IROH_REMOTE_ALLOW_TOOLS.split(",").filter(
 					(name) => name !== "subagent_registry" && name !== "image_gen",

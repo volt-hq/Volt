@@ -86,7 +86,6 @@ import {
 	isIrohRemoteClientAllowedForWorkspace,
 } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
-import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
@@ -171,6 +170,7 @@ import { resolveWorktreeCleanupPolicy } from "./state.ts";
 import { sanitizeHostThemeTokens } from "./theme-push.ts";
 import { type LiveWorker, MAX_WORKER_HOSTED_SESSIONS, type WorkerRegistry } from "./worker-registry.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import type { WorkspaceSession } from "./workspace-sessions.ts";
 import {
 	getWorkspaceWorktreesDir,
 	getWorktreesRoot,
@@ -1320,30 +1320,24 @@ class IrohDaemonService {
 			return;
 		}
 
-		const sessionDir = getDefaultSessionDirPath(workspace.path, this.services.agentDir);
-		let sessionCwd: string | undefined;
+		let stored: WorkspaceSession | undefined;
 		try {
-			const sessionRef = await SessionManager.findForResume(sessionDir, request.sessionId);
-			if (sessionRef !== undefined) {
-				const manager = await SessionManager.openReadOnly(sessionRef);
-				try {
-					sessionCwd = manager.getCwd();
-				} finally {
-					await manager.closePersistence();
-				}
-			}
+			stored = await this.services.workspaceSessions.find(request.workspaceName, request.sessionId);
 		} catch {
-			sessionCwd = undefined;
+			stored = undefined;
 		}
 		if (await finishIfSuperseded()) return;
-		if (sessionCwd === undefined) {
+		if (stored === undefined) {
 			connection.send({ type: "error", id: request.id, code: "not_found", message: "session not found" });
 			return;
 		}
-		const worktree = (state.worktrees ?? []).find(
-			(candidate) =>
-				candidate.workspaceName === request.workspaceName && candidate.sessionIds.includes(request.sessionId),
-		);
+		const sessionCwd = stored.cwd;
+		// The worktree it is bound to, else the one its directory is in.
+		const worktree =
+			(state.worktrees ?? []).find(
+				(candidate) =>
+					candidate.workspaceName === request.workspaceName && candidate.sessionIds.includes(request.sessionId),
+			) ?? stored.placement.worktree;
 		let runtimeDirectory: WorkspaceDirectoryResolution;
 		try {
 			const rootPath = await realpath(worktree?.path ?? workspace.path);
@@ -1490,6 +1484,7 @@ class IrohDaemonService {
 	private get remoteIntentHost(): RemoteIntentHost {
 		this.remoteIntentHostValue ??= {
 			agentDir: this.services.agentDir,
+			workspaceSessions: this.services.workspaceSessions,
 			auditLogger: this.services.auditLogger,
 			stateManager: this.stateManager,
 			keepAwake: {
@@ -3287,7 +3282,9 @@ class IrohDaemonService {
 	): IrohRemoteSessionContextsRpcBackend {
 		const backend = createIrohRemoteSessionContextsRpcBackend({
 			workspaceName: authorization.workspace.name,
-			sessionDirectory: getDefaultSessionDirPath(authorization.workspace.path, this.services.agentDir),
+			sessionDirectory: this.services.workspaceSessions.sessionDir,
+			ownedSessionIds: (sessionIds) =>
+				this.services.workspaceSessions.owned(authorization.workspace.name, sessionIds),
 			getChangeContext: (sessionId) =>
 				authorization.workspaceGeneration === undefined
 					? undefined
@@ -3733,7 +3730,7 @@ class IrohDaemonService {
 	/** The services a phone's conversation open draws on. */
 	private get conversationOpenServices(): ConversationOpenServices {
 		return {
-			agentDir: this.services.agentDir,
+			workspaceSessions: this.services.workspaceSessions,
 			...(this.profile === undefined ? {} : { profile: this.profile }),
 			toolPolicy: (authorization) =>
 				resolveIrohRemoteRuntimeToolPolicy({
@@ -4601,6 +4598,7 @@ class IrohDaemonService {
 			case "worker_notification_delivery":
 			case "worker_moved":
 			case "worker_last_session":
+			case "worker_session_owned":
 			case "worker_authority":
 			case "worker_worktree_restore":
 			case "worker_worktree_release":
@@ -4988,6 +4986,7 @@ class IrohDaemonService {
 					| "worker_notification_delivery"
 					| "worker_moved"
 					| "worker_last_session"
+					| "worker_session_owned"
 					| "worker_authority"
 					| "worker_worktree_restore"
 					| "worker_worktree_release";
@@ -5060,6 +5059,18 @@ class IrohDaemonService {
 					success: true,
 					details: { reason: "conversation_moved", previousSessionId, sessionId: request.sessionId },
 				});
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "worker_session_owned": {
+				const relay = this.workerRelayOf(connection, request.relayId);
+				if (!relay.ok) return refuse(relay.code, relay.message);
+				if (
+					!isIrohRemoteSessionId(request.sessionId) ||
+					!(await this.isStoredSession(relay.entry.relay.workspaceName, request.sessionId))
+				) {
+					return refuse("invalid_session", "not a stored session of the relay's workspace");
+				}
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}
@@ -5139,12 +5150,11 @@ class IrohDaemonService {
 		}
 	}
 
-	/** Whether `sessionId` is a stored session of the registered workspace `workspaceName`. */
+	/** Whether `sessionId` is a stored session the registered workspace `workspaceName` owns. */
 	private async isStoredSession(workspaceName: string, sessionId: string): Promise<boolean> {
-		const workspace = this.services.state.getHostState().workspaces.find((entry) => entry.name === workspaceName);
-		if (!workspace) return false;
-		const sessionDir = getDefaultSessionDirPath(workspace.path, this.services.agentDir);
-		return (await SessionManager.findForResume(sessionDir, sessionId).catch(() => undefined)) !== undefined;
+		return (
+			(await this.services.workspaceSessions.find(workspaceName, sessionId).catch(() => undefined)) !== undefined
+		);
 	}
 
 	private async requireEngineSafe(): Promise<

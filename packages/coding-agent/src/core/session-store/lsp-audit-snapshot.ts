@@ -14,6 +14,8 @@ export interface AuditSnapshotOptions {
 	maxEntries: number;
 	maxBytes: number;
 	maxEntryBytes: number;
+	/** Read only the sessions whose `session_cwd_index.cwd_key` is this canonical cwd; null reads every session. */
+	cwdKey: string | null;
 }
 
 export interface AuditSession {
@@ -135,11 +137,14 @@ export function runLspAuditSnapshot(loadBuiltin: (name: string) => unknown): voi
 			result.status = "unsupported";
 			return;
 		}
+		// A workspace audit selects its cwd's sessions first, so other workspaces never spend its scan limits.
+		const scope =
+			options.cwdKey === null ? "" : "WHERE id IN (SELECT session_id FROM session_cwd_index WHERE cwd_key = ?) ";
 		const sessions = db
 			.prepare(
-				"SELECT id, substr(cwd, 1, 8192) AS cwd, created_at AS createdAt, origin FROM sessions ORDER BY id LIMIT ?",
+				`SELECT id, substr(cwd, 1, 8192) AS cwd, created_at AS createdAt, origin FROM sessions ${scope}ORDER BY id LIMIT ?`,
 			)
-			.all(options.maxSessions + 1);
+			.all(...(options.cwdKey === null ? [] : [options.cwdKey]), options.maxSessions + 1);
 		result.limited = sessions.length > options.maxSessions;
 		result.sessions = sessions.slice(0, options.maxSessions) as unknown as AuditSession[];
 		const lengths = db.prepare(

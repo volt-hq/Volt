@@ -418,6 +418,9 @@ describe.runIf(nativeIrohAvailable)("phones in conversation workers", () => {
 		expect(await client.request({ type: "worker_last_session", relayId, sessionId: ref.sessionId })).toMatchObject(
 			refused,
 		);
+		expect(await client.request({ type: "worker_session_owned", relayId, sessionId: ref.sessionId })).toMatchObject(
+			refused,
+		);
 		expect(
 			await client.request({
 				type: "worker_notification_delivery",

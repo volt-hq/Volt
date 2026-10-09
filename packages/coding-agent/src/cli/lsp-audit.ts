@@ -5,8 +5,8 @@ export const LSP_AUDIT_HELP = `Usage: volt lsp audit [--json | --format text|jso
 
 Offline, read-only LSP usage and outcome audit. Defaults to the last 14 days
 in the canonical current workspace. --until is exclusive. --session-dir
-selects an existing sessions.sqlite directory; --all-workspaces includes all
-workspaces in that directory, or all default stores when no directory is set.
+selects an existing sessions.sqlite directory, else the default store is read;
+--all-workspaces includes all workspaces in the store.
 No authentication, provider requests, or language servers are started.
 Reports are bounded and content-free; incomplete coverage is reported explicitly.
 Exit status: 0 complete, 2 partial coverage/invalid arguments, 130 cancelled.`;

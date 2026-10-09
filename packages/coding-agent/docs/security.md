@@ -53,13 +53,15 @@ Extensions are trusted code: they run in the volt process with the user's permis
 
 ## Session Storage
 
-Each workspace or custom session directory contains the authoritative
-`sessions.sqlite` database. Volt creates the directory with owner-only `0700`
+The default session directory (`~/.volt/agent/sessions/`) contains one
+authoritative `sessions.sqlite` database for every working directory, and a
+custom session directory contains its own. Volt creates the directory with owner-only `0700`
 permissions and hardens `sessions.sqlite`, `sessions.sqlite-wal`, and
 `sessions.sqlite-shm` to `0600`. Explicit JSONL snapshot exports use `0600`.
 
-Treat the database and its WAL/SHM sidecars as one sensitive live store. Do not
-copy only `sessions.sqlite` while Volt is running. Session content can include
+Treat the database and its WAL/SHM sidecars as one sensitive live store: the
+default one holds every project's history, so damage to it affects all of them.
+Do not copy only `sessions.sqlite` while Volt is running. Session content can include
 prompts, model responses, tool arguments/results, workspace paths, and
 extension state.
 

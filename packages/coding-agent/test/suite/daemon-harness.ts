@@ -178,7 +178,7 @@ export async function createDaemonHarness(options: DaemonHarnessOptions = {}): P
 		workers: runtime.workers,
 		generation,
 		async createSession() {
-			const manager = await SessionManager.create(workspaceDir, getDefaultSessionDir(workspaceDir, agentDir));
+			const manager = await SessionManager.create(workspaceDir, getDefaultSessionDir(agentDir));
 			const ref = manager.getSessionRef();
 			await manager.closePersistence();
 			if (!ref) throw new Error("The harness session has no reference");

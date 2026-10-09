@@ -5,7 +5,7 @@
  * imported into the store first.
  */
 
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -48,7 +48,7 @@ function context(overrides: Partial<TuiStartupContext> = {}): TuiStartupContext 
 }
 
 /** A stored session of `cwd` with one user message. */
-async function storedSession(cwd: string, sessionDir = getDefaultSessionDirPath(cwd)): Promise<SessionReference> {
+async function storedSession(cwd: string, sessionDir = getDefaultSessionDirPath()): Promise<SessionReference> {
 	const manager = await SessionManager.create(cwd, sessionDir);
 	await manager.logWriter.appendMessage({ role: "user", content: `stored in ${cwd}`, timestamp: 1 });
 	const ref = manager.getSessionRef();
@@ -137,10 +137,11 @@ describe("the TUI's startup conversation", () => {
 	});
 
 	it("asks to continue a session whose working directory is gone in the TUI's, and starts nothing when cancelled", async () => {
+		// Started through a link to the project: indexed there, its stored cwd is the link, which is then removed.
 		const gone = join(root, "gone");
-		mkdirSync(gone);
-		const ref = await storedSession(gone, getDefaultSessionDirPath(project));
-		rmSync(gone, { recursive: true, force: true });
+		symlinkSync(project, gone, "dir");
+		const ref = await storedSession(gone);
+		unlinkSync(gone);
 		const selector = vi.spyOn(startupUi, "showStartupSelector").mockResolvedValueOnce(undefined);
 		expect(await resolveTuiStartupTarget(parseArgs(["-c"]), context())).toEqual({ exit: 0 });
 		selector.mockResolvedValueOnce(project as never);

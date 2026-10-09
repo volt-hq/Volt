@@ -33,7 +33,7 @@ describe("a conversation worker's managed checkouts", () => {
 		const agentDir = join(root, "agent");
 		const checkout = join(getWorktreesRoot(agentDir), "ws", "amber-basin");
 		mkdirSync(checkout, { recursive: true });
-		const manager = await SessionManager.create(checkout, getDefaultSessionDir(checkout, agentDir));
+		const manager = await SessionManager.create(checkout, getDefaultSessionDir(agentDir));
 		const ensureDaemon = vi.spyOn(daemonSpawn, "ensureDaemonRunning");
 		markConversationWorkerProcess();
 		try {

@@ -174,10 +174,7 @@ describe("conversations TUIs open in workers", () => {
 		await client.promptAndWait("hi");
 		expect(assistantTexts(client)).toEqual(["hello from the TUI's worker"]);
 		// The worker wrote the stored log the daemon created.
-		const stored = await SessionManager.findForResume(
-			getDefaultSessionDirPath(harness.workspacePath, harness.agentDir),
-			opened.sessionId,
-		);
+		const stored = await SessionManager.findForResume(getDefaultSessionDirPath(harness.agentDir), opened.sessionId);
 		expect(stored?.sessionId).toBe(opened.sessionId);
 		expect((await harness.status()).workers).toEqual([
 			expect.objectContaining({
@@ -478,9 +475,7 @@ describe("conversations TUIs open in workers", () => {
 		cleanups.push(() => client.stop());
 		await client.promptAndWait("hi");
 		const startup = client.conversation ?? "";
-		expect(
-			await SessionManager.findForResume(getDefaultSessionDirPath(harness.workspacePath, harness.agentDir), startup),
-		).toBeUndefined();
+		expect(await SessionManager.findForResume(getDefaultSessionDirPath(harness.agentDir), startup)).toBeUndefined();
 
 		// Another TUI, or a phone, never reaches it.
 		const other = await harness.connect("tui");

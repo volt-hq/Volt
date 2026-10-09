@@ -22,6 +22,7 @@ import {
 } from "../src/core/remote/iroh/session-contexts.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type RemoteIntentHost, remoteIntentServices, remoteStreamAllows } from "../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
@@ -91,6 +92,11 @@ function remoteHost(sessionContexts: IrohRemoteSessionContextsRpcBackend, reques
 	};
 	return {
 		agentDir: "/tmp/volt-agent",
+		workspaceSessions: new WorkspaceSessions({
+			agentDir: "/tmp/volt-agent",
+			workspaces: () => [],
+			worktrees: async () => [],
+		}),
 		auditLogger: new IrohRemoteAuditLogger(),
 		stateManager: new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() }),
 		pushTargets: unused,
@@ -229,20 +235,28 @@ describe("session_contexts workspace discovery", () => {
 		const persistedId = "session-persisted";
 		const persisted = await SessionManager.create("/workspace", directory, { id: persistedId });
 		await persisted.logWriter.recordStartingGitContext(gitContext);
+		// Stored with a context, but another workspace's.
+		const foreign = await SessionManager.create("/elsewhere", directory, { id: "session-foreign" });
+		await foreign.logWriter.recordStartingGitContext(gitContext);
 		const listSpy = vi.spyOn(SessionManager, "list");
 		const workLookups: string[] = [];
 		const sessionBackend = createIrohRemoteSessionContextsRpcBackend({
 			workspaceName: "volt",
 			sessionDirectory: directory,
+			ownedSessionIds: async (sessionIds) =>
+				new Set(sessionIds.filter((sessionId) => sessionId !== "session-foreign")),
 			getChangeContext: (sessionId) => {
 				workLookups.push(sessionId);
 				return sessionId === persistedId ? changeContext : undefined;
 			},
 		});
 
-		await expect(sessionBackend.getSessionContexts("volt", [persistedId, "session-missing"])).resolves.toEqual([
+		await expect(
+			sessionBackend.getSessionContexts("volt", [persistedId, "session-missing", "session-foreign"]),
+		).resolves.toEqual([
 			{ sessionId: persistedId, startingGitContext: gitContext, changeContext },
 			{ sessionId: "session-missing", startingGitContext: null, changeContext: null },
+			{ sessionId: "session-foreign", startingGitContext: null, changeContext: null },
 		]);
 		expect(workLookups).toEqual([persistedId, "session-missing"]);
 		expect(listSpy).not.toHaveBeenCalled();

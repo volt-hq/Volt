@@ -978,6 +978,11 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	worker_moved: withId("worker_moved", { from: LogSessionIdSchema, to: LogSessionIdSchema }),
 	/** Worker: a relayed phone was redirected to `sessionId`, its last session in the workspace now. */
 	worker_last_session: withId("worker_last_session", { relayId: Type.String(), sessionId: LogSessionIdSchema }),
+	/**
+	 * Worker: whether `sessionId` is a stored session of a relay's workspace,
+	 * one its phone's `sessions` query lists. `ok` when it is.
+	 */
+	worker_session_owned: withId("worker_session_owned", { relayId: Type.String(), sessionId: LogSessionIdSchema }),
 	/** Worker: whether a relay's client still holds the authority it was relayed with (before each frame acts). */
 	worker_authority: withId("worker_authority", { relayId: Type.String() }),
 	/** Worker: its answer to `worker_stop`, from its own idle check when the stop arrived. */
@@ -1019,6 +1024,7 @@ export const WORKER_REQUEST_TYPES = [
 	"worker_notification_delivery",
 	"worker_moved",
 	"worker_last_session",
+	"worker_session_owned",
 	"worker_authority",
 	"worker_stop_result",
 	"worker_close_result",
@@ -1063,6 +1069,7 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worker_notification_delivery,
 	CONTROL_REQUEST_SCHEMAS.worker_moved,
 	CONTROL_REQUEST_SCHEMAS.worker_last_session,
+	CONTROL_REQUEST_SCHEMAS.worker_session_owned,
 	CONTROL_REQUEST_SCHEMAS.worker_authority,
 	CONTROL_REQUEST_SCHEMAS.worker_stop_result,
 	CONTROL_REQUEST_SCHEMAS.worker_close_result,

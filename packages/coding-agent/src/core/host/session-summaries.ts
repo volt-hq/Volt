@@ -1,7 +1,7 @@
 /**
- * Summaries of stored sessions: a workspace's, or every session directory's,
- * possibly matching a search, with a live conversation's own summary taken
- * from its open log.
+ * Summaries of stored sessions: a workspace's, or every one of the
+ * conversation's store, possibly matching a search, with a live
+ * conversation's own summary taken from its open log.
  */
 
 import type { RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
@@ -31,7 +31,7 @@ export interface WorkspaceSessionSummary {
 	sessionDir?: string;
 }
 
-/** Which stored sessions a listing reads: the workspace's or every session directory's, possibly searched. */
+/** Which stored sessions a listing reads: the workspace's or every one of the store, possibly searched. */
 export interface SessionListingOptions {
 	readonly scope?: "workspace" | "all";
 	readonly search?: string;
@@ -118,9 +118,9 @@ export async function listWorkspaceSessions(session: AgentSession, cwd: string):
 
 /**
  * Stored sessions as `options` select them: the workspace's (`listWorkspaceSessions`
- * without a search), or every session directory's, as the session picker
- * lists them. A search keeps the sessions whose text matches it. The open
- * session's live summary replaces its stored one.
+ * without a search), or every one of the conversation's store, as the session
+ * picker lists them. A search keeps the sessions whose text matches it. The
+ * open session's live summary replaces its stored one.
  */
 export async function listSessionSummaries(
 	session: AgentSession,
@@ -129,21 +129,17 @@ export async function listSessionSummaries(
 ): Promise<WorkspaceSessionSummary[]> {
 	const { scope = "workspace", search } = options;
 	if (scope === "workspace" && search === undefined) return listWorkspaceSessions(session, cwd);
-	const manager = session.sessionManager;
-	const sessionDir = manager.getSessionDir();
+	// An in-memory session has no directory: it lists the default store.
+	const sessionDir = session.sessionManager.getSessionDir() || undefined;
 	let infos: SessionInfo[];
 	if (scope === "workspace") {
 		infos = (await SessionManager.search(cwd, search ?? "", sessionDir)).filter(
 			(info) => !info.cwd || sameFilesystemLocation(info.cwd, cwd),
 		);
 	} else if (search === undefined) {
-		infos = manager.usesDefaultSessionDir()
-			? await SessionManager.listAll()
-			: await SessionManager.listAll(sessionDir);
+		infos = await SessionManager.listAll(sessionDir);
 	} else {
-		infos = manager.usesDefaultSessionDir()
-			? await SessionManager.searchAll(search)
-			: await SessionManager.searchAll(search, sessionDir);
+		infos = await SessionManager.searchAll(search, sessionDir);
 	}
 	const current = summarizeOpenSession(session, cwd);
 	return infos.map((info) =>

@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as startupUi from "../../../src/cli/startup-ui.ts";
@@ -141,16 +141,18 @@ describe("PR #329 manager ownership contract", () => {
 		sessionDir: string;
 	}> {
 		const fallbackCwd = process.cwd();
+		// Started through a link to the current directory: the store indexes it there, and its stored cwd is
+		// the link, which is then removed.
 		const missingCwd = join(harness.tempDir, `${id}-missing-cwd`);
-		mkdirSync(missingCwd, { recursive: true });
+		symlinkSync(fallbackCwd, missingCwd, "dir");
 		delete process.env[ENV_SESSION_DIR];
-		const sessionDir = getDefaultSessionDirPath(fallbackCwd);
+		const sessionDir = getDefaultSessionDirPath();
 		const manager = await SessionManager.create(missingCwd, sessionDir, { id });
 		await manager.logWriter.appendMessage({ role: "user", content: "missing cwd seed", timestamp: Date.now() });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted missing-cwd session reference");
 		await manager.closePersistence();
-		rmSync(missingCwd, { recursive: true, force: true });
+		unlinkSync(missingCwd);
 		return { fallbackCwd, ref, sessionDir };
 	}
 

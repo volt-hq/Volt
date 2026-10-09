@@ -85,7 +85,7 @@ async function fixture(archive = true) {
 	const created = await manager.create(workspace, { id: "local" });
 	if (!created.ok) throw new Error(created.error);
 	const record = created.worktree;
-	const sessionDir = getDefaultSessionDirPath(source, agentDir);
+	const sessionDir = getDefaultSessionDirPath(agentDir);
 	const session = await SessionManager.create(record.path, sessionDir, { id: "local-session" });
 	await session.logWriter.appendMessage({ role: "user", content: "Retained conversation", timestamp: Date.now() });
 	const ref = session.getSessionRef()!;
@@ -298,7 +298,7 @@ describe("#442 local archived-worktree resume", () => {
 		);
 		const ref = local.getSessionRef()!;
 		await local.closePersistence();
-		expect(ref.sessionDirectory).not.toBe(f.sessionDir);
+		expect(ref.sessionDirectory === f.sessionDir).toBe(store === "default");
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
 		const runtime = await createRuntime(f.factory, {
 			cwd: f.record.path,
@@ -308,7 +308,10 @@ describe("#442 local archived-worktree resume", () => {
 		cleanups.push(() => runtime.dispose());
 		expect(runtime.cwd).toBe(f.record.path);
 		expect(runtime.session.sessionId).toBe(ref.sessionId);
-		expect(await f.state.findWorktreeForSession(f.workspace.name, ref.sessionId)).toBeUndefined();
+		// Archiving bound a default-store session under the checkout to it; a custom store's stays unbound.
+		expect((await f.state.findWorktreeForSession(f.workspace.name, ref.sessionId))?.id).toBe(
+			store === "default" ? f.record.id : undefined,
+		);
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
 			removed: false,
 			reason: "busy",
@@ -729,7 +732,8 @@ describe("#442 local archived-worktree resume", () => {
 		["print", "fresh-custom"],
 		["json", "fresh-custom"],
 	])("protects CLI %s %s through provider completion", async (mode, start) => {
-		const f = await fixture(start === "continue");
+		// `--continue` continues the checkout's own session: Current Folder is the exact directory.
+		const f = await fixture(false);
 		const previousCwd = process.cwd();
 		const previousExitCode = process.exitCode;
 		const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -771,7 +775,7 @@ describe("#442 local archived-worktree resume", () => {
 			},
 		]);
 		try {
-			process.chdir(start === "continue" ? f.source : f.record.path);
+			process.chdir(f.record.path);
 			Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
 			await main([
 				...(start === "continue" ? ["--continue"] : []),

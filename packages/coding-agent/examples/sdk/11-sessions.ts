@@ -46,7 +46,7 @@ if (sessions.length > 0) {
 	opened.dispose();
 }
 
-// Custom session directory (no cwd encoding)
+// Custom session directory (one store for every cwd, like the default ~/.volt/agent/sessions)
 // const customDir = "/path/to/my-sessions";
 // const { session } = await createAgentSession({
 //   sessionManager: await SessionManager.create(process.cwd(), customDir),

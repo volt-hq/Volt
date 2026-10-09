@@ -187,10 +187,10 @@ export interface WorkerRegistryOptions {
 	/** The daemon's `detachedRuntimeTtlMs` state setting, read whenever a detached idle group arms its timer. */
 	detachedRuntimeTtlMs(): number;
 	/**
-	 * Whether `sessionId` is a stored session of `workspaceName`, or of the
-	 * session directory of the claiming group's top-level conversation (a
-	 * TUI's sessions are stored by their working directory): a worker claims
-	 * only its own workspace's sessions.
+	 * Whether `sessionId` is a stored session `workspaceName` owns, found in
+	 * the session directory of the claiming group's top-level conversation (a
+	 * custom store) or the default store: a worker claims only its own
+	 * workspace's sessions.
 	 */
 	sessionInWorkspace(workspaceName: string, sessionId: string, sessionDirectory?: string): Promise<boolean>;
 	audit(event: WorkerRegistryAuditEvent): void;

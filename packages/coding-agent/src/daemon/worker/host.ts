@@ -583,6 +583,7 @@ async function serveWorker(request: WorkerLaunchRequest, options: RunWorkerOptio
 					deliverNotification: (notification) => client.deliverNotification(relayId, notification),
 					// The daemon re-reads the relay's authority before each frame acts (D4).
 					revalidate: async () => (await client.authority(relayId)) === "current",
+					ownsSession: (sessionId) => client.sessionOwned(relayId, sessionId),
 				},
 				// The phone's own structural intents redirect it; an extension's moves open here (D1).
 				redirect: {

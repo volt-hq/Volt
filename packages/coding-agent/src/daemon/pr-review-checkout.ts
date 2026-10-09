@@ -260,12 +260,7 @@ export class PrReviewCheckoutManager {
 			authority.assertCurrent();
 			return this.response(prior);
 		}
-		if (
-			await SessionManager.findForResume(
-				getDefaultSessionDirPath(workspace.path, this.options.agentDir),
-				request.sessionId,
-			)
-		)
+		if (await SessionManager.findForResume(getDefaultSessionDirPath(this.options.agentDir), request.sessionId))
 			throw new PrReviewCheckoutError("review_preparation_conflict");
 		const releaseSource =
 			request.sourceWorktreeId === undefined
