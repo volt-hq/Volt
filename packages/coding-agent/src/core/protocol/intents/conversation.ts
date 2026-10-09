@@ -598,10 +598,12 @@ export const newSessionIntent = defineIntent({
 });
 
 /**
- * A local client opens a stored session of any session directory the
- * `sessions` query lists; a remote one only its workspace's. A session whose
- * cwd is gone is rejected `unavailable` unless `cwdOverride` (local clients
- * only) names an existing directory to run it in.
+ * A local client opens any stored session of its conversation's store; a
+ * remote one only its workspace's, as its `sessions` query lists them
+ * (wherever in the workspace they started, when the host knows the
+ * workspace's sessions; else those of the conversation's cwd). A session
+ * whose cwd is gone is rejected `unavailable` unless `cwdOverride` (local
+ * clients only) names an existing directory to run it in.
  */
 export const switchSessionIntent = defineIntent({
 	name: "switch_session",
@@ -621,9 +623,10 @@ export const switchSessionIntent = defineIntent({
 			input.cwdOverride === undefined
 				? undefined
 				: existingDirectory(input.cwdOverride, session.sessionManager.getCwd());
+		const ownsSession = ctx.services.workspace?.ownsSession;
 		return rejectingMissingCwd(() =>
 			openStoredSessionById(host, client, input.sessionId, {
-				scope: ctx.profile.name === "local" ? "all" : "workspace",
+				scope: ctx.profile.name === "local" ? "all" : ownsSession ? { owns: ownsSession } : "workspace",
 				...(cwdOverride === undefined ? {} : { cwdOverride }),
 				...(ctx.assertCurrent === undefined ? {} : { assertConversationGenerationCurrent: ctx.assertCurrent }),
 			}),

@@ -324,32 +324,41 @@ export async function openStoredSession(
 }
 
 /**
- * The stored session `sessionId` as `conversation` finds it in its store:
- * one of its cwd, or, with `scope: "all"`, any of the store, as the
- * `sessions` query lists them with that scope. Undefined when there is none.
+ * Which stored sessions of a conversation's store a client finds: those of
+ * its cwd (`workspace`), any (`all`), or those its host's workspace owns
+ * (`owns`: a remote client's workspace, wherever in it a session started).
+ */
+export type StoredSessionScope = "workspace" | "all" | { readonly owns: (sessionId: string) => Promise<boolean> };
+
+/**
+ * The stored session `sessionId` as `conversation` finds it in its store
+ * with `scope`, as the `sessions` query lists them. Undefined when there is
+ * none.
  */
 export async function findStoredSession(
 	conversation: HostedConversation,
 	sessionId: string,
-	scope: "workspace" | "all" = "workspace",
+	scope: StoredSessionScope = "workspace",
 ): Promise<SessionInfo | undefined> {
 	assertValidSessionId(sessionId);
 	const sessionDir = conversation.session.sessionManager.getSessionDir() || getDefaultSessionDir();
 	const found = await findSessionInfoById(sessionDir, sessionId);
-	if (found === undefined) return undefined;
-	return scope === "all" || !found.cwd || sameFilesystemLocation(found.cwd, conversation.cwd) ? found : undefined;
+	if (found === undefined || scope === "all") return found;
+	if (scope === "workspace") {
+		return !found.cwd || sameFilesystemLocation(found.cwd, conversation.cwd) ? found : undefined;
+	}
+	return (await scope.owns(sessionId)) ? found : undefined;
 }
 
 /**
- * Move `client` to the stored session `sessionId` of its conversation's
- * workspace or, with `scope: "all"`, of any session directory the `sessions`
- * query lists with that scope.
+ * Move `client` to the stored session `sessionId` its conversation finds
+ * with `scope` (see `findStoredSession`): one of its cwd by default.
  */
 export async function openStoredSessionById(
 	host: ConversationHost,
 	client: HostClient,
 	sessionId: string,
-	options?: SwitchSessionIntentOptions & { readonly scope?: "workspace" | "all" },
+	options?: SwitchSessionIntentOptions & { readonly scope?: StoredSessionScope },
 ): Promise<SessionIntentResult> {
 	const source = intentSource(host, client, options?.assertConversationGenerationCurrent);
 	assertValidSessionId(sessionId);

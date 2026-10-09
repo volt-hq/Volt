@@ -4598,6 +4598,7 @@ class IrohDaemonService {
 			case "worker_notification_delivery":
 			case "worker_moved":
 			case "worker_last_session":
+			case "worker_session_owned":
 			case "worker_authority":
 			case "worker_worktree_restore":
 			case "worker_worktree_release":
@@ -4985,6 +4986,7 @@ class IrohDaemonService {
 					| "worker_notification_delivery"
 					| "worker_moved"
 					| "worker_last_session"
+					| "worker_session_owned"
 					| "worker_authority"
 					| "worker_worktree_restore"
 					| "worker_worktree_release";
@@ -5057,6 +5059,18 @@ class IrohDaemonService {
 					success: true,
 					details: { reason: "conversation_moved", previousSessionId, sessionId: request.sessionId },
 				});
+				connection.send({ type: "ok", id: request.id });
+				return;
+			}
+			case "worker_session_owned": {
+				const relay = this.workerRelayOf(connection, request.relayId);
+				if (!relay.ok) return refuse(relay.code, relay.message);
+				if (
+					!isIrohRemoteSessionId(request.sessionId) ||
+					!(await this.isStoredSession(relay.entry.relay.workspaceName, request.sessionId))
+				) {
+					return refuse("invalid_session", "not a stored session of the relay's workspace");
+				}
 				connection.send({ type: "ok", id: request.id });
 				return;
 			}

@@ -202,6 +202,7 @@ const REQUESTS: ByType<ControlRequest> = {
 	},
 	worker_moved: { type: "worker_moved", id: "37", from: "s-1", to: "s-2" },
 	worker_last_session: { type: "worker_last_session", id: "38", relayId: "rl-1", sessionId: "s-2" },
+	worker_session_owned: { type: "worker_session_owned", id: "45", relayId: "rl-1", sessionId: "s-2" },
 	worker_authority: { type: "worker_authority", id: "39", relayId: "rl-1" },
 };
 
@@ -330,6 +331,7 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worker_worktree_release: [{ pinId: "p".repeat(65) }, { pinId: undefined }],
 	worker_moved: [{ to: undefined }],
 	worker_last_session: [{ sessionId: undefined }],
+	worker_session_owned: [{ sessionId: undefined }, { relayId: undefined }],
 	worker_authority: [{ relayId: undefined }],
 };
 

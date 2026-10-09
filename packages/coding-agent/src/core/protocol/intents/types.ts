@@ -152,6 +152,8 @@ export interface IntentWorkspaceServices {
 	uploadDeviceLogs?(request: { fileName?: string; content: string }): Promise<{ path: string; byteCount: number }>;
 	/** The workspace's sessions, newest first, as the host lists them to its remote clients. */
 	listSessions?(): Promise<Static<typeof RpcSessionListItemSchema>[]>;
+	/** Whether the workspace owns the stored session `sessionId`: one its remote clients' `sessions` query lists. */
+	ownsSession?(sessionId: string): Promise<boolean>;
 }
 
 /** The theme a host shares with its remote clients: resolved hex colors by token name. */

@@ -331,4 +331,47 @@ describe.runIf(nativeIrohAvailable)("#722 a phone of the workspace", () => {
 			expect(refused.handshake).toMatchObject({ success: false, outcome: "invalid_conversation_target" });
 		}
 	}, 120_000);
+
+	it("switches to every listed session from a conversation in another directory, and to no other directory's", async () => {
+		const f = await fixture();
+		const root = await terminalSession(f, f.harness.workspacePath);
+		const subdirectory = await terminalSession(f, f.subdirectory);
+		const worktree = await terminalSession(f, f.worktree.subdirectory);
+		const nested = await terminalSession(f, f.nested);
+		const sibling = await terminalSession(f, f.sibling);
+		const custom = await terminalSession(f, f.subdirectory, f.customStore);
+		const paired = await pair(f);
+		const attach = async (sessionId: string) => {
+			const stream = await paired.openConversation({ target: "session", sessionId });
+			cleanups.push(() => stream.close());
+			expect(stream.handshake).toMatchObject({ success: true, sessionId });
+			const phone = stream.phone!;
+			await phone.hello();
+			await phone.subscribe(sessionId);
+			return phone;
+		};
+
+		// The worker redirects the phone to the session it switched to, in whichever directory of the workspace.
+		for (const [from, to] of [
+			[root, subdirectory],
+			[subdirectory, worktree],
+			[worktree, root],
+		]) {
+			const phone = await attach(from.sessionId);
+			expect(await phone.intent("switch_session", { sessionId: to.sessionId })).toMatchObject({
+				type: "accepted",
+				conversation: to.sessionId,
+			});
+			await phone.ended;
+			expect(phone.frames.at(-1)).toMatchObject({ type: "ended", reason: "moved", target: to.sessionId });
+		}
+		// The default store has the nested workspace's and the sibling's sessions, but the workspace does not own them.
+		const phone = await attach(subdirectory.sessionId);
+		for (const ref of [nested, sibling, custom]) {
+			expect(await phone.intent("switch_session", { sessionId: ref.sessionId })).toMatchObject({
+				type: "rejected",
+				reason: { message: expect.stringContaining("Session not found in current workspace") },
+			});
+		}
+	}, 120_000);
 });
