@@ -22,13 +22,14 @@ import type {
 	IrohRemoteRuntimeToolPolicy,
 } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
-import { getDefaultSessionDir, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import { SessionManager, type SessionReference } from "../core/session-manager.ts";
 import type { SessionWriter } from "../core/session-writer.ts";
 import type { IntegratedConversationSessionSelection } from "./handshake-responses.ts";
 import { resolveIrohRemoteSessionTarget, type SessionTargetSessionHandle } from "./session-target.ts";
 import type { WorkerSpawnInput } from "./worker-registry.ts";
 import type { WorkerCompatibility } from "./worker-spawn-options.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import type { WorkspaceSessions } from "./workspace-sessions.ts";
 import { getRegisteredWorkingDirectoryForWorktree, type WorktreeRuntimePreparation } from "./worktree-manager.ts";
 
 export function createConversationOpenError(
@@ -77,7 +78,8 @@ async function resolveInsideRoot(rootPath: string, cwd: string): Promise<Workspa
 
 /** The daemon's services a conversation open draws on. */
 export interface ConversationOpenServices {
-	readonly agentDir: string;
+	/** The stored sessions each workspace owns: a phone opens only its workspace's. */
+	readonly workspaceSessions: WorkspaceSessions;
 	readonly profile?: string;
 	/** The phone's tool policy: its grant ∩ the workspace ceiling ∩ `remote.allowTools` (D9). */
 	toolPolicy(authorization: IrohRemoteClientAuthorizationSuccess): IrohRemoteRuntimeToolPolicy;
@@ -157,8 +159,7 @@ export async function resolveConversationOpen(
 		...(worktree === undefined ? {} : { worktree }),
 	});
 	signal?.throwIfAborted();
-	// Parent-keyed, so worktree sessions stay listed under the workspace.
-	const sessionDir = getDefaultSessionDir(workspace.path, services.agentDir);
+	const sessions = services.workspaceSessions;
 	const target =
 		hello.conversation.target === "new"
 			? hello.conversation.sessionId === undefined
@@ -172,12 +173,23 @@ export async function resolveConversationOpen(
 							? ({ kind: "last" } as const)
 							: ({ kind: "last", resumeSessionId: previous } as const);
 					})();
+	// A new conversation's id names one stored conversation: one another workspace owns, or none does, never opens here.
+	if (target.kind === "new") {
+		const stored = await sessions.locate(target.sessionId).catch(() => undefined);
+		if (stored !== undefined && stored.placement?.workspace.name !== workspace.name) {
+			throw createConversationOpenError(
+				"invalid_conversation_target",
+				"session id is already used outside this workspace",
+				{ workspace: workspace.name, sessionId: target.sessionId },
+			);
+		}
+	}
 	const resolved = await resolveIrohRemoteSessionTarget<SessionManager | DeferredSession>(
 		target,
 		{ name: workspace.name, path: workspace.path },
 		{
-			find: (sessionId) => SessionManager.findForResume(sessionDir, sessionId),
-			list: async () => (await SessionManager.listAll(sessionDir)).map((info) => ({ id: info.id, ref: info.ref })),
+			find: async (sessionId) => (await sessions.find(workspace.name, sessionId))?.ref,
+			list: async () => (await sessions.list(workspace.name)).map((info) => ({ id: info.id, ref: info.ref })),
 			open: (ref) => SessionManager.openReadOnly(ref),
 			// Nothing is created yet: a spawn creates the log.
 			create: async (sessionId) => {
@@ -257,7 +269,7 @@ export async function resolveConversationOpen(
 				if (created || bindPrReview !== undefined) {
 					const manager =
 						ref === undefined
-							? await SessionManager.create(cwd.absolutePath, sessionDir, { id: sessionId })
+							? await SessionManager.create(cwd.absolutePath, sessions.sessionDir, { id: sessionId })
 							: await SessionManager.open(ref);
 					try {
 						await bindPrReview?.(manager.logWriter);

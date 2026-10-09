@@ -57,9 +57,9 @@ import {
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import { getReviewDiscussionLink } from "../core/review-discussions.ts";
-import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
 import { listWorkspaceDirectories } from "./workspace-directory.ts";
+import type { WorkspaceSessions } from "./workspace-sessions.ts";
 import { getRegisteredWorkingDirectoryForWorktree, getWorktreesRoot } from "./worktree-manager.ts";
 
 type SessionListItem = Static<typeof RpcSessionListItemSchema>;
@@ -72,6 +72,8 @@ const SESSION_TITLE_MAX_SCALARS = 160;
 /** The daemon's backends the remote services call. */
 export interface RemoteIntentHost {
 	readonly agentDir: string;
+	/** The stored sessions each workspace owns. */
+	readonly workspaceSessions: WorkspaceSessions;
 	readonly auditLogger: IrohRemoteAuditLogger;
 	readonly stateManager: IrohRemoteHostStateManager;
 	readonly keepAwake?: IntentKeepAwakeService;
@@ -219,12 +221,17 @@ function timestamp(value: string | Date): string {
 }
 
 /**
- * The sessions of the stream's workspace, newest first: its stored sessions
- * (`currentId` the stream's own), the worktree each is bound to, whether a
- * worker hosts it with a client on it, and the daemon's change association.
+ * The sessions of the stream's workspace, newest first: the stored sessions
+ * it owns, wherever under it or its worktrees they were started
+ * (`currentId` the stream's own), the worktree each is in or bound to,
+ * whether a worker hosts it with a client on it, and the daemon's change
+ * association.
  */
 export async function listRemoteWorkspaceSessions(
-	host: Pick<RemoteIntentHost, "agentDir" | "stateManager" | "listRuntimeStates" | "getChangeContext">,
+	host: Pick<
+		RemoteIntentHost,
+		"agentDir" | "workspaceSessions" | "stateManager" | "listRuntimeStates" | "getChangeContext"
+	>,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	currentId?: string,
 ): Promise<SessionListItem[]> {
@@ -235,30 +242,34 @@ export async function listRemoteWorkspaceSessions(
 		additionalRedactedPaths: [getWorktreesRoot(host.agentDir)],
 	});
 	const title = (text: string): string => truncateScalars(titles.sanitizeText(text), SESSION_TITLE_MAX_SCALARS);
-	const sessions = new Map<string, { item: SessionListItem; cwd?: string }>();
+	const sessions = new Map<string, { item: SessionListItem; cwd: string }>();
 	const add = (
 		item: Omit<SessionListItem, "workingDirectory" | "firstMessage" | "sessionName"> & {
 			firstMessage: string;
 			sessionName?: string;
 		},
-		cwd: string | undefined,
+		cwd: string,
+		workingDirectory: string | undefined,
 	): void => {
-		const workingDirectory = relativeWorkingDirectory(workspace.path, cwd);
 		sessions.set(item.sessionId, {
 			item: {
 				...item,
 				firstMessage: title(item.firstMessage),
 				...(item.sessionName === undefined ? {} : { sessionName: title(item.sessionName) }),
-				...(typeof workingDirectory === "string" ? { workingDirectory } : {}),
+				...(workingDirectory === undefined ? {} : { workingDirectory }),
 			},
-			...(cwd === undefined ? {} : { cwd }),
+			cwd,
 		});
 	};
-	for (const info of await SessionManager.list(workspace.path, getDefaultSessionDir(workspace.path, host.agentDir))) {
+	for (const info of await host.workspaceSessions.list(workspace.name)) {
 		const reviewDiscussion = await getReviewDiscussionLink(info.ref);
+		// Its directory relative to the root it runs in: the workspace, or the worktree checkout it is in.
+		const { root, worktree } = info.placement;
+		const inRoot = relativeWorkingDirectory(root, info.cwdKey) ?? undefined;
 		add(
 			{
 				sessionId: info.id,
+				...(worktree === undefined ? {} : { worktreeId: worktree.id }),
 				...(reviewDiscussion ? { reviewDiscussion } : {}),
 				...(info.name === undefined ? {} : { sessionName: info.name }),
 				createdAt: timestamp(info.created),
@@ -269,7 +280,8 @@ export async function listRemoteWorkspaceSessions(
 				...(info.origin === undefined ? {} : { origin: info.origin }),
 				...(info.startingGitContext === undefined ? {} : { startingGitContext: info.startingGitContext }),
 			},
-			info.cwd,
+			info.cwdKey,
+			worktree === undefined ? inRoot : getRegisteredWorkingDirectoryForWorktree(worktree, inRoot),
 		);
 	}
 	try {

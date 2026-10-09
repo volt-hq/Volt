@@ -60,12 +60,14 @@ export type SessionStoreWorkerOperation =
 			readonly kind: "list_sessions";
 			readonly includeHidden: boolean;
 			readonly cwd: string | null;
+			readonly cwdRoots: readonly string[] | null;
 	  }
 	| {
 			readonly kind: "search_sessions";
 			readonly query: string;
 			readonly includeHidden: boolean;
 			readonly cwd: string | null;
+			readonly cwdRoots: readonly string[] | null;
 	  }
 	| { readonly kind: "find_session"; readonly sessionId: string; readonly sessionGeneration: string }
 	| { readonly kind: "find_session_by_id"; readonly sessionId: string }
@@ -194,6 +196,10 @@ function timestampValue(value: unknown, path: string): string {
 
 function nullableString(value: unknown, path: string): string | null {
 	return value === null ? null : stringValue(value, path);
+}
+
+function nullableCwdRoots(value: unknown, path: string): string[] | null {
+	return value === null ? null : arrayValue(value, path, nonEmptyString);
 }
 
 function originValue(value: unknown, path: string): SessionStoreOrigin | null {
@@ -520,19 +526,21 @@ export function parseSessionStoreWorkerOperation(value: unknown): SessionStoreWo
 			exactKeys(input, "$operation", ["kind", "cwd"]);
 			return { kind, cwd: nullableString(input.cwd, "$operation.cwd") };
 		case "list_sessions":
-			exactKeys(input, "$operation", ["kind", "includeHidden", "cwd"]);
+			exactKeys(input, "$operation", ["kind", "includeHidden", "cwd", "cwdRoots"]);
 			return {
 				kind,
 				includeHidden: booleanValue(input.includeHidden, "$operation.includeHidden"),
 				cwd: nullableString(input.cwd, "$operation.cwd"),
+				cwdRoots: nullableCwdRoots(input.cwdRoots, "$operation.cwdRoots"),
 			};
 		case "search_sessions":
-			exactKeys(input, "$operation", ["kind", "query", "includeHidden", "cwd"]);
+			exactKeys(input, "$operation", ["kind", "query", "includeHidden", "cwd", "cwdRoots"]);
 			return {
 				kind,
 				query: stringValue(input.query, "$operation.query"),
 				includeHidden: booleanValue(input.includeHidden, "$operation.includeHidden"),
 				cwd: nullableString(input.cwd, "$operation.cwd"),
+				cwdRoots: nullableCwdRoots(input.cwdRoots, "$operation.cwdRoots"),
 			};
 		case "apply_transaction":
 			exactKeys(input, "$operation", ["kind", "input"]);
@@ -581,6 +589,7 @@ function parseSummary(value: unknown, path: string): SessionStoreSessionSummary 
 		"sessionGeneration",
 		"formatVersion",
 		"cwd",
+		"cwdKey",
 		"createdAt",
 		"updatedAt",
 		"parentSessionDirectory",
@@ -626,6 +635,7 @@ function parseSummary(value: unknown, path: string): SessionStoreSessionSummary 
 		sessionGeneration: idValue(input.sessionGeneration, `${path}.sessionGeneration`),
 		formatVersion: safeInteger(input.formatVersion, `${path}.formatVersion`, 1),
 		cwd: nonEmptyString(input.cwd, `${path}.cwd`),
+		cwdKey: nonEmptyString(input.cwdKey, `${path}.cwdKey`),
 		createdAt: timestampValue(input.createdAt, `${path}.createdAt`),
 		updatedAt: timestampValue(input.updatedAt, `${path}.updatedAt`),
 		parentSessionDirectory,

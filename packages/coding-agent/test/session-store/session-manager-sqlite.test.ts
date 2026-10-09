@@ -404,7 +404,7 @@ describe("SQLite-backed SessionManager", () => {
 		expect(matches.map((session) => session.firstMessage)).toEqual(["summary a", "summary b"]);
 	});
 
-	it("isolates an incompatible store while preserving global list and search results", async () => {
+	it("lists and searches every directory's sessions from the default store, never an old per-directory one", async () => {
 		const { root } = fixture();
 		const agentDir = join(root, "agent");
 		const olderCwd = join(root, "work-a");
@@ -429,17 +429,21 @@ describe("SQLite-backed SessionManager", () => {
 			timestamp: 1_700_000_001_001,
 		});
 
-		const incompatibleStore = join(agentDir, "sessions", "incompatible");
+		// A store left under the sessions root by an older layout is not read.
+		const incompatibleStore = join(
+			agentDir,
+			"sessions",
+			`--${olderCwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`,
+		);
 		seedIncompatibleStore(incompatibleStore);
 
 		const progress = vi.fn();
 		const listed = await SessionManager.listAll(progress);
 		expect(listed.map((session) => session.id)).toEqual(["isolation-new", "isolation-old"]);
-		expect(progress.mock.calls).toEqual([
-			[1, 3],
-			[2, 3],
-			[3, 3],
-		]);
+		expect(listed.every((session) => session.ref.sessionDirectory === join(agentDir, "sessions"))).toBe(true);
+		expect(progress.mock.calls).toEqual([[2, 2]]);
+		// Current Folder is the exact directory.
+		expect((await SessionManager.list(olderCwd)).map((session) => session.id)).toEqual(["isolation-old"]);
 
 		const matches = await SessionManager.searchAll('"isolationneedle"');
 		expect(matches.map((session) => session.id)).toEqual(["isolation-old", "isolation-new"]);
@@ -452,18 +456,14 @@ describe("SQLite-backed SessionManager", () => {
 		});
 	});
 
-	it("rejects global enumeration when every database-bearing store fails", async () => {
+	it("fails global enumeration when the default store is incompatible", async () => {
 		const { root } = fixture();
 		const agentDir = join(root, "agent");
-		const sessionsRoot = join(agentDir, "sessions");
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
-		seedIncompatibleStore(join(sessionsRoot, "incompatible"));
-		mkdirSync(join(sessionsRoot, "no-database"));
+		seedIncompatibleStore(join(agentDir, "sessions"));
 
-		await expect(SessionManager.listAll()).rejects.toThrow("Could not list sessions from any project store");
-		await expect(SessionManager.searchAll("needle")).rejects.toThrow(
-			"Could not search sessions in any project store",
-		);
+		await expect(SessionManager.listAll()).rejects.toMatchObject({ code: "store_schema_mismatch" });
+		await expect(SessionManager.searchAll("needle")).rejects.toMatchObject({ code: "store_schema_mismatch" });
 	});
 
 	it("loses the log of a writer whose session was deleted under it", async () => {

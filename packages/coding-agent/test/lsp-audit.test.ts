@@ -296,29 +296,28 @@ describe("offline LSP audit", () => {
 		).toBe(0);
 	});
 
-	it("deduplicates forked operations across stores and retains useful totals beside a corrupt store", async () => {
-		const source = fixture();
-		const fork = fixture();
-		const broken = fixture();
-		session(source.db, "original", source.cwd, "subagent");
-		session(fork.db, "fork", fork.cwd, null, "2026-09-11T00:00:00.000Z");
-		result(source.db, "original", 1, "lsp", operation("cross-store"));
-		result(fork.db, "fork", 1, "lsp", operation("cross-store"));
-		broken.db.close();
-		writeFileSync(join(broken.sessionDir, "sessions.sqlite"), "corrupt");
-		mkdirSync(join(source.root, "sessions"));
-		const linkType = process.platform === "win32" ? "junction" : "dir";
-		symlinkSync(source.sessionDir, join(source.root, "sessions", "source"), linkType);
-		symlinkSync(fork.sessionDir, join(source.root, "sessions", "fork"), linkType);
-		symlinkSync(broken.sessionDir, join(source.root, "sessions", "broken"), linkType);
-		vi.stubEnv("VOLT_CODING_AGENT_DIR", source.root);
+	it("reads every workspace of the default store with allWorkspaces, deduplicating forked operations across them", async () => {
+		const { db, root, cwd, sessionDir } = fixture();
+		const other = join(root, "other-workspace");
+		mkdirSync(other);
+		session(db, "original", other, "subagent");
+		session(db, "fork", cwd, null, "2026-09-11T00:00:00.000Z");
+		result(db, "original", 1, "lsp", operation("cross-workspace"));
+		result(db, "fork", 1, "lsp", operation("cross-workspace"));
+		db.close();
+		renameSync(sessionDir, join(root, "sessions"));
+		vi.stubEnv("VOLT_CODING_AGENT_DIR", root);
 		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
-		const report = await auditLsp({ cwd: fork.cwd, now, allWorkspaces: true });
-		expect(report.coverage).toMatchObject({ partial: true, storesRead: 2, skippedStores: { corrupt: 1 } });
+		const report = await auditLsp({ cwd, now, allWorkspaces: true });
+		expect(report.coverage).toMatchObject({ partial: false, storesDiscovered: 1, storesRead: 1 });
 		expect(report.totals.operations).toBe(1);
 		expect(report.byCohort.subagent.operations).toBe(1);
 		expect(report.utilization.toolActiveConversations).toBe(1);
 		expect(report.deduplication.copiesRemoved).toBe(1);
+		// Without allWorkspaces, only the cwd's sessions count: the copy, attributed as the original is out of scope.
+		const workspace = await auditLsp({ cwd, now });
+		expect(workspace.coverage).toMatchObject({ storesDiscovered: 1, storesRead: 1 });
+		expect(workspace.byCohort.subagent.operations).toBe(0);
 	});
 
 	it("does not read an uncommitted rollback-journal store as an immutable snapshot", async () => {
@@ -349,7 +348,7 @@ describe("offline LSP audit", () => {
 	});
 
 	it.each(["absolute", "relative"])(
-		"discovers the writer's default store for a symlink cwd (%s path)",
+		"reads the default store for a symlink cwd (%s path), keeping its sessions by canonical cwd",
 		async (spelling) => {
 			const { db, root, cwd, sessionDir } = fixture();
 			const alias = join(root, "Alias");
@@ -363,8 +362,7 @@ describe("offline LSP audit", () => {
 			result(db, "real", 1, "lsp", operation("real"));
 			result(db, "other", 1, "lsp", operation("other"));
 			db.close();
-			const defaultDir = getDefaultSessionDirPath(alias);
-			mkdirSync(join(root, "sessions"));
+			const defaultDir = getDefaultSessionDirPath(root);
 			renameSync(sessionDir, defaultDir);
 			const before = files(defaultDir);
 			const report = await auditLsp({
@@ -380,7 +378,6 @@ describe("offline LSP audit", () => {
 			expect(report.totals.operations).toBe(2);
 			expect(report.utilization.toolActiveConversations).toBe(2);
 			expect(files(defaultDir)).toEqual(before);
-			expect(existsSync(getDefaultSessionDirPath(cwd))).toBe(false);
 		},
 	);
 
@@ -433,7 +430,7 @@ describe("offline LSP audit", () => {
 		expect(timed.coverage).toMatchObject({ partial: true, skippedStores: { timeout: 1 } });
 	});
 
-	it("discovers only bounded default stores and honors an explicit directory over environment", async () => {
+	it("reads only the default store, never an old per-directory one, and honors an explicit directory over environment", async () => {
 		const { db, root, cwd, sessionDir } = fixture();
 		session(db, "root", cwd);
 		result(db, "root", 1, "lsp", operation("one"));
@@ -441,15 +438,19 @@ describe("offline LSP audit", () => {
 		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", join(root, "wrong"));
 		expect((await auditLsp({ cwd, sessionDir, now })).totals.operations).toBe(1);
 		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
-		mkdirSync(join(root, "sessions"));
-		const linkType = process.platform === "win32" ? "junction" : "dir";
-		symlinkSync(sessionDir, join(root, "sessions", "one"), linkType);
-		symlinkSync(sessionDir, join(root, "sessions", "two"), linkType);
-		const all = await auditLsp({ cwd, now, allWorkspaces: true });
-		expect(all.coverage.storesRead).toBe(1);
-		expect(all.totals.operations).toBe(1);
-		const bounded = await auditLsp({ cwd, now, allWorkspaces: true, limits: { maxStores: 1 } });
-		expect(bounded.coverage).toMatchObject({ partial: true, limitsReached: ["stores"] });
+		db.close();
+		renameSync(sessionDir, join(root, "sessions"));
+		// A store an older layout left under the sessions root is not read.
+		const old = fixture();
+		session(old.db, "old", cwd);
+		result(old.db, "old", 1, "lsp", operation("old"));
+		old.db.close();
+		renameSync(old.sessionDir, join(root, "sessions", "--old-layout--"));
+		for (const allWorkspaces of [false, true]) {
+			const report = await auditLsp({ cwd, now, allWorkspaces });
+			expect(report.coverage).toMatchObject({ storesDiscovered: 1, storesRead: 1 });
+			expect(report.totals.operations).toBe(1);
+		}
 	});
 
 	it("redacts untrusted metadata, reports oversized entries, and marks orphaned copies uncertain", async () => {

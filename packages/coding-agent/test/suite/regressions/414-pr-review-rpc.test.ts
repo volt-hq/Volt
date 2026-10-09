@@ -45,6 +45,7 @@ import {
 	remoteIntentServices,
 	remoteStreamAllows,
 } from "../../../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type QueryOutcome, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { createHostHarness } from "../host-harness.ts";
@@ -163,6 +164,11 @@ async function stream(scope: RemoteStreamScope | ConversationScope, options: Str
 	const auditLogger = new IrohRemoteAuditLogger();
 	const host: RemoteIntentHost = {
 		agentDir: workspacePath,
+		workspaceSessions: new WorkspaceSessions({
+			agentDir: workspacePath,
+			workspaces: () => [],
+			worktrees: async () => [],
+		}),
 		auditLogger,
 		stateManager: new IrohRemoteHostStateManager({ initialState: createEmptyIrohRemoteHostState() }),
 		pushTargets: () => ({ register: unexpected }),

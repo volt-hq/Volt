@@ -26,6 +26,7 @@ import {
 	remoteIntentServices,
 	remoteStreamAllows,
 } from "../../../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
@@ -135,6 +136,11 @@ async function managementStream(
 	cleanups.push(() => auditLogger.flush());
 	const host: RemoteIntentHost = {
 		agentDir: f.agentDir,
+		workspaceSessions: new WorkspaceSessions({
+			agentDir: f.agentDir,
+			workspaces: () => [],
+			worktrees: async () => [],
+		}),
 		auditLogger,
 		stateManager: f.state,
 		pushTargets: unexpected,
@@ -177,7 +183,7 @@ describe("#426 PR review capacity errors", () => {
 		await expect(create.mock.results[0].value).resolves.toEqual({ ok: false, error: "worktree_limit_reached" });
 		expect(await f.state.listWorktrees()).toEqual([]);
 		expect(existsSync(join(f.agentDir, "worktrees"))).toBe(false);
-		expect(await SessionManager.list(f.source, getDefaultSessionDirPath(f.source, f.agentDir))).toEqual([]);
+		expect(await SessionManager.list(f.source, getDefaultSessionDirPath(f.agentDir))).toEqual([]);
 	});
 
 	it("keeps other worktree failures generic and excludes host diagnostics", async () => {

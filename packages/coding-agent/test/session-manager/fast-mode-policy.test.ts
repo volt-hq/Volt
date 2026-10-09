@@ -119,9 +119,9 @@ describe("SessionManager Fast mode policy", () => {
 	it("honors options passed as the second listAll argument", async () => {
 		const agentDir = createTempDir();
 		const cwd = join(agentDir, "workspace");
-		const sessionDir = join(agentDir, "sessions", "workspace-sessions");
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
-		const manager = await SessionManager.create(cwd, sessionDir);
+		// In the default store, which listAll reads without a directory.
+		const manager = await SessionManager.create(cwd);
 		await manager.logWriter.appendFastModeChange(true);
 
 		expect(await SessionManager.listAll()).toEqual([]);

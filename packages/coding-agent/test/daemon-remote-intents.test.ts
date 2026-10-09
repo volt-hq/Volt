@@ -40,6 +40,7 @@ import type {
 	IrohRemoteSessionContext,
 	IrohRemoteSessionContextsRpcBackend,
 } from "../src/core/remote/iroh/session-contexts.ts";
+import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { IrohRemoteWorktreeRpcBackend, IrohRemoteWorktreeSummary } from "../src/core/remote/iroh/worktree-rpc.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
@@ -55,6 +56,7 @@ import {
 	remoteStreamAllows,
 	toRemoteKeepAwakeStatus,
 } from "../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import { createSessionManagerTestOwner, type SessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
@@ -76,7 +78,20 @@ interface FakeHost extends RemoteIntentHost {
 	readonly audit: IrohRemoteAuditEvent[];
 }
 
-/** The daemon's backends as fakes: each test supplies the ones it exercises; the rest fail if called. */
+/** The sessions the workspace "ws" at `workspacePath` owns in `agentDir`'s default store, with `worktrees`. */
+function workspaceSessionsFor(
+	agentDir: string,
+	workspacePath: string,
+	worktrees: () => Promise<readonly IrohRemoteWorkspaceWorktree[]> = async () => [],
+): WorkspaceSessions {
+	return new WorkspaceSessions({ agentDir, workspaces: () => [{ name: "ws", path: workspacePath }], worktrees });
+}
+
+/**
+ * The daemon's backends as fakes: each test supplies the ones it exercises;
+ * the rest fail if called. No workspace owns a stored session unless the
+ * test supplies `workspaceSessions`.
+ */
 function fakeHost(agentDir: string, overrides: HostOverrides = {}): FakeHost {
 	const audit: IrohRemoteAuditEvent[] = [];
 	const unexpected = (what: string) => (): never => {
@@ -84,6 +99,7 @@ function fakeHost(agentDir: string, overrides: HostOverrides = {}): FakeHost {
 	};
 	return {
 		agentDir,
+		workspaceSessions: new WorkspaceSessions({ agentDir, workspaces: () => [], worktrees: async () => [] }),
 		audit,
 		auditLogger: new IrohRemoteAuditLogger({
 			now: () => 0,
@@ -221,7 +237,7 @@ describe("listRemoteWorkspaceSessions", () => {
 		}
 		owner = createSessionManagerTestOwner();
 		owner.start();
-		const sessionDir = getDefaultSessionDir(workspacePath, agentDir);
+		const sessionDir = getDefaultSessionDir(agentDir);
 		await storeSession(sessionDir, { id: "s-root", cwd: workspacePath, at: T0 });
 		await storeSession(sessionDir, {
 			id: "s-sub",
@@ -253,20 +269,17 @@ describe("listRemoteWorkspaceSessions", () => {
 
 	it("lists the workspace's stored sessions newest first, with working directories relative to the workspace", async () => {
 		const sessions = await listRemoteWorkspaceSessions(
-			{ agentDir, stateManager: new IrohRemoteHostStateManager() },
+			{
+				agentDir,
+				workspaceSessions: workspaceSessionsFor(agentDir, workspacePath),
+				stateManager: new IrohRemoteHostStateManager(),
+			},
 			authorizationFor(workspacePath),
 			"s-sub",
 		);
 
-		expect(sessions.map((session) => session.sessionId)).toEqual([
-			"s-long",
-			"s-worktree-root",
-			"s-worktree",
-			"s-subagent",
-			"s-outside",
-			"s-sub",
-			"s-root",
-		]);
+		// Outside the workspace, and in a checkout no worktree record names, a session is not the workspace's.
+		expect(sessions.map((session) => session.sessionId)).toEqual(["s-long", "s-subagent", "s-sub", "s-root"]);
 		const sessionsById = byId(sessions);
 		// The relayed conversation's session is the current one.
 		expect(sessions.filter((session) => session.current).map((session) => session.sessionId)).toEqual(["s-sub"]);
@@ -278,9 +291,8 @@ describe("listRemoteWorkspaceSessions", () => {
 			modifiedAt: expect.any(String),
 			createdAt: expect.any(String),
 		});
-		// At the workspace root, and outside the workspace, a session has no working directory.
+		// At the workspace root, a session has no working directory.
 		expect(sessionsById.get("s-root")).not.toHaveProperty("workingDirectory");
-		expect(sessionsById.get("s-outside")).not.toHaveProperty("workingDirectory");
 		expect(sessionsById.get("s-subagent")?.origin).toBe("subagent");
 		expect(sessionsById.get("s-root")).not.toHaveProperty("origin");
 		// No host path reaches the listing.
@@ -304,7 +316,14 @@ describe("listRemoteWorkspaceSessions", () => {
 		await stateManager.bindWorktreeSession("ws", "fix-login", "s-unlisted");
 
 		const sessionsById = byId(
-			await listRemoteWorkspaceSessions({ agentDir, stateManager }, authorizationFor(workspacePath)),
+			await listRemoteWorkspaceSessions(
+				{
+					agentDir,
+					workspaceSessions: workspaceSessionsFor(agentDir, workspacePath, () => stateManager.listWorktrees()),
+					stateManager,
+				},
+				authorizationFor(workspacePath),
+			),
 		);
 
 		expect(sessionsById.get("s-worktree")).toMatchObject({
@@ -345,7 +364,13 @@ describe("listRemoteWorkspaceSessions", () => {
 					}
 				: undefined,
 		);
-		const host = { agentDir, stateManager: new IrohRemoteHostStateManager(), listRuntimeStates, getChangeContext };
+		const host = {
+			agentDir,
+			workspaceSessions: workspaceSessionsFor(agentDir, workspacePath),
+			stateManager: new IrohRemoteHostStateManager(),
+			listRuntimeStates,
+			getChangeContext,
+		};
 
 		const sessions = await listRemoteWorkspaceSessions(
 			host,
@@ -357,8 +382,7 @@ describe("listRemoteWorkspaceSessions", () => {
 		expect(sessionsById.get("s-root")?.runtimeState).toBe("attached");
 		expect(sessionsById.get("s-sub")?.runtimeState).toBe("detached");
 		expect(sessionsById.get("s-subagent")?.runtimeState).toBe("attached");
-		// No worker hosts them: no runtime state.
-		expect(sessionsById.get("s-outside")).not.toHaveProperty("runtimeState");
+		// No worker hosts it: no runtime state.
 		expect(sessionsById.get("s-long")).not.toHaveProperty("runtimeState");
 		expect(sessionsById.has("s-gone")).toBe(false);
 
@@ -383,7 +407,11 @@ describe("listRemoteWorkspaceSessions", () => {
 	it("bounds session titles and first messages to 160 Unicode scalars", async () => {
 		const sessionsById = byId(
 			await listRemoteWorkspaceSessions(
-				{ agentDir, stateManager: new IrohRemoteHostStateManager() },
+				{
+					agentDir,
+					workspaceSessions: workspaceSessionsFor(agentDir, workspacePath),
+					stateManager: new IrohRemoteHostStateManager(),
+				},
 				authorizationFor(workspacePath),
 			),
 		);
@@ -400,7 +428,7 @@ describe("listRemoteWorkspaceSessions", () => {
 		const checkout = join(cutAgentDir, "worktrees", "--ws--", "fix-login");
 		mkdirSync(cutWorkspace, { recursive: true });
 		// The 160-scalar cut lands inside the workspace root and inside a worktree checkout.
-		await storeSession(getDefaultSessionDir(cutWorkspace, cutAgentDir), {
+		await storeSession(getDefaultSessionDir(cutAgentDir), {
 			id: "s-cut-root",
 			cwd: cutWorkspace,
 			at: T0,
@@ -408,7 +436,11 @@ describe("listRemoteWorkspaceSessions", () => {
 			name: `${"y".repeat(160 - Math.floor(checkout.length / 2) - 1)} ${checkout}/src/index.ts`,
 		});
 		const [cut] = await listRemoteWorkspaceSessions(
-			{ agentDir: cutAgentDir, stateManager: new IrohRemoteHostStateManager() },
+			{
+				agentDir: cutAgentDir,
+				workspaceSessions: workspaceSessionsFor(cutAgentDir, cutWorkspace),
+				stateManager: new IrohRemoteHostStateManager(),
+			},
 			authorizationFor(cutWorkspace),
 		);
 		expect(cut?.firstMessage).toContain(" /workspace/");
@@ -424,6 +456,7 @@ describe("listRemoteWorkspaceSessions", () => {
 		const sessions = await listRemoteWorkspaceSessions(
 			{
 				agentDir,
+				workspaceSessions: workspaceSessionsFor(agentDir, workspacePath),
 				stateManager,
 				listRuntimeStates: () => {
 					throw new Error("worker registry unavailable");
@@ -431,7 +464,7 @@ describe("listRemoteWorkspaceSessions", () => {
 			},
 			authorizationFor(workspacePath),
 		);
-		expect(sessions).toHaveLength(7);
+		expect(sessions).toHaveLength(4);
 		expect(sessions.some((session) => session.worktreeId !== undefined || session.runtimeState !== undefined)).toBe(
 			false,
 		);
@@ -497,7 +530,7 @@ describe("remote intent services over protocol frames", () => {
 		const agentDir = join(harness.tempDir, "agent");
 		const cwd = join(workspacePath, "packages", "app");
 		mkdirSync(cwd, { recursive: true });
-		const sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(workspacePath, agentDir));
+		const sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(agentDir));
 		const opened = await harness.host.open({ kind: "adopt", sessionManager });
 		if (opened.cancelled) throw new Error("Opening the conversation was cancelled");
 		return { harness, conversation: opened.conversation, workspacePath, agentDir };
@@ -543,10 +576,13 @@ describe("remote intent services over protocol frames", () => {
 		const owner = createSessionManagerTestOwner();
 		owner.start();
 		cleanups.push(() => owner.drain());
-		await storeSession(getDefaultSessionDir(workspacePath, agentDir), { id: "s-root", cwd: workspacePath, at: T0 });
+		await storeSession(getDefaultSessionDir(agentDir), { id: "s-root", cwd: workspacePath, at: T0 });
 		await conversation.session.prompt("hello from the phone");
 
-		const phone = await conversationStream(setup, fakeHost(agentDir));
+		const phone = await conversationStream(
+			setup,
+			fakeHost(agentDir, { workspaceSessions: workspaceSessionsFor(agentDir, workspacePath) }),
+		);
 		const first = await phone.query("sessions", { limit: 1 });
 		expect(first).toMatchObject({
 			type: "result",

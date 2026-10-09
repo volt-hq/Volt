@@ -263,10 +263,10 @@ Persisted sessions use a tree structure in SQLite. Each entry has an `id` and `p
 
 ### Management
 
-Volt creates one authoritative `sessions.sqlite` store per workspace directory under `~/.volt/agent/sessions/`, or one in a custom session directory. Live sessions are addressed by stable IDs. Listing, exact-ID resolution, continuation candidate selection, and remote discovery read materialized SQLite summaries without scanning transcripts. Deep search scans extracted searchable text one session at a time; its cost grows with searchable text and query complexity, and JavaScript regular expressions have no general runtime bound.
+Volt keeps the sessions of every working directory in one authoritative `sessions.sqlite` store in `~/.volt/agent/sessions/`, or in a custom session directory's own store. Live sessions are addressed by stable IDs. Listing, exact-ID resolution, continuation candidate selection, and remote discovery read materialized SQLite summaries without scanning transcripts. Deep search scans extracted searchable text one session at a time; its cost grows with searchable text and query complexity, and JavaScript regular expressions have no general runtime bound.
 
 ```bash
-volt -c                  # Continue most recent session
+volt -c                  # Continue the most recent session of this directory
 volt -r                  # Browse and select from past sessions
 volt --no-session        # Ephemeral mode (don't save)
 volt --name "my task"    # Set session display name at startup

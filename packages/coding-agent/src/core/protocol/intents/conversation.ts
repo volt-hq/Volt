@@ -13,7 +13,7 @@ import { findStoredSession, openFork, openNewSession, openStoredSessionById } fr
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
 import { QueueClearPersistenceError } from "../../session/client-inputs.ts";
 import { MissingSessionCwdError } from "../../session-cwd.ts";
-import { SessionManager } from "../../session-manager.ts";
+import { getDefaultSessionDir, SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
 import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
 import {
@@ -562,10 +562,10 @@ export const newSessionIntent = defineIntent({
 		let parentSessionRef =
 			input.parentSessionId === session.sessionId ? session.sessionManager.getSessionRef() : undefined;
 		if (input.parentSessionId && !parentSessionRef) {
-			const candidates = await SessionManager.listAll(session.sessionManager.getSessionDir(), undefined, {
-				includeMessageFreeDurable: true,
-			});
-			parentSessionRef = candidates.find((candidate) => candidate.id === input.parentSessionId)?.ref;
+			parentSessionRef = await SessionManager.findForResume(
+				session.sessionManager.getSessionDir() || getDefaultSessionDir(),
+				input.parentSessionId,
+			);
 			if (!parentSessionRef) throw new Error(`Unknown parent session: ${input.parentSessionId}`);
 		}
 		return openNewSession(host, client, {

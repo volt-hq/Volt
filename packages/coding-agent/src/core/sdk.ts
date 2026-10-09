@@ -413,7 +413,7 @@ async function createAgentSessionWithTrackedResources(
 		});
 	let sessionManager = options.sessionManager;
 	if (!sessionManager) {
-		sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+		sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(agentDir));
 		onDefaultSessionManagerCreated(sessionManager);
 	}
 	await seedReviewDiscussionSession(sessionManager);

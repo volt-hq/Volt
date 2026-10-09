@@ -11,7 +11,13 @@ import {
 	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import {
+	getDefaultSessionDirPath,
+	listSessionLocations,
+	SessionManager,
+	type SessionReference,
+} from "../core/session-manager.ts";
+import { SESSION_STORE_DATABASE_FILENAME } from "../core/session-store/index.ts";
 import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
@@ -338,13 +344,11 @@ export class WorktreeManager {
 				this.reviewSourceReservations.has(`${workspaceName}\0${id}`),
 			hasActiveSession: this.hasActiveRuntimeForSession,
 			reserveSessions: this.reserveSessionsForRemoval,
-			storedSessionIds: async (workspace, record) => {
-				const sessionDir = getDefaultSessionDirPath(workspace.path, this.agentDir);
-				if (!existsSync(sessionDir)) return [];
-				const sessions = await SessionManager.list(workspace.path, sessionDir, undefined, {
-					includeMessageFreeDurable: true,
-				});
-				return sessions.filter((session) => isPathContained(record.path, session.cwd)).map((session) => session.id);
+			storedSessionIds: async (_workspace, record) => {
+				const sessionDir = getDefaultSessionDirPath(this.agentDir);
+				if (!existsSync(join(sessionDir, SESSION_STORE_DATABASE_FILENAME))) return [];
+				const sessions = await listSessionLocations(sessionDir, [record.path], { includeMessageFreeDurable: true });
+				return sessions.map((session) => session.id);
 			},
 			now: this.now,
 		});
@@ -1391,8 +1395,8 @@ export class WorktreeManager {
 	 * recorded ids bound at creation, so descendants (fork/new) of older hosts,
 	 * subagent sessions, and pre-fix stranded sessions can live under a
 	 * checkout without a binding. Resolve those from the authoritative session
-	 * store's cwd in the parent-keyed session directory, then self-heal the
-	 * durable binding. Missing, ambiguous, or unreadable state fails closed.
+	 * store's cwd in the default store, then self-heal the durable binding.
+	 * Missing, ambiguous, or unreadable state fails closed.
 	 */
 	private async resolveSessionWorktreeByStoredCwd(
 		workspaceName: string,
@@ -1407,7 +1411,7 @@ export class WorktreeManager {
 		if (!workspace) {
 			return undefined;
 		}
-		const sessionDir = getDefaultSessionDirPath(workspace.path, this.agentDir);
+		const sessionDir = getDefaultSessionDirPath(this.agentDir);
 		let storedCwd: string;
 		try {
 			const sessionRef = await SessionManager.findForResume(sessionDir, sessionId);

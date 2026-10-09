@@ -23,7 +23,7 @@ import {
 	findSessionInfoById,
 	getDefaultSessionDir,
 	type SessionInfo,
-	SessionManager,
+	type SessionManager,
 	type SessionReference,
 } from "../session-manager.ts";
 import type { LogWriter } from "../session-writer.ts";
@@ -324,10 +324,9 @@ export async function openStoredSession(
 }
 
 /**
- * The stored session `sessionId` as `conversation` finds it: in its
- * workspace (its session directory, with its cwd), or, with `scope: "all"`,
- * also in every session directory the `sessions` query lists with that
- * scope. Undefined when there is none.
+ * The stored session `sessionId` as `conversation` finds it in its store:
+ * one of its cwd, or, with `scope: "all"`, any of the store, as the
+ * `sessions` query lists them with that scope. Undefined when there is none.
  */
 export async function findStoredSession(
 	conversation: HostedConversation,
@@ -335,15 +334,10 @@ export async function findStoredSession(
 	scope: "workspace" | "all" = "workspace",
 ): Promise<SessionInfo | undefined> {
 	assertValidSessionId(sessionId);
-	const manager = conversation.session.sessionManager;
-	const sessionDir = manager.getSessionDir() || getDefaultSessionDir(conversation.cwd);
+	const sessionDir = conversation.session.sessionManager.getSessionDir() || getDefaultSessionDir();
 	const found = await findSessionInfoById(sessionDir, sessionId);
-	if (found && (!found.cwd || sameFilesystemLocation(found.cwd, conversation.cwd))) return found;
-	if (scope === "workspace") return undefined;
-	const all = manager.usesDefaultSessionDir()
-		? await SessionManager.listAll()
-		: await SessionManager.listAll(manager.getSessionDir());
-	return all.find((info) => info.id === sessionId);
+	if (found === undefined) return undefined;
+	return scope === "all" || !found.cwd || sameFilesystemLocation(found.cwd, conversation.cwd) ? found : undefined;
 }
 
 /**

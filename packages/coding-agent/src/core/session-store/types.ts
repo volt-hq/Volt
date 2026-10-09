@@ -1,5 +1,5 @@
 export const SESSION_STORE_DATABASE_FILENAME = "sessions.sqlite";
-export const SESSION_STORE_SCHEMA_VERSION = 5;
+export const SESSION_STORE_SCHEMA_VERSION = 6;
 export const SESSION_STORE_READ_ENTRIES_MAX = 1_000;
 export const SESSION_STORE_BUSY_TIMEOUT_MS = 5_000;
 
@@ -53,6 +53,8 @@ export interface SessionStoreSessionSummary {
 	readonly sessionGeneration: string;
 	readonly formatVersion: number;
 	readonly cwd: string;
+	/** The canonical cwd the store indexed when the session was created: its real path, or the resolved path. */
+	readonly cwdKey: string;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 	readonly parentSessionDirectory: string | null;
@@ -211,7 +213,10 @@ export interface SessionStoreReadEntriesResult {
 
 export interface SessionStoreListOptions {
 	readonly includeHidden?: boolean;
+	/** Only sessions whose canonical cwd is this directory's. */
 	readonly cwd?: string;
+	/** Only sessions whose canonical cwd is one of these directories' or inside one; empty matches none. */
+	readonly cwdRoots?: readonly string[];
 }
 
 /** Exact local-store identity. Never resolve historical relations by id alone. */

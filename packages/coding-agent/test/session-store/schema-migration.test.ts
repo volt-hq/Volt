@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -16,6 +16,7 @@ import {
 } from "../../src/core/session-store/index.ts";
 import {
 	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
+	SESSION_STORE_CWD_INDEX_SCHEMA_SQL,
 	SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL,
 	SESSION_STORE_SCHEMA_SQL,
 	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
@@ -29,16 +30,20 @@ import { SESSION_STORE_V1_SCHEMA_SQL } from "../../src/core/session-store/schema
 import { SESSION_STORE_V2_SCHEMA_SQL } from "../../src/core/session-store/schema-v2.ts";
 import { SESSION_STORE_V3_SCHEMA_SQL } from "../../src/core/session-store/schema-v3.ts";
 import { SESSION_STORE_V4_SCHEMA_SQL } from "../../src/core/session-store/schema-v4.ts";
+import { SESSION_STORE_V5_SCHEMA_SQL } from "../../src/core/session-store/schema-v5.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
-const VERSIONS = [1, 2, 3, 4] as const;
+const VERSIONS = [1, 2, 3, 4, 5] as const;
 type LegacyVersion = (typeof VERSIONS)[number];
 const LEGACY_SCHEMA_SQL: Record<LegacyVersion, string> = {
 	1: SESSION_STORE_V1_SCHEMA_SQL,
 	2: SESSION_STORE_V2_SCHEMA_SQL,
 	3: SESSION_STORE_V3_SCHEMA_SQL,
 	4: SESSION_STORE_V4_SCHEMA_SQL,
+	5: SESSION_STORE_V5_SCHEMA_SQL,
 };
+/** Versions with the v2 review tables v5 dropped. */
+const hasReviewTables = (version: LegacyVersion): boolean => version >= 2 && version <= 4;
 /** The tables v2 added for review state and v5 dropped. */
 const REVIEW_TABLES = ["review_anchors", "review_anchor_aliases", "review_discussions", "review_discussion_children"];
 const [CLIENT_INPUT_COPY, CLIENT_INPUT_DROP, , CLIENT_INPUT_RESTORE, CLIENT_INPUT_COPY_DROP] =
@@ -74,9 +79,9 @@ function freshSchemaObjects(): Record<string, unknown>[] {
 }
 
 /**
- * Seeds an exact pre-v5 store with one accepted client input, and from v2
- * on a review run with an alias and a discussion whose child is a session of
- * the store. Pre-v3 sessions carry revisions and revision-keyed commit
+ * Seeds an exact pre-v6 store with one accepted client input, and from v2
+ * to v4 a review run with an alias and a discussion whose child is a session
+ * of the store. Pre-v3 sessions carry revisions and revision-keyed commit
  * evidence; pre-v4 client inputs have no origin.
  */
 function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[version]): string {
@@ -145,7 +150,7 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 			canonical(message),
 		);
 		db.prepare(
-			version === 4
+			version >= 4
 				? "INSERT INTO client_inputs VALUES ('source', 'client', 'receipt', 'steer', NULL, ?, ?, NULL, NULL, 'accepted', NULL, NULL)"
 				: "INSERT INTO client_inputs VALUES ('source', 'client', 'receipt', 'steer', ?, ?, NULL, NULL, 'accepted', NULL, NULL)",
 		).run(semanticDigest, canonical(input));
@@ -154,7 +159,7 @@ function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[versi
 			COMMIT_DIGEST,
 			NOW,
 		);
-		if (version !== 1) {
+		if (hasReviewTables(version)) {
 			db.prepare(`INSERT INTO review_anchors (run_id, source_session_id, source_session_generation, cwd,
 				general_session_id, general_session_generation, general_revision, created_at)
 				VALUES ('run', 'source', 'source-generation', ?, 'source', 'source-generation', 0, ?)`).run(dir, NOW);
@@ -294,9 +299,9 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("exact v1 to v4 to v5 session store migration", () => {
+describe("exact v1 to v5 to v6 session store migration", () => {
 	it.each(VERSIONS)(
-		"upgrades v%i in place, dropping revisions and the review tables without carrying their rows",
+		"upgrades v%i in place, dropping revisions and the review tables without carrying their rows, indexing every cwd",
 		async (version) => {
 			const dir = directory();
 			const path = seed(dir, version);
@@ -304,7 +309,7 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 			const before = tableRows(beforeDb);
 			beforeDb.close();
 			const client = await open(dir);
-			expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 5 });
+			expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 6 });
 			const db = new DatabaseSync(path);
 			try {
 				const after = tableRows(db);
@@ -320,7 +325,7 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 								}),
 								transaction_commits: [],
 							}),
-					...(version === 4
+					...(version >= 4
 						? {}
 						: {
 								client_inputs: before.client_inputs!.map((row) => ({
@@ -333,12 +338,18 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 				for (const table of REVIEW_TABLES) expect(after[table]).toBeUndefined();
 				expect(after.review_run_index).toEqual([]);
 				expect(after.review_discussion_index).toEqual([]);
+				// Every session's cwd is indexed by its real path.
+				expect(after.session_cwd_index).toEqual(
+					(before.sessions as Array<{ id: string }>)
+						.map(({ id }) => ({ session_id: id, cwd_key: realpathSync.native(dir) }))
+						.sort((left, right) => left.session_id.localeCompare(right.session_id)),
+				);
 				expect(schemaObjects(db)).toEqual(freshSchemaObjects());
 				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'created_at'").get()?.value_json).toBe(
 					canonical(NOW),
 				);
 				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'schema_id'").get()?.value_json).toBe(
-					canonical("volt-session-store-v5"),
+					canonical("volt-session-store-v6"),
 				);
 				expect(db.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe("ok");
 				expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
@@ -393,7 +404,7 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 			} finally {
 				await manager.closePersistence();
 			}
-			if (version !== 1) {
+			if (hasReviewTables(version)) {
 				const child = await SessionManager.open({
 					sessionDirectory: dir,
 					storeId: "original-store",
@@ -415,10 +426,10 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 		},
 	);
 
-	it("creates fresh v5 stores and leaves repeat opens unchanged", async () => {
+	it("creates fresh v6 stores and leaves repeat opens unchanged", async () => {
 		const dir = directory();
 		const client = await open(dir);
-		expect(client.info.schemaVersion).toBe(5);
+		expect(client.info.schemaVersion).toBe(6);
 		await client.close();
 		const db = new DatabaseSync(client.info.databasePath);
 		const before = dump(db);
@@ -441,7 +452,7 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 		expect(results.filter((result) => result.status === "rejected")).toEqual([]);
 		const opened = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
 		expect(new Set(opened.map((client) => client.info.storeId))).toEqual(new Set(["original-store"]));
-		expect(opened.every((client) => client.info.schemaVersion === 5)).toBe(true);
+		expect(opened.every((client) => client.info.schemaVersion === 6)).toBe(true);
 		for (const client of opened)
 			expect((await client.loadSession("source", "source-generation"))?.entries).toHaveLength(2);
 	});
@@ -450,14 +461,14 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 		[1, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
 		[1, "client input restore", CLIENT_INPUT_RESTORE],
 		[1, "review index DDL", SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL],
-		[1, "version", "PRAGMA user_version = 5"],
+		[1, "version", "PRAGMA user_version = 6"],
 		[1, "commit", "COMMIT"],
 		[2, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
 		[2, "evidence drop", "DROP TABLE transaction_commits"],
 		[2, "evidence DDL", SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL],
 		[2, "client input restore", CLIENT_INPUT_RESTORE],
 		[2, "review anchor drop", DROP_ANCHORS],
-		[2, "version", "PRAGMA user_version = 5"],
+		[2, "version", "PRAGMA user_version = 6"],
 		[2, "commit", "COMMIT"],
 		[3, "client input copy", CLIENT_INPUT_COPY],
 		[3, "client input drop", CLIENT_INPUT_DROP],
@@ -465,15 +476,19 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 		[3, "client input restore", CLIENT_INPUT_RESTORE],
 		[3, "client input copy drop", CLIENT_INPUT_COPY_DROP],
 		[3, "review discussion drop", DROP_DISCUSSIONS],
-		[3, "version", "PRAGMA user_version = 5"],
+		[3, "version", "PRAGMA user_version = 6"],
 		[3, "commit", "COMMIT"],
 		[4, "review child drop", DROP_CHILDREN],
 		[4, "review discussion drop", DROP_DISCUSSIONS],
 		[4, "review alias drop", DROP_ALIASES],
 		[4, "review anchor drop", DROP_ANCHORS],
 		[4, "review index DDL", SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL],
-		[4, "version", "PRAGMA user_version = 5"],
+		[4, "cwd index DDL", SESSION_STORE_CWD_INDEX_SCHEMA_SQL],
+		[4, "version", "PRAGMA user_version = 6"],
 		[4, "commit", "COMMIT"],
+		[5, "cwd index DDL", SESSION_STORE_CWD_INDEX_SCHEMA_SQL],
+		[5, "version", "PRAGMA user_version = 6"],
+		[5, "commit", "COMMIT"],
 	] as const)("rolls back a v%i %s failure completely and permits a clean retry", (version, _phase, failingSql) => {
 		const path = seed(directory(), version);
 		const db = new DatabaseSync(path);
@@ -491,20 +506,20 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 			expect(dump(db)).toEqual(before);
 			spy.mockRestore();
 			expect(initializeSessionStoreSchema(db)).toBe("original-store");
-			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(5);
+			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(6);
 		} finally {
 			db.close();
 		}
 	});
 
-	it.each(VERSIONS)("rolls back failed v5 postvalidation including metadata and retries from v%i", (version) => {
+	it.each(VERSIONS)("rolls back failed v6 postvalidation including metadata and retries from v%i", (version) => {
 		const db = new DatabaseSync(seed(directory(), version));
 		try {
 			const before = dump(db);
 			const exec = db.exec.bind(db);
 			const spy = vi.spyOn(db, "exec").mockImplementation((sql) => {
 				exec(sql);
-				if (sql === "PRAGMA user_version = 5") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
+				if (sql === "PRAGMA user_version = 6") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
 			});
 			expect(() => initializeSessionStoreSchema(db)).toThrow(/exact supported schema/);
 			expect(db.isTransaction).toBe(false);
@@ -529,14 +544,20 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 				"PRAGMA user_version = 7",
 				"PRAGMA foreign_keys = OFF; INSERT INTO search_chunks VALUES ('missing', 0, NULL, 'orphan')",
 				"PRAGMA ignore_check_constraints = ON; UPDATE sessions SET format_version = 0",
-				// A partial or altered review schema is not an exact one either.
-				...(version === 1
-					? []
-					: [
+				// A partial or altered review or cwd index schema is not an exact one either.
+				...(hasReviewTables(version)
+					? [
 							"DROP TABLE review_anchor_aliases",
 							"DROP INDEX review_discussions_run_idx",
 							"CREATE TABLE review_run_index (run_id TEXT PRIMARY KEY) STRICT",
-						]),
+						]
+					: []),
+				...(version === 5
+					? [
+							"DROP INDEX review_run_index_session_idx",
+							"CREATE TABLE session_cwd_index (session_id TEXT PRIMARY KEY, cwd_key TEXT NOT NULL) STRICT",
+						]
+					: []),
 			].map((sql) => [version, sql] as const),
 		),
 	)("rejects v%i tampering without partial upgrade: %s", async (version, sql) => {
@@ -553,6 +574,31 @@ describe("exact v1 to v4 to v5 session store migration", () => {
 		} finally {
 			after.close();
 		}
+	});
+
+	it("indexes a session whose cwd no longer exists by its resolved path", async () => {
+		const dir = directory();
+		const path = seed(dir, 5);
+		const db = new DatabaseSync(path);
+		try {
+			db.prepare(`INSERT INTO sessions (id, session_generation, format_version, cwd, created_at, updated_at)
+				VALUES ('gone', 'gone-generation', 5, ?, ?, ?)`).run(join(dir, "missing", "..", "removed"), NOW, NOW);
+		} finally {
+			db.close();
+		}
+		const client = await open(dir);
+		expect((await client.findSessionSummaryById("gone"))?.cwdKey).toBe(join(realpathSync.native(dir), "removed"));
+		expect((await client.findSessionSummaryById("source"))?.cwdKey).toBe(realpathSync.native(dir));
+	});
+
+	it("rejects a v6 store whose cwd index was altered", async () => {
+		const dir = directory();
+		const client = await open(dir);
+		await client.close();
+		const db = new DatabaseSync(client.info.databasePath);
+		db.exec("DROP INDEX session_cwd_index_key_idx");
+		db.close();
+		await expect(SQLiteSessionStoreClient.open(dir)).rejects.toMatchObject({ code: "store_schema_mismatch" });
 	});
 
 	it.each(VERSIONS)("rejects weakened v%i DDL even when its metadata digest is recomputed", async (version) => {

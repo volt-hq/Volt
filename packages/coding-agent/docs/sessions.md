@@ -4,10 +4,14 @@ Volt saves conversations as sessions so you can continue work, branch from earli
 
 ## Session Storage
 
-Volt stores the sessions of each working directory in `sessions.sqlite`, in a directory of its own under `~/.volt/agent/sessions/`. A custom `--session-dir` contains its own `sessions.sqlite`. This SQLite database is the live authoritative store; sessions are addressed by stable IDs instead of live files.
+Volt stores the sessions of every working directory in one SQLite database, `~/.volt/agent/sessions/sessions.sqlite`. When it creates a session, it records the session's directory by its real path, so a session started through a symlink belongs to the link's target. A custom `--session-dir` (or `VOLT_CODING_AGENT_SESSION_DIR`, or the `sessionDir` setting) contains its own `sessions.sqlite`. This SQLite database is the live authoritative store; sessions are addressed by stable IDs instead of live files.
+
+A session ID names one session of a store, in one directory. `--session-id` with the ID of a session of another directory is refused instead of moving that session.
+
+Earlier Volt versions kept one store per working directory, in `~/.volt/agent/sessions/--<directory>--/`. Volt does not read, move, or delete those stores. To open one, pass its directory: `volt -r --session-dir ~/.volt/agent/sessions/--<directory>--`.
 
 ```bash
-volt -c                  # Continue most recent session
+volt -c                  # Continue the most recent session of this directory
 volt -r                  # Browse and select from past sessions
 volt --no-session        # Ephemeral mode; do not save
 volt --name "my task"    # Set session display name at startup
@@ -15,7 +19,7 @@ volt --session <id|path> # Resume by partial ID, or import a JSONL snapshot by p
 volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a new session
 ```
 
-In interactive Volt, `--session` with the ID of a session from another project offers to fork it into the current directory.
+In interactive Volt, `--session` with the ID of a session from another directory offers to fork it into the current directory.
 
 Use `/session` in interactive mode to see the session's name, store directory (`In-memory` with `--no-session`), session ID, message counts, tokens, and cost.
 
@@ -99,12 +103,12 @@ Background jobs, subagents, reviews, host actions, and extension work are work i
 
 ## Resuming and Deleting Sessions
 
-`/resume` opens an interactive session picker for the current project. `volt -r` opens the same picker at startup.
+`/resume` opens an interactive session picker for the current folder. `volt -r` opens the same picker at startup. The current folder is exactly the directory Volt runs in: a session started in one of its subdirectories, or in a worktree checkout, is listed under All.
 
 In the picker you can:
 
 - search by typing
-- switch between the current folder's sessions and all sessions with Tab
+- switch between the current folder's sessions and all sessions of the store with Tab
 - toggle path display with Ctrl+P
 - toggle sort mode with Ctrl+S
 - filter to named sessions with Ctrl+N

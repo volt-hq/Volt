@@ -570,11 +570,10 @@ async function createIrohRemoteSessionManager(
 		(await resolveIrohRemoteSessionTarget(
 			getSessionTarget(options),
 			{ name: "", path: options.cwd },
-			createSessionManagerTargetStore(
-				options.cwd,
-				options.sessionDir ?? getDefaultSessionDir(options.projectCwd ?? options.cwd, agentDir),
-				{ listAll: true, preserveSessionCwd: true },
-			),
+			createSessionManagerTargetStore(options.cwd, options.sessionDir ?? getDefaultSessionDir(agentDir), {
+				listAll: true,
+				preserveSessionCwd: true,
+			}),
 		));
 	return {
 		sessionManager: resolved.sessionManager,

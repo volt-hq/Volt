@@ -605,9 +605,9 @@ const { session } = await createAgentSession({
 - Settings (`settings.json`)
 - Custom models (`models.json`)
 - Credentials (`auth.json`)
-- Per-workspace SQLite session stores (`sessions/`)
+- The default SQLite session store (`sessions/sessions.sqlite`), shared by every working directory
 
-When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence workspace session-store selection and tool path resolution.
+When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. `agentDir` still selects the default session store, and `cwd` still sets the new session's directory and tool path resolution.
 
 ### Model
 
@@ -957,7 +957,7 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 ### Session Management
 
-Each workspace or custom session directory has one authoritative `sessions.sqlite` store. Persisted sessions use stable references:
+The default session directory, `getDefaultSessionDir(agentDir?)` (`<agentDir>/sessions`), holds one authoritative `sessions.sqlite` store for every working directory; a custom session directory holds its own. `getDefaultSessionDirPath(agentDir?)` returns the same path without creating it. Persisted sessions use stable references:
 
 ```typescript
 interface SessionReference {
@@ -992,6 +992,7 @@ if (modelFallbackMessage) {
 }
 
 // Summary-only listing and deep search return SessionInfo objects with stable refs.
+// list, search, and continueRecent match exactly this canonical cwd; listAll reads the whole store.
 // Search scans extracted searchable text one session at a time.
 const currentProjectSessions = await SessionManager.list(process.cwd());
 const matchingSessions = await SessionManager.search(process.cwd(), "authentication");

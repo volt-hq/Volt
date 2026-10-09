@@ -30,6 +30,7 @@ import {
 	remoteIntentServices,
 	remoteStreamAllows,
 } from "../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type IntentOutcome, type RemotePhone } from "./utilities/remote-phone.ts";
 
@@ -155,6 +156,11 @@ function serveWorkspaceStream(options: WorkspaceStreamOptions): WorkspaceStream 
 	const auditEvents: IrohRemoteAuditEvent[] = [];
 	const host: RemoteIntentHost = {
 		agentDir: "/home/user/.volt/agent",
+		workspaceSessions: new WorkspaceSessions({
+			agentDir: "/home/user/.volt/agent",
+			workspaces: () => [],
+			worktrees: async () => [],
+		}),
 		auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
 		stateManager: new IrohRemoteHostStateManager(),
 		pushTargets: () => unexpected("pushTargets"),

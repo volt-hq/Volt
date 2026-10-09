@@ -511,7 +511,7 @@ describe("managed relay credential recovery", () => {
 			expect(
 				await fixture.control.request({ type: "workspace_register", name: "repo", path: fixture.agentDir }),
 			).toMatchObject({ type: "ok" });
-			const sessionDir = getDefaultSessionDir(fixture.agentDir, fixture.agentDir);
+			const sessionDir = getDefaultSessionDir(fixture.agentDir);
 			const localSession = await SessionManager.create(fixture.agentDir, sessionDir, { id: "local-session" });
 			await localSession.logWriter.appendSessionInfo("Preserved local session");
 			await localSession.closePersistence();

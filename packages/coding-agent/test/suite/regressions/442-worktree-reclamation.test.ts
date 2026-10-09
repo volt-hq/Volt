@@ -115,7 +115,7 @@ async function fixture(maxWorktreesPerWorkspace = 1, runReviewGit?: WorktreeGitR
 	const authority = { workspaceGeneration: 1, assertCurrent: () => {} };
 	const bindReview = async (worktreeId: string) => {
 		const record = (await state.listWorktrees()).find((entry) => entry.id === worktreeId)!;
-		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(source, agentDir), {
+		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(agentDir), {
 			id: request.sessionId,
 		});
 		try {
@@ -475,10 +475,7 @@ describe("#442 worktree reclamation", () => {
 		const restored = await resumed.manager.resolveSessionWorktree(f.workspace.name, f.request.sessionId);
 		expect(restored?.path).toBe(archived.path);
 		expect(restored?.checkoutArchive).toBeUndefined();
-		const ref = await SessionManager.findForResume(
-			getDefaultSessionDirPath(f.source, f.agentDir),
-			f.request.sessionId,
-		);
+		const ref = await SessionManager.findForResume(getDefaultSessionDirPath(f.agentDir), f.request.sessionId);
 		const session = await SessionManager.open(ref!);
 		try {
 			const binding = session.getPrReviewBinding()!;

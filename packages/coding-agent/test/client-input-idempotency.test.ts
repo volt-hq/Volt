@@ -38,6 +38,7 @@ import {
 } from "../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreLease } from "../src/core/session-store/index.ts";
 import { listRemoteWorkspaceSessions } from "../src/daemon/remote-intents.ts";
+import { WorkspaceSessions } from "../src/daemon/workspace-sessions.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHarness, getUserTexts, type Harness } from "./suite/harness.ts";
 import { appendsEntryType, type ConversationLogBatchMatcher, lose } from "./utilities/faulty-log.ts";
@@ -1626,7 +1627,7 @@ describe("durable client input idempotency", () => {
 		const workspaceDir = join(agentDir, "workspace");
 		mkdirSync(workspaceDir, { recursive: true });
 		tempDirs.push(agentDir);
-		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
+		const sessionDir = getDefaultSessionDir(agentDir);
 		const manager = await SessionManager.create(workspaceDir, sessionDir);
 		await seedSession(manager, (seed) =>
 			seed.clientInput(
@@ -1641,7 +1642,15 @@ describe("durable client input idempotency", () => {
 
 		expect(await SessionManager.list(workspaceDir, sessionDir)).toEqual([]);
 		expect(await SessionManager.listAll(sessionDir)).toEqual([]);
-		const remoteHost = { agentDir, stateManager: new IrohRemoteHostStateManager() };
+		const remoteHost = {
+			agentDir,
+			workspaceSessions: new WorkspaceSessions({
+				agentDir,
+				workspaces: () => [createAuthorization(workspaceDir).workspace],
+				worktrees: async () => [],
+			}),
+			stateManager: new IrohRemoteHostStateManager(),
+		};
 		expect(await listRemoteWorkspaceSessions(remoteHost, createAuthorization(workspaceDir))).toEqual([]);
 
 		// Enumeration purity does not weaken recovery: an explicit reopen still

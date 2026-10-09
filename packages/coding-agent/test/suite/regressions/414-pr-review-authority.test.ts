@@ -19,6 +19,7 @@ import { PrReviewCheckoutManager, type PrReviewPreparationAuthority } from "../.
 import * as reviewGit from "../../../src/daemon/pr-review-git.ts";
 import { VoltdStateStore } from "../../../src/daemon/state.ts";
 import { WorkerRegistry } from "../../../src/daemon/worker-registry.ts";
+import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import { getWorktreesRoot, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
@@ -297,6 +298,11 @@ async function fixture(grant = capabilities) {
 			sessionInWorkspace: async () => false,
 			audit() {},
 		}),
+		workspaceSessions: new WorkspaceSessions({
+			agentDir,
+			workspaces: () => state.getHostState().workspaces,
+			worktrees: () => stateManager.listWorktrees(),
+		}),
 		// Streams record client activity for PR status polling; nothing else may touch the change association.
 		changes: new Proxy(
 			{},
@@ -370,7 +376,7 @@ async function fixture(grant = capabilities) {
 				expect(git(source, "show-ref")).toBe(before.refs);
 				expect(runGit.mock.calls.some(([args]) => args[0] === "fetch")).toBe(false);
 			}
-			expect(await SessionManager.list(source, getDefaultSessionDirPath(source, agentDir))).toEqual([]);
+			expect(await SessionManager.list(source, getDefaultSessionDirPath(agentDir))).toEqual([]);
 			expect(services.workers.size).toBe(0);
 		},
 	};

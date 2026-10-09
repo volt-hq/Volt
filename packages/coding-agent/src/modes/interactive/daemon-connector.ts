@@ -348,7 +348,6 @@ export class DaemonConnector implements ConversationConnector {
 		const currentDir = here.target.sessionDir;
 		const found = await findSessionByExactId(
 			sessionId,
-			here.cwd,
 			this.sessionDir,
 			currentDir === undefined ? [] : [currentDir],
 		).catch(() => undefined);

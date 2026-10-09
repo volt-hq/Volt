@@ -15,6 +15,8 @@ export interface IrohRemoteSessionContextsRpcBackend {
 export function createIrohRemoteSessionContextsRpcBackend(options: {
 	workspaceName: string;
 	sessionDirectory: string;
+	/** Which of `sessionIds` the workspace owns in `sessionDirectory`: only those get contexts. */
+	ownedSessionIds(sessionIds: readonly string[]): Promise<ReadonlySet<string>>;
 	getChangeContext(sessionId: string): RpcSessionChangeContext | undefined;
 }): IrohRemoteSessionContextsRpcBackend {
 	return {
@@ -22,14 +24,16 @@ export function createIrohRemoteSessionContextsRpcBackend(options: {
 			if (workspaceName !== options.workspaceName) {
 				throw new Error("Session context workspace mismatch");
 			}
+			const owned = await options.ownedSessionIds(sessionIds);
 			// The host of a conversation records its starting Git context in its log.
-			const startingContexts = await SessionManager.readStartingGitContexts(options.sessionDirectory, [
-				...sessionIds,
-			]);
+			const startingContexts = await SessionManager.readStartingGitContexts(
+				options.sessionDirectory,
+				sessionIds.filter((sessionId) => owned.has(sessionId)),
+			);
 			return sessionIds.map((sessionId) => ({
 				sessionId,
 				startingGitContext: startingContexts.get(sessionId) ?? null,
-				changeContext: options.getChangeContext(sessionId) ?? null,
+				changeContext: (owned.has(sessionId) ? options.getChangeContext(sessionId) : undefined) ?? null,
 			}));
 		},
 	};

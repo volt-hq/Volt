@@ -131,7 +131,7 @@ describe("the daemon connector", () => {
 		const harness = await startHarness();
 		const other = join(harness.workspacePath, "other");
 		mkdirSync(other);
-		const stored = await SessionManager.create(other, getDefaultSessionDirPath(other, harness.agentDir));
+		const stored = await SessionManager.create(other, getDefaultSessionDirPath(harness.agentDir));
 		const storedId = stored.getSessionId();
 		await stored.logWriter.appendMessage({ role: "user", content: "stored elsewhere", timestamp: 1 });
 		await stored.closePersistence();
@@ -197,7 +197,7 @@ describe("the daemon connector's trust and workspace bounds", () => {
 		const harness = await startHarness();
 		const other = join(harness.workspacePath, "other");
 		mkdirSync(other);
-		const stored = await SessionManager.create(other, getDefaultSessionDirPath(other, harness.agentDir));
+		const stored = await SessionManager.create(other, getDefaultSessionDirPath(harness.agentDir));
 		const storedId = stored.getSessionId();
 		await stored.logWriter.appendMessage({ role: "user", content: "in another project", timestamp: 1 });
 		await stored.closePersistence();

@@ -333,6 +333,7 @@ export class SQLiteSessionStoreClient {
 			kind: "list_sessions",
 			includeHidden: options.includeHidden ?? false,
 			cwd: options.cwd ?? null,
+			cwdRoots: options.cwdRoots ?? null,
 		})) as SessionStoreSessionSummary[];
 	}
 
@@ -357,6 +358,7 @@ export class SQLiteSessionStoreClient {
 			query,
 			includeHidden: options.includeHidden ?? false,
 			cwd: options.cwd ?? null,
+			cwdRoots: options.cwdRoots ?? null,
 		})) as SessionStoreSearchResult[];
 	}
 

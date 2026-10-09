@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
+import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import { parseCanonicalSessionStoreJson, stringifyCanonicalSessionStoreJson } from "./canonical-json.ts";
 import {
 	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
+	SESSION_STORE_CWD_INDEX_SCHEMA_SQL,
 	SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL,
 	SESSION_STORE_SCHEMA_ID,
 	SESSION_STORE_SCHEMA_SQL,
@@ -12,7 +14,13 @@ import { SESSION_STORE_V1_SCHEMA_ID, SESSION_STORE_V1_SCHEMA_SQL } from "./schem
 import { SESSION_STORE_V2_SCHEMA_ID, SESSION_STORE_V2_SCHEMA_SQL } from "./schema-v2.ts";
 import { SESSION_STORE_V3_SCHEMA_ID, SESSION_STORE_V3_SCHEMA_SQL } from "./schema-v3.ts";
 import { SESSION_STORE_V4_SCHEMA_ID, SESSION_STORE_V4_SCHEMA_SQL } from "./schema-v4.ts";
+import { SESSION_STORE_V5_SCHEMA_ID, SESSION_STORE_V5_SCHEMA_SQL } from "./schema-v5.ts";
 import { SESSION_STORE_SCHEMA_VERSION, SessionStoreError } from "./types.ts";
+
+/** The `session_cwd_index` key of a stored cwd: its real path, or the resolved path when that cannot be read. */
+export function sessionCwdKey(cwd: string): string {
+	return canonicalizePath(resolvePath(cwd));
+}
 
 /** The v3 client input columns, copied into the rebuilt v4 table (which adds `origin`). */
 const V3_CLIENT_INPUT_COLUMNS =
@@ -68,7 +76,8 @@ const SCHEMAS = {
 	2: { schemaId: SESSION_STORE_V2_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V2_SCHEMA_SQL) },
 	3: { schemaId: SESSION_STORE_V3_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V3_SCHEMA_SQL) },
 	4: { schemaId: SESSION_STORE_V4_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V4_SCHEMA_SQL) },
-	5: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
+	5: { schemaId: SESSION_STORE_V5_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V5_SCHEMA_SQL) },
+	6: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
 } as const;
 
 function mismatch(message: string): never {
@@ -120,7 +129,7 @@ function validateIntegrity(db: DatabaseSync): void {
 	}
 }
 
-/** Only the exact frozen v1 to v4 schemas can upgrade. All DDL and metadata commit together. */
+/** Only the exact frozen v1 to v5 schemas can upgrade. All DDL and metadata commit together. */
 export function initializeSessionStoreSchema(db: DatabaseSync): string {
 	// Re-read after the write lock: another opener may have initialized/upgraded while we waited.
 	db.exec("BEGIN IMMEDIATE");
@@ -134,14 +143,14 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 			const insert = db.prepare("INSERT INTO store_metadata (key, value_json) VALUES (?, ?)");
 			for (const [key, value] of Object.entries({
 				schema_id: SESSION_STORE_SCHEMA_ID,
-				schema_digest: SCHEMAS[5].digest,
+				schema_digest: SCHEMAS[SESSION_STORE_SCHEMA_VERSION].digest,
 				store_id: randomUUID(),
 				schema_version: SESSION_STORE_SCHEMA_VERSION,
 				created_at: new Date().toISOString(),
 			}))
 				insert.run(key, stringifyCanonicalSessionStoreJson(value, "Store metadata"));
 			db.exec(`PRAGMA user_version = ${SESSION_STORE_SCHEMA_VERSION}`);
-		} else if (version === 1 || version === 2 || version === 3 || version === 4) {
+		} else if (version === 1 || version === 2 || version === 3 || version === 4 || version === 5) {
 			validateSchema(db, version);
 			validateIntegrity(db);
 			if (version === 1 || version === 2) {
@@ -152,13 +161,25 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 				db.exec(SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL);
 			}
 			// v4 client inputs record the receipt's origin and the terminal `withdrawn` state.
-			if (version !== 4) for (const sql of SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL) db.exec(sql);
-			// v5 keeps review state in the logs; v1 never had the review tables.
-			if (version !== 1) for (const sql of SESSION_STORE_V5_REVIEW_UPGRADE_SQL) db.exec(sql);
-			db.exec(SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL);
+			if (version < 4) for (const sql of SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL) db.exec(sql);
+			if (version < 5) {
+				// v5 keeps review state in the logs; v1 never had the review tables.
+				if (version !== 1) for (const sql of SESSION_STORE_V5_REVIEW_UPGRADE_SQL) db.exec(sql);
+				db.exec(SESSION_STORE_REVIEW_INDEX_SCHEMA_SQL);
+			}
+			// v6 indexes every session's canonical cwd, read from the filesystem once, here.
+			db.exec(SESSION_STORE_CWD_INDEX_SCHEMA_SQL);
+			const index = db.prepare("INSERT INTO session_cwd_index (session_id, cwd_key) VALUES (?, ?)");
+			for (const row of db.prepare("SELECT id, cwd FROM sessions ORDER BY id").all()) {
+				if (typeof row.id !== "string" || typeof row.cwd !== "string") mismatch("Invalid stored session row");
+				index.run(row.id, sessionCwdKey(row.cwd));
+			}
 			const update = db.prepare("UPDATE store_metadata SET value_json = ? WHERE key = ?");
 			update.run(stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_ID, "Schema id"), "schema_id");
-			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[5].digest, "Schema digest"), "schema_digest");
+			update.run(
+				stringifyCanonicalSessionStoreJson(SCHEMAS[SESSION_STORE_SCHEMA_VERSION].digest, "Schema digest"),
+				"schema_digest",
+			);
 			update.run(
 				stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_VERSION, "Schema version"),
 				"schema_version",

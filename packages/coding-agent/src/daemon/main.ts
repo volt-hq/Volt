@@ -19,7 +19,6 @@ import {
 	IrohRemoteHostStateManager,
 	isIrohRemoteWorkspaceHasWorktreesError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import {
 	getCurrentThemeName,
@@ -78,6 +77,7 @@ import { TuiConversations } from "./tui-conversations.ts";
 import { waitForWorkerGate } from "./worker-gate.ts";
 import type { WorkerLauncher } from "./worker-launcher.ts";
 import { WorkerRegistry } from "./worker-registry.ts";
+import { WorkspaceSessions } from "./workspace-sessions.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
 export interface Clock {
@@ -191,6 +191,8 @@ export interface VoltdRuntimeServices {
 	controlServer: ControlServer;
 	/** The conversation workers the daemon supervises. */
 	workers: WorkerRegistry;
+	/** Which workspace owns each stored session. */
+	workspaceSessions: WorkspaceSessions;
 	keepAwake: KeepAwakeController;
 	/** Stored Brave Search API key for the web_search tool, persisted in auth.json. */
 	webSearchKey: { set(apiKey: string | null): void; readonly configured: boolean };
@@ -499,6 +501,12 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 
 	const extensionInstances: VoltdServiceExtensionInstance[] = [];
 	let controlServer: ControlServer | undefined;
+	// Which workspace owns each stored session: every daemon lookup of a workspace's sessions asks this.
+	const workspaceSessions = new WorkspaceSessions({
+		agentDir,
+		workspaces: () => state.getHostState().workspaces,
+		worktrees: () => stateManager.listWorktrees(),
+	});
 	const workers = new WorkerRegistry({
 		launcher: config.workerLauncher ?? {
 			launch() {
@@ -514,16 +522,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			return hostState.workspaceGenerations?.find((record) => record.workspaceName === workspaceName)?.generation;
 		},
 		detachedRuntimeTtlMs: () => state.state.settings.detachedRuntimeTtlMs,
-		sessionInWorkspace: async (workspaceName, sessionId, sessionDirectory) => {
-			const workspace = state.getHostState().workspaces.find((candidate) => candidate.name === workspaceName);
-			if (!workspace) return false;
-			for (const directory of [getDefaultSessionDir(workspace.path, agentDir), sessionDirectory]) {
-				if (directory !== undefined && (await SessionManager.findForResume(directory, sessionId)) !== undefined) {
-					return true;
-				}
-			}
-			return false;
-		},
+		sessionInWorkspace: async (workspaceName, sessionId, sessionDirectory) =>
+			(await workspaceSessions.find(workspaceName, sessionId, sessionDirectory)) !== undefined,
 		audit: (event) => void auditLogger.log(event).catch(() => {}),
 		log: (level, message, details) => logger.log(level, "workers", message, details),
 	});
@@ -531,8 +531,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	const tuiConversations = new TuiConversations({
 		agentDir,
 		workers,
+		sessions: workspaceSessions,
 		workspaces: () => state.getHostState().workspaces,
-		worktrees: () => stateManager.listWorktrees(),
 		currentGeneration: (workspaceName) => {
 			const hostState = state.getHostState();
 			if (!hostState.workspaces.some((workspace) => workspace.name === workspaceName)) return undefined;
@@ -1227,6 +1227,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		auditLogger,
 		controlServer,
 		workers,
+		workspaceSessions,
 		keepAwake,
 		webSearchKey,
 		requestShutdown,

@@ -1,14 +1,12 @@
 /**
  * Finding a stored session from the CLI's arguments, read-only: by exact id
- * (an indexed lookup in the session directory, or in every project's default
- * one under the sessions root), by id prefix, or a JSONL file path to import.
- * Only the host that opens the session opens its log.
+ * (an indexed lookup in the session directory, or in the default store), by
+ * id prefix, or a JSONL file path to import. Only the host that opens the
+ * session opens its log.
  */
 
 import { existsSync } from "node:fs";
-import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { getSessionsDir } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { sameFilesystemLocation } from "./host/session-summaries.ts";
 import {
@@ -58,14 +56,12 @@ async function findExactSessionInfoInStore(
 
 /**
  * The stored session `sessionId`: in `sessionDir` when given, else in the
- * default session directory of `cwd`, then in every other project's under
- * the sessions root. Directories in `first` are searched before those. A
- * store that cannot be read is skipped; when none could be read, the lookup
- * fails with their errors.
+ * directories in `first`, then in the default store. A store that cannot be
+ * read is skipped; when none could be read, the lookup fails with their
+ * errors.
  */
 export async function findSessionByExactId(
 	sessionId: string,
-	cwd: string,
 	sessionDir?: string,
 	first: readonly string[] = [],
 ): Promise<FoundSession | undefined> {
@@ -92,35 +88,23 @@ export async function findSessionByExactId(
 		}
 	};
 
-	for (const directory of [...first, getDefaultSessionDirPath(cwd)]) {
+	for (const directory of [...first, getDefaultSessionDirPath()]) {
 		const info = await findInReadableStore(directory);
 		if (info) return { ref: info.ref, cwd: info.cwd };
 	}
-
-	const sessionsRoot = getSessionsDir();
-	if (existsSync(sessionsRoot)) {
-		const directories = (await readdir(sessionsRoot, { withFileTypes: true }))
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => join(sessionsRoot, entry.name))
-			.sort();
-		for (const directory of directories) {
-			const info = await findInReadableStore(directory);
-			if (info) return { ref: info.ref, cwd: info.cwd };
-		}
-	}
 	if (readableStores === 0 && storeErrors.length > 0) {
-		throw new AggregateError(storeErrors, "Could not look up an exact session ID in any project store");
+		throw new AggregateError(storeErrors, "Could not look up an exact session ID in any session store");
 	}
 	return undefined;
 }
 
-/** The stored session `sessionId` of this project (`cwd`): in `sessionDir`, or the cwd's default session directory. */
+/** The stored session `sessionId` of exactly `cwd`: in `sessionDir`, or the default store. */
 export async function findLocalSessionByExactId(
 	sessionId: string,
 	cwd: string,
 	sessionDir?: string,
 ): Promise<{ type: "local"; ref: SessionReference } | undefined> {
-	const directory = sessionDir ?? getDefaultSessionDirPath(cwd);
+	const directory = sessionDir ?? getDefaultSessionDirPath();
 	const info = await findExactSessionInfoInStore(directory, sessionId);
 	if (!info || (info.cwd && !sameFilesystemLocation(info.cwd, cwd))) return undefined;
 	return { type: "local", ref: info.ref };
@@ -142,9 +126,7 @@ export async function resolveSessionArgument(
 	}
 
 	// Exact IDs use indexed summary lookup; only the final owner opens the selected transcript.
-	const exactMatch = canBeExactSessionId(sessionArg)
-		? await findSessionByExactId(sessionArg, cwd, sessionDir)
-		: undefined;
+	const exactMatch = canBeExactSessionId(sessionArg) ? await findSessionByExactId(sessionArg, sessionDir) : undefined;
 	if (exactMatch) {
 		return !exactMatch.cwd || sameFilesystemLocation(exactMatch.cwd, cwd)
 			? { type: "local", ref: exactMatch.ref }

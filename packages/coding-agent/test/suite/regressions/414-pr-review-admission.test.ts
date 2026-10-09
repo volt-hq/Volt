@@ -35,6 +35,7 @@ import * as daemonSpawn from "../../../src/daemon/spawn.ts";
 import type { WorkerDaemonClient } from "../../../src/daemon/worker/daemon-client.ts";
 import { WorkerConversations } from "../../../src/daemon/worker/hosted.ts";
 import type { WorkerSpawnInput } from "../../../src/daemon/worker-registry.ts";
+import { WorkspaceSessions } from "../../../src/daemon/workspace-sessions.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { anchorLiveReviewRun } from "../../utilities/review-runs.ts";
@@ -92,7 +93,7 @@ async function fixture(nested = false, workspaceName = "project") {
 	const remote = join(root, "remote.git");
 	const { base, head } = gitSeed.copyTo(source, remote);
 	const agentDir = join(root, "agent");
-	const sessionDir = getDefaultSessionDir(workspace.path, agentDir);
+	const sessionDir = getDefaultSessionDir(agentDir);
 	const harness = await createHarness({ settings: { lsp: { enabled: false }, compaction: { enabled: false } } });
 	const authorization: IrohRemoteClientAuthorizationSuccess = {
 		ok: true,
@@ -212,7 +213,11 @@ async function fixture(nested = false, workspaceName = "project") {
 				[...workers].some((worker) => worker.spec.workspace.name === name && worker.hosted.get(id) !== undefined),
 		});
 		const services: ConversationOpenServices = {
-			agentDir,
+			workspaceSessions: new WorkspaceSessions({
+				agentDir,
+				workspaces: () => [workspace],
+				worktrees: () => state.listWorktrees(),
+			}),
 			toolPolicy: () => ({ tools: ["read", "write"], allowUnlistedExtensionTools: false }),
 			projectTrusted: () => true,
 			resolveWorktree: async (name, hello, id) => {
