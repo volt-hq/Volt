@@ -21,7 +21,7 @@ import { formatLspAudit, handleLspAuditCommand, parseLspAuditArgs } from "../src
 import type { LspOperationMetadata } from "../src/core/lsp/outcome.ts";
 import { getDefaultSessionDirPath } from "../src/core/session-manager.ts";
 import { auditLsp } from "../src/core/session-store/lsp-audit.ts";
-import { initializeSessionStoreSchema } from "../src/core/session-store/schema-migration.ts";
+import { initializeSessionStoreSchema, sessionCwdKey } from "../src/core/session-store/schema-migration.ts";
 
 const roots: string[] = [];
 const databases: DatabaseSync[] = [];
@@ -47,6 +47,8 @@ function session(db: DatabaseSync, id: string, cwd: string, origin: "subagent" |
 	db.prepare(
 		"INSERT INTO sessions (id, session_generation, format_version, cwd, created_at, updated_at, origin) VALUES (?, ?, 5, ?, ?, ?, ?)",
 	).run(id, `${id}-generation`, cwd, created, completedAt, origin);
+	// As the store indexes every session it creates.
+	db.prepare("INSERT INTO session_cwd_index (session_id, cwd_key) VALUES (?, ?)").run(id, sessionCwdKey(cwd));
 }
 
 function operation(id: string, overrides: Partial<LspOperationMetadata> = {}): LspOperationMetadata {
@@ -314,10 +316,38 @@ describe("offline LSP audit", () => {
 		expect(report.byCohort.subagent.operations).toBe(1);
 		expect(report.utilization.toolActiveConversations).toBe(1);
 		expect(report.deduplication.copiesRemoved).toBe(1);
-		// Without allWorkspaces, only the cwd's sessions count: the copy, attributed as the original is out of scope.
+		// Without allWorkspaces, only the cwd's sessions are read: the copy counts here, its original context unknown.
 		const workspace = await auditLsp({ cwd, now });
-		expect(workspace.coverage).toMatchObject({ storesDiscovered: 1, storesRead: 1 });
+		expect(workspace.coverage).toMatchObject({ storesDiscovered: 1, storesRead: 1, sessionsScanned: 1 });
+		expect(workspace.totals.operations).toBe(1);
+		expect(workspace.deduplication.originalContextUnavailable).toBe(1);
 		expect(workspace.byCohort.subagent.operations).toBe(0);
+	});
+
+	it("spends a default-store workspace audit's scan limits on its own cwd's sessions alone", async () => {
+		const { db, root, cwd, sessionDir } = fixture();
+		const other = join(root, "other-workspace");
+		mkdirSync(other);
+		// Another workspace's session sorts first and alone exceeds the entry limit.
+		session(db, "a-other", other);
+		for (const ordinal of [1, 2, 3]) result(db, "a-other", ordinal, "read");
+		session(db, "z-own", cwd);
+		result(db, "z-own", 1, "lsp", operation("own"));
+		db.close();
+		renameSync(sessionDir, getDefaultSessionDirPath(root));
+		vi.stubEnv("VOLT_CODING_AGENT_DIR", root);
+		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
+		const limits = { maxEntries: 2 };
+		const workspace = await auditLsp({ cwd, now, limits });
+		expect(workspace.totals.operations).toBe(1);
+		expect(workspace.coverage).toMatchObject({
+			partial: false,
+			sessionsScanned: 1,
+			entriesScanned: 1,
+			limitsReached: [],
+		});
+		const all = await auditLsp({ cwd, now, limits, allWorkspaces: true });
+		expect(all.coverage).toMatchObject({ partial: true, limitsReached: ["scan"] });
 	});
 
 	it("does not read an uncommitted rollback-journal store as an immutable snapshot", async () => {

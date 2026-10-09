@@ -128,14 +128,15 @@ async function tuiConversation(f: Fixture, cwd: string): Promise<{ sessionId: st
 	return { sessionId: opened.sessionId, client };
 }
 
-function authorization(f: Fixture): IrohRemoteClientAuthorizationSuccess {
+/** A phone of `name` (the harness workspace by default; another registration has no generation here). */
+function authorization(f: Fixture, name = f.harness.workspaceName): IrohRemoteClientAuthorizationSuccess {
 	return {
 		ok: true,
 		allowTools: "read",
 		client: {
 			nodeId: "n-722",
 			label: "phone",
-			allowedWorkspaces: [f.harness.workspaceName],
+			allowedWorkspaces: [name],
 			allowedTools: "read",
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			pairedAt: 1,
@@ -143,22 +144,25 @@ function authorization(f: Fixture): IrohRemoteClientAuthorizationSuccess {
 		},
 		paired: false,
 		pairingSecretConsumed: false,
-		workspace: { name: f.harness.workspaceName, path: f.harness.workspacePath },
-		workspaceGeneration: f.harness.generation(),
-		workspaceNames: [f.harness.workspaceName],
-		workspaces: [{ name: f.harness.workspaceName, status: "available" }],
+		workspace: { name, path: f.harness.workspacePath },
+		...(name === f.harness.workspaceName ? { workspaceGeneration: f.harness.generation() } : {}),
+		workspaceNames: [name],
+		workspaces: [{ name, status: "available" }],
 	};
 }
 
 /** The sessions in the workspace's listing, as its phones see them. */
-async function listed(f: Fixture): Promise<Awaited<ReturnType<typeof listRemoteWorkspaceSessions>>> {
+async function listed(
+	f: Fixture,
+	name = f.harness.workspaceName,
+): Promise<Awaited<ReturnType<typeof listRemoteWorkspaceSessions>>> {
 	return listRemoteWorkspaceSessions(
 		{
 			agentDir: f.harness.agentDir,
 			workspaceSessions: f.harness.services.workspaceSessions,
 			stateManager: f.harness.services.stateManager,
 		},
-		authorization(f),
+		authorization(f, name),
 	);
 }
 
@@ -221,6 +225,40 @@ describe("#722 sessions started anywhere in a workspace", () => {
 			{ timeout: 15_000 },
 		);
 	}, 120_000);
+
+	it("are every same-path registration's, except a managed worktree checkout's, which stay its workspace's", async () => {
+		const f = await fixture();
+		const alias = "alias";
+		expect(
+			await f.harness.services.stateManager.insertWorkspace({ name: alias, path: f.harness.workspacePath }),
+		).toBe(true);
+		const root = await terminalSession(f, f.harness.workspacePath);
+		const subdirectory = await terminalSession(f, f.subdirectory);
+		const worktree = await terminalSession(f, f.worktree.subdirectory);
+		const ids = [root.sessionId, subdirectory.sessionId, worktree.sessionId];
+		const owned = f.harness.services.workspaceSessions;
+
+		for (const name of [f.harness.workspaceName, alias]) {
+			for (const ref of [root, subdirectory]) {
+				expect(await owned.find(name, ref.sessionId)).toMatchObject({
+					id: ref.sessionId,
+					placement: { workspace: { name } },
+				});
+			}
+		}
+		expect([...(await owned.owned(f.harness.workspaceName, ids))].sort()).toEqual([...ids].sort());
+		expect([...(await owned.owned(alias, ids))].sort()).toEqual([root.sessionId, subdirectory.sessionId].sort());
+		expect(await owned.find(alias, worktree.sessionId)).toBeUndefined();
+
+		const aliasSessions = await listed(f, alias);
+		expect(aliasSessions.map((session) => session.sessionId).sort()).toEqual(
+			[root.sessionId, subdirectory.sessionId].sort(),
+		);
+		expect(aliasSessions).toContainEqual(
+			expect.objectContaining({ sessionId: subdirectory.sessionId, workingDirectory: "packages/app" }),
+		);
+		expect((await listed(f)).map((session) => session.sessionId).sort()).toEqual([...ids].sort());
+	}, 60_000);
 
 	it("never reuse an id stored for another directory for a TUI's new conversation", async () => {
 		const f = await fixture();

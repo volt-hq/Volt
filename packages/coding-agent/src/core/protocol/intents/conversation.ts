@@ -13,7 +13,7 @@ import { findStoredSession, openFork, openNewSession, openStoredSessionById } fr
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
 import { QueueClearPersistenceError } from "../../session/client-inputs.ts";
 import { MissingSessionCwdError } from "../../session-cwd.ts";
-import { getDefaultSessionDir, SessionManager } from "../../session-manager.ts";
+import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
 import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
 import {
@@ -535,6 +535,8 @@ function acceptMove<O extends { cancelled: true } | { cancelled: false; sessionI
 /**
  * `cwd` (an existing directory; local clients only) starts the session
  * there, with `workspaceName` and `baseRef` for its Git context.
+ * `parentSessionId` names a stored session of the conversation's store for a
+ * local client; a remote one names only a session of the conversation's cwd.
  */
 export const newSessionIntent = defineIntent({
 	name: "new_session",
@@ -551,7 +553,7 @@ export const newSessionIntent = defineIntent({
 	sourceOwned: true,
 	available: localOnlyInput(["cwd", "workspaceName", "baseRef"]),
 	async run(ctx, input) {
-		const { host, client, session } = targetOf(ctx);
+		const { host, client, session, conversation } = targetOf(ctx);
 		const cwd = input.cwd === undefined ? undefined : existingDirectory(input.cwd, session.sessionManager.getCwd());
 		const preservedReviewRun = input.preserveReviewRunId
 			? await getCanonicalReviewRun(session.sessionManager, input.preserveReviewRunId)
@@ -562,10 +564,13 @@ export const newSessionIntent = defineIntent({
 		let parentSessionRef =
 			input.parentSessionId === session.sessionId ? session.sessionManager.getSessionRef() : undefined;
 		if (input.parentSessionId && !parentSessionRef) {
-			parentSessionRef = await SessionManager.findForResume(
-				session.sessionManager.getSessionDir() || getDefaultSessionDir(),
-				input.parentSessionId,
-			);
+			parentSessionRef = (
+				await findStoredSession(
+					conversation,
+					input.parentSessionId,
+					ctx.profile.name === "local" ? "all" : "workspace",
+				)
+			)?.ref;
 			if (!parentSessionRef) throw new Error(`Unknown parent session: ${input.parentSessionId}`);
 		}
 		return openNewSession(host, client, {

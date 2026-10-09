@@ -2,6 +2,7 @@ import { realpath, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Worker } from "node:worker_threads";
 import { ENV_SESSION_DIR, expandTildePath } from "../../config.ts";
+import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import type { LspOperationMetadata } from "../lsp/outcome.ts";
 import { getDefaultSessionDirPath } from "../session-manager.ts";
 import {
@@ -385,6 +386,11 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 	const cwd = options.cwd ?? process.cwd();
 	const canonicalCwd = await canonical(cwd);
 	const explicitDir = options.sessionDir ?? process.env[ENV_SESSION_DIR];
+	// A workspace audit of the default store reads only its cwd's sessions (by their `session_cwd_index` key,
+	// `sessionCwdKey`, computed without loading the store's schema module), so other workspaces never spend its
+	// scan limits. An explicit store is read whole, so an operation a clone copied is credited to its original
+	// session in another workspace; the cwd scope below then keeps this workspace's.
+	const cwdKey = options.allWorkspaces || explicitDir ? null : canonicalizePath(resolvePath(cwd));
 	// One store holds every workspace's sessions; the cwd scope below keeps this workspace's unless `allWorkspaces`.
 	const directories = [explicitDir ? await canonical(explicitDir) : getDefaultSessionDirPath()];
 	const uniqueDirectories = new Set<string>();
@@ -442,6 +448,7 @@ export async function auditLsp(options: LspAuditOptions = {}): Promise<LspAuditR
 				maxEntries: limits.maxEntries - coverage.entriesScanned,
 				maxBytes: limits.maxBytes - coverage.bytesScanned,
 				maxEntryBytes: limits.maxEntryBytes,
+				cwdKey,
 			},
 			Math.min(limits.maxStoreMs, remainingMs),
 			options.signal,

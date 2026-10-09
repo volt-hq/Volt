@@ -176,7 +176,11 @@ export async function resolveConversationOpen(
 	// A new conversation's id names one stored conversation: one another workspace owns, or none does, never opens here.
 	if (target.kind === "new") {
 		const stored = await sessions.locate(target.sessionId).catch(() => undefined);
-		if (stored !== undefined && stored.placement?.workspace.name !== workspace.name) {
+		const owned =
+			stored === undefined
+				? undefined
+				: await sessions.find(workspace.name, target.sessionId).catch(() => undefined);
+		if (stored !== undefined && owned === undefined) {
 			throw createConversationOpenError(
 				"invalid_conversation_target",
 				"session id is already used outside this workspace",

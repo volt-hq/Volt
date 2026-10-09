@@ -499,8 +499,10 @@ workspace), else the innermost registered workspace containing it. So a
 workspace's phones list and open the sessions started anywhere under its root or
 in its worktrees' checkouts, except under a subdirectory registered as a
 workspace of its own (a local-only one too), and never a session of a sibling
-directory whose path only starts with the workspace's. A session of a worktree
-whose record was removed, and a session of an explicitly configured session
+directory whose path only starts with the workspace's. A directory registered
+under several workspace names belongs to each of them, except in a checkout of
+a managed worktree, which belongs to that worktree's own workspace. A session of
+a worktree whose record was removed, and a session of an explicitly configured session
 directory, belong to no workspace for phones. A phone's new conversation cannot
 take the ID of a stored session its workspace does not own
 (`invalid_conversation_target`). Session lists and resumes use the store's

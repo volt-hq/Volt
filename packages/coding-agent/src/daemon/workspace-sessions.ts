@@ -9,7 +9,9 @@
  * under its root and in its worktrees' checkouts, except under a registered
  * workspace nested inside it (local-only ones included) or another
  * workspace's worktree; a session of a worktree whose record is gone, of no
- * workspace, or of a custom store is no workspace's.
+ * workspace, or of a custom store is no workspace's. A directory registered
+ * under several workspace names belongs to each of them (outside a managed
+ * worktree, which is its own workspace's); a TUI's open places it in the first.
  *
  * Every daemon lookup of a workspace's sessions goes through here: a
  * phone's listing and open, change observation, session contexts, worker
@@ -110,6 +112,22 @@ export class WorkspacePlacementIndex {
 		return innermost(this.worktrees, directory) ?? this.workspaceContaining(directory);
 	}
 
+	/**
+	 * Where the canonical directory `directory` runs for `workspaceName`, when
+	 * that workspace owns it: the innermost managed worktree containing it, if
+	 * that worktree is the workspace's; else the workspace's root, if it is the
+	 * innermost registered root containing the directory. Every workspace
+	 * registered at that root owns it, where `place` picks the first.
+	 */
+	placeFor(workspaceName: string, directory: string): SessionPlacement | undefined {
+		const worktree = innermost(this.worktrees, directory);
+		if (worktree !== undefined) return worktree.workspace.name === workspaceName ? worktree : undefined;
+		const root = innermost(this.workspaces, directory)?.root;
+		return root === undefined
+			? undefined
+			: this.workspaces.find((placement) => placement.workspace.name === workspaceName && placement.root === root);
+	}
+
 	/** The innermost registered workspace containing the canonical directory `directory`. */
 	workspaceContaining(directory: string): SessionPlacement | undefined {
 		return innermost(this.workspaces, directory);
@@ -154,8 +172,8 @@ export class WorkspaceSessions {
 		if (roots.length === 0 || !existsSync(join(this.sessionDir, SESSION_STORE_DATABASE_FILENAME))) return [];
 		const owned: WorkspaceSession[] = [];
 		for (const location of await listSessionLocations(this.sessionDir, roots, options)) {
-			const placement = placements.place(location.cwdKey);
-			if (placement?.workspace.name === workspaceName) owned.push({ ...location, placement });
+			const placement = placements.placeFor(workspaceName, location.cwdKey);
+			if (placement !== undefined) owned.push({ ...location, placement });
 		}
 		return owned;
 	}
@@ -174,8 +192,8 @@ export class WorkspaceSessions {
 		const directories = new Set([sessionDirectory, this.sessionDir].flatMap((dir) => (dir ? [resolve(dir)] : [])));
 		for (const directory of directories) {
 			const location = await findStoredSessionLocation(directory, sessionId);
-			const placement = location === undefined ? undefined : placements.place(location.cwdKey);
-			if (location !== undefined && placement?.workspace.name === workspaceName) return { ...location, placement };
+			const placement = location === undefined ? undefined : placements.placeFor(workspaceName, location.cwdKey);
+			if (location !== undefined && placement !== undefined) return { ...location, placement };
 		}
 		return undefined;
 	}
@@ -196,7 +214,7 @@ export class WorkspaceSessions {
 		const owned = new Set<string>();
 		for (const sessionId of sessionIds) {
 			const location = await findStoredSessionLocation(this.sessionDir, sessionId);
-			if (location !== undefined && placements.place(location.cwdKey)?.workspace.name === workspaceName) {
+			if (location !== undefined && placements.placeFor(workspaceName, location.cwdKey) !== undefined) {
 				owned.add(sessionId);
 			}
 		}

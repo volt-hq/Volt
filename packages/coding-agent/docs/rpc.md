@@ -213,7 +213,7 @@ The Remote column says whether the remote profile (paired devices) admits the in
 | `set_agent_mode` | `{mode: build|plan}` | | yes |
 | `plan_execute` | `{planId, expectedRevision, strategy}` | `{started}` | yes |
 | `plan_change`, `plan_discard` | `{planId, expectedRevision}` | | yes |
-| `new_session` | `{parentSessionId?, preserveReviewRunId?, replaceReviewGeneral?, cwd?, workspaceName?, baseRef?}`: `cwd` (*local*; an existing directory) starts the session there, with `workspaceName` and `baseRef` (*local*) for its Git context | `{cancelled: true}` when cancelled | yes |
+| `new_session` | `{parentSessionId?, preserveReviewRunId?, replaceReviewGeneral?, cwd?, workspaceName?, baseRef?}`: `cwd` (*local*; an existing directory) starts the session there, with `workspaceName` and `baseRef` (*local*) for its Git context. `parentSessionId` records a stored session as the new session's parent: for a local client any session of its conversation's store, for a remote one only a session of its conversation's cwd | `{cancelled: true}` when cancelled | yes |
 | `switch_session` | `{sessionId, cwdOverride?}`: a local client opens any stored session of its conversation's store (what `sessions` lists with `scope: "all"`), a remote one only its workspace's. A session whose cwd is gone is rejected `unavailable`; `cwdOverride` (*local*) runs it in another existing directory, which the store does not keep | `{cancelled: true}` when cancelled | yes |
 | `fork` | `{entryId}`: fork before a user message | `{text}` (the message, for the editor) or `{cancelled: true}` | no |
 | `clone` | `{}` | `{cancelled: true}` when cancelled | no |
