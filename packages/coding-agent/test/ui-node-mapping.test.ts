@@ -428,30 +428,33 @@ describe("tool card", () => {
 		return created;
 	}
 
-	it("shows the summary collapsed and the body expanded, under the state badge", () => {
+	it("shows the summary collapsed and the body expanded, under the state glyph and title", () => {
 		const toolCard = card(base);
 		expect(lines(toolCard, 60)).toEqual([
 			"",
-			" $ npm test [running] Executing (2.5s)",
-			" last line",
-			expect.stringContaining("to expand"),
+			" ● $ npm test Executing (2.5s)",
+			"   last line",
+			"   ctrl+o to expand",
 		]);
 		toolCard.setProps({ ...base, expanded: true });
-		expect(text(toolCard)).toContain("first line\n last line");
+		expect(text(toolCard)).toContain("   first line\n   last line");
 		expect(text(toolCard)).not.toContain("to expand");
+		// A card the transcript does not ask to say how to expand stays quiet about it.
+		toolCard.setProps({ ...base, expandHint: false });
+		expect(lines(toolCard, 60)).toEqual(["", " ● $ npm test Executing (2.5s)", "   last line"]);
 
 		// A finished call shows its duration from a second on, and only when the presentation asks.
 		toolCard.setProps({ ...base, state: "done", elapsedMs: 400 });
-		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [success] Executing");
+		expect(lines(toolCard, 60)[1]).toBe(" ✓ $ npm test Executing");
 		toolCard.setProps({ ...base, state: "done", isError: true });
-		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [failure] Executing (2.5s)");
+		expect(lines(toolCard, 60)[1]).toBe(" ✗ $ npm test Executing (2.5s)");
 		toolCard.setProps({ ...base, presentation: { ...base.presentation, showsDuration: false } });
-		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [running] Executing");
+		expect(lines(toolCard, 60)[1]).toBe(" ● $ npm test Executing");
 		toolCard.setProps({ ...base, state: "pending", elapsedMs: undefined });
-		expect(lines(toolCard, 60)[1]).toBe(" $ npm test [pending] Executing");
-		// Where the title would shrink to almost nothing, the state goes on its own line.
-		expect(lines(toolCard, 24).slice(1, 3)).toEqual([" $ npm test", " [pending] Executing"]);
-		expect(lines(toolCard, 32)[1]).toBe(" $ npm test [pending] Executing");
+		expect(lines(toolCard, 60)[1]).toBe(" ○ $ npm test Executing");
+		// Where the title would shrink to almost nothing, the activity goes on its own line, under the title.
+		expect(lines(toolCard, 20).slice(1, 3)).toEqual([" ○ $ npm test", "   Executing"]);
+		expect(lines(toolCard, 24)[1]).toBe(" ○ $ npm test Executing");
 		toolCard.setProps({ ...base, presentation: { ...base.presentation, hidden: true } });
 		expect(toolCard.render(60).lines).toEqual([]);
 	});
@@ -494,7 +497,7 @@ describe("tool card", () => {
 		toolCard.setProps({ ...base, state: "done", isError: true });
 		const afterProps = toolCard.render(60);
 		expect(afterProps).not.toBe(before);
-		expect(stripAnsi(afterProps.lines[1] ?? "")).toContain("[failure]");
+		expect(stripAnsi(afterProps.lines[1] ?? "")).toContain("✗ $ npm test");
 
 		// A theme change recolors the card, and the app invalidates the transcript when the theme changes.
 		initTheme("light");

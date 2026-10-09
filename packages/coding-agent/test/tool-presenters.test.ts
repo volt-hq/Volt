@@ -234,6 +234,39 @@ describe("read presenter", () => {
 		expect(plain(presented.body)).toContain("hidden");
 	});
 
+	it("shows how much of the file a limited read left, not the note it leaves the model", () => {
+		const text = Array.from({ length: 12 }, (_, index) => `line ${index}`).join("\n");
+		const presented = present(
+			presentRead,
+			input({ path: "a.txt", limit: 12 }, "done", {
+				text: `${text}\n\n[50 more lines in file. Use offset=13 to continue.]`,
+			}),
+		);
+		expect(plain(presented.summary)).toContain("2 more lines");
+		expect(plain(presented.body)).toContain("line 11\n[50 more lines in file]");
+		expect(JSON.stringify(presented)).not.toContain("offset=");
+
+		// A read the summary shows whole says so there.
+		const short = present(
+			presentRead,
+			input({ path: "a.txt", limit: 2 }, "done", {
+				text: "a\nb\n\n[8 more lines in file. Use offset=3 to continue.]",
+			}),
+		);
+		expect(short.body).toBeUndefined();
+		expect(plain(short.summary)).toBe("a\nb\n[8 more lines in file]");
+
+		// A truncated read says how it was truncated instead.
+		const truncated = present(
+			presentRead,
+			input({ path: "big.txt" }, "done", {
+				text: "a\n\n[Showing lines 1-1 of 5000 (50.0KB limit). Use offset=2 to continue.]",
+				details: { truncation: { truncated: true, truncatedBy: "bytes", outputLines: 1, totalLines: 5000 } },
+			}),
+		);
+		expect(plain(truncated.body)).toBe("a\n[Truncated: 1 lines shown (50.0KB limit)]");
+	});
+
 	it("shows truncation, errors, and image notes", () => {
 		const truncated = present(
 			presentRead,
@@ -316,10 +349,11 @@ describe("edit presenter", () => {
 			),
 		);
 		expect(presented.activity).toBe("Generating edits");
-		expect(plain(presented.summary)).toContain("+3 -2");
+		expect(title(presented)).toBe("edit a.ts +3 -2");
 		const diff = presented.summary?.find((node) => node.type === "diff");
-		expect(diff).toMatchObject({ type: "diff", path: "a.ts" });
-		expect(diff?.type === "diff" ? diff.lineNumbers : undefined).toBeUndefined();
+		// The title names the file, so the diff does not again.
+		expect(diff).toMatchObject({ type: "diff", lineNumbers: false });
+		expect(diff).not.toHaveProperty("path");
 		expect(plain(presented.summary)).toContain("hunk:edit 2 of 2");
 	});
 
@@ -335,7 +369,7 @@ describe("edit presenter", () => {
 			presentEdit,
 			input({ path: "a.ts", edits: [] }, "done", { text: "ok", details: { diff } }),
 		);
-		expect(plain(presented.summary)).toContain("+2 -1");
+		expect(title(presented)).toBe("edit a.ts +2 -1");
 		expect(parseEditDiff(diff)).toEqual([
 			{ kind: "context", text: "keep", oldLine: 1 },
 			{ kind: "remove", text: "old", oldLine: 2 },
@@ -578,7 +612,7 @@ describe("presenting calls", () => {
 			input({ path: "a", edits: [{ oldText: big, newText: `${big}\nmore` }] }, "pending"),
 		);
 		expect(performance.now() - started).toBeLessThan(1_000);
-		expect(plain(presented.summary)).toContain("+6001 -6000");
+		expect(title(presented)).toBe("edit a +6001 -6000");
 	});
 
 	it("keeps the generic presentation's lines within the line bound", () => {

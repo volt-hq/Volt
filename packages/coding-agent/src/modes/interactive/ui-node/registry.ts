@@ -49,6 +49,7 @@ import {
 	ProgressBar,
 	prefixRenderFrame,
 	type RenderFrame,
+	type SemanticTheme,
 	StepProgress,
 	type StyledText,
 	Table,
@@ -76,6 +77,8 @@ export interface UiNodeViewOptions {
 	readonly imageWidthCells?: number;
 	/** Show every line of terminal nodes instead of their newest 12, as tool cards do. */
 	readonly fullTerminals?: boolean;
+	/** How the views style semantic tokens; the TUI theme's tokens by default. */
+	readonly semanticTheme?: SemanticTheme;
 }
 
 /** Most rows a terminal node shows, its newest lines. */
@@ -85,10 +88,12 @@ const IMAGE_MAX_WIDTH_CELLS = 60;
 
 /** Styled text, wrapped. */
 class StyledTextView implements Component {
+	private readonly semantic: SemanticTheme;
 	private text: StyledText;
 	private token: UiNodeToken;
 
-	constructor(text: StyledText, token: UiNodeToken = "text") {
+	constructor(semantic: SemanticTheme, text: StyledText, token: UiNodeToken = "text") {
+		this.semantic = semantic;
 		this.text = text;
 		this.token = token;
 	}
@@ -101,15 +106,17 @@ class StyledTextView implements Component {
 	invalidate(): void {}
 
 	render(width: number): RenderFrame {
-		return createRenderFrame(wrapStyledText(this.text, width, TUI_SEMANTIC_THEME, this.token));
+		return createRenderFrame(wrapStyledText(this.text, width, this.semantic, this.token));
 	}
 }
 
 /** Labelled values, one item per line: the label muted, the value wrapped after it. */
 class KeyValueView implements Component {
+	private readonly semantic: SemanticTheme;
 	private items: UiKeyValueNode["items"];
 
-	constructor(items: UiKeyValueNode["items"]) {
+	constructor(semantic: SemanticTheme, items: UiKeyValueNode["items"]) {
+		this.semantic = semantic;
 		this.items = items;
 	}
 
@@ -122,10 +129,10 @@ class KeyValueView implements Component {
 	render(width: number): RenderFrame {
 		const lines: string[] = [];
 		for (const item of this.items) {
-			const label = wrapStyledText(item.label, width, TUI_SEMANTIC_THEME, "muted").join(" ");
+			const label = wrapStyledText(item.label, width, this.semantic, "muted").join(" ");
 			const prefix = truncateToWidth(`${label}: `, Math.max(1, Math.floor(width / 2)), "…");
 			const indent = visibleWidth(prefix);
-			const value = wrapStyledText(item.value, Math.max(1, width - indent), TUI_SEMANTIC_THEME);
+			const value = wrapStyledText(item.value, Math.max(1, width - indent), this.semantic);
 			lines.push(...value.map((line, index) => `${index === 0 ? prefix : " ".repeat(indent)}${line}`));
 		}
 		return createRenderFrame(lines);
@@ -134,10 +141,12 @@ class KeyValueView implements Component {
 
 /** A list's items, each after its bullet or number. */
 class ListView implements Component {
+	private readonly semantic: SemanticTheme;
 	private ordered: boolean;
 	private items: readonly Component[] = [];
 
-	constructor(ordered: boolean) {
+	constructor(semantic: SemanticTheme, ordered: boolean) {
+		this.semantic = semantic;
 		this.ordered = ordered;
 	}
 
@@ -159,7 +168,7 @@ class ListView implements Component {
 			const [first, ...rest] = frame.lines;
 			if (first === undefined) return;
 			frames.push(
-				createRenderFrame([`${theme.fg("muted", marker)}${first.slice(indent.length)}`, ...rest], frame.images),
+				createRenderFrame([`${this.semantic.muted(marker)}${first.slice(indent.length)}`, ...rest], frame.images),
 			);
 		});
 		return concatRenderFrames(frames);
@@ -169,9 +178,11 @@ class ListView implements Component {
 /** A component under an optional bold title line. */
 class TitledView<C extends Component> implements Component {
 	readonly body: C;
+	private readonly semantic: SemanticTheme;
 	private title: UiNodeStyledText | undefined;
 
-	constructor(body: C, title: UiNodeStyledText | undefined) {
+	constructor(semantic: SemanticTheme, body: C, title: UiNodeStyledText | undefined) {
+		this.semantic = semantic;
 		this.body = body;
 		this.title = title;
 	}
@@ -187,7 +198,7 @@ class TitledView<C extends Component> implements Component {
 	render(width: number): RenderFrame {
 		const body = this.body.render(width);
 		if (this.title === undefined) return body;
-		const title = TUI_SEMANTIC_THEME.bold(truncateStyledText(this.title, width, TUI_SEMANTIC_THEME));
+		const title = this.semantic.bold(truncateStyledText(this.title, width, this.semantic));
 		return concatRenderFrames([createRenderFrame([title]), body]);
 	}
 }
@@ -198,18 +209,20 @@ class TitledView<C extends Component> implements Component {
  * far, which advances whenever the view renders.
  */
 class ProgressView implements Component {
+	private readonly semantic: SemanticTheme;
 	private node: UiProgressNode;
 	private view: { kind: "determinate"; bar: ProgressBar } | { kind: "steps"; steps: StepProgress };
 
-	constructor(node: UiProgressNode) {
+	constructor(semantic: SemanticTheme, node: UiProgressNode) {
+		this.semantic = semantic;
 		this.node = node;
-		this.view = ProgressView.create(node);
+		this.view = this.create(node);
 	}
 
-	private static create(node: UiProgressNode): ProgressView["view"] {
+	private create(node: UiProgressNode): ProgressView["view"] {
 		return node.kind === "determinate"
-			? { kind: "determinate", bar: new ProgressBar(TUI_SEMANTIC_THEME, barProps(node)) }
-			: { kind: "steps", steps: new StepProgress(TUI_SEMANTIC_THEME, stepsProps(node, Date.now())) };
+			? { kind: "determinate", bar: new ProgressBar(this.semantic, barProps(node)) }
+			: { kind: "steps", steps: new StepProgress(this.semantic, stepsProps(node, Date.now())) };
 	}
 
 	set(node: UiProgressNode): void {
@@ -217,7 +230,7 @@ class ProgressView implements Component {
 		if (node.kind === "determinate" && this.view.kind === "determinate") this.view.bar.setProps(barProps(node));
 		else if (node.kind === "steps" && this.view.kind === "steps")
 			this.view.steps.setProps(stepsProps(node, Date.now()));
-		else this.view = ProgressView.create(node);
+		else this.view = this.create(node);
 	}
 
 	invalidate(): void {}
@@ -396,8 +409,8 @@ function sendAction(actions: readonly UiNodeAction[], id: string, intents: UiInt
 class ActionsView extends ActionBar {
 	private actions: readonly UiNodeAction[];
 
-	constructor(actions: readonly UiNodeAction[], intents: UiIntentSink | undefined) {
-		super(TUI_SEMANTIC_THEME, { actions: actionItems(actions) });
+	constructor(semantic: SemanticTheme, actions: readonly UiNodeAction[], intents: UiIntentSink | undefined) {
+		super(semantic, { actions: actionItems(actions) });
 		this.actions = actions;
 		this.onAction = (id) => sendAction(this.actions, id, intents);
 	}
@@ -433,8 +446,13 @@ class CardView extends Card {
 	private sections = new Map<string, CardSectionView>();
 	private actions: readonly UiNodeAction[] = [];
 
-	constructor(node: UiCardNode, registry: ViewRegistry<UiNode>, intents: UiIntentSink | undefined) {
-		super(TUI_SEMANTIC_THEME, cardProps(node, []));
+	constructor(
+		semantic: SemanticTheme,
+		node: UiCardNode,
+		registry: ViewRegistry<UiNode>,
+		intents: UiIntentSink | undefined,
+	) {
+		super(semantic, cardProps(node, []));
 		this.registry = registry;
 		this.onAction = (id) => sendAction(this.actions, id, intents);
 		this.set(node);
@@ -517,10 +535,12 @@ function formProps(node: UiFormNode): FormProps {
 
 /** A form under its title; submitting sends its submit intent with the values, cancelling its cancel intent. */
 class FormView extends Form {
+	private readonly semantic: SemanticTheme;
 	private node: UiFormNode;
 
-	constructor(node: UiFormNode, intents: UiIntentSink | undefined) {
-		super(TUI_SEMANTIC_THEME, formProps(node));
+	constructor(semantic: SemanticTheme, node: UiFormNode, intents: UiIntentSink | undefined) {
+		super(semantic, formProps(node));
+		this.semantic = semantic;
 		this.node = node;
 		this.onSubmit = (values) => intents?.send(formSubmitIntent(this.node.submit, values));
 		this.onCancel = () => {
@@ -536,7 +556,7 @@ class FormView extends Form {
 	override render(width: number): RenderFrame {
 		const form = super.render(width);
 		if (this.node.title === undefined) return form;
-		const title = TUI_SEMANTIC_THEME.bold(truncateStyledText(this.node.title, width, TUI_SEMANTIC_THEME));
+		const title = this.semantic.bold(truncateStyledText(this.node.title, width, this.semantic));
 		return concatRenderFrames([createRenderFrame([title]), form]);
 	}
 }
@@ -561,12 +581,13 @@ function textToken(node: UiTextNode): UiNodeToken {
 /** The node-type registry of the mapping: every `UiNode` type. */
 export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegistry<UiNode> {
 	const { intents } = options;
+	const semantic = options.semanticTheme ?? TUI_SEMANTIC_THEME;
 	const showImages = options.showImages ?? true;
 	const imageWidthCells = Math.max(1, Math.floor(options.imageWidthCells ?? IMAGE_MAX_WIDTH_CELLS));
 	const fullTerminals = options.fullTerminals === true;
 	const registry = new ViewRegistry<UiNode>();
 	registry.register("text", {
-		create: (node) => new StyledTextView(node.text, textToken(node)),
+		create: (node) => new StyledTextView(semantic, node.text, textToken(node)),
 		update: (view, node) => view.set(node.text, textToken(node)),
 	});
 	registry.register("markdown", {
@@ -574,39 +595,40 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 		update: (view, node) => view.setText(node.markdown),
 	});
 	registry.register("list", {
-		create: (node) => new ListView(node.ordered === true),
+		create: (node) => new ListView(semantic, node.ordered === true),
 		update: () => {},
 		children: (node) => node.items,
 		mount: (view, items, node) => view.set(node.ordered === true, items),
 	});
 	registry.register("table", {
-		create: (node) => new Table(TUI_SEMANTIC_THEME, tableProps(node)),
+		create: (node) => new Table(semantic, tableProps(node)),
 		update: (view, node) => view.setProps(tableProps(node)),
 	});
 	registry.register("keyValue", {
-		create: (node) => new KeyValueView(node.items),
+		create: (node) => new KeyValueView(semantic, node.items),
 		update: (view, node) => view.set(node.items),
 	});
 	registry.register("progress", {
-		create: (node) => new ProgressView(node),
+		create: (node) => new ProgressView(semantic, node),
 		update: (view, node) => view.set(node),
 	});
 	registry.register("form", {
-		create: (node) => new FormView(node, intents),
+		create: (node) => new FormView(semantic, node, intents),
 		update: (view, node) => view.set(node),
 	});
 	registry.register("actions", {
-		create: (node) => new ActionsView(node.actions, intents),
+		create: (node) => new ActionsView(semantic, node.actions, intents),
 		update: (view, node) => view.set(node.actions),
 	});
 	registry.register("card", {
-		create: (node) => new CardView(node, registry, intents),
+		create: (node) => new CardView(semantic, node, registry, intents),
 		update: (view, node) => view.set(node),
 	});
 	registry.register("diff", {
 		create: (node) =>
 			new TitledView(
-				new DiffView(TUI_SEMANTIC_THEME, { lines: node.lines, lineNumbers: node.lineNumbers }),
+				semantic,
+				new DiffView(semantic, { lines: node.lines, lineNumbers: node.lineNumbers }),
 				node.path,
 			),
 		update: (view, node) => {
@@ -616,14 +638,14 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 	});
 	registry.register("terminal", {
 		create: (node) =>
-			new TitledView(new TerminalOutput(TUI_SEMANTIC_THEME, terminalProps(node, fullTerminals)), node.title),
+			new TitledView(semantic, new TerminalOutput(semantic, terminalProps(node, fullTerminals)), node.title),
 		update: (view, node) => {
 			view.setTitle(node.title);
 			view.body.setProps(terminalProps(node, fullTerminals));
 		},
 	});
 	registry.register("code", {
-		create: (node) => new TitledView(new CodeView(node), node.title),
+		create: (node) => new TitledView(semantic, new CodeView(node), node.title),
 		update: (view, node) => {
 			view.setTitle(node.title);
 			view.body.set(node);
@@ -634,7 +656,7 @@ export function createUiNodeRegistry(options: UiNodeViewOptions = {}): ViewRegis
 		update: (view, node) => view.set(node),
 	});
 	registry.register("tree", {
-		create: (node) => new TreeView(TUI_SEMANTIC_THEME, { items: node.items, expanded: node.expanded }),
+		create: (node) => new TreeView(semantic, { items: node.items, expanded: node.expanded }),
 		update: (view, node) => view.setProps({ items: node.items, expanded: node.expanded }),
 	});
 	return registry;

@@ -123,7 +123,7 @@ describe("the transcript drawn afresh while a call runs", () => {
 		view.show();
 		// Toggling the thinking blocks draws the transcript afresh while the call runs.
 		view.rebuild();
-		expect(text()).toContain("[running]");
+		expect(text()).toContain(`● ${TOOL_NAME}`);
 
 		state.transcript = [assistantEntry(), toolResultEntry("FINAL_RESULT")];
 		state.live = emptyLiveFold(2);
@@ -131,8 +131,8 @@ describe("the transcript drawn afresh while a call runs", () => {
 
 		const shown = text();
 		expect(shown).toContain("FINAL_RESULT");
-		expect(shown).toContain("[success]");
-		expect(shown).not.toContain("[running]");
+		expect(shown).toContain(`✓ ${TOOL_NAME}`);
+		expect(shown).not.toContain(`● ${TOOL_NAME}`);
 		expect(shown.split(TOOL_NAME).length - 1).toBe(1);
 	});
 
@@ -141,6 +141,6 @@ describe("the transcript drawn afresh while a call runs", () => {
 		view.show();
 
 		expect(text()).toContain("HISTORICAL_RESULT");
-		expect(text()).toContain("[success]");
+		expect(text()).toContain(`✓ ${TOOL_NAME}`);
 	});
 });

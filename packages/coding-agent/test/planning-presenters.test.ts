@@ -136,7 +136,7 @@ describe("planning tool presenters", () => {
 		});
 
 		const collapsed = rendered(component);
-		expect(collapsed).toContain("update plan · 3 steps [success]");
+		expect(collapsed).toContain("✓ update plan · 3 steps");
 		expect(collapsed).toContain("DRAFT · revision 7 · 1/3 complete");
 		expect(collapsed).not.toContain("planId");
 		expect(collapsed).not.toContain("EXPANDED_STEP_TAIL");
@@ -192,7 +192,7 @@ describe("planning tool presenters", () => {
 		expect(plainTitle(presentation)).toBe(expected);
 		expect(presentation.summary).toBeUndefined();
 		expect(presentation.body).toBeUndefined();
-		expect(rendered(row(name, args))).toContain(`${expected} [pending]`);
+		expect(rendered(row(name, args))).toContain(`○ ${expected}`);
 	});
 
 	it("titles streaming arguments that are incomplete or of the wrong type", () => {
@@ -235,7 +235,7 @@ describe("planning tool presenters", () => {
 			isError: true,
 		});
 		const text = rendered(component);
-		expect(text).toContain("[failure]");
+		expect(text).toContain("✗ update plan");
 		expect(text).toContain("Plan changed; apply the latest planning state and retry");
 		expect(text).not.toContain("planId");
 	});

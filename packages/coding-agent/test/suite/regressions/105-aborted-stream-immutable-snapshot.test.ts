@@ -90,8 +90,7 @@ describe("InteractiveMode aborted stream snapshots (#105)", () => {
 			.render(100)
 			.lines.map((line) => stripAnsi(line))
 			.join("\n");
-		expect(text).toContain("slow_tool");
-		expect(text).toContain("[failure]");
+		expect(text).toContain("✗ slow_tool");
 		expect(text).toContain("Aborted after 2 retry attempts");
 		expect(message.error?.message).toBe("Request was aborted");
 	});

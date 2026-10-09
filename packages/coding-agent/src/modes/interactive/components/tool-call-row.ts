@@ -43,6 +43,7 @@ export class ToolCallRow implements Component {
 	private readonly options: ToolCallRowOptions;
 	private current: ToolCallRowUpdate = { state: "pending" };
 	private expanded = false;
+	private expandHint = true;
 	private showImages: boolean;
 	private imageWidthCells: number;
 	private startedAt: number | undefined;
@@ -72,6 +73,12 @@ export class ToolCallRow implements Component {
 		return this.current.presentation;
 	}
 
+	/** Expanding shows more of the call: its presentation has a body. */
+	get expandable(): boolean {
+		const presentation = this.current.presentation;
+		return presentation?.hidden !== true && (presentation?.body?.length ?? 0) > 0;
+	}
+
 	update(update: ToolCallRowUpdate): void {
 		if (this.disposed) return;
 		this.current = update;
@@ -93,6 +100,13 @@ export class ToolCallRow implements Component {
 
 	setExpanded(expanded: boolean): void {
 		this.expanded = expanded;
+		this.sync();
+	}
+
+	/** Whether the collapsed row says how to expand it. */
+	setExpandHint(show: boolean): void {
+		if (this.expandHint === show) return;
+		this.expandHint = show;
 		this.sync();
 	}
 
@@ -162,6 +176,7 @@ export class ToolCallRow implements Component {
 			state,
 			isError: state === "done" && isError === true,
 			expanded: this.expanded,
+			expandHint: this.expandHint,
 			...(elapsedMs === undefined ? {} : { elapsedMs }),
 			images: this.showImages ? this.images() : [],
 			...(work.length === 0 ? {} : { work }),

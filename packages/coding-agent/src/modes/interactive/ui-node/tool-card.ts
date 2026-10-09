@@ -1,12 +1,14 @@
 /**
  * The generic tool card (RFC §8.3, Q9): a tool call renders from its
  * presentation, the `UiNode` data its tool presents, inside chrome the client
- * owns: the state badge, elapsed time (when the presentation `showsDuration`),
- * collapsed or expanded content, the actions, the result's images, and the
- * work the call started (a background job), live. Work the presentation binds
- * an `open_work` or `cancel_work` action to is the presentation's to show,
- * and the card does not list it again. Collapsed, the card shows the summary;
- * expanded, the body, or the summary when there is no body. A hidden
+ * owns: the state glyph before the title, elapsed time (when the presentation
+ * `showsDuration`), collapsed or expanded content, the actions, the result's
+ * images, and the work the call started (a background job), live. Work the
+ * presentation binds an `open_work` or `cancel_work` action to is the
+ * presentation's to show, and the card does not list it again. Collapsed, the
+ * card shows the summary; expanded, the body, or the summary when there is no
+ * body. The content sits under the title, past the glyph, in the theme's tool
+ * output colors, so it stands apart from the assistant's text. A hidden
  * presentation renders nothing.
  */
 
@@ -38,7 +40,7 @@ import { formatDuration } from "../../../core/tools/render-utils.ts";
 import { stripTerminalControls } from "../../../core/ui/ansi-tokens.ts";
 import { keyHint } from "../components/keybinding-hints.ts";
 import { createUiNodeView, isRenderVolatile, type UiNodeViewOptions } from "./registry.ts";
-import { TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
+import { TOOL_OUTPUT_SEMANTIC_THEME, TOOL_TITLE_SEMANTIC_THEME, TUI_SEMANTIC_THEME } from "./semantic-theme.ts";
 
 export type ToolCardState = "pending" | "running" | "done";
 
@@ -75,10 +77,15 @@ export interface ToolCardProps {
 	readonly images?: readonly ToolCardImage[];
 	/** The work the call started. */
 	readonly work?: readonly ToolCardWork[];
+	/** Collapsed with a body, the card says how to expand it. True by default. */
+	readonly expandHint?: boolean;
 }
 
-/** Narrowest title, in cells, the header keeps beside the call's state before it moves the state below. */
+/** Narrowest title, in cells, the header keeps beside the activity and elapsed time before it moves them below. */
 const HEADER_TITLE_MIN_WIDTH = 16;
+
+/** What the content is indented by: it sits under the title, past the state glyph. */
+const CONTENT_INDENT = "  ";
 
 /** A finished call whose presentation shows its duration shows it from this long on. */
 const DURATION_DISPLAY_THRESHOLD_MS = 1000;
@@ -93,9 +100,10 @@ const WORK_STATUS_TOKENS: Readonly<Record<string, UiNodeToken>> = {
 	interrupted: "muted",
 };
 
-function stateBadge(state: ToolCardState, isError: boolean): string {
-	if (state === "done") return isError ? theme.fg("error", "[failure]") : theme.fg("success", "[success]");
-	return state === "running" ? theme.fg("warning", "[running]") : theme.fg("muted", "[pending]");
+/** The call's state as a glyph, as steps and work items show theirs. */
+function stateGlyph(state: ToolCardState, isError: boolean): string {
+	if (state === "done") return isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+	return state === "running" ? theme.fg("accent", "●") : theme.fg("muted", "○");
 }
 
 /** Output lines a collapsed card shows of the work its call started. */
@@ -196,8 +204,9 @@ export class ToolCard implements Component {
 
 	constructor(props: ToolCardProps, options: UiNodeViewOptions = {}) {
 		this.props = props;
-		this.content = createUiNodeView({ ...options, fullTerminals: true });
-		this.extras = createUiNodeView(options);
+		const views = { semanticTheme: TOOL_OUTPUT_SEMANTIC_THEME, ...options };
+		this.content = createUiNodeView({ ...views, fullTerminals: true });
+		this.extras = createUiNodeView(views);
 		this.sync();
 	}
 
@@ -226,15 +235,21 @@ export class ToolCard implements Component {
 	}
 
 	private renderFrame(width: number): RenderFrame {
-		const { presentation, expanded } = this.props;
+		const { presentation, expanded, expandHint = true } = this.props;
 		if (presentation.hidden) return createRenderFrame([]);
+		// A column of margin on either side; the content sits under the title.
 		const inner = Math.max(1, width - 2);
-		const frames = [createRenderFrame(this.header(inner)), this.content.render(inner)];
-		if (!expanded && (presentation.body?.length ?? 0) > 0) {
-			frames.push(createRenderFrame([truncateToWidth(keyHint("app.tools.expand", "to expand"), inner, "")]));
+		const contentWidth = Math.max(1, inner - CONTENT_INDENT.length);
+		const content = [this.content.render(contentWidth)];
+		if (expandHint && !expanded && (presentation.body?.length ?? 0) > 0) {
+			content.push(createRenderFrame([truncateToWidth(keyHint("app.tools.expand", "to expand"), contentWidth, "")]));
 		}
-		frames.push(this.extras.render(inner));
-		return concatRenderFrames([createRenderFrame([""]), prefixRenderFrame(concatRenderFrames(frames), " ")]);
+		content.push(this.extras.render(contentWidth));
+		const card = concatRenderFrames([
+			createRenderFrame(this.header(inner)),
+			prefixRenderFrame(concatRenderFrames(content), CONTENT_INDENT),
+		]);
+		return concatRenderFrames([createRenderFrame([""]), prefixRenderFrame(card, " ")]);
 	}
 
 	private sync(): void {
@@ -255,10 +270,12 @@ export class ToolCard implements Component {
 		this.volatile = isRenderVolatile([...shown, ...extras]);
 	}
 
-	/** The title, then the state badge, activity, and elapsed time; the title gives way first. */
+	/** The state glyph and title, then the activity and elapsed time; the title gives way first. */
 	private header(width: number): string[] {
 		const { presentation, state, isError = false, elapsedMs } = this.props;
-		const meta = [stateBadge(state, isError)];
+		const glyph = `${stateGlyph(state, isError)} `;
+		const titleWidth = Math.max(1, width - visibleWidth(glyph));
+		const meta: string[] = [];
 		if (presentation.activity !== undefined) {
 			meta.push(renderStyledText(presentation.activity, TUI_SEMANTIC_THEME, "muted").replace(/\n/g, " "));
 		}
@@ -267,17 +284,25 @@ export class ToolCard implements Component {
 			elapsedMs !== undefined &&
 			(state === "running" || elapsedMs >= DURATION_DISPLAY_THRESHOLD_MS);
 		if (showsElapsed) meta.push(theme.fg("dim", `(${formatDuration(elapsedMs)})`));
+		if (meta.length === 0) return [truncateToWidth(glyph + this.title(titleWidth), width, "…")];
 		const suffix = meta.join(" ");
 		const fullWidth = styledTextWidth(presentation.title);
-		const room = width - visibleWidth(suffix) - 1;
-		// Where the title would shrink to almost nothing, the state goes on its own line, so it never hides the title.
+		const room = titleWidth - visibleWidth(suffix) - 1;
+		// Where the title would shrink to almost nothing, the rest goes on its own line, so it never hides the title.
 		if (room < Math.min(fullWidth, HEADER_TITLE_MIN_WIDTH)) {
-			const title = TUI_SEMANTIC_THEME.bold(truncateStyledText(presentation.title, width, TUI_SEMANTIC_THEME));
-			return [truncateToWidth(title, width, "…"), truncateToWidth(suffix, width, "…")];
+			return [
+				truncateToWidth(glyph + this.title(titleWidth), width, "…"),
+				truncateToWidth(CONTENT_INDENT + suffix, width, "…"),
+			];
 		}
-		const title = TUI_SEMANTIC_THEME.bold(
-			truncateStyledText(presentation.title, Math.min(fullWidth, Math.max(1, room)), TUI_SEMANTIC_THEME),
-		);
-		return [truncateToWidth(`${title} ${suffix}`, width, "…")];
+		const title = this.title(Math.min(fullWidth, Math.max(1, room)));
+		return [truncateToWidth(`${glyph}${title} ${suffix}`, width, "…")];
+	}
+
+	/** The title within `width`: styled as its spans say, or bold when it is plain text. */
+	private title(width: number): string {
+		const { title } = this.props.presentation;
+		const text = truncateStyledText(title, width, TOOL_TITLE_SEMANTIC_THEME);
+		return typeof title === "string" ? TOOL_TITLE_SEMANTIC_THEME.bold(text) : text;
 	}
 }

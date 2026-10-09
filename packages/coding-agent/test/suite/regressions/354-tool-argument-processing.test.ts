@@ -92,7 +92,7 @@ describe("tool argument processing (#354)", () => {
 		component.updateArgs({ step: 1 });
 		component.updateArgs({ step: 2 });
 		component.updateResult({ content: [{ type: "text", text: "Stopped" }], isError: true });
-		expect(component.render(80).lines.join("\n")).toContain("[failure]");
+		expect(component.render(80).lines.join("\n")).toContain("✗");
 		component.dispose();
 		const count = present.mock.calls.length;
 		vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);
