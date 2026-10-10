@@ -13,10 +13,12 @@
  * among themselves but not after the other frames before them, so a stop
  * never waits behind a long intent such as `compact`; a client that needs an
  * earlier intent admitted first waits for its `accepted`. User shell commands
- * (`bash`), compactions (`compact`), and tree navigations (`navigate_tree`,
- * which may summarize the branch it leaves) run in a lane of their own the
- * same way: each runs as conversation activity, so the prompts, the queue's
- * withdrawal, and the intents sent while it runs do not wait for it. A
+ * (`bash`), compactions (`compact`), tree navigations (`navigate_tree`,
+ * which may summarize the branch it leaves), and provider sign-ins
+ * (`auth.login`, which waits for the user's browser) run in a lane of their
+ * own the same way: each runs as conversation activity, so the prompts, the
+ * queue's withdrawal, and the intents and queries sent while it runs do not
+ * wait for it. A
  * stopping intent is checked against the connection's
  * authority like any other. Non-input intents are deduplicated per
  * conversation by `intentId`, or, for a client the host knows across its
@@ -129,10 +131,11 @@ const STOPPING_INTENTS: ReadonlySet<string> = new Set(["abort", "abort_bash", "a
 
 /**
  * Intents that run as conversation activity: one at a time in a lane of
- * their own, so a long shell command, compaction, or branch summary never
- * holds the frames after it.
+ * their own, so a long shell command, compaction, branch summary, or
+ * provider sign-in (which waits for the user's browser) never holds the
+ * frames after it.
  */
-const ACTIVITY_INTENTS: ReadonlySet<string> = new Set(["bash", "compact", "navigate_tree"]);
+const ACTIVITY_INTENTS: ReadonlySet<string> = new Set(["bash", "compact", "navigate_tree", "auth.login"]);
 
 /** Intents whose acceptance changes the `sessions` catalog without moving the client. */
 const SESSIONS_INTENTS: ReadonlySet<string> = new Set(["delete_session", "set_session_name"]);

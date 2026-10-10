@@ -38,12 +38,23 @@ export function getModelCatalogSignature(modelRegistry: ModelRegistry): string {
 }
 
 /**
+ * Whether a directory event names a lock a reader or writer of a file takes
+ * (`auth.json.lock`): the reload a change starts takes that lock itself, so
+ * reacting to it would start the next reload, forever.
+ */
+export function isLockFileWatchEvent(fileName: string | null): boolean {
+	return fileName?.endsWith(".lock") === true;
+}
+
+/**
  * Directory watchers may report only the destination name for a rename (for
  * example `auth.json.bak` when auth.json is moved away), or omit the filename
  * entirely. Reconcile on every rename/unknown-name event so atomic replacement
- * and temporary moves cannot hide an auth/models transition.
+ * and temporary moves cannot hide an auth/models transition. A lock file
+ * coming and going is not a change: every reload creates one.
  */
 export function isModelCatalogSourceWatchEvent(eventType: string, fileName: string | null): boolean {
+	if (isLockFileWatchEvent(fileName)) return false;
 	return eventType === "rename" || fileName === null || WATCHED_FILE_NAMES.has(fileName);
 }
 
