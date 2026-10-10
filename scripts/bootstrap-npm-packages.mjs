@@ -13,6 +13,8 @@ export const NPM_REGISTRY = "https://registry.npmjs.org/";
 export const PLACEHOLDER_VERSION = BOOTSTRAP_VERSION;
 export const PLACEHOLDER_TAG = "bootstrap";
 const LICENSE_PATH = fileURLToPath(new URL("../LICENSE", import.meta.url));
+// The beta packages' placeholders were published before the repository moved to volt-hq/Volt, and npm versions are immutable.
+const PRE_TRANSFER_REPOSITORY_URL = "git+https://github.com/hansjm10/Volt.git";
 const DEFAULT_VERIFICATION_ATTEMPTS = 61;
 const DEFAULT_VERIFICATION_DELAY_MS = 5_000;
 const FORBIDDEN_PACKAGE_FIELDS = [
@@ -120,7 +122,11 @@ function assertExactPlaceholderMetadata(pkg, metadata) {
 	const expected = expectedPlaceholderManifest(pkg);
 	for (const [field, value] of Object.entries(expected)) {
 		if (field === "files") continue;
-		if (!isDeepStrictEqual(metadata[field], value)) {
+		const preTransferRepository =
+			field === "repository" &&
+			pkg.historicalBeta &&
+			isDeepStrictEqual(metadata[field], { ...value, url: PRE_TRANSFER_REPOSITORY_URL });
+		if (!preTransferRepository && !isDeepStrictEqual(metadata[field], value)) {
 			throw new Error(`${pkg.name} exists with unexpected ${field}; refusing to publish`);
 		}
 	}

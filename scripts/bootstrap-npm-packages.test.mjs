@@ -131,6 +131,31 @@ test("bootstrap package inspection accepts only the exact placeholder", () => {
 	);
 });
 
+test("bootstrap package inspection accepts the pre-transfer repository only on beta placeholders", () => {
+	const withRepositoryUrl = (pkg, url) => (args) => {
+		const query = expectedQueryResult(pkg, args);
+		if (args[0] !== "view") return query;
+		const metadata = JSON.parse(query.stdout);
+		return result(0, JSON.stringify({ ...metadata, repository: { ...metadata.repository, url } }));
+	};
+	const betaPackage = BOOTSTRAP_PACKAGE_IDENTITIES.find((pkg) => pkg.historicalBeta);
+	const laterPackage = BOOTSTRAP_PACKAGE_IDENTITIES.find((pkg) => !pkg.historicalBeta);
+	assert.ok(betaPackage && laterPackage);
+
+	assert.deepEqual(
+		inspectBootstrapPackage(betaPackage, withRepositoryUrl(betaPackage, "git+https://github.com/hansjm10/Volt.git")),
+		{ state: "placeholder" },
+	);
+	assert.throws(
+		() => inspectBootstrapPackage(laterPackage, withRepositoryUrl(laterPackage, "git+https://github.com/hansjm10/Volt.git")),
+		/unexpected repository/,
+	);
+	assert.throws(
+		() => inspectBootstrapPackage(betaPackage, withRepositoryUrl(betaPackage, "git+https://github.com/someone/Volt.git")),
+		/unexpected repository/,
+	);
+});
+
 test("bootstrap defaults to a read-only preflight", () => {
 	const commands = [];
 	const run = (args) => {
