@@ -10,7 +10,7 @@
 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxResponseStep, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { HostFrame, RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
@@ -236,6 +236,33 @@ describe("protocol subagents", () => {
 		});
 		// No live `subagent/<id>` value: a subagent's progress is its work's.
 		expect(context.parent.liveState.get(`subagent/${workId}`)).toBeUndefined();
+	});
+
+	test("a running subagent's live work progress is the tool its conversation runs, without checkpoints", async () => {
+		const context = await setup();
+		context.harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("read", { path: "src/auth.ts" }), { stopReason: "toolUse" }),
+			runsUntilStopped,
+		]);
+		const outcome = await context.client.intent("start_subagent", { agent: "scout", prompt: "inspect auth" });
+		if (outcome.type !== "accepted") throw new Error(`start_subagent was rejected: ${JSON.stringify(outcome)}`);
+		const { workId } = outcome.result as { workId: string };
+		await vi.waitFor(() => expect(context.harness.faux.state.callCount).toBe(2));
+		await vi.waitFor(() =>
+			expect(context.parent.liveState.get(`work/${workId}`)).toMatchObject({
+				kind: "work",
+				workId,
+				progress: { text: "read src/auth.ts" },
+			}),
+		);
+		// Activity is live only: the log keeps no checkpoint of it.
+		const workTypes = context.parent.session.sessionManager
+			.committedEntriesAfter(0)
+			.filter((entry) => entry.type.startsWith("work_"))
+			.map((entry) => entry.type);
+		expect(workTypes).toEqual(["work_started"]);
+		await context.parent.work.cancel(workId);
+		await vi.waitFor(() => expect(context.parent.work.get(workId)?.outcome).toBe("cancelled"));
 	});
 
 	test("cancel_work stops a running subagent; its closed conversation stays readable from its log", async () => {

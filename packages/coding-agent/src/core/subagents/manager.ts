@@ -20,6 +20,7 @@ import {
 	type WorkExecutor,
 	type WorkKindDefinition,
 	type WorkRegistry,
+	workText,
 } from "../work/registry.ts";
 import type {
 	SubagentCapacityLimitSnapshot,
@@ -46,7 +47,7 @@ import {
 } from "./registry.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 import { SubagentTurnBudget, type SubagentTurnLimits } from "./turn-budget.ts";
-import { readSubagentWorkInput, SUBAGENT_WORK_KIND, subagentWorkKind } from "./work.ts";
+import { readSubagentWorkInput, SUBAGENT_WORK_KIND, subagentToolActivity, subagentWorkKind } from "./work.ts";
 
 export type SubagentEvent = AgentSessionEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
@@ -1716,6 +1717,7 @@ export class SubagentManager {
 			/**
 			 * The child's work: it ends with the child's run, which a cancel or
 			 * close of the work stops. A resumed run is prompted to continue first.
+			 * The tool the child runs, or ran last, is the work's live progress.
 			 */
 			const runWork = async (ctx: WorkContext, continuation?: string): Promise<WorkExecution> => {
 				const stop = (): void => {
@@ -1724,6 +1726,13 @@ export class SubagentManager {
 				};
 				ctx.signal.addEventListener("abort", stop, { once: true });
 				if (ctx.signal.aborted) stop();
+				const unsubscribeActivity = runtime.session.subscribe(
+					(event) => {
+						if (event.type !== "tool_execution_start") return;
+						ctx.progress({ text: workText(subagentToolActivity(event.toolName, event.args)) });
+					},
+					{ monitorGitContext: false },
+				);
 				try {
 					const completion = handle!.waitForEnd();
 					if (continuation !== undefined) await handle!.prompt(continuation);
@@ -1734,6 +1743,7 @@ export class SubagentManager {
 						? { outcome: "cancelled" }
 						: { outcome: "failed", error: errorMessage(promptFailure?.error ?? error) };
 				} finally {
+					unsubscribeActivity();
 					ctx.signal.removeEventListener("abort", stop);
 					if (control.detached) await handle!.dispose().catch(() => undefined);
 				}

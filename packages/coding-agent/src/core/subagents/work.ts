@@ -55,6 +55,54 @@ export function subagentWorkInput(agent: string, task: string): JsonValue {
 	return { agent, task: boundTask(task) };
 }
 
+/** Longest activity line, in characters: what a subagent is doing now. */
+export const SUBAGENT_ACTIVITY_MAX_CHARS = 120;
+
+/** The arguments that name what a tool call acts on, in the order an activity line prefers them. */
+const TOOL_ACTIVITY_ARG_KEYS = [
+	"command",
+	"path",
+	"file_path",
+	"filePath",
+	"pattern",
+	"query",
+	"url",
+	"agent",
+	"task",
+	"prompt",
+	"name",
+];
+
+/**
+ * A subagent's tool call as one activity line, such as `read src/auth.ts`:
+ * the tool and the first string argument naming what it acts on, collapsed
+ * to one line of at most {@link SUBAGENT_ACTIVITY_MAX_CHARS}.
+ */
+export function subagentToolActivity(toolName: string, args: unknown): string {
+	let detail: string | undefined;
+	if (isRecord(args)) {
+		for (const key of TOOL_ACTIVITY_ARG_KEYS) {
+			const value = args[key];
+			if (typeof value === "string" && value.trim().length > 0) {
+				detail = value;
+				break;
+			}
+		}
+		if (!detail) {
+			for (const value of Object.values(args)) {
+				if (typeof value === "string" && value.trim().length > 0) {
+					detail = value;
+					break;
+				}
+			}
+		}
+	}
+	const collapsed = (detail ? `${toolName} ${detail}` : toolName).replace(/\s+/g, " ").trim();
+	return collapsed.length <= SUBAGENT_ACTIVITY_MAX_CHARS
+		? collapsed
+		: `${collapsed.slice(0, SUBAGENT_ACTIVITY_MAX_CHARS - 1)}…`;
+}
+
 /** A subagent work item's input as the log keeps it. */
 export function readSubagentWorkInput(input: JsonValue): SubagentWorkInput {
 	if (!isRecord(input)) return { agent: "subagent" };

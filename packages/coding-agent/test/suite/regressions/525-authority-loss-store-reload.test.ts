@@ -405,7 +405,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(access.extensionSelector).toBeDefined();
 		access.extensionSelector?.handleInput("\n");
 		await vi.waitFor(() =>
-			expect(viewport(terminal)).toContain("host_action · Host action · Installing the test tool"),
+			expect(viewport(terminal)).toMatch(/host_action · Host action · (?:\d+\.\ds · )?Installing the test tool/),
 		);
 		shown.resolve();
 		await expect(kept).resolves.toMatchObject({ status: "ran", execution: { outcome: "completed" } });

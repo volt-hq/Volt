@@ -387,29 +387,184 @@ describe("conversation transcript lines", () => {
 	});
 });
 
-describe("work status line", () => {
-	it("shows nothing without open work, one item's state and progress, or counts per state", () => {
-		const source = new FakeSource([view(item("done", { outcome: "completed" }))]);
-		const status = new WorkStatus(() => source);
-		expect(status.render(80).lines).toEqual([]);
-		source.views = [
-			...source.views,
-			view(item("job-1", { title: "npm run check" }), {
-				live: { kind: "work", workId: "job-1", progress: { text: "PASS 12 of 40" } },
-			}),
-		];
-		const single = text(status);
-		expect(single).toMatch(/^Work · ● running · job · npm run check · PASS 12 of 40\s+(?:Alt|Option)\+J$/);
-		source.views = [
-			...source.views,
-			view(item("agent-1", { kind: "subagent", resume: true }), { suspended: true }),
-			view(item("action-1", { kind: "host_action", state: "awaiting_approval" })),
-		];
-		expect(text(status)).toMatch(/^Work · 1 running · 1 suspended · 1 awaiting approval\s+(?:Alt|Option)\+J$/);
+describe("work status list", () => {
+	const HINT = /(?:Alt|Option)\+J$/;
+	const live = (workId: string, progress: string): Pick<WorkItemView, "live"> => ({
+		live: { kind: "work", workId, progress: { text: progress } },
+	});
+
+	/** Every line fits each width, and the work keeps its number of lines. */
+	function expectFits(status: WorkStatus, lines: number): void {
 		for (const width of [1, 10, 20, 40, 120]) {
 			text(status, width);
-			expect(status.render(width).lines).toHaveLength(1);
+			expect(status.render(width).lines).toHaveLength(lines);
 		}
+	}
+
+	it("shows nothing without open work", () => {
+		const status = new WorkStatus(() => new FakeSource([view(item("done", { outcome: "completed" }))]));
+		expect(status.render(80).lines).toEqual([]);
+		expect(new WorkStatus(() => undefined).render(80).lines).toEqual([]);
+	});
+
+	it("shows one item's state, kind, title, elapsed time, and progress on one line", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(100_000);
+		const source = new FakeSource([
+			view(item("job-1", { title: "npm run check" }), { startedAt: 88_000, ...live("job-1", "PASS 12 of 40") }),
+		]);
+		const status = new WorkStatus(() => source);
+		expect(text(status)).toMatch(
+			/^Work · ● running · job · npm run check · 12\.0s · PASS 12 of 40\s+(?:Alt|Option)\+J$/,
+		);
+		vi.setSystemTime(101_000);
+		expect(text(status)).toContain("npm run check · 13.0s · PASS 12 of 40");
+		// Suspended work shows no elapsed time; checkpointed progress shows without a live value.
+		source.views = [
+			view(item("agent-1", { kind: "subagent", title: "scout", resume: true, progress: { text: "grep auth" } }), {
+				startedAt: 50_000,
+				suspended: true,
+			}),
+		];
+		expect(text(status)).toMatch(/^Work · ‖ suspended · subagent · scout · grep auth\s+(?:Alt|Option)\+J$/);
+		expectFits(status, 1);
+	});
+
+	it("shows the work one tool call started as one group: its first item, and its newest progress", () => {
+		const source = new FakeSource([
+			view(
+				item("agent-1", {
+					kind: "subagent",
+					title: "general: audit",
+					toolCallId: "call-1",
+					startedOrdinal: 3,
+				}),
+				live("agent-1", "read src/auth.ts"),
+			),
+			view(item("job-1", { title: "audit", toolCallId: "call-1", startedOrdinal: 2 }), live("job-1", "partial")),
+		]);
+		const status = new WorkStatus(() => source);
+		const single = text(status);
+		expect(single).toMatch(/^Work · ● running · job · audit · read src\/auth\.ts\s+(?:Alt|Option)\+J$/);
+		expect(single).not.toContain("· +");
+		expectFits(status, 1);
+		// Past two items, the group says how many more it holds.
+		source.views = [1, 2, 3, 4].map((n) =>
+			view(
+				item(`agent-${n}`, { kind: "subagent", title: `scout ${n}`, toolCallId: "call-p", startedOrdinal: n }),
+				n === 4 ? {} : live(`agent-${n}`, `step ${n}`),
+			),
+		);
+		expect(text(status)).toMatch(/^Work · ● running · subagent · scout 1 · step 3 · \+3\s+(?:Alt|Option)\+J$/);
+		expectFits(status, 1);
+	});
+
+	it("shows a group's most active state and its elapsed time, whichever item started first", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(100_000);
+		const child = (
+			n: number,
+			workOverrides: Partial<ClientWorkItem> = {},
+			viewOverrides: Partial<WorkItemView> = {},
+		) =>
+			view(
+				item(`agent-${n}`, {
+					kind: "subagent",
+					title: `scout ${n}`,
+					resume: true,
+					toolCallId: "call-p",
+					startedOrdinal: n,
+					...workOverrides,
+				}),
+				{ startedAt: 90_000 + n * 1_000, ...viewOverrides },
+			);
+		// A parallel call's children after a restart, the newer one resumed.
+		const source = new FakeSource([
+			child(1, {}, { suspended: true }),
+			child(2, {}, live("agent-2", "read a.ts")),
+			child(3, {}, { suspended: true }),
+		]);
+		const status = new WorkStatus(() => source, { terminalRows: () => 24 });
+		expect(text(status)).toMatch(
+			/^Work · ● running · subagent · scout 1 · 8\.0s · read a\.ts · \+2\s+(?:Alt|Option)\+J$/,
+		);
+		// The counts and the rows take the same state.
+		source.views.push(view(item("job-1", { title: "npm test", startedOrdinal: 4 })));
+		expect(text(status).split("\n")).toEqual([
+			expect.stringMatching(/^Work · 2 running\s+(?:Alt|Option)\+J$/),
+			"  ● · subagent · scout 1 · 8.0s · read a.ts · +2",
+			"  ● · job · npm test",
+		]);
+		// Cancelling only the oldest child leaves the group running.
+		source.views = [child(1, { state: "cancelling" }), child(2)];
+		expect(text(status)).toMatch(/^Work · ● running · subagent · scout 1 · 8\.0s\s+(?:Alt|Option)\+J$/);
+		// Cancelling counts before suspended.
+		source.views = [child(1, {}, { suspended: true }), child(2, { state: "cancelling" })];
+		expect(text(status)).toMatch(/^Work · ◌ cancelling · subagent · scout 1 · 8\.0s\s+(?:Alt|Option)\+J$/);
+	});
+
+	it("shows several groups as counts per state, then one row each", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(100_000);
+		const source = new FakeSource([
+			view(item("job-2", { title: "sleep 120", startedOrdinal: 5 }), { startedAt: 95_000 }),
+			view(
+				item("agent-1", { kind: "subagent", title: "general: audit", toolCallId: "call-1", startedOrdinal: 4 }),
+				live("agent-1", "grep TODO"),
+			),
+			view(item("job-1", { title: "audit", toolCallId: "call-1", startedOrdinal: 3 })),
+			view(
+				item("action-1", {
+					kind: "host_action",
+					title: "Install rust-analyzer",
+					state: "awaiting_approval",
+					startedOrdinal: 2,
+				}),
+			),
+		]);
+		const status = new WorkStatus(() => source, { terminalRows: () => 24 });
+		const lines = text(status).split("\n");
+		expect(lines).toHaveLength(4);
+		expect(lines[0]).toMatch(/^Work · 2 running · 1 awaiting approval\s+/);
+		expect(lines[0]).toMatch(HINT);
+		expect(lines.slice(1)).toEqual([
+			"  ● · job · sleep 120 · 5.0s",
+			"  ● · job · audit · grep TODO",
+			"  ? awaiting approval · host_action · Install rust-analyzer",
+		]);
+		expectFits(status, 4);
+		// Without the terminal's height, several groups show as rows too.
+		expect(new WorkStatus(() => source).render(80).lines).toHaveLength(4);
+	});
+
+	it("shows two rows and how many more groups there are past three", () => {
+		const source = new FakeSource(
+			[5, 4, 3, 2, 1].map((n) => view(item(`job-${n}`, { title: `job ${n}`, startedOrdinal: n }))),
+		);
+		const status = new WorkStatus(() => source, { terminalRows: () => 24 });
+		const lines = text(status).split("\n");
+		expect(lines[0]).toMatch(/^Work · 5 running\s+(?:Alt|Option)\+J$/);
+		expect(lines.slice(1)).toEqual(["  ● · job · job 5", "  ● · job · job 4", "  +3 more"]);
+		expectFits(status, 4);
+	});
+
+	it("shows only the counts on a terminal shorter than the list needs", () => {
+		let rows = 19;
+		const source = new FakeSource([
+			view(item("job-1", { title: "npm test", startedOrdinal: 2 })),
+			view(item("agent-1", { kind: "subagent", title: "scout", resume: true, startedOrdinal: 1 }), {
+				suspended: true,
+			}),
+		]);
+		const status = new WorkStatus(() => source, { terminalRows: () => rows });
+		expect(text(status)).toMatch(/^Work · 1 running · 1 suspended\s+(?:Alt|Option)\+J$/);
+		expectFits(status, 1);
+		rows = 20;
+		expect(text(status).split("\n")).toEqual([
+			expect.stringMatching(/^Work · 1 running · 1 suspended\s+(?:Alt|Option)\+J$/),
+			"  ● · job · npm test",
+			"  ‖ suspended · subagent · scout",
+		]);
 	});
 
 	it.each(["f6", "none"] as const)("right-aligns the configured shortcut or /work: %s", (binding) => {
