@@ -459,6 +459,50 @@ describe("work status list", () => {
 		expectFits(status, 1);
 	});
 
+	it("shows a group's most active state and its elapsed time, whichever item started first", () => {
+		vi.useFakeTimers({ toFake: ["Date"] });
+		vi.setSystemTime(100_000);
+		const child = (
+			n: number,
+			workOverrides: Partial<ClientWorkItem> = {},
+			viewOverrides: Partial<WorkItemView> = {},
+		) =>
+			view(
+				item(`agent-${n}`, {
+					kind: "subagent",
+					title: `scout ${n}`,
+					resume: true,
+					toolCallId: "call-p",
+					startedOrdinal: n,
+					...workOverrides,
+				}),
+				{ startedAt: 90_000 + n * 1_000, ...viewOverrides },
+			);
+		// A parallel call's children after a restart, the newer one resumed.
+		const source = new FakeSource([
+			child(1, {}, { suspended: true }),
+			child(2, {}, live("agent-2", "read a.ts")),
+			child(3, {}, { suspended: true }),
+		]);
+		const status = new WorkStatus(() => source, { terminalRows: () => 24 });
+		expect(text(status)).toMatch(
+			/^Work · ● running · subagent · scout 1 · 8\.0s · read a\.ts · \+2\s+(?:Alt|Option)\+J$/,
+		);
+		// The counts and the rows take the same state.
+		source.views.push(view(item("job-1", { title: "npm test", startedOrdinal: 4 })));
+		expect(text(status).split("\n")).toEqual([
+			expect.stringMatching(/^Work · 2 running\s+(?:Alt|Option)\+J$/),
+			"  ● · subagent · scout 1 · 8.0s · read a.ts · +2",
+			"  ● · job · npm test",
+		]);
+		// Cancelling only the oldest child leaves the group running.
+		source.views = [child(1, { state: "cancelling" }), child(2)];
+		expect(text(status)).toMatch(/^Work · ● running · subagent · scout 1 · 8\.0s\s+(?:Alt|Option)\+J$/);
+		// Cancelling counts before suspended.
+		source.views = [child(1, {}, { suspended: true }), child(2, { state: "cancelling" })];
+		expect(text(status)).toMatch(/^Work · ◌ cancelling · subagent · scout 1 · 8\.0s\s+(?:Alt|Option)\+J$/);
+	});
+
 	it("shows several groups as counts per state, then one row each", () => {
 		vi.useFakeTimers({ toFake: ["Date"] });
 		vi.setSystemTime(100_000);

@@ -2,8 +2,9 @@
  * The work list of the footer: the conversation's open work at a glance,
  * whatever its kind. Work one tool call started is one group (a background
  * subagent's job and subagent, a parallel call's children); other work is a
- * group of its own. A group shows its state, kind, title, elapsed time, and
- * newest progress text, and how many more items it holds past two.
+ * group of its own. A group shows its most active item's state and elapsed
+ * time, its first item's kind and title, its newest progress text, and how
+ * many more items it holds past two.
  *
  * One group is one line. Several show a line of counts per state, then one
  * row per group, at most {@link WORK_LIST_MAX_ROWS} lines of them; a terminal
@@ -62,17 +63,29 @@ function progressText(view: WorkItemView): string | undefined {
 	return line || undefined;
 }
 
-/** A group as its first-started item and what follows its state: kind, title, elapsed time, progress, and more. */
+/** Open states from most to least active: a group shows its most active item's. */
+const OPEN_STATE_ORDER = ["running", "cancelling", "awaiting approval", "suspended"];
+
+function activityRank(view: WorkItemView): number {
+	const rank = OPEN_STATE_ORDER.indexOf(workStateLabel(view));
+	return rank === -1 ? OPEN_STATE_ORDER.length : rank;
+}
+
+/**
+ * A group as its most active item, first-started among equals, whose state it shows, and what follows the
+ * state: the first-started item's kind and title, the active item's elapsed time, progress, and more.
+ */
 function groupView(
 	group: readonly WorkItemView[],
 	now: number,
-): { readonly lead: WorkItemView; readonly parts: string[] } {
+): { readonly active: WorkItemView; readonly parts: string[] } {
 	const byStart = [...group].sort((left, right) => left.item.startedOrdinal - right.item.startedOrdinal);
 	const lead = byStart[0]!;
+	const active = byStart.reduce((best, view) => (activityRank(view) < activityRank(best) ? view : best));
 	const progress = byStart.map(progressText).findLast((text) => text !== undefined);
-	const elapsed = workTiming(lead, now);
+	const elapsed = workTiming(active, now);
 	return {
-		lead,
+		active,
 		parts: [
 			theme.fg("muted", workDisplayText(lead.item.kind)),
 			workTitle(lead.item),
@@ -111,11 +124,13 @@ export class WorkStatus implements Component {
 		const now = Date.now();
 		const groups = workGroups(open).map((group) => groupView(group, now));
 		if (groups.length === 1) {
-			const { lead, parts } = groups[0]!;
-			return createRenderFrame([withHint([title, styledWorkState(lead), ...parts].join(separator), width)]);
+			const { active, parts } = groups[0]!;
+			return createRenderFrame([withHint([title, styledWorkState(active), ...parts].join(separator), width)]);
 		}
 		const counts = new Map<string, number>();
-		for (const { lead } of groups) counts.set(workStateLabel(lead), (counts.get(workStateLabel(lead)) ?? 0) + 1);
+		for (const { active } of groups) {
+			counts.set(workStateLabel(active), (counts.get(workStateLabel(active)) ?? 0) + 1);
+		}
 		const header = withHint(
 			[title, ...[...counts].map(([label, count]) => theme.fg("muted", `${count} ${label}`))].join(separator),
 			width,
@@ -123,8 +138,8 @@ export class WorkStatus implements Component {
 		const terminalRows = this.terminalRows?.();
 		if (terminalRows !== undefined && terminalRows < WORK_LIST_MIN_TERMINAL_ROWS) return createRenderFrame([header]);
 		const shown = groups.length > WORK_LIST_MAX_ROWS ? groups.slice(0, WORK_LIST_MAX_ROWS - 1) : groups;
-		const rows = shown.map(({ lead, parts }) => {
-			const state = workStateLabel(lead) === "running" ? styledWorkGlyph(lead) : styledWorkState(lead);
+		const rows = shown.map(({ active, parts }) => {
+			const state = workStateLabel(active) === "running" ? styledWorkGlyph(active) : styledWorkState(active);
 			return truncateToWidth(`  ${[state, ...parts].join(separator)}`, width);
 		});
 		if (shown.length < groups.length) {
