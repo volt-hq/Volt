@@ -373,7 +373,8 @@ export default function(volt) {
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("with-deps");
 		expect(result.extensions[0].id).toBe("with-deps");
-		expect(result.extensions[0].version).toBe("0.2.3");
+		const { version } = JSON.parse(fs.readFileSync(path.join(extPath, "package.json"), "utf8"));
+		expect(result.extensions[0].version).toBe(version);
 		// The extension registers a 'parse_duration' tool
 		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
 	});
