@@ -30,6 +30,7 @@ import type {
 	SubagentWorkBinding,
 } from "../subagents/index.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { SUBAGENT_ACTIVITY_MAX_CHARS, subagentToolActivity } from "../subagents/work.ts";
 import type { WorkKindDefinition } from "../work/registry.ts";
 import { createBackgroundCleanupReceipt } from "./background-cleanup.ts";
 import { formatDuration } from "./render-utils.ts";
@@ -44,7 +45,7 @@ export const DEFAULT_SUBAGENT_CHAIN_MAX_STEPS = 8;
 export const SUBAGENT_TREE_MAX_DEPTH = 5;
 export const SUBAGENT_TREE_MAX_CHILDREN = 16;
 const SUBAGENT_TREE_TASK_PREVIEW_CHARS = 200;
-const SUBAGENT_TREE_ACTIVITY_CHARS = 120;
+const SUBAGENT_TREE_ACTIVITY_CHARS = SUBAGENT_ACTIVITY_MAX_CHARS;
 const SUBAGENT_PROGRESS_THROTTLE_MS = 200;
 
 const BUILT_IN_SUBAGENT_SUMMARY =
@@ -473,42 +474,6 @@ function clampInline(text: string, maxChars: number): string {
 	return `${collapsed.slice(0, Math.max(1, maxChars - 1))}…`;
 }
 
-const TOOL_ACTIVITY_ARG_KEYS = [
-	"command",
-	"path",
-	"file_path",
-	"filePath",
-	"pattern",
-	"query",
-	"url",
-	"agent",
-	"task",
-	"prompt",
-	"name",
-];
-
-function describeToolActivity(toolName: string, args: unknown): string {
-	let detail: string | undefined;
-	if (isRecord(args)) {
-		for (const key of TOOL_ACTIVITY_ARG_KEYS) {
-			const value = args[key];
-			if (typeof value === "string" && value.trim().length > 0) {
-				detail = value;
-				break;
-			}
-		}
-		if (!detail) {
-			for (const value of Object.values(args)) {
-				if (typeof value === "string" && value.trim().length > 0) {
-					detail = value;
-					break;
-				}
-			}
-		}
-	}
-	return clampInline(detail ? `${toolName} ${detail}` : toolName, SUBAGENT_TREE_ACTIVITY_CHARS);
-}
-
 function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
 	return isRecord(value) && typeof value.mode === "string" && typeof value.status === "string";
 }
@@ -664,7 +629,7 @@ class SubagentTaskLiveActivity {
 		switch (event.type) {
 			case "tool_execution_start": {
 				this.toolCalls += 1;
-				this.currentActivity = describeToolActivity(event.toolName, event.args);
+				this.currentActivity = subagentToolActivity(event.toolName, event.args);
 				if (event.toolName === "subagent") {
 					this.childArgs.set(event.toolCallId, event.args);
 				}

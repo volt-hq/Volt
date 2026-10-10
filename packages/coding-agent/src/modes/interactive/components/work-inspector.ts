@@ -134,11 +134,21 @@ const STATE_STYLES: Record<string, { glyph: string; color: "accent" | "warning" 
 	interrupted: { glyph: "○", color: "muted" },
 };
 
+function stateStyle(label: string): { glyph: string; color: "accent" | "warning" | "success" | "error" | "muted" } {
+	return STATE_STYLES[label] ?? { glyph: "●", color: "muted" };
+}
+
 /** An item's state, styled, with its glyph. */
 export function styledWorkState(view: Pick<WorkItemView, "item" | "live" | "suspended">): string {
 	const label = workStateLabel(view);
-	const style = STATE_STYLES[label] ?? { glyph: "●", color: "muted" as const };
+	const style = stateStyle(label);
 	return theme.fg(style.color, `${style.glyph} ${label}`);
+}
+
+/** An item's state as its glyph alone, styled. */
+export function styledWorkGlyph(view: Pick<WorkItemView, "item" | "live" | "suspended">): string {
+	const style = stateStyle(workStateLabel(view));
+	return theme.fg(style.color, style.glyph);
 }
 
 /** How long an item ran or runs; empty for suspended work, and when the log has no start time. */

@@ -773,7 +773,7 @@ export class InteractiveMode {
 		this.pendingMessagesContainer.addChild(this.queueContainer);
 		this.statusContainer = new Container();
 		this.work = new ConversationWork({ client: () => this.store.client, holder: this.store });
-		this.workStatus = new WorkStatus(() => this.work);
+		this.workStatus = new WorkStatus(() => this.work, { terminalRows: () => this.ui.terminal.rows });
 		this.planStatusContainer = new Container();
 		this.planDetailsContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -2920,13 +2920,16 @@ export class InteractiveMode {
 
 	/**
 	 * Tool calls show the work they started live: a row reads its work again
-	 * when it changed, and every second while it runs.
+	 * when it changed, and every second while it runs. The footer's work list
+	 * draws again every second while it shows the elapsed time of open work.
 	 */
 	private showToolCallWork(): void {
 		const shown = new Map<string, string>();
 		const running = new Set<string>();
+		let timed = false;
 		for (const view of this.work.items()) {
 			const { item, live } = view;
+			if (item.outcome === undefined && !view.suspended && view.startedAt !== undefined) timed = true;
 			if (item.toolCallId === undefined) continue;
 			if (item.outcome === undefined) running.add(item.toolCallId);
 			// Its row shows its newest output: read it again as soon as it may have changed.
@@ -2951,9 +2954,9 @@ export class InteractiveMode {
 			this.ui.requestRender();
 		}
 		this.stopWorkTicker();
-		if (running.size > 0) {
+		if (running.size > 0 || timed) {
 			this.workTicker = setInterval(() => {
-				this.transcript.invalidateWork(running);
+				if (running.size > 0) this.transcript.invalidateWork(running);
 				this.ui.requestRender();
 			}, 1000);
 			this.workTicker.unref?.();

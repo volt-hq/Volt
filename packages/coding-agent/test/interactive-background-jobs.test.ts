@@ -467,7 +467,7 @@ describe("interactive background jobs", () => {
 			expect(statusRow).toBeGreaterThan(editorRow);
 			expect(viewport.join("\n")).toContain("Keep the plan visible");
 			expect(viewport.filter((line) => line.includes("Work · ● running"))).toHaveLength(1);
-			expect(viewport[statusRow]).toContain("Run focused integration checks · first live output");
+			expect(viewport[statusRow]).toMatch(/Run focused integration checks · (?:\d+\.\ds · )?first live output/);
 			// The output shows only as the work line's progress: not in the transcript or the plan pane.
 			expect(viewport.filter((line) => line.includes("first live output"))).toEqual([viewport[statusRow]]);
 			expect(access.workStatus.render(80).lines).toHaveLength(1);
