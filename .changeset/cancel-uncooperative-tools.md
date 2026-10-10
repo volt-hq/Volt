@@ -3,4 +3,4 @@
 "@hansjm10/volt-coding-agent": patch
 ---
 
-fix(tui): Fixed session recovery hanging on tools that ignore cancellation, preserving unsent input and rejecting late tool output. ([#536](https://github.com/volt-hq/Volt/issues/536))
+internal(tui): Fixed session recovery hanging on tools that ignore cancellation, preserving unsent input and rejecting late tool output. ([#536](https://github.com/volt-hq/Volt/issues/536))
