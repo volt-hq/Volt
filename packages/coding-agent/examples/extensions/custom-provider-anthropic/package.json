@@ -1,7 +1,7 @@
 {
   "name": "volt-extension-custom-provider-anthropic",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "clean": "echo 'nothing to clean'",
@@ -13,7 +13,10 @@
     "displayName": "Custom Anthropic Provider",
     "description": "Registers a custom Anthropic provider with OAuth login.",
     "entry": "index.ts",
-    "permissions": ["network", "providers"]
+    "permissions": [
+      "network",
+      "providers"
+    ]
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.52.0"
