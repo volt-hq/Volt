@@ -5,7 +5,7 @@
  * exports.
  */
 
-import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { Api, AssistantMessage, Model, TextContent } from "@hansjm10/volt-ai";
 import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { resolvePath } from "../../utils/paths.ts";
@@ -84,8 +84,6 @@ export interface SessionInfoHost {
 	isDisposed(): boolean;
 	/** The model the active branch names. */
 	model(): Model<Api> | undefined;
-	/** The active branch's messages, copied. */
-	messages(): AgentMessage[];
 	/** The tools the conversation's requests carry. */
 	activeTools(): readonly AgentTool[];
 	/** The runtime state an HTML export renders. */
@@ -263,7 +261,9 @@ export class SessionInfo {
 			}
 		}
 
-		const estimate = estimateContextTokens(this.host.messages(), [...this.host.activeTools()]);
+		const estimate = estimateContextTokens(this.host.sessionManager.getConversationState().context.messages, [
+			...this.host.activeTools(),
+		]);
 		const percent = (estimate.tokens / contextWindow) * 100;
 
 		return {

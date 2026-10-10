@@ -609,7 +609,6 @@ export class AgentSession {
 			assertActive: () => this._assertActive(),
 			isDisposed: () => this._disposed,
 			model: () => this.model,
-			messages: () => this.messages,
 			activeTools: () => this._conversation.activeTools,
 			state: () => this.state,
 			presenters: () => this.presenters,
