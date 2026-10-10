@@ -99,6 +99,22 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
+	it("estimates context messages after the last assistant usage", async () => {
+		const session = await createSession(async (sessionManager) => {
+			await sessionManager.logWriter.appendMessage(createUserMessage("hello", 1));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("hi", 200, 2));
+			await sessionManager.logWriter.appendMessage(createUserMessage("x".repeat(400), 3));
+		});
+
+		try {
+			const contextUsage = session.getContextUsage();
+			expect(contextUsage?.tokens).toBe(300);
+			expect(session.getSessionStats().contextUsage).toEqual(contextUsage);
+		} finally {
+			session.dispose();
+		}
+	});
+
 	it("reports unknown current context usage immediately after compaction", async () => {
 		const session = await createSession(async (sessionManager) => {
 			await sessionManager.logWriter.appendMessage(createUserMessage("first", 1));
