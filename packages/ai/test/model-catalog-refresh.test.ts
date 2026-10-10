@@ -53,7 +53,7 @@ describe("Claude Sonnet 5.5 catalog", () => {
 				input: ["text", "image"],
 				contextWindow: 1_000_000,
 				maxTokens: 128_000,
-				cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+				cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
 				promptCache: {
 					modes: ["explicit"],
 					retention: { short: { ttlSeconds: 300 }, long: { ttlSeconds: 3_600 } },

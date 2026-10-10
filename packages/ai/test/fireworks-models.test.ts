@@ -19,9 +19,9 @@ describe("Fireworks models", () => {
 		expect(model.contextWindow).toBe(1000000);
 		expect(model.maxTokens).toBe(384000);
 		expect(model.cost).toEqual({
-			input: 0.22,
-			output: 0.66,
-			cacheRead: 0.007,
+			input: 0.3,
+			output: 1.2,
+			cacheRead: 0.006,
 			cacheWrite: 0,
 		});
 	});
