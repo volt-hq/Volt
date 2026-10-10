@@ -1,7 +1,7 @@
 {
   "name": "volt-extension-custom-provider-gitlab-duo",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "clean": "echo 'nothing to clean'",
@@ -13,6 +13,9 @@
     "displayName": "GitLab Duo Provider",
     "description": "Registers GitLab Duo as a model provider.",
     "entry": "index.ts",
-    "permissions": ["network", "providers"]
+    "permissions": [
+      "network",
+      "providers"
+    ]
   }
 }
