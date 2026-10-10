@@ -3,7 +3,7 @@
 "@hansjm10/volt-protocol": patch
 ---
 
-improvement(tui): The TUI's session commands (`/clear`, `/resume`, `/fork`, `/clone`, `/tree`, `/name`, `/session`, `/copy`, `/share`, `/export`, `/import`, `/compact`, `/reload`, `/worktree`, and `/quit`) go to its host as a client, and an extension command's `ctx.fork()` and `ctx.navigateTree()` fill the editor again. ([#585](https://github.com/volt-hq/Volt/issues/585))
+improvement(tui): The TUI's session commands (`/clear`, `/resume`, `/fork`, `/clone`, `/tree`, `/name`, `/session`, `/copy`, `/share`, `/export`, `/import`, `/compact`, `/reload`, `/worktree`, and `/quit`) go to its host as a client. ([#585](https://github.com/volt-hq/Volt/issues/585))
 
 The `/resume` picker lists and searches sessions through the host and deletes only sessions of the current folder; it says so for a session of another folder in the All scope. A session resumed or imported whose folder is gone still asks to continue in the current one, and so does an extension command's `ctx.switchSession()`. Messages sent during `/compact` wait in the conversation's queue without waiting for the compaction to answer. `/reload` shows the errors the reloaded setup reports, such as a `models.json` the host could not read. A `/worktree` session is stored where the session it leaves is, and is bound to its worktree once the TUI moved to it.
 
