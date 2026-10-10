@@ -259,7 +259,9 @@ describe("multi-job presentation and delivery", () => {
 		try {
 			card.markExecutionStarted();
 			const frame = card.render(width);
-			expect(frame.lines.map(stripAnsi).join(" ").replace(/\s+/g, " ")).toContain("[running] Waiting for");
+			expect(frame.lines.map(stripAnsi).join(" ").replace(/\s+/g, " ")).toContain(
+				"● jobs wait (all) · 2 jobs Waiting for",
+			);
 			for (const line of frame.lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			first.finish.resolve();
 			second.finish.resolve();

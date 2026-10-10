@@ -128,7 +128,7 @@ describe("the TUI's transcript from its store", () => {
 			},
 		});
 
-		const shown = await waitForScreen(tui, "list the files", "ls -la", "[success]", "file-b", "Two files.");
+		const shown = await waitForScreen(tui, "list the files", "✓ $ ls -la", "file-b", "Two files.");
 		expect(occurrences(shown, "ls -la")).toBe(1);
 		expect(tui.store.transcript().map((entry) => entry.type)).toEqual(["message", "message", "message", "message"]);
 	});
@@ -145,11 +145,11 @@ describe("the TUI's transcript from its store", () => {
 			]);
 
 			const run = session.prompt("run it");
-			await waitForScreen(tui, "run it", "[running]", "first");
+			await waitForScreen(tui, "run it", "● $ printf", "first");
 			await run;
 			await session.waitForIdle();
-			const shown = await waitForScreen(tui, "[success]", "second", "finished");
-			expect(shown).not.toContain("[running]");
+			const shown = await waitForScreen(tui, "✓ $ printf", "second", "finished");
+			expect(shown).not.toContain("● $ printf");
 			expect(occurrences(shown, "sleep 3")).toBe(1);
 		},
 	);
@@ -177,7 +177,7 @@ describe("the TUI's transcript from its store", () => {
 			},
 		]);
 		const shown = await waitForScreen(tui, "$ make check");
-		expect(shown).not.toContain("[running]");
+		expect(shown).toContain("○ $ make check");
 	});
 
 	it("shows why an aborted turn's calls never ran, and a failed turn's error", async () => {
@@ -193,7 +193,7 @@ describe("the TUI's transcript from its store", () => {
 				{ stopReason: "aborted" },
 			),
 		);
-		await waitForScreen(tui, "Starting.", "[failure]", "Operation aborted");
+		await waitForScreen(tui, "Starting.", "✗ read", "Operation aborted");
 
 		await session.sessionWriter.appendMessage(
 			assistant(session, [{ type: "text", text: "Partial." }], {

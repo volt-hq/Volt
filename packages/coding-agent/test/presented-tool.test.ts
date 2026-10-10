@@ -78,10 +78,10 @@ describe("presented tool rows", () => {
 			vi.advanceTimersByTime(1000);
 			const preview = text(component);
 			expect(preview).toContain("Second line");
-			expect(preview).toContain("[pending] Generating content");
+			expect(preview).toContain("○ write story.txt Generating content");
 			for (const phase of [
-				{ status: "[pending] Waiting to run", transition: () => component.setArgsComplete() },
-				{ status: "[running] Writing file", transition: () => component.markExecutionStarted() },
+				{ status: "○ write story.txt Waiting to run", transition: () => component.setArgsComplete() },
+				{ status: "● write story.txt Writing file", transition: () => component.markExecutionStarted() },
 			]) {
 				phase.transition();
 				for (const width of [20, 32, 80, 140]) {
@@ -102,12 +102,12 @@ describe("presented tool rows", () => {
 		try {
 			component.markExecutionStarted();
 			vi.advanceTimersByTime(2_000);
-			expect(text(component)).toContain("$ sleep 5 [running] (2.0s)");
+			expect(text(component)).toContain("● $ sleep 5 (2.0s)");
 			expect(requestRender).toHaveBeenCalled();
 			vi.setSystemTime(6_000);
 			component.updateResult({ content: [{ type: "text", text: "done" }], isError: false });
 			const rendered = text(component);
-			expect(rendered).toContain("[success] (5.0s)");
+			expect(rendered).toContain("✓ $ sleep 5 (5.0s)");
 			expect(rendered.match(/5\.0s/g)).toHaveLength(1);
 			const renders = requestRender.mock.calls.length;
 			vi.advanceTimersByTime(5_000);
@@ -122,7 +122,7 @@ describe("presented tool rows", () => {
 		vi.useFakeTimers();
 		const { component } = row("bash", { command: "ls" }, presentBash);
 		component.updateResult({ content: [{ type: "text", text: "a\nb" }], isError: false });
-		expect(text(component)).toContain("$ ls [success]");
+		expect(text(component)).toContain("✓ $ ls");
 		expect(text(component)).not.toContain("s)");
 		expect(vi.getTimerCount()).toBe(0);
 		component.dispose();
@@ -354,7 +354,7 @@ describe("presented tool rows", () => {
 		component.markExecutionStarted();
 		vi.setSystemTime(1_400);
 		component.updateResult({ content: [], isError: false });
-		expect(text(component)).toContain("$ true [success]");
+		expect(text(component)).toContain("✓ $ true");
 		expect(text(component)).not.toContain("0.4s");
 		component.dispose();
 	});
@@ -391,7 +391,7 @@ describe("presented tool rows", () => {
 		component.updateArgs({ step: 1 });
 		component.updateArgs({ step: 2 });
 		component.updateResult({ content: [{ type: "text", text: "Stopped" }], isError: true });
-		expect(text(component)).toContain("[failure]");
+		expect(text(component)).toContain("✗ preview");
 		component.dispose();
 		const count = present.mock.calls.length;
 		vi.advanceTimersByTime(STREAMING_RENDER_INTERVAL_MS * 2);

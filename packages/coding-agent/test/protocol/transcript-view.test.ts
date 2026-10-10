@@ -180,7 +180,7 @@ describe("protocol transcript view", () => {
 		// Tool items present as their tools do.
 		expect(JSON.stringify(items[2]?.presentation)).toContain("read");
 		expect(JSON.stringify(items[2]?.presentation)).toContain("secret file contents");
-		expect(items[5]?.presentation).toMatchObject({ summary: [{ type: "text", key: "counts" }, { type: "diff" }] });
+		expect(items[5]?.presentation).toMatchObject({ summary: [{ type: "diff" }] });
 		expect(JSON.stringify(items[6]?.presentation)).toContain("$ ");
 
 		// Tool items carry no per-tool fields: clients render the presentation.

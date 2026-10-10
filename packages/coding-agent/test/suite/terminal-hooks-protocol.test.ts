@@ -25,7 +25,7 @@ import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
 import { createLiveRecorder } from "../utilities/live-recorder.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";
 import { createExtensionRuntime } from "./extension-runtime.ts";
-import { createTuiHarness, type TuiHarness } from "./tui-harness.ts";
+import { createTuiHarness, type TuiHarness, waitForScreen } from "./tui-harness.ts";
 
 const request = {
 	questions: [
@@ -225,7 +225,7 @@ describe("the TUI as a client of the terminal hooks", () => {
 			fauxAssistantMessage("Proceeding with CLI first."),
 		]);
 		const running = session.prompt("Implement the question tool");
-		await vi.waitFor(() => expect(tui.screen()).toContain("Which clients should this cover?"));
+		await waitForScreen(tui, "Which clients should this cover?");
 		tui.terminal.sendInput("\r");
 		await running;
 		const result = session.messages.find(

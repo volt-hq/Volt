@@ -230,6 +230,21 @@ function lineRange(args: Args): string {
 	return `:${start}${limit === undefined ? "" : `-${start + limit - 1}`}`;
 }
 
+/**
+ * The read tool's text without the note it appends for the model (where to
+ * continue reading), and how many lines of the file follow what it read when
+ * the note says so. A truncated read's note is shown by its truncation instead.
+ */
+function withoutReadFooter(text: string): { text: string; moreInFile?: number } {
+	const match =
+		/\n\n\[(?:(\d+) more lines in file|Showing lines \d+-\d+ of \d+(?: \([^)\]\n]*\))?)\. Use offset=\d+ to continue\.\]$/.exec(
+			text,
+		);
+	if (!match) return { text };
+	const more = match[1] === undefined ? undefined : Number.parseInt(match[1], 10);
+	return { text: text.slice(0, match.index), ...(more === undefined ? {} : { moreInFile: more }) };
+}
+
 function readTruncation(details: unknown): UiNode[] {
 	const truncation = isRecord(details) ? details.truncation : undefined;
 	if (!isRecord(truncation) || truncation.truncated !== true) return [];
@@ -253,7 +268,7 @@ export const presentRead: ToolPresenter = (input) => {
 	const rawPath = stringArg(input.args, "file_path", "path");
 	const range = lineRange(input.args);
 	const compact = rawPath === undefined ? undefined : compactRead(rawPath, input.cwd);
-	const suffix = range ? [{ text: range, token: "warning" as const }] : undefined;
+	const suffix = range ? [{ text: range, token: "muted" as const }] : undefined;
 	const title =
 		compact === undefined
 			? titleOf("read", rawPath, suffix)
@@ -271,23 +286,27 @@ export const presentRead: ToolPresenter = (input) => {
 		const note = text.trim() ? [textNode("note", text.trim(), "muted")] : [];
 		return { title, ...(note.length === 0 ? {} : { summary: note }) };
 	}
-	const lines = codeLines(text);
+	const read = withoutReadFooter(text);
+	const lines = codeLines(read.text);
 	if (lines.length === 0) return { title };
 	const truncation = readTruncation(input.result?.details);
+	const rest =
+		read.moreInFile === undefined ? [] : [textNode("rest", `[${read.moreInFile} more lines in file]`, "muted")];
+	// A file the summary shows whole needs no body.
+	const fits = compact === undefined && truncation.length === 0 && lines.length <= FILE_SUMMARY_LINES;
 	const summary =
 		compact === undefined
 			? [
 					codeNode("code", lines.slice(0, FILE_SUMMARY_LINES), rawPath),
 					...moreLines(FILE_SUMMARY_LINES, lines.length),
 					...truncation,
+					...(fits ? rest : []),
 				]
 			: [];
-	// A file the summary shows whole needs no body.
-	const fits = compact === undefined && truncation.length === 0 && lines.length <= FILE_SUMMARY_LINES;
 	return {
 		title,
 		...(summary.length === 0 ? {} : { summary }),
-		...(fits ? {} : { body: [codeNode("code", lines, rawPath), ...truncation] }),
+		...(fits ? {} : { body: [codeNode("code", lines, rawPath), ...truncation, ...rest] }),
 	};
 };
 
@@ -419,47 +438,41 @@ function previewDiff(edits: readonly { oldText: string; newText: string }[]): Di
 	return lines;
 }
 
-function changeCounts(lines: readonly DiffLine[]): UiNode {
+/** " +N -M": the lines a change adds and removes, after the path in the title; nothing when it changes no line. */
+function changeCounts(lines: readonly DiffLine[]): UiNodeStyledText | undefined {
 	const added = lines.filter((line) => line.kind === "add").length;
 	const removed = lines.filter((line) => line.kind === "remove").length;
-	return textNode("counts", [
+	if (added === 0 && removed === 0) return undefined;
+	return [
+		{ text: " " },
 		{ text: `+${added}`, token: "success" },
 		{ text: " " },
 		{ text: `-${removed}`, token: "error" },
-	]);
+	];
 }
 
 /**
- * edit: the path, the change as a diff with "+N -M" (before it runs, each
+ * edit: the path with "+N -M", the change as a diff (before it runs, each
  * replacement's lines; once it ran, the file's diff with line numbers), and
- * diagnostics.
+ * diagnostics. The title names the file, so the diff does not again.
  */
 export const presentEdit: ToolPresenter = (input) => {
 	const rawPath = stringArg(input.args, "file_path", "path");
-	const title = titleOf("edit", rawPath);
 	const activity = activityOf(input, "Generating edits", "Applying edits");
 	const details = input.result?.details;
 	const resultDiff =
 		input.state === "done" && isRecord(details) && typeof details.diff === "string" ? details.diff : undefined;
-	let nodes: UiNode[];
-	if (isFailed(input)) {
-		nodes = errorNode(input);
-	} else {
-		const lines = resultDiff !== undefined ? parseEditDiff(resultDiff) : previewDiff(editsOf(input.args));
-		nodes =
-			lines.length === 0
-				? []
-				: [
-						changeCounts(lines),
-						{
-							type: "diff",
-							key: "diff",
-							...(rawPath === undefined ? {} : { path: rawPath }),
-							lines,
-							...(resultDiff === undefined ? {} : { lineNumbers: true }),
-						},
-					];
-	}
+	const lines = isFailed(input)
+		? []
+		: resultDiff !== undefined
+			? parseEditDiff(resultDiff)
+			: previewDiff(editsOf(input.args));
+	const title = titleOf("edit", rawPath, changeCounts(lines));
+	const nodes: UiNode[] = isFailed(input)
+		? errorNode(input)
+		: lines.length === 0
+			? []
+			: [{ type: "diff", key: "diff", lines, lineNumbers: resultDiff !== undefined }];
 	const summary = [...nodes, ...(input.state === "done" ? diagnosticsNode(details) : [])];
 	return {
 		title,

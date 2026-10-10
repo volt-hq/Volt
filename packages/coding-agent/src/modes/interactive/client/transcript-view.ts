@@ -200,6 +200,7 @@ export class TranscriptView {
 		for (const entry of transcript) this.append(entry, false);
 		this.rendered = [...transcript];
 		this.showLive([]);
+		this.placeExpandHint();
 		this.host.ui.requestRender();
 	}
 
@@ -219,6 +220,7 @@ export class TranscriptView {
 			this.rendered.push(entry);
 		}
 		this.showLive(items);
+		this.placeExpandHint();
 		this.host.ui.requestRender();
 	}
 
@@ -238,7 +240,15 @@ export class TranscriptView {
 		for (const entry of next.slice(this.rendered.length)) this.append(entry, false);
 		this.rendered = [...next];
 		this.showLive([]);
+		this.placeExpandHint();
 		this.host.ui.requestRender();
+	}
+
+	/** Only the newest call that expanding shows more of says how to expand: the hint under every call is noise. */
+	private placeExpandHint(): void {
+		let newest: ToolCallRow | undefined;
+		for (const row of this.tools.values()) if (row.expandable) newest = row;
+		for (const row of this.tools.values()) row.setExpandHint(row === newest);
 	}
 
 	/** Re-read the work of the tool calls in `toolCallIds`: it changed. */

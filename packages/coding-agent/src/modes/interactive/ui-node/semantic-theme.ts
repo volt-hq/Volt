@@ -21,3 +21,20 @@ export const TUI_SEMANTIC_THEME: SemanticTheme = {
 	underline: (text) => theme.underline(text),
 	code: (text) => theme.fg("mdCode", text),
 };
+
+/**
+ * A tool call's content: unstyled text in the theme's tool output color, and
+ * muted text one step dimmer, so the call's output stands apart from the
+ * assistant's text and keeps its own emphasis.
+ */
+export const TOOL_OUTPUT_SEMANTIC_THEME: SemanticTheme = {
+	...TUI_SEMANTIC_THEME,
+	text: (text) => theme.fg("toolOutput", text),
+	muted: (text) => theme.fg("dim", text),
+};
+
+/** A tool call's title: unstyled text in the theme's tool title color. */
+export const TOOL_TITLE_SEMANTIC_THEME: SemanticTheme = {
+	...TUI_SEMANTIC_THEME,
+	text: (text) => theme.fg("toolTitle", text),
+};
