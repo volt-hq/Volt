@@ -28,7 +28,6 @@ import {
 	errorNode,
 	isFailed,
 	isRecord,
-	moreLines,
 	oneLine,
 	plainText,
 	stringArg,
@@ -118,8 +117,10 @@ function omittedBefore(details: unknown): number {
 
 /**
  * bash: `$ command` (with the timeout in force), the output as terminal
- * lines (collapsed, its newest five), and how a failed command ended. While
- * the command runs, a line it is still writing is kept apart, so new output
+ * lines, and how a failed command ended. Collapsed, a running command shows
+ * its newest five lines; a finished one shows output that fits in five lines
+ * whole, and otherwise how it ended and how many lines it wrote. While the
+ * command runs, a line it is still writing is kept apart, so new output
  * reaches clients as appended lines.
  */
 export const presentBash: ToolPresenter = (input) => {
@@ -149,21 +150,35 @@ export const presentBash: ToolPresenter = (input) => {
 	const tail = all.slice(-BASH_SUMMARY_LINES);
 	const statusNode = status === undefined ? [] : [textNode("status", status.text, status.token)];
 	const warnings = input.state === "done" ? bashWarnings(result?.details) : [];
-	const summary: UiNode[] = [
-		...(tail.length === 0
+	const total = omitted + all.length;
+	// Finished output the summary cannot show whole is a count: its newest lines say little of it.
+	const counted = input.state === "done" && (omitted > 0 || all.length > BASH_SUMMARY_LINES);
+	const countText: UiNodeStyledText = [
+		...(status === undefined
 			? []
 			: [
-					{
-						type: "terminal" as const,
-						key: "tail",
-						lines: tail,
-						...(omitted + all.length - tail.length > 0
-							? { omittedLines: omitted + all.length - tail.length }
-							: {}),
-					},
+					{ text: status.text, token: status.token },
+					{ text: " · ", token: "muted" as const },
 				]),
-		...statusNode,
+		{ text: `${total} line${total === 1 ? "" : "s"}`, token: "muted" },
 	];
+	const summary: UiNode[] = counted
+		? [textNode("lines", countText)]
+		: [
+				...(tail.length === 0
+					? []
+					: [
+							{
+								type: "terminal" as const,
+								key: "tail",
+								lines: tail,
+								...(omitted + all.length - tail.length > 0
+									? { omittedLines: omitted + all.length - tail.length }
+									: {}),
+							},
+						]),
+				...statusNode,
+			];
 	// Output the summary shows whole needs no body.
 	const fits = commandNode.length === 0 && warnings.length === 0 && omitted === 0 && all.length <= BASH_SUMMARY_LINES;
 	const body: UiNode[] = fits
@@ -260,9 +275,11 @@ function readTruncation(details: unknown): UiNode[] {
 }
 
 /**
- * read: the path and line range, the file's text as code (collapsed, its
- * first ten lines), and how it was truncated. Skills, Volt's docs, and
- * context files show collapsed as their title only.
+ * read: the path and line range, the file's text as code, and how it was
+ * truncated. Collapsed, text that fits in ten lines shows whole; longer text
+ * shows how many lines were read and how many follow in the file, or how the
+ * read was truncated. Skills, Volt's docs, and context files show collapsed
+ * as their title only.
  */
 export const presentRead: ToolPresenter = (input) => {
 	const rawPath = stringArg(input.args, "file_path", "path");
@@ -294,15 +311,16 @@ export const presentRead: ToolPresenter = (input) => {
 		read.moreInFile === undefined ? [] : [textNode("rest", `[${read.moreInFile} more lines in file]`, "muted")];
 	// A file the summary shows whole needs no body.
 	const fits = compact === undefined && truncation.length === 0 && lines.length <= FILE_SUMMARY_LINES;
+	// Text the summary cannot show whole is a count: the start of a file says little of it.
+	const count = `${lines.length} line${lines.length === 1 ? "" : "s"}${read.moreInFile === undefined ? "" : ` · ${read.moreInFile} more in file`}`;
 	const summary =
-		compact === undefined
-			? [
-					codeNode("code", lines.slice(0, FILE_SUMMARY_LINES), rawPath),
-					...moreLines(FILE_SUMMARY_LINES, lines.length),
-					...truncation,
-					...(fits ? rest : []),
-				]
-			: [];
+		compact !== undefined
+			? []
+			: fits
+				? [codeNode("code", lines, rawPath), ...rest]
+				: truncation.length > 0
+					? truncation
+					: [textNode("lines", count, "muted")];
 	return {
 		title,
 		...(summary.length === 0 ? {} : { summary }),
@@ -321,7 +339,12 @@ function diagnosticsNode(details: unknown): UiNode[] {
 		: [];
 }
 
-/** write: the path, what it is doing while it runs, the content as code (collapsed, its first ten lines), and diagnostics. */
+/**
+ * write: the path, what it is doing while it runs, the content as code, and
+ * diagnostics. Collapsed, the content is how many lines it has until the call
+ * is done, then whole when it fits in ten lines; errors and diagnostics always
+ * show.
+ */
 export const presentWrite: ToolPresenter = (input) => {
 	const rawPath = stringArg(input.args, "file_path", "path");
 	const title = titleOf("write", rawPath);
@@ -335,14 +358,16 @@ export const presentWrite: ToolPresenter = (input) => {
 		summary = body = [textNode("invalid", "[invalid content arg - expected string]", "error")];
 	} else {
 		const lines = typeof content === "string" ? codeLines(content) : [];
+		// Content still arriving, or too long to show whole, is a count: its first lines say little of it.
+		const fits = input.state === "done" && lines.length <= FILE_SUMMARY_LINES;
+		const code = lines.length === 0 ? [] : [codeNode("code", lines, rawPath)];
 		summary =
 			lines.length === 0
 				? []
-				: [
-						codeNode("code", lines.slice(0, FILE_SUMMARY_LINES), rawPath),
-						...moreLines(FILE_SUMMARY_LINES, lines.length, `, ${lines.length} total`),
-					];
-		body = lines.length <= FILE_SUMMARY_LINES ? [] : [codeNode("code", lines, rawPath)];
+				: fits
+					? code
+					: [textNode("lines", `${lines.length} line${lines.length === 1 ? "" : "s"}`, "muted")];
+		body = fits ? [] : code;
 	}
 	summary = [...summary, ...failure, ...diagnostics];
 	// Content the summary shows whole needs no body.

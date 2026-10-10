@@ -77,7 +77,8 @@ describe("presented tool rows", () => {
 			component.updateArgs({ path: "story.txt", content: "First line\nSecond line" });
 			vi.advanceTimersByTime(1000);
 			const preview = text(component);
-			expect(preview).toContain("Second line");
+			// The content counts up as it arrives.
+			expect(preview).toContain("2 lines");
 			expect(preview).toContain("○ write story.txt Generating content");
 			for (const phase of [
 				{ status: "○ write story.txt Waiting to run", transition: () => component.setArgsComplete() },
