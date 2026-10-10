@@ -311,6 +311,30 @@ describe("auth.login with a subscription", () => {
 		});
 	});
 
+	it("answers the queries and intents sent while a sign-in waits for the user", async () => {
+		const { conversation, invoker, setLogin } = await setup();
+		const finish = Promise.withResolvers<void>();
+		setLogin(async (callbacks) => {
+			callbacks.onAuth({ url: "https://sub.invalid/authorize" });
+			await finish.promise;
+			return { refresh: "refresh", access: "access", expires: Date.now() + 3_600_000 };
+		});
+		const login = invoker.intent("auth.login", { provider: "test-sub", method: "oauth" });
+		void login.catch(() => undefined);
+		await nextRequest(invoker, "provider_auth");
+		// Each answers while the sign-in waits; more of them, over time, than a connection holds for its lane (256).
+		for (let index = 0; index < 300; index++) {
+			if (index % 2 === 0) expect((await invoker.query("settings")).profile).toBeDefined();
+			else expect((await invoker.query("conversation_info")).cwd).toBeDefined();
+		}
+		expect((await invoker.intent("set_session_name", { name: "while signing in" })).type).toBe("accepted");
+		expect(conversation.session.modelRegistry.authStorage.get("test-sub")).toBeUndefined();
+
+		finish.resolve();
+		expect((await login).result).toEqual({});
+		expect(conversation.session.modelRegistry.authStorage.get("test-sub")).toMatchObject({ type: "oauth" });
+	});
+
 	it("takes a pasted redirect URL as the answer to a manual sign-in", async () => {
 		const { conversation, invoker } = await setup();
 		let pasted: string | undefined;

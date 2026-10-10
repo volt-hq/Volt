@@ -69,6 +69,34 @@ describe("model catalog watcher", () => {
 		expect(isModelCatalogSourceWatchEvent("change", "settings.json")).toBe(false);
 	});
 
+	test("ignores the lock a reload takes, so a reload does not start the next one", async () => {
+		expect(isModelCatalogSourceWatchEvent("rename", "auth.json.lock")).toBe(false);
+		expect(isModelCatalogSourceWatchEvent("change", "auth.json.lock")).toBe(false);
+		expect(isModelCatalogSourceWatchEvent("rename", "models.json.lock")).toBe(false);
+
+		const registry = createRegistry();
+		saveApiKeyFromAnotherProcess("sk-original");
+		registry.refreshFromDisk();
+		const refreshFromDisk = vi.spyOn(registry, "refreshFromDisk");
+		const stop = startModelCatalogWatcher({
+			agentDir,
+			getModelRegistry: () => registry,
+			onCatalogChanged: vi.fn(),
+			debounceMs: 25,
+		});
+		try {
+			// Another process rewrote auth.json: the refresh's own auth.json.lock churn starts no other.
+			saveApiKeyFromAnotherProcess("sk-rotated");
+			await vi.waitFor(() => expect(refreshFromDisk).toHaveBeenCalled(), { timeout: 5000 });
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			const settled = refreshFromDisk.mock.calls.length;
+			await new Promise((resolve) => setTimeout(resolve, 300));
+			expect(refreshFromDisk).toHaveBeenCalledTimes(settled);
+		} finally {
+			stop();
+		}
+	});
+
 	test("explicit registry refresh preserves only the recognized auth.json.bak move", async () => {
 		const registry = createRegistry();
 		saveApiKeyFromAnotherProcess("sk-original");

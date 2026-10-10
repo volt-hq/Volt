@@ -63,7 +63,10 @@ export async function openPrivateRegularFile(filePath: string, flags: number): P
  *
  * Set `hardenExisting` to false for a caller-provided parent directory. This
  * still creates a missing leaf privately without unexpectedly chmodding a
- * shared directory such as the process temp root.
+ * shared directory such as the process temp root. An existing directory that
+ * is already owner-only is left untouched: a chmod, even to the same mode, is
+ * an attribute change a watch on the directory reports, and readers of the
+ * files in it harden it on every read.
  */
 export function ensurePrivateDirectorySync(directoryPath: string, options: { hardenExisting?: boolean } = {}): void {
 	let existed = true;
@@ -78,7 +81,7 @@ export function ensurePrivateDirectorySync(directoryPath: string, options: { har
 	if (stat.isSymbolicLink() || !stat.isDirectory()) {
 		throw new Error(`Refusing to use non-directory private path: ${directoryPath}`);
 	}
-	if (!existed || options.hardenExisting !== false) {
+	if (!existed || (options.hardenExisting !== false && (stat.mode & 0o777) !== PRIVATE_DIRECTORY_MODE)) {
 		chmodSync(directoryPath, PRIVATE_DIRECTORY_MODE);
 	}
 }
@@ -88,7 +91,10 @@ export function ensurePrivateDirectorySync(directoryPath: string, options: { har
  *
  * Path-based on purpose: this never opens the file, so it cannot release POSIX
  * record locks that another part of this process (such as SQLite) holds on it.
- * Returns the validated lstat identity for callers that need a later identity check.
+ * A file that is already owner-only is left untouched: a chmod, even to the
+ * same mode, is an attribute change a directory watch reports, and readers
+ * harden on every read. Returns the validated lstat identity for callers that
+ * need a later identity check.
  */
 export function hardenPrivateRegularFileSync(filePath: string): Stats {
 	const stat = lstatSync(filePath);
@@ -98,7 +104,7 @@ export function hardenPrivateRegularFileSync(filePath: string): Stats {
 	if (stat.nlink !== 1) {
 		throw new Error(`Refusing to use multiply-linked private file: ${filePath}`);
 	}
-	chmodSync(filePath, PRIVATE_FILE_MODE);
+	if ((stat.mode & 0o777) !== PRIVATE_FILE_MODE) chmodSync(filePath, PRIVATE_FILE_MODE);
 	return stat;
 }
 

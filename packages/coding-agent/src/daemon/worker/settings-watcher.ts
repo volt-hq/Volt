@@ -7,7 +7,9 @@
  * `models.json` reloads its credentials and models, and tells its clients
  * when the available models changed, so a `/login` in one worker reaches the
  * others. A directory that cannot be watched is not, and its file is still
- * read on the next reload.
+ * read on the next reload. Reloading a file takes its lock (`settings.json.lock`,
+ * `auth.json.lock`), which the watch sees come and go: those events are not
+ * changes, or every reload would start the next.
  *
  * A project trusted when the conversation opened because it held nothing
  * that needs trust is not trusted for what was written into it since: while
@@ -19,7 +21,7 @@ import { type FSWatcher, watch } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME } from "../../config.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { startModelCatalogWatcher } from "../../core/model-catalog-watcher.ts";
+import { isLockFileWatchEvent, startModelCatalogWatcher } from "../../core/model-catalog-watcher.ts";
 
 const SETTINGS_FILE_NAME = "settings.json";
 const SETTINGS_DEBOUNCE_MS = 300;
@@ -28,6 +30,7 @@ const SETTINGS_DEBOUNCE_MS = 300;
 function watchSettingsFile(directory: string, onChange: () => void): FSWatcher | undefined {
 	try {
 		const watcher = watch(directory, (eventType, fileName) => {
+			if (isLockFileWatchEvent(fileName)) return;
 			// A rename may name only the temporary file of an atomic replace, or nothing.
 			if (eventType === "rename" || fileName === null || fileName === SETTINGS_FILE_NAME) onChange();
 		});
