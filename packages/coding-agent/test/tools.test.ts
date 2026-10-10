@@ -462,18 +462,18 @@ describe("Coding Agent Tools", () => {
 		});
 
 		it("should handle command errors", async () => {
-			await expect(bashTool.execute("test-call-9", { command: "exit 1" })).rejects.toThrow(
-				/(Command failed|code 1)/,
-			);
+			const result = await bashTool.execute("test-call-9", { command: "exit 1" });
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/Command exited with code 1$/);
 		});
 
 		it("should respect timeout", async () => {
-			await expect(bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 })).rejects.toThrow(
-				/timed out/i,
-			);
+			const result = await bashTool.execute("test-call-10", { command: "sleep 5", timeout: 1 });
+			expect(result.isError).toBe(true);
+			expect(getTextOutput(result)).toMatch(/timed out/i);
 		});
 
-		it("should include full output path for truncated timeout and abort errors", async () => {
+		it("should keep truncation details and the full output path for truncated timeout and abort errors", async () => {
 			for (const testCase of [
 				{ error: "timeout:5", expected: "Command timed out after 5 seconds" },
 				{ error: "aborted", expected: "Command aborted" },
@@ -488,20 +488,19 @@ describe("Coding Agent Tools", () => {
 				};
 				const bash = createBashTool(testDir, { operations });
 
-				let error: unknown;
-				try {
-					await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail" });
-				} catch (err) {
-					error = err;
-				}
+				const result = await bash.execute(`test-call-${testCase.error}`, { command: "chatty-fail" });
 
-				expect(error).toBeInstanceOf(Error);
-				const message = (error as Error).message;
+				expect(result.isError).toBe(true);
+				const message = getTextOutput(result);
 				expect(message).toContain(testCase.expected);
 				expect(message).toMatch(/\[Showing lines \d+-\d+ of \d+\. Full output: /);
 				expect(message).not.toContain("Full output: undefined");
 				const fullOutputPath = message.match(/Full output: ([^\]\n]+)/)?.[1];
 				expect(fullOutputPath).toBeDefined();
+				expect(result.details).toMatchObject({
+					fullOutputPath,
+					truncation: { truncated: true, totalLines: 3000 },
+				});
 				expect(existsSync(fullOutputPath!)).toBe(true);
 				const fullOutput = readFileSync(fullOutputPath!, "utf-8");
 				expect(fullOutput).toContain("1\n2\n3");

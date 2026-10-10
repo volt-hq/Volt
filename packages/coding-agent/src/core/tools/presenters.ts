@@ -137,8 +137,11 @@ export const presentBash: ToolPresenter = (input) => {
 			: [];
 	const result = input.result;
 	const running = result?.partial === true;
-	const raw = withoutTruncationFooter(resultText(result));
-	const { output, status } = input.state === "done" && result?.isError ? bashStatus(raw) : { output: raw };
+	const text = resultText(result);
+	// A failed command's status follows its truncation footer, so the status comes off first.
+	const ended = input.state === "done" && result?.isError ? bashStatus(text) : { output: text };
+	const { status } = ended;
+	const output = withoutTruncationFooter(ended.output);
 	const lines = outputLines(output);
 	let partialLine: UiStyledLine | undefined;
 	if (running && lines.length > 0 && !output.endsWith("\n")) {

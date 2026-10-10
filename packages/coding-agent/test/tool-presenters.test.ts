@@ -213,6 +213,46 @@ describe("bash presenter", () => {
 		expect(output?.type === "terminal" ? output.lines.at(-1) : undefined).toBe("line-4000");
 	});
 
+	it.each([
+		{ status: "exit 1", end: (): { exitCode: number | null } => ({ exitCode: 1 }) },
+		{
+			status: "timed out after 5s",
+			end: (): { exitCode: number | null } => {
+				throw new Error("timeout:5");
+			},
+		},
+	])("counts every line a failed command wrote when its output was truncated: $status", async ({ status, end }) => {
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, { onData }) => {
+				for (let i = 1; i <= 4000; i++) onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
+				return end();
+			},
+		};
+		const result = await createBashToolDefinition(cwd, { operations }).execute(
+			"bash-truncated-failure",
+			{ command: "generate output" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		const presented = present(presentBash, {
+			args: { command: "generate output" },
+			argsComplete: true,
+			state: "done",
+			result: { content: result.content, details: result.details, isError: result.isError === true, partial: false },
+			cwd,
+		});
+		expect(plain(presented.summary)).toBe(`${status} · 4000 lines`);
+		const body = plain(presented.body);
+		expect(body.match(/Full output:/g)).toHaveLength(1);
+		expect(body).toContain("Truncated: showing 2000 of 4000 lines");
+		expect(body).not.toContain("[Showing lines");
+		const output = presented.body?.find((node) => node.key === "output");
+		expect(output).toMatchObject({ type: "terminal", omittedLines: 2000 });
+		expect(output?.type === "terminal" ? output.lines.at(-1) : undefined).toBe("line-4000");
+		expect(presented.body?.find((node) => node.key === "status")).toMatchObject({ text: status });
+	});
+
 	it("converts ANSI styling to semantic tokens", () => {
 		const presented = present(presentBash, input({ command: "x" }, "done", { text: "\x1b[31mfailed\x1b[0m ok" }));
 		const terminal = presented.summary?.[0];

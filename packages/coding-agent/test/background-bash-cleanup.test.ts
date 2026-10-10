@@ -75,17 +75,20 @@ describe("background native Bash cleanup", () => {
 				if (update.content.some((part) => part.type === "text" && part.text.includes("ready"))) ready.resolve();
 			},
 		);
-		const rejected = expect(execution).rejects.toThrow("Command aborted");
+		const aborted = expect(execution).resolves.toMatchObject({
+			isError: true,
+			content: [{ type: "text", text: expect.stringContaining("Command aborted") }],
+		});
 		try {
 			await ready.promise;
 			controller.abort();
 			await barrier.shellStopped.promise;
 			// This must resolve before releasing finishTeardown.
-			await rejected;
+			await aborted;
 		} finally {
 			controller.abort();
 			barrier.finishTeardown.resolve();
-			await rejected;
+			await aborted;
 			barrier.spy.mockRestore();
 		}
 	}, 15_000);
