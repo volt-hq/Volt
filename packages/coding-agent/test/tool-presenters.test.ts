@@ -140,11 +140,27 @@ describe("bash presenter", () => {
 		expect(short.body).toBeUndefined();
 	});
 
-	it("collapses to the newest five lines, counting the rest", () => {
+	it("collapses finished output longer than five lines to how many lines it wrote", () => {
 		const lines = Array.from({ length: 12 }, (_, index) => `line-${index + 1}`);
 		const presented = present(presentBash, input({ command: "seq 12" }, "done", { text: lines.join("\n") }));
-		expect(presented.summary?.[0]).toMatchObject({ type: "terminal", lines: lines.slice(-5), omittedLines: 7 });
+		expect(presented.summary).toEqual([{ type: "text", key: "lines", text: [{ text: "12 lines", token: "muted" }] }]);
 		expect(plain(presented.body)).toBe(lines.join("\n"));
+
+		// A failed command says how it ended beside the count.
+		const failed = present(
+			presentBash,
+			input({ command: "seq 12" }, "done", {
+				text: `${lines.join("\n")}\n\nCommand exited with code 2`,
+				isError: true,
+			}),
+		);
+		expect(plain(failed.summary)).toBe("exit 2 · 12 lines");
+		expect(plain(failed.body)).toBe(`${lines.join("\n")}\nexit 2`);
+
+		// Output that fits shows whole, with no body.
+		const short = present(presentBash, input({ command: "seq 5" }, "done", { text: "1\n2\n3\n4\n5" }));
+		expect(short.summary?.[0]).toMatchObject({ type: "terminal", lines: ["1", "2", "3", "4", "5"] });
+		expect(short.body).toBeUndefined();
 	});
 
 	it.each([
@@ -186,6 +202,8 @@ describe("bash presenter", () => {
 			result: { content: result.content, details: result.details, isError: false, partial: false },
 			cwd,
 		});
+		// The count is of every line the command wrote, not only the ones the tool kept.
+		expect(plain(presented.summary)).toBe("4000 lines");
 		const body = plain(presented.body);
 		expect(body.match(/Full output:/g)).toHaveLength(1);
 		expect(body).toContain("Truncated: showing 2000 of 4000 lines");
@@ -193,6 +211,46 @@ describe("bash presenter", () => {
 		const output = presented.body?.find((node) => node.key === "output");
 		expect(output).toMatchObject({ type: "terminal", omittedLines: 2000 });
 		expect(output?.type === "terminal" ? output.lines.at(-1) : undefined).toBe("line-4000");
+	});
+
+	it.each([
+		{ status: "exit 1", end: (): { exitCode: number | null } => ({ exitCode: 1 }) },
+		{
+			status: "timed out after 5s",
+			end: (): { exitCode: number | null } => {
+				throw new Error("timeout:5");
+			},
+		},
+	])("counts every line a failed command wrote when its output was truncated: $status", async ({ status, end }) => {
+		const operations: BashOperations = {
+			exec: async (_command, _cwd, { onData }) => {
+				for (let i = 1; i <= 4000; i++) onData(Buffer.from(`line-${String(i).padStart(4, "0")}\n`));
+				return end();
+			},
+		};
+		const result = await createBashToolDefinition(cwd, { operations }).execute(
+			"bash-truncated-failure",
+			{ command: "generate output" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		const presented = present(presentBash, {
+			args: { command: "generate output" },
+			argsComplete: true,
+			state: "done",
+			result: { content: result.content, details: result.details, isError: result.isError === true, partial: false },
+			cwd,
+		});
+		expect(plain(presented.summary)).toBe(`${status} · 4000 lines`);
+		const body = plain(presented.body);
+		expect(body.match(/Full output:/g)).toHaveLength(1);
+		expect(body).toContain("Truncated: showing 2000 of 4000 lines");
+		expect(body).not.toContain("[Showing lines");
+		const output = presented.body?.find((node) => node.key === "output");
+		expect(output).toMatchObject({ type: "terminal", omittedLines: 2000 });
+		expect(output?.type === "terminal" ? output.lines.at(-1) : undefined).toBe("line-4000");
+		expect(presented.body?.find((node) => node.key === "status")).toMatchObject({ text: status });
 	});
 
 	it("converts ANSI styling to semantic tokens", () => {
@@ -214,14 +272,16 @@ describe("read presenter", () => {
 		);
 	});
 
-	it("collapses to the first ten lines as code and shows the whole file expanded", () => {
+	it("collapses text longer than ten lines to how many lines it read and shows it whole expanded", () => {
 		const text = Array.from({ length: 14 }, (_, index) => `const v${index} = ${index};`).join("\n");
 		const presented = present(presentRead, input({ path: "a.ts" }, "done", { text: `${text}\n\n` }));
-		expect(presented.summary?.[0]).toMatchObject({ type: "code", language: "typescript" });
-		expect(plain(presented.summary)).toContain("const v9 = 9;");
-		expect(plain(presented.summary)).not.toContain("const v10");
-		expect(plain(presented.summary)).toContain("4 more lines");
-		expect(presented.body?.[0]).toMatchObject({ type: "code", code: text });
+		expect(presented.summary).toEqual([{ type: "text", key: "lines", text: "14 lines", token: "muted" }]);
+		expect(presented.body?.[0]).toMatchObject({ type: "code", language: "typescript", code: text });
+
+		// Text that fits shows whole as code, with no body.
+		const short = present(presentRead, input({ path: "a.ts" }, "done", { text: "const a = 1;\n" }));
+		expect(short.summary).toEqual([{ type: "code", key: "code", language: "typescript", code: "const a = 1;" }]);
+		expect(short.body).toBeUndefined();
 	});
 
 	const outside = process.platform === "win32" ? "C:/outside/AGENTS.md" : "/outside/AGENTS.md";
@@ -245,7 +305,7 @@ describe("read presenter", () => {
 				text: `${text}\n\n[50 more lines in file. Use offset=13 to continue.]`,
 			}),
 		);
-		expect(plain(presented.summary)).toContain("2 more lines");
+		expect(plain(presented.summary)).toBe("12 lines · 50 more in file");
 		expect(plain(presented.body)).toContain("line 11\n[50 more lines in file]");
 		expect(JSON.stringify(presented)).not.toContain("offset=");
 
@@ -268,6 +328,7 @@ describe("read presenter", () => {
 			}),
 		);
 		expect(plain(truncated.body)).toBe("a\n[Truncated: 1 lines shown (50.0KB limit)]");
+		expect(plain(truncated.summary)).toBe("[Truncated: 1 lines shown (50.0KB limit)]");
 	});
 
 	it("never shows the note the read tool leaves the model", async () => {
@@ -344,12 +405,22 @@ describe("write presenter", () => {
 		expect(present(presentWrite, input(args, "done", { text: "ok" })).activity).toBeUndefined();
 	});
 
-	it("shows the content as code without trailing blank lines, collapsed to ten lines", () => {
-		const content = `${Array.from({ length: 12 }, (_, index) => `line ${index}`).join("\n")}\n\n`;
-		const presented = present(presentWrite, input({ path: "notes.md", content }, "pending"));
-		expect(presented.summary?.[0]).toMatchObject({ type: "code", language: "markdown" });
-		expect(plain(presented.summary)).toContain("2 more lines, 12 total");
-		expect(presented.body?.[0]).toMatchObject({ code: content.trimEnd() });
+	it("counts the content while it arrives and shows it whole once written when it fits in ten lines", () => {
+		const count = (lines: number) => [{ type: "text", key: "lines", text: `${lines} lines`, token: "muted" }];
+		const long = `${Array.from({ length: 12 }, (_, index) => `line ${index}`).join("\n")}\n\n`;
+		const generating = present(presentWrite, input({ path: "notes.md", content: long }, "pending"));
+		expect(generating.summary).toEqual(count(12));
+		expect(generating.body?.[0]).toMatchObject({ type: "code", language: "markdown", code: long.trimEnd() });
+		const written = present(presentWrite, input({ path: "notes.md", content: long }, "done", { text: "ok" }));
+		expect(written.summary).toEqual(count(12));
+		expect(written.body?.[0]).toMatchObject({ code: long.trimEnd() });
+
+		// Short content is a count while it arrives too, then shows whole, with no body.
+		const short = "a\nb\n\n";
+		expect(present(presentWrite, input({ path: "notes.md", content: short }, "running")).summary).toEqual(count(2));
+		const done = present(presentWrite, input({ path: "notes.md", content: short }, "done", { text: "ok" }));
+		expect(done.summary).toEqual([{ type: "code", key: "code", language: "markdown", code: "a\nb" }]);
+		expect(done.body).toBeUndefined();
 	});
 
 	it("reports invalid content, errors, and diagnostics", () => {
@@ -371,6 +442,13 @@ describe("write presenter", () => {
 			text: "a.ts:1 error",
 			token: "warning",
 		});
+		// Collapsed to a count, a long write still shows its diagnostics.
+		const long = Array.from({ length: 20 }, (_, index) => `line ${index}`).join("\n");
+		const diagnosedLong = present(
+			presentWrite,
+			input({ path: "a", content: long }, "done", { text: "ok", details: { diagnostics: "a.ts:1 error" } }),
+		);
+		expect(plain(diagnosedLong.summary)).toBe("20 lines\na.ts:1 error");
 	});
 });
 

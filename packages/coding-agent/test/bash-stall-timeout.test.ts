@@ -10,12 +10,20 @@ import { type BashOperations, createBashToolDefinition } from "../src/core/tools
 
 const ctx = {} as never;
 
+/** The text of a call's result, which must have failed. */
+function failureText(result: { content: ReadonlyArray<{ type: string; text?: string }>; isError?: boolean }): string {
+	expect(result.isError).toBe(true);
+	return result.content.map((part) => part.text ?? "").join("");
+}
+
 describe("bash stall detection", () => {
 	test("kills a command that goes silent and explains why", async () => {
 		const tool = createBashToolDefinition(process.cwd());
-		await expect(
-			tool.execute("stall-1", { command: "sleep 30", stallTimeout: 1 }, undefined, undefined, ctx),
-		).rejects.toThrow(/produced no output for 1 seconds and was killed as hung/);
+		expect(
+			failureText(
+				await tool.execute("stall-1", { command: "sleep 30", stallTimeout: 1 }, undefined, undefined, ctx),
+			),
+		).toMatch(/produced no output for 1 seconds and was killed as hung/);
 	}, 15000);
 
 	test("leaves a slow but talking command alone past the stall window", async () => {
@@ -40,9 +48,9 @@ describe("bash stall detection", () => {
 		// and re-arm the timer, failing the kill case spuriously.
 		const silent = "sleep 4; echo done";
 
-		await expect(
-			tool.execute("stall-3a", { command: silent, stallTimeout: 1 }, undefined, undefined, ctx),
-		).rejects.toThrow(/killed as hung/);
+		expect(
+			failureText(await tool.execute("stall-3a", { command: silent, stallTimeout: 1 }, undefined, undefined, ctx)),
+		).toMatch(/killed as hung/);
 
 		const result = await tool.execute("stall-3b", { command: silent, stallTimeout: 0 }, undefined, undefined, ctx);
 		expect(JSON.stringify(result)).toContain("done");
@@ -66,9 +74,11 @@ describe("bash stall detection", () => {
 		const tool = createBashToolDefinition(process.cwd());
 		const controller = new AbortController();
 		setTimeout(() => controller.abort(), 150);
-		await expect(
-			tool.execute("stall-4", { command: "sleep 30", stallTimeout: 1 }, controller.signal, undefined, ctx),
-		).rejects.toThrow(/Command aborted/);
+		expect(
+			failureText(
+				await tool.execute("stall-4", { command: "sleep 30", stallTimeout: 1 }, controller.signal, undefined, ctx),
+			),
+		).toMatch(/Command aborted/);
 	}, 15000);
 
 	// The opposite ordering: the stall fires first, then the run is torn down
@@ -86,9 +96,11 @@ describe("bash stall detection", () => {
 			},
 		};
 		const tool = createBashToolDefinition(process.cwd(), { operations });
-		await expect(
-			tool.execute("stall-5", { command: "hang", stallTimeout: 1 }, controller.signal, undefined, ctx),
-		).rejects.toThrow(/killed as hung/);
+		expect(
+			failureText(
+				await tool.execute("stall-5", { command: "hang", stallTimeout: 1 }, controller.signal, undefined, ctx),
+			),
+		).toMatch(/killed as hung/);
 	}, 15000);
 });
 

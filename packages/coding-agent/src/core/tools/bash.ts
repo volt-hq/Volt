@@ -1,6 +1,6 @@
 import { constants } from "node:fs";
 import { access as fsAccess } from "node:fs/promises";
-import type { AgentTool } from "@hansjm10/volt-agent-core";
+import type { AgentTool, AgentToolResult } from "@hansjm10/volt-agent-core";
 import { spawn } from "child_process";
 import { type Static, Type } from "typebox";
 import { waitForChildProcess } from "../../utils/child-process.ts";
@@ -351,7 +351,15 @@ export function createBashToolDefinition(
 				return { text, details };
 			};
 
-			const appendStatus = (text: string, status: string) => `${text ? `${text}\n\n` : ""}${status}`;
+			// A command that ran and failed keeps its output's details, as one that succeeded does.
+			const failure = (
+				{ text, details }: ReturnType<typeof formatOutput>,
+				status: string,
+			): AgentToolResult<BashToolDetails | undefined> => ({
+				content: [{ type: "text", text: `${text ? `${text}\n\n` : ""}${status}` }],
+				...(details === undefined ? {} : { details }),
+				isError: true,
+			});
 
 			try {
 				let exitCode: number | null;
@@ -371,36 +379,34 @@ export function createBashToolDefinition(
 					exitCode = result.exitCode;
 				} catch (err) {
 					const snapshot = await finishOutput();
-					const { text } = formatOutput(snapshot, "");
+					const output = formatOutput(snapshot, "");
 					if (err instanceof Error && err.message === "aborted") {
 						// Whichever cause fired first wins: a caller abort makes the
 						// command fall silent as a side effect, and a stall kill can be
 						// followed by a caller abort before this branch runs.
 						if (abortCause === "stall") {
-							throw new Error(
-								appendStatus(
-									text,
-									`Command produced no output for ${stallSeconds} seconds and was killed as hung. If this command is legitimately silent for longer, pass a larger stallTimeout.`,
-								),
+							return failure(
+								output,
+								`Command produced no output for ${stallSeconds} seconds and was killed as hung. If this command is legitimately silent for longer, pass a larger stallTimeout.`,
 							);
 						}
-						throw new Error(appendStatus(text, "Command aborted"));
+						return failure(output, "Command aborted");
 					}
 					if (err instanceof Error && err.message.startsWith("timeout:")) {
 						const timeoutSecs = err.message.split(":")[1];
-						throw new Error(appendStatus(text, `Command timed out after ${timeoutSecs} seconds`));
+						return failure(output, `Command timed out after ${timeoutSecs} seconds`);
 					}
 					throw err;
 				}
 
 				const snapshot = await finishOutput();
-				const { text: outputText, details } = formatOutput(snapshot);
+				const output = formatOutput(snapshot);
 				if (exitCode !== 0 && exitCode !== null) {
-					throw new Error(appendStatus(outputText, `Command exited with code ${exitCode}`));
+					return failure(output, `Command exited with code ${exitCode}`);
 				}
 				return {
-					content: [{ type: "text", text: outputText }],
-					...(details === undefined ? {} : { details }),
+					content: [{ type: "text", text: output.text }],
+					...(output.details === undefined ? {} : { details: output.details }),
 				};
 			} finally {
 				clearUpdateTimer();
