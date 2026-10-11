@@ -456,15 +456,14 @@ export class SessionExtensionBinding {
 
 	/** How the session reaches the daemon's managed worktrees for its extensions (`ctx.worktrees`). */
 	private createWorktreesHandler(): ExtensionWorktreesHandler {
-		const route = (): Required<SessionWorktreeDaemon> => {
-			const daemon = this.host.worktreeDaemon;
-			if (daemon?.create === undefined || daemon.list === undefined) {
-				throw new Error("Managed worktrees are available only in conversations the daemon hosts");
-			}
-			return { restore: daemon.restore, create: daemon.create, list: daemon.list };
-		};
+		const unavailable = (): Error =>
+			new Error("Managed worktrees are available only in conversations the daemon hosts");
 		return {
-			list: async () => (await route().list()).map(extensionWorktree),
+			list: async () => {
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.list === undefined) throw unavailable();
+				return (await daemon.list()).map(extensionWorktree);
+			},
 			create: async (options) => {
 				if (!isRecord(options)) throw new TypeError("ctx.worktrees.create takes { name?, branch?, baseRef? }");
 				const read = (key: "name" | "branch" | "baseRef"): string | undefined => {
@@ -478,8 +477,10 @@ export class SessionExtensionBinding {
 				const name = read("name");
 				const branch = read("branch");
 				const baseRef = read("baseRef");
+				const daemon = this.host.worktreeDaemon;
+				if (daemon?.create === undefined) throw unavailable();
 				return extensionWorktree(
-					await route().create({
+					await daemon.create({
 						...(name === undefined ? {} : { name }),
 						...(branch === undefined ? {} : { branch }),
 						...(baseRef === undefined ? {} : { baseRef }),
