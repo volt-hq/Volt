@@ -1793,7 +1793,11 @@ export class ExtensionRunner {
 					const event: InputEvent = {
 						type: "input",
 						text: currentText,
-						images: currentImages,
+						// A copy: only a transform result changes the prompt.
+						images:
+							currentImages === undefined
+								? undefined
+								: cloneCanonicalData(currentImages, `Extension input images for ${ext.id}`),
 						source,
 						streamingBehavior,
 					};

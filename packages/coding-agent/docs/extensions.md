@@ -1045,7 +1045,7 @@ Fired when user input is received, after extension commands are checked but befo
 ```typescript
 volt.on("input", async (event, ctx) => {
   // event.text - raw input (before skill/template expansion)
-  // event.images - attached images, if any
+  // event.images - a copy of the attached images, if any; only a transform result changes them
   // event.source - "interactive" (typed), "rpc" (API), or "extension" (via sendUserMessage)
   // event.streamingBehavior - "steer" | "followUp" | undefined
   //   undefined when idle, "steer" for mid-stream interrupts,
