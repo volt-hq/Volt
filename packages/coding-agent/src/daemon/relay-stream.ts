@@ -202,7 +202,11 @@ export class RelayLifecycleOwner {
 			this.enqueueWrite(bufferedRemainder, false);
 		}
 		socket.on("data", (chunk: Buffer) => this.enqueueWrite(chunk, true));
-		socket.on("error", (error: Error) => this.beginActiveClose("error", "abortive", error.message));
+		// A failing socket is the worker going away too: a write of the phone's
+		// bytes fails once the worker closed after its last frame (EPIPE), possibly
+		// before its EOF is read. Every byte it wrote that was admitted still
+		// reaches the phone before FIN, as on EOF; a reset would discard them.
+		socket.on("error", (error: Error) => this.beginActiveClose("error", "graceful", error.message));
 		// A close without a daemon-initiated reason or a socket error is the worker
 		// going away (it ended the stream, or exited).
 		socket.on("close", () => this.beginActiveClose(this.closeReason ?? "worker_disconnected", "abortive"));
