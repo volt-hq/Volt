@@ -127,7 +127,7 @@ async function start(
 			: `labels approved pull requests' issues "${config.merge.readyLabel}" for a human to merge`;
 	const confirmed = await ctx.ui.confirm(
 		"Start the issue orchestrator?",
-		`It works open issues labeled ${config.tracker.labels.join(" + ")} in ${config.tracker.repo ?? "this repository"} with up to ${config.agent.maxConcurrent} agents at once, and ${merging}.`,
+		`It works open issues labeled ${config.tracker.labels.join(" + ")} in ${config.tracker.repo ?? "this repository"}, including the ones its agents file (also labeled "${config.tracker.filedLabel}"), with up to ${config.agent.maxConcurrent} agents at once, and ${merging}.`,
 		{ signal: ctx.signal },
 	);
 	if (!confirmed) return undefined;

@@ -24,7 +24,11 @@ describe("issue orchestrator workflow", () => {
 	it("applies defaults, and requires the labels that gate which issues are worked", () => {
 		const config = parseWorkflow("---\ntracker:\n  labels: [agent-ready]\n---\n");
 		expect(config).toMatchObject({
-			tracker: { labels: ["agent-ready"], excludeLabels: ["agent-needs-human", "agent-approved"] },
+			tracker: {
+				labels: ["agent-ready"],
+				excludeLabels: ["agent-needs-human", "agent-approved"],
+				filedLabel: "agent-filed",
+			},
 			ghCommand: ["gh"],
 			polling: { intervalMs: 60_000 },
 			workspace: { hookTimeoutMs: 600_000 },
@@ -49,6 +53,7 @@ tracker:
   labels: [agent-ready, roadmap]
   exclude_labels: blocked
   review_author: volt-agent[bot]
+  filed_label: found-by-agent
 github:
   command: [volt-agent, gh]
 polling:
@@ -89,6 +94,7 @@ Ignored too.
 				labels: ["agent-ready", "roadmap"],
 				excludeLabels: ["blocked", "needs-human", "agent-approved"],
 				reviewAuthor: "volt-agent[bot]",
+				filedLabel: "found-by-agent",
 			},
 			ghCommand: ["volt-agent", "gh"],
 			polling: { intervalMs: 30_000 },

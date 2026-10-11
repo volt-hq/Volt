@@ -59,6 +59,11 @@ export interface WorkflowConfig {
 		readonly excludeLabels: readonly string[];
 		/** The login whose review comments count; the `gh` user when omitted. */
 		readonly reviewAuthor?: string;
+		/**
+		 * The label agents add, beside `labels`, to the issues they file: the
+		 * orchestrator works those too, and the label tells them apart.
+		 */
+		readonly filedLabel: string;
 	};
 	/** The command that runs GitHub CLI, such as `["gh"]` or `["volt-agent", "gh"]`. */
 	readonly ghCommand: readonly string[];
@@ -116,14 +121,14 @@ You are in a git worktree at {{ worktree.path }}, on branch {{ worktree.branch }
 3. Push the branch: git push -u origin {{ worktree.branch }}
 4. Open a pull request whose body says "Fixes #{{ issue.number }}": {{ gh }} pr create --repo {{ repo }} --head {{ worktree.branch }}
 
-If you find problems outside this issue (tech debt, unrelated bugs), file each as a new issue with {{ gh }} issue create --repo {{ repo }} instead of fixing it here. Never add the labels {{ tracker.labels }} to an issue you file.
+If you find problems outside this issue (tech debt, unrelated bugs), file each as a new issue with {{ gh }} issue create --repo {{ repo }} instead of fixing it here. Label every issue you file {{ tracker.filed_labels }}, and say in its body that you found it while working on {{ issue.identifier }}.
 
 Stop once the pull request is open.`,
 	review: `Review pull request #{{ pr.number }} ({{ pr.url }}), which addresses issue {{ issue.identifier }}: {{ issue.title }}.
 
 The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.branch }}. Update it first (git pull --ff-only) and check that git rev-parse HEAD is {{ pr.head_sha }}. Review that commit only. This is review round {{ round }} of at most {{ review.max_rounds }}.
 
-Do not change code or push. Report only findings that should block the merge: bugs, regressions, missing tests for changed behavior, and violations of the repository's rules. File problems outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, without the labels {{ tracker.labels }}.
+Do not change code or push. Report only findings that should block the merge: bugs, regressions, missing tests for changed behavior, and violations of the repository's rules. File problems outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, labeled {{ tracker.filed_labels }}, saying in each body that you found it while reviewing {{ pr.url }}.
 
 Post exactly one comment on the pull request with your findings ({{ gh }} pr comment {{ pr.number }} --repo {{ repo }} --body-file <file>). Its last line must be exactly one of:
 {{ review.clean_marker }}
@@ -136,7 +141,7 @@ The worktree at {{ worktree.path }} is on the pull request's branch {{ worktree.
 Read the latest review: {{ gh }} pr view {{ pr.number }} --repo {{ repo }} --comments
 Failing checks: {{ ci.failing }}
 
-Fix every blocking finding and failing check, run the affected checks and tests, commit, and push to {{ worktree.branch }}. File findings outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, without the labels {{ tracker.labels }}. Do not post review verdicts.
+Fix every blocking finding and failing check, run the affected checks and tests, commit, and push to {{ worktree.branch }}. File findings outside the pull request's scope as new issues with {{ gh }} issue create --repo {{ repo }}, labeled {{ tracker.filed_labels }}, saying in each body that you found it while fixing {{ pr.url }}. Do not post review verdicts.
 
 Stop once the fixes are pushed.`,
 };
@@ -285,6 +290,7 @@ export function parseWorkflow(content: string): WorkflowConfig {
 	const handoffLabel = root.string("handoff_label") ?? "agent-needs-human";
 	const readyLabel = merge.string("ready_label") ?? "agent-approved";
 	const reviewAuthor = tracker.string("review_author");
+	const filedLabel = tracker.string("filed_label") ?? "agent-filed";
 	const baseRef = workspace.string("base_ref");
 	const afterCreate = hooks.string("after_create");
 	return {
@@ -293,6 +299,7 @@ export function parseWorkflow(content: string): WorkflowConfig {
 			labels,
 			excludeLabels: [...new Set([...tracker.strings("exclude_labels"), handoffLabel, readyLabel])],
 			...(reviewAuthor === undefined ? {} : { reviewAuthor }),
+			filedLabel,
 		},
 		ghCommand: ghCommand.length === 0 ? ["gh"] : ghCommand,
 		polling: { intervalMs: root.section("polling").number("interval_ms", { integer: true, min: 5_000 }) ?? 60_000 },

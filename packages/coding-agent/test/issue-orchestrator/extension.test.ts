@@ -176,6 +176,10 @@ describe("issue orchestrator extension", () => {
 			limits: { maxDurationMs: 3_600_000 },
 		});
 		expect(started[0]?.task).toContain("You are working on GitHub issue o/r#12: Fix the thing");
+		// Issues the agent files get the workflow's labels, so the orchestrator works them too.
+		expect(started[0]?.task).toContain(
+			"Label every issue you file agent-ready, agent-filed, and say in its body that you found it while working on o/r#12.",
+		);
 		await vi.waitFor(() =>
 			expect(panels.at(-1)?.node).toMatchObject({
 				type: "card",

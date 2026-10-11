@@ -481,7 +481,10 @@ export class Orchestrator {
 			},
 			repo: tracker.repo,
 			gh: config.ghCommand.join(" "),
-			tracker: { labels: [...config.tracker.labels] },
+			tracker: {
+				labels: [...config.tracker.labels],
+				filed_labels: [...config.tracker.labels, config.tracker.filedLabel],
+			},
 			worktree: { path: workspace.path, branch: workspace.branch },
 			attempt: attempts === 0 ? null : attempts + 1,
 			round: "round" in phase ? phase.round : null,

@@ -45,7 +45,9 @@ Each tick (every `polling.interval_ms`, and whenever an agent finishes) the orch
 
 A verdict is the last line of a pull request comment by `tracker.review_author`: `<!-- volt-orchestrator review head=<sha> verdict=clean|changes -->`. Comments by anyone else do not count, so a stranger cannot approve a pull request.
 
-When the orchestrator stops working an issue it comments why and adds `handoff_label` (`agent-needs-human`). Removing the label hands the issue back. Create the labels in the repository first; without them the comment is still posted.
+When the orchestrator stops working an issue it comments why and adds `handoff_label` (`agent-needs-human`). Removing the label hands the issue back. Create the labels in the repository first (yours, `agent-filed`, `agent-needs-human`, and `agent-approved`): `gh issue create` refuses a label the repository does not have, and a handoff without its label is only the comment.
+
+Issues the agents file along the way (tech debt, out-of-scope bugs) get the `tracker.labels` labels too, so the orchestrator works them as well, plus `tracker.filed_label` (`agent-filed`) to tell them apart. Their bodies name the issue or pull request the agent found them in. To have a human vet them first instead, add `agent-filed` to `tracker.exclude_labels`.
 
 Limits: `agent.max_concurrent` agents at once (and a role's `max_concurrent`), `agent.max_attempts` runs per phase of one head commit, exponential backoff after a failed run (10 s doubling, at most `agent.max_retry_backoff_ms`), and each role's `max_turns`, `max_tokens`, `max_cost_usd`, and `max_duration_ms`.
 
@@ -53,14 +55,15 @@ State lives in memory. After a restart, `/orchestrate start` again: the next tic
 
 ## Safety
 
-- Only issues carrying every `tracker.labels` label are worked. Use a label only maintainers apply.
+- Only issues carrying every `tracker.labels` label are worked. Use a label only maintainers and the orchestrator's agents apply.
+- Agent-filed issues are worked without a human looking at them first, and each can lead to more. If a chain of them runs away, exclude `agent-filed` (or stop the orchestrator); every one of them carries it.
 - Issue text reaches the agents as data inside the prompt, but agents run the conversation's tools, and a prompt injection in an issue is still an injection. Keep the label gate strict, and keep `merge.mode: handoff` until you trust the setup.
 - `merge.mode: auto` merges only a pull request whose head commit the review author reviewed clean and whose checks pass; with `merge.require_checks` (the default), a pull request without checks goes to a human. Branch protection still applies to the merge.
 - Agents use the same GitHub credentials as you unless `github.command` and the prompts route them elsewhere (for example a bot wrapper). The agents can read `gh`'s stored token like any process you run.
 
 ## Workflow file
 
-The front matter configures the orchestrator; `## implement`, `## review`, and `## fix` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, and `ci.failing`. An unknown variable fails the run.
+The front matter configures the orchestrator; `## implement`, `## review`, and `## fix` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `tracker.filed_labels` (the labels agents give the issues they file), `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, and `ci.failing`. An unknown variable fails the run.
 
 ```markdown
 ---
@@ -69,6 +72,7 @@ tracker:
   labels: [agent-ready]             # required: every issue worked has all of them
   exclude_labels: [blocked]         # plus handoff_label and merge.ready_label
   review_author: volt-agent[bot]    # default: the gh user
+  filed_label: agent-filed          # agents add it, with labels, to the issues they file
 github:
   command: [volt-agent, gh]         # default: [gh]
 polling:
