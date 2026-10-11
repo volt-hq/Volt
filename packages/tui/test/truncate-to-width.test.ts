@@ -49,6 +49,12 @@ describe("truncateToWidth", () => {
 		assert.strictEqual(truncated.endsWith("\x1b[0m"), true);
 	});
 
+	it("counts text after a non-SGR CSI sequence when truncating", () => {
+		const truncated = truncateToWidth("\x1b[2Aabcdefghijklmnop\x1b[0m", 10);
+		assert.ok(visibleWidth(truncated) <= 10);
+		assert.ok(truncated.includes("\x1b[2A"));
+	});
+
 	it("keeps a contiguous prefix instead of skipping a wide grapheme and resuming later", () => {
 		const truncated = truncateToWidth("🙂\t界 \x1b_abc\x07", 7, "…", true);
 		assert.strictEqual(truncated, "🙂\t\x1b[0m…\x1b[0m ");

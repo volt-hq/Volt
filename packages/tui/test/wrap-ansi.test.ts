@@ -152,6 +152,14 @@ describe("wrapTextWithAnsi", () => {
 			assert.strictEqual(visibleWidth(text), 5);
 		});
 
+		it("should ignore non-SGR CSI sequences without consuming following text", () => {
+			assert.strictEqual(visibleWidth("\x1b[2Ahello world"), 11);
+
+			const wrapped = wrapTextWithAnsi(`\x1b[?25l${"word ".repeat(30)}`, 40);
+			assert.ok(wrapped.length > 1);
+			for (const line of wrapped) assert.ok(visibleWidth(line) <= 40);
+		});
+
 		it("should treat isolated regional indicators as width 2", () => {
 			assert.strictEqual(visibleWidth("🇨"), 2);
 			assert.strictEqual(visibleWidth("🇨🇳"), 2);
