@@ -264,6 +264,9 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
   "tui.editor.cursorLeft": ["left", "alt+h"],
   "tui.editor.cursorRight": ["right", "alt+l"],
   "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
-  "tui.editor.cursorWordRight": ["alt+right", "alt+w"]
+  "tui.editor.cursorWordRight": ["alt+right", "alt+w"],
+  "app.work.open": "alt+o"
 }
 ```
+
+`alt+j` opens the work inspector by default, and volt handles that shortcut before the editor sees the key. The example therefore moves `app.work.open` to `alt+o` so `alt+j` moves the cursor down.
