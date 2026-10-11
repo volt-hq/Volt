@@ -264,7 +264,7 @@ export default function (volt: ExtensionAPI<ExtensionSettingsOf<typeof manifest>
 
 | Permission | Allows | Enforced |
 |------------|--------|----------|
-| `exec` | `volt.exec` | Yes: `volt.exec` rejects without it |
+| `exec` | `volt.exec`, and starting subagents with `ctx.subagents.start` | Yes: both reject without it |
 | `providers` | `volt.registerProvider`, `volt.unregisterProvider`, and registering or reaching provider implementations through `ctx.modelRegistry` and its `client` | Yes |
 | `secrets` | `ctx.modelRegistry.authStorage`, `getApiKeyAndHeaders`, `getApiKeyForProvider`, `login`, and `client.generateImages`; without it, `ctx.modelRegistry.client` requests go only to catalog models as the catalog has them (same `baseUrl` and headers) | Yes |
 | `network` | Network access | No: declared and shown only |
@@ -277,7 +277,7 @@ Permissions are advisory: extensions run in your process and can reach Node's ow
 `extensions.<id>.enabled` in global or (trusted) project settings decides whether an extension runs; it does by default. A disabled extension's factory never runs: a package's entry is not imported until it is enabled, and a single file is evaluated only to read its manifest. Toggle one with `/extensions` (pick it, then Enable or Disable), `/extensions enable <id>`, `/extensions disable <id>`, or the `set_extension_enabled` intent ([rpc.md](rpc.md)); every open conversation follows at once, without `/reload`.
 
 - **Enabling** runs a new instance: its factory, then `activate` (`reason: "enable"`) and `session_start` (`reason: "enable"`). Its tools are offered from the next request. The new instance gets contexts and a `ctx.ui` of its own; a stopped instance's `ctx.ui` stays stopped even when its id runs again. If you have not acknowledged its permissions, the client that enables it asks you to; a paired device cannot enable it until you have. A session runs an extension enabled meanwhile (by another client, conversation, or a settings edit) only once its permissions are acknowledged; until then it is listed as failed.
-- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, and its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`). From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
+- **Disabling** stops it at once: no hook, command, intent, shortcut, completion provider, or presenter of it runs again, and its tool calls show the built-in or generic presentation and its custom messages their text. It hears `session_shutdown` (`reason: "disable"`) and `deactivate` (`reason: "disable"`), for at most 10 seconds; then its status items, panels, title, pending dialogs, providers (registered through `volt` or `ctx.modelRegistry`), and managed-services tasks go, its running work is cancelled (waited for up to 10 seconds, then finished `cancelled`), and so are the subagent runs it started. From then on its `volt` registers nothing and its calls that steer the conversation (`sendMessage`, `sendUserMessage`, `appendEntry`, `setModel`, `ctx.abort()`, `ctx.newSession()`, ...) throw, and its `ctx.ui` shows nothing. Its tools leave at the next turn boundary: a tool call already running finishes first. Then its `volt` and every context it was given throw, and its `volt.events` listeners are removed.
 - Skills, prompts, and themes an extension adds through `resources_discover` change on the next `/reload`.
 
 `/store install` and `/store remove` pick up an installed or removed extension the same way; `/reload` reloads every extension (`deactivate` and `activate` with `reason: "reload"`).
@@ -1237,6 +1237,34 @@ volt.on("before_agent_start", (event, ctx) => {
 ### ctx.startWork(kind, options, run)
 
 Starts background work of a kind the extension registered with [`volt.registerWorkKind()`](#voltregisterworkkindname-kind). Resolves with `{ workId }` once the work is recorded; `run` then executes in the background. An extension starts only its own kinds: `kind` is the name it registered, and another extension's kind (or a built-in kind such as `job`) is never found. The context of a `ctx.newSession()`/`ctx.fork()`/`ctx.switchSession()` `withSession` callback cannot start work.
+
+### ctx.subagents
+
+Runs agents as work of the conversation: each run is a `subagent` item every client shows in its work list and subagent tree, with the child's conversation to open. Starting one needs the [`exec` permission](#permissions), since the child runs the conversation's tools; it runs under the conversation's tool policy, never a wider one.
+
+```typescript
+volt.registerCommand("fix-issue", {
+  handler: async (args, ctx) => {
+    const run = await ctx.subagents.start({
+      agent: "general",
+      task: `Fix issue #${args} and open a pull request.`,
+      cwd: checkoutPath, // optional
+      limits: { maxTurns: 60, maxTotalCostUsd: 5, maxDurationMs: 3_600_000 },
+    });
+    const result = await run.ended; // { status, output?, error?, usage: { tokens, cost } }
+    ctx.ui.notify(`#${args}: ${result.status}`);
+  },
+});
+```
+
+- `definitions()` lists the agent definitions the conversation may start now (`name`, `description`).
+- `start({ agent, task, cwd?, limits?, parentWorkId? })` resolves once the child accepted `task`, with the run's `id` (its work id), the child's `sessionId`, and `ended`, which resolves with how the run ended and never rejects: `status` (`completed`, `failed`, or `cancelled`), the child's final reply as `output`, an `error`, and the `usage` its replies reported (tokens, cache reads and writes included, and cost in USD).
+  - `cwd` is an absolute path to a directory inside the conversation's working directory, or inside a [managed worktree](daemon.md#git-worktrees) of the same repository; the conversation's working directory by default.
+  - `limits` stop the run: `maxTurns` (assistant turns before the child must give a final report without tools), `maxTotalTokens`, `maxTotalCostUsd`, and `maxDurationMs` (the child and the subagents it starts). Omitted ones keep the host's. A run started inside a subagent's conversation stays within that subagent's limits.
+  - `parentWorkId` names running work of the extension's own kind: clients show the run under it.
+- `cancel(id)` cancels a run the extension started (another extension's is not found); its `ended` resolves `cancelled`. A run that already ended is left as it is.
+
+A panel or work detail of the extension may open or cancel the runs it started (`open_work`, `cancel_work`). Runs are work: a restart leaves an unfinished one suspended, as it does a model's subagent, and its `ended` is gone with the process.
 
 ### ctx.reviews
 

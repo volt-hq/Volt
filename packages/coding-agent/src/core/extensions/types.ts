@@ -315,11 +315,96 @@ export interface ExtensionContext {
 	 */
 	startWork(kind: string, options: StartWorkOptions, run: WorkRun): Promise<{ readonly workId: string }>;
 	/**
+	 * Subagents the extension runs as work of the conversation: each shows in
+	 * every client's work list and subagent tree, and runs under the
+	 * conversation's tool policy. Starting one needs the `exec` permission.
+	 */
+	readonly subagents: ExtensionSubagents;
+	/**
 	 * Reviews of the conversation: the extension starts one on any engine the
 	 * conversation can run, as `/review` does, and reads how it ended. Starting
 	 * one needs the `exec` permission.
 	 */
 	readonly reviews: ExtensionReviews;
+}
+
+// ============================================================================
+// Subagents
+// ============================================================================
+
+/** An agent definition the conversation may start. */
+export interface ExtensionSubagentDefinition {
+	readonly name: string;
+	readonly description: string;
+}
+
+/** Limits of one subagent run. Each is a positive number; omitted ones keep the host's. */
+export interface ExtensionSubagentLimits {
+	/** Assistant turns before the child must give a tool-free final report. */
+	readonly maxTurns?: number;
+	/** Tokens the child (and the subagents it starts) may use before the run is stopped. */
+	readonly maxTotalTokens?: number;
+	/** Provider cost in USD the run may reach before it is stopped. */
+	readonly maxTotalCostUsd?: number;
+	/** Wall-clock time the run may take before it is stopped. */
+	readonly maxDurationMs?: number;
+}
+
+/** A subagent run to start (`ctx.subagents.start`). */
+export interface ExtensionSubagentStartOptions {
+	/** The agent definition's name, one of `ctx.subagents.definitions()`. */
+	readonly agent: string;
+	/** The child's first prompt. */
+	readonly task: string;
+	/**
+	 * The child's working directory: an absolute path to a directory inside the
+	 * conversation's working directory, or inside a managed worktree of the
+	 * same repository. The conversation's working directory by default.
+	 */
+	readonly cwd?: string;
+	readonly limits?: ExtensionSubagentLimits;
+	/** Running work of the extension's own kind the run belongs to: clients show the run under it. */
+	readonly parentWorkId?: string;
+}
+
+/** How a subagent run ended. */
+export interface ExtensionSubagentResult {
+	readonly status: "completed" | "failed" | "cancelled";
+	/** The child's final reply, when it gave one. */
+	readonly output?: string;
+	readonly error?: string;
+	/** What the child's replies reported using: their tokens (cache reads and writes included) and cost in USD. */
+	readonly usage: { readonly tokens: number; readonly cost: number };
+}
+
+/** A started subagent run. */
+export interface ExtensionSubagentRun {
+	/** The run's work id: `cancel` takes it, and a panel action may open or cancel it. */
+	readonly id: string;
+	/** The child's conversation. */
+	readonly sessionId: string;
+	/** Resolves once the run ended; never rejects. */
+	readonly ended: Promise<ExtensionSubagentResult>;
+}
+
+/** The subagents an extension runs (`ctx.subagents`). */
+export interface ExtensionSubagents {
+	/** The agent definitions the conversation may start now. */
+	definitions(): ExtensionSubagentDefinition[];
+	/**
+	 * Start agent `agent` on `task`. Resolves once the child accepted the task.
+	 * Needs the `exec` permission: the child runs the conversation's tools.
+	 */
+	start(options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	/** Cancel a run the extension started; its `ended` resolves `cancelled`. */
+	cancel(id: string): Promise<void>;
+}
+
+/** How the session runs an extension's subagents: `owner` is the extension's manifest id. */
+export interface ExtensionSubagentsHandler {
+	definitions(): ExtensionSubagentDefinition[];
+	start(owner: string, options: ExtensionSubagentStartOptions): Promise<ExtensionSubagentRun>;
+	cancel(owner: string, id: string): Promise<void>;
 }
 
 // ============================================================================

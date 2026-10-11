@@ -19,6 +19,8 @@ import type {
 	SubagentHandle,
 	SubagentRegistryRecord,
 	SubagentResult,
+	SubagentRun,
+	SubagentRunOptions,
 	SubagentRunStatus,
 	SubagentSpawnAdmissionResult,
 	SubagentSpawnBatchLease,
@@ -325,6 +327,10 @@ export interface SubagentToolManager {
 	workKind?(binding: SubagentWorkBinding): WorkKindDefinition;
 	/** Start a subagent as work of the conversation, detached from any tool call, under its tool policy. */
 	startWork?(agentName: string, task: string): Promise<{ workId: string; conversation: string }>;
+	/** Start a subagent as `startWork` does, with a cwd, limits, and parent work; `ended` says how it ended. */
+	startRun?(agentName: string, task: string, options?: SubagentRunOptions): Promise<SubagentRun>;
+	/** Cancel a subagent run that is work of the conversation. */
+	cancelRun?(workId: string): Promise<void>;
 	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
 	listAvailableDefinitions?(): readonly SubagentDefinition[];
 	/**
