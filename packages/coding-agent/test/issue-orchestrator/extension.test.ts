@@ -75,6 +75,8 @@ function setup(options: { confirm?: boolean } = {}) {
 	writeFileSync(join(cwd, ".volt", "WORKFLOW.md"), WORKFLOW);
 	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
 	const calls: Array<{ command: string; args: string[]; cwd?: string }> = [];
+	let sessionName: string | undefined;
+	const notes: Array<{ customType: string; content: string; display: boolean }> = [];
 	const volt = {
 		registerWorkKind: vi.fn(),
 		registerCommand: (name: string, command: Omit<RegisteredCommand, "name" | "sourceInfo">) => {
@@ -82,6 +84,11 @@ function setup(options: { confirm?: boolean } = {}) {
 		},
 		on: vi.fn(),
 		exec: exec(calls),
+		getSessionName: () => sessionName,
+		setSessionName: async (name: string) => {
+			sessionName = name;
+		},
+		sendMessage: (message: { customType: string; content: string; display: boolean }) => notes.push(message),
 	} as unknown as ExtensionAPI;
 	issueOrchestrator(volt);
 
@@ -145,7 +152,19 @@ function setup(options: { confirm?: boolean } = {}) {
 		if (!registered) throw new Error("/orchestrate is not registered");
 		return registered.handler(args, ctx);
 	};
-	return { command, calls, notifications, panels, worktrees, creates, started, cancelled, work: () => work };
+	return {
+		command,
+		calls,
+		notifications,
+		panels,
+		worktrees,
+		creates,
+		started,
+		cancelled,
+		notes,
+		sessionName: () => sessionName,
+		work: () => work,
+	};
 }
 
 describe("issue orchestrator extension", () => {
@@ -154,9 +173,32 @@ describe("issue orchestrator extension", () => {
 	});
 
 	it("starts an issue's agent in its worktree under the loop's work, and stops it", async () => {
-		const { command, calls, panels, worktrees, creates, started, cancelled, work, notifications } = setup();
+		const {
+			command,
+			calls,
+			panels,
+			worktrees,
+			creates,
+			started,
+			cancelled,
+			work,
+			notifications,
+			notes,
+			sessionName,
+		} = setup();
 
 		await command("start");
+		// Named, and with a displayed note, so session lists show the conversation.
+		expect(sessionName()).toBe("Issue orchestrator · o/r");
+		expect(notes).toEqual([
+			{
+				customType: "issue-orchestrator",
+				display: true,
+				content: expect.stringContaining(
+					"Issue orchestrator started for o/r (.volt/WORKFLOW.md): working open issues labeled agent-ready",
+				),
+			},
+		]);
 		await vi.waitFor(() => expect(started).toHaveLength(1));
 		// On the issue's branch, which a released issue still has.
 		expect(creates).toEqual([{ name: "issue-12", branch: "volt/issue-12", reuseBranch: true, baseRef: "main" }]);
@@ -209,16 +251,21 @@ describe("issue orchestrator extension", () => {
 			result: { summary: expect.stringContaining("1 runs, $0.25") },
 		});
 		expect(cancelled).toEqual(["sa_1"]);
+		expect(notes.at(-1)).toMatchObject({
+			content: expect.stringMatching(/^Issue orchestrator stopped\. o\/r: 0 running/),
+		});
 		expect(panels.at(-1)).toBeUndefined();
 		await command("status");
 		expect(notifications.at(-1)).toBe("The orchestrator is not running.");
 	});
 
 	it("starts nothing the user declines", async () => {
-		const { command, work, calls } = setup({ confirm: false });
+		const { command, work, calls, notes, sessionName } = setup({ confirm: false });
 		await command("start");
 		expect(work()).toBeUndefined();
 		expect(calls).toEqual([]);
+		expect(notes).toEqual([]);
+		expect(sessionName()).toBeUndefined();
 	});
 
 	it("says what is wrong with a workflow it cannot load", async () => {

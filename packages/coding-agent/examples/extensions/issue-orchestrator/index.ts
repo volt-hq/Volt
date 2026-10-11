@@ -13,7 +13,7 @@
  * project, GitHub CLI signed in, and the `exec` permission.
  */
 
-import { resolve } from "node:path";
+import { basename, relative, resolve } from "node:path";
 import {
 	defineManifest,
 	type ExtensionAPI,
@@ -37,6 +37,8 @@ export const manifest = defineManifest({
 const COMMAND = "orchestrate";
 const DEFAULT_WORKFLOW = ".volt/WORKFLOW.md";
 const SUBCOMMANDS = ["start", "stop", "status", "refresh"] as const;
+/** The custom message type of the orchestrator's notes in the conversation. */
+const NOTE_TYPE = "issue-orchestrator";
 
 interface Active {
 	readonly controller: AbortController;
@@ -131,6 +133,17 @@ async function start(
 		{ signal: ctx.signal },
 	);
 	if (!confirmed) return undefined;
+
+	// A conversation that holds only work and extension commands has no messages, so session lists
+	// would leave it out: a name and a displayed message keep it there, under a title that says what it is.
+	const repo = config.tracker.repo ?? basename(ctx.cwd);
+	if (volt.getSessionName() === undefined) {
+		await volt.setSessionName(`Issue orchestrator · ${repo}`).catch(() => undefined);
+	}
+	note(
+		volt,
+		`Issue orchestrator started for ${repo} (${relative(ctx.cwd, path) || path}): working open issues labeled ${config.tracker.labels.join(" + ")}, including the ones its agents file, with up to ${config.agent.maxConcurrent} agents at once, and it ${merging}. Its agents run under its work item (/work); /orchestrate status, refresh, and stop control it.`,
+	);
 
 	const controller = new AbortController();
 	let workId: string | undefined;
@@ -229,6 +242,7 @@ async function start(
 			try {
 				await orchestrator.run(controller.signal);
 				const final = orchestrator.snapshot();
+				note(volt, `Issue orchestrator stopped. ${summary(final)}.`);
 				return {
 					outcome: work.signal.aborted ? "cancelled" : "completed",
 					result: { summary: summary(final) },
@@ -278,6 +292,15 @@ export async function releaseWorktree(
 		if (!message.startsWith("worktree_not_found")) return "kept";
 	}
 	return "released";
+}
+
+/** Post a line about the orchestrator to the conversation; it shows to every client and stays in the transcript. */
+function note(volt: ExtensionAPI, text: string): void {
+	try {
+		volt.sendMessage({ customType: NOTE_TYPE, content: text, display: true });
+	} catch {
+		// The conversation is closing or the extension stopping: nothing to tell.
+	}
 }
 
 function summary(snapshot: OrchestratorSnapshot): string {

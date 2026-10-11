@@ -20,7 +20,7 @@ In that conversation:
 /orchestrate stop             # cancel the agents and stop
 ```
 
-The loop is work of the conversation: it shows in `/work`, and every agent it starts is a subagent under it, which you can open and watch. A panel lists what runs, waits, retries, and was handed to a human. The loop itself is deterministic code, so the conversation's model is free for questions about it.
+The loop is work of the conversation: it shows in `/work`, and every agent it starts is a subagent under it, which you can open and watch. The conversation is named `Issue orchestrator · <repo>` (unless you named it) and gets a note when the loop starts and stops, so `/resume` lists it after you quit. A panel lists what runs, waits, retries, and was handed to a human. The loop itself is deterministic code, so the conversation's model is free for questions about it.
 
 Requirements:
 
