@@ -27,6 +27,12 @@ describe("truncateToWidth", () => {
 		assert.ok(visibleWidth(truncated) <= 20);
 	});
 
+	it("truncates text that follows a non-SGR CSI sequence", () => {
+		const truncated = truncateToWidth("\x1b[2Aabcdefghijklmnop\x1b[0m", 10);
+
+		assert.strictEqual(truncated, "\x1b[2Aabcdefg\x1b[0m...\x1b[0m");
+	});
+
 	it("clips wide ellipsis safely and brackets it with resets", () => {
 		assert.strictEqual(truncateToWidth("abcdef", 1, "🙂"), "");
 		assert.strictEqual(truncateToWidth("abcdef", 2, "🙂"), "\x1b[0m🙂\x1b[0m");
