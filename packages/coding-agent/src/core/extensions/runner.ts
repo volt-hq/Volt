@@ -1262,7 +1262,8 @@ export class ExtensionRunner {
 		});
 		context.getSystemPromptOptions = () => {
 			assertActive();
-			return this.getSystemPromptOptionsFn();
+			// A copy: the options share the session's loaded skills and context files.
+			return structuredClone(this.getSystemPromptOptionsFn());
 		};
 		context.waitForIdle = () => {
 			assertActive();
@@ -1677,7 +1678,8 @@ export class ExtensionRunner {
 						prompt,
 						images,
 						systemPrompt: currentSystemPrompt,
-						systemPromptOptions,
+						// A copy: the options share the session's loaded skills and context files.
+						systemPromptOptions: structuredClone(systemPromptOptions),
 					};
 					const handlerResult = await handler(event, ctx);
 
