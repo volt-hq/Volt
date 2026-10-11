@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 import { configDefaults, defineConfig } from "vitest/config";
 
 const testAgentDir = join(tmpdir(), `volt-coding-agent-vitest-${randomUUID()}`);
+// The global setup bundles the session-store worker here; the --import hook loads it for source-mode store workers.
+const sessionStoreWorkerBundle = `${testAgentDir}-session-store-worker.mjs`;
+const sessionStoreWorkerRedirect = new URL("./test/session-store-worker-redirect.mjs", import.meta.url).href;
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
 const aiSrcSchemas = fileURLToPath(new URL("../ai/src/schemas.ts", import.meta.url));
@@ -26,9 +29,11 @@ export default defineConfig({
 		],
 		testTimeout: 30000,
 		globalSetup: "./test/vitest-global-setup.ts",
+		execArgv: ["--import", sessionStoreWorkerRedirect],
 		env: {
 			VOLT_CODING_AGENT_DIR: testAgentDir,
 			VOLT_CODING_AGENT_SESSION_DIR: "",
+			VOLT_TEST_SESSION_STORE_WORKER: sessionStoreWorkerBundle,
 		},
 		// Local runs use half the host's cores; set VITEST_MAX_WORKERS to share a busy host. CLI and pool overrides still apply.
 		maxWorkers: process.env.CI && process.env.CI !== "false" ? 8 : "50%",
