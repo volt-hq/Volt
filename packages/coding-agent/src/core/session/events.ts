@@ -542,6 +542,18 @@ export class SessionEvents {
 	async emitExtensionEvent(event: AgentEvent): Promise<AgentMessage | undefined> {
 		this.host.assertActive();
 		const extensionRunner = this.host.extensionRunner();
+		// An observation no extension handles needs no extension copy; `dispatch` still validates the event
+		// before session listeners see it. `message_end` always owns its message, and `turn_end` counts turns.
+		if (
+			(event.type === "message_start" ||
+				event.type === "message_update" ||
+				event.type === "tool_execution_start" ||
+				event.type === "tool_execution_update" ||
+				event.type === "tool_execution_end") &&
+			!extensionRunner.hasHandlers(event.type)
+		) {
+			return undefined;
+		}
 		if (event.type === "agent_start") {
 			this.turnIndex = 0;
 			await extensionRunner.emit({ type: "agent_start" });
