@@ -1,0 +1,105 @@
+# Issue orchestrator
+
+Works a repository's GitHub issues with agents, as the repository's `.volt/WORKFLOW.md` says: an implementer opens a pull request, a reviewer posts a verdict on each head commit, a fixer addresses changes and failing checks, and the loop repeats until the review is clean and CI is green. Then the orchestrator merges the pull request, or labels the issue for a human to merge (the default).
+
+The shape of the loop and of the workflow file follow the Symphony service specification. The difference is the review loop: each role runs its own agent, and the orchestrator reads what an issue needs next from GitHub alone.
+
+## Running it
+
+```bash
+volt -e packages/coding-agent/examples/extensions/issue-orchestrator
+```
+
+In that conversation:
+
+```
+/orchestrate start            # .volt/WORKFLOW.md
+/orchestrate start path.md    # another workflow file
+/orchestrate status
+/orchestrate refresh          # tick now
+/orchestrate stop             # cancel the agents and stop
+```
+
+The loop is work of the conversation: it shows in `/work`, and every agent it starts is a subagent under it, which you can open and watch. A panel lists what runs, waits, retries, and was handed to a human. The loop itself is deterministic code, so the conversation's model is free for questions about it.
+
+Requirements:
+
+- interactive Volt, whose conversations the daemon hosts: each issue gets a [managed worktree](../../../docs/daemon.md#git-worktrees) (`issue-<n>` on branch `volt/issue-<n>`);
+- a trusted project, since the workflow's hooks run commands;
+- GitHub CLI signed in, for the orchestrator and for the agents;
+- the agent definitions the roles name (`general` by default).
+
+## How an issue moves
+
+Each tick (every `polling.interval_ms`, and whenever an agent finishes) the orchestrator re-reads the workflow, stops runs of issues that closed or lost their label, and works each open issue that carries every `tracker.labels` label and no excluded one, oldest first:
+
+| GitHub state | Next |
+|---|---|
+| No pull request from `volt/issue-<n>` | `implement` agent |
+| Open pull request, no verdict on its head commit | `review` agent |
+| Verdict `changes` | `fix` agent, while fewer than `review.max_rounds` heads were reviewed; else a human |
+| Verdict `clean`, checks running | wait |
+| Verdict `clean`, checks failing | `fix` agent, under the same round limit |
+| Verdict `clean`, checks passing | merge (`merge.mode: auto`), or the `merge.ready_label` for a human |
+| Pull request merged, or issue closed | done |
+
+A verdict is the last line of a pull request comment by `tracker.review_author`: `<!-- volt-orchestrator review head=<sha> verdict=clean|changes -->`. Comments by anyone else do not count, so a stranger cannot approve a pull request.
+
+When the orchestrator stops working an issue it comments why and adds `handoff_label` (`agent-needs-human`). Removing the label hands the issue back. Create the labels in the repository first; without them the comment is still posted.
+
+Limits: `agent.max_concurrent` agents at once (and a role's `max_concurrent`), `agent.max_attempts` runs per phase of one head commit, exponential backoff after a failed run (10 s doubling, at most `agent.max_retry_backoff_ms`), and each role's `max_turns`, `max_tokens`, `max_cost_usd`, and `max_duration_ms`.
+
+State lives in memory. After a restart, `/orchestrate start` again: the next tick finds each issue's phase on GitHub.
+
+## Safety
+
+- Only issues carrying every `tracker.labels` label are worked. Use a label only maintainers apply.
+- Issue text reaches the agents as data inside the prompt, but agents run the conversation's tools, and a prompt injection in an issue is still an injection. Keep the label gate strict, and keep `merge.mode: handoff` until you trust the setup.
+- `merge.mode: auto` merges only a pull request whose head commit the review author reviewed clean and whose checks pass; with `merge.require_checks` (the default), a pull request without checks goes to a human. Branch protection still applies to the merge.
+- Agents use the same GitHub credentials as you unless `github.command` and the prompts route them elsewhere (for example a bot wrapper). The agents can read `gh`'s stored token like any process you run.
+
+## Workflow file
+
+The front matter configures the orchestrator; `## implement`, `## review`, and `## fix` sections of the body replace the built-in prompt of that role. Templates take `{{ issue.number }}`, `issue.identifier`, `issue.title`, `issue.body`, `issue.url`, `issue.labels`, `repo`, `gh`, `tracker.labels`, `worktree.path`, `worktree.branch`, `attempt`, `round`, `reason`, `pr.number`, `pr.url`, `pr.head_sha`, `review.max_rounds`, `review.clean_marker`, `review.changes_marker`, and `ci.failing`. An unknown variable fails the run.
+
+```markdown
+---
+tracker:
+  repo: volt-hq/Volt                # default: the repository gh sees here
+  labels: [agent-ready]             # required: every issue worked has all of them
+  exclude_labels: [blocked]         # plus handoff_label and merge.ready_label
+  review_author: volt-agent[bot]    # default: the gh user
+github:
+  command: [volt-agent, gh]         # default: [gh]
+polling:
+  interval_ms: 60000
+workspace:
+  base_ref: main                    # default: the checkout's current branch
+  hooks:
+    after_create: npm ci --ignore-scripts
+    timeout_ms: 600000
+agent:
+  max_concurrent: 2
+  max_attempts: 3
+  max_retry_backoff_ms: 300000
+roles:
+  implement: { agent: general, max_turns: 120, max_cost_usd: 10 }
+  review:    { agent: reviewer, max_concurrent: 1 }
+  fix:       { agent: general }
+review:
+  max_rounds: 3
+merge:
+  mode: handoff                     # or auto
+  method: squash                    # merge, rebase
+  require_checks: true
+  ready_label: agent-approved
+handoff_label: agent-needs-human
+---
+
+## review
+
+Review pull request #{{ pr.number }} against this repository's AGENTS.md ...
+End your comment with {{ review.clean_marker }} or {{ review.changes_marker }}.
+```
+
+Use a different agent definition (with its own `model`) for `review`, so the model that wrote a change is not the only one judging it.

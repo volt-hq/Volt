@@ -70,6 +70,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 |-----------|-------------|
 | `git-checkpoint.ts` | Creates git stash checkpoints at each turn for code restoration on fork |
 | `auto-commit-on-exit.ts` | Auto-commits on exit using last assistant message for commit message |
+| `issue-orchestrator/` | Works labeled GitHub issues with agents in managed worktrees: implement, review until clean, then merge or hand to a human ([README](issue-orchestrator/README.md)) |
 
 ### System Prompt & Compaction
 

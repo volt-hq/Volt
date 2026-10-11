@@ -3048,6 +3048,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `settings.ts` | Typed settings declared in the manifest | `defineManifest` settings, `settings_changed`, `updateSettings` |
 | `preset.ts` | Saveable presets (model, tools, thinking) | `registerCommand`, `registerIntent`, `registerShortcut`, `registerFlag`, `ui.form`, `setModel`, `setActiveTools`, `setThinkingLevel`, `appendEntry` |
 | `tools.ts` | Enable and disable tools from a form | `registerCommand`, `ui.form`, `setActiveTools`, session events |
+| `issue-orchestrator/` | Work labeled GitHub issues with agents: implement, review until clean, merge or hand off | `registerWorkKind`, `startWork`, `ctx.subagents`, `ctx.worktrees`, `setPanel`, `exec` |
 | **Remote & Sandbox** |||
 | `ssh.ts` | SSH remote execution | `registerFlag`, `on("user_bash")`, `on("before_agent_start")`, tool operations |
 | `sandbox/` | Sandboxed tool execution | Tool operations |
