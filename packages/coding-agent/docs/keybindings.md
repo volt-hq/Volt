@@ -231,11 +231,14 @@ Create `~/.volt/agent/keybindings.json`:
 {
   "tui.editor.cursorUp": ["up", "ctrl+p"],
   "tui.editor.cursorDown": ["down", "ctrl+n"],
-  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"]
+  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"],
+  "app.model.cycleForward": "alt+m"
 }
 ```
 
 Each action can have a single key or an array of keys. User config overrides defaults.
+
+`ctrl+p` cycles models by default, and volt handles that shortcut before the editor sees the key. The example therefore moves `app.model.cycleForward` to `alt+m` so `ctrl+p` moves the cursor up.
 
 On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, volt shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
 
@@ -251,9 +254,12 @@ On native Windows, `app.suspend` has no default binding because Windows terminal
   "tui.editor.cursorWordRight": ["alt+right", "alt+f"],
   "tui.editor.deleteCharForward": ["delete", "ctrl+d"],
   "tui.editor.deleteCharBackward": ["backspace", "ctrl+h"],
-  "tui.input.newLine": ["shift+enter", "ctrl+j"]
+  "tui.input.newLine": ["shift+enter", "ctrl+j"],
+  "app.model.cycleForward": "alt+m"
 }
 ```
+
+As in the example above, `app.model.cycleForward` moves to `alt+m` so `ctrl+p` moves the cursor up.
 
 ### Vim Example
 
