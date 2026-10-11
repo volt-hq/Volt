@@ -99,6 +99,21 @@ export function parseReviewMarkers(body: string, createdAt: string): ReviewMarke
 	}));
 }
 
+/**
+ * A login as GitHub's APIs disagree on it, made comparable: REST names an
+ * app `volt-agent[bot]`, GraphQL (and so `gh pr view --json`) `volt-agent`,
+ * and `gh` search `app/volt-agent`.
+ */
+export function sameLogin(left: string, right: string): boolean {
+	const normalize = (login: string) =>
+		login
+			.trim()
+			.toLowerCase()
+			.replace(/^app\//, "")
+			.replace(/\[bot\]$/, "");
+	return normalize(left) === normalize(right);
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -179,7 +194,7 @@ export class GitHubTracker implements Tracker {
 		const comments = isRecord(pr) && Array.isArray(pr.comments) ? pr.comments : [];
 		return comments
 			.filter(isRecord)
-			.filter((comment) => isRecord(comment.author) && comment.author.login === this.reviewAuthor)
+			.filter((comment) => isRecord(comment.author) && sameLogin(text(comment.author.login), this.reviewAuthor))
 			.flatMap((comment) => parseReviewMarkers(text(comment.body), text(comment.createdAt)))
 			.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 	}

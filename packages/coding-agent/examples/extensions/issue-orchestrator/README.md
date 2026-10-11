@@ -71,7 +71,7 @@ tracker:
   repo: volt-hq/Volt                # default: the repository gh sees here
   labels: [agent-ready]             # required: every issue worked has all of them
   exclude_labels: [blocked]         # plus handoff_label and merge.ready_label
-  review_author: volt-agent[bot]    # default: the gh user
+  review_author: volt-agent[bot]    # default: the gh user; volt-agent and app/volt-agent match too
   filed_label: agent-filed          # agents add it, with labels, to the issues they file
 github:
   command: [volt-agent, gh]         # default: [gh]

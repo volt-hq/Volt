@@ -5,6 +5,7 @@ import {
 	GitHubTracker,
 	parseReviewMarkers,
 	reviewMarker,
+	sameLogin,
 } from "../../examples/extensions/issue-orchestrator/github.ts";
 
 const SHA = "a".repeat(40);
@@ -98,6 +99,17 @@ describe("issue orchestrator GitHub tracker", () => {
 			{ headSha: SHA, verdict: "changes", createdAt: "2026-10-02" },
 		]);
 		expect(parseReviewMarkers("<!-- volt-orchestrator review head=abc verdict=clean -->", "t")).toEqual([]);
+
+		// gh reports an app's comments as `volt-agent`, which REST calls `volt-agent[bot]`: either spelling counts.
+		const bot = [{ author: { login: "volt-agent" }, body: reviewMarker(SHA, "clean"), createdAt: "2026-10-05" }];
+		const asBot = new GitHubTracker(
+			scriptedGh({ "pr view 8": JSON.stringify({ comments: bot }) }).run,
+			"o/r",
+			"volt-agent[bot]",
+		);
+		expect(await asBot.reviews(8)).toEqual([{ headSha: SHA, verdict: "clean", createdAt: "2026-10-05" }]);
+		expect(sameLogin("app/volt-agent", "Volt-Agent[bot]")).toBe(true);
+		expect(sameLogin("volt-agent", "volt-agent-two")).toBe(false);
 	});
 
 	it("reads checks: none, pending, failing, and passing", async () => {
