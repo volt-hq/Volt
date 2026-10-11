@@ -29,6 +29,7 @@ import type { DeepReadonly, ImageContent, Message, Model, PromptCacheRefresher, 
 import type { WorkNoticeDetails } from "@hansjm10/volt-protocol/entries";
 import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
+import type { SessionWorktreeDaemon } from "../daemon/session-worktree.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { BackgroundJobDiagnostics } from "./background-job-diagnostics.ts";
 import type { BashResult } from "./bash-executor.ts";
@@ -273,6 +274,8 @@ export interface AgentSessionConfig {
 	mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
 	/** Language servers shared with other sessions of the same delegation tree. Private per session when omitted. */
 	lspServerPool?: LspServerPool;
+	/** The daemon's managed worktrees, which a daemon-hosted session's extensions create and list. */
+	worktreeDaemon?: SessionWorktreeDaemon;
 }
 
 /** AgentSession runtime projection. A model is optional until one is selected. */
@@ -667,6 +670,7 @@ export class AgentSession {
 				resourceLoader: this._resourceLoader,
 				cwd: this._cwd,
 				agentDir: this._agentDir,
+				worktreeDaemon: config.worktreeDaemon,
 				lifetimeSignal: this._lifetimeAbort.signal,
 				liveState: this.liveState,
 				conversation: () => this._conversation,

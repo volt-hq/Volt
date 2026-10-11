@@ -2015,6 +2015,12 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.worker_worktree_release"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_worktree_create"
+				},
+				{
+					"$ref": "#/$defs/Control.Request.worker_worktree_list"
 				}
 			]
 		},
@@ -2884,6 +2890,52 @@
 						"stopped",
 						"refused_active"
 					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_worktree_create": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_create"
+				},
+				"id": {
+					"type": "string"
+				},
+				"worktreeName": {
+					"type": "string",
+					"maxLength": 128
+				},
+				"branch": {
+					"type": "string",
+					"maxLength": 256
+				},
+				"baseRef": {
+					"type": "string",
+					"maxLength": 256
+				}
+			},
+			"additionalProperties": false
+		},
+		"Control.Request.worker_worktree_list": {
+			"type": "object",
+			"required": [
+				"type",
+				"id"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "worker_worktree_list"
+				},
+				"id": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false

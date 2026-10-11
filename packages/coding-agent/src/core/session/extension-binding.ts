@@ -30,6 +30,8 @@ import { statSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type HostRequest, type HostResponse, WORK_NOTICE_CUSTOM_TYPE } from "@hansjm10/volt-protocol";
+import type { ControlWorktreeStatus } from "../../daemon/control-protocol.ts";
+import type { SessionWorktreeDaemon } from "../../daemon/session-worktree.ts";
 import { isPathInside } from "../../daemon/workspace-directory.ts";
 import { resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
 import { canonicalizePath } from "../../utils/paths.ts";
@@ -44,6 +46,8 @@ import {
 	type ExtensionSubagentStartOptions,
 	type ExtensionSubagentsHandler,
 	type ExtensionUIContext,
+	type ExtensionWorktree,
+	type ExtensionWorktreesHandler,
 	type ReplacedSessionContext,
 	type SessionStartEvent,
 	type ShutdownHandler,
@@ -184,6 +188,18 @@ function subagentLimits(limits: unknown): Pick<SubagentRunOptions, "limits" | "t
 	};
 }
 
+/** A managed worktree as an extension sees it. */
+function extensionWorktree(status: ControlWorktreeStatus): ExtensionWorktree {
+	return {
+		id: status.id,
+		path: status.path,
+		branch: status.branch,
+		...(status.baseRef === undefined ? {} : { baseRef: status.baseRef }),
+		available: status.available !== false,
+		...(status.dirty === undefined ? {} : { dirty: status.dirty }),
+	};
+}
+
 /** A work kind the session refused to register, as an extension error. */
 function refusedKind(refusal: WorkKindRefusal): ExtensionError {
 	return { extensionId: refusal.extensionId, event: "register_work_kind", error: refusal.error };
@@ -205,6 +221,8 @@ export interface SessionExtensionBindingHost {
 	readonly cwd: string;
 	/** The user's agent directory, where permission acknowledgments are stored. */
 	readonly agentDir: string;
+	/** The daemon's managed worktrees, in a conversation the daemon hosts. */
+	readonly worktreeDaemon: SessionWorktreeDaemon | undefined;
 	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	readonly lifetimeSignal: AbortSignal;
 	/** The conversation's live state, where the data-only UI calls go. */
@@ -323,6 +341,7 @@ export class SessionExtensionBinding {
 	/** The extensions' subagent runs that have not ended. */
 	private readonly runningSubagents = new Set<string>();
 	private readonly subagents: ExtensionSubagentsHandler = this.createSubagentsHandler();
+	private readonly worktrees: ExtensionWorktreesHandler = this.createWorktreesHandler();
 	private readonly uiHost: ExtensionUiHost = {
 		// Read when a call runs: the routers are built before the binding's host is set.
 		live: () => this.host.liveState,
@@ -431,6 +450,41 @@ export class SessionExtensionBinding {
 				const manager = this.host.tools().getSubagentToolManager();
 				if (manager?.cancelRun === undefined) throw new Error("Subagents are not available in this session");
 				await manager.cancelRun(id);
+			},
+		};
+	}
+
+	/** How the session reaches the daemon's managed worktrees for its extensions (`ctx.worktrees`). */
+	private createWorktreesHandler(): ExtensionWorktreesHandler {
+		const route = (): Required<SessionWorktreeDaemon> => {
+			const daemon = this.host.worktreeDaemon;
+			if (daemon?.create === undefined || daemon.list === undefined) {
+				throw new Error("Managed worktrees are available only in conversations the daemon hosts");
+			}
+			return { restore: daemon.restore, create: daemon.create, list: daemon.list };
+		};
+		return {
+			list: async () => (await route().list()).map(extensionWorktree),
+			create: async (options) => {
+				if (!isRecord(options)) throw new TypeError("ctx.worktrees.create takes { name?, branch?, baseRef? }");
+				const read = (key: "name" | "branch" | "baseRef"): string | undefined => {
+					const value = options[key];
+					if (value === undefined) return undefined;
+					if (typeof value !== "string" || value.trim().length === 0) {
+						throw new TypeError(`ctx.worktrees.create: ${key} must be a non-empty string`);
+					}
+					return value;
+				};
+				const name = read("name");
+				const branch = read("branch");
+				const baseRef = read("baseRef");
+				return extensionWorktree(
+					await route().create({
+						...(name === undefined ? {} : { name }),
+						...(branch === undefined ? {} : { branch }),
+						...(baseRef === undefined ? {} : { baseRef }),
+					}),
+				);
 			},
 		};
 	}
@@ -1079,6 +1133,7 @@ export class SessionExtensionBinding {
 		const kinds = this.host.extensionKinds();
 		runner.bindWork(kinds.start, () => this.refuseDeclarations(runner));
 		runner.bindSubagents(this.subagents);
+		runner.bindWorktrees(this.worktrees);
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
